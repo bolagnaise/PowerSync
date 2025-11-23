@@ -1066,16 +1066,16 @@ def solar_curtailment_check():
             else:
                 logger.info(f"✅ Export price is positive ({feedin_price}c/kWh) - normal operation for {user.email}")
 
-                # If currently curtailed, restore to pv_only (default safe mode)
+                # If currently curtailed, restore to battery_ok (allows both solar and battery export)
                 if current_export_rule == 'never':
                     logger.info(f"Restoring export from curtailment for {user.email}")
-                    result = tesla_client.set_grid_export_rule(user.tesla_energy_site_id, 'pv_only')
+                    result = tesla_client.set_grid_export_rule(user.tesla_energy_site_id, 'battery_ok')
                     if not result:
-                        logger.error(f"Failed to restore export to 'pv_only' for {user.email}")
+                        logger.error(f"Failed to restore export to 'battery_ok' for {user.email}")
                         error_count += 1
                         continue
 
-                    logger.info(f"✅ Restored export to 'pv_only' for {user.email}")
+                    logger.info(f"✅ Restored export to 'battery_ok' for {user.email}")
                     success_count += 1
                 else:
                     logger.debug(f"Export rule is already '{current_export_rule}' - no action needed for {user.email}")
