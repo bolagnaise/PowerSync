@@ -110,16 +110,16 @@
                 <a href="{{ url_for('main.fleet_api_oauth_start') }}" class="primary" style="display: block; text-align: center; width: 100%; margin-top: 0.5em;">Connect to Tesla Fleet API</a>
 
                 <details style="margin-top: 0.5em;">
-                    <summary style="font-size: 0.85em;">Setup Requirements</summary>
-                    <div style="font-size: 0.8em; margin-top: 0.5em; padding: 0.5em; background: rgba(255, 165, 0, 0.1); border-radius: 0.3em;">
-                        <p style="margin: 0 0 0.5em 0;"><strong>⚠️ Requires configuration:</strong></p>
+                    <summary style="font-size: 0.85em;">Setup Instructions</summary>
+                    <div style="font-size: 0.8em; margin-top: 0.5em; padding: 0.5em; background: rgba(100, 150, 255, 0.1); border-radius: 0.3em;">
+                        <p style="margin: 0 0 0.5em 0;"><strong>📝 Setup Steps:</strong></p>
 
                         <ol style="margin: 0.3em 0 0 1.2em; padding: 0;">
                             <li style="margin: 0.3em 0;">Register an application at <a href="https://developer.tesla.com" target="_blank">developer.tesla.com</a></li>
                             <li style="margin: 0.3em 0;">Get your Client ID and Client Secret</li>
-                            <li style="margin: 0.3em 0;">Add <code>TESLA_CLIENT_ID</code>, <code>TESLA_CLIENT_SECRET</code>, and <code>TESLA_REDIRECT_URI</code> to your <code>.env</code> file</li>
-                            <li style="margin: 0.3em 0;">Restart the Flask app</li>
-                            <li style="margin: 0.3em 0;">Click "Connect to Tesla Fleet API" to authorize</li>
+                            <li style="margin: 0.3em 0;">Enter them in the "Tesla Fleet API" section below</li>
+                            <li style="margin: 0.3em 0;">Click "Save Settings" to store your credentials</li>
+                            <li style="margin: 0.3em 0;">Click "Connect to Tesla Fleet API" above to authorize</li>
                         </ol>
                     </div>
                 </details>
@@ -129,8 +129,9 @@
                     <p style="font-size: 0.8em; margin-top: 0.5em;">
                         ✓ Completely free<br>
                         ✓ Direct connection to Tesla<br>
-                        ✗ Complex setup (OAuth, app registration)<br>
-                        ✗ Requires .env configuration<br>
+                        ✓ GUI-based configuration (no .env needed)<br>
+                        ✗ Requires Tesla developer account<br>
+                        ✗ OAuth setup required<br>
                         ✗ Tokens expire every 8 hours (auto-refresh)
                     </p>
                 </details>
@@ -175,6 +176,37 @@
                             style="background: none; border: none; cursor: pointer; padding: 0.5em;
                                    font-size: 1.2em; color: var(--muted-color); flex-shrink: 0; width: 40px;"
                             aria-label="Toggle visibility" title="Show/Hide API Key">
+                        👁️
+                    </button>
+                </div>
+            </fieldset>
+
+            <fieldset style="margin-top: 1em;">
+                <legend>Tesla Fleet API (Optional)</legend>
+                <label for="fleet_api_client_id">
+                    {{ form.fleet_api_client_id.label }}
+                    <small>Register your application at <a href="https://developer.tesla.com" target="_blank">developer.tesla.com</a> and paste your Client ID here.</small>
+                </label>
+                <div style="display: flex; align-items: center; gap: 0.5em;">
+                    {{ form.fleet_api_client_id(size=64, type='password', class='secure-field', style='width: 100%;') }}
+                    <button type="button" onclick="toggleVisibility('fleet_api_client_id', this)"
+                            style="background: none; border: none; cursor: pointer; padding: 0.5em;
+                                   font-size: 1.2em; color: var(--muted-color); flex-shrink: 0; width: 40px;"
+                            aria-label="Toggle visibility" title="Show/Hide Client ID">
+                        👁️
+                    </button>
+                </div>
+
+                <label for="fleet_api_client_secret" style="margin-top: 0.5em;">
+                    {{ form.fleet_api_client_secret.label }}
+                    <small>Your Client Secret from <a href="https://developer.tesla.com" target="_blank">developer.tesla.com</a>.</small>
+                </label>
+                <div style="display: flex; align-items: center; gap: 0.5em;">
+                    {{ form.fleet_api_client_secret(size=64, type='password', class='secure-field', style='width: 100%;') }}
+                    <button type="button" onclick="toggleVisibility('fleet_api_client_secret', this)"
+                            style="background: none; border: none; cursor: pointer; padding: 0.5em;
+                                   font-size: 1.2em; color: var(--muted-color); flex-shrink: 0; width: 40px;"
+                            aria-label="Toggle visibility" title="Show/Hide Client Secret">
                         👁️
                     </button>
                 </div>
