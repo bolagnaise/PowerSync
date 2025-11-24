@@ -140,13 +140,7 @@
             <strong>Price History</strong>
             <div style="float: right;">
                 <select id="price-day-selector" style="font-size: 0.9em;">
-                    <option value="today" selected>Today</option>
-                    <option value="yesterday">Yesterday</option>
-                    <option value="2">2 Days Ago</option>
-                    <option value="3">3 Days Ago</option>
-                    <option value="4">4 Days Ago</option>
-                    <option value="5">5 Days Ago</option>
-                    <option value="6">6 Days Ago</option>
+                    <!-- Options populated dynamically by JavaScript -->
                 </select>
             </div>
         </header>
@@ -1233,6 +1227,36 @@
         document.getElementById('timeframe-selector').addEventListener('change', fetchEnergyUsageHistory);
         // Refresh energy charts every 30 seconds
         setInterval(fetchEnergyUsageHistory, 30 * 1000);
+
+        // Populate price day selector with actual dates
+        function populatePriceDaySelector() {
+            const selector = document.getElementById('price-day-selector');
+            const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+            // Add "Today" option
+            const todayOption = document.createElement('option');
+            todayOption.value = 'today';
+            todayOption.textContent = 'Today';
+            todayOption.selected = true;
+            selector.appendChild(todayOption);
+
+            // Add previous days with actual dates
+            for (let i = 1; i <= 6; i++) {
+                const date = new Date();
+                date.setDate(date.getDate() - i);
+
+                const day = date.getDate();
+                const month = monthNames[date.getMonth()];
+
+                const option = document.createElement('option');
+                option.value = i === 1 ? 'yesterday' : i.toString();
+                option.textContent = `${day} ${month}`;
+                selector.appendChild(option);
+            }
+        }
+
+        populatePriceDaySelector();
+
         // Add event listener for price history day selector
         document.getElementById('price-day-selector').addEventListener('change', fetchPriceHistory);
 
