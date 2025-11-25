@@ -41,7 +41,7 @@ def require_tesla_client(f):
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        from app.tesla_client import get_tesla_client
+        from app.api_clients import get_tesla_client
 
         tesla_client = get_tesla_client(current_user)
         if not tesla_client:
@@ -73,7 +73,7 @@ def require_amber_client(f):
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        from app.amber_client import get_amber_client
+        from app.api_clients import get_amber_client
 
         amber_client = get_amber_client(current_user)
         if not amber_client:
@@ -230,7 +230,7 @@ def restore_tariff_background(app, user_id, site_id, tariff_data,
     with app.app_context():
         try:
             from app.models import User
-            from app.tesla_client import get_tesla_client
+            from app.api_clients import get_tesla_client
 
             # Get user
             user = User.query.get(user_id)
