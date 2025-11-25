@@ -318,6 +318,8 @@ def demand_charges():
         current_user.shoulder_start_minute = form.shoulder_start_minute.data if form.shoulder_start_minute.data is not None else 0
         current_user.shoulder_end_hour = form.shoulder_end_hour.data if form.shoulder_end_hour.data is not None else 14
         current_user.shoulder_end_minute = form.shoulder_end_minute.data if form.shoulder_end_minute.data is not None else 0
+        current_user.daily_supply_charge = form.daily_supply_charge.data if form.daily_supply_charge.data else 0.0
+        current_user.monthly_supply_charge = form.monthly_supply_charge.data if form.monthly_supply_charge.data else 0.0
 
         try:
             db.session.commit()
@@ -346,6 +348,8 @@ def demand_charges():
     form.shoulder_start_minute.data = current_user.shoulder_start_minute
     form.shoulder_end_hour.data = current_user.shoulder_end_hour
     form.shoulder_end_minute.data = current_user.shoulder_end_minute
+    form.daily_supply_charge.data = current_user.daily_supply_charge
+    form.monthly_supply_charge.data = current_user.monthly_supply_charge
 
     logger.info(f"Rendering demand charges page - Enabled: {current_user.enable_demand_charges}, Peak rate: {current_user.peak_demand_rate}")
     return render_template('demand_charges.html', title='Demand Charges', form=form)

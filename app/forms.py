@@ -92,6 +92,22 @@ class DemandChargeForm(FlaskForm):
     shoulder_end_hour = IntegerField('Shoulder End Hour', validators=[Optional(), NumberRange(min=0, max=23)], default=14)
     shoulder_end_minute = IntegerField('Shoulder End Minute', validators=[Optional(), NumberRange(min=0, max=59)], default=0)
 
+    # Daily supply charges (optional - only for custom TOU schedules)
+    daily_supply_charge = DecimalField(
+        'Daily Supply Charge ($)',
+        validators=[Optional(), NumberRange(min=0)],
+        places=4,
+        default=0,
+        description='Fixed daily charge from your electricity bill (e.g., 1.1770 for $1.18/day). Note: Amber pricing already includes network fees.'
+    )
+    monthly_supply_charge = DecimalField(
+        'Monthly Supply Charge ($)',
+        validators=[Optional(), NumberRange(min=0)],
+        places=2,
+        default=0,
+        description='Monthly account fee if applicable (rare)'
+    )
+
     submit = SubmitField('Save Demand Charges')
 
 

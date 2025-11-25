@@ -56,6 +56,10 @@ class User(UserMixin, db.Model):
     shoulder_end_hour = db.Column(db.Integer, default=14)
     shoulder_end_minute = db.Column(db.Integer, default=0)
 
+    # Daily Supply Charge Configuration
+    daily_supply_charge = db.Column(db.Float, default=0.0)  # Daily supply charge ($)
+    monthly_supply_charge = db.Column(db.Float, default=0.0)  # Monthly fixed charge ($)
+
     # AEMO Spike Detection Configuration
     aemo_region = db.Column(db.String(10))  # NEM region: NSW1, QLD1, VIC1, SA1, TAS1
     aemo_spike_threshold = db.Column(db.Float, default=300.0)  # Spike threshold in $/MWh

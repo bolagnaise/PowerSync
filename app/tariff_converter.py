@@ -472,17 +472,25 @@ class AmberTariffConverter:
         name = "Amber Electric (Tesla Sync)"
         utility = "Amber Electric"
 
+        # Build daily charges list
+        daily_charges_list = []
+        if user and user.daily_supply_charge and user.daily_supply_charge > 0:
+            daily_charges_list.append({
+                "name": "Daily Supply Charge",
+                "amount": float(user.daily_supply_charge)
+            })
+
+        if not daily_charges_list:
+            # Default empty charge for Tesla compatibility
+            daily_charges_list.append({"name": "Charge"})
+
         tariff = {
             "version": 1,
             "code": code,
             "name": name,
             "utility": utility,
             "currency": "AUD",
-            "daily_charges": [
-                {
-                    "name": "Charge"
-                }
-            ],
+            "daily_charges": daily_charges_list,
             "demand_charges": {
                 "ALL": {
                     "rates": {
@@ -524,11 +532,7 @@ class AmberTariffConverter:
             "sell_tariff": {
                 "name": "Amber Electric (managed by Tesla Sync, do not edit)",
                 "utility": "Amber Electric",
-                "daily_charges": [
-                    {
-                        "name": "Charge"
-                    }
-                ],
+                "daily_charges": daily_charges_list,
                 "demand_charges": {
                     "ALL": {
                         "rates": {
