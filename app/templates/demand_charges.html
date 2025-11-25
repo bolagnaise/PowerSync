@@ -140,6 +140,30 @@
                         {{ form.offpeak_rate(placeholder="0.0000") }}
                     </label>
                 </fieldset>
+
+                <!-- Daily Supply Charges (Optional) -->
+                <fieldset style="margin-top: 1em; padding: 1em; background: rgba(100, 200, 255, 0.05); border-radius: 0.5em;">
+                    <legend><strong>Daily Supply Charges (Optional)</strong></legend>
+
+                    <div role="alert" style="background: rgba(255, 193, 7, 0.1); padding: 0.75em; border-radius: 0.25em; margin-bottom: 1em; border-left: 4px solid #ffc107;">
+                        <p style="font-size: 0.9em; margin: 0;">
+                            <strong>Note for Amber users:</strong> Amber's pricing already includes network fees amortized into the per-kWh rate.
+                            Only add daily charges if using custom TOU schedules with fixed-rate providers.
+                        </p>
+                    </div>
+
+                    <label for="daily_supply_charge">
+                        {{ form.daily_supply_charge.label }}
+                        <small>{{ form.daily_supply_charge.description }}</small>
+                        {{ form.daily_supply_charge(placeholder="1.1770") }}
+                    </label>
+
+                    <label for="monthly_supply_charge" style="margin-top: 0.5em;">
+                        {{ form.monthly_supply_charge.label }}
+                        <small>{{ form.monthly_supply_charge.description }}</small>
+                        {{ form.monthly_supply_charge(placeholder="0.00") }}
+                    </label>
+                </fieldset>
             </div>
 
             {{ form.submit(class_="primary", style="margin-top: 1em;") }}
@@ -196,6 +220,20 @@
                 </tr>
             </tbody>
         </table>
+
+        {% if current_user.daily_supply_charge and current_user.daily_supply_charge > 0 or current_user.monthly_supply_charge and current_user.monthly_supply_charge > 0 %}
+        <div style="margin-top: 1em; padding: 0.75em; background: rgba(100, 200, 255, 0.05); border-radius: 0.25em;">
+            <strong>Daily Supply Charges:</strong>
+            <ul style="margin: 0.5em 0 0 0; padding-left: 1.5em;">
+                {% if current_user.daily_supply_charge and current_user.daily_supply_charge > 0 %}
+                <li>Daily Charge: ${{ "%.4f"|format(current_user.daily_supply_charge) }}/day</li>
+                {% endif %}
+                {% if current_user.monthly_supply_charge and current_user.monthly_supply_charge > 0 %}
+                <li>Monthly Charge: ${{ "%.2f"|format(current_user.monthly_supply_charge) }}/month</li>
+                {% endif %}
+            </ul>
+        </div>
+        {% endif %}
     </article>
     {% endif %}
 
