@@ -322,6 +322,8 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
         end_time: str = "20:00",
         days: str = "All Days",
         billing_day: int = 1,
+        daily_supply_charge: float = 0.0,
+        monthly_supply_charge: float = 0.0,
     ) -> None:
         """Initialize the coordinator."""
         self.tesla_coordinator = tesla_coordinator
@@ -331,6 +333,8 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
         self.end_time = end_time
         self.days = days
         self.billing_day = billing_day
+        self.daily_supply_charge = daily_supply_charge
+        self.monthly_supply_charge = monthly_supply_charge
 
         # Track peak demand (persists across coordinator updates)
         self._peak_demand_kw = 0.0
@@ -417,14 +421,30 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
         now = dt_util.now()
         in_peak_period = self._is_in_peak_period(now)
 
-        # Calculate estimated cost (peak demand * rate)
-        estimated_cost = self._peak_demand_kw * self.rate
+        # Calculate estimated demand charge cost (peak demand * rate)
+        estimated_demand_cost = self._peak_demand_kw * self.rate
+
+        # Calculate days elapsed in current billing cycle
+        days_elapsed = self._calculate_days_elapsed(now)
+
+        # Calculate days until next billing cycle reset
+        days_until_reset = self._calculate_days_until_reset(now)
+
+        # Calculate daily supply charge cost (accumulates daily)
+        daily_supply_cost = self.daily_supply_charge * days_elapsed
+
+        # Calculate total monthly cost
+        total_monthly_cost = estimated_demand_cost + daily_supply_cost + self.monthly_supply_charge
 
         return {
             "in_peak_period": in_peak_period,
             "grid_import_power_kw": grid_import_kw,
             "peak_demand_kw": self._peak_demand_kw,
-            "estimated_cost": estimated_cost,
+            "estimated_cost": estimated_demand_cost,
+            "daily_supply_charge_cost": daily_supply_cost,
+            "monthly_supply_charge": self.monthly_supply_charge,
+            "total_monthly_cost": total_monthly_cost,
+            "days_until_reset": days_until_reset,
             "last_update": dt_util.utcnow(),
         }
 
@@ -432,3 +452,52 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
         """Reset peak demand tracking (e.g., at start of new billing cycle)."""
         _LOGGER.info("Resetting peak demand from %.2f kW to 0", self._peak_demand_kw)
         self._peak_demand_kw = 0.0
+
+    def _calculate_days_elapsed(self, now: datetime) -> int:
+        """Calculate days elapsed since last billing day."""
+        current_day = now.day
+
+        if current_day >= self.billing_day:
+            # We're past the billing day this month
+            days_elapsed = current_day - self.billing_day + 1
+        else:
+            # We haven't reached the billing day this month yet
+            # Need to count from last month's billing day
+            # Get the last day of previous month
+            first_of_this_month = now.replace(day=1)
+            last_month = first_of_this_month - timedelta(days=1)
+            last_day_of_last_month = last_month.day
+
+            # Days from billing day last month to end of last month
+            if self.billing_day <= last_day_of_last_month:
+                days_in_last_month = last_day_of_last_month - self.billing_day + 1
+            else:
+                # Billing day doesn't exist in last month (e.g., Feb 30)
+                # Start from last day of last month
+                days_in_last_month = 1
+
+            # Plus days in current month
+            days_elapsed = days_in_last_month + current_day
+
+        return days_elapsed
+
+    def _calculate_days_until_reset(self, now: datetime) -> int:
+        """Calculate days until next billing cycle reset."""
+        current_day = now.day
+
+        if current_day < self.billing_day:
+            # Next reset is this month
+            return self.billing_day - current_day
+        else:
+            # Next reset is next month
+            # Get the last day of this month
+            if now.month == 12:
+                next_month = now.replace(year=now.year + 1, month=1, day=1)
+            else:
+                next_month = now.replace(month=now.month + 1, day=1)
+
+            last_day_this_month = (next_month - timedelta(days=1)).day
+
+            # Days remaining in this month plus billing day in next month
+            days_remaining_this_month = last_day_this_month - current_day
+            return days_remaining_this_month + self.billing_day

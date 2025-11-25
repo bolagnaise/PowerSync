@@ -28,6 +28,8 @@ from .const import (
     CONF_DEMAND_CHARGE_DAYS,
     CONF_DEMAND_CHARGE_BILLING_DAY,
     CONF_DEMAND_CHARGE_APPLY_TO,
+    CONF_DAILY_SUPPLY_CHARGE,
+    CONF_MONTHLY_SUPPLY_CHARGE,
     CONF_TESLA_API_PROVIDER,
     CONF_FLEET_API_ACCESS_TOKEN,
     TESLA_PROVIDER_TESLEMETRY,
@@ -308,6 +310,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_DEMAND_CHARGE_BILLING_DAY,
             entry.data.get(CONF_DEMAND_CHARGE_BILLING_DAY, 1)
         )
+        daily_supply_charge = entry.options.get(
+            CONF_DAILY_SUPPLY_CHARGE,
+            entry.data.get(CONF_DAILY_SUPPLY_CHARGE, 0.0)
+        )
+        monthly_supply_charge = entry.options.get(
+            CONF_MONTHLY_SUPPLY_CHARGE,
+            entry.data.get(CONF_MONTHLY_SUPPLY_CHARGE, 0.0)
+        )
 
         demand_charge_coordinator = DemandChargeCoordinator(
             hass,
@@ -318,6 +328,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             end_time=demand_charge_end_time,
             days=demand_charge_days,
             billing_day=demand_charge_billing_day,
+            daily_supply_charge=daily_supply_charge,
+            monthly_supply_charge=monthly_supply_charge,
         )
         await demand_charge_coordinator.async_config_entry_first_refresh()
         _LOGGER.info("Demand charge coordinator initialized")

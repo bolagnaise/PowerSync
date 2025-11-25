@@ -30,6 +30,8 @@ from .const import (
     CONF_DEMAND_CHARGE_DAYS,
     CONF_DEMAND_CHARGE_BILLING_DAY,
     CONF_DEMAND_CHARGE_APPLY_TO,
+    CONF_DAILY_SUPPLY_CHARGE,
+    CONF_MONTHLY_SUPPLY_CHARGE,
     CONF_TESLA_API_PROVIDER,
     TESLA_PROVIDER_TESLEMETRY,
     TESLA_PROVIDER_FLEET_API,
@@ -435,6 +437,10 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 data[CONF_DEMAND_CHARGE_ENABLED] = False
 
+            # Add supply charges (always include, even if 0)
+            data[CONF_DAILY_SUPPLY_CHARGE] = user_input.get(CONF_DAILY_SUPPLY_CHARGE, 0.0)
+            data[CONF_MONTHLY_SUPPLY_CHARGE] = user_input.get(CONF_MONTHLY_SUPPLY_CHARGE, 0.0)
+
             return self.async_create_entry(title="Tesla Sync", data=data)
 
         # Build the form schema
@@ -455,6 +461,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional(CONF_DEMAND_CHARGE_APPLY_TO, default="Buy Only"): vol.In(
                     ["Buy Only", "Sell Only", "Both"]
                 ),
+                vol.Optional(CONF_DAILY_SUPPLY_CHARGE, default=0.0): vol.Coerce(float),
+                vol.Optional(CONF_MONTHLY_SUPPLY_CHARGE, default=0.0): vol.Coerce(float),
             }
         )
 
@@ -527,6 +535,14 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             CONF_SOLAR_CURTAILMENT_ENABLED,
             self.config_entry.data.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
         )
+        current_daily_supply_charge = self.config_entry.options.get(
+            CONF_DAILY_SUPPLY_CHARGE,
+            self.config_entry.data.get(CONF_DAILY_SUPPLY_CHARGE, 0.0)
+        )
+        current_monthly_supply_charge = self.config_entry.options.get(
+            CONF_MONTHLY_SUPPLY_CHARGE,
+            self.config_entry.data.get(CONF_MONTHLY_SUPPLY_CHARGE, 0.0)
+        )
 
         return self.async_show_form(
             step_id="init",
@@ -576,6 +592,14 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_DEMAND_CHARGE_APPLY_TO,
                         default=current_apply_to,
                     ): vol.In(["Buy Only", "Sell Only", "Both"]),
+                    vol.Optional(
+                        CONF_DAILY_SUPPLY_CHARGE,
+                        default=current_daily_supply_charge,
+                    ): vol.Coerce(float),
+                    vol.Optional(
+                        CONF_MONTHLY_SUPPLY_CHARGE,
+                        default=current_monthly_supply_charge,
+                    ): vol.Coerce(float),
                 }
             ),
         )

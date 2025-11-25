@@ -35,6 +35,10 @@ CONF_DEMAND_CHARGE_DAYS = "demand_charge_days"
 CONF_DEMAND_CHARGE_BILLING_DAY = "demand_charge_billing_day"
 CONF_DEMAND_CHARGE_APPLY_TO = "demand_charge_apply_to"
 
+# Daily supply charge configuration
+CONF_DAILY_SUPPLY_CHARGE = "daily_supply_charge"
+CONF_MONTHLY_SUPPLY_CHARGE = "monthly_supply_charge"
+
 # Data coordinator update intervals
 UPDATE_INTERVAL_PRICES = timedelta(minutes=5)  # Amber updates every 5 minutes
 UPDATE_INTERVAL_ENERGY = timedelta(minutes=1)  # Tesla energy data every minute
@@ -74,6 +78,11 @@ SENSOR_TYPE_IN_DEMAND_CHARGE_PERIOD = "in_demand_charge_period"
 SENSOR_TYPE_PEAK_DEMAND_THIS_CYCLE = "peak_demand_this_cycle"
 SENSOR_TYPE_DEMAND_CHARGE_COST = "demand_charge_cost"
 SENSOR_TYPE_DAYS_UNTIL_DEMAND_RESET = "days_until_demand_reset"
+
+# Supply charge sensors
+SENSOR_TYPE_DAILY_SUPPLY_CHARGE_COST = "daily_supply_charge_cost"
+SENSOR_TYPE_MONTHLY_SUPPLY_CHARGE = "monthly_supply_charge"
+SENSOR_TYPE_TOTAL_MONTHLY_COST = "total_monthly_cost"
 
 # Switch types
 SWITCH_TYPE_AUTO_SYNC = "auto_sync"
