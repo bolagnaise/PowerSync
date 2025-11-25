@@ -1795,72 +1795,6 @@ def test_aemo_spike(tesla_client):
         return redirect(url_for('main.settings'))
 
 
-def _test_aemo_restore_background(app, user_id, backup_profile_id, site_id, tariff_data):
-    """Background task to restore from AEMO spike mode"""
-    import json
-
-    with app.app_context():
-        try:
-            from app.models import User, SavedTOUProfile
-            from app import db
-
-            logger.info(f"Background spike restore: Starting restore for user {user_id}")
-
-            # Get fresh user and profile objects in this thread's context
-            user = User.query.get(user_id)
-            backup_profile = SavedTOUProfile.query.get(backup_profile_id)
-
-            if not user or not backup_profile:
-                logger.error(f"Background spike restore: User or profile not found")
-                return
-
-            # Get Tesla client
-            tesla_client = get_tesla_client(user)
-            if not tesla_client:
-                logger.error(f"Background spike restore: Failed to get Tesla client")
-                return
-
-            # Step 1: Switch to self_consumption mode FIRST
-            logger.info(f"Background spike restore: Switching to self_consumption mode before tariff upload")
-            mode_result = tesla_client.set_operation_mode(site_id, 'self_consumption')
-            if not mode_result:
-                logger.error(f"Background spike restore: Failed to switch to self_consumption mode")
-                return
-
-            # Step 2: Upload tariff while in self_consumption mode
-            logger.info(f"Background spike restore: Uploading tariff while in self_consumption mode")
-            result = tesla_client.set_tariff_rate(site_id, tariff_data)
-
-            if result:
-                user.aemo_in_spike_mode = False
-                user.aemo_spike_test_mode = False  # Clear test mode
-                user.aemo_spike_start_time = None
-                backup_profile.last_restored_at = datetime.utcnow()
-                db.session.commit()
-
-                logger.info(f"✅ Background spike restore: Tariff uploaded for user {user_id}")
-
-                # Step 3: Wait 60 seconds for Tesla to process
-                import time
-                logger.info(f"Background spike restore: Waiting 60 seconds for Tesla to process tariff change...")
-                time.sleep(60)
-
-                # Step 4: Switch back to autonomous mode
-                logger.info(f"Background spike restore: Switching back to autonomous mode")
-                autonomous_result = tesla_client.set_operation_mode(site_id, 'autonomous')
-
-                if autonomous_result:
-                    logger.info(f"✅ Background spike restore completed for user {user_id} - Powerwall should apply tariff immediately")
-                else:
-                    logger.error(f"❌ Failed to switch back to autonomous mode for user {user_id}")
-            else:
-                logger.error(f"❌ Background spike restore failed for user {user_id}")
-
-        except Exception as e:
-            logger.error(f"Error in background spike restore: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-
 
 @bp.route('/test-aemo-restore', methods=['POST'])
 @login_required
@@ -1891,14 +1825,25 @@ def test_aemo_restore():
             if backup_profile:
                 tariff = json.loads(backup_profile.tariff_json)
 
-                # Start background thread to restore tariff
-                from flask import current_app
-                thread = threading.Thread(
-                    target=_test_aemo_restore_background,
-                    args=(current_app._get_current_object(), current_user.id, backup_profile.id, current_user.tesla_energy_site_id, tariff)
+                # Database update callback for AEMO spike restore
+                def aemo_spike_callback(user, db):
+                    """Clear AEMO spike mode flags and update profile timestamp"""
+                    user.aemo_in_spike_mode = False
+                    user.aemo_spike_test_mode = False
+                    user.aemo_spike_start_time = None
+                    backup_profile_obj = SavedTOUProfile.query.get(backup_profile.id)
+                    if backup_profile_obj:
+                        backup_profile_obj.last_restored_at = datetime.utcnow()
+
+                # Start background task to restore tariff
+                start_background_task(
+                    restore_tariff_background,
+                    current_user.id,
+                    current_user.tesla_energy_site_id,
+                    tariff,
+                    callback=aemo_spike_callback,
+                    profile_name="AEMO Spike Restore"
                 )
-                thread.daemon = True
-                thread.start()
 
                 logger.info(f"Spike restore initiated in background for {current_user.email}")
                 flash('⏳ Restoring original tariff from spike mode. This will take ~60 seconds. You can navigate away.')
@@ -2022,75 +1967,6 @@ def save_current_tou_rate(tesla_client):
     return redirect(url_for('main.current_tou_rate'))
 
 
-def _restore_tou_rate_background(app, user_id, profile_id, site_id, tariff_data, profile_name):
-    """Background task to restore TOU rate to Tesla"""
-    import json
-
-    with app.app_context():
-        try:
-            from app.models import User, SavedTOUProfile
-            from app import db
-
-            logger.info(f"Background restore: Starting restore for profile {profile_id}")
-
-            # Get fresh user and profile objects in this thread's context
-            user = User.query.get(user_id)
-            profile = SavedTOUProfile.query.get(profile_id)
-
-            if not user or not profile:
-                logger.error(f"Background restore: User or profile not found")
-                return
-
-            # Get Tesla client
-            tesla_client = get_tesla_client(user)
-            if not tesla_client:
-                logger.error(f"Background restore: Failed to get Tesla client")
-                return
-
-            # Step 1: Switch to self_consumption mode FIRST
-            logger.info(f"Background restore: Switching to self_consumption mode before tariff upload")
-            mode_result = tesla_client.set_operation_mode(site_id, 'self_consumption')
-            if not mode_result:
-                logger.error(f"Background restore: Failed to switch to self_consumption mode")
-                return
-
-            # Step 2: Upload tariff while in self_consumption mode
-            logger.info(f"Background restore: Uploading tariff while in self_consumption mode")
-            result = tesla_client.set_tariff_rate(site_id, tariff_data)
-
-            if result:
-                # Update the profile's last_restored_at timestamp
-                profile.last_restored_at = datetime.utcnow()
-
-                # Mark this profile as current
-                SavedTOUProfile.query.filter_by(user_id=user_id, is_current=True).update({'is_current': False})
-                profile.is_current = True
-
-                db.session.commit()
-
-                logger.info(f"✅ Background restore: Tariff uploaded: {profile_name}")
-
-                # Step 3: Wait 60 seconds for Tesla to process
-                import time
-                logger.info(f"Background restore: Waiting 60 seconds for Tesla to process tariff change...")
-                time.sleep(60)
-
-                # Step 4: Switch back to autonomous mode
-                logger.info(f"Background restore: Switching back to autonomous mode")
-                autonomous_result = tesla_client.set_operation_mode(site_id, 'autonomous')
-
-                if autonomous_result:
-                    logger.info(f"✅ Background restore completed: {profile_name} - Powerwall should apply tariff immediately")
-                else:
-                    logger.error(f"❌ Failed to switch back to autonomous mode for {profile_name}")
-            else:
-                logger.error(f"❌ Background restore failed: {profile_name}")
-
-        except Exception as e:
-            logger.error(f"Error in background restore: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-
 
 @bp.route('/current_tou_rate/restore/<int:profile_id>', methods=['POST'])
 @login_required
@@ -2115,14 +1991,25 @@ def restore_tou_rate(profile_id, tesla_client):
         # Parse the saved tariff JSON
         tariff_data = json.loads(profile.tariff_json)
 
-        # Start background thread to restore tariff
-        from flask import current_app
-        thread = threading.Thread(
-            target=_restore_tou_rate_background,
-            args=(current_app._get_current_object(), current_user.id, profile_id, site_id, tariff_data, profile.name)
+        # Database update callback for TOU rate restore
+        def tou_restore_callback(user, db):
+            """Update profile timestamps and mark as current"""
+            profile_obj = SavedTOUProfile.query.get(profile_id)
+            if profile_obj:
+                profile_obj.last_restored_at = datetime.utcnow()
+                # Mark this profile as current
+                SavedTOUProfile.query.filter_by(user_id=user.id, is_current=True).update({'is_current': False})
+                profile_obj.is_current = True
+
+        # Start background task to restore tariff
+        start_background_task(
+            restore_tariff_background,
+            current_user.id,
+            site_id,
+            tariff_data,
+            callback=tou_restore_callback,
+            profile_name=profile.name
         )
-        thread.daemon = True
-        thread.start()
 
         logger.info(f"Restore initiated in background for profile: {profile.name}")
         flash(f'⏳ Restoring TOU rate: {profile.name}. This will take ~60 seconds. You can navigate away.')
