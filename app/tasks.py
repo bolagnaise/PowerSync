@@ -11,9 +11,10 @@ import json
 logger = logging.getLogger(__name__)
 
 # Global sync deduplication (prevents overlapping syncs from WebSocket + scheduled triggers)
+# WebSocket sync is primary (has actual settled prices), scheduled sync is failsafe only
 _last_sync_lock = threading.Lock()
 _last_sync_time = None
-_min_sync_interval_seconds = 30  # Prevent syncs closer than 30 seconds apart
+_min_sync_interval_seconds = 60  # Prevent syncs closer than 60 seconds apart
 
 
 def extract_most_recent_actual_interval(forecast_data, timezone_str=None):
@@ -135,11 +136,12 @@ def sync_all_users():
     global _last_sync_time
 
     # Deduplication check to prevent overlapping syncs
+    # WebSocket sync is primary (has actual settled prices), scheduled sync is failsafe only
     with _last_sync_lock:
         if _last_sync_time is not None:
             elapsed = (datetime.now(timezone.utc) - _last_sync_time).total_seconds()
             if elapsed < _min_sync_interval_seconds:
-                logger.info(f"⏭️  Skipping sync - last sync was {elapsed:.0f}s ago (min interval: {_min_sync_interval_seconds}s)")
+                logger.info(f"⏭️  Skipping sync - last sync was {elapsed:.0f}s ago (WebSocket sync likely already ran, scheduled sync is failsafe only)")
                 return
 
         _last_sync_time = datetime.now(timezone.utc)

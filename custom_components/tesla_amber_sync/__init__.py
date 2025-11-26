@@ -4,6 +4,7 @@ from __future__ import annotations
 import aiohttp
 import asyncio
 import logging
+from datetime import datetime
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
@@ -46,6 +47,11 @@ from .coordinator import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Global sync deduplication (prevents overlapping syncs from WebSocket + scheduled triggers)
+# WebSocket sync is primary (has actual settled prices), scheduled sync is failsafe only
+_last_sync_time: datetime | None = None
+_min_sync_interval_seconds = 60  # Prevent syncs closer than 60 seconds apart
 
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH]
 
@@ -357,6 +363,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register services
     async def handle_sync_tou(call: ServiceCall) -> None:
         """Handle the sync TOU schedule service call."""
+        global _last_sync_time
+
+        # Deduplication check to prevent overlapping syncs
+        # WebSocket sync is primary (has actual settled prices), scheduled sync is failsafe only
+        if _last_sync_time is not None:
+            from homeassistant.util import dt as dt_util
+            elapsed = (dt_util.utcnow() - _last_sync_time).total_seconds()
+            if elapsed < _min_sync_interval_seconds:
+                _LOGGER.info(
+                    "⏭️  Skipping sync - last sync was %.0fs ago (WebSocket sync likely already ran, scheduled sync is failsafe only)",
+                    elapsed
+                )
+                return
+
+        _last_sync_time = dt_util.utcnow()
         _LOGGER.info("Manual TOU sync requested")
 
         # Get latest Amber prices
