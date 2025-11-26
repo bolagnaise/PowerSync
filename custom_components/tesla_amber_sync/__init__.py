@@ -48,12 +48,90 @@ from .coordinator import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# Global sync deduplication (prevents overlapping syncs from WebSocket + scheduled triggers)
-# WebSocket sync is primary (has actual settled prices), scheduled sync is failsafe only
-_last_sync_time: datetime | None = None
-_min_sync_interval_seconds = 60  # Prevent syncs closer than 60 seconds apart
-
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH]
+
+
+class SyncCoordinator:
+    """
+    Coordinates Tesla sync with WebSocket wait-with-timeout pattern (async version for Home Assistant).
+
+    At the start of each 5-minute period:
+    1. Wait up to 60 seconds for WebSocket to deliver price data
+    2. If WebSocket arrives → Use WebSocket data and sync immediately
+    3. If timeout (60s) → Fallback to REST API sync
+
+    Only ONE sync per 5-minute period.
+    """
+
+    def __init__(self):
+        self._websocket_event = asyncio.Event()
+        self._websocket_data = None
+        self._current_period = None  # Track which 5-min period we're in
+        self._lock = asyncio.Lock()
+
+    def notify_websocket_update(self, prices_data):
+        """Called by WebSocket when new price data arrives."""
+        self._websocket_data = prices_data
+        self._websocket_event.set()
+        _LOGGER.info("📡 WebSocket price update received, notifying sync coordinator")
+
+    async def wait_for_websocket_or_timeout(self, timeout_seconds=60):
+        """
+        Wait for WebSocket data or timeout.
+
+        Returns:
+            dict: WebSocket price data if arrived within timeout, None if timeout
+        """
+        _LOGGER.info(f"⏱️  Waiting up to {timeout_seconds}s for WebSocket price update...")
+
+        try:
+            # Wait for event with timeout
+            await asyncio.wait_for(self._websocket_event.wait(), timeout=timeout_seconds)
+
+            async with self._lock:
+                if self._websocket_data:
+                    _LOGGER.info("✅ WebSocket data received, using real-time prices")
+                    data = self._websocket_data
+                    # Clear for next period
+                    self._websocket_event.clear()
+                    self._websocket_data = None
+                    return data
+                else:
+                    _LOGGER.warning("⏰ WebSocket event set but no data available")
+                    self._websocket_event.clear()
+                    return None
+
+        except asyncio.TimeoutError:
+            _LOGGER.warning(f"⏰ WebSocket timeout after {timeout_seconds}s, falling back to REST API")
+            # Clear for next period
+            self._websocket_event.clear()
+            async with self._lock:
+                self._websocket_data = None
+            return None
+
+    async def should_sync_this_period(self):
+        """
+        Check if we should sync for the current 5-minute period.
+        Prevents duplicate syncs within the same period.
+
+        Returns:
+            bool: True if this is a new period and we should sync
+        """
+        from homeassistant.util import dt as dt_util
+
+        now = dt_util.utcnow()
+        # Calculate current 5-minute period (e.g., 17:00, 17:05, 17:10, etc.)
+        current_period = now.replace(second=0, microsecond=0)
+        current_period = current_period.replace(minute=current_period.minute - (current_period.minute % 5))
+
+        async with self._lock:
+            if self._current_period == current_period:
+                _LOGGER.info(f"⏭️  Already synced for period {current_period}, skipping")
+                return False
+
+            self._current_period = current_period
+            _LOGGER.info(f"🆕 New sync period: {current_period}")
+            return True
 
 
 async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
@@ -218,6 +296,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Tesla Sync from a config entry."""
     _LOGGER.info("Setting up Tesla Sync integration")
 
+    # Initialize sync coordinator for wait-with-timeout pattern
+    coordinator = SyncCoordinator()
+    _LOGGER.info("🎯 Sync coordinator initialized")
+
     # Initialize WebSocket client for real-time Amber prices
     ws_client = None
 
@@ -362,23 +444,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Register services
     async def handle_sync_tou(call: ServiceCall) -> None:
-        """Handle the sync TOU schedule service call."""
-        global _last_sync_time
+        """
+        Handle the sync TOU schedule service call.
 
-        # Deduplication check to prevent overlapping syncs
-        # WebSocket sync is primary (has actual settled prices), scheduled sync is failsafe only
-        if _last_sync_time is not None:
-            from homeassistant.util import dt as dt_util
-            elapsed = (dt_util.utcnow() - _last_sync_time).total_seconds()
-            if elapsed < _min_sync_interval_seconds:
-                _LOGGER.info(
-                    "⏭️  Skipping sync - last sync was %.0fs ago (WebSocket sync likely already ran, scheduled sync is failsafe only)",
-                    elapsed
-                )
-                return
+        Uses wait-with-timeout pattern:
+        1. Check if we should sync this period (prevents duplicates within same 5-min window)
+        2. Wait up to 60s for WebSocket price update
+        3. If WebSocket arrives -> Use WebSocket data
+        4. If timeout -> Fallback to REST API
 
-        _last_sync_time = dt_util.utcnow()
-        _LOGGER.info("Manual TOU sync requested")
+        Only ONE sync per 5-minute period.
+        """
+        # Check if we should sync this period (prevents duplicates within same 5-min window)
+        if not await coordinator.should_sync_this_period():
+            return
+
+        # Wait for WebSocket or timeout (60s)
+        websocket_data = await coordinator.wait_for_websocket_or_timeout(timeout_seconds=60)
+
+        _LOGGER.info("=== Starting TOU sync ===")
 
         # Get latest Amber prices
         await amber_coordinator.async_request_refresh()
@@ -495,23 +579,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Wire up WebSocket sync callback now that handlers are defined
     if ws_client:
-        async def websocket_sync_callback():
-            """Callback to trigger Tesla sync when WebSocket receives price update."""
-            # Honor auto-sync setting
-            auto_sync_enabled = entry.options.get(
-                CONF_AUTO_SYNC_ENABLED,
-                entry.data.get(CONF_AUTO_SYNC_ENABLED, True)
-            )
-
-            if auto_sync_enabled:
-                _LOGGER.debug("WebSocket triggered TOU sync (auto-sync enabled)")
-                await handle_sync_tou(None)
-            else:
-                _LOGGER.debug("WebSocket sync skipped (auto-sync disabled)")
+        def websocket_sync_callback(prices_data):
+            """Callback to notify sync coordinator when WebSocket receives price update."""
+            coordinator.notify_websocket_update(prices_data)
 
         # Assign callback to WebSocket client
         ws_client._sync_callback = websocket_sync_callback
-        _LOGGER.info("🔗 WebSocket sync callback configured")
+        _LOGGER.info("🔗 WebSocket sync callback configured to notify coordinator")
 
     # Set up automatic TOU sync every 5 minutes if auto-sync is enabled
     async def auto_sync_tou(now):
@@ -545,14 +619,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("Performing initial TOU sync")
         await handle_sync_tou(None)
 
-    # Start the automatic sync timer (every 5 minutes, aligned to clock at :35 seconds)
-    # Triggers at :00:35, :05:35, :10:35, :15:35, :20:35, :25:35, :30:35, :35:35, :40:35, :45:35, :50:35, :55:35
-    # The 35-second offset ensures AEMO ActualInterval data is published before we fetch it
+    # Start the automatic sync timer (every 5 minutes, at start of period)
+    # Triggers at :00:00, :05:00, :10:00, :15:00, :20:00, :25:00, :30:00, :35:00, :40:00, :45:00, :50:00, :55:00
+    # At :00, waits up to 60s for WebSocket, then falls back to REST API if no WebSocket data
     cancel_timer = async_track_utc_time_change(
         hass,
         auto_sync_tou,
         minute=[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55],
-        second=35,
+        second=0,  # Start of period, wait for WebSocket
     )
 
     # Store the cancel function so we can clean it up later

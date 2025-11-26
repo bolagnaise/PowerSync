@@ -118,7 +118,7 @@ def create_app(config_class=Config):
 
         scheduler.add_job(
             func=run_sync_all_users,
-            trigger=CronTrigger(minute='*/5', second='35'),
+            trigger=CronTrigger(minute='*/5', second='0'),  # Start of period, wait for WebSocket
             id='sync_tou_schedules',
             name='Sync TOU schedules from Amber to Tesla',
             replace_existing=True
@@ -163,7 +163,7 @@ def create_app(config_class=Config):
         # Start the scheduler
         scheduler.start()
         logger.info("✅ Background scheduler started:")
-        logger.info("  - TOU sync will run every 5 minutes at :35 seconds (ensures AEMO ActualInterval data is available)")
+        logger.info("  - TOU sync will run every 5 minutes at :00 (waits up to 60s for WebSocket, then REST API fallback)")
         logger.info("  - Price history collection will run every 5 minutes at :35 seconds")
         logger.info("  - Energy usage logging will run every minute (Teslemetry allows 1/min)")
         logger.info("  - Solar curtailment check will run every minute")
@@ -210,13 +210,14 @@ def create_app(config_class=Config):
                         logger.info(f"Using first Amber site: {site_id}")
 
                 if site_id:
-                    # Create callback function for WebSocket-triggered sync
-                    def websocket_sync_callback():
-                        """Callback to trigger Tesla sync when WebSocket receives price update"""
-                        with app.app_context():
-                            sync_all_users()
+                    # Create callback function to notify coordinator when WebSocket receives price update
+                    def websocket_sync_callback(prices_data):
+                        """Callback to notify sync coordinator when WebSocket receives price update"""
+                        from app.tasks import get_sync_coordinator
+                        coordinator = get_sync_coordinator()
+                        coordinator.notify_websocket_update(prices_data)
 
-                    # Initialize and start WebSocket client with sync callback
+                    # Initialize and start WebSocket client with coordinator callback
                     ws_client = AmberWebSocketClient(decrypted_token, site_id, sync_callback=websocket_sync_callback)
                     ws_client.start()
 

@@ -249,9 +249,9 @@ class AmberWebSocketClient:
                     if general_price is not None and feedin_price is not None:
                         logger.info(f"💰 Price update: buy={general_price:.2f}¢/kWh, sell={feedin_price:.2f}¢/kWh")
 
-                # Trigger immediate Tesla sync if callback configured
+                # Notify coordinator when price data arrives (cooldown prevents notification spam)
                 if self._should_trigger_sync():
-                    self._trigger_sync()
+                    self._trigger_sync(converted_prices)
 
             elif data.get("type") == "subscription-success":
                 logger.info("✅ Subscription confirmed by server")
@@ -294,12 +294,15 @@ class AmberWebSocketClient:
 
         return True
 
-    def _trigger_sync(self):
+    def _trigger_sync(self, prices_data):
         """
-        Trigger Tesla sync callback in thread-safe manner.
+        Notify sync coordinator of new price data.
 
         Runs callback in thread pool executor to avoid blocking WebSocket event loop.
         Updates last trigger time to implement cooldown.
+
+        Args:
+            prices_data: Dictionary with price data to pass to coordinator
         """
         if not self._sync_callback:
             return
@@ -309,14 +312,14 @@ class AmberWebSocketClient:
 
             # Run callback in separate thread to avoid blocking WebSocket
             from concurrent.futures import ThreadPoolExecutor
-            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="WS-Sync")
-            future = executor.submit(self._sync_callback)
+            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="WS-Notify")
+            future = executor.submit(self._sync_callback, prices_data)
 
             # Don't wait for completion - fire and forget
-            logger.info("🚀 Triggered immediate Tesla sync from WebSocket price update")
+            logger.info("📡 Notified sync coordinator of WebSocket price update")
 
         except Exception as e:
-            logger.error(f"Error triggering sync callback: {e}", exc_info=True)
+            logger.error(f"Error notifying sync coordinator: {e}", exc_info=True)
 
     def get_latest_prices(self, max_age_seconds: int = 10) -> Optional[Dict[str, Any]]:
         """

@@ -10,11 +10,89 @@ import json
 
 logger = logging.getLogger(__name__)
 
-# Global sync deduplication (prevents overlapping syncs from WebSocket + scheduled triggers)
-# WebSocket sync is primary (has actual settled prices), scheduled sync is failsafe only
-_last_sync_lock = threading.Lock()
-_last_sync_time = None
-_min_sync_interval_seconds = 60  # Prevent syncs closer than 60 seconds apart
+
+class SyncCoordinator:
+    """
+    Coordinates Tesla sync with WebSocket wait-with-timeout pattern.
+
+    At the start of each 5-minute period:
+    1. Wait up to 60 seconds for WebSocket to deliver price data
+    2. If WebSocket arrives → Use WebSocket data and sync immediately
+    3. If timeout (60s) → Fallback to REST API sync
+
+    Only ONE sync per 5-minute period.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._websocket_event = threading.Event()
+        self._websocket_data = None
+        self._current_period = None  # Track which 5-min period we're in
+
+    def notify_websocket_update(self, prices_data):
+        """Called by WebSocket when new price data arrives."""
+        with self._lock:
+            self._websocket_data = prices_data
+            self._websocket_event.set()
+            logger.info("📡 WebSocket price update received, notifying sync coordinator")
+
+    def wait_for_websocket_or_timeout(self, timeout_seconds=60):
+        """
+        Wait for WebSocket data or timeout.
+
+        Returns:
+            dict: WebSocket price data if arrived within timeout, None if timeout
+        """
+        logger.info(f"⏱️  Waiting up to {timeout_seconds}s for WebSocket price update...")
+
+        # Wait for event with timeout
+        received = self._websocket_event.wait(timeout=timeout_seconds)
+
+        with self._lock:
+            if received and self._websocket_data:
+                logger.info("✅ WebSocket data received, using real-time prices")
+                data = self._websocket_data
+                # Clear for next period
+                self._websocket_event.clear()
+                self._websocket_data = None
+                return data
+            else:
+                logger.warning(f"⏰ WebSocket timeout after {timeout_seconds}s, falling back to REST API")
+                # Clear for next period
+                self._websocket_event.clear()
+                self._websocket_data = None
+                return None
+
+    def should_sync_this_period(self):
+        """
+        Check if we should sync for the current 5-minute period.
+        Prevents duplicate syncs within the same period.
+
+        Returns:
+            bool: True if this is a new period and we should sync
+        """
+        now = datetime.now(timezone.utc)
+        # Calculate current 5-minute period (e.g., 17:00, 17:05, 17:10, etc.)
+        current_period = now.replace(second=0, microsecond=0)
+        current_period = current_period.replace(minute=current_period.minute - (current_period.minute % 5))
+
+        with self._lock:
+            if self._current_period == current_period:
+                logger.info(f"⏭️  Already synced for period {current_period}, skipping")
+                return False
+
+            self._current_period = current_period
+            logger.info(f"🆕 New sync period: {current_period}")
+            return True
+
+
+# Global sync coordinator
+_sync_coordinator = SyncCoordinator()
+
+
+def get_sync_coordinator():
+    """Get the global sync coordinator instance."""
+    return _sync_coordinator
 
 
 def extract_most_recent_actual_interval(forecast_data, timezone_str=None):
@@ -129,22 +207,23 @@ def extract_most_recent_actual_interval(forecast_data, timezone_str=None):
 
 def sync_all_users():
     """
-    Automatically sync TOU schedules for all configured users
-    This runs periodically in the background
+    Automatically sync TOU schedules for all configured users.
+
+    Uses wait-with-timeout pattern:
+    1. Wait up to 60s for WebSocket price update
+    2. If WebSocket arrives -> Use WebSocket data
+    3. If timeout -> Fallback to REST API
+
+    Only ONE sync per 5-minute period.
     """
     from app import db
-    global _last_sync_time
 
-    # Deduplication check to prevent overlapping syncs
-    # WebSocket sync is primary (has actual settled prices), scheduled sync is failsafe only
-    with _last_sync_lock:
-        if _last_sync_time is not None:
-            elapsed = (datetime.now(timezone.utc) - _last_sync_time).total_seconds()
-            if elapsed < _min_sync_interval_seconds:
-                logger.info(f"⏭️  Skipping sync - last sync was {elapsed:.0f}s ago (WebSocket sync likely already ran, scheduled sync is failsafe only)")
-                return
+    # Check if we should sync this period (prevents duplicates within same 5-min window)
+    if not _sync_coordinator.should_sync_this_period():
+        return
 
-        _last_sync_time = datetime.now(timezone.utc)
+    # Wait for WebSocket or timeout (60s)
+    websocket_data = _sync_coordinator.wait_for_websocket_or_timeout(timeout_seconds=60)
 
     logger.info("=== Starting automatic TOU sync for all users ===")
 

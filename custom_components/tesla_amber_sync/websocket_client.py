@@ -219,9 +219,9 @@ class AmberWebSocketClient:
                 if general_price is not None and feedin_price is not None:
                     _LOGGER.info(f"💰 Price update: buy={general_price:.2f}¢/kWh, sell={feedin_price:.2f}¢/kWh")
 
-                # Trigger immediate Tesla sync if callback configured
+                # Notify coordinator when price data arrives (cooldown prevents notification spam)
                 if self._should_trigger_sync():
-                    asyncio.create_task(self._trigger_sync())
+                    asyncio.create_task(self._trigger_sync(converted_prices))
 
             elif data.get("type") == "subscription-success":
                 _LOGGER.info("✅ Subscription confirmed by server")
@@ -264,12 +264,15 @@ class AmberWebSocketClient:
 
         return True
 
-    async def _trigger_sync(self):
+    async def _trigger_sync(self, prices_data):
         """
-        Trigger Tesla sync callback in async manner.
+        Notify sync coordinator of new price data.
 
-        Runs callback as a background task to avoid blocking WebSocket event loop.
+        Runs callback to notify coordinator of price arrival.
         Updates last trigger time to implement cooldown.
+
+        Args:
+            prices_data: Dictionary with price data to pass to coordinator
         """
         if not self._sync_callback:
             return
@@ -277,14 +280,14 @@ class AmberWebSocketClient:
         try:
             self._last_sync_trigger = datetime.now(timezone.utc)
 
-            # Call the async callback
-            # Note: callback should be an async function
-            await self._sync_callback()
+            # Call the sync callback with price data
+            # Note: callback is now synchronous (coordinator.notify_websocket_update is sync)
+            self._sync_callback(prices_data)
 
-            _LOGGER.info("🚀 Triggered immediate Tesla sync from WebSocket price update")
+            _LOGGER.info("📡 Notified sync coordinator of WebSocket price update")
 
         except Exception as e:
-            _LOGGER.error(f"Error triggering sync callback: {e}", exc_info=True)
+            _LOGGER.error(f"Error notifying sync coordinator: {e}", exc_info=True)
 
     def get_latest_prices(self, max_age_seconds: int = 360) -> Optional[list]:
         """
