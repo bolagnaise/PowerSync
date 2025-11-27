@@ -152,10 +152,24 @@ class AmberTariffConverter:
                         logger.error(error_msg)
                         raise ValueError(error_msg)
 
-                # For ActualInterval/CurrentInterval: Use perKwh (actual settled prices)
+                # For CurrentInterval: Prefer advancedPrice (Amber retail forecast) over perKwh (AEMO wholesale)
+                # For ActualInterval: Use perKwh (actual settled retail price)
                 else:
-                    per_kwh_cents = point.get('perKwh', 0)
-                    logger.debug(f"{nem_time} [{interval_type}]: perKwh={per_kwh_cents:.2f}c/kWh (actual)")
+                    if interval_type == 'CurrentInterval' and advanced_price:
+                        # CurrentInterval has advancedPrice during first 25 mins - use it for Amber retail forecast
+                        if isinstance(advanced_price, dict):
+                            per_kwh_cents = advanced_price.get(forecast_type, advanced_price.get('predicted', 0))
+                            logger.debug(f"{nem_time} [CurrentInterval]: advancedPrice.{forecast_type}={per_kwh_cents:.2f}c/kWh (Amber retail forecast)")
+                        else:
+                            per_kwh_cents = advanced_price
+                            logger.debug(f"{nem_time} [CurrentInterval]: advancedPrice={per_kwh_cents:.2f}c/kWh (Amber retail forecast)")
+                    else:
+                        # ActualInterval or CurrentInterval without advancedPrice (last 5 mins of 30-min period)
+                        per_kwh_cents = point.get('perKwh', 0)
+                        if interval_type == 'ActualInterval':
+                            logger.debug(f"{nem_time} [ActualInterval]: perKwh={per_kwh_cents:.2f}c/kWh (actual settled retail)")
+                        else:
+                            logger.debug(f"{nem_time} [CurrentInterval]: perKwh={per_kwh_cents:.2f}c/kWh (fallback - AEMO wholesale)")
 
                 # Amber API convention: feedIn (sell) prices are negative when you get paid
                 # Tesla convention: sell prices are positive when you get paid

@@ -340,10 +340,24 @@ def convert_amber_to_tesla_tariff(
                     _LOGGER.error(error_msg)
                     raise ValueError(error_msg)
 
-            # For ActualInterval/CurrentInterval: Use perKwh (actual settled prices)
+            # For CurrentInterval: Prefer advancedPrice (Amber retail forecast) over perKwh (AEMO wholesale)
+            # For ActualInterval: Use perKwh (actual settled retail price)
             else:
-                per_kwh_cents = point.get("perKwh", 0)
-                _LOGGER.debug("%s [%s]: perKwh=%.2fc/kWh (actual)", nem_time, interval_type, per_kwh_cents)
+                if interval_type == "CurrentInterval" and advanced_price:
+                    # CurrentInterval has advancedPrice during first 25 mins - use it for Amber retail forecast
+                    if isinstance(advanced_price, dict):
+                        per_kwh_cents = advanced_price.get(forecast_type, advanced_price.get("predicted", 0))
+                        _LOGGER.debug("%s [CurrentInterval]: advancedPrice.%s=%.2fc/kWh (Amber retail forecast)", nem_time, forecast_type, per_kwh_cents)
+                    else:
+                        per_kwh_cents = advanced_price
+                        _LOGGER.debug("%s [CurrentInterval]: advancedPrice=%.2fc/kWh (Amber retail forecast)", nem_time, per_kwh_cents)
+                else:
+                    # ActualInterval or CurrentInterval without advancedPrice (last 5 mins of 30-min period)
+                    per_kwh_cents = point.get("perKwh", 0)
+                    if interval_type == "ActualInterval":
+                        _LOGGER.debug("%s [ActualInterval]: perKwh=%.2fc/kWh (actual settled retail)", nem_time, per_kwh_cents)
+                    else:
+                        _LOGGER.debug("%s [CurrentInterval]: perKwh=%.2fc/kWh (fallback - AEMO wholesale)", nem_time, per_kwh_cents)
 
             # Amber convention: feedIn prices are negative when you get paid
             # Tesla convention: sell prices are positive when you get paid
