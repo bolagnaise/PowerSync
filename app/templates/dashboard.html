@@ -661,9 +661,6 @@
 
                 // Update 5-minute billing window with live prices
                 update5MinWindow(data.prices || data);
-
-                // Fetch and update price history
-                await fetchPriceHistory();
             } catch (error) {
                 console.error('Error fetching current prices:', error);
             }
@@ -1275,6 +1272,7 @@
         // Initial load
         checkAPIStatus();
         fetchTOUSchedule();
+        fetchPriceHistory();
 
         // Refresh current prices every 1 minute (Amber updates every 5 mins, so we catch updates quickly)
         setInterval(fetchCurrentPrices, 60 * 1000);
