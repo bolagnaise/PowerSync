@@ -190,91 +190,109 @@ def create_app(config_class=Config):
         # Lock already held by another worker - skip scheduler initialization
         logger.info("⏭️  Another worker is running the scheduler - skipping initialization in this worker")
 
-    # Initialize WebSocket client for real-time price updates (all workers)
-    # Each worker maintains its own WebSocket connection for optimal performance
+    # Initialize WebSocket client for real-time price updates (ONLY ONE WORKER)
+    # Use file locking to ensure only ONE worker (in multi-worker setup) runs WebSocket client
+    # This prevents duplicate sync triggers when Amber pushes price updates to all clients
+    websocket_lock_file_path = os.path.join(app.instance_path, 'websocket.lock')
+
     try:
-        from app.websocket_client import AmberWebSocketClient
-        from app.models import User
+        # Try to acquire exclusive lock (non-blocking)
+        websocket_lock_file = open(websocket_lock_file_path, 'w')
+        fcntl.flock(websocket_lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 
-        # Query database within application context
-        with app.app_context():
-            # Get the first user's Amber credentials (assuming single-user setup)
-            # In multi-user setups, each user would need their own WebSocket client
-            user = User.query.first()
-            if user and user.amber_api_token_encrypted:
-                from app.utils import decrypt_token
+        # If we got here, we acquired the lock - this worker will run the WebSocket client
+        logger.info("🔒 This worker acquired the WebSocket lock - initializing WebSocket client")
 
-                # Decrypt the Amber API token
-                decrypted_token = decrypt_token(user.amber_api_token_encrypted)
+        try:
+            from app.websocket_client import AmberWebSocketClient
+            from app.models import User
 
-                # Fetch site ID from Amber API (not stored in User model)
-                site_id = None
-                from app.api_clients import get_amber_client
-                amber_client = get_amber_client(user)
-                if amber_client:
-                    sites = amber_client.get_sites()
-                    if sites:
-                        site_id = sites[0]['id']
-                        logger.info(f"Using first Amber site: {site_id}")
+            # Query database within application context
+            with app.app_context():
+                # Get the first user's Amber credentials (assuming single-user setup)
+                # In multi-user setups, each user would need their own WebSocket client
+                user = User.query.first()
+                if user and user.amber_api_token_encrypted:
+                    from app.utils import decrypt_token
 
-                if site_id:
-                    # Create callback function to TRIGGER SYNC when WebSocket receives price update
-                    # This is the PRIMARY sync trigger - WebSocket price arrival starts everything
-                    def websocket_sync_callback(prices_data):
-                        """
-                        EVENT-DRIVEN SYNC: WebSocket price arrival triggers immediate sync.
-                        This is the primary trigger - cron jobs are just fallback.
-                        """
-                        from app.tasks import get_sync_coordinator, sync_all_users_with_websocket_data, save_price_history_with_websocket_data
+                    # Decrypt the Amber API token
+                    decrypted_token = decrypt_token(user.amber_api_token_encrypted)
 
-                        # Notify coordinator (for period deduplication)
-                        coordinator = get_sync_coordinator()
-                        coordinator.notify_websocket_update(prices_data)
+                    # Fetch site ID from Amber API (not stored in User model)
+                    site_id = None
+                    from app.api_clients import get_amber_client
+                    amber_client = get_amber_client(user)
+                    if amber_client:
+                        sites = amber_client.get_sites()
+                        if sites:
+                            site_id = sites[0]['id']
+                            logger.info(f"Using first Amber site: {site_id}")
 
-                        # Check if we should sync this period (prevents duplicates)
-                        if not coordinator.should_sync_this_period():
-                            logger.info("⏭️  WebSocket price received but already synced this period, skipping")
-                            return
+                    if site_id:
+                        # Create callback function to TRIGGER SYNC when WebSocket receives price update
+                        # This is the PRIMARY sync trigger - WebSocket price arrival starts everything
+                        def websocket_sync_callback(prices_data):
+                            """
+                            EVENT-DRIVEN SYNC: WebSocket price arrival triggers immediate sync.
+                            This is the primary trigger - cron jobs are just fallback.
+                            """
+                            from app.tasks import get_sync_coordinator, sync_all_users_with_websocket_data, save_price_history_with_websocket_data
 
-                        # TRIGGER SYNC IMMEDIATELY with WebSocket data (event-driven!)
-                        logger.info("🚀 WebSocket price received - triggering immediate sync (event-driven)")
+                            # Notify coordinator (for period deduplication)
+                            coordinator = get_sync_coordinator()
+                            coordinator.notify_websocket_update(prices_data)
 
-                        # Run sync in app context (needed for database operations)
-                        with app.app_context():
-                            try:
-                                # 1. Sync TOU to Tesla with WebSocket price
-                                sync_all_users_with_websocket_data(prices_data)
+                            # Check if we should sync this period (prevents duplicates)
+                            if not coordinator.should_sync_this_period():
+                                logger.info("⏭️  WebSocket price received but already synced this period, skipping")
+                                return
 
-                                # 2. Save price history with WebSocket price
-                                save_price_history_with_websocket_data(prices_data)
+                            # TRIGGER SYNC IMMEDIATELY with WebSocket data (event-driven!)
+                            logger.info("🚀 WebSocket price received - triggering immediate sync (event-driven)")
 
-                                logger.info("✅ Event-driven sync completed successfully")
-                            except Exception as e:
-                                logger.error(f"❌ Error in event-driven sync: {e}", exc_info=True)
+                            # Run sync in app context (needed for database operations)
+                            with app.app_context():
+                                try:
+                                    # 1. Sync TOU to Tesla with WebSocket price
+                                    sync_all_users_with_websocket_data(prices_data)
 
-                    # Initialize and start WebSocket client with enhanced callback
-                    ws_client = AmberWebSocketClient(decrypted_token, site_id, sync_callback=websocket_sync_callback)
-                    ws_client.start()
+                                    # 2. Save price history with WebSocket price
+                                    save_price_history_with_websocket_data(prices_data)
 
-                    # Store in app config for access by routes and tasks
-                    app.config['AMBER_WEBSOCKET_CLIENT'] = ws_client
+                                    logger.info("✅ Event-driven sync completed successfully")
+                                except Exception as e:
+                                    logger.error(f"❌ Error in event-driven sync: {e}", exc_info=True)
 
-                    # Register cleanup on app teardown
-                    def cleanup_websocket():
-                        logger.info("Cleaning up WebSocket client")
-                        ws_client.stop()
+                        # Initialize and start WebSocket client with enhanced callback
+                        ws_client = AmberWebSocketClient(decrypted_token, site_id, sync_callback=websocket_sync_callback)
+                        ws_client.start()
 
-                    atexit.register(cleanup_websocket)
+                        # Store in app config for access by routes and tasks
+                        app.config['AMBER_WEBSOCKET_CLIENT'] = ws_client
 
-                    logger.info("🔌 Amber WebSocket client initialized and started")
+                        # Register cleanup on app teardown
+                        def cleanup_websocket():
+                            logger.info("Cleaning up WebSocket client")
+                            ws_client.stop()
+                            fcntl.flock(websocket_lock_file.fileno(), fcntl.LOCK_UN)
+                            websocket_lock_file.close()
+                            logger.info("🔓 WebSocket client shut down and lock released")
+
+                        atexit.register(cleanup_websocket)
+
+                        logger.info("🔌 Amber WebSocket client initialized and started")
+                    else:
+                        logger.warning("No Amber site ID available - WebSocket client not started")
                 else:
-                    logger.warning("No Amber site ID available - WebSocket client not started")
-            else:
-                logger.info("No user with Amber credentials found - WebSocket client not started")
+                    logger.info("No user with Amber credentials found - WebSocket client not started")
 
-    except Exception as e:
-        logger.error(f"Failed to initialize WebSocket client: {e}", exc_info=True)
-        logger.warning("WebSocket client not available - will use REST API fallback")
+        except Exception as e:
+            logger.error(f"Failed to initialize WebSocket client: {e}", exc_info=True)
+            logger.warning("WebSocket client not available - will use REST API fallback")
+
+    except IOError:
+        # Lock already held by another worker - skip WebSocket initialization
+        logger.info("⏭️  Another worker is running the WebSocket client - skipping initialization in this worker")
 
     logger.info("Flask application created successfully")
     return app
