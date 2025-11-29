@@ -218,14 +218,41 @@ def create_app(config_class=Config):
                         logger.info(f"Using first Amber site: {site_id}")
 
                 if site_id:
-                    # Create callback function to notify coordinator when WebSocket receives price update
+                    # Create callback function to TRIGGER SYNC when WebSocket receives price update
+                    # This is the PRIMARY sync trigger - WebSocket price arrival starts everything
                     def websocket_sync_callback(prices_data):
-                        """Callback to notify sync coordinator when WebSocket receives price update"""
-                        from app.tasks import get_sync_coordinator
+                        """
+                        EVENT-DRIVEN SYNC: WebSocket price arrival triggers immediate sync.
+                        This is the primary trigger - cron jobs are just fallback.
+                        """
+                        from app.tasks import get_sync_coordinator, sync_all_users_with_websocket_data, save_price_history_with_websocket_data
+
+                        # Notify coordinator (for period deduplication)
                         coordinator = get_sync_coordinator()
                         coordinator.notify_websocket_update(prices_data)
 
-                    # Initialize and start WebSocket client with coordinator callback
+                        # Check if we should sync this period (prevents duplicates)
+                        if not coordinator.should_sync_this_period():
+                            logger.info("⏭️  WebSocket price received but already synced this period, skipping")
+                            return
+
+                        # TRIGGER SYNC IMMEDIATELY with WebSocket data (event-driven!)
+                        logger.info("🚀 WebSocket price received - triggering immediate sync (event-driven)")
+
+                        # Run sync in app context (needed for database operations)
+                        with app.app_context():
+                            try:
+                                # 1. Sync TOU to Tesla with WebSocket price
+                                sync_all_users_with_websocket_data(prices_data)
+
+                                # 2. Save price history with WebSocket price
+                                save_price_history_with_websocket_data(prices_data)
+
+                                logger.info("✅ Event-driven sync completed successfully")
+                            except Exception as e:
+                                logger.error(f"❌ Error in event-driven sync: {e}", exc_info=True)
+
+                    # Initialize and start WebSocket client with enhanced callback
                     ws_client = AmberWebSocketClient(decrypted_token, site_id, sync_callback=websocket_sync_callback)
                     ws_client.start()
 

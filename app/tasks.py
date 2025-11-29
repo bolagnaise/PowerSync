@@ -221,25 +221,42 @@ def extract_most_recent_actual_interval(forecast_data, timezone_str=None):
         return None
 
 
+def sync_all_users_with_websocket_data(websocket_data):
+    """
+    EVENT-DRIVEN: Sync TOU with pre-fetched WebSocket data (called by WebSocket callback).
+    This is the fast path - data already arrived, no waiting.
+    """
+    _sync_all_users_internal(websocket_data)
+
+
 def sync_all_users():
     """
-    Automatically sync TOU schedules for all configured users.
+    CRON FALLBACK: Sync TOU only if WebSocket hasn't delivered yet.
 
-    Uses wait-with-timeout pattern:
-    1. Wait up to 60s for WebSocket price update
-    2. If WebSocket arrives -> Use WebSocket data
-    3. If timeout -> Fallback to REST API
-
-    Only ONE sync per 5-minute period.
+    This is the safety net if WebSocket fails. Checks if already synced first,
+    then waits up to 60s for WebSocket, falls back to REST API if timeout.
     """
     from app import db
+
+    # FALLBACK CHECK: Has WebSocket already synced this period?
+    if _sync_coordinator.already_synced_this_period():
+        logger.info("⏭️  Cron triggered but WebSocket already synced this period - skipping (fallback not needed)")
+        return
 
     # Check if we should sync this period (prevents duplicates within same 5-min window)
     if not _sync_coordinator.should_sync_this_period():
         return
 
     # Wait for WebSocket or timeout (60s)
+    logger.info("⏰ Cron fallback: waiting 60s for WebSocket...")
     websocket_data = _sync_coordinator.wait_for_websocket_or_timeout(timeout_seconds=60)
+
+    _sync_all_users_internal(websocket_data)
+
+
+def _sync_all_users_internal(websocket_data):
+    """Internal sync logic shared by both event-driven and cron-fallback paths."""
+    from app import db
 
     logger.info("=== Starting automatic TOU sync for all users ===")
 
@@ -379,11 +396,38 @@ def sync_all_users():
     return success_count, error_count
 
 
+def save_price_history_with_websocket_data(websocket_data):
+    """
+    EVENT-DRIVEN: Save price history with pre-fetched WebSocket data.
+    This is the fast path - data already arrived, no waiting.
+    """
+    _save_price_history_internal(websocket_data)
+
+
 def save_price_history():
     """
-    Automatically save current Amber prices to database for historical tracking
-    This runs periodically in the background to ensure continuous price history
+    CRON FALLBACK: Save price history only if WebSocket hasn't delivered yet.
+
+    This is the safety net if WebSocket fails. Checks if already saved first,
+    then waits up to 60s for WebSocket, falls back to REST API if timeout.
     """
+    from app import db
+
+    # FALLBACK CHECK: Has WebSocket already triggered collection this period?
+    coordinator = get_sync_coordinator()
+    if coordinator.already_synced_this_period():
+        logger.info("⏭️  Cron triggered but WebSocket already saved price history this period - skipping")
+        return
+
+    # Wait for WebSocket or timeout (60s)
+    logger.info("⏰ Cron fallback for price history: waiting 60s for WebSocket...")
+    websocket_data = coordinator.wait_for_websocket_or_timeout(timeout_seconds=60)
+
+    _save_price_history_internal(websocket_data)
+
+
+def _save_price_history_internal(websocket_data):
+    """Internal price history logic shared by both event-driven and cron-fallback paths."""
     from app import db
 
     logger.info("=== Starting automatic price history collection ===")
@@ -413,10 +457,7 @@ def save_price_history():
                 error_count += 1
                 continue
 
-            # Get current prices from WebSocket (primary) or REST API (fallback)
-            # Wait up to 60 seconds for WebSocket data (same logic as TOU sync)
-            coordinator = get_sync_coordinator()
-            websocket_data = coordinator.wait_for_websocket_or_timeout(timeout_seconds=60)
+            # Use provided WebSocket data (already fetched by caller)
 
             prices = None
             if websocket_data:
