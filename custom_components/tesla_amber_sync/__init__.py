@@ -464,27 +464,48 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         _LOGGER.info("=== Starting TOU sync ===")
 
-        # Get latest Amber prices
-        await amber_coordinator.async_request_refresh()
-
-        if not amber_coordinator.data:
-            _LOGGER.error("No Amber price data available")
-            return
-
         # Import tariff converter from existing code
         from .tariff_converter import (
             convert_amber_to_tesla_tariff,
             extract_most_recent_actual_interval,
         )
 
-        # Extract most recent CurrentInterval/ActualInterval from 5-min forecast data
-        # This captures short-term price spikes that would otherwise be averaged out
-        forecast_5min = amber_coordinator.data.get("forecast_5min", [])
-        current_actual_interval = extract_most_recent_actual_interval(forecast_5min)
-        if current_actual_interval:
-            _LOGGER.info("CurrentInterval/ActualInterval extracted for current period pricing")
+        # Get current interval price from WebSocket (real-time) or REST API fallback
+        # WebSocket is PRIMARY source for current price, REST API is fallback if timeout
+        current_actual_interval = None
+
+        if websocket_data:
+            # WebSocket data received within 60s - use it directly as primary source
+            current_actual_interval = websocket_data
+            general_price = current_actual_interval.get('general', {}).get('perKwh') if current_actual_interval.get('general') else None
+            feedin_price = current_actual_interval.get('feedIn', {}).get('perKwh') if current_actual_interval.get('feedIn') else None
+            _LOGGER.info(f"✅ Using WebSocket price for current interval: general={general_price}¢/kWh, feedIn={feedin_price}¢/kWh")
         else:
-            _LOGGER.info("No CurrentInterval/ActualInterval available, will use 30-min forecast averaging")
+            # WebSocket timeout - fallback to REST API for current price
+            _LOGGER.warning(f"⏰ WebSocket timeout - using REST API fallback for current price")
+
+            # Refresh coordinator to get REST API current prices
+            await amber_coordinator.async_request_refresh()
+
+            if amber_coordinator.data:
+                # Extract most recent CurrentInterval/ActualInterval from 5-min forecast data
+                forecast_5min = amber_coordinator.data.get("forecast_5min", [])
+                current_actual_interval = extract_most_recent_actual_interval(forecast_5min)
+
+                if current_actual_interval:
+                    general_price = current_actual_interval.get('general', {}).get('perKwh') if current_actual_interval.get('general') else None
+                    _LOGGER.info(f"📡 Using REST API price for current interval: general={general_price}¢/kWh")
+                else:
+                    _LOGGER.warning("No current price data available, proceeding with 30-min forecast only")
+            else:
+                _LOGGER.error("No Amber price data available from REST API")
+
+        # Refresh coordinator to get latest forecast data (regardless of WebSocket status)
+        await amber_coordinator.async_request_refresh()
+
+        if not amber_coordinator.data:
+            _LOGGER.error("No Amber forecast data available")
+            return
 
         # Get forecast type from options (if set) or data (from initial config)
         forecast_type = entry.options.get(
