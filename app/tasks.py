@@ -85,6 +85,22 @@ class SyncCoordinator:
             logger.info(f"🆕 New sync period: {current_period}")
             return True
 
+    def already_synced_this_period(self):
+        """
+        Check if we already synced for the current 5-minute period (read-only).
+        Used by cron fallback to determine if WebSocket already handled this period.
+
+        Returns:
+            bool: True if already synced this period, False if not synced yet
+        """
+        now = datetime.now(timezone.utc)
+        # Calculate current 5-minute period
+        current_period = now.replace(second=0, microsecond=0)
+        current_period = current_period.replace(minute=current_period.minute - (current_period.minute % 5))
+
+        with self._lock:
+            return self._current_period == current_period
+
 
 # Global sync coordinator
 _sync_coordinator = SyncCoordinator()
@@ -400,7 +416,7 @@ def save_price_history():
             # Get current prices from WebSocket (primary) or REST API (fallback)
             # Wait up to 60 seconds for WebSocket data (same logic as TOU sync)
             coordinator = get_sync_coordinator()
-            websocket_data = coordinator.wait_for_websocket_data(timeout=60)
+            websocket_data = coordinator.wait_for_websocket_or_timeout(timeout_seconds=60)
 
             prices = None
             if websocket_data:
