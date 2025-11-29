@@ -480,13 +480,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info("⏭️  Cron triggered but WebSocket already synced this period - skipping (fallback not needed)")
             return
 
-        # Check if we should sync this period (prevents duplicates within same 5-min window)
-        if not await coordinator.should_sync_this_period():
-            return
-
-        # Wait for WebSocket or timeout (60s)
+        # Wait for WebSocket or timeout (60s) - DON'T mark period yet, let WebSocket mark it if it arrives
         _LOGGER.info("⏰ Cron fallback: waiting 60s for WebSocket...")
         websocket_data = await coordinator.wait_for_websocket_or_timeout(timeout_seconds=60)
+
+        # NOW check if we should sync this period (after wait completes)
+        # If WebSocket arrived during wait and triggered sync, this will return False
+        if not await coordinator.should_sync_this_period():  # ✅ FIXED: After wait
+            _LOGGER.info("⏭️  WebSocket sync completed during wait - skipping cron fallback")
+            return
 
         await _handle_sync_tou_internal(websocket_data)
 
