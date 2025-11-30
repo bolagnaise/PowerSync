@@ -127,9 +127,9 @@ class AmberTariffConverter:
                 # For ForecastInterval: REQUIRE advancedPrice (no fallback)
                 if interval_type == 'ForecastInterval':
                     if not advanced_price:
-                        error_msg = f"Missing advancedPrice for ForecastInterval at {nem_time}. Amber API may be incomplete."
-                        logger.error(error_msg)
-                        raise ValueError(error_msg)
+                        # Expected for far-future forecasts (>36h) - Amber API doesn't provide advancedPrice
+                        logger.debug(f"Skipping ForecastInterval at {nem_time} - no advancedPrice (expected for far-future forecasts)")
+                        continue
 
                     # Handle dict format (standard: {predicted, low, high})
                     if isinstance(advanced_price, dict):
