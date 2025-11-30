@@ -220,10 +220,10 @@ def create_app(config_class=Config):
             replace_existing=True
         )
 
-        # Add job to save price history every 5 minutes for continuous tracking
+        # Add job to save price history every 5 minutes (same timing as TOU sync - 60s after Amber price updates)
         scheduler.add_job(
             func=run_save_price_history,
-            trigger=CronTrigger(minute='*/5', second='35'),
+            trigger=CronTrigger(minute='1-59/5', second='0'),  # Run at :01, :06, :11, etc. (same as TOU sync)
             id='save_price_history',
             name='Save Amber price history to database',
             replace_existing=True
@@ -262,7 +262,7 @@ def create_app(config_class=Config):
         logger.info("✅ Background scheduler started:")
         logger.info("  - TOU sync: WebSocket event-driven (primary) + REST API fallback every 5 minutes at :01")
         logger.info("  - Solar curtailment: WebSocket event-driven (primary) + REST API fallback every 5 minutes at :01")
-        logger.info("  - Price history: WebSocket event-driven (primary) + REST API fallback every 5 minutes at :35")
+        logger.info("  - Price history: WebSocket event-driven (primary) + REST API fallback every 5 minutes at :01")
         logger.info("  - Energy usage logging: every minute (Teslemetry allows 1/min)")
         logger.info("  - AEMO price monitoring: every 1 minute at :35 seconds for spike detection")
 
