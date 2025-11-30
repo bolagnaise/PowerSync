@@ -1097,14 +1097,14 @@ def create_spike_tariff(current_aemo_price_mwh):
 
 def solar_curtailment_check():
     """
-    Monitor Amber export prices and curtail solar export when price is 0c or negative
+    Monitor Amber export prices and curtail solar export when price is below 1c/kWh
 
     Flow:
     1. Check Amber feed-in price for users with solar curtailment enabled
-    2. If export price <= 0c:
+    2. If export price < 1c:
        - Set grid export rule to 'never' to prevent exporting at negative prices
        - Workaround for Tesla API bug: Toggle to 'pv_only' then back to 'never' to force apply
-    3. If export price > 0c:
+    3. If export price >= 1c:
        - Restore normal export (pv_only or battery_ok based on user preferences)
     """
     from app import db
@@ -1178,9 +1178,9 @@ def solar_curtailment_check():
             current_export_rule = current_settings.get('customer_preferred_export_rule')
             logger.info(f"Current export rule for {user.email}: {current_export_rule}")
 
-            # CURTAILMENT LOGIC: Export price is 0c or negative
-            if feedin_price <= 0:
-                logger.warning(f"🚫 CURTAILMENT TRIGGERED: Export price is {feedin_price}c/kWh (≤0) for {user.email}")
+            # CURTAILMENT LOGIC: Export price is below 1c/kWh
+            if feedin_price < 1:
+                logger.warning(f"🚫 CURTAILMENT TRIGGERED: Export price is {feedin_price}c/kWh (<1c) for {user.email}")
                 logger.info(f"Current state: export_rule='{current_export_rule}' → Target: export_rule='never'")
 
                 # If already set to 'never', toggle to force apply (workaround for Tesla API bug)
@@ -1313,9 +1313,9 @@ def solar_curtailment_with_websocket_data(prices_data):
             current_export_rule = current_settings.get('customer_preferred_export_rule')
             logger.info(f"Current export rule for {user.email}: {current_export_rule}")
 
-            # CURTAILMENT LOGIC: Export price is 0c or negative
-            if feedin_price <= 0:
-                logger.warning(f"🚫 CURTAILMENT TRIGGERED: Export price is {feedin_price}c/kWh (≤0) for {user.email}")
+            # CURTAILMENT LOGIC: Export price is below 1c/kWh
+            if feedin_price < 1:
+                logger.warning(f"🚫 CURTAILMENT TRIGGERED: Export price is {feedin_price}c/kWh (<1c) for {user.email}")
 
                 if current_export_rule == 'never':
                     logger.info(f"Already curtailed - toggling to force re-apply for {user.email}")

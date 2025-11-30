@@ -1086,13 +1086,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def handle_solar_curtailment_check(call: ServiceCall = None) -> None:
         """
-        Check Amber export prices and curtail solar export when price is 0c or negative.
+        Check Amber export prices and curtail solar export when price is below 1c/kWh.
 
         Flow:
         1. Check if curtailment is enabled for this entry
         2. Get feed-in price from Amber coordinator
-        3. If export price <= 0c: Set grid export rule to 'never'
-        4. If export price > 0c: Restore normal export ('battery_ok')
+        3. If export price < 1c: Set grid export rule to 'never'
+        4. If export price >= 1c: Restore normal export ('battery_ok')
         """
         # Check if curtailment is enabled
         curtailment_enabled = entry.options.get(
@@ -1169,9 +1169,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error fetching grid export settings: {err}")
                 return
 
-            # CURTAILMENT LOGIC: Export price is 0c or negative
-            if feedin_price <= 0:
-                _LOGGER.warning(f"🚫 CURTAILMENT TRIGGERED: Export price is {feedin_price}c/kWh (≤0)")
+            # CURTAILMENT LOGIC: Export price is below 1c/kWh
+            if feedin_price < 1:
+                _LOGGER.warning(f"🚫 CURTAILMENT TRIGGERED: Export price is {feedin_price}c/kWh (<1c)")
                 _LOGGER.info(f"Current state: export_rule='{current_export_rule}' → Target: export_rule='never'")
 
                 # If already set to 'never', toggle to force apply (Tesla API bug workaround)
@@ -1332,9 +1332,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error fetching grid export settings: {err}")
                 return
 
-            # CURTAILMENT LOGIC: Export price is 0c or negative
-            if feedin_price <= 0:
-                _LOGGER.warning(f"🚫 CURTAILMENT TRIGGERED: Export price is {feedin_price}c/kWh (≤0)")
+            # CURTAILMENT LOGIC: Export price is below 1c/kWh
+            if feedin_price < 1:
+                _LOGGER.warning(f"🚫 CURTAILMENT TRIGGERED: Export price is {feedin_price}c/kWh (<1c)")
 
                 if current_export_rule == "never":
                     _LOGGER.info("Already curtailed - toggling to force re-apply (Tesla API workaround)")
