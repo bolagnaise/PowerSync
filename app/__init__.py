@@ -133,7 +133,7 @@ def create_app(config_class=Config):
 
         scheduler.add_job(
             func=run_sync_all_users,
-            trigger=CronTrigger(minute='*/5', second='0'),  # Fallback if WebSocket fails (waits 60s for WebSocket)
+            trigger=CronTrigger(minute='1-59/5', second='0'),  # Run at :01, :06, :11, etc. (60s after Amber price updates)
             id='sync_tou_schedules',
             name='Sync TOU schedules from Amber to Tesla',
             replace_existing=True
@@ -179,7 +179,7 @@ def create_app(config_class=Config):
         # Start the scheduler
         scheduler.start()
         logger.info("✅ Background scheduler started:")
-        logger.info("  - TOU sync: WebSocket event-driven (primary) + cron fallback every 5 minutes at :00 (waits 60s for WebSocket)")
+        logger.info("  - TOU sync: WebSocket event-driven (primary) + REST API fallback every 5 minutes at :01 (60s after Amber updates, no wait)")
         logger.info("  - Price history collection will run every 5 minutes at :35 seconds")
         logger.info("  - Energy usage logging will run every minute (Teslemetry allows 1/min)")
         logger.info("  - Solar curtailment check will run every 5 minutes at :35 seconds (aligned with WebSocket prices)")

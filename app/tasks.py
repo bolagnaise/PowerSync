@@ -13,12 +13,11 @@ logger = logging.getLogger(__name__)
 
 class SyncCoordinator:
     """
-    Coordinates Tesla sync with WebSocket wait-with-timeout pattern.
+    Coordinates Tesla sync between WebSocket and REST API.
 
-    At the start of each 5-minute period:
-    1. Wait up to 60 seconds for WebSocket to deliver price data
-    2. If WebSocket arrives → Use WebSocket data and sync immediately
-    3. If timeout (60s) → Fallback to REST API sync
+    - WebSocket: If price data arrives, sync immediately (event-driven)
+    - Cron fallback: At 60s into each 5-minute period (e.g., :01, :06, :11...),
+      fetch directly from REST API (no wait needed - prices are fresh at 60s offset)
 
     Only ONE sync per 5-minute period.
     """
@@ -36,7 +35,7 @@ class SyncCoordinator:
             self._websocket_event.set()
             logger.info("📡 WebSocket price update received, notifying sync coordinator")
 
-    def wait_for_websocket_or_timeout(self, timeout_seconds=60):
+    def wait_for_websocket_or_timeout(self, timeout_seconds=15):
         """
         Wait for WebSocket data or timeout.
 
@@ -233,8 +232,8 @@ def sync_all_users():
     """
     CRON FALLBACK: Sync TOU only if WebSocket hasn't delivered yet.
 
-    This is the safety net if WebSocket fails. Checks if already synced first,
-    then waits up to 60s for WebSocket, falls back to REST API if timeout.
+    Runs at :01 (60s into each 5-min period) so Amber REST API prices are fresh.
+    No wait needed - just fetch directly from REST API.
     """
     from app import db
 
@@ -243,17 +242,9 @@ def sync_all_users():
         logger.info("⏭️  Cron triggered but WebSocket already synced this period - skipping (fallback not needed)")
         return
 
-    # Wait for WebSocket or timeout (60s) - DON'T mark period yet, let WebSocket mark it if it arrives
-    logger.info("⏰ Cron fallback: waiting 60s for WebSocket...")
-    websocket_data = _sync_coordinator.wait_for_websocket_or_timeout(timeout_seconds=60)
-
-    # NOW check if we should sync this period (after wait completes)
-    # If WebSocket arrived during wait and triggered sync, this will return False
-    if not _sync_coordinator.should_sync_this_period():
-        logger.info("⏭️  WebSocket sync completed during wait - skipping cron fallback")
-        return
-
-    _sync_all_users_internal(websocket_data)
+    # No wait needed - at 60s into period, REST API prices are fresh
+    logger.info("⏰ Cron fallback: fetching prices from REST API (60s into period)")
+    _sync_all_users_internal(None)  # None = use REST API
 
 
 def _sync_all_users_internal(websocket_data):
@@ -410,8 +401,8 @@ def save_price_history():
     """
     CRON FALLBACK: Save price history only if WebSocket hasn't delivered yet.
 
-    This is the safety net if WebSocket fails. Checks if already saved first,
-    then waits up to 60s for WebSocket, falls back to REST API if timeout.
+    Runs at :35 seconds into each 5-min period so REST API prices are fresh.
+    No wait needed - just fetch directly from REST API.
     """
     from app import db
 
@@ -421,11 +412,9 @@ def save_price_history():
         logger.info("⏭️  Cron triggered but WebSocket already saved price history this period - skipping")
         return
 
-    # Wait for WebSocket or timeout (60s)
-    logger.info("⏰ Cron fallback for price history: waiting 60s for WebSocket...")
-    websocket_data = coordinator.wait_for_websocket_or_timeout(timeout_seconds=60)
-
-    _save_price_history_internal(websocket_data)
+    # No wait needed - at 35s into period, REST API prices are fresh
+    logger.info("⏰ Cron fallback for price history: fetching from REST API (35s into period)")
+    _save_price_history_internal(None)  # None = use REST API
 
 
 def _save_price_history_internal(websocket_data):

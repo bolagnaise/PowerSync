@@ -54,12 +54,11 @@ PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH]
 
 class SyncCoordinator:
     """
-    Coordinates Tesla sync with WebSocket wait-with-timeout pattern (async version for Home Assistant).
+    Coordinates Tesla sync between WebSocket and REST API (async version for Home Assistant).
 
-    At the start of each 5-minute period:
-    1. Wait up to 60 seconds for WebSocket to deliver price data
-    2. If WebSocket arrives → Use WebSocket data and sync immediately
-    3. If timeout (60s) → Fallback to REST API sync
+    - WebSocket: If price data arrives, sync immediately (event-driven)
+    - Cron fallback: At 60s into each 5-minute period (e.g., :01, :06, :11...),
+      fetch directly from REST API (no wait needed - prices are fresh at 60s offset)
 
     Only ONE sync per 5-minute period.
     """
@@ -76,7 +75,7 @@ class SyncCoordinator:
         self._websocket_event.set()
         _LOGGER.info("📡 WebSocket price update received, notifying sync coordinator")
 
-    async def wait_for_websocket_or_timeout(self, timeout_seconds=60):
+    async def wait_for_websocket_or_timeout(self, timeout_seconds=15):
         """
         Wait for WebSocket data or timeout.
 
@@ -473,25 +472,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """
         CRON FALLBACK: Handle sync only if WebSocket hasn't delivered yet.
 
-        This is the safety net if WebSocket fails. Checks if already synced first,
-        then waits up to 60s for WebSocket, falls back to REST API if timeout.
+        Runs at :01 (60s into each 5-min period) so Amber REST API prices are fresh.
+        No wait needed - just fetch directly from REST API.
         """
         # FALLBACK CHECK: Has WebSocket already synced this period?
         if await coordinator.already_synced_this_period():
             _LOGGER.info("⏭️  Cron triggered but WebSocket already synced this period - skipping (fallback not needed)")
             return
 
-        # Wait for WebSocket or timeout (60s) - DON'T mark period yet, let WebSocket mark it if it arrives
-        _LOGGER.info("⏰ Cron fallback: waiting 60s for WebSocket...")
-        websocket_data = await coordinator.wait_for_websocket_or_timeout(timeout_seconds=60)
-
-        # NOW check if we should sync this period (after wait completes)
-        # If WebSocket arrived during wait and triggered sync, this will return False
-        if not await coordinator.should_sync_this_period():  # ✅ FIXED: After wait
-            _LOGGER.info("⏭️  WebSocket sync completed during wait - skipping cron fallback")
-            return
-
-        await _handle_sync_tou_internal(websocket_data)
+        # No wait needed - at 60s into period, REST API prices are fresh
+        _LOGGER.info("⏰ Cron fallback: fetching prices from REST API (60s into period)")
+        await _handle_sync_tou_internal(None)  # None = use REST API
 
     async def _handle_sync_tou_internal(websocket_data) -> None:
         """Internal sync logic shared by both event-driven and cron-fallback paths."""
@@ -877,14 +868,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("Performing initial TOU sync")
         await handle_sync_tou(None)
 
-    # Start the automatic sync timer (every 5 minutes, at start of period)
-    # Triggers at :00:00, :05:00, :10:00, :15:00, :20:00, :25:00, :30:00, :35:00, :40:00, :45:00, :50:00, :55:00
-    # At :00, waits up to 60s for WebSocket, then falls back to REST API if no WebSocket data
+    # Start the automatic sync timer (every 5 minutes, 60s after Amber price updates)
+    # Triggers at :01:00, :06:00, :11:00, :16:00, :21:00, :26:00, :31:00, :36:00, :41:00, :46:00, :51:00, :56:00
+    # Running 60s after period start ensures Amber prices are fresh when using REST API fallback
     cancel_timer = async_track_utc_time_change(
         hass,
         auto_sync_tou,
-        minute=[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55],
-        second=0,  # Start of period, wait for WebSocket
+        minute=[1, 6, 11, 16, 21, 26, 31, 36, 41, 46, 51, 56],
+        second=0,  # 60s after Amber price update, REST API prices are fresh
     )
 
     # Store the cancel function so we can clean it up later
