@@ -8,8 +8,19 @@ load_dotenv(os.path.join(basedir, '.env'))
 
 def get_version():
     """Get the current git commit hash as version identifier."""
+    # Try VERSION file first (Docker deployment)
+    version_file = os.path.join(basedir, 'VERSION')
+    if os.path.exists(version_file):
+        try:
+            with open(version_file, 'r') as f:
+                version = f.read().strip()
+                if version and version != 'unknown':
+                    return version
+        except Exception:
+            pass
+
+    # Fall back to git command (development)
     try:
-        # Get short commit hash (first 7 characters)
         result = subprocess.run(
             ['git', 'rev-parse', '--short=7', 'HEAD'],
             cwd=basedir,
@@ -21,6 +32,7 @@ def get_version():
             return result.stdout.strip()
     except Exception:
         pass
+
     return 'unknown'
 
 class Config:

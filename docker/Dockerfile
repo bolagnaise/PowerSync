@@ -20,8 +20,14 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Accept build argument for git commit hash
+ARG GIT_COMMIT=unknown
+
 # Copy application code
 COPY . .
+
+# Write VERSION file with git commit hash
+RUN echo "${GIT_COMMIT}" > /app/VERSION
 
 # Copy and set up entrypoint script
 COPY docker/docker-entrypoint.sh /usr/local/bin/
