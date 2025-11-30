@@ -145,8 +145,10 @@ class AmberWebSocketClient:
                             "siteId": self.site_id
                         }
                     }
-                    await websocket.send(json.dumps(subscribe_message))
-                    logger.info(f"📡 Subscribed to live prices for site {self.site_id}")
+                    subscribe_json = json.dumps(subscribe_message)
+                    logger.info(f"📡 Sending subscription: {subscribe_json}")
+                    await websocket.send(subscribe_json)
+                    logger.info(f"📡 Subscription sent for site {self.site_id}, waiting for response...")
 
                     # Listen for messages
                     async for message in websocket:
@@ -189,11 +191,14 @@ class AmberWebSocketClient:
             message: Raw message string from WebSocket
         """
         try:
-            data = json.loads(message)
+            # Log raw message first for debugging
+            logger.info(f"📨 Raw WebSocket message: {message[:500]}...")  # First 500 chars
 
-            # Log message for debugging
-            logger.info(f"📨 WebSocket message received: {data}")
+            data = json.loads(message)
             self._message_count += 1
+
+            # Log parsed message structure
+            logger.info(f"📨 Parsed message keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
 
             # Expected format from Amber WebSocket:
             # {
