@@ -66,6 +66,28 @@ class SensitiveDataFilter(logging.Filter):
             flags=re.IGNORECASE
         )
 
+        # Handle site IDs (UUIDs and alphanumeric IDs)
+        text = re.sub(
+            r'(site[_\s]?[iI][dD][\s:=]+)([a-fA-F0-9-]{20,})',
+            lambda m: m.group(1) + self.obfuscate(m.group(2)),
+            text
+        )
+
+        # Handle "for site {id}" pattern
+        text = re.sub(
+            r'(for site\s+)([a-fA-F0-9-]{20,})',
+            lambda m: m.group(1) + self.obfuscate(m.group(2)),
+            text,
+            flags=re.IGNORECASE
+        )
+
+        # Handle email addresses
+        text = re.sub(
+            r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})',
+            lambda m: self.obfuscate(m.group(1)),
+            text
+        )
+
         return text
 
     def filter(self, record):
