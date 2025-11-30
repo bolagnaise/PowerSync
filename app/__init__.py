@@ -11,17 +11,98 @@ import logging
 import atexit
 import fcntl
 import os
+import re
 
-# Set up logging
+
+class SensitiveDataFilter(logging.Filter):
+    """
+    Logging filter that obfuscates sensitive data like API keys and tokens.
+    Shows first 4 and last 4 characters with asterisks in between.
+    """
+
+    # Patterns to match sensitive data
+    PATTERNS = [
+        # Bearer tokens (Amber PSK, Teslemetry, etc.)
+        (re.compile(r'(Bearer\s+)([a-zA-Z0-9_-]{20,})', re.IGNORECASE), r'\1'),
+        # Amber PSK keys (psk_...)
+        (re.compile(r'(psk_)([a-zA-Z0-9]{20,})', re.IGNORECASE), r'\1'),
+        # Generic API keys/tokens (32+ hex chars)
+        (re.compile(r'(["\']?(?:api[_-]?key|token|secret|password|authorization)["\']?\s*[=:]\s*["\']?)([a-zA-Z0-9_-]{20,})(["\']?)', re.IGNORECASE), None),
+    ]
+
+    @staticmethod
+    def obfuscate(value, show_chars=4):
+        """Obfuscate a string showing only first and last N characters."""
+        if len(value) <= show_chars * 2:
+            return '*' * len(value)
+        return f"{value[:show_chars]}{'*' * (len(value) - show_chars * 2)}{value[-show_chars:]}"
+
+    def _obfuscate_string(self, text):
+        """Apply all obfuscation patterns to a string."""
+        if not text:
+            return text
+
+        # Handle Bearer tokens
+        text = re.sub(
+            r'(Bearer\s+)([a-zA-Z0-9_-]{20,})',
+            lambda m: m.group(1) + self.obfuscate(m.group(2)),
+            text,
+            flags=re.IGNORECASE
+        )
+
+        # Handle psk_ tokens
+        text = re.sub(
+            r'(psk_)([a-zA-Z0-9]{20,})',
+            lambda m: m.group(1) + self.obfuscate(m.group(2)),
+            text,
+            flags=re.IGNORECASE
+        )
+
+        # Handle authorization headers in websocket logs
+        text = re.sub(
+            r'(authorization:\s*Bearer\s+)([a-zA-Z0-9_-]{20,})',
+            lambda m: m.group(1) + self.obfuscate(m.group(2)),
+            text,
+            flags=re.IGNORECASE
+        )
+
+        return text
+
+    def filter(self, record):
+        """Filter log record to obfuscate sensitive data."""
+        # Handle the message
+        if record.msg:
+            record.msg = self._obfuscate_string(str(record.msg))
+
+        # Handle args if present (for %-style formatting)
+        if record.args:
+            if isinstance(record.args, dict):
+                record.args = {k: self._obfuscate_string(str(v)) if isinstance(v, str) else v
+                              for k, v in record.args.items()}
+            elif isinstance(record.args, tuple):
+                record.args = tuple(self._obfuscate_string(str(a)) if isinstance(a, str) else a
+                                   for a in record.args)
+
+        return True
+
+
+# Set up logging with sensitive data filter
 log_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'flask.log')
+
+# Create handlers
+file_handler = logging.FileHandler(log_file)
+console_handler = logging.StreamHandler()
+
+# Add filter to both handlers
+sensitive_filter = SensitiveDataFilter()
+file_handler.addFilter(sensitive_filter)
+console_handler.addFilter(sensitive_filter)
+
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
-    handlers=[
-        logging.FileHandler(log_file),
-        logging.StreamHandler()  # Also log to console
-    ]
+    handlers=[file_handler, console_handler]
 )
 logger = logging.getLogger(__name__)
 
