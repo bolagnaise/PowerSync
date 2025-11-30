@@ -1191,11 +1191,12 @@ def solar_curtailment_check():
 
             # CURTAILMENT LOGIC: Export price is 0c or negative
             if feedin_price <= 0:
-                logger.warning(f"🚫 Export price is {feedin_price}c/kWh - applying curtailment for {user.email}")
+                logger.warning(f"🚫 CURTAILMENT TRIGGERED: Export price is {feedin_price}c/kWh (≤0) for {user.email}")
+                logger.info(f"Current state: export_rule='{current_export_rule}' → Target: export_rule='never'")
 
                 # If already set to 'never', toggle to force apply (workaround for Tesla API bug)
                 if current_export_rule == 'never':
-                    logger.info(f"Export already set to 'never' - toggling to force apply for {user.email}")
+                    logger.info(f"Already curtailed - toggling to force re-apply (Tesla API workaround) for {user.email}")
 
                     # Toggle to pv_only
                     logger.info(f"Step 1: Setting export to 'pv_only' for {user.email}")
@@ -1217,44 +1218,48 @@ def solar_curtailment_check():
                         error_count += 1
                         continue
 
-                    logger.info(f"✅ Toggled export rule to force curtailment for {user.email}")
+                    logger.info(f"✅ CURTAILMENT MAINTAINED: Toggled export rule to force re-apply for {user.email}")
 
                 else:
                     # Not already 'never', so just set it
-                    logger.info(f"Setting export to 'never' for {user.email}")
+                    logger.info(f"Applying curtailment: '{current_export_rule}' → 'never' for {user.email}")
                     result = tesla_client.set_grid_export_rule(user.tesla_energy_site_id, 'never')
                     if not result:
-                        logger.error(f"Failed to set export to 'never' for {user.email}")
+                        logger.error(f"❌ Failed to apply curtailment (set export to 'never') for {user.email}")
                         error_count += 1
                         continue
 
-                    logger.info(f"✅ Applied solar curtailment (export=never) for {user.email}")
+                    logger.info(f"✅ CURTAILMENT APPLIED: Export rule changed '{current_export_rule}' → 'never' for {user.email}")
 
                 success_count += 1
+                logger.info(f"📊 Action summary: Curtailment active (price: {feedin_price}c/kWh, export: 'never')")
 
             # NORMAL MODE: Export price is positive
             else:
-                logger.info(f"✅ Export price is positive ({feedin_price}c/kWh) - normal operation for {user.email}")
+                logger.info(f"✅ NORMAL OPERATION: Export price is {feedin_price}c/kWh (>0) for {user.email}")
 
                 # If currently curtailed, restore to battery_ok (allows both solar and battery export)
                 if current_export_rule == 'never':
-                    logger.info(f"Restoring export from curtailment for {user.email}")
+                    logger.info(f"🔄 RESTORING FROM CURTAILMENT: 'never' → 'battery_ok' for {user.email}")
                     result = tesla_client.set_grid_export_rule(user.tesla_energy_site_id, 'battery_ok')
                     if not result:
-                        logger.error(f"Failed to restore export to 'battery_ok' for {user.email}")
+                        logger.error(f"❌ Failed to restore from curtailment (set export to 'battery_ok') for {user.email}")
                         error_count += 1
                         continue
 
-                    logger.info(f"✅ Restored export to 'battery_ok' for {user.email}")
+                    logger.info(f"✅ CURTAILMENT REMOVED: Export restored 'never' → 'battery_ok' for {user.email}")
+                    logger.info(f"📊 Action summary: Restored to normal (price: {feedin_price}c/kWh, export: 'battery_ok')")
                     success_count += 1
                 else:
-                    logger.debug(f"Export rule is already '{current_export_rule}' - no action needed for {user.email}")
+                    logger.debug(f"Already in normal mode (export='{current_export_rule}') - no action needed for {user.email}")
+                    logger.info(f"📊 Action summary: No change needed (price: {feedin_price}c/kWh, export: '{current_export_rule}')")
                     success_count += 1
 
         except Exception as e:
-            logger.error(f"Error checking solar curtailment for {user.email}: {e}", exc_info=True)
+            logger.error(f"❌ Unexpected error in solar curtailment check for {user.email}: {e}", exc_info=True)
+            logger.error(f"Error context: Failed during curtailment check - user may have incomplete configuration")
             error_count += 1
             continue
 
-    logger.info(f"=== Solar curtailment check complete: {success_count} successful, {error_count} errors ===")
+    logger.info(f"=== ✅ Solar curtailment check complete: {success_count} users processed successfully, {error_count} errors ===")
 

@@ -31,6 +31,7 @@ from .const import (
     CONF_DEMAND_CHARGE_APPLY_TO,
     CONF_DAILY_SUPPLY_CHARGE,
     CONF_MONTHLY_SUPPLY_CHARGE,
+    CONF_SOLAR_CURTAILMENT_ENABLED,
     CONF_TESLA_API_PROVIDER,
     CONF_FLEET_API_ACCESS_TOKEN,
     TESLA_PROVIDER_TESLEMETRY,
@@ -628,6 +629,186 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await amber_coordinator.async_request_refresh()
         await tesla_coordinator.async_request_refresh()
 
+    async def handle_solar_curtailment_check(call: ServiceCall = None) -> None:
+        """
+        Check Amber export prices and curtail solar export when price is 0c or negative.
+
+        Flow:
+        1. Check if curtailment is enabled for this entry
+        2. Get feed-in price from Amber coordinator
+        3. If export price <= 0c: Set grid export rule to 'never'
+        4. If export price > 0c: Restore normal export ('battery_ok')
+        """
+        # Check if curtailment is enabled
+        curtailment_enabled = entry.options.get(
+            CONF_SOLAR_CURTAILMENT_ENABLED,
+            entry.data.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
+        )
+
+        if not curtailment_enabled:
+            _LOGGER.debug("Solar curtailment is disabled, skipping check")
+            return
+
+        _LOGGER.info("=== Starting solar curtailment check ===")
+
+        try:
+            # Refresh Amber prices to get latest feed-in price
+            await amber_coordinator.async_request_refresh()
+
+            if not amber_coordinator.data:
+                _LOGGER.error("No Amber price data available for curtailment check")
+                return
+
+            # Get feed-in (export) price from current prices
+            current_prices = amber_coordinator.data.get("current", [])
+            if not current_prices:
+                _LOGGER.warning("No current price data available for curtailment check")
+                return
+
+            feedin_price = None
+            for price_data in current_prices:
+                if price_data.get("channelType") == "feedIn":
+                    feedin_price = price_data.get("perKwh", 0)
+                    break
+
+            if feedin_price is None:
+                _LOGGER.warning("No feed-in price found in Amber data")
+                return
+
+            _LOGGER.info(f"Current export price: {feedin_price}c/kWh")
+
+            # Get current grid export settings from Tesla
+            session = async_get_clientsession(hass)
+            headers = {
+                "Authorization": f"Bearer {entry.data[CONF_TESLEMETRY_API_TOKEN]}",
+                "Content-Type": "application/json",
+            }
+
+            # Determine API base URL
+            api_base_url = TESLEMETRY_API_BASE_URL
+            if tesla_api_provider == TESLA_PROVIDER_FLEET_API:
+                api_base_url = FLEET_API_BASE_URL
+
+            # Get current export rule
+            try:
+                async with session.get(
+                    f"{api_base_url}/api/1/energy_sites/{entry.data[CONF_TESLA_ENERGY_SITE_ID]}/grid_import_export",
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        _LOGGER.error(f"Failed to get grid export settings: {response.status} - {error_text}")
+                        return
+
+                    data = await response.json()
+                    current_export_rule = data.get("response", {}).get("customer_preferred_export_rule")
+                    _LOGGER.info(f"Current export rule: {current_export_rule}")
+
+            except Exception as err:
+                _LOGGER.error(f"Error fetching grid export settings: {err}")
+                return
+
+            # CURTAILMENT LOGIC: Export price is 0c or negative
+            if feedin_price <= 0:
+                _LOGGER.warning(f"🚫 CURTAILMENT TRIGGERED: Export price is {feedin_price}c/kWh (≤0)")
+                _LOGGER.info(f"Current state: export_rule='{current_export_rule}' → Target: export_rule='never'")
+
+                # If already set to 'never', toggle to force apply (Tesla API bug workaround)
+                if current_export_rule == "never":
+                    _LOGGER.info("Already curtailed - toggling to force re-apply (Tesla API workaround)")
+
+                    # Toggle to pv_only
+                    try:
+                        async with session.post(
+                            f"{api_base_url}/api/1/energy_sites/{entry.data[CONF_TESLA_ENERGY_SITE_ID]}/grid_import_export",
+                            headers=headers,
+                            json={"customer_preferred_export_rule": "pv_only"},
+                            timeout=aiohttp.ClientTimeout(total=30),
+                        ) as response:
+                            if response.status != 200:
+                                error_text = await response.text()
+                                _LOGGER.error(f"Failed to toggle export to 'pv_only': {response.status} - {error_text}")
+                                return
+
+                        # Wait for change to register
+                        await asyncio.sleep(2)
+
+                        # Toggle back to never
+                        async with session.post(
+                            f"{api_base_url}/api/1/energy_sites/{entry.data[CONF_TESLA_ENERGY_SITE_ID]}/grid_import_export",
+                            headers=headers,
+                            json={"customer_preferred_export_rule": "never"},
+                            timeout=aiohttp.ClientTimeout(total=30),
+                        ) as response:
+                            if response.status != 200:
+                                error_text = await response.text()
+                                _LOGGER.error(f"Failed to set export to 'never': {response.status} - {error_text}")
+                                return
+
+                        _LOGGER.info(f"✅ CURTAILMENT MAINTAINED: Toggled export rule to force re-apply")
+
+                    except Exception as err:
+                        _LOGGER.error(f"Error toggling export rule: {err}")
+                        return
+
+                else:
+                    # Not already 'never', so just set it
+                    _LOGGER.info(f"Applying curtailment: '{current_export_rule}' → 'never'")
+                    try:
+                        async with session.post(
+                            f"{api_base_url}/api/1/energy_sites/{entry.data[CONF_TESLA_ENERGY_SITE_ID]}/grid_import_export",
+                            headers=headers,
+                            json={"customer_preferred_export_rule": "never"},
+                            timeout=aiohttp.ClientTimeout(total=30),
+                        ) as response:
+                            if response.status != 200:
+                                error_text = await response.text()
+                                _LOGGER.error(f"❌ Failed to apply curtailment: {response.status} - {error_text}")
+                                return
+
+                        _LOGGER.info(f"✅ CURTAILMENT APPLIED: Export rule changed '{current_export_rule}' → 'never'")
+
+                    except Exception as err:
+                        _LOGGER.error(f"Error applying curtailment: {err}")
+                        return
+
+                _LOGGER.info(f"📊 Action summary: Curtailment active (price: {feedin_price}c/kWh, export: 'never')")
+
+            # NORMAL MODE: Export price is positive
+            else:
+                _LOGGER.info(f"✅ NORMAL OPERATION: Export price is {feedin_price}c/kWh (>0)")
+
+                # If currently curtailed, restore to battery_ok
+                if current_export_rule == "never":
+                    _LOGGER.info(f"🔄 RESTORING FROM CURTAILMENT: 'never' → 'battery_ok'")
+                    try:
+                        async with session.post(
+                            f"{api_base_url}/api/1/energy_sites/{entry.data[CONF_TESLA_ENERGY_SITE_ID]}/grid_import_export",
+                            headers=headers,
+                            json={"customer_preferred_export_rule": "battery_ok"},
+                            timeout=aiohttp.ClientTimeout(total=30),
+                        ) as response:
+                            if response.status != 200:
+                                error_text = await response.text()
+                                _LOGGER.error(f"❌ Failed to restore from curtailment: {response.status} - {error_text}")
+                                return
+
+                        _LOGGER.info(f"✅ CURTAILMENT REMOVED: Export restored 'never' → 'battery_ok'")
+                        _LOGGER.info(f"📊 Action summary: Restored to normal (price: {feedin_price}c/kWh, export: 'battery_ok')")
+
+                    except Exception as err:
+                        _LOGGER.error(f"Error restoring from curtailment: {err}")
+                        return
+                else:
+                    _LOGGER.debug(f"Already in normal mode (export='{current_export_rule}') - no action needed")
+                    _LOGGER.info(f"📊 Action summary: No change needed (price: {feedin_price}c/kWh, export: '{current_export_rule}')")
+
+        except Exception as e:
+            _LOGGER.error(f"❌ Unexpected error in solar curtailment check: {e}", exc_info=True)
+
+        _LOGGER.info("=== Solar curtailment check complete ===")
+
     hass.services.async_register(DOMAIN, SERVICE_SYNC_TOU, handle_sync_tou)
     hass.services.async_register(DOMAIN, SERVICE_SYNC_NOW, handle_sync_now)
 
@@ -709,6 +890,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Store the cancel function so we can clean it up later
     hass.data[DOMAIN][entry.entry_id]["auto_sync_cancel"] = cancel_timer
 
+    # Set up automatic curtailment check every 5 minutes at :35 seconds (aligned with WebSocket prices)
+    # Triggers at :00:35, :05:35, :10:35, :15:35, :20:35, :25:35, :30:35, :35:35, :40:35, :45:35, :50:35, :55:35
+    async def auto_curtailment_check(now):
+        """Automatically check curtailment if enabled."""
+        await handle_solar_curtailment_check(None)
+
+    curtailment_cancel_timer = async_track_utc_time_change(
+        hass,
+        auto_curtailment_check,
+        minute=[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55],
+        second=35,  # Aligned with WebSocket price updates
+    )
+
+    # Store the curtailment cancel function
+    hass.data[DOMAIN][entry.entry_id]["curtailment_cancel"] = curtailment_cancel_timer
+    _LOGGER.info("Solar curtailment check scheduled every 5 minutes at :35 seconds (aligned with WebSocket prices)")
+
     _LOGGER.info("Tesla Sync integration setup complete")
     return True
 
@@ -722,6 +920,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if cancel_timer := entry_data.get("auto_sync_cancel"):
         cancel_timer()
         _LOGGER.debug("Cancelled auto-sync timer")
+
+    # Cancel the curtailment timer if it exists
+    if curtailment_cancel := entry_data.get("curtailment_cancel"):
+        curtailment_cancel()
+        _LOGGER.debug("Cancelled curtailment timer")
 
     # Stop WebSocket client if it exists
     if ws_client := entry_data.get("ws_client"):

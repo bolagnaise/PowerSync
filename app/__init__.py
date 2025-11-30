@@ -159,10 +159,11 @@ def create_app(config_class=Config):
             replace_existing=True
         )
 
-        # Add job to check solar curtailment every minute (prevent export at negative prices)
+        # Add job to check solar curtailment every 5 minutes (prevent export at negative prices)
+        # Aligned with WebSocket price updates at :35 seconds
         scheduler.add_job(
             func=run_solar_curtailment_check,
-            trigger=CronTrigger(minute='*'),
+            trigger=CronTrigger(minute='*/5', second='35'),
             id='solar_curtailment_check',
             name='Check Amber export prices for solar curtailment',
             replace_existing=True
@@ -174,7 +175,7 @@ def create_app(config_class=Config):
         logger.info("  - TOU sync: WebSocket event-driven (primary) + cron fallback every 5 minutes at :00 (waits 60s for WebSocket)")
         logger.info("  - Price history collection will run every 5 minutes at :35 seconds")
         logger.info("  - Energy usage logging will run every minute (Teslemetry allows 1/min)")
-        logger.info("  - Solar curtailment check will run every minute")
+        logger.info("  - Solar curtailment check will run every 5 minutes at :35 seconds (aligned with WebSocket prices)")
         logger.info("  - AEMO price monitoring will run every 1 minute at :35 seconds for spike detection")
 
         # Shut down the scheduler and release lock when exiting the app
