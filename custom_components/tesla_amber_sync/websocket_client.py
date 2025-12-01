@@ -380,7 +380,7 @@ class AmberWebSocketClient:
                         except asyncio.TimeoutError:
                             # No message received within timeout - log status
                             elapsed = (datetime.now(timezone.utc) - last_status_log).total_seconds()
-                            _LOGGER.warning(
+                            _LOGGER.debug(
                                 f"⏳ WebSocket waiting for messages... "
                                 f"(no data for {elapsed:.0f}s, connection: {self._connection_status}, "
                                 f"messages received: {self._message_count})"
