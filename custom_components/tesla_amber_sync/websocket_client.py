@@ -266,8 +266,20 @@ class AmberWebSocketClient:
             return
 
         self._running = True
-        self._task = asyncio.create_task(self._connect_and_listen())
+        self._task = asyncio.create_task(self._run_with_error_handling())
         _LOGGER.info("✅ WebSocket client task started")
+
+    async def _run_with_error_handling(self):
+        """Wrapper to catch and log any unhandled exceptions in the WebSocket task."""
+        try:
+            await self._connect_and_listen()
+        except asyncio.CancelledError:
+            _LOGGER.info("WebSocket task was cancelled")
+            raise
+        except Exception as e:
+            _LOGGER.error(f"💥 Unhandled exception in WebSocket task: {e}", exc_info=True)
+            self._error_count += 1
+            self._last_error = str(e)
 
     async def stop(self):
         """Stop the WebSocket client and clean up."""
@@ -295,6 +307,7 @@ class AmberWebSocketClient:
 
     async def _connect_and_listen(self):
         """Connect to WebSocket and listen for messages with auto-reconnect."""
+        _LOGGER.info("🚀 WebSocket task started, entering connection loop")
         while self._running:
             try:
                 self._connection_status = "connecting"
