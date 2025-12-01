@@ -86,3 +86,22 @@ jobs:
           repository: ${{ env.DOCKER_HUB_USERNAME }}/${{ env.IMAGE_NAME_LEGACY }}
           readme-filepath: ./README.md
           short-description: "⚠️ DEPRECATED: Please use bolagnaise/tesla-sync instead"
+
+      - name: Notify Discord
+        if: github.event_name != 'pull_request'
+        run: |
+          curl -H "Content-Type: application/json" \
+            -d '{
+              "embeds": [{
+                "title": "🚀 Tesla Sync Update",
+                "description": "'"$(echo '${{ github.event.head_commit.message }}' | head -1)"'",
+                "color": 5025616,
+                "fields": [
+                  {"name": "Branch", "value": "`${{ github.ref_name }}`", "inline": true},
+                  {"name": "Author", "value": "${{ github.actor }}", "inline": true},
+                  {"name": "Commit", "value": "`${{ steps.git-info.outputs.commit }}`", "inline": true}
+                ],
+                "url": "https://github.com/${{ github.repository }}/commit/${{ github.sha }}"
+              }]
+            }' \
+            ${{ secrets.DISCORD_WEBHOOK }}
