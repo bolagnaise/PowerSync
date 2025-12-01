@@ -1159,7 +1159,12 @@ def solar_curtailment_check():
                 error_count += 1
                 continue
 
-            logger.info(f"Current export price for {user.email}: {feedin_price}c/kWh")
+            # Amber returns feed-in prices as NEGATIVE when you're paid to export
+            # e.g., feedin_price = -10.44 means you get paid 10.44c/kWh (good!)
+            # e.g., feedin_price = +5.00 means you pay 5c/kWh to export (bad!)
+            # So we want to curtail when feedin_price > 0 (user would pay to export)
+            export_earnings = -feedin_price  # Convert to positive = earnings per kWh
+            logger.info(f"Current feed-in price for {user.email}: {feedin_price}c/kWh (export earnings: {export_earnings}c/kWh)")
 
             # Get Tesla client
             tesla_client = get_tesla_client(user)
@@ -1178,9 +1183,10 @@ def solar_curtailment_check():
             current_export_rule = current_settings.get('customer_preferred_export_rule')
             logger.info(f"Current export rule for {user.email}: {current_export_rule}")
 
-            # CURTAILMENT LOGIC: Export price is below 1c/kWh
-            if feedin_price < 1:
-                logger.warning(f"🚫 CURTAILMENT TRIGGERED: Export price is {feedin_price}c/kWh (<1c) for {user.email}")
+            # CURTAILMENT LOGIC: Curtail when export earnings < 1c/kWh
+            # (i.e., when feedin_price > -1, meaning you earn less than 1c or pay to export)
+            if export_earnings < 1:
+                logger.warning(f"🚫 CURTAILMENT TRIGGERED: Export earnings {export_earnings:.2f}c/kWh (<1c) for {user.email}")
                 logger.info(f"Current state: export_rule='{current_export_rule}' → Target: export_rule='never'")
 
                 # If already set to 'never', toggle to force apply (workaround for Tesla API bug)
@@ -1221,11 +1227,11 @@ def solar_curtailment_check():
                     logger.info(f"✅ CURTAILMENT APPLIED: Export rule changed '{current_export_rule}' → 'never' for {user.email}")
 
                 success_count += 1
-                logger.info(f"📊 Action summary: Curtailment active (price: {feedin_price}c/kWh, export: 'never')")
+                logger.info(f"📊 Action summary: Curtailment active (earnings: {export_earnings:.2f}c/kWh, export: 'never')")
 
-            # NORMAL MODE: Export price is positive
+            # NORMAL MODE: Export earnings >= 1c/kWh (worth exporting)
             else:
-                logger.info(f"✅ NORMAL OPERATION: Export price is {feedin_price}c/kWh (>0) for {user.email}")
+                logger.info(f"✅ NORMAL OPERATION: Export earnings {export_earnings:.2f}c/kWh (>=1c) for {user.email}")
 
                 # If currently curtailed, restore to battery_ok (allows both solar and battery export)
                 if current_export_rule == 'never':
@@ -1237,11 +1243,11 @@ def solar_curtailment_check():
                         continue
 
                     logger.info(f"✅ CURTAILMENT REMOVED: Export restored 'never' → 'battery_ok' for {user.email}")
-                    logger.info(f"📊 Action summary: Restored to normal (price: {feedin_price}c/kWh, export: 'battery_ok')")
+                    logger.info(f"📊 Action summary: Restored to normal (earnings: {export_earnings:.2f}c/kWh, export: 'battery_ok')")
                     success_count += 1
                 else:
                     logger.debug(f"Already in normal mode (export='{current_export_rule}') - no action needed for {user.email}")
-                    logger.info(f"📊 Action summary: No change needed (price: {feedin_price}c/kWh, export: '{current_export_rule}')")
+                    logger.info(f"📊 Action summary: No change needed (earnings: {export_earnings:.2f}c/kWh, export: '{current_export_rule}')")
                     success_count += 1
 
         except Exception as e:
