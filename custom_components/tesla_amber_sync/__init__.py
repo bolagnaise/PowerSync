@@ -230,6 +230,18 @@ class SensitiveDataFilter(logging.Filter):
 
         return text
 
+    def _obfuscate_arg(self, arg: Any) -> Any:
+        """Obfuscate an argument only if it contains sensitive data, preserving type otherwise."""
+        # Convert to string for pattern matching
+        str_value = str(arg)
+        obfuscated = self._obfuscate_string(str_value)
+
+        # Only return string version if obfuscation actually changed something
+        # This preserves numeric types for format specifiers like %d and %.3f
+        if obfuscated != str_value:
+            return obfuscated
+        return arg
+
     def filter(self, record: logging.LogRecord) -> bool:
         """Filter log record to obfuscate sensitive data."""
         # Handle the message
@@ -237,12 +249,13 @@ class SensitiveDataFilter(logging.Filter):
             record.msg = self._obfuscate_string(str(record.msg))
 
         # Handle args if present (for %-style formatting)
-        # Convert ALL args to strings first, then obfuscate (handles dicts, lists, etc.)
+        # Only convert args to strings if obfuscation patterns match
+        # This preserves numeric types for format specifiers like %d and %.3f
         if record.args:
             if isinstance(record.args, dict):
-                record.args = {k: self._obfuscate_string(str(v)) for k, v in record.args.items()}
+                record.args = {k: self._obfuscate_arg(v) for k, v in record.args.items()}
             elif isinstance(record.args, tuple):
-                record.args = tuple(self._obfuscate_string(str(a)) for a in record.args)
+                record.args = tuple(self._obfuscate_arg(a) for a in record.args)
 
         return True
 
