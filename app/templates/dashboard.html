@@ -553,7 +553,10 @@
                 // Amber returns feed-in as: negative = you get paid, positive = you pay
                 // Negate for display so positive = earnings (what user expects)
                 const feedinValue = -feedinPrice.perKwh;
-                document.getElementById('current-feedin-price').textContent = `${feedinValue.toFixed(0)}¢`;
+                const feedinPriceEl = document.getElementById('current-feedin-price');
+                feedinPriceEl.textContent = `${feedinValue.toFixed(0)}¢`;
+                // Red text for negative prices (you pay to export)
+                feedinPriceEl.style.color = feedinValue < 0 ? '#ef4444' : '';
             }
 
             // Fetch and display 5-minute forecast (separate API call)
@@ -710,11 +713,14 @@
                         displayPrice = isCurrent ? -displayInterval.perKwh : -getDisplayPrice(displayInterval);
                     }
 
+                    // Red text for negative feed-in prices (you pay to export)
+                    const priceColor = (selectedChannel !== 'general' && displayPrice < 0) ? '#ef4444' : '';
+
                     html += `
                         <div style="border: ${borderStyle}; border-radius: 12px; padding: 0.7em; min-width: 70px; background: ${bgStyle}; text-align: center;">
                             <div style="font-size: 0.75em; font-weight: ${isCurrent ? 'bold' : 'normal'}; margin-bottom: 0.4em; opacity: 0.9;">${timeLabel}</div>
                             <div style="color: ${circleColor}; font-size: 2.5em; line-height: 1;">●</div>
-                            <div style="font-size: 1em; font-weight: bold; margin-top: 0.3em;">${displayPrice.toFixed(0)}¢</div>
+                            <div style="font-size: 1em; font-weight: bold; margin-top: 0.3em;${priceColor ? ` color: ${priceColor};` : ''}">${displayPrice.toFixed(0)}¢</div>
                             <div style="font-size: 0.75em; opacity: 0.7; margin-top: 0.2em;">${Math.round(displayInterval.renewables || 0)}%</div>
                         </div>
                     `;
