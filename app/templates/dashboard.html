@@ -700,7 +700,14 @@
 
                     // For feed-in, negate to show earnings (Amber: negative=paid, positive=pay)
                     // For import, show absolute value
-                    const displayPrice = selectedChannel === 'general' ? absPrice : -getDisplayPrice(displayInterval);
+                    // For current tile, use perKwh directly to match main circle; for forecast tiles use getDisplayPrice
+                    let displayPrice;
+                    if (selectedChannel === 'general') {
+                        displayPrice = absPrice;
+                    } else {
+                        // Feed-in: negate and use perKwh for current tile (matches main circle), advancedPrice for forecast
+                        displayPrice = isCurrent ? -displayInterval.perKwh : -getDisplayPrice(displayInterval);
+                    }
 
                     html += `
                         <div style="border: ${borderStyle}; border-radius: 12px; padding: 0.7em; min-width: 70px; background: ${bgStyle}; text-align: center;">
