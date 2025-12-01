@@ -676,16 +676,19 @@ def amber_current_price(amber_client):
 @bp.route('/api/amber/5min-forecast')
 @login_required
 def amber_5min_forecast():
-    """Get 5-minute interval forecast for the next hour"""
-    logger.info(f"5-minute forecast requested by user: {current_user.email}")
+    """Get 5-minute interval forecast for the next few hours"""
+    # Allow requesting more hours for the 30-min forecast view (default: 1 hour)
+    hours = request.args.get('hours', 1, type=int)
+    hours = min(hours, 4)  # Cap at 4 hours to avoid excessive API calls
+    logger.info(f"5-minute forecast requested by user: {current_user.email} (hours={hours})")
 
     amber_client = get_amber_client(current_user)
     if not amber_client:
         logger.warning("Amber client not available for 5-min forecast")
         return jsonify({'error': 'Amber API not configured'}), 400
 
-    # Get 1 hour of forecast data at 5-minute resolution
-    forecast = amber_client.get_price_forecast(next_hours=1, resolution=5)
+    # Get forecast data at 5-minute resolution
+    forecast = amber_client.get_price_forecast(next_hours=hours, resolution=5)
     if not forecast:
         logger.error("Failed to fetch 5-minute forecast")
         return jsonify({'error': 'Failed to fetch 5-minute forecast'}), 500
