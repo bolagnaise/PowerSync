@@ -818,26 +818,29 @@
                 let currentBlockIndex = 0;
 
                 sourceIntervals.forEach((interval, idx) => {
-                    // Always parse from nemTime using browser's local timezone for consistency
-                    let hour, minute;
+                    // Use server-provided localHour/localMinute (based on Powerwall timezone)
+                    let hour = interval.localHour;
+                    let minute = interval.localMinute;
 
-                    if (interval.nemTime) {
-                        // nemTime is ISO format with timezone, e.g., "2025-12-02T09:35:00+10:00"
-                        // new Date() will parse this and getHours()/getMinutes() gives browser local time
-                        const nemDate = new Date(interval.nemTime);
-                        hour = nemDate.getHours();
-                        minute = nemDate.getMinutes();
-                    } else if (interval.localHour !== undefined && interval.localMinute !== undefined) {
-                        // Fallback to server-provided local time
-                        hour = interval.localHour;
-                        minute = interval.localMinute;
-                    } else if (interval.localTime) {
-                        // Parse from localTime string
-                        const timeParts = interval.localTime.split('T')[1];
-                        if (timeParts) {
-                            const [h, m] = timeParts.split(':');
-                            hour = parseInt(h, 10);
-                            minute = parseInt(m, 10);
+                    // Debug: log first interval to see what data we're getting
+                    if (idx === 0) {
+                        console.log('First interval data:', {
+                            localHour: interval.localHour,
+                            localMinute: interval.localMinute,
+                            localTime: interval.localTime,
+                            nemTime: interval.nemTime
+                        });
+                    }
+
+                    // Fallback: parse from localTime string if localHour/localMinute not set
+                    if (hour === undefined || minute === undefined) {
+                        if (interval.localTime) {
+                            const timeParts = interval.localTime.split('T')[1];
+                            if (timeParts) {
+                                const [h, m] = timeParts.split(':');
+                                hour = parseInt(h, 10);
+                                minute = parseInt(m, 10);
+                            }
                         }
                     }
 
