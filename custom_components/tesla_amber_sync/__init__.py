@@ -1283,16 +1283,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if tesla_api_provider == TESLA_PROVIDER_FLEET_API:
                 api_base_url = FLEET_API_BASE_URL
 
-            # Get current export rule
+            # Get current export rule from site_info (grid_import_export only supports POST)
             try:
                 async with session.get(
-                    f"{api_base_url}/api/1/energy_sites/{entry.data[CONF_TESLA_ENERGY_SITE_ID]}/grid_import_export",
+                    f"{api_base_url}/api/1/energy_sites/{entry.data[CONF_TESLA_ENERGY_SITE_ID]}/site_info",
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as response:
                     if response.status != 200:
                         error_text = await response.text()
-                        _LOGGER.error(f"Failed to get grid export settings: {response.status} - {error_text}")
+                        _LOGGER.error(f"Failed to get site_info: {response.status} - {error_text}")
                         return
 
                     data = await response.json()
@@ -1300,7 +1300,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.info(f"Current export rule: {current_export_rule}")
 
             except Exception as err:
-                _LOGGER.error(f"Error fetching grid export settings: {err}")
+                _LOGGER.error(f"Error fetching site_info: {err}")
                 return
 
             # CURTAILMENT LOGIC: Export price is below 1c/kWh
@@ -1446,16 +1446,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if tesla_api_provider == TESLA_PROVIDER_FLEET_API:
                 api_base_url = FLEET_API_BASE_URL
 
-            # Get current export rule
+            # Get current export rule from site_info (grid_import_export only supports POST)
             try:
                 async with session.get(
-                    f"{api_base_url}/api/1/energy_sites/{entry.data[CONF_TESLA_ENERGY_SITE_ID]}/grid_import_export",
+                    f"{api_base_url}/api/1/energy_sites/{entry.data[CONF_TESLA_ENERGY_SITE_ID]}/site_info",
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as response:
                     if response.status != 200:
                         error_text = await response.text()
-                        _LOGGER.error(f"Failed to get grid export settings: {response.status} - {error_text}")
+                        _LOGGER.error(f"Failed to get site_info: {response.status} - {error_text}")
                         return
 
                     data = await response.json()
@@ -1463,7 +1463,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.info(f"Current export rule: {current_export_rule}")
 
             except Exception as err:
-                _LOGGER.error(f"Error fetching grid export settings: {err}")
+                _LOGGER.error(f"Error fetching site_info: {err}")
                 return
 
             # CURTAILMENT LOGIC: Export price is below 1c/kWh
