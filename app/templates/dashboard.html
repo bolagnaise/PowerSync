@@ -654,7 +654,8 @@
                     const timeLabel = `${hour}:${String(minute).padStart(2, '0')}`;
 
                     // Check if this is the current 5-minute interval
-                    const isCurrent = (hour === currentHour && minute === currentMinute);
+                    // Use both time match AND first tile (idx === 0) as fallback for current detection
+                    const isCurrent = (hour === currentHour && minute === currentMinute) || idx === 0;
 
                     // Use live WebSocket price for current tile, forecast price for future tiles
                     let displayInterval = interval;
