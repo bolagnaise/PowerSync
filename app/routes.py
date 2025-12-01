@@ -696,6 +696,15 @@ def amber_5min_forecast():
     # Convert nemTime to user's local timezone for each interval
     user_tz = ZoneInfo(get_powerwall_timezone(current_user))
 
+    # Get current time in user's timezone to filter out past intervals
+    now_utc = datetime.now(timezone.utc)
+    now_local = now_utc.astimezone(user_tz)
+    # Round down to current 5-min interval
+    current_5min = now_local.replace(minute=(now_local.minute // 5) * 5, second=0, microsecond=0)
+
+    logger.info(f"Current time in user timezone: {now_local.strftime('%Y-%m-%d %H:%M:%S %Z')}, filtering from {current_5min.strftime('%H:%M')}")
+
+    filtered_forecast = []
     for interval in forecast:
         if 'nemTime' in interval:
             try:
@@ -706,16 +715,23 @@ def amber_5min_forecast():
                 # Convert to user's timezone
                 local_dt = nem_dt.astimezone(user_tz)
 
+                # Skip intervals that are in the past (before current 5-min interval)
+                if local_dt < current_5min:
+                    continue
+
                 # Add localTime field (naive datetime string in user's timezone)
                 interval['localTime'] = local_dt.strftime('%Y-%m-%dT%H:%M:%S')
                 interval['localHour'] = local_dt.hour
                 interval['localMinute'] = local_dt.minute
+                filtered_forecast.append(interval)
             except Exception as e:
                 logger.error(f"Error converting nemTime to local timezone: {e}")
 
+    logger.info(f"Filtered forecast: {len(forecast)} -> {len(filtered_forecast)} intervals (removed past intervals)")
+
     # Group by channel type and return
-    general_intervals = [i for i in forecast if i.get('channelType') == 'general']
-    feedin_intervals = [i for i in forecast if i.get('channelType') == 'feedIn']
+    general_intervals = [i for i in filtered_forecast if i.get('channelType') == 'general']
+    feedin_intervals = [i for i in filtered_forecast if i.get('channelType') == 'feedIn']
 
     result = {
         'fetch_time': datetime.utcnow().isoformat(),
