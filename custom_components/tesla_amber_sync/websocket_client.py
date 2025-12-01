@@ -1,10 +1,8 @@
 """Amber Electric WebSocket client for real-time price updates (async version for Home Assistant)"""
 import asyncio
-import functools
 import json
 import logging
 import re
-import ssl
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 import websockets
@@ -306,21 +304,12 @@ class AmberWebSocketClient:
                     "authorization": f"Bearer {self.api_token}"
                 }
 
-                # Create SSL context in executor to avoid blocking event loop
-                # (ssl.SSLContext.set_default_verify_paths is a blocking call)
-                loop = asyncio.get_event_loop()
-                ssl_context = await loop.run_in_executor(
-                    None,
-                    functools.partial(ssl.create_default_context)
-                )
-
-                # Connect to WebSocket
+                # Connect to WebSocket (let websockets handle SSL automatically)
                 async with websockets.connect(
                     self.WS_URL,
                     additional_headers=headers,
                     ping_interval=30,  # Send ping every 30 seconds
                     ping_timeout=10,   # Wait 10 seconds for pong
-                    ssl=ssl_context,   # Use pre-created SSL context
                 ) as websocket:
                     self._websocket = websocket
                     self._connection_status = "connected"
