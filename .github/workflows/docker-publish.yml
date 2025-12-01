@@ -89,19 +89,24 @@ jobs:
 
       - name: Notify Discord
         if: github.event_name != 'pull_request'
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
+          # Extract first line and escape for JSON
+          TITLE=$(echo "$COMMIT_MSG" | head -1 | sed 's/"/\\"/g' | sed "s/'/\\'/g")
           curl -H "Content-Type: application/json" \
-            -d '{
-              "embeds": [{
-                "title": "🚀 Tesla Sync Update",
-                "description": "'"$(echo '${{ github.event.head_commit.message }}' | head -1)"'",
-                "color": 5025616,
-                "fields": [
-                  {"name": "Branch", "value": "`${{ github.ref_name }}`", "inline": true},
-                  {"name": "Author", "value": "${{ github.actor }}", "inline": true},
-                  {"name": "Commit", "value": "`${{ steps.git-info.outputs.commit }}`", "inline": true}
+            -d "{
+              \"embeds\": [{
+                \"title\": \"🚀 Tesla Sync Update\",
+                \"description\": \"${TITLE}\",
+                \"color\": 5025616,
+                \"fields\": [
+                  {\"name\": \"Branch\", \"value\": \"\`${{ github.ref_name }}\`\", \"inline\": true},
+                  {\"name\": \"Author\", \"value\": \"${{ github.actor }}\", \"inline\": true},
+                  {\"name\": \"Commit\", \"value\": \"\`${{ steps.git-info.outputs.commit }}\`\", \"inline\": true}
                 ],
-                "url": "https://github.com/${{ github.repository }}/commit/${{ github.sha }}"
+                \"url\": \"https://github.com/${{ github.repository }}/commit/${{ github.sha }}\"
               }]
-            }' \
-            ${{ secrets.DISCORD_WEBHOOK }}
+            }" \
+            "$DISCORD_WEBHOOK"
