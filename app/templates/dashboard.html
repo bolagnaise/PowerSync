@@ -857,7 +857,7 @@
                     isPast: idx < currentBlockIndex
                 }));
 
-                // Generate HTML for 30-min blocks with inline expansion
+                // Generate HTML for 30-min blocks - when expanded, show 5-min segments inline in the row
                 let html = '';
 
                 blocks.forEach((block, blockIdx) => {
@@ -868,30 +868,11 @@
                     const isCurrent = block.isCurrent;
                     const isExpanded = currentExpandedBlock === blockIdx;
 
-                    // Format time label
-                    const displayHour = block.hour % 12 || 12;
-                    const timeLabel = `${displayHour}:${String(block.startMinute).padStart(2, '0')}`;
-
-                    // Calculate aggregate stats
-                    const prices = block.intervals.map(i => selectedChannel === 'general' ? getDisplayPrice(i) : -getDisplayPrice(i));
-                    const avgPrice = prices.reduce((a, b) => a + b, 0) / prices.length;
-                    const avgRenewables = block.intervals.reduce((a, i) => a + (i.renewables || 0), 0) / block.intervals.length;
-
                     // Check for spike status
                     const spikeInfo = getSpikeInfo(block.intervals);
 
-                    // Styling
-                    const opacity = isPast ? '0.5' : '1';
-                    const blockBg = spikeInfo ? spikeInfo.bgColor : (isExpanded ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.05)');
-                    const blockBorder = isExpanded ? '2px solid rgba(255,255,255,0.5)' : (spikeInfo ? `2px solid ${spikeInfo.borderColor}` : '1px solid rgba(255,255,255,0.1)');
-                    const dotColor = spikeInfo ? spikeInfo.dotColor : getPriceColor(avgPrice, selectedChannel === 'general');
-                    const textWeight = isCurrent ? 'bold' : 'normal';
-                    const textColor = isCurrent ? '#22c55e' : 'inherit';
-                    const cursor = isExpandable ? 'pointer' : 'default';
-
-                    // Generate inline 5-min expansion HTML
-                    let expansionHtml = '';
                     if (isExpanded && isExpandable) {
+                        // Show individual 5-min segments inline in the row (wrapped in a container with border)
                         const segmentsHtml = block.intervals.map((interval, iIdx) => {
                             const intPrice = selectedChannel === 'general' ? getDisplayPrice(interval) : -getDisplayPrice(interval);
                             const intColor = getPriceColor(intPrice, selectedChannel === 'general');
@@ -899,65 +880,85 @@
                             const intIsPast = interval.localHour < currentHour ||
                                 (interval.localHour === currentHour && interval.localMinute < currentMinute);
                             const intOpacity = intIsPast ? '0.5' : '1';
-                            const intSpikeStyle = intSpike === 'spike' ? 'background: rgba(220, 38, 38, 0.3); border: 1px solid #ef4444;' :
-                                intSpike === 'potential' ? 'background: rgba(245, 158, 11, 0.2); border: 1px solid #f59e0b;' :
-                                'background: rgba(255,255,255,0.08);';
+                            const intBg = intSpike === 'spike' ? 'rgba(220, 38, 38, 0.3)' :
+                                intSpike === 'potential' ? 'rgba(245, 158, 11, 0.2)' :
+                                'rgba(255,255,255,0.08)';
 
                             return `
-                                <div style="padding: 0.4em; border-radius: 6px; text-align: center; min-width: 38px; ${intSpikeStyle} opacity: ${intOpacity};">
-                                    <div style="font-size: 0.7em; opacity: 0.8;">:${String(interval.localMinute).padStart(2, '0')}</div>
-                                    <div style="color: ${intColor}; font-size: 1.2em; line-height: 1;">●</div>
-                                    <div style="font-size: 0.8em; font-weight: bold;${selectedChannel !== 'general' && intPrice < 0 ? ' color: #ef4444;' : ''}">${intPrice.toFixed(0)}¢</div>
+                                <div style="padding: 0.4em 0.5em; border-radius: 6px; text-align: center; min-width: 42px; background: ${intBg}; opacity: ${intOpacity}; flex-shrink: 0;">
+                                    <div style="font-size: 0.65em; opacity: 0.8;">:${String(interval.localMinute).padStart(2, '0')}</div>
+                                    <div style="color: ${intColor}; font-size: 1.3em; line-height: 1;">●</div>
+                                    <div style="font-size: 0.75em; font-weight: bold;${selectedChannel !== 'general' && intPrice < 0 ? ' color: #ef4444;' : ''}">${intPrice.toFixed(0)}¢</div>
                                 </div>
                             `;
                         }).join('');
 
-                        expansionHtml = `
-                            <div style="margin-top: 0.5em; padding-top: 0.5em; border-top: 1px solid rgba(255,255,255,0.2);">
-                                <div style="display: flex; justify-content: center; gap: 0.3em; flex-wrap: wrap;">
-                                    ${segmentsHtml}
-                                </div>
+                        // Wrap expanded segments in a bordered container
+                        html += `
+                            <div id="${blockId}" class="thirty-min-block expanded" data-block-idx="${blockIdx}"
+                                onclick="toggle30MinBlock(${blockIdx})"
+                                style="display: flex; gap: 0.3em; padding: 0.4em; border-radius: 10px; border: 2px solid rgba(255,255,255,0.5); background: rgba(255,255,255,0.1); cursor: pointer; flex-shrink: 0;">
+                                ${segmentsHtml}
+                            </div>
+                        `;
+                    } else {
+                        // Show collapsed 30-min block
+                        const displayHour = block.hour % 12 || 12;
+                        const timeLabel = `${displayHour}:${String(block.startMinute).padStart(2, '0')}`;
+
+                        const prices = block.intervals.map(i => selectedChannel === 'general' ? getDisplayPrice(i) : -getDisplayPrice(i));
+                        const avgPrice = prices.reduce((a, b) => a + b, 0) / prices.length;
+                        const avgRenewables = block.intervals.reduce((a, i) => a + (i.renewables || 0), 0) / block.intervals.length;
+
+                        const opacity = isPast ? '0.5' : '1';
+                        const blockBg = spikeInfo ? spikeInfo.bgColor : 'rgba(255,255,255,0.05)';
+                        const blockBorder = spikeInfo ? `2px solid ${spikeInfo.borderColor}` : '1px solid rgba(255,255,255,0.1)';
+                        const dotColor = spikeInfo ? spikeInfo.dotColor : getPriceColor(avgPrice, selectedChannel === 'general');
+                        const textWeight = isCurrent ? 'bold' : 'normal';
+                        const textColor = isCurrent ? '#22c55e' : 'inherit';
+                        const cursor = isExpandable ? 'pointer' : 'default';
+
+                        html += `
+                            <div id="${blockId}" class="thirty-min-block" data-block-idx="${blockIdx}" style="
+                                background: ${blockBg};
+                                border: ${blockBorder};
+                                border-radius: 10px;
+                                padding: 0.5em 0.6em;
+                                min-width: 65px;
+                                text-align: center;
+                                cursor: ${cursor};
+                                transition: all 0.2s;
+                                flex-shrink: 0;
+                                opacity: ${opacity};
+                            " ${isExpandable ? `onclick="toggle30MinBlock(${blockIdx})"` : ''}>
+                                ${spikeInfo ? `<div style="font-size: 0.55em; color: ${spikeInfo.borderColor}; font-weight: bold;">${spikeInfo.icon} ${spikeInfo.label}</div>` : ''}
+                                <div style="font-size: 0.7em; font-weight: ${textWeight}; color: ${textColor};">${timeLabel}</div>
+                                <div style="color: ${dotColor}; font-size: 1.5em; line-height: 1; margin: 0.1em 0;">●</div>
+                                <div style="font-size: 0.85em; font-weight: ${textWeight};${selectedChannel !== 'general' && avgPrice < 0 ? ' color: #ef4444;' : ''}">${avgPrice.toFixed(0)}¢</div>
+                                <div style="font-size: 0.55em; opacity: 0.7;">${Math.round(avgRenewables)}%</div>
+                                ${isExpandable ? '<div style="font-size: 0.5em; opacity: 0.5; margin-top: 0.1em;">▼</div>' : ''}
                             </div>
                         `;
                     }
-
-                    html += `
-                        <div id="${blockId}" class="thirty-min-block ${isExpanded ? 'expanded' : ''}" data-block-idx="${blockIdx}" style="
-                            background: ${blockBg};
-                            border: ${blockBorder};
-                            border-radius: 10px;
-                            padding: 0.5em 0.6em;
-                            min-width: ${isExpanded ? '280px' : '70px'};
-                            text-align: center;
-                            cursor: ${cursor};
-                            transition: all 0.2s;
-                            flex-shrink: 0;
-                            opacity: ${opacity};
-                        " ${isExpandable ? `onclick="toggle30MinBlock(${blockIdx})"` : ''}>
-                            ${spikeInfo ? `<div style="font-size: 0.6em; color: ${spikeInfo.borderColor}; font-weight: bold;">${spikeInfo.icon} ${spikeInfo.label}</div>` : ''}
-                            <div style="font-size: 0.75em; font-weight: ${textWeight}; color: ${textColor};">${timeLabel}</div>
-                            <div style="color: ${dotColor}; font-size: 1.6em; line-height: 1; margin: 0.1em 0;">●</div>
-                            <div style="font-size: 0.9em; font-weight: ${textWeight};${selectedChannel !== 'general' && avgPrice < 0 ? ' color: #ef4444;' : ''}">${avgPrice.toFixed(0)}¢</div>
-                            <div style="font-size: 0.6em; opacity: 0.7;">${Math.round(avgRenewables)}%</div>
-                            ${isExpandable && !isExpanded ? '<div style="font-size: 0.5em; opacity: 0.5; margin-top: 0.2em;">▼</div>' : ''}
-                            ${expansionHtml}
-                        </div>
-                    `;
                 });
 
                 forecastDiv.innerHTML = html;
 
-                // Center scroll on current block after rendering
-                setTimeout(() => {
-                    const currentBlockEl = document.getElementById(`block-${currentBlockIndex}`);
-                    if (currentBlockEl && scrollContainer) {
-                        const containerWidth = scrollContainer.offsetWidth;
-                        const blockLeft = currentBlockEl.offsetLeft;
-                        const blockWidth = currentBlockEl.offsetWidth;
-                        const scrollTo = blockLeft - (containerWidth / 2) + (blockWidth / 2);
-                        scrollContainer.scrollLeft = scrollTo;
-                    }
-                }, 50);
+                // Center scroll on current block (or expanded block) after rendering
+                // Use requestAnimationFrame to ensure DOM is fully rendered
+                requestAnimationFrame(() => {
+                    setTimeout(() => {
+                        const targetBlockIdx = currentExpandedBlock !== null ? currentExpandedBlock : currentBlockIndex;
+                        const targetBlockEl = document.getElementById(`block-${targetBlockIdx}`);
+                        if (targetBlockEl && scrollContainer) {
+                            const containerWidth = scrollContainer.offsetWidth;
+                            const blockLeft = targetBlockEl.offsetLeft;
+                            const blockWidth = targetBlockEl.offsetWidth;
+                            const scrollTo = blockLeft - (containerWidth / 2) + (blockWidth / 2);
+                            scrollContainer.scrollLeft = scrollTo;
+                        }
+                    }, 10);
+                });
 
                 // Auto-expand current block on first load
                 if (currentExpandedBlock === null) {
