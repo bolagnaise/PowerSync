@@ -744,24 +744,39 @@
         let thirtyMinBlocksData = []; // Store block data for expansion
         let initialExpandDone = false; // Track if we've done the initial auto-expand
 
+        // Store 5-min data for block expansion (fetched separately)
+        let fiveMinIntervalsCache = { general: [], feedIn: [] };
+
         async function generate30MinForecast() {
             const forecastDiv = document.getElementById('thirty-min-forecast');
             const scrollContainer = document.getElementById('thirty-min-scroll-container');
             if (!forecastDiv) return;
 
             try {
-                // Fetch 30-minute resolution forecast (24 hours to ensure we get data past midnight)
-                // Using 30-min resolution because it has data for the full forecast period
-                // (5-min resolution is only available ~1-1.5 hours ahead)
-                // Note: Amber API returns data from start of day, so we request 24h to ensure coverage
-                const response = await fetch('/api/amber/30min-forecast?hours=24');
-                if (!response.ok) {
+                // Fetch both 30-min and 5-min data in parallel
+                // 30-min: for the full forecast display (24h coverage)
+                // 5-min: for expanding the first couple blocks (only ~1h available)
+                const [response30min, response5min] = await Promise.all([
+                    fetch('/api/amber/30min-forecast?hours=24'),
+                    fetch('/api/amber/5min-forecast?hours=1')
+                ]);
+
+                if (!response30min.ok) {
                     forecastDiv.innerHTML = '<p style="color: rgba(255,255,255,0.7);">30-minute forecast not available</p>';
                     return;
                 }
 
-                const data = await response.json();
+                const data = await response30min.json();
                 const forecastType = data.forecast_type || 'predicted';
+
+                // Cache 5-min data for expansion (if available)
+                if (response5min.ok) {
+                    const data5min = await response5min.json();
+                    fiveMinIntervalsCache = {
+                        general: data5min.general || [],
+                        feedIn: data5min.feedIn || []
+                    };
+                }
 
                 // Select intervals based on selected channel
                 // Note: With 30-min resolution, each interval IS a 30-min block (no need to group 5-min intervals)
@@ -877,11 +892,11 @@
 
                 // Store for expansion
                 // isPast: only blocks before index 0 are past (none from the API since it starts at current)
-                // Note: With 30-min resolution API, we don't have 5-min breakdowns, so blocks are not expandable
+                // First 2 blocks are expandable if we have 5-min data cached for them
                 thirtyMinBlocksData = blocks.map((block, idx) => ({
                     ...block,
                     forecastType,
-                    isExpandable: false, // 30-min resolution doesn't have 5-min breakdowns
+                    isExpandable: idx === 0 || idx === 1, // First two blocks can be expanded with 5-min data
                     isPast: false // No 30-min blocks are past since API starts at current interval
                 }));
 
@@ -900,35 +915,57 @@
                     const spikeInfo = getSpikeInfo(block.intervals);
 
                     if (isExpanded && isExpandable) {
-                        // Show individual 5-min segments inline in the row (wrapped in a container with border)
-                        const segmentsHtml = block.intervals.map((interval, iIdx) => {
-                            const intPrice = selectedChannel === 'general' ? getDisplayPrice(interval) : -getDisplayPrice(interval);
-                            const intColor = getPriceColor(intPrice, selectedChannel === 'general');
-                            const intSpike = interval.spikeStatus || 'none';
-                            const intIsPast = interval.localHour < currentHour ||
-                                (interval.localHour === currentHour && interval.localMinute < currentMinute);
-                            const intOpacity = intIsPast ? '0.5' : '1';
-                            const intBg = intSpike === 'spike' ? 'rgba(220, 38, 38, 0.3)' :
-                                intSpike === 'potential' ? 'rgba(245, 158, 11, 0.2)' :
-                                'rgba(255,255,255,0.08)';
+                        // Get 5-min intervals from cache for this 30-min block
+                        const cached5min = selectedChannel === 'general' ? fiveMinIntervalsCache.general : fiveMinIntervalsCache.feedIn;
+                        // Filter to intervals that fall within this block's 30-min period
+                        const blockStart = block.startMinute;
+                        const blockEnd = blockStart + 30;
+                        const fiveMinIntervals = cached5min.filter(interval => {
+                            return interval.localHour === block.hour &&
+                                   interval.localMinute >= blockStart &&
+                                   interval.localMinute < blockEnd;
+                        });
 
-                            return `
-                                <div style="padding: 0.4em 0.5em; border-radius: 6px; text-align: center; min-width: 42px; background: ${intBg}; opacity: ${intOpacity}; flex-shrink: 0;">
-                                    <div style="font-size: 0.65em; opacity: 0.8;">:${String(interval.localMinute).padStart(2, '0')}</div>
-                                    <div style="color: ${intColor}; font-size: 1.3em; line-height: 1;">●</div>
-                                    <div style="font-size: 0.75em; font-weight: bold;${selectedChannel !== 'general' && intPrice < 0 ? ' color: #ef4444;' : ''}">${intPrice.toFixed(0)}¢</div>
+                        // If no 5-min data available, show a message
+                        if (fiveMinIntervals.length === 0) {
+                            html += `
+                                <div id="${blockId}" class="thirty-min-block expanded" data-block-idx="${blockIdx}"
+                                    onclick="toggle30MinBlock(${blockIdx})"
+                                    style="display: flex; gap: 0.3em; padding: 0.6em 1em; border-radius: 10px; border: 2px solid rgba(255,255,255,0.5); background: rgba(255,255,255,0.1); cursor: pointer; flex-shrink: 0; align-items: center;">
+                                    <span style="font-size: 0.75em; opacity: 0.7;">5-min data not available</span>
                                 </div>
                             `;
-                        }).join('');
+                        } else {
+                            // Show individual 5-min segments inline in the row (wrapped in a container with border)
+                            const segmentsHtml = fiveMinIntervals.map((interval, iIdx) => {
+                                const intPrice = selectedChannel === 'general' ? getDisplayPrice(interval) : -getDisplayPrice(interval);
+                                const intColor = getPriceColor(intPrice, selectedChannel === 'general');
+                                const intSpike = interval.spikeStatus || 'none';
+                                const intIsPast = interval.localHour < currentHour ||
+                                    (interval.localHour === currentHour && interval.localMinute < currentMinute);
+                                const intOpacity = intIsPast ? '0.5' : '1';
+                                const intBg = intSpike === 'spike' ? 'rgba(220, 38, 38, 0.3)' :
+                                    intSpike === 'potential' ? 'rgba(245, 158, 11, 0.2)' :
+                                    'rgba(255,255,255,0.08)';
 
-                        // Wrap expanded segments in a bordered container
-                        html += `
-                            <div id="${blockId}" class="thirty-min-block expanded" data-block-idx="${blockIdx}"
-                                onclick="toggle30MinBlock(${blockIdx})"
-                                style="display: flex; gap: 0.3em; padding: 0.4em; border-radius: 10px; border: 2px solid rgba(255,255,255,0.5); background: rgba(255,255,255,0.1); cursor: pointer; flex-shrink: 0;">
-                                ${segmentsHtml}
-                            </div>
-                        `;
+                                return `
+                                    <div style="padding: 0.4em 0.5em; border-radius: 6px; text-align: center; min-width: 42px; background: ${intBg}; opacity: ${intOpacity}; flex-shrink: 0;">
+                                        <div style="font-size: 0.65em; opacity: 0.8;">:${String(interval.localMinute).padStart(2, '0')}</div>
+                                        <div style="color: ${intColor}; font-size: 1.3em; line-height: 1;">●</div>
+                                        <div style="font-size: 0.75em; font-weight: bold;${selectedChannel !== 'general' && intPrice < 0 ? ' color: #ef4444;' : ''}">${intPrice.toFixed(0)}¢</div>
+                                    </div>
+                                `;
+                            }).join('');
+
+                            // Wrap expanded segments in a bordered container
+                            html += `
+                                <div id="${blockId}" class="thirty-min-block expanded" data-block-idx="${blockIdx}"
+                                    onclick="toggle30MinBlock(${blockIdx})"
+                                    style="display: flex; gap: 0.3em; padding: 0.4em; border-radius: 10px; border: 2px solid rgba(255,255,255,0.5); background: rgba(255,255,255,0.1); cursor: pointer; flex-shrink: 0;">
+                                    ${segmentsHtml}
+                                </div>
+                            `;
+                        }
                     } else {
                         // Show collapsed 30-min block
                         const displayHour = block.hour % 12 || 12;
