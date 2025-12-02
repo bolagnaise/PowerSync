@@ -742,6 +742,7 @@
         // Only current and next block are expandable (API only has accurate 5-min data for these)
         let currentExpandedBlock = null;
         let thirtyMinBlocksData = []; // Store block data for expansion
+        let initialExpandDone = false; // Track if we've done the initial auto-expand
 
         async function generate30MinForecast() {
             const forecastDiv = document.getElementById('thirty-min-forecast');
@@ -982,8 +983,9 @@
                     }, 10);
                 });
 
-                // Auto-expand current block on first load
-                if (currentExpandedBlock === null) {
+                // Auto-expand current block on first load only
+                if (!initialExpandDone) {
+                    initialExpandDone = true;
                     currentExpandedBlock = currentBlockIndex;
                     generate30MinForecast(); // Re-render with expansion
                 }
