@@ -1449,11 +1449,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                     data = await response.json()
                     site_info = data.get("response", {})
-                    current_export_rule = site_info.get("customer_preferred_export_rule")
+                    # Fields can be at top level OR inside 'components' depending on API/firmware
+                    components = site_info.get("components", {})
+                    current_export_rule = components.get("customer_preferred_export_rule") or site_info.get("customer_preferred_export_rule")
 
-                    # Handle VPP users where export rule is derived from components_non_export_configured
+                    # Handle VPP users where export rule is derived from non_export_configured
                     if current_export_rule is None:
-                        non_export = site_info.get("components_non_export_configured")
+                        non_export = components.get("non_export_configured") or site_info.get("components_non_export_configured")
                         if non_export is not None:
                             current_export_rule = "never" if non_export else "battery_ok"
                             _LOGGER.info(f"VPP user: derived export_rule='{current_export_rule}' from components_non_export_configured={non_export}")
@@ -1522,10 +1524,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             if verify_response.status == 200:
                                 verify_data = await verify_response.json()
                                 verify_info = verify_data.get("response", {})
-                                verified_rule = verify_info.get("customer_preferred_export_rule")
-                                # Also check components_non_export_configured for VPP users
+                                # Fields can be at top level OR inside 'components' depending on API/firmware
+                                verify_components = verify_info.get("components", {})
+                                verified_rule = verify_components.get("customer_preferred_export_rule") or verify_info.get("customer_preferred_export_rule")
+                                # Also check non_export_configured for VPP users
                                 if verified_rule is None:
-                                    non_export = verify_info.get("components_non_export_configured")
+                                    non_export = verify_components.get("non_export_configured") or verify_info.get("components_non_export_configured")
                                     if non_export is not None:
                                         verified_rule = "never" if non_export else "battery_ok"
                                 if verified_rule is None:
@@ -1585,10 +1589,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             if verify_response.status == 200:
                                 verify_data = await verify_response.json()
                                 verify_info = verify_data.get("response", {})
-                                verified_rule = verify_info.get("customer_preferred_export_rule")
-                                # Also check components_non_export_configured for VPP users
+                                # Fields can be at top level OR inside 'components' depending on API/firmware
+                                verify_components = verify_info.get("components", {})
+                                verified_rule = verify_components.get("customer_preferred_export_rule") or verify_info.get("customer_preferred_export_rule")
+                                # Also check non_export_configured for VPP users
                                 if verified_rule is None:
-                                    non_export = verify_info.get("components_non_export_configured")
+                                    non_export = verify_components.get("non_export_configured") or verify_info.get("components_non_export_configured")
                                     if non_export is not None:
                                         verified_rule = "never" if non_export else "battery_ok"
                                 if verified_rule is None:
@@ -1680,11 +1686,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                     data = await response.json()
                     site_info = data.get("response", {})
-                    current_export_rule = site_info.get("customer_preferred_export_rule")
+                    # Fields can be at top level OR inside 'components' depending on API/firmware
+                    components = site_info.get("components", {})
+                    current_export_rule = components.get("customer_preferred_export_rule") or site_info.get("customer_preferred_export_rule")
 
-                    # Handle VPP users where export rule is derived from components_non_export_configured
+                    # Handle VPP users where export rule is derived from non_export_configured
                     if current_export_rule is None:
-                        non_export = site_info.get("components_non_export_configured")
+                        non_export = components.get("non_export_configured") or site_info.get("components_non_export_configured")
                         if non_export is not None:
                             current_export_rule = "never" if non_export else "battery_ok"
                             _LOGGER.info(f"VPP user: derived export_rule='{current_export_rule}' from components_non_export_configured={non_export}")
@@ -1753,10 +1761,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             if verify_response.status == 200:
                                 verify_data = await verify_response.json()
                                 verify_info = verify_data.get("response", {})
-                                verified_rule = verify_info.get("customer_preferred_export_rule")
-                                # Also check components_non_export_configured for VPP users
+                                # Fields can be at top level OR inside 'components' depending on API/firmware
+                                verify_components = verify_info.get("components", {})
+                                verified_rule = verify_components.get("customer_preferred_export_rule") or verify_info.get("customer_preferred_export_rule")
+                                # Also check non_export_configured for VPP users
                                 if verified_rule is None:
-                                    non_export = verify_info.get("components_non_export_configured")
+                                    non_export = verify_components.get("non_export_configured") or verify_info.get("components_non_export_configured")
                                     if non_export is not None:
                                         verified_rule = "never" if non_export else "battery_ok"
                                 if verified_rule is None:
@@ -1815,10 +1825,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             if verify_response.status == 200:
                                 verify_data = await verify_response.json()
                                 verify_info = verify_data.get("response", {})
-                                verified_rule = verify_info.get("customer_preferred_export_rule")
-                                # Also check components_non_export_configured for VPP users
+                                # Fields can be at top level OR inside 'components' depending on API/firmware
+                                verify_components = verify_info.get("components", {})
+                                verified_rule = verify_components.get("customer_preferred_export_rule") or verify_info.get("customer_preferred_export_rule")
+                                # Also check non_export_configured for VPP users
                                 if verified_rule is None:
-                                    non_export = verify_info.get("components_non_export_configured")
+                                    non_export = verify_components.get("non_export_configured") or verify_info.get("components_non_export_configured")
                                     if non_export is not None:
                                         verified_rule = "never" if non_export else "battery_ok"
                                 if verified_rule is None:

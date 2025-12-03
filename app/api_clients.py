@@ -647,7 +647,7 @@ class FleetAPIClient(TeslaAPIClientBase):
         Get current grid import/export settings for the Powerwall
 
         For VPP/Amber subscribers, customer_preferred_export_rule is not returned.
-        Instead, check components_non_export_configured:
+        Instead, check components.non_export_configured:
         - True = export is NEVER (non-export configured)
         - False/missing = export is allowed (battery_ok equivalent)
         """
@@ -656,14 +656,18 @@ class FleetAPIClient(TeslaAPIClientBase):
             site_info = self.get_site_info(site_id)
 
             if site_info:
-                export_rule = site_info.get('customer_preferred_export_rule')
-                disallow_charge = site_info.get('disallow_charge_from_grid_with_solar_installed')
-                non_export_configured = site_info.get('components_non_export_configured')
+                # Fields can be at top level OR inside 'components' depending on API/firmware version
+                components = site_info.get('components', {})
 
-                # VPP users: derive export rule from components_non_export_configured
+                # Try components first, then top level as fallback
+                export_rule = components.get('customer_preferred_export_rule') or site_info.get('customer_preferred_export_rule')
+                disallow_charge = components.get('disallow_charge_from_grid_with_solar_installed') or site_info.get('disallow_charge_from_grid_with_solar_installed')
+                non_export_configured = components.get('non_export_configured') or site_info.get('components_non_export_configured')
+
+                # VPP users: derive export rule from non_export_configured
                 if export_rule is None and non_export_configured is not None:
                     export_rule = 'never' if non_export_configured else 'battery_ok'
-                    logger.info(f"VPP user detected: derived export_rule='{export_rule}' from components_non_export_configured={non_export_configured}")
+                    logger.info(f"VPP user detected: derived export_rule='{export_rule}' from non_export_configured={non_export_configured}")
 
                 settings = {
                     'customer_preferred_export_rule': export_rule,
@@ -1156,18 +1160,19 @@ class TeslemetryAPIClient(TeslaAPIClientBase):
             site_info = self.get_site_info(site_id)
 
             if site_info:
-                # Standard field (non-VPP users)
-                export_rule = site_info.get('customer_preferred_export_rule')
-                disallow_charge = site_info.get('disallow_charge_from_grid_with_solar_installed')
+                # Fields can be at top level OR inside 'components' depending on API/firmware version
+                components = site_info.get('components', {})
 
-                # VPP/Amber users: check components_non_export_configured
-                non_export_configured = site_info.get('components_non_export_configured')
+                # Try components first, then top level as fallback
+                export_rule = components.get('customer_preferred_export_rule') or site_info.get('customer_preferred_export_rule')
+                disallow_charge = components.get('disallow_charge_from_grid_with_solar_installed') or site_info.get('disallow_charge_from_grid_with_solar_installed')
+                non_export_configured = components.get('non_export_configured') or site_info.get('components_non_export_configured')
 
                 # If customer_preferred_export_rule is missing but non_export_configured exists,
-                # this is a VPP user - derive the export rule from components_non_export_configured
+                # this is a VPP user - derive the export rule from non_export_configured
                 if export_rule is None and non_export_configured is not None:
                     export_rule = 'never' if non_export_configured else 'battery_ok'
-                    logger.info(f"VPP user detected: derived export_rule='{export_rule}' from components_non_export_configured={non_export_configured}")
+                    logger.info(f"VPP user detected: derived export_rule='{export_rule}' from non_export_configured={non_export_configured}")
 
                 settings = {
                     'customer_preferred_export_rule': export_rule,
