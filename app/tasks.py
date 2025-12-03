@@ -1240,6 +1240,15 @@ def solar_curtailment_check():
                         error_count += 1
                         continue
 
+                    # Verify the change actually took effect by reading back
+                    verify_settings = tesla_client.get_grid_import_export(user.tesla_energy_site_id)
+                    verified_rule = verify_settings.get('customer_preferred_export_rule') if verify_settings else None
+                    if verified_rule != 'never':
+                        logger.warning(f"⚠️ CURTAILMENT VERIFICATION FAILED: Set returned success but read-back shows '{verified_rule}' (expected 'never') for {user.email}")
+                        logger.warning(f"Full verification response: {verify_settings}")
+                    else:
+                        logger.info(f"✓ Curtailment verified via read-back: export_rule='{verified_rule}'")
+
                     logger.info(f"✅ CURTAILMENT APPLIED: Export rule changed '{current_export_rule}' → 'never' for {user.email}")
                     user.current_export_rule = 'never'
                     user.current_export_rule_updated = datetime.utcnow()
@@ -1260,6 +1269,15 @@ def solar_curtailment_check():
                         logger.error(f"❌ Failed to restore from curtailment (set export to 'battery_ok') for {user.email}")
                         error_count += 1
                         continue
+
+                    # Verify the change actually took effect by reading back
+                    verify_settings = tesla_client.get_grid_import_export(user.tesla_energy_site_id)
+                    verified_rule = verify_settings.get('customer_preferred_export_rule') if verify_settings else None
+                    if verified_rule != 'battery_ok':
+                        logger.warning(f"⚠️ RESTORE VERIFICATION FAILED: Set returned success but read-back shows '{verified_rule}' (expected 'battery_ok') for {user.email}")
+                        logger.warning(f"Full verification response: {verify_settings}")
+                    else:
+                        logger.info(f"✓ Restore verified via read-back: export_rule='{verified_rule}'")
 
                     logger.info(f"✅ CURTAILMENT REMOVED: Export restored 'never' → 'battery_ok' for {user.email}")
                     user.current_export_rule = 'battery_ok'
@@ -1370,6 +1388,15 @@ def solar_curtailment_with_websocket_data(prices_data):
                 else:
                     result = tesla_client.set_grid_export_rule(user.tesla_energy_site_id, 'never')
                     if result:
+                        # Verify the change actually took effect by reading back
+                        verify_settings = tesla_client.get_grid_import_export(user.tesla_energy_site_id)
+                        verified_rule = verify_settings.get('customer_preferred_export_rule') if verify_settings else None
+                        if verified_rule != 'never':
+                            logger.warning(f"⚠️ CURTAILMENT VERIFICATION FAILED: Set returned success but read-back shows '{verified_rule}' (expected 'never') for {user.email}")
+                            logger.warning(f"Full verification response: {verify_settings}")
+                        else:
+                            logger.info(f"✓ Curtailment verified via read-back: export_rule='{verified_rule}'")
+
                         logger.info(f"✅ CURTAILMENT APPLIED: '{current_export_rule}' → 'never' for {user.email}")
                         user.current_export_rule = 'never'
                         user.current_export_rule_updated = datetime.utcnow()
@@ -1384,6 +1411,15 @@ def solar_curtailment_with_websocket_data(prices_data):
                 if current_export_rule == 'never':
                     result = tesla_client.set_grid_export_rule(user.tesla_energy_site_id, 'battery_ok')
                     if result:
+                        # Verify the change actually took effect by reading back
+                        verify_settings = tesla_client.get_grid_import_export(user.tesla_energy_site_id)
+                        verified_rule = verify_settings.get('customer_preferred_export_rule') if verify_settings else None
+                        if verified_rule != 'battery_ok':
+                            logger.warning(f"⚠️ RESTORE VERIFICATION FAILED: Set returned success but read-back shows '{verified_rule}' (expected 'battery_ok') for {user.email}")
+                            logger.warning(f"Full verification response: {verify_settings}")
+                        else:
+                            logger.info(f"✓ Restore verified via read-back: export_rule='{verified_rule}'")
+
                         logger.info(f"✅ CURTAILMENT REMOVED: 'never' → 'battery_ok' for {user.email}")
                         user.current_export_rule = 'battery_ok'
                         user.current_export_rule_updated = datetime.utcnow()

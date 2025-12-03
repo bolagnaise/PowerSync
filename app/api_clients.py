@@ -622,6 +622,20 @@ class FleetAPIClient(TeslaAPIClientBase):
 
             response.raise_for_status()
             data = response.json()
+
+            # Log full response for debugging
+            logger.debug(f"Set grid export rule response: {data}")
+
+            # Check if the response indicates actual success
+            if isinstance(data, dict) and 'response' in data:
+                response_data = data['response']
+                if isinstance(response_data, dict) and 'result' in response_data:
+                    if not response_data['result']:
+                        reason = response_data.get('reason', 'Unknown reason')
+                        logger.error(f"❌ Set grid export rule failed: {reason}")
+                        logger.error(f"Full response: {data}")
+                        return None
+
             logger.info(f"Successfully set grid export rule to '{export_rule}' via Fleet API")
             return data
         except requests.exceptions.RequestException as e:
@@ -1203,6 +1217,20 @@ class TeslemetryAPIClient(TeslaAPIClientBase):
 
             response.raise_for_status()
             data = response.json()
+
+            # Log full response for debugging
+            logger.debug(f"Set grid export rule response: {data}")
+
+            # Check if the response indicates actual success (like set_tariff_rate does)
+            if isinstance(data, dict) and 'response' in data:
+                response_data = data['response']
+                if isinstance(response_data, dict) and 'result' in response_data:
+                    if not response_data['result']:
+                        reason = response_data.get('reason', 'Unknown reason')
+                        logger.error(f"❌ Set grid export rule failed: {reason}")
+                        logger.error(f"Full response: {data}")
+                        return None
+
             logger.info(f"Successfully set grid export rule to '{export_rule}'")
             return data
         except requests.exceptions.RequestException as e:

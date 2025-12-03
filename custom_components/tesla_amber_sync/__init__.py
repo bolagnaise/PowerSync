@@ -1450,6 +1450,39 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 _LOGGER.error(f"❌ Failed to apply curtailment: {response.status} - {error_text}")
                                 return
 
+                            # Check response body for actual result
+                            response_data = await response.json()
+                            _LOGGER.debug(f"Set grid export rule response: {response_data}")
+                            if isinstance(response_data, dict) and 'response' in response_data:
+                                result_data = response_data['response']
+                                if isinstance(result_data, dict) and 'result' in result_data:
+                                    if not result_data['result']:
+                                        reason = result_data.get('reason', 'Unknown reason')
+                                        _LOGGER.error(f"❌ Set grid export rule failed: {reason}")
+                                        _LOGGER.error(f"Full response: {response_data}")
+                                        return
+
+                        # Verify the change actually took effect by reading back
+                        async with session.get(
+                            f"{api_base_url}/api/1/energy_sites/{entry.data[CONF_TESLA_ENERGY_SITE_ID]}/site_info",
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=30),
+                        ) as verify_response:
+                            if verify_response.status == 200:
+                                verify_data = await verify_response.json()
+                                verify_info = verify_data.get("response", {})
+                                verified_rule = verify_info.get("customer_preferred_export_rule")
+                                # Also check components_non_export_configured for VPP users
+                                if verified_rule is None:
+                                    non_export = verify_info.get("components_non_export_configured")
+                                    if non_export is not None:
+                                        verified_rule = "never" if non_export else "battery_ok"
+                                if verified_rule != "never":
+                                    _LOGGER.warning(f"⚠️ CURTAILMENT VERIFICATION FAILED: Set returned success but read-back shows '{verified_rule}' (expected 'never')")
+                                    _LOGGER.warning(f"Full verification response: {verify_info}")
+                                else:
+                                    _LOGGER.info(f"✓ Curtailment verified via read-back: export_rule='{verified_rule}'")
+
                         _LOGGER.info(f"✅ CURTAILMENT APPLIED: Export rule changed '{current_export_rule}' → 'never'")
                         await update_cached_export_rule("never")
                         _LOGGER.info(f"📊 Action summary: Curtailment active (earnings: {export_earnings:.2f}c/kWh, export: 'never')")
@@ -1476,6 +1509,39 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 error_text = await response.text()
                                 _LOGGER.error(f"❌ Failed to restore from curtailment: {response.status} - {error_text}")
                                 return
+
+                            # Check response body for actual result
+                            response_data = await response.json()
+                            _LOGGER.debug(f"Set grid export rule response: {response_data}")
+                            if isinstance(response_data, dict) and 'response' in response_data:
+                                result_data = response_data['response']
+                                if isinstance(result_data, dict) and 'result' in result_data:
+                                    if not result_data['result']:
+                                        reason = result_data.get('reason', 'Unknown reason')
+                                        _LOGGER.error(f"❌ Set grid export rule failed: {reason}")
+                                        _LOGGER.error(f"Full response: {response_data}")
+                                        return
+
+                        # Verify the change actually took effect by reading back
+                        async with session.get(
+                            f"{api_base_url}/api/1/energy_sites/{entry.data[CONF_TESLA_ENERGY_SITE_ID]}/site_info",
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=30),
+                        ) as verify_response:
+                            if verify_response.status == 200:
+                                verify_data = await verify_response.json()
+                                verify_info = verify_data.get("response", {})
+                                verified_rule = verify_info.get("customer_preferred_export_rule")
+                                # Also check components_non_export_configured for VPP users
+                                if verified_rule is None:
+                                    non_export = verify_info.get("components_non_export_configured")
+                                    if non_export is not None:
+                                        verified_rule = "never" if non_export else "battery_ok"
+                                if verified_rule != "battery_ok":
+                                    _LOGGER.warning(f"⚠️ RESTORE VERIFICATION FAILED: Set returned success but read-back shows '{verified_rule}' (expected 'battery_ok')")
+                                    _LOGGER.warning(f"Full verification response: {verify_info}")
+                                else:
+                                    _LOGGER.info(f"✓ Restore verified via read-back: export_rule='{verified_rule}'")
 
                         _LOGGER.info(f"✅ CURTAILMENT REMOVED: Export restored 'never' → 'battery_ok'")
                         await update_cached_export_rule("battery_ok")
@@ -1603,6 +1669,39 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 _LOGGER.error(f"❌ Failed to apply curtailment: {response.status} - {error_text}")
                                 return
 
+                            # Check response body for actual result
+                            response_data = await response.json()
+                            _LOGGER.debug(f"Set grid export rule response: {response_data}")
+                            if isinstance(response_data, dict) and 'response' in response_data:
+                                result_data = response_data['response']
+                                if isinstance(result_data, dict) and 'result' in result_data:
+                                    if not result_data['result']:
+                                        reason = result_data.get('reason', 'Unknown reason')
+                                        _LOGGER.error(f"❌ Set grid export rule failed: {reason}")
+                                        _LOGGER.error(f"Full response: {response_data}")
+                                        return
+
+                        # Verify the change actually took effect by reading back
+                        async with session.get(
+                            f"{api_base_url}/api/1/energy_sites/{entry.data[CONF_TESLA_ENERGY_SITE_ID]}/site_info",
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=30),
+                        ) as verify_response:
+                            if verify_response.status == 200:
+                                verify_data = await verify_response.json()
+                                verify_info = verify_data.get("response", {})
+                                verified_rule = verify_info.get("customer_preferred_export_rule")
+                                # Also check components_non_export_configured for VPP users
+                                if verified_rule is None:
+                                    non_export = verify_info.get("components_non_export_configured")
+                                    if non_export is not None:
+                                        verified_rule = "never" if non_export else "battery_ok"
+                                if verified_rule != "never":
+                                    _LOGGER.warning(f"⚠️ CURTAILMENT VERIFICATION FAILED: Set returned success but read-back shows '{verified_rule}' (expected 'never')")
+                                    _LOGGER.warning(f"Full verification response: {verify_info}")
+                                else:
+                                    _LOGGER.info(f"✓ Curtailment verified via read-back: export_rule='{verified_rule}'")
+
                         _LOGGER.info(f"✅ CURTAILMENT APPLIED: Export rule changed '{current_export_rule}' → 'never'")
                         await update_cached_export_rule("never")
                         _LOGGER.info(f"📊 Action summary: Curtailment active (earnings: {export_earnings:.2f}c/kWh, export: 'never')")
@@ -1628,6 +1727,39 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 error_text = await response.text()
                                 _LOGGER.error(f"❌ Failed to restore from curtailment: {response.status} - {error_text}")
                                 return
+
+                            # Check response body for actual result
+                            response_data = await response.json()
+                            _LOGGER.debug(f"Set grid export rule response: {response_data}")
+                            if isinstance(response_data, dict) and 'response' in response_data:
+                                result_data = response_data['response']
+                                if isinstance(result_data, dict) and 'result' in result_data:
+                                    if not result_data['result']:
+                                        reason = result_data.get('reason', 'Unknown reason')
+                                        _LOGGER.error(f"❌ Set grid export rule failed: {reason}")
+                                        _LOGGER.error(f"Full response: {response_data}")
+                                        return
+
+                        # Verify the change actually took effect by reading back
+                        async with session.get(
+                            f"{api_base_url}/api/1/energy_sites/{entry.data[CONF_TESLA_ENERGY_SITE_ID]}/site_info",
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=30),
+                        ) as verify_response:
+                            if verify_response.status == 200:
+                                verify_data = await verify_response.json()
+                                verify_info = verify_data.get("response", {})
+                                verified_rule = verify_info.get("customer_preferred_export_rule")
+                                # Also check components_non_export_configured for VPP users
+                                if verified_rule is None:
+                                    non_export = verify_info.get("components_non_export_configured")
+                                    if non_export is not None:
+                                        verified_rule = "never" if non_export else "battery_ok"
+                                if verified_rule != "battery_ok":
+                                    _LOGGER.warning(f"⚠️ RESTORE VERIFICATION FAILED: Set returned success but read-back shows '{verified_rule}' (expected 'battery_ok')")
+                                    _LOGGER.warning(f"Full verification response: {verify_info}")
+                                else:
+                                    _LOGGER.info(f"✓ Restore verified via read-back: export_rule='{verified_rule}'")
 
                         _LOGGER.info(f"✅ CURTAILMENT REMOVED: Export restored 'never' → 'battery_ok'")
                         await update_cached_export_rule("battery_ok")
