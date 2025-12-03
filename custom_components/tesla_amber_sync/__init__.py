@@ -1407,12 +1407,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             current_export_rule = "never" if non_export else "battery_ok"
                             _LOGGER.info(f"VPP user: derived export_rule='{current_export_rule}' from components_non_export_configured={non_export}")
 
-                    # If still None, fall back to cached value
+                    # If still None, fall back to cached value (but mark as unverified)
+                    using_cached_rule = False
                     if current_export_rule is None:
                         cached_rule = hass.data[DOMAIN][entry.entry_id].get("cached_export_rule")
                         if cached_rule:
                             current_export_rule = cached_rule
-                            _LOGGER.info(f"Using cached export_rule='{current_export_rule}' (API returned None)")
+                            using_cached_rule = True
+                            _LOGGER.info(f"Using cached export_rule='{current_export_rule}' (API returned None - will verify by applying)")
 
                     _LOGGER.info(f"Current export rule: {current_export_rule}")
 
@@ -1425,13 +1427,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if export_earnings < 1:
                 _LOGGER.info(f"🚫 CURTAILMENT TRIGGERED: Export earnings {export_earnings:.2f}c/kWh (<1c)")
 
-                # If already curtailed, no action needed (we track state via cache)
-                if current_export_rule == "never":
-                    _LOGGER.info(f"✅ Already curtailed (export='never') - no action needed")
+                # If already curtailed AND verified from API, no action needed
+                # If using cache, always apply curtailment to be safe (cache may be stale)
+                if current_export_rule == "never" and not using_cached_rule:
+                    _LOGGER.info(f"✅ Already curtailed (export='never', verified from API) - no action needed")
                     _LOGGER.info(f"📊 Action summary: Curtailment active (earnings: {export_earnings:.2f}c/kWh, export: 'never')")
                 else:
-                    # Not already 'never', so apply curtailment
-                    _LOGGER.info(f"Applying curtailment: '{current_export_rule}' → 'never'")
+                    # Apply curtailment (either not 'never' or using unverified cache)
+                    if using_cached_rule:
+                        _LOGGER.info(f"Applying curtailment (cache says '{current_export_rule}' but unverified) → 'never'")
+                    else:
+                        _LOGGER.info(f"Applying curtailment: '{current_export_rule}' → 'never'")
                     try:
                         async with session.post(
                             f"{api_base_url}/api/1/energy_sites/{entry.data[CONF_TESLA_ENERGY_SITE_ID]}/grid_import_export",
@@ -1554,12 +1560,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             current_export_rule = "never" if non_export else "battery_ok"
                             _LOGGER.info(f"VPP user: derived export_rule='{current_export_rule}' from components_non_export_configured={non_export}")
 
-                    # If still None, fall back to cached value
+                    # If still None, fall back to cached value (but mark as unverified)
+                    using_cached_rule = False
                     if current_export_rule is None:
                         cached_rule = hass.data[DOMAIN][entry.entry_id].get("cached_export_rule")
                         if cached_rule:
                             current_export_rule = cached_rule
-                            _LOGGER.info(f"Using cached export_rule='{current_export_rule}' (API returned None)")
+                            using_cached_rule = True
+                            _LOGGER.info(f"Using cached export_rule='{current_export_rule}' (API returned None - will verify by applying)")
 
                     _LOGGER.info(f"Current export rule: {current_export_rule}")
 
@@ -1572,13 +1580,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if export_earnings < 1:
                 _LOGGER.info(f"🚫 CURTAILMENT TRIGGERED: Export earnings {export_earnings:.2f}c/kWh (<1c)")
 
-                # If already curtailed, no action needed (we track state via cache)
-                if current_export_rule == "never":
-                    _LOGGER.info(f"✅ Already curtailed (export='never') - no action needed")
+                # If already curtailed AND verified from API, no action needed
+                # If using cache, always apply curtailment to be safe (cache may be stale)
+                if current_export_rule == "never" and not using_cached_rule:
+                    _LOGGER.info(f"✅ Already curtailed (export='never', verified from API) - no action needed")
                     _LOGGER.info(f"📊 Action summary: Curtailment active (earnings: {export_earnings:.2f}c/kWh, export: 'never')")
                 else:
-                    # Not already 'never', so apply curtailment
-                    _LOGGER.info(f"Applying curtailment: '{current_export_rule}' → 'never'")
+                    # Apply curtailment (either not 'never' or using unverified cache)
+                    if using_cached_rule:
+                        _LOGGER.info(f"Applying curtailment (cache says '{current_export_rule}' but unverified) → 'never'")
+                    else:
+                        _LOGGER.info(f"Applying curtailment: '{current_export_rule}' → 'never'")
                     try:
                         async with session.post(
                             f"{api_base_url}/api/1/energy_sites/{entry.data[CONF_TESLA_ENERGY_SITE_ID]}/grid_import_export",
