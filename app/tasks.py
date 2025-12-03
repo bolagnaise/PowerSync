@@ -1210,10 +1210,12 @@ def solar_curtailment_check():
                     current_export_rule = 'never' if non_export else 'battery_ok'
                     logger.info(f"VPP user {user.email}: derived export_rule='{current_export_rule}' from components_non_export_configured={non_export}")
 
-            # If still None, fall back to cached value from database
+            # If still None, fall back to cached value from database (but mark as unverified)
+            using_cached_rule = False
             if current_export_rule is None and user.current_export_rule:
                 current_export_rule = user.current_export_rule
-                logger.info(f"Using cached export_rule='{current_export_rule}' for {user.email} (API returned None)")
+                using_cached_rule = True
+                logger.info(f"Using cached export_rule='{current_export_rule}' for {user.email} (API returned None - will verify by applying)")
 
             logger.info(f"Current export rule for {user.email}: {current_export_rule}")
 
@@ -1222,12 +1224,16 @@ def solar_curtailment_check():
             if export_earnings < 1:
                 logger.info(f"🚫 CURTAILMENT TRIGGERED: Export earnings {export_earnings:.2f}c/kWh (<1c) for {user.email}")
 
-                # If already set to 'never', no action needed
-                if current_export_rule == 'never':
-                    logger.info(f"✅ Already curtailed (export='never') - no action needed for {user.email}")
+                # If already curtailed AND verified from API, no action needed
+                # If using cache, always apply curtailment to be safe (cache may be stale)
+                if current_export_rule == 'never' and not using_cached_rule:
+                    logger.info(f"✅ Already curtailed (export='never', verified from API) - no action needed for {user.email}")
                 else:
-                    # Not already 'never', so apply curtailment
-                    logger.info(f"Applying curtailment: '{current_export_rule}' → 'never' for {user.email}")
+                    # Apply curtailment (either not 'never' or using unverified cache)
+                    if using_cached_rule:
+                        logger.info(f"Applying curtailment (cache says '{current_export_rule}' but unverified) → 'never' for {user.email}")
+                    else:
+                        logger.info(f"Applying curtailment: '{current_export_rule}' → 'never' for {user.email}")
                     result = tesla_client.set_grid_export_rule(user.tesla_energy_site_id, 'never')
                     if not result:
                         logger.error(f"❌ Failed to apply curtailment (set export to 'never') for {user.email}")
