@@ -361,7 +361,7 @@ class SyncCoordinator:
                     return None
 
         except asyncio.TimeoutError:
-            _LOGGER.warning(f"⏰ WebSocket timeout after {timeout_seconds}s, falling back to REST API")
+            _LOGGER.info(f"⏰ WebSocket timeout after {timeout_seconds}s, falling back to REST API")
             # Clear for next period
             self._websocket_event.clear()
             async with self._lock:
@@ -1203,7 +1203,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info(f"✅ Using WebSocket price for current interval: general={general_price}¢/kWh, feedIn={feedin_price}¢/kWh")
         else:
             # WebSocket timeout - fallback to REST API for current price
-            _LOGGER.warning(f"⏰ WebSocket timeout - using REST API fallback for current price")
+            _LOGGER.info(f"⏰ WebSocket timeout - using REST API fallback for current price")
 
             # Refresh coordinator to get REST API current prices
             await amber_coordinator.async_request_refresh()
@@ -1423,7 +1423,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # CURTAILMENT LOGIC: Curtail when export earnings < 1c/kWh
             # (i.e., when feedin_price > -1, meaning you earn less than 1c or pay to export)
             if export_earnings < 1:
-                _LOGGER.warning(f"🚫 CURTAILMENT TRIGGERED: Export earnings {export_earnings:.2f}c/kWh (<1c)")
+                _LOGGER.info(f"🚫 CURTAILMENT TRIGGERED: Export earnings {export_earnings:.2f}c/kWh (<1c)")
 
                 # If already curtailed, no action needed (we track state via cache)
                 if current_export_rule == "never":
@@ -1570,7 +1570,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # CURTAILMENT LOGIC: Curtail when export earnings < 1c/kWh
             # (i.e., when feedin_price > -1, meaning you earn less than 1c or pay to export)
             if export_earnings < 1:
-                _LOGGER.warning(f"🚫 CURTAILMENT TRIGGERED: Export earnings {export_earnings:.2f}c/kWh (<1c)")
+                _LOGGER.info(f"🚫 CURTAILMENT TRIGGERED: Export earnings {export_earnings:.2f}c/kWh (<1c)")
 
                 # If already curtailed, no action needed (we track state via cache)
                 if current_export_rule == "never":
@@ -1704,6 +1704,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Set up automatic TOU sync every 5 minutes if auto-sync is enabled
     async def auto_sync_tou(now):
         """Automatically sync TOU schedule if enabled."""
+        # Ensure WebSocket thread is alive (restart if it died)
+        if ws_client:
+            await ws_client.ensure_running()
+
         # Check if auto-sync is enabled in the config entry options
         auto_sync_enabled = entry.options.get(
             CONF_AUTO_SYNC_ENABLED,

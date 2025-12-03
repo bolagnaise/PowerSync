@@ -69,7 +69,7 @@ class SyncCoordinator:
                 self._websocket_data = None
                 return data
             else:
-                logger.warning(f"⏰ WebSocket timeout after {timeout_seconds}s, falling back to REST API")
+                logger.info(f"⏰ WebSocket timeout after {timeout_seconds}s, falling back to REST API")
                 # Clear for next period
                 self._websocket_event.clear()
                 self._websocket_data = None
@@ -319,7 +319,7 @@ def _sync_all_users_internal(websocket_data):
                 logger.info(f"✅ Using WebSocket price for current interval: general={general_price}¢/kWh, feedIn={feedin_price}¢/kWh")
             else:
                 # WebSocket timeout - fallback to REST API for current price
-                logger.warning(f"⏰ WebSocket timeout - using REST API fallback for current price")
+                logger.info(f"⏰ WebSocket timeout - using REST API fallback for current price")
                 current_prices = amber_client.get_current_prices()
 
                 if current_prices:
@@ -485,7 +485,7 @@ def _save_price_history_internal(websocket_data):
                 logger.info(f"✅ Using WebSocket price for history: general={general_price}¢/kWh, feedIn={feedin_price}¢/kWh")
             else:
                 # WebSocket timeout - fallback to REST API
-                logger.warning(f"⏰ WebSocket timeout - using REST API fallback for price history")
+                logger.info(f"⏰ WebSocket timeout - using REST API fallback for price history")
                 prices = amber_client.get_current_prices()
 
             if not prices:
@@ -1220,7 +1220,7 @@ def solar_curtailment_check():
             # CURTAILMENT LOGIC: Curtail when export earnings < 1c/kWh
             # (i.e., when feedin_price > -1, meaning you earn less than 1c or pay to export)
             if export_earnings < 1:
-                logger.warning(f"🚫 CURTAILMENT TRIGGERED: Export earnings {export_earnings:.2f}c/kWh (<1c) for {user.email}")
+                logger.info(f"🚫 CURTAILMENT TRIGGERED: Export earnings {export_earnings:.2f}c/kWh (<1c) for {user.email}")
 
                 # If already set to 'never', no action needed
                 if current_export_rule == 'never':
@@ -1356,7 +1356,7 @@ def solar_curtailment_with_websocket_data(prices_data):
             # CURTAILMENT LOGIC: Curtail when export earnings < 1c/kWh
             # (i.e., when feedin_price > -1, meaning you earn less than 1c or pay to export)
             if export_earnings < 1:
-                logger.warning(f"🚫 CURTAILMENT TRIGGERED: Export earnings {export_earnings:.2f}c/kWh (<1c) for {user.email}")
+                logger.info(f"🚫 CURTAILMENT TRIGGERED: Export earnings {export_earnings:.2f}c/kWh (<1c) for {user.email}")
 
                 if current_export_rule == 'never':
                     logger.info(f"✅ Already curtailed (export='never') - no action needed for {user.email}")

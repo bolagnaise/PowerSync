@@ -361,6 +361,10 @@ def create_app(config_class=Config):
         # Wrapper functions to run tasks within app context
         def run_sync_all_users():
             with app.app_context():
+                # Ensure WebSocket thread is alive (restart if it died)
+                ws_client = app.config.get('AMBER_WEBSOCKET_CLIENT')
+                if ws_client:
+                    ws_client.ensure_running()
                 sync_all_users()
 
         def run_save_price_history():

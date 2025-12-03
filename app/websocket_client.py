@@ -58,6 +58,9 @@ class AmberWebSocketClient:
         self._reconnect_delay = 1  # Start with 1 second
         self._max_reconnect_delay = 60  # Max 60 seconds
 
+        # Stale cache warning debounce (only warn once until data is fresh again)
+        self._stale_warning_logged = False
+
         # Tesla sync triggering
         self._sync_callback = sync_callback
         self._last_sync_trigger: Optional[datetime] = None
@@ -247,6 +250,7 @@ class AmberWebSocketClient:
                     # Store the converted price data
                     self._cached_prices = converted_prices
                     self._last_update = datetime.now(timezone.utc)
+                    self._stale_warning_logged = False  # Reset stale warning on fresh data
 
                     # Log the price update
                     general_price = converted_prices.get("general", {}).get("perKwh")
@@ -350,7 +354,10 @@ class AmberWebSocketClient:
             # Check if data is stale
             age = (datetime.now(timezone.utc) - self._last_update).total_seconds()
             if age > max_age_seconds:
-                logger.warning(f"Cached WebSocket data is {age:.1f}s old (max: {max_age_seconds}s)")
+                # Only warn once until data becomes fresh again (debounce spam)
+                if not self._stale_warning_logged:
+                    logger.warning(f"Cached WebSocket data is {age:.1f}s old (max: {max_age_seconds}s) - using REST fallback")
+                    self._stale_warning_logged = True
                 return None
 
             # Convert to Amber API format
@@ -393,3 +400,31 @@ class AmberWebSocketClient:
             "last_error": self._last_error,
             "has_cached_data": bool(self._cached_prices),
         }
+
+    def ensure_running(self) -> bool:
+        """
+        Check if WebSocket thread is alive and restart if needed.
+
+        Call this periodically to ensure the WebSocket connection stays
+        alive even after unexpected failures.
+
+        Returns:
+            bool: True if thread was restarted, False if already running
+        """
+        if not self._running:
+            # Client was explicitly stopped, don't restart
+            return False
+
+        if self._thread is None or not self._thread.is_alive():
+            logger.warning("WebSocket thread died unexpectedly - restarting...")
+            self._connection_status = "reconnecting"
+            self._thread = threading.Thread(
+                target=self._run_event_loop,
+                daemon=True,
+                name="AmberWebSocket"
+            )
+            self._thread.start()
+            logger.info("WebSocket thread restarted successfully")
+            return True
+
+        return False
