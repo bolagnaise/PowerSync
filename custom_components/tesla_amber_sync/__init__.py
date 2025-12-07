@@ -2025,6 +2025,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if demand_charge_coordinator:
         async def auto_demand_charging_check(now):
             """Automatically check demand period and toggle grid charging."""
+            from homeassistant.util import dt as dt_util
             try:
                 entry_data = hass.data[DOMAIN].get(entry.entry_id, {})
                 dc_coordinator = entry_data.get("demand_charge_coordinator")
@@ -2079,6 +2080,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Perform initial demand period check
         _LOGGER.info("Performing initial demand period grid charging check")
+        from homeassistant.util import dt as dt_util
         await auto_demand_charging_check(dt_util.now())
 
     _LOGGER.info("Tesla Sync integration setup complete")
