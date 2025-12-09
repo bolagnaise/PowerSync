@@ -436,7 +436,6 @@ def convert_amber_to_tesla_tariff(
 
     # Apply artificial price increase during demand periods if enabled (ALPHA feature)
     if demand_artificial_price_enabled and demand_charge_enabled:
-        from datetime import datetime
         artificial_increase = 2.0  # $2/kWh increase during demand periods
         periods_modified = 0
 
