@@ -68,21 +68,10 @@ views:
         display_zero_lines: false
         clickable_entities: true
         use_new_flow_rate_model: true
-      - type: entities
-        title: Solar Curtailment
-        entities:
-          - entity: sensor.solar_curtailment
-            name: Export Status
-            icon: mdi:solar-power-variant
-        state_color: true
-        footer:
-          type: markdown
-          content: >
-            {% if states('sensor.solar_curtailment') == 'Active' %}
-            ⚠️ **Curtailment Active** - Solar export blocked due to negative feed-in price
-            {% else %}
-            ✅ Normal - Solar export allowed
-            {% endif %}
+      - type: entity
+        entity: sensor.solar_curtailment
+        name: Solar Curtailment
+        icon: mdi:solar-power-variant
       - type: custom:apexcharts-card
         header:
           show: true
