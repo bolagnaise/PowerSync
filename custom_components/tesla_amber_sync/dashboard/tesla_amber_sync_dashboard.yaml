@@ -9,37 +9,10 @@
 #
 # 2. Create new dashboard in Home Assistant:
 #    Settings → Dashboards → Add Dashboard → "New dashboard from scratch"
-#    Give it a name like "Tesla Amber Sync"
 #
 # 3. Open the new dashboard, click the 3 dots menu → "Edit dashboard"
 #    Then click 3 dots again → "Raw configuration editor"
 #    Delete all content and paste this entire file
-#
-# ENTITY NAMES:
-# This dashboard uses sensors from Tesla Amber Sync and the Amber Electric HACS integration.
-# If Home Assistant renamed your entities (e.g., added _2 suffix),
-# you may need to adjust the entity IDs below.
-#
-# Tesla Amber Sync sensors:
-#   sensor.current_electricity_price
-#   sensor.solar_power
-#   sensor.grid_power
-#   sensor.battery_power
-#   sensor.home_load
-#   sensor.battery_level
-#   sensor.in_demand_charge_period
-#   sensor.peak_demand_this_cycle
-#   sensor.demand_charge_cost_this_month
-#   sensor.daily_supply_charge_cost_this_month
-#   sensor.monthly_supply_charge
-#   sensor.total_estimated_monthly_cost
-#   sensor.aemo_wholesale_price
-#   sensor.aemo_spike_status
-#
-# Amber Electric HACS integration sensors (optional):
-#   sensor.amber_general_price - Current import price
-#   sensor.amber_feed_in_price - Current feed-in/export price
-#   sensor.amber_general_forecast - Forecast import price
 #
 # ============================================================================
 
@@ -48,26 +21,37 @@ views:
   - title: Energy Dashboard
     path: energy
     icon: mdi:lightning-bolt
-    cards:
+    type: sections
+    sections:
       # ========================================
-      # HEADER - Current Price & Status
+      # ROW 1: Price & Battery Status
       # ========================================
-      - type: horizontal-stack
+      - type: grid
         cards:
-          # Current Price Gauge
           - type: gauge
-            entity: sensor.current_electricity_price
-            name: Current Price
-            unit: $/kWh
+            entity: sensor.amber_general_price
+            name: Import Price
+            unit: ¢/kWh
             min: 0
-            max: 1
+            max: 60
             needle: true
             severity:
               green: 0
-              yellow: 0.20
-              red: 0.35
+              yellow: 25
+              red: 40
 
-          # Battery Level Gauge
+          - type: gauge
+            entity: sensor.amber_feed_in_price
+            name: Feed-in Price
+            unit: ¢/kWh
+            min: -10
+            max: 30
+            needle: true
+            severity:
+              red: -10
+              yellow: 0
+              green: 5
+
           - type: gauge
             entity: sensor.battery_level
             name: Battery
@@ -81,447 +65,164 @@ views:
               green: 60
 
       # ========================================
-      # AMBER ELECTRIC PRICING (from Amber HACS integration)
+      # ROW 2: Power Flow
       # ========================================
-      - type: horizontal-stack
+      - type: grid
         cards:
-          - type: entity
-            entity: sensor.amber_general_price
-            name: Import Price
-            icon: mdi:cash-minus
-
-          - type: entity
-            entity: sensor.amber_feed_in_price
-            name: Feed-in Price
-            icon: mdi:cash-plus
-
-          - type: entity
-            entity: sensor.amber_general_forecast
-            name: Forecast
-            icon: mdi:chart-timeline-variant
-
-      # AEMO Spike Alert Banner (shows only when spike active)
-      - type: conditional
-        conditions:
-          - condition: state
-            entity: sensor.aemo_spike_status
-            state: "Spike Active"
-        card:
-          type: markdown
-          content: >-
-            ## ⚡ PRICE SPIKE ACTIVE
-
-            AEMO wholesale price is above threshold. Powerwall configured for maximum export.
-          style: |
-            ha-card {
-              background-color: #F44336;
-              color: white;
-              text-align: center;
-            }
+          - type: custom:power-flow-card-plus
+            entities:
+              battery:
+                entity: sensor.battery_power
+                state_of_charge: sensor.battery_level
+                name: Battery
+                color_icon: true
+                display_state: two_way
+              grid:
+                entity: sensor.grid_power
+                name: Grid
+                color_icon: true
+                display_state: two_way
+              solar:
+                entity: sensor.solar_power
+                name: Solar
+                color_icon: true
+                display_state: one_way
+              home:
+                entity: sensor.home_load
+                name: Home
+                color_icon: true
+            watt_threshold: 0
+            kw_decimals: 2
+            min_flow_rate: 0.75
+            max_flow_rate: 6
+            display_zero_lines: false
+            clickable_entities: true
+            use_new_flow_rate_model: true
 
       # ========================================
-      # POWER FLOW VISUALIZATION
+      # ROW 3: Price History Chart
       # ========================================
-      - type: custom:power-flow-card-plus
-        entities:
-          battery:
-            entity: sensor.battery_power
-            state_of_charge: sensor.battery_level
-            name: Battery
-            color_icon: true
-            display_state: two_way
-            invert_state: false
-          grid:
-            entity: sensor.grid_power
-            name: Grid
-            color_icon: true
-            display_state: two_way
-          solar:
-            entity: sensor.solar_power
-            name: Solar
-            color_icon: true
-            display_state: one_way
-          home:
-            entity: sensor.home_load
-            name: Home
-            color_icon: true
-        watt_threshold: 0
-        kw_decimals: 2
-        min_flow_rate: 0.75
-        max_flow_rate: 6
-        display_zero_lines: false
-        clickable_entities: true
-        use_new_flow_rate_model: true
-
-      # ========================================
-      # REAL-TIME POWER READINGS
-      # ========================================
-      - type: horizontal-stack
+      - type: grid
         cards:
-          - type: entity
-            entity: sensor.solar_power
-            name: Solar
-            icon: mdi:solar-power
-
-          - type: entity
-            entity: sensor.battery_power
-            name: Battery
-            icon: mdi:battery-charging
-
-          - type: entity
-            entity: sensor.grid_power
-            name: Grid
-            icon: mdi:transmission-tower
-
-          - type: entity
-            entity: sensor.home_load
-            name: Home
-            icon: mdi:home-lightning-bolt
-
-      # ========================================
-      # PRICE HISTORY CHART (24 hours)
-      # ========================================
-      - type: custom:apexcharts-card
-        header:
-          show: true
-          title: Amber Electricity Prices - Last 24 Hours
-          show_states: true
-          colorize_states: true
-        graph_span: 24h
-        yaxis:
-          - id: price
+          - type: custom:apexcharts-card
+            header:
+              show: true
+              title: Amber Prices - 24 Hours
+              show_states: true
+              colorize_states: true
+            graph_span: 24h
+            yaxis:
+              - id: price
+                apex_config:
+                  tickAmount: 5
+            series:
+              - entity: sensor.amber_general_price
+                name: Import
+                type: line
+                color: "#FF9800"
+                yaxis_id: price
+                stroke_width: 2
+                group_by:
+                  func: avg
+                  duration: 5min
+              - entity: sensor.amber_feed_in_price
+                name: Feed-in
+                type: line
+                color: "#4CAF50"
+                yaxis_id: price
+                stroke_width: 2
+                group_by:
+                  func: avg
+                  duration: 5min
             apex_config:
-              tickAmount: 5
-              labels:
-                formatter: |
-                  EVAL:function(val) {
-                    return val.toFixed(0) + '¢';
-                  }
-        series:
-          - entity: sensor.amber_general_price
-            name: Import
-            type: line
-            color: "#FF9800"
-            yaxis_id: price
-            stroke_width: 2
-            fill_raw: last
-            group_by:
-              func: avg
-              duration: 5min
-            show:
-              legend_value: true
-              in_header: true
-          - entity: sensor.amber_feed_in_price
-            name: Feed-in
-            type: line
-            color: "#4CAF50"
-            yaxis_id: price
-            stroke_width: 2
-            fill_raw: last
-            group_by:
-              func: avg
-              duration: 5min
-            show:
-              legend_value: true
-              in_header: true
-        apex_config:
-          chart:
-            height: 200
-          stroke:
-            curve: smooth
-          tooltip:
-            y:
-              formatter: |
-                EVAL:function(val) {
-                  return val.toFixed(2) + '¢/kWh';
-                }
+              chart:
+                height: 200
+              stroke:
+                curve: smooth
+              legend:
+                show: true
 
       # ========================================
-      # ENERGY USAGE CHARTS (2x2 Grid)
+      # ROW 4: Energy Charts
       # ========================================
-      - type: vertical-stack
+      - type: grid
         cards:
-          - type: horizontal-stack
-            cards:
-              # Solar Generation Chart
-              - type: custom:apexcharts-card
-                header:
-                  show: true
-                  title: Solar Generation
-                  show_states: true
-                  colorize_states: true
-                graph_span: 12h
-                series:
-                  - entity: sensor.solar_power
-                    name: Solar
-                    type: area
-                    color: "#FFD700"
-                    stroke_width: 2
-                    fill_raw: last
-                    group_by:
-                      func: avg
-                      duration: 5min
-                apex_config:
-                  chart:
-                    height: 150
-                  yaxis:
-                    min: 0
-                    labels:
-                      formatter: |
-                        EVAL:function(val) {
-                          return val.toFixed(1) + ' kW';
-                        }
-                  fill:
-                    type: gradient
-                    gradient:
-                      shadeIntensity: 0.1
-                      opacityFrom: 0.7
-                      opacityTo: 0.3
+          - type: custom:apexcharts-card
+            header:
+              show: true
+              title: Solar
+              show_states: true
+            graph_span: 12h
+            series:
+              - entity: sensor.solar_power
+                name: Solar
+                type: area
+                color: "#FFD700"
+                stroke_width: 2
+                group_by:
+                  func: avg
+                  duration: 5min
+            apex_config:
+              chart:
+                height: 150
+              yaxis:
+                min: 0
 
-              # Grid Power Chart
-              - type: custom:apexcharts-card
-                header:
-                  show: true
-                  title: Grid Power
-                  show_states: true
-                  colorize_states: true
-                graph_span: 12h
-                series:
-                  - entity: sensor.grid_power
-                    name: Grid
-                    type: area
-                    color: "#F44336"
-                    stroke_width: 2
-                    fill_raw: last
-                    group_by:
-                      func: avg
-                      duration: 5min
-                apex_config:
-                  chart:
-                    height: 150
-                  yaxis:
-                    labels:
-                      formatter: |
-                        EVAL:function(val) {
-                          return val.toFixed(1) + ' kW';
-                        }
-                  fill:
-                    type: gradient
-                    gradient:
-                      shadeIntensity: 0.1
-                      opacityFrom: 0.7
-                      opacityTo: 0.3
+          - type: custom:apexcharts-card
+            header:
+              show: true
+              title: Battery
+              show_states: true
+            graph_span: 12h
+            series:
+              - entity: sensor.battery_power
+                name: Battery
+                type: area
+                color: "#2196F3"
+                stroke_width: 2
+                group_by:
+                  func: avg
+                  duration: 5min
+            apex_config:
+              chart:
+                height: 150
 
-          - type: horizontal-stack
-            cards:
-              # Battery Power Chart
-              - type: custom:apexcharts-card
-                header:
-                  show: true
-                  title: Battery Power
-                  show_states: true
-                  colorize_states: true
-                graph_span: 12h
-                series:
-                  - entity: sensor.battery_power
-                    name: Battery
-                    type: area
-                    color: "#2196F3"
-                    stroke_width: 2
-                    fill_raw: last
-                    group_by:
-                      func: avg
-                      duration: 5min
-                apex_config:
-                  chart:
-                    height: 150
-                  yaxis:
-                    labels:
-                      formatter: |
-                        EVAL:function(val) {
-                          return val.toFixed(1) + ' kW';
-                        }
-                  fill:
-                    type: gradient
-                    gradient:
-                      shadeIntensity: 0.1
-                      opacityFrom: 0.7
-                      opacityTo: 0.3
+          - type: custom:apexcharts-card
+            header:
+              show: true
+              title: Grid
+              show_states: true
+            graph_span: 12h
+            series:
+              - entity: sensor.grid_power
+                name: Grid
+                type: area
+                color: "#F44336"
+                stroke_width: 2
+                group_by:
+                  func: avg
+                  duration: 5min
+            apex_config:
+              chart:
+                height: 150
 
-              # Home Load Chart
-              - type: custom:apexcharts-card
-                header:
-                  show: true
-                  title: Home Load
-                  show_states: true
-                  colorize_states: true
-                graph_span: 12h
-                series:
-                  - entity: sensor.home_load
-                    name: Home
-                    type: area
-                    color: "#9C27B0"
-                    stroke_width: 2
-                    fill_raw: last
-                    group_by:
-                      func: avg
-                      duration: 5min
-                apex_config:
-                  chart:
-                    height: 150
-                  yaxis:
-                    min: 0
-                    labels:
-                      formatter: |
-                        EVAL:function(val) {
-                          return val.toFixed(1) + ' kW';
-                        }
-                  fill:
-                    type: gradient
-                    gradient:
-                      shadeIntensity: 0.1
-                      opacityFrom: 0.7
-                      opacityTo: 0.3
-
-      # ========================================
-      # DEMAND CHARGE SECTION
-      # (Remove this section if not using demand charges)
-      # ========================================
-      - type: markdown
-        content: "## Demand Charges"
-
-      # Demand Period Alert
-      - type: conditional
-        conditions:
-          - condition: state
-            entity: sensor.in_demand_charge_period
-            state: "True"
-        card:
-          type: markdown
-          content: >-
-            ### ⚠️ IN DEMAND PERIOD
-
-            Grid charging is disabled to minimize peak demand.
-          style: |
-            ha-card {
-              background-color: #FF9800;
-              color: white;
-              text-align: center;
-            }
-
-      - type: horizontal-stack
-        cards:
-          - type: entity
-            entity: sensor.in_demand_charge_period
-            name: In Demand Period
-            icon: mdi:clock-alert
-
-          - type: entity
-            entity: sensor.peak_demand_this_cycle
-            name: Peak Demand
-            icon: mdi:chart-bell-curve
-
-          - type: entity
-            entity: sensor.demand_charge_cost_this_month
-            name: Demand Cost
-            icon: mdi:currency-usd
-
-      - type: horizontal-stack
-        cards:
-          - type: entity
-            entity: sensor.daily_supply_charge_cost_this_month
-            name: Daily Supply
-            icon: mdi:calendar-month
-
-          - type: entity
-            entity: sensor.monthly_supply_charge
-            name: Monthly Supply
-            icon: mdi:calendar
-
-          - type: entity
-            entity: sensor.total_estimated_monthly_cost
-            name: Total Monthly
-            icon: mdi:cash-multiple
-
-      # ========================================
-      # AEMO WHOLESALE MONITORING
-      # (Remove this section if not using AEMO spike detection)
-      # ========================================
-      - type: markdown
-        content: "## AEMO Wholesale Market"
-
-      - type: horizontal-stack
-        cards:
-          - type: gauge
-            entity: sensor.aemo_wholesale_price
-            name: Wholesale Price
-            unit: $/MWh
-            min: 0
-            max: 500
-            needle: true
-            severity:
-              green: 0
-              yellow: 100
-              red: 300
-
-          - type: entity
-            entity: sensor.aemo_spike_status
-            name: Spike Status
-            icon: mdi:alert-decagram
-
-      # ========================================
-      # ALL SENSORS (Detailed View)
-      # ========================================
-      - type: markdown
-        content: "## All Sensors"
-
-      - type: entities
-        title: Amber Electric (HACS Integration)
-        show_header_toggle: false
-        entities:
-          - entity: sensor.amber_general_price
-            name: Import Price
-            icon: mdi:cash-minus
-          - entity: sensor.amber_feed_in_price
-            name: Feed-in Price
-            icon: mdi:cash-plus
-          - entity: sensor.amber_general_forecast
-            name: Forecast Price
-            icon: mdi:chart-timeline-variant
-
-      - type: entities
-        title: Tesla Amber Sync Sensors
-        show_header_toggle: false
-        entities:
-          - entity: sensor.current_electricity_price
-            name: Current Price
-            icon: mdi:currency-usd
-          - entity: sensor.solar_power
-            name: Solar Power
-            icon: mdi:solar-power
-          - entity: sensor.battery_power
-            name: Battery Power
-            icon: mdi:battery-charging
-          - entity: sensor.battery_level
-            name: Battery Level
-            icon: mdi:battery
-          - entity: sensor.grid_power
-            name: Grid Power
-            icon: mdi:transmission-tower
-          - entity: sensor.home_load
-            name: Home Load
-            icon: mdi:home-lightning-bolt
-          - type: divider
-          - entity: sensor.in_demand_charge_period
-            name: In Demand Period
-          - entity: sensor.peak_demand_this_cycle
-            name: Peak Demand
-          - entity: sensor.demand_charge_cost_this_month
-            name: Demand Cost
-          - entity: sensor.total_estimated_monthly_cost
-            name: Total Monthly Cost
-          - type: divider
-          - entity: sensor.aemo_wholesale_price
-            name: AEMO Price
-          - entity: sensor.aemo_spike_status
-            name: AEMO Spike Status
+          - type: custom:apexcharts-card
+            header:
+              show: true
+              title: Home
+              show_states: true
+            graph_span: 12h
+            series:
+              - entity: sensor.home_load
+                name: Home
+                type: area
+                color: "#9C27B0"
+                stroke_width: 2
+                group_by:
+                  func: avg
+                  duration: 5min
+            apex_config:
+              chart:
+                height: 150
+              yaxis:
+                min: 0
