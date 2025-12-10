@@ -99,6 +99,9 @@
       },
       "days_until_demand_reset": {
         "name": "Days Until Demand Reset"
+      },
+      "tariff_schedule": {
+        "name": "Tariff Schedule"
       }
     },
     "switch": {

@@ -109,6 +109,9 @@ SWITCH_TYPE_AUTO_SYNC = "auto_sync"
 SENSOR_TYPE_AEMO_PRICE = "aemo_price"
 SENSOR_TYPE_AEMO_SPIKE_STATUS = "aemo_spike_status"
 
+# Tariff schedule sensor
+SENSOR_TYPE_TARIFF_SCHEDULE = "tariff_schedule"
+
 # Attributes
 ATTR_LAST_SYNC = "last_sync"
 ATTR_SYNC_STATUS = "sync_status"

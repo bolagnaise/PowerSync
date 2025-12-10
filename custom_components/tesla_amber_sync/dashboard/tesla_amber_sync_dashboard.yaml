@@ -65,7 +65,19 @@ views:
               green: 60
 
       # ========================================
-      # ROW 2: Power Flow
+      # ROW 2: Tariff Schedule Status
+      # ========================================
+      - type: grid
+        cards:
+          - type: entity
+            entity: sensor.tariff_schedule
+            name: TOU Schedule
+            icon: mdi:calendar-clock
+          # Note: Full 48-period schedule is in sensor attributes
+          # View in Developer Tools → States → sensor.tariff_schedule
+
+      # ========================================
+      # ROW 3: Power Flow
       # ========================================
       - type: grid
         cards:

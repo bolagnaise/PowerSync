@@ -143,6 +143,9 @@
       },
       "aemo_spike_status": {
         "name": "AEMO Spike Status"
+      },
+      "tariff_schedule": {
+        "name": "Tariff Schedule"
       }
     },
     "switch": {

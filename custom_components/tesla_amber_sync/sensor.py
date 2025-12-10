@@ -45,6 +45,7 @@ from .const import (
     SENSOR_TYPE_TOTAL_MONTHLY_COST,
     SENSOR_TYPE_AEMO_PRICE,
     SENSOR_TYPE_AEMO_SPIKE_STATUS,
+    SENSOR_TYPE_TARIFF_SCHEDULE,
     CONF_DEMAND_CHARGE_ENABLED,
     CONF_DEMAND_CHARGE_RATE,
     CONF_DEMAND_CHARGE_START_TIME,
@@ -287,6 +288,15 @@ async def async_setup_entry(
                 )
             )
 
+    # Add tariff schedule sensor (always added for visualization)
+    entities.append(
+        TariffScheduleSensor(
+            hass=hass,
+            entry=entry,
+        )
+    )
+    _LOGGER.info("Tariff schedule sensor added for TOU visualization")
+
     async_add_entities(entities)
 
 
@@ -429,3 +439,65 @@ class AEMOSpikeSensor(SensorEntity):
         if self.entity_description.attr_fn:
             return self.entity_description.attr_fn(self._spike_manager.get_status())
         return {}
+
+
+class TariffScheduleSensor(SensorEntity):
+    """Sensor for displaying the current tariff schedule sent to Tesla."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialize the sensor."""
+        self.hass = hass
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_{SENSOR_TYPE_TARIFF_SCHEDULE}"
+        self._attr_has_entity_name = True
+        self._attr_name = "Tariff Schedule"
+        self._attr_icon = "mdi:calendar-clock"
+
+    @property
+    def native_value(self) -> Any:
+        """Return the state - number of periods in schedule."""
+        tariff_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("tariff_schedule")
+        if tariff_data:
+            return tariff_data.get("last_sync", "Unknown")
+        return "Not synced"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the tariff schedule as attributes for visualization."""
+        tariff_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("tariff_schedule")
+        if not tariff_data:
+            return {}
+
+        attributes = {
+            "last_sync": tariff_data.get("last_sync"),
+            "period_count": len(tariff_data.get("buy_prices", {})),
+        }
+
+        # Add buy and sell prices as individual attributes for easy access
+        buy_prices = tariff_data.get("buy_prices", {})
+        sell_prices = tariff_data.get("sell_prices", {})
+
+        # Create a list format suitable for apexcharts-card visualization
+        # Format: list of {time: "HH:MM", buy: price, sell: price}
+        schedule_list = []
+        for period_key in sorted(buy_prices.keys()):
+            # Convert PERIOD_HH_MM to HH:MM
+            parts = period_key.replace("PERIOD_", "").split("_")
+            time_str = f"{parts[0]}:{parts[1]}"
+            schedule_list.append({
+                "time": time_str,
+                "buy": buy_prices.get(period_key, 0),
+                "sell": sell_prices.get(period_key, 0),
+            })
+
+        attributes["schedule"] = schedule_list
+
+        # Also add raw dicts for flexibility
+        attributes["buy_prices"] = buy_prices
+        attributes["sell_prices"] = sell_prices
+
+        return attributes

@@ -1349,6 +1349,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.error("Failed to convert Amber prices to Tesla tariff")
             return
 
+        # Store tariff schedule in hass.data for the sensor to read
+        from datetime import datetime as dt
+        buy_prices = tariff.get("buy_tariff", {}).get("energy_charges", {}).get("Summer", {}).get("rates", {})
+        sell_prices = tariff.get("sell_tariff", {}).get("energy_charges", {}).get("Summer", {}).get("rates", {})
+
+        hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = {
+            "buy_prices": buy_prices,
+            "sell_prices": sell_prices,
+            "last_sync": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        _LOGGER.info("Tariff schedule stored: %d buy periods, %d sell periods", len(buy_prices), len(sell_prices))
+
         # Send tariff to Tesla via Teslemetry or Fleet API
         # Get fresh token in case it was refreshed by tesla_fleet integration
         current_token, current_provider = token_getter()
