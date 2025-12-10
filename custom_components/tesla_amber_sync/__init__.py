@@ -1352,7 +1352,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Store tariff schedule in hass.data for the sensor to read
         from datetime import datetime as dt
         from homeassistant.helpers.dispatcher import async_dispatcher_send
-        buy_prices = tariff.get("buy_tariff", {}).get("energy_charges", {}).get("Summer", {}).get("rates", {})
+        # Buy prices are at top level, sell prices are under sell_tariff
+        buy_prices = tariff.get("energy_charges", {}).get("Summer", {}).get("rates", {})
         sell_prices = tariff.get("sell_tariff", {}).get("energy_charges", {}).get("Summer", {}).get("rates", {})
 
         hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = {
