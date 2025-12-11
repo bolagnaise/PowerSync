@@ -157,7 +157,6 @@ def api_curtailment_status():
 
     # Read cached export rule from user model (set by curtailment tasks)
     export_rule = current_user.current_export_rule
-    is_curtailed = export_rule == 'never'
 
     # Get current feed-in price if Amber is configured
     feedin_price = None
@@ -175,6 +174,16 @@ def api_curtailment_status():
                         if feedin_price is not None:
                             export_earnings = -feedin_price
                         break
+
+    # Determine curtailment status based on CURRENT price conditions
+    # Curtailment should be active only when export earnings < 1c/kWh
+    # This ensures dashboard shows correct state even if cache is stale
+    if export_earnings is not None:
+        # Use current price to determine if curtailment SHOULD be active
+        is_curtailed = export_earnings < 1.0
+    else:
+        # No price data available, fall back to cached rule
+        is_curtailed = export_rule == 'never'
 
     return jsonify({
         'enabled': True,

@@ -586,19 +586,45 @@ class SolarCurtailmentSensor(SensorEntity):
         if self._unsub_dispatcher:
             self._unsub_dispatcher()
 
+    def _get_feedin_price(self) -> float | None:
+        """Get current feed-in price from Amber coordinator."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        amber_coordinator = entry_data.get("amber_coordinator")
+        if not amber_coordinator or not amber_coordinator.data:
+            return None
+
+        # Look for feed-in price in current prices
+        current_prices = amber_coordinator.data.get("current", [])
+        for price in current_prices:
+            if price.get("channelType") == "feedIn":
+                return price.get("perKwh")
+        return None
+
+    def _is_curtailed(self) -> bool:
+        """Determine if curtailment should be active based on current price."""
+        feedin_price = self._get_feedin_price()
+
+        if feedin_price is not None:
+            # Export earnings = -feedin_price (Amber uses negative for feed-in costs)
+            export_earnings = -feedin_price
+            # Curtailment active when export earnings < 1c/kWh
+            return export_earnings < 1.0
+
+        # No price data, fall back to cached rule
+        cached_rule = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("cached_export_rule")
+        return cached_rule == "never"
+
     @property
     def native_value(self) -> str:
         """Return the state - whether curtailment is active."""
-        cached_rule = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("cached_export_rule")
-        if cached_rule == "never":
+        if self._is_curtailed():
             return "Active"
         return "Normal"
 
     @property
     def icon(self) -> str:
         """Return the icon based on state."""
-        cached_rule = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("cached_export_rule")
-        if cached_rule == "never":
+        if self._is_curtailed():
             return "mdi:solar-power-variant-outline"  # Different icon when curtailed
         return "mdi:solar-power-variant"
 
@@ -611,9 +637,13 @@ class SolarCurtailmentSensor(SensorEntity):
             CONF_SOLAR_CURTAILMENT_ENABLED,
             self._entry.data.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
         )
+        feedin_price = self._get_feedin_price()
+        export_earnings = -feedin_price if feedin_price is not None else None
 
         return {
             "export_rule": cached_rule,
             "curtailment_enabled": curtailment_enabled,
-            "description": "Export blocked due to negative feed-in price" if cached_rule == "never" else "Normal solar export allowed",
+            "feedin_price": feedin_price,
+            "export_earnings": export_earnings,
+            "description": "Export blocked due to negative feed-in price" if self._is_curtailed() else "Normal solar export allowed",
         }
