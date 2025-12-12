@@ -51,6 +51,6 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 # Run the application with gunicorn (production-ready)
-# Single worker for simpler architecture - sufficient for single-user deployment
-# Eliminates race conditions with scheduler/WebSocket file locks
-CMD ["gunicorn", "-w", "1", "-b", "0.0.0.0:5001", "--timeout", "120", "--access-logfile", "-", "--error-logfile", "-", "run:app"]
+# Single worker with threads for concurrent request handling
+# Threads allow serving public key while registration request waits for Tesla callback
+CMD ["gunicorn", "-w", "1", "--threads", "4", "-b", "0.0.0.0:5001", "--timeout", "120", "--access-logfile", "-", "--error-logfile", "-", "run:app"]
