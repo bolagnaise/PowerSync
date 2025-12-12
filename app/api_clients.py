@@ -803,6 +803,83 @@ class FleetAPIClient(TeslaAPIClientBase):
             logger.error(f"Error fetching calendar history via Fleet API: {e}")
             return None
 
+    def set_tariff_rate(self, site_id, tariff_content):
+        """
+        Set the electricity tariff/rate plan for the site via Fleet API
+
+        Uses the time_of_use_settings endpoint with tariff_content_v2
+
+        Args:
+            site_id: Energy site ID
+            tariff_content: Dictionary with complete tariff structure (v2 format)
+        """
+        try:
+            logger.info(f"Setting tariff rate for site {site_id} via Fleet API")
+            logger.debug(f"Tariff structure keys: {list(tariff_content.keys())}")
+
+            # The payload structure for time_of_use_settings with tariff
+            payload = {
+                "tou_settings": {
+                    "tariff_content_v2": tariff_content
+                }
+            }
+
+            # Log a sample of the tariff being sent for debugging
+            if 'energy_charges' in tariff_content and tariff_content['energy_charges']:
+                energy_charges_keys = list(tariff_content['energy_charges'].keys())
+                logger.debug(f"Tariff energy_charges seasons: {energy_charges_keys}")
+
+            # Debug: Check if tou_periods are being sent
+            if 'seasons' in tariff_content and 'Summer' in tariff_content['seasons']:
+                if 'tou_periods' in tariff_content['seasons']['Summer']:
+                    sample_period = list(tariff_content['seasons']['Summer']['tou_periods'].items())[0]
+                    logger.info(f"DEBUG: Sending tou_periods - First period: {sample_period[0]} = {sample_period[1]}")
+                else:
+                    logger.warning(f"DEBUG: No tou_periods in tariff being sent!")
+
+            response = requests.post(
+                f"{self.base_url}/api/1/energy_sites/{site_id}/time_of_use_settings",
+                headers=self.headers,
+                json=payload,
+                timeout=30
+            )
+
+            # Auto-refresh on 401
+            if response.status_code == 401 and self.refresh_token:
+                self.refresh_access_token()
+                response = requests.post(
+                    f"{self.base_url}/api/1/energy_sites/{site_id}/time_of_use_settings",
+                    headers=self.headers,
+                    json=payload,
+                    timeout=30
+                )
+
+            logger.info(f"Set tariff via Fleet API response status: {response.status_code}")
+
+            response.raise_for_status()
+            data = response.json()
+
+            logger.info(f"Fleet API response: {data}")
+
+            # Check if the response indicates success
+            if isinstance(data, dict):
+                if 'response' in data:
+                    response_data = data['response']
+                    if isinstance(response_data, dict) and 'result' in response_data:
+                        if not response_data['result']:
+                            reason = response_data.get('reason', 'Unknown reason')
+                            logger.error(f"Tariff update failed: {reason}")
+                            logger.error(f"Full response: {data}")
+                            return None
+
+            logger.info(f"Successfully set tariff rate for site {site_id} via Fleet API")
+            return data
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error setting tariff rate via Fleet API: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Error response: {e.response.text}")
+            return None
+
 
 class TeslemetryAPIClient(TeslaAPIClientBase):
     """Client for Teslemetry API (Tesla API proxy service)"""
