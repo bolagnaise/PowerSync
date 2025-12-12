@@ -31,9 +31,6 @@ class User(UserMixin, db.Model):
     fleet_api_refresh_token_encrypted = db.Column(db.LargeBinary)
     fleet_api_token_expires_at = db.Column(db.DateTime)
 
-    # Ngrok Tunnel (for Fleet API registration)
-    ngrok_authtoken_encrypted = db.Column(db.LargeBinary)
-
     # Two-Factor Authentication
     totp_secret = db.Column(db.String(32))  # Base32 encoded secret for TOTP
     two_factor_enabled = db.Column(db.Boolean, default=False)

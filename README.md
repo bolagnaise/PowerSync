@@ -239,7 +239,7 @@ Tesla Sync supports two methods for accessing your Tesla Powerwall. Choose which
 - ✅ Direct Tesla API access via OAuth
 - ✅ Works with both Docker and Home Assistant deployments
 - ✅ Automatic token refresh
-- ✅ Built-in ngrok tunnel for easy setup (no port forwarding needed)
+- ✅ Built-in Cloudflare Tunnel for easy setup (no port forwarding needed)
 
 **Cons:**
 - ⚠️ Requires OAuth app registration with Tesla
@@ -497,6 +497,8 @@ SECRET_KEY=your-random-secret-key-here
 - **Automated Builds:** Every push to main branch
 - **Production Server:** Gunicorn with 4 workers
 
+**Note:** For Tesla Fleet API registration, `cloudflared` is bundled in the Docker image and will be auto-downloaded for local installations.
+
 ### Method 2: Build from Source
 
 For development or customization:
@@ -660,17 +662,18 @@ Direct OAuth access to Tesla's Fleet API with built-in tunnel support.
 - ✅ Completely free
 - ✅ Direct API access
 - ✅ Configurable via web GUI
-- ✅ Built-in ngrok tunnel (no port forwarding or public domain needed)
+- ✅ Built-in Cloudflare Tunnel (no port forwarding or public domain needed)
 - ✅ Step-by-step guided setup in the UI
 
 **Setup:**
 1. Register OAuth app at https://developer.tesla.com
-2. In Settings, start the ngrok tunnel to get a public URL
-3. Update Tesla Developer Portal with the tunnel URL
-4. Enter Client ID and Client Secret in Settings
-5. Generate keys and register domain (one-click buttons)
-6. Authorize with Tesla
-7. See [TESLA_FLEET_SETUP.md](docs/TESLA_FLEET_SETUP.md) for details
+2. In Settings, click "Install" to auto-download cloudflared (or it's pre-installed in Docker)
+3. Start the Cloudflare tunnel to get a public URL
+4. Update Tesla Developer Portal with the tunnel URL
+5. Enter Client ID and Client Secret in Settings
+6. Generate keys and register domain (one-click buttons)
+7. Authorize with Tesla
+8. See [TESLA_FLEET_SETUP.md](docs/TESLA_FLEET_SETUP.md) for details
 
 ## Configuration
 

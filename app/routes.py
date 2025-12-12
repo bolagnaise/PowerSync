@@ -587,21 +587,7 @@ def settings():
 
     logger.info(f"Rendering settings page - Has Amber token: {bool(current_user.amber_api_token_encrypted)}, Has Teslemetry key: {bool(current_user.teslemetry_api_key_encrypted)}, Tesla Site ID: {current_user.tesla_energy_site_id}")
 
-    # Get ngrok authtoken (masked) for display
-    ngrok_authtoken = ''
-    if current_user.ngrok_authtoken_encrypted:
-        try:
-            token = decrypt_token(current_user.ngrok_authtoken_encrypted)
-            if token:
-                # Show masked version: first 4 chars + asterisks + last 4 chars
-                if len(token) > 8:
-                    ngrok_authtoken = token[:4] + '*' * 8 + token[-4:]
-                else:
-                    ngrok_authtoken = '********'
-        except Exception:
-            pass
-
-    return render_template('settings.html', title='Settings', form=form, ngrok_authtoken=ngrok_authtoken)
+    return render_template('settings.html', title='Settings', form=form)
 
 
 @bp.route('/demand-charges', methods=['GET', 'POST'])
@@ -2945,6 +2931,82 @@ def fleet_api_oauth_callback():
     return redirect(url_for('main.settings'))
 
 
+@bp.route('/fleet-api/disconnect', methods=['POST'])
+@login_required
+def fleet_api_disconnect():
+    """Disconnect Tesla Fleet API - clear OAuth tokens and credentials."""
+    try:
+        logger.info(f"Fleet API disconnect requested by user: {current_user.email}")
+
+        # Clear Fleet API OAuth tokens
+        current_user.fleet_api_access_token_encrypted = None
+        current_user.fleet_api_refresh_token_encrypted = None
+        current_user.fleet_api_token_expires_at = None
+
+        # Clear Fleet API credentials
+        current_user.fleet_api_client_id_encrypted = None
+        current_user.fleet_api_client_secret_encrypted = None
+        current_user.fleet_api_redirect_uri = None
+
+        # Clear Tesla site ID since it was obtained via Fleet API
+        current_user.tesla_energy_site_id = None
+
+        db.session.commit()
+
+        logger.info(f"Fleet API disconnected for user: {current_user.email}")
+        flash('Tesla Fleet API disconnected successfully')
+        return redirect(url_for('main.settings'))
+
+    except Exception as e:
+        logger.error(f"Error disconnecting Fleet API: {e}")
+        flash('Error disconnecting Fleet API. Please try again.')
+        return redirect(url_for('main.settings'))
+
+
+@bp.route('/fleet-api/delete-keys', methods=['POST'])
+@login_required
+def fleet_api_delete_keys():
+    """Delete Tesla Fleet API domain keys."""
+    logger.info(f"Delete keys requested by user: {current_user.email}")
+
+    # Define key directory and paths
+    keys_dir = os.path.join(current_app.root_path, '..', 'data', 'tesla-keys')
+    private_key_path = os.path.join(keys_dir, 'private-key.pem')
+    public_key_path = os.path.join(keys_dir, 'com.tesla.3p.public-key.pem')
+
+    deleted_files = []
+    errors = []
+
+    try:
+        if os.path.exists(private_key_path):
+            os.remove(private_key_path)
+            deleted_files.append('private-key.pem')
+            logger.info(f"Deleted private key: {private_key_path}")
+
+        if os.path.exists(public_key_path):
+            os.remove(public_key_path)
+            deleted_files.append('com.tesla.3p.public-key.pem')
+            logger.info(f"Deleted public key: {public_key_path}")
+
+        if deleted_files:
+            return jsonify({
+                'success': True,
+                'message': f'Deleted keys: {", ".join(deleted_files)}'
+            })
+        else:
+            return jsonify({
+                'success': True,
+                'message': 'No keys found to delete'
+            })
+
+    except Exception as e:
+        logger.error(f"Error deleting keys: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
 @bp.route('/fleet-api/generate-keys', methods=['POST'])
 @login_required
 def fleet_api_generate_keys():
@@ -3210,71 +3272,296 @@ def fleet_api_register_partner():
         }), 500
 
 
-@bp.route('/fleet-api/save-ngrok-token', methods=['POST'])
-@login_required
-def save_ngrok_token():
-    """Save ngrok authtoken for the current user."""
+# ============================================================================
+# Cloudflare Tunnel Management (for Tesla Fleet API registration)
+# ============================================================================
+
+import subprocess
+import threading
+import re
+import platform
+import urllib.request
+import stat
+
+
+def get_cloudflared_path():
+    """Get the path to cloudflared binary, checking both PATH and local data directory."""
+    # Check if in PATH first
     try:
-        data = request.get_json()
-        authtoken = data.get('authtoken', '').strip()
+        result = subprocess.run(['which', 'cloudflared'], capture_output=True, text=True)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
 
-        if authtoken:
-            current_user.ngrok_authtoken_encrypted = encrypt_token(authtoken)
-            logger.info(f"Ngrok authtoken saved for user: {current_user.email}")
+    # Check local data directory
+    data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data')
+    local_path = os.path.join(data_dir, 'cloudflared')
+    if os.path.exists(local_path) and os.access(local_path, os.X_OK):
+        return local_path
+
+    return None
+
+
+def download_cloudflared():
+    """Download cloudflared binary for the current platform."""
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+
+    # Map architecture names
+    if machine in ('x86_64', 'amd64'):
+        arch = 'amd64'
+    elif machine in ('arm64', 'aarch64'):
+        arch = 'arm64'
+    elif machine in ('armv7l', 'armhf'):
+        arch = 'arm'
+    else:
+        raise ValueError(f'Unsupported architecture: {machine}')
+
+    # Determine download URL
+    if system == 'darwin':
+        if arch == 'arm64':
+            filename = 'cloudflared-darwin-arm64.tgz'
         else:
-            current_user.ngrok_authtoken_encrypted = None
-            logger.info(f"Ngrok authtoken cleared for user: {current_user.email}")
+            filename = 'cloudflared-darwin-amd64.tgz'
+        is_tarball = True
+    elif system == 'linux':
+        filename = f'cloudflared-linux-{arch}'
+        is_tarball = False
+    else:
+        raise ValueError(f'Unsupported platform: {system}')
 
-        db.session.commit()
+    url = f'https://github.com/cloudflare/cloudflared/releases/latest/download/{filename}'
 
-        return jsonify({'success': True})
+    # Download to data directory
+    data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data')
+    os.makedirs(data_dir, exist_ok=True)
+    cloudflared_path = os.path.join(data_dir, 'cloudflared')
 
+    logger.info(f'Downloading cloudflared from {url}')
+
+    if is_tarball:
+        # Download and extract tarball (macOS)
+        import tarfile
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix='.tgz', delete=False) as tmp:
+            urllib.request.urlretrieve(url, tmp.name)
+            with tarfile.open(tmp.name, 'r:gz') as tar:
+                # Extract cloudflared binary
+                for member in tar.getmembers():
+                    if member.name == 'cloudflared':
+                        tar.extract(member, data_dir)
+                        break
+            os.unlink(tmp.name)
+    else:
+        # Direct binary download (Linux)
+        urllib.request.urlretrieve(url, cloudflared_path)
+
+    # Make executable
+    os.chmod(cloudflared_path, os.stat(cloudflared_path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    logger.info(f'cloudflared installed to {cloudflared_path}')
+    return cloudflared_path
+
+
+class CloudflareTunnel:
+    """Manages a Cloudflare tunnel subprocess for exposing the local server."""
+
+    def __init__(self):
+        self.process = None
+        self.public_url = None
+        self.tunnel_type = None  # 'quick' or 'named'
+        self._output_lines = []
+        self._reader_thread = None
+
+    def start_quick_tunnel(self, port=5001, timeout=30):
+        """
+        Start a Cloudflare quick tunnel and wait for the URL.
+
+        Args:
+            port: Local port to tunnel (default 5001)
+            timeout: Max seconds to wait for URL (default 30)
+
+        Returns:
+            The public tunnel URL (https://xxx.trycloudflare.com)
+
+        Raises:
+            FileNotFoundError: If cloudflared is not installed
+            TimeoutError: If URL not received within timeout
+        """
+        cloudflared_bin = get_cloudflared_path()
+        if not cloudflared_bin:
+            raise FileNotFoundError("cloudflared not installed")
+
+        cmd = [cloudflared_bin, 'tunnel', '--url', f'http://localhost:{port}']
+
+        logger.info(f"Starting cloudflared quick tunnel on port {port}")
+
+        self.process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+
+        # Read output in background thread
+        self._output_lines = []
+        self._reader_thread = threading.Thread(target=self._read_output, daemon=True)
+        self._reader_thread.start()
+
+        # Wait for URL to appear in output
+        import time as time_module
+        start_time = time_module.time()
+        url_pattern = re.compile(r'https://[a-z0-9-]+\.trycloudflare\.com')
+
+        while time_module.time() - start_time < timeout:
+            for line in self._output_lines:
+                match = url_pattern.search(line)
+                if match:
+                    self.public_url = match.group(0)
+                    self.tunnel_type = 'quick'
+                    logger.info(f"Cloudflare tunnel started: {self.public_url}")
+                    return self.public_url
+            time_module.sleep(0.5)
+
+        # Timeout - kill process
+        self.stop()
+        raise TimeoutError("Timed out waiting for tunnel URL")
+
+    def _read_output(self):
+        """Read process output in background thread."""
+        try:
+            for line in self.process.stdout:
+                self._output_lines.append(line)
+                logger.debug(f"cloudflared: {line.strip()}")
+        except Exception:
+            pass
+
+    def stop(self):
+        """Stop the tunnel process."""
+        if self.process:
+            logger.info("Stopping cloudflared tunnel")
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+            self.process = None
+        self.public_url = None
+        self.tunnel_type = None
+        self._output_lines = []
+
+    def is_running(self):
+        """Check if the tunnel process is still running."""
+        return self.process is not None and self.process.poll() is None
+
+
+# Global tunnel instance
+_cloudflare_tunnel = None
+
+
+@bp.route('/fleet-api/check-cloudflared')
+@login_required
+def check_cloudflared_installed():
+    """Check if cloudflared CLI is available on the system."""
+    cloudflared_bin = get_cloudflared_path()
+    if not cloudflared_bin:
+        return jsonify({
+            'installed': False,
+            'error': 'cloudflared not found'
+        })
+
+    try:
+        result = subprocess.run(
+            [cloudflared_bin, '--version'],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        version = result.stdout.strip() or result.stderr.strip()
+        # Extract just the version string
+        version_match = re.search(r'cloudflared version (\S+)', version)
+        if version_match:
+            version = version_match.group(1)
+        return jsonify({
+            'installed': True,
+            'version': version
+        })
+    except subprocess.TimeoutExpired:
+        return jsonify({
+            'installed': False,
+            'error': 'cloudflared check timed out'
+        })
     except Exception as e:
-        logger.error(f"Failed to save ngrok authtoken: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({
+            'installed': False,
+            'error': str(e)
+        })
+
+
+@bp.route('/fleet-api/install-cloudflared', methods=['POST'])
+@login_required
+def install_cloudflared():
+    """Download and install cloudflared binary."""
+    try:
+        # Check if already installed
+        existing = get_cloudflared_path()
+        if existing:
+            return jsonify({
+                'success': True,
+                'message': 'cloudflared already installed',
+                'path': existing
+            })
+
+        # Download cloudflared
+        path = download_cloudflared()
+        return jsonify({
+            'success': True,
+            'message': 'cloudflared installed successfully',
+            'path': path
+        })
+    except Exception as e:
+        logger.error(f"Failed to install cloudflared: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
 
 @bp.route('/fleet-api/start-tunnel', methods=['POST'])
 @login_required
 def fleet_api_start_tunnel():
     """
-    Start an ngrok tunnel for Tesla Fleet API registration.
+    Start a Cloudflare quick tunnel for Tesla Fleet API registration.
 
     This creates a temporary public URL that Tesla's servers can reach
     to verify the public key and complete domain registration.
     """
+    global _cloudflare_tunnel
+
     logger.info(f"Tunnel start requested by user: {current_user.email}")
 
+    # Check if tunnel is already running
+    if _cloudflare_tunnel and _cloudflare_tunnel.is_running():
+        public_url = _cloudflare_tunnel.public_url
+        logger.info(f"Tunnel already active: {public_url}")
+        return jsonify({
+            'success': True,
+            'public_url': public_url,
+            'public_key_url': f"{public_url}/.well-known/appspecific/com.tesla.3p.public-key.pem",
+            'callback_url': f"{public_url}/fleet-api/callback",
+            'already_running': True
+        })
+
     try:
-        from pyngrok import ngrok
-
-        # Set authtoken if user has one saved
-        if current_user.ngrok_authtoken_encrypted:
-            authtoken = decrypt_token(current_user.ngrok_authtoken_encrypted)
-            if authtoken:
-                ngrok.set_auth_token(authtoken)
-                logger.info(f"Using saved ngrok authtoken (length: {len(authtoken)})")
-
-        # Check if tunnel is already running
-        existing_tunnels = ngrok.get_tunnels()
-        for tunnel in existing_tunnels:
-            if 'localhost:5001' in tunnel.config.get('addr', ''):
-                logger.info(f"Tunnel already active: {tunnel.public_url}")
-                return jsonify({
-                    'success': True,
-                    'public_url': tunnel.public_url,
-                    'public_key_url': f"{tunnel.public_url}/.well-known/appspecific/com.tesla.3p.public-key.pem",
-                    'callback_url': f"{tunnel.public_url}/fleet-api/callback",
-                    'already_running': True
-                })
-
         # Start new tunnel
-        logger.info("Starting new ngrok tunnel on port 5001")
-        tunnel = ngrok.connect(5001, bind_tls=True)
-        public_url = tunnel.public_url
+        _cloudflare_tunnel = CloudflareTunnel()
+        public_url = _cloudflare_tunnel.start_quick_tunnel(port=5001, timeout=30)
 
         # Store in app config
-        current_app.config['NGROK_URL'] = public_url
+        current_app.config['TUNNEL_URL'] = public_url
 
         logger.info(f"Tunnel started successfully: {public_url}")
 
@@ -3285,6 +3572,20 @@ def fleet_api_start_tunnel():
             'callback_url': f"{public_url}/fleet-api/callback",
             'already_running': False
         })
+
+    except FileNotFoundError:
+        logger.error("cloudflared not installed")
+        return jsonify({
+            'success': False,
+            'error': 'cloudflared is not installed. Install with: brew install cloudflared (macOS) or download from https://github.com/cloudflare/cloudflared/releases'
+        }), 500
+
+    except TimeoutError:
+        logger.error("Timed out waiting for tunnel URL")
+        return jsonify({
+            'success': False,
+            'error': 'Timed out waiting for tunnel to start. Please try again.'
+        }), 500
 
     except Exception as e:
         logger.error(f"Failed to start tunnel: {e}")
@@ -3299,16 +3600,19 @@ def fleet_api_start_tunnel():
 @bp.route('/fleet-api/stop-tunnel', methods=['POST'])
 @login_required
 def fleet_api_stop_tunnel():
-    """Stop all ngrok tunnels."""
+    """Stop the Cloudflare tunnel."""
+    global _cloudflare_tunnel
+
     logger.info(f"Tunnel stop requested by user: {current_user.email}")
 
     try:
-        from pyngrok import ngrok
+        if _cloudflare_tunnel:
+            _cloudflare_tunnel.stop()
+            _cloudflare_tunnel = None
 
-        ngrok.disconnect_all()
-        current_app.config.pop('NGROK_URL', None)
+        current_app.config.pop('TUNNEL_URL', None)
 
-        logger.info("All tunnels stopped")
+        logger.info("Tunnel stopped")
 
         return jsonify({
             'success': True,
@@ -3326,23 +3630,23 @@ def fleet_api_stop_tunnel():
 @bp.route('/fleet-api/tunnel-status')
 @login_required
 def fleet_api_tunnel_status():
-    """Check if an ngrok tunnel is currently running."""
+    """Check if a Cloudflare tunnel is currently running."""
+    global _cloudflare_tunnel
+
     try:
-        from pyngrok import ngrok
-
-        tunnels = ngrok.get_tunnels()
-        active_tunnel = None
-
-        for tunnel in tunnels:
-            if 'localhost:5001' in tunnel.config.get('addr', '') or ':5001' in tunnel.config.get('addr', ''):
-                active_tunnel = tunnel.public_url
-                break
+        if _cloudflare_tunnel and _cloudflare_tunnel.is_running():
+            public_url = _cloudflare_tunnel.public_url
+            return jsonify({
+                'active': True,
+                'tunnel_type': _cloudflare_tunnel.tunnel_type,
+                'public_url': public_url,
+                'public_key_url': f"{public_url}/.well-known/appspecific/com.tesla.3p.public-key.pem",
+                'callback_url': f"{public_url}/fleet-api/callback"
+            })
 
         return jsonify({
-            'active': active_tunnel is not None,
-            'public_url': active_tunnel,
-            'public_key_url': f"{active_tunnel}/.well-known/appspecific/com.tesla.3p.public-key.pem" if active_tunnel else None,
-            'callback_url': f"{active_tunnel}/fleet-api/callback" if active_tunnel else None
+            'active': False,
+            'public_url': None
         })
 
     except Exception as e:

@@ -99,35 +99,21 @@
                     {% endif %}
                 </p>
 
-                <a href="{{ url_for('main.fleet_api_oauth_start') }}" class="outline" style="display: block; text-align: center; width: 100%; font-size: 0.85em; margin-top: 0.5em;">Reconnect / Refresh Tokens</a>
-
-                <!-- Key Status and Generation -->
-                <div id="keyStatusSection" style="padding: 0.6em; background: rgba(150, 150, 150, 0.1); border-radius: 0.5em; margin: 0.5em 0;">
-                    <p style="margin: 0; font-size: 0.85em;">
-                        <strong>Domain Keys:</strong> <span id="keyStatusText">Checking...</span>
-                    </p>
+                <div style="display: flex; gap: 0.5em; margin-top: 0.5em;">
+                    <a href="{{ url_for('main.fleet_api_oauth_start') }}" class="outline" style="flex: 1; text-align: center; font-size: 0.85em;">Reconnect</a>
+                    <form action="{{ url_for('main.fleet_api_disconnect') }}" method="post" style="flex: 1; margin: 0;">
+                        <button type="submit" class="outline secondary" style="width: 100%; font-size: 0.85em;" onclick="return confirm('Disconnect Tesla Fleet API? This will clear all OAuth tokens and credentials.')">Disconnect</button>
+                    </form>
                 </div>
 
-                <button type="button" id="generateKeysBtn" class="outline" style="display: block; text-align: center; width: 100%; font-size: 0.85em; margin-top: 0.5em;" onclick="generateKeys()">
-                    Generate Domain Keys
-                </button>
-                <p id="generateKeysStatus" style="font-size: 0.8em; margin-top: 0.3em; display: none;"></p>
-
-                <!-- Tunnel Section -->
+                <!-- Tunnel Section - FIRST for initial setup -->
                 <div id="tunnelSection" style="padding: 0.6em; background: rgba(100, 150, 255, 0.1); border-radius: 0.5em; margin: 0.5em 0;">
                     <p style="margin: 0 0 0.5em 0; font-size: 0.85em;">
-                        <strong>Public Tunnel (ngrok)</strong>
+                        <strong>Public Tunnel (Cloudflare)</strong>
                     </p>
-                    <div style="margin-bottom: 0.5em;">
-                        <label for="ngrokAuthtoken" style="font-size: 0.8em; margin-bottom: 0.2em; display: block;">
-                            Authtoken <small>(<a href="https://dashboard.ngrok.com/get-started/your-authtoken" target="_blank">get free token</a>)</small>
-                        </label>
-                        <div style="display: flex; gap: 0.3em; align-items: center;">
-                            <input type="password" id="ngrokAuthtoken" placeholder="Enter ngrok authtoken" style="flex: 1; font-size: 0.85em; padding: 0.4em; margin: 0;" value="{{ ngrok_authtoken or '' }}">
-                            <button type="button" class="outline" style="font-size: 0.8em; padding: 0.4em 0.8em; margin: 0; white-space: nowrap; width: auto;" onclick="saveNgrokToken()">Save</button>
-                        </div>
-                        <p id="ngrokTokenStatus" style="font-size: 0.75em; margin: 0.2em 0 0 0; display: none;"></p>
-                    </div>
+                    <p id="cloudflaredStatus" style="font-size: 0.8em; margin: 0 0 0.5em 0;">
+                        <span style="color: #999;">Checking cloudflared...</span>
+                    </p>
                     <p style="margin: 0; font-size: 0.85em;">
                         <strong>Status:</strong> <span id="tunnelStatusText">Checking...</span>
                     </p>
@@ -151,17 +137,33 @@
                 </div>
                 <p id="tunnelActionStatus" style="font-size: 0.8em; margin-top: 0.3em; display: none;"></p>
 
+                <!-- Key Status and Generation -->
+                <div id="keyStatusSection" style="padding: 0.6em; background: rgba(150, 150, 150, 0.1); border-radius: 0.5em; margin: 0.5em 0;">
+                    <p style="margin: 0; font-size: 0.85em;">
+                        <strong>Domain Keys:</strong> <span id="keyStatusText">Checking...</span>
+                    </p>
+                </div>
+
+                <div style="display: flex; gap: 0.5em; margin-top: 0.5em;">
+                    <button type="button" id="generateKeysBtn" class="outline" style="flex: 1; text-align: center; font-size: 0.85em;" onclick="generateKeys()">
+                        Generate Keys
+                    </button>
+                    <button type="button" id="deleteKeysBtn" class="outline secondary" style="flex: 1; text-align: center; font-size: 0.85em;" onclick="deleteKeys()">
+                        Delete Keys
+                    </button>
+                </div>
+                <p id="generateKeysStatus" style="font-size: 0.8em; margin-top: 0.3em; display: none;"></p>
+
                 <button type="button" id="registerDomainBtn" class="outline" style="display: block; text-align: center; width: 100%; font-size: 0.85em; margin-top: 0.5em;" onclick="registerDomain()">
                     Register Domain with Tesla
                 </button>
                 <p id="registerDomainStatus" style="font-size: 0.8em; margin-top: 0.3em; display: none;"></p>
 
                 <details style="margin-top: 0.5em;">
-                    <summary style="font-size: 0.85em;">Can't expose your server to the internet?</summary>
+                    <summary style="font-size: 0.85em;">Setup steps for new registration</summary>
                     <div style="font-size: 0.8em; margin-top: 0.5em; padding: 0.5em; background: rgba(100, 200, 255, 0.1); border-radius: 0.3em;">
-                        <p style="margin: 0 0 0.5em 0;">Use the <strong>Public Tunnel</strong> feature above to temporarily expose your app:</p>
+                        <p style="margin: 0 0 0.5em 0;">To register a new domain with Tesla:</p>
                         <ol style="margin: 0.3em 0 0 1.2em; padding: 0;">
-                            <li style="margin: 0.3em 0;">Click <strong>"Generate Domain Keys"</strong></li>
                             <li style="margin: 0.3em 0;">Click <strong>"Start Tunnel"</strong> to get a public URL</li>
                             <li style="margin: 0.3em 0;">Update <strong>Tesla Developer Portal</strong> with the tunnel URL:
                                 <ul style="margin: 0.2em 0 0 1em;">
@@ -169,7 +171,8 @@
                                     <li>Redirect URI: <code>[tunnel-url]/fleet-api/callback</code></li>
                                 </ul>
                             </li>
-                            <li style="margin: 0.3em 0;">Update <strong>Redirect URI</strong> in settings below</li>
+                            <li style="margin: 0.3em 0;">Update <strong>Redirect URI</strong> in API Configuration below</li>
+                            <li style="margin: 0.3em 0;">Click <strong>"Generate Keys"</strong></li>
                             <li style="margin: 0.3em 0;">Click <strong>"Register Domain with Tesla"</strong></li>
                             <li style="margin: 0.3em 0;">Complete OAuth authorization</li>
                             <li style="margin: 0.3em 0;">Click <strong>"Stop Tunnel"</strong> when done</li>
@@ -195,13 +198,11 @@
                 <div style="padding: 0.6em; background: rgba(100, 150, 255, 0.1); border-radius: 0.5em; margin: 0.5em 0;">
                     <p style="margin: 0 0 0.4em 0; font-size: 0.85em;">
                         <strong>1. Start Public Tunnel</strong>
-                        <small style="color: #888; margin-left: 0.5em;">(<a href="https://dashboard.ngrok.com/get-started/your-authtoken" target="_blank">get free ngrok token</a>)</small>
+                        <small style="color: #888; margin-left: 0.5em;">(requires <a href="https://github.com/cloudflare/cloudflared/releases" target="_blank">cloudflared</a>)</small>
                     </p>
-                    <div style="display: flex; gap: 0.3em; align-items: center; margin-bottom: 0.4em;">
-                        <input type="password" id="ngrokAuthtokenSetup" placeholder="ngrok authtoken" style="flex: 1; font-size: 0.85em; padding: 0.4em; margin: 0;" value="{{ ngrok_authtoken or '' }}">
-                        <button type="button" class="outline" style="font-size: 0.8em; padding: 0.4em 0.8em; margin: 0; white-space: nowrap; width: auto;" onclick="saveNgrokTokenSetup()">Save</button>
-                    </div>
-                    <p id="ngrokTokenStatusSetup" style="font-size: 0.75em; margin: 0 0 0.3em 0; display: none;"></p>
+                    <p id="cloudflaredStatusSetup" style="font-size: 0.8em; margin: 0 0 0.3em 0;">
+                        <span style="color: #999;">Checking cloudflared...</span>
+                    </p>
                     <div style="display: flex; align-items: center; gap: 0.5em;">
                         <span style="font-size: 0.85em;"><span id="tunnelStatusTextSetup">Checking...</span></span>
                         <button type="button" id="startTunnelBtnSetup" class="outline" style="font-size: 0.8em; padding: 0.3em 0.8em; margin: 0;" onclick="startTunnel()">Start</button>
@@ -499,51 +500,82 @@
     {% endif %}
 
     <script>
-        // Check key status and tunnel status on page load
+        // Check key status, cloudflared installation, and tunnel status on page load
         document.addEventListener('DOMContentLoaded', function() {
             checkKeyStatus();
+            checkCloudflaredInstalled();
             checkTunnelStatus();
         });
 
-        // Helper to save ngrok token (works for both connected and setup views)
-        async function saveNgrokTokenGeneric(inputId, statusId) {
-            const input = document.getElementById(inputId);
-            const status = document.getElementById(statusId);
-            if (!input || !status) return;
-
-            const token = input.value.trim();
-            status.style.display = 'block';
-            status.style.color = '#666';
-            status.textContent = 'Saving...';
+        // Check if cloudflared CLI is installed
+        async function checkCloudflaredInstalled() {
+            const statusElements = [
+                document.getElementById('cloudflaredStatus'),
+                document.getElementById('cloudflaredStatusSetup')
+            ];
 
             try {
-                const response = await fetch('{{ url_for("main.save_ngrok_token") }}', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ authtoken: token })
+                const response = await fetch('{{ url_for("main.check_cloudflared_installed") }}');
+                const data = await response.json();
+
+                statusElements.forEach(el => {
+                    if (!el) return;
+                    if (data.installed) {
+                        el.innerHTML = '<span style="color: #51cf66;">✓ cloudflared ' + data.version + '</span>';
+                    } else {
+                        el.innerHTML = '<span style="color: #ff6b6b;">✗ cloudflared not installed</span> - <button onclick="installCloudflared()" style="padding: 0.2em 0.5em; font-size: 0.9em;">Install</button>';
+                    }
                 });
 
-                const data = await response.json();
-                if (data.success) {
-                    status.style.color = '#51cf66';
-                    status.textContent = '✓ Token saved';
-                    setTimeout(() => { status.style.display = 'none'; }, 3000);
-                } else {
-                    status.style.color = '#ff6b6b';
-                    status.textContent = '✗ ' + (data.error || 'Failed to save');
+                // Disable start buttons if cloudflared not installed
+                if (!data.installed) {
+                    ['startTunnelBtn', 'startTunnelBtnSetup'].forEach(id => {
+                        const btn = document.getElementById(id);
+                        if (btn) {
+                            btn.disabled = true;
+                            btn.title = 'cloudflared must be installed first';
+                        }
+                    });
                 }
             } catch (error) {
-                status.style.color = '#ff6b6b';
-                status.textContent = '✗ Error: ' + error.message;
+                statusElements.forEach(el => {
+                    if (el) el.innerHTML = '<span style="color: #999;">Could not check cloudflared</span>';
+                });
             }
         }
 
-        function saveNgrokToken() {
-            saveNgrokTokenGeneric('ngrokAuthtoken', 'ngrokTokenStatus');
-        }
+        // Install cloudflared automatically
+        async function installCloudflared() {
+            const statusElements = [
+                document.getElementById('cloudflaredStatus'),
+                document.getElementById('cloudflaredStatusSetup')
+            ];
 
-        function saveNgrokTokenSetup() {
-            saveNgrokTokenGeneric('ngrokAuthtokenSetup', 'ngrokTokenStatusSetup');
+            statusElements.forEach(el => {
+                if (el) el.innerHTML = '<span style="color: #fcc419;">Installing cloudflared...</span>';
+            });
+
+            try {
+                const response = await fetch('{{ url_for("main.install_cloudflared") }}', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                const data = await response.json();
+
+                if (data.success) {
+                    // Re-check to get version and enable buttons
+                    await checkCloudflaredInstalled();
+                    await checkTunnelStatus();
+                } else {
+                    statusElements.forEach(el => {
+                        if (el) el.innerHTML = '<span style="color: #ff6b6b;">✗ Install failed: ' + data.error + '</span>';
+                    });
+                }
+            } catch (error) {
+                statusElements.forEach(el => {
+                    if (el) el.innerHTML = '<span style="color: #ff6b6b;">✗ Install failed: ' + error.message + '</span>';
+                });
+            }
         }
 
         async function checkTunnelStatus() {
@@ -568,7 +600,7 @@
 
                     // Auto-fill the Redirect URI field in the form
                     const redirectUriField = document.getElementById('fleet_api_redirect_uri');
-                    if (redirectUriField && (!redirectUriField.value || redirectUriField.value.includes('localhost') || redirectUriField.value.includes('ngrok'))) {
+                    if (redirectUriField && (!redirectUriField.value || redirectUriField.value.includes('localhost') || redirectUriField.value.includes('ngrok') || redirectUriField.value.includes('trycloudflare'))) {
                         redirectUriField.value = data.public_url + '/fleet-api/callback';
                     }
                 } else {
@@ -620,7 +652,7 @@
             }
             if (status) {
                 status.style.display = 'block';
-                status.textContent = 'Initializing ngrok tunnel...';
+                status.textContent = 'Starting Cloudflare tunnel... (may take 10-20 seconds)';
                 status.style.color = '#666';
             }
 
@@ -892,6 +924,58 @@
                 if (btn) {
                     btn.disabled = false;
                     btn.textContent = 'Generate Domain Keys';
+                }
+            }
+        }
+
+        async function deleteKeys() {
+            if (!confirm('Delete domain keys? You will need to regenerate and re-register with Tesla.')) {
+                return;
+            }
+
+            const btn = document.getElementById('deleteKeysBtn');
+            const status = document.getElementById('generateKeysStatus');
+
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = 'Deleting...';
+            }
+            if (status) {
+                status.style.display = 'block';
+                status.textContent = 'Deleting keys...';
+                status.style.color = '#666';
+            }
+
+            try {
+                const response = await fetch('{{ url_for("main.fleet_api_delete_keys") }}', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    if (status) {
+                        status.style.color = '#51cf66';
+                        status.textContent = '✓ ' + data.message;
+                    }
+                    // Update the key status display
+                    checkKeyStatus();
+                } else {
+                    if (status) {
+                        status.style.color = '#ff6b6b';
+                        status.textContent = '✗ ' + (data.error || 'Failed to delete keys');
+                    }
+                }
+            } catch (error) {
+                if (status) {
+                    status.style.color = '#ff6b6b';
+                    status.textContent = '✗ Error: ' + error.message;
+                }
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = 'Delete Keys';
                 }
             }
         }

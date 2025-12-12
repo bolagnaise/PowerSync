@@ -13,6 +13,5 @@ cryptography
 email-validator
 APScheduler==3.10.4
 websockets>=12.0
-pyngrok>=7.0.0
 pyotp>=2.9.0
 qrcode[pil]>=7.4.0
