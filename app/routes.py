@@ -2764,25 +2764,32 @@ def fleet_api_register_partner():
 
     This calls POST /api/1/partner_accounts to register the domain.
     Required before any Fleet API calls will work (fixes 412 Precondition Failed).
+
+    Uses client_credentials flow to get a partner token (different from user token).
     """
     logger.info(f"Partner registration initiated by user: {current_user.email}")
 
-    # Check if we have an access token
-    if not current_user.fleet_api_access_token_encrypted:
-        logger.error("No Fleet API access token - user needs to authenticate first")
-        return jsonify({
-            'success': False,
-            'error': 'No access token. Please connect to Tesla Fleet API first.'
-        }), 400
+    # Get client credentials - needed for partner token
+    client_id = None
+    client_secret = None
 
-    # Decrypt the access token
-    access_token = decrypt_token(current_user.fleet_api_access_token_encrypted)
-    if not access_token:
-        logger.error("Failed to decrypt Fleet API access token")
+    if current_user.fleet_api_client_id_encrypted:
+        client_id = decrypt_token(current_user.fleet_api_client_id_encrypted)
+    if current_user.fleet_api_client_secret_encrypted:
+        client_secret = decrypt_token(current_user.fleet_api_client_secret_encrypted)
+
+    # Fall back to environment variables
+    if not client_id:
+        client_id = os.getenv('TESLA_CLIENT_ID')
+    if not client_secret:
+        client_secret = os.getenv('TESLA_CLIENT_SECRET')
+
+    if not client_id or not client_secret:
+        logger.error("Missing client credentials for partner token")
         return jsonify({
             'success': False,
-            'error': 'Failed to decrypt access token.'
-        }), 500
+            'error': 'Client ID and Client Secret are required. Please configure them in settings.'
+        }), 400
 
     # Get the domain from the redirect URI or environment
     redirect_uri = current_user.fleet_api_redirect_uri or os.getenv('TESLA_REDIRECT_URI')
@@ -2805,21 +2812,54 @@ def fleet_api_register_partner():
 
     logger.info(f"Registering domain: {domain}")
 
-    # Call Tesla's partner registration endpoint
-    # Use the same region as configured in the API client
-    base_url = "https://fleet-api.prd.na.vn.cloud.tesla.com"
-    register_url = f"{base_url}/api/1/partner_accounts"
+    # Step 1: Get a partner token using client_credentials flow
+    # This is different from the user token obtained via authorization_code flow
+    token_url = "https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token"
+    fleet_api_base = "https://fleet-api.prd.na.vn.cloud.tesla.com"
 
-    headers = {
-        'Authorization': f'Bearer {access_token}',
-        'Content-Type': 'application/json'
-    }
-
-    payload = {
-        'domain': domain
+    token_data = {
+        'grant_type': 'client_credentials',
+        'client_id': client_id,
+        'client_secret': client_secret,
+        'scope': 'openid user_data vehicle_device_data vehicle_cmds vehicle_charging_cmds energy_device_data energy_cmds',
+        'audience': fleet_api_base
     }
 
     try:
+        logger.info("Requesting partner token via client_credentials flow")
+        token_response = requests.post(token_url, data=token_data, timeout=30)
+
+        if token_response.status_code != 200:
+            logger.error(f"Failed to get partner token: {token_response.status_code} - {token_response.text}")
+            return jsonify({
+                'success': False,
+                'error': f'Failed to get partner token: {token_response.text}'
+            }), token_response.status_code
+
+        token_json = token_response.json()
+        partner_token = token_json.get('access_token')
+
+        if not partner_token:
+            logger.error("No access_token in partner token response")
+            return jsonify({
+                'success': False,
+                'error': 'No access token received from Tesla'
+            }), 500
+
+        logger.info("Successfully obtained partner token")
+
+        # Step 2: Register the domain using the partner token
+        register_url = f"{fleet_api_base}/api/1/partner_accounts"
+
+        headers = {
+            'Authorization': f'Bearer {partner_token}',
+            'Content-Type': 'application/json'
+        }
+
+        payload = {
+            'domain': domain
+        }
+
         logger.info(f"Calling Tesla partner registration: POST {register_url}")
         response = requests.post(register_url, json=payload, headers=headers, timeout=30)
 
