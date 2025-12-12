@@ -115,8 +115,21 @@
 
                 <!-- Tunnel Section -->
                 <div id="tunnelSection" style="padding: 0.6em; background: rgba(100, 150, 255, 0.1); border-radius: 0.5em; margin: 0.5em 0;">
+                    <p style="margin: 0 0 0.5em 0; font-size: 0.85em;">
+                        <strong>Public Tunnel (ngrok)</strong>
+                    </p>
+                    <div style="margin-bottom: 0.5em;">
+                        <label for="ngrokAuthtoken" style="font-size: 0.8em; margin-bottom: 0.2em; display: block;">
+                            Authtoken <small>(<a href="https://dashboard.ngrok.com/get-started/your-authtoken" target="_blank">get free token</a>)</small>
+                        </label>
+                        <div style="display: flex; gap: 0.3em;">
+                            <input type="password" id="ngrokAuthtoken" placeholder="Enter ngrok authtoken" style="flex: 1; font-size: 0.85em; padding: 0.4em;" value="{{ ngrok_authtoken or '' }}">
+                            <button type="button" class="outline" style="font-size: 0.8em; padding: 0.4em 0.6em;" onclick="saveNgrokToken()">Save</button>
+                        </div>
+                        <p id="ngrokTokenStatus" style="font-size: 0.75em; margin: 0.2em 0 0 0; display: none;"></p>
+                    </div>
                     <p style="margin: 0; font-size: 0.85em;">
-                        <strong>Public Tunnel:</strong> <span id="tunnelStatusText">Checking...</span>
+                        <strong>Status:</strong> <span id="tunnelStatusText">Checking...</span>
                     </p>
                     <div id="tunnelUrlDisplay" style="display: none; margin-top: 0.5em;">
                         <p style="margin: 0; font-size: 0.8em; word-break: break-all;">
@@ -440,6 +453,37 @@
             checkKeyStatus();
             checkTunnelStatus();
         });
+
+        async function saveNgrokToken() {
+            const input = document.getElementById('ngrokAuthtoken');
+            const status = document.getElementById('ngrokTokenStatus');
+            const token = input.value.trim();
+
+            status.style.display = 'block';
+            status.style.color = '#666';
+            status.textContent = 'Saving...';
+
+            try {
+                const response = await fetch('{{ url_for("main.save_ngrok_token") }}', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ authtoken: token })
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    status.style.color = '#51cf66';
+                    status.textContent = '✓ Token saved';
+                    setTimeout(() => { status.style.display = 'none'; }, 3000);
+                } else {
+                    status.style.color = '#ff6b6b';
+                    status.textContent = '✗ ' + (data.error || 'Failed to save');
+                }
+            } catch (error) {
+                status.style.color = '#ff6b6b';
+                status.textContent = '✗ Error: ' + error.message;
+            }
+        }
 
         async function checkTunnelStatus() {
             const statusText = document.getElementById('tunnelStatusText');

@@ -379,7 +379,22 @@ def settings():
     logger.debug(f"AEMO enabled: {form.aemo_spike_detection_enabled.data}, Region: {form.aemo_region.data}, Threshold: ${form.aemo_spike_threshold.data}")
 
     logger.info(f"Rendering settings page - Has Amber token: {bool(current_user.amber_api_token_encrypted)}, Has Teslemetry key: {bool(current_user.teslemetry_api_key_encrypted)}, Tesla Site ID: {current_user.tesla_energy_site_id}")
-    return render_template('settings.html', title='Settings', form=form)
+
+    # Get ngrok authtoken (masked) for display
+    ngrok_authtoken = ''
+    if current_user.ngrok_authtoken_encrypted:
+        try:
+            token = decrypt_token(current_user.ngrok_authtoken_encrypted)
+            if token:
+                # Show masked version: first 4 chars + asterisks + last 4 chars
+                if len(token) > 8:
+                    ngrok_authtoken = token[:4] + '*' * 8 + token[-4:]
+                else:
+                    ngrok_authtoken = '********'
+        except Exception:
+            pass
+
+    return render_template('settings.html', title='Settings', form=form, ngrok_authtoken=ngrok_authtoken)
 
 
 @bp.route('/demand-charges', methods=['GET', 'POST'])
@@ -2904,6 +2919,30 @@ def fleet_api_register_partner():
         }), 500
 
 
+@bp.route('/fleet-api/save-ngrok-token', methods=['POST'])
+@login_required
+def save_ngrok_token():
+    """Save ngrok authtoken for the current user."""
+    try:
+        data = request.get_json()
+        authtoken = data.get('authtoken', '').strip()
+
+        if authtoken:
+            current_user.ngrok_authtoken_encrypted = encrypt_token(authtoken)
+            logger.info(f"Ngrok authtoken saved for user: {current_user.email}")
+        else:
+            current_user.ngrok_authtoken_encrypted = None
+            logger.info(f"Ngrok authtoken cleared for user: {current_user.email}")
+
+        db.session.commit()
+
+        return jsonify({'success': True})
+
+    except Exception as e:
+        logger.error(f"Failed to save ngrok authtoken: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @bp.route('/fleet-api/start-tunnel', methods=['POST'])
 @login_required
 def fleet_api_start_tunnel():
@@ -2916,8 +2955,14 @@ def fleet_api_start_tunnel():
     logger.info(f"Tunnel start requested by user: {current_user.email}")
 
     try:
-        from pyngrok import ngrok
-        from pyngrok.conf import PyngrokConfig
+        from pyngrok import ngrok, conf
+
+        # Set authtoken if user has one saved
+        if current_user.ngrok_authtoken_encrypted:
+            authtoken = decrypt_token(current_user.ngrok_authtoken_encrypted)
+            if authtoken:
+                conf.get_default().auth_token = authtoken
+                logger.info("Using saved ngrok authtoken")
 
         # Check if tunnel is already running
         existing_tunnels = ngrok.get_tunnels()

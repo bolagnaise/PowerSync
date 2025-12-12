@@ -30,6 +30,9 @@ class User(UserMixin, db.Model):
     fleet_api_refresh_token_encrypted = db.Column(db.LargeBinary)
     fleet_api_token_expires_at = db.Column(db.DateTime)
 
+    # Ngrok Tunnel (for Fleet API registration)
+    ngrok_authtoken_encrypted = db.Column(db.LargeBinary)
+
     # Status Tracking
     last_update_status = db.Column(db.String(255))
     last_update_time = db.Column(db.DateTime)
