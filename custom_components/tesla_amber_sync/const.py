@@ -73,6 +73,7 @@ AEMO_SENSOR_30MIN_PATTERN = "sensor.aemo_nem_{region}_current_30min_forecast"
 ELECTRICITY_PROVIDERS = {
     "amber": "Amber Electric",
     "flow_power": "Flow Power",
+    "globird": "Globird",
 }
 
 # Flow Power state options with export rates

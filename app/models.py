@@ -94,7 +94,7 @@ class User(UserMixin, db.Model):
     aemo_pre_spike_operation_mode = db.Column(db.String(20))  # Operation mode before spike (self_consumption, autonomous, backup)
 
     # Electricity Provider Configuration
-    electricity_provider = db.Column(db.String(20), default='amber')  # 'amber', 'flow_power'
+    electricity_provider = db.Column(db.String(20), default='amber')  # 'amber', 'flow_power', 'globird'
     flow_power_state = db.Column(db.String(10))  # NEM region: NSW1, VIC1, QLD1, SA1
     flow_power_price_source = db.Column(db.String(20), default='amber')  # 'amber', 'aemo'
 

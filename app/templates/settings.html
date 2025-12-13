@@ -334,14 +334,15 @@
 
                 <label for="electricity_provider">
                     Provider
-                    <select id="electricity_provider" name="electricity_provider" onchange="toggleFlowPowerOptions()">
+                    <select id="electricity_provider" name="electricity_provider" onchange="toggleProviderOptions()">
                         <option value="amber" {% if not current_user.electricity_provider or current_user.electricity_provider == 'amber' %}selected{% endif %}>Amber Electric</option>
                         <option value="flow_power" {% if current_user.electricity_provider == 'flow_power' %}selected{% endif %}>Flow Power</option>
+                        <option value="globird" {% if current_user.electricity_provider == 'globird' %}selected{% endif %}>Globird</option>
                     </select>
                 </label>
             </fieldset>
 
-            <fieldset id="amberFieldset" style="margin-top: 1em; {% if current_user.electricity_provider == 'flow_power' %}display: none;{% endif %}">
+            <fieldset id="amberFieldset" style="margin-top: 1em; {% if current_user.electricity_provider in ['flow_power', 'globird'] %}display: none;{% endif %}">
                 <legend>Amber Electric</legend>
                 <label for="amber_token">
                     {{ form.amber_token.label }}
@@ -392,6 +393,102 @@
                         <strong>Export rate outside Happy Hour:</strong> 0c/kWh
                     </p>
                 </article>
+            </fieldset>
+
+            <fieldset id="globirdFieldset" style="margin-top: 1em; {% if current_user.electricity_provider != 'globird' %}display: none;{% endif %}">
+                <legend>Globird - AEMO Spike Detection</legend>
+                <p style="font-size: 0.85em; margin: 0 0 1em 0; color: var(--muted-color);">
+                    Monitor AEMO NEM wholesale electricity prices and automatically switch to export mode during price spikes.
+                    When the price exceeds your threshold, the system saves your current tariff and uploads a spike tariff that
+                    encourages battery export. When prices return to normal, your original tariff is restored.
+                </p>
+
+                {% if current_user.sync_enabled %}
+                <article style="background: rgba(255, 165, 0, 0.15); padding: 1em; border-radius: 0.5em; margin-bottom: 1em; border-left: 4px solid orange;">
+                    <p style="margin: 0; font-size: 0.85em;">
+                        ⚠️ <strong>Note:</strong> AEMO spike detection is automatically disabled when Amber auto sync is enabled.
+                        To use spike detection, disable auto sync from the Dashboard first.
+                    </p>
+                </article>
+                {% endif %}
+
+                <label for="globird_aemo_spike_detection_enabled">
+                    <input type="checkbox" id="globird_aemo_spike_detection_enabled" name="aemo_spike_detection_enabled"
+                           {% if form.aemo_spike_detection_enabled.data %}checked{% endif %}
+                           onchange="toggleGlobirdAemoFields(this.checked)">
+                    Enable AEMO Spike Detection
+                </label>
+
+                <div id="globird-aemo-fields" style="{% if not form.aemo_spike_detection_enabled.data %}display: none;{% endif %} margin-top: 1em;">
+                    <label for="globird_aemo_region">
+                        {{ form.aemo_region.label }}
+                        <small>Select your NEM region for monitoring wholesale electricity prices</small>
+                        <select id="globird_aemo_region" name="aemo_region">
+                            <option value="">Select Region...</option>
+                            <option value="NSW1" {% if form.aemo_region.data == 'NSW1' %}selected{% endif %}>NSW - New South Wales</option>
+                            <option value="QLD1" {% if form.aemo_region.data == 'QLD1' %}selected{% endif %}>QLD - Queensland</option>
+                            <option value="VIC1" {% if form.aemo_region.data == 'VIC1' %}selected{% endif %}>VIC - Victoria</option>
+                            <option value="SA1" {% if form.aemo_region.data == 'SA1' %}selected{% endif %}>SA - South Australia</option>
+                            <option value="TAS1" {% if form.aemo_region.data == 'TAS1' %}selected{% endif %}>TAS - Tasmania</option>
+                        </select>
+                    </label>
+
+                    <label for="globird_aemo_spike_threshold">
+                        {{ form.aemo_spike_threshold.label }}
+                        <small>{{ form.aemo_spike_threshold.description }}</small>
+                        <input type="number" id="globird_aemo_spike_threshold" name="aemo_spike_threshold"
+                               value="{{ form.aemo_spike_threshold.data or 300 }}" step="0.01" min="0"
+                               placeholder="300.00" style="max-width: 200px;">
+                    </label>
+
+                    {% if current_user.aemo_spike_detection_enabled %}
+                    <article style="background: rgba(100, 200, 150, 0.1); padding: 1em; border-radius: 0.5em; margin-top: 1em;">
+                        <p style="margin: 0; font-size: 0.85em;"><strong>Status:</strong></p>
+                        <ul style="margin: 0.5em 0 0 1.5em; padding: 0; font-size: 0.85em;">
+                            <li>Region: <strong>{{ current_user.aemo_region or 'Not set' }}</strong></li>
+                            <li>Threshold: <strong>${{ '%.2f'|format(current_user.aemo_spike_threshold or 0) }}/MWh</strong></li>
+                            {% if current_user.aemo_last_price %}
+                            <li>Last Price: <strong>${{ '%.2f'|format(current_user.aemo_last_price) }}/MWh</strong>
+                                {% if current_user.aemo_in_spike_mode %}
+                                    <span style="color: #dc3545;">⚠️ IN SPIKE MODE</span>
+                                {% else %}
+                                    <span style="color: #28a745;">✓ Normal</span>
+                                {% endif %}
+                            </li>
+                            {% endif %}
+                            {% if current_user.aemo_last_check %}
+                            <li>Last Check: {{ (current_user.aemo_last_check | user_timezone).strftime('%Y-%m-%d %H:%M:%S') }}</li>
+                            {% endif %}
+                        </ul>
+                    </article>
+                    {% endif %}
+
+                    <details style="margin-top: 1em;">
+                        <summary style="font-size: 0.85em;">How It Works</summary>
+                        <div style="font-size: 0.8em; margin-top: 0.5em; padding: 0.5em; background: rgba(100, 200, 150, 0.05); border-radius: 0.3em;">
+                            <p style="margin: 0 0 0.5em 0;"><strong>Monitoring:</strong></p>
+                            <ol style="margin: 0 0 0.5em 1.2em; padding: 0;">
+                                <li>Every 5 minutes, checks AEMO NEM wholesale prices for your region</li>
+                                <li>Prices are in $/MWh (e.g., $300/MWh = 30c/kWh)</li>
+                            </ol>
+
+                            <p style="margin: 0.5em 0;"><strong>Spike Detection:</strong></p>
+                            <ol style="margin: 0 0 0.5em 1.2em; padding: 0;">
+                                <li>When price >= threshold: Saves your current tariff to "Pre-Spike Backup"</li>
+                                <li>Uploads a spike tariff with very high sell rates to encourage export</li>
+                                <li>Tesla Powerwall sees high feed-in rates and exports battery to grid</li>
+                            </ol>
+
+                            <p style="margin: 0.5em 0;"><strong>Return to Normal:</strong></p>
+                            <ol style="margin: 0 0 0.5em 1.2em; padding: 0;">
+                                <li>When price < threshold: Restores your saved tariff</li>
+                                <li>Battery returns to normal operation</li>
+                            </ol>
+
+                            <p style="margin: 0.5em 0 0 0;"><strong>Note:</strong> This works alongside Amber sync. Spike detection temporarily overrides your rates during high-price events.</p>
+                        </div>
+                    </details>
+                </div>
             </fieldset>
 
             <fieldset style="margin-top: 1em;">
@@ -485,103 +582,14 @@
                 </div>
             </fieldset>
 
-            <fieldset style="margin-top: 1em;">
-                <legend>AEMO Spike Detection</legend>
-                <p style="font-size: 0.85em; margin: 0 0 1em 0; color: var(--muted-color);">
-                    Monitor AEMO NEM wholesale electricity prices and automatically switch to export mode during price spikes.
-                    When the price exceeds your threshold, the system saves your current tariff and uploads a spike tariff that
-                    encourages battery export. When prices return to normal, your original tariff is restored.
-                </p>
-
-                {% if current_user.sync_enabled %}
-                <article style="background: rgba(255, 165, 0, 0.15); padding: 1em; border-radius: 0.5em; margin-bottom: 1em; border-left: 4px solid orange;">
-                    <p style="margin: 0; font-size: 0.85em;">
-                        ⚠️ <strong>Note:</strong> AEMO spike detection is automatically disabled when Amber auto sync is enabled.
-                        To use spike detection, disable auto sync from the Dashboard first.
-                    </p>
-                </article>
-                {% endif %}
-
-                <label for="aemo_spike_detection_enabled">
-                    <input type="checkbox" id="aemo_spike_detection_enabled" name="aemo_spike_detection_enabled"
-                           {% if form.aemo_spike_detection_enabled.data %}checked{% endif %}
-                           onchange="toggleAemoFields(this.checked)">
-                    Enable AEMO Spike Detection
-                </label>
-
-                <div id="aemo-fields" style="{% if not form.aemo_spike_detection_enabled.data %}display: none;{% endif %} margin-top: 1em;">
-                    <label for="aemo_region">
-                        {{ form.aemo_region.label }}
-                        <small>Select your NEM region for monitoring wholesale electricity prices</small>
-                        {{ form.aemo_region() }}
-                    </label>
-
-                    <label for="aemo_spike_threshold">
-                        {{ form.aemo_spike_threshold.label }}
-                        <small>{{ form.aemo_spike_threshold.description }}</small>
-                        <input type="number" id="aemo_spike_threshold" name="aemo_spike_threshold"
-                               value="{{ form.aemo_spike_threshold.data or 300 }}" step="0.01" min="0"
-                               placeholder="300.00" style="max-width: 200px;">
-                    </label>
-
-                    {% if current_user.aemo_spike_detection_enabled %}
-                    <article style="background: rgba(100, 200, 150, 0.1); padding: 1em; border-radius: 0.5em; margin-top: 1em;">
-                        <p style="margin: 0; font-size: 0.85em;"><strong>Status:</strong></p>
-                        <ul style="margin: 0.5em 0 0 1.5em; padding: 0; font-size: 0.85em;">
-                            <li>Region: <strong>{{ current_user.aemo_region or 'Not set' }}</strong></li>
-                            <li>Threshold: <strong>${{ '%.2f'|format(current_user.aemo_spike_threshold or 0) }}/MWh</strong></li>
-                            {% if current_user.aemo_last_price %}
-                            <li>Last Price: <strong>${{ '%.2f'|format(current_user.aemo_last_price) }}/MWh</strong>
-                                {% if current_user.aemo_in_spike_mode %}
-                                    <span style="color: #dc3545;">⚠️ IN SPIKE MODE</span>
-                                {% else %}
-                                    <span style="color: #28a745;">✓ Normal</span>
-                                {% endif %}
-                            </li>
-                            {% endif %}
-                            {% if current_user.aemo_last_check %}
-                            <li>Last Check: {{ (current_user.aemo_last_check | user_timezone).strftime('%Y-%m-%d %H:%M:%S') }}</li>
-                            {% endif %}
-                        </ul>
-                    </article>
-                    {% endif %}
-
-                    <details style="margin-top: 1em;">
-                        <summary style="font-size: 0.85em;">How It Works</summary>
-                        <div style="font-size: 0.8em; margin-top: 0.5em; padding: 0.5em; background: rgba(100, 200, 150, 0.05); border-radius: 0.3em;">
-                            <p style="margin: 0 0 0.5em 0;"><strong>Monitoring:</strong></p>
-                            <ol style="margin: 0 0 0.5em 1.2em; padding: 0;">
-                                <li>Every 5 minutes, checks AEMO NEM wholesale prices for your region</li>
-                                <li>Prices are in $/MWh (e.g., $300/MWh = 30¢/kWh)</li>
-                            </ol>
-
-                            <p style="margin: 0.5em 0;"><strong>Spike Detection:</strong></p>
-                            <ol style="margin: 0 0 0.5em 1.2em; padding: 0;">
-                                <li>When price ≥ threshold: Saves your current tariff to "Pre-Spike Backup"</li>
-                                <li>Uploads a spike tariff with very high sell rates to encourage export</li>
-                                <li>Tesla Powerwall sees high feed-in rates and exports battery to grid</li>
-                            </ol>
-
-                            <p style="margin: 0.5em 0;"><strong>Return to Normal:</strong></p>
-                            <ol style="margin: 0 0 0.5em 1.2em; padding: 0;">
-                                <li>When price &lt; threshold: Restores your saved tariff</li>
-                                <li>Battery returns to normal operation</li>
-                            </ol>
-
-                            <p style="margin: 0.5em 0 0 0;"><strong>Note:</strong> This works alongside Amber sync. Spike detection temporarily overrides your rates during high-price events.</p>
-                        </div>
-                    </details>
-                </div>
-            </fieldset>
-
             {{ form.submit(class_="primary", style="margin-top: 1em;") }}
         </form>
     </article>
 
-    <!-- AEMO Spike Testing (separate from main form) -->
-    {% if current_user.aemo_spike_detection_enabled %}
+    <!-- AEMO Spike Testing (separate from main form) - Only for Globird users -->
+    {% if current_user.electricity_provider == 'globird' and current_user.aemo_spike_detection_enabled %}
     <article>
-        <header><strong>AEMO Spike Detection Testing</strong></header>
+        <header><strong>Globird - AEMO Spike Detection Testing</strong></header>
         <p style="font-size: 0.85em;">Test the spike detection system without waiting for a real price spike.</p>
 
         <form method="POST" action="{{ url_for('main.test_aemo_spike') }}" style="display: inline; margin-right: 0.5em;">
@@ -1253,25 +1261,32 @@
             }
         }
 
-        function toggleAemoFields(enabled) {
-            const fields = document.getElementById('aemo-fields');
-            if (enabled) {
-                fields.style.display = 'block';
-            } else {
-                fields.style.display = 'none';
+        function toggleGlobirdAemoFields(enabled) {
+            const fields = document.getElementById('globird-aemo-fields');
+            if (fields) {
+                fields.style.display = enabled ? 'block' : 'none';
             }
         }
 
-        function toggleFlowPowerOptions() {
+        function toggleProviderOptions() {
             const provider = document.getElementById('electricity_provider').value;
             const amberFieldset = document.getElementById('amberFieldset');
             const flowPowerFieldset = document.getElementById('flowPowerFieldset');
+            const globirdFieldset = document.getElementById('globirdFieldset');
+
+            // Hide all provider-specific fieldsets first
+            amberFieldset.style.display = 'none';
+            flowPowerFieldset.style.display = 'none';
+            globirdFieldset.style.display = 'none';
+
+            // Show the selected provider's fieldset
             if (provider === 'flow_power') {
-                amberFieldset.style.display = 'none';
                 flowPowerFieldset.style.display = 'block';
+            } else if (provider === 'globird') {
+                globirdFieldset.style.display = 'block';
             } else {
+                // Default to Amber
                 amberFieldset.style.display = 'block';
-                flowPowerFieldset.style.display = 'none';
             }
         }
 

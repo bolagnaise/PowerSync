@@ -530,7 +530,7 @@ def settings():
         # Flow Power / Electricity Provider settings
         if 'electricity_provider' in submitted_fields:
             provider = request.form.get('electricity_provider')
-            if provider in ['amber', 'flow_power']:
+            if provider in ['amber', 'flow_power', 'globird']:
                 logger.info(f"Saving electricity provider: {provider}")
                 current_user.electricity_provider = provider
 
