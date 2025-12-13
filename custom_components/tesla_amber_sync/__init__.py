@@ -1461,6 +1461,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 demand_charge_apply_to,
             )
 
+        # Get electricity provider for tariff naming
+        electricity_provider = entry.options.get(
+            CONF_ELECTRICITY_PROVIDER,
+            entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
+        )
+
         # Convert prices to Tesla tariff format
         # forecast_data comes from either AEMO sensor or Amber coordinator (set above)
         tariff = convert_amber_to_tesla_tariff(
@@ -1476,6 +1482,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             demand_charge_apply_to=demand_charge_apply_to,
             demand_charge_days=demand_charge_days,
             demand_artificial_price_enabled=demand_artificial_price_enabled,
+            electricity_provider=electricity_provider,
         )
 
         if not tariff:
@@ -1483,10 +1490,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return
 
         # Apply Flow Power export rates and network tariff if configured
-        electricity_provider = entry.options.get(
-            CONF_ELECTRICITY_PROVIDER,
-            entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
-        )
         flow_power_state = entry.options.get(
             CONF_FLOW_POWER_STATE,
             entry.data.get(CONF_FLOW_POWER_STATE, "")

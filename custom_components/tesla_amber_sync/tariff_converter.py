@@ -231,6 +231,7 @@ def convert_amber_to_tesla_tariff(
     demand_charge_apply_to: str = "Buy Only",
     demand_charge_days: str = "All Days",
     demand_artificial_price_enabled: bool = False,
+    electricity_provider: str = "amber",
 ) -> dict[str, Any] | None:
     """
     Convert Amber price forecast to Tesla tariff format.
@@ -505,7 +506,8 @@ def convert_amber_to_tesla_tariff(
         general_prices,
         feedin_prices,
         demand_charge_rates,
-        demand_charge_apply_to
+        demand_charge_apply_to,
+        electricity_provider,
     )
 
     return tariff
@@ -731,6 +733,7 @@ def _build_tariff_structure(
     feedin_prices: dict[str, float],
     demand_charge_rates: dict[str, float] | None = None,
     demand_charge_apply_to: str = "Buy Only",
+    electricity_provider: str = "amber",
 ) -> dict[str, Any]:
     """
     Build the complete Tesla tariff structure.
@@ -740,10 +743,18 @@ def _build_tariff_structure(
         feedin_prices: Sell prices for all 48 periods
         demand_charge_rates: Demand charge rates for all 48 periods (optional)
         demand_charge_apply_to: Where to apply demand charges ("Buy Only", "Sell Only", "Both")
+        electricity_provider: Provider code ("amber", "flow_power", "globird")
 
     Returns:
         Complete Tesla tariff structure
     """
+    # Map provider codes to display names
+    provider_names = {
+        "amber": "Amber Electric",
+        "flow_power": "Flow Power",
+        "globird": "Globird",
+    }
+    provider_name = provider_names.get(electricity_provider, "Amber Electric")
     # Build TOU periods
     tou_periods = _build_tou_periods(general_prices.keys())
 
@@ -765,9 +776,9 @@ def _build_tariff_structure(
 
     tariff = {
         "version": 1,
-        "code": "TESLA_SYNC:AMBER:AMBER",
-        "name": "Amber Electric (Tesla Sync)",
-        "utility": "Amber Electric",
+        "code": f"TESLA_SYNC:{electricity_provider.upper()}",
+        "name": f"{provider_name} (Tesla Sync)",
+        "utility": provider_name,
         "currency": "AUD",
         "daily_charges": [{"name": "Charge"}],
         "demand_charges": {
@@ -797,8 +808,8 @@ def _build_tariff_structure(
             },
         },
         "sell_tariff": {
-            "name": "Amber Electric (managed by Tesla Sync)",
-            "utility": "Amber Electric",
+            "name": f"{provider_name} (managed by Tesla Sync)",
+            "utility": provider_name,
             "daily_charges": [{"name": "Charge"}],
             "demand_charges": {
                 "ALL": {"rates": {"ALL": 0}},
