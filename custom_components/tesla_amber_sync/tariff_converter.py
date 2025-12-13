@@ -1292,3 +1292,170 @@ def _apply_network_tariff_manual(
         _LOGGER.info("Manual network tariff applied to %d periods in %s", modified_count, season)
 
     return tariff
+
+
+# Flow Power PEA (Price Efficiency Adjustment) Constants
+# These are also defined in const.py but duplicated here for tariff_converter independence
+FLOW_POWER_PEA_OFFSET = 9.7      # Combined: MARKET_AVG + BENCHMARK (c/kWh)
+FLOW_POWER_DEFAULT_BASE_RATE = 34.0  # Default Flow Power base rate (c/kWh)
+
+
+def apply_flow_power_pea(
+    tariff: dict[str, Any],
+    wholesale_prices: dict[str, float],
+    base_rate: float = FLOW_POWER_DEFAULT_BASE_RATE,
+    custom_pea: float | None = None
+) -> dict[str, Any]:
+    """
+    Apply Flow Power base rate + PEA (Price Efficiency Adjustment) pricing model.
+
+    REPLACES network tariff calculation with Flow Power's actual billing model:
+    Final Rate = Base Rate + PEA
+               = Base Rate + (wholesale - 9.7)
+
+    PEA adjusts your rate based on wholesale prices when you consume:
+    - Cheap/negative wholesale → negative PEA → pay less than base rate
+    - Average wholesale (8c) → PEA ≈ -1.7c → pay slightly less than base rate
+    - Expensive wholesale → positive PEA → pay more than base rate
+
+    Examples:
+    - Wholesale -0.5c: Final = 34 + (-0.5 - 9.7) = 34 - 10.2 = 23.8c/kWh
+    - Wholesale 8c:    Final = 34 + (8 - 9.7) = 34 - 1.7 = 32.3c/kWh
+    - Wholesale 15c:   Final = 34 + (15 - 9.7) = 34 + 5.3 = 39.3c/kWh
+
+    Args:
+        tariff: Tesla tariff structure with wholesale prices in energy_charges
+        wholesale_prices: Dict mapping PERIOD_HH_MM to wholesale price in $/kWh
+        base_rate: Flow Power base rate in c/kWh (from your plan, default 34c)
+        custom_pea: Optional fixed PEA override in c/kWh (from bills)
+
+    Returns:
+        Modified tariff with Flow Power pricing applied to buy prices
+    """
+    if not tariff:
+        _LOGGER.warning("No tariff provided for Flow Power PEA adjustment")
+        return tariff
+
+    _LOGGER.info(
+        "Applying Flow Power PEA: base_rate=%.1fc/kWh, custom_pea=%s",
+        base_rate,
+        f"{custom_pea:.1f}c" if custom_pea is not None else "auto"
+    )
+
+    # Track statistics for logging
+    pea_values = []
+    final_prices = []
+
+    # Apply to Summer season buy rates (energy_charges)
+    for season in ["Summer"]:
+        if season not in tariff.get("energy_charges", {}):
+            continue
+
+        rates = tariff["energy_charges"][season].get("rates", {})
+        modified_count = 0
+
+        for period in list(rates.keys()):
+            if custom_pea is not None:
+                # User override - apply fixed PEA from bills
+                pea = custom_pea
+            else:
+                # Calculate PEA from wholesale price
+                # Get wholesale price for this period ($/kWh -> c/kWh)
+                wholesale_dollars = wholesale_prices.get(period, 0.08)  # Default 8c if missing
+                wholesale_cents = wholesale_dollars * 100
+                pea = wholesale_cents - FLOW_POWER_PEA_OFFSET  # wholesale - 9.7
+
+            pea_values.append(pea)
+
+            # Final rate = base_rate + PEA (in c/kWh)
+            final_cents = base_rate + pea
+
+            # Convert to $/kWh and clamp to 0 (Tesla restriction: no negatives)
+            final_dollars = max(0, final_cents / 100)
+            final_dollars = round(final_dollars, 4)
+
+            final_prices.append(final_cents)
+
+            if rates[period] != final_dollars:
+                modified_count += 1
+                _LOGGER.debug(
+                    "%s: base=%.1fc + PEA=%.1fc = %.1fc ($%.4f/kWh)",
+                    period, base_rate, pea, final_cents, final_dollars
+                )
+
+            rates[period] = final_dollars
+
+        _LOGGER.info("Flow Power PEA applied to %d periods in %s", modified_count, season)
+
+    # Log summary statistics
+    if pea_values:
+        avg_pea = sum(pea_values) / len(pea_values)
+        min_pea = min(pea_values)
+        max_pea = max(pea_values)
+        avg_final = sum(final_prices) / len(final_prices)
+
+        _LOGGER.info(
+            "Flow Power PEA summary: avg_pea=%.1fc, range=[%.1fc to %.1fc], avg_final=%.1fc/kWh",
+            avg_pea, min_pea, max_pea, avg_final
+        )
+
+    return tariff
+
+
+def get_wholesale_lookup(forecast_data: list[dict[str, Any]]) -> dict[str, float]:
+    """
+    Extract wholesale prices from forecast data into a period lookup.
+
+    Used by apply_flow_power_pea() to calculate PEA from wholesale prices.
+
+    Args:
+        forecast_data: List of price forecast points (5-min or 30-min resolution)
+
+    Returns:
+        Dict mapping PERIOD_HH_MM to wholesale price in $/kWh
+    """
+    wholesale_lookup: dict[str, list[float]] = {}
+
+    for point in forecast_data:
+        try:
+            nem_time = point.get("nemTime", "")
+            timestamp = datetime.fromisoformat(nem_time.replace("Z", "+00:00"))
+            channel_type = point.get("channelType", "")
+            duration = point.get("duration", 30)
+
+            # Only use general (import) prices
+            if channel_type != "general":
+                continue
+
+            # Get wholesale component - prefer wholesaleKWHPrice for raw wholesale
+            # Fall back to perKwh for AEMO data (which is already wholesale)
+            wholesale_cents = point.get("wholesaleKWHPrice")
+            if wholesale_cents is None:
+                # AEMO data - perKwh is the wholesale price
+                wholesale_cents = point.get("perKwh", 0)
+
+            wholesale_dollars = wholesale_cents / 100
+
+            # Use interval START time for bucketing (same as tariff converter)
+            interval_start = timestamp - timedelta(minutes=duration)
+
+            # Round to nearest 30-minute interval
+            start_minute_bucket = 0 if interval_start.minute < 30 else 30
+            period_key = f"PERIOD_{interval_start.hour:02d}_{start_minute_bucket:02d}"
+
+            # Store in lookup (average if multiple intervals in same 30-min period)
+            if period_key not in wholesale_lookup:
+                wholesale_lookup[period_key] = []
+            wholesale_lookup[period_key].append(wholesale_dollars)
+
+        except Exception as err:
+            _LOGGER.debug("Error extracting wholesale price: %s", err)
+            continue
+
+    # Average multiple values per period
+    result: dict[str, float] = {}
+    for period, prices in wholesale_lookup.items():
+        result[period] = sum(prices) / len(prices)
+
+    _LOGGER.debug("Built wholesale lookup with %d periods", len(result))
+    return result

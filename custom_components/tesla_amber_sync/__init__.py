@@ -71,6 +71,11 @@ from .const import (
     CONF_NETWORK_OFFPEAK_END,
     CONF_NETWORK_OTHER_FEES,
     CONF_NETWORK_INCLUDE_GST,
+    # Flow Power PEA configuration
+    CONF_PEA_ENABLED,
+    CONF_FLOW_POWER_BASE_RATE,
+    CONF_PEA_CUSTOM_VALUE,
+    FLOW_POWER_DEFAULT_BASE_RATE,
 )
 from .coordinator import (
     AmberPriceCoordinator,
@@ -1489,33 +1494,55 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_FLOW_POWER_PRICE_SOURCE, "amber")
         )
 
-        # Apply network tariff if using AEMO wholesale prices (no network fees included)
+        # Apply pricing adjustments for Flow Power + AEMO (wholesale prices need adjustment)
         if electricity_provider == "flow_power" and flow_power_price_source in ("aemo_sensor", "aemo"):
-            from .tariff_converter import apply_network_tariff
-            _LOGGER.info("Applying network tariff to AEMO wholesale prices")
+            # Check if PEA (Price Efficiency Adjustment) is enabled
+            pea_enabled = entry.options.get(CONF_PEA_ENABLED, True)  # Default True for Flow Power
 
-            # Get network tariff config from options
-            # Primary: aemo_to_tariff library with distributor + tariff code
-            # Fallback: Manual rates when use_manual_rates=True or library unavailable
-            tariff = apply_network_tariff(
-                tariff,
-                # Library-based pricing (primary)
-                distributor=entry.options.get(CONF_NETWORK_DISTRIBUTOR),
-                tariff_code=entry.options.get(CONF_NETWORK_TARIFF_CODE),
-                use_manual_rates=entry.options.get(CONF_NETWORK_USE_MANUAL_RATES, False),
-                # Manual pricing (fallback)
-                tariff_type=entry.options.get(CONF_NETWORK_TARIFF_TYPE, "flat"),
-                flat_rate=entry.options.get(CONF_NETWORK_FLAT_RATE, 8.0),
-                peak_rate=entry.options.get(CONF_NETWORK_PEAK_RATE, 15.0),
-                shoulder_rate=entry.options.get(CONF_NETWORK_SHOULDER_RATE, 5.0),
-                offpeak_rate=entry.options.get(CONF_NETWORK_OFFPEAK_RATE, 2.0),
-                peak_start=entry.options.get(CONF_NETWORK_PEAK_START, "16:00"),
-                peak_end=entry.options.get(CONF_NETWORK_PEAK_END, "21:00"),
-                offpeak_start=entry.options.get(CONF_NETWORK_OFFPEAK_START, "10:00"),
-                offpeak_end=entry.options.get(CONF_NETWORK_OFFPEAK_END, "15:00"),
-                other_fees=entry.options.get(CONF_NETWORK_OTHER_FEES, 1.5),
-                include_gst=entry.options.get(CONF_NETWORK_INCLUDE_GST, True),
-            )
+            if pea_enabled:
+                # Use Flow Power PEA pricing model: Base Rate + PEA
+                # PEA replaces network tariff - Flow Power base rate already includes network
+                from .tariff_converter import apply_flow_power_pea, get_wholesale_lookup
+
+                base_rate = entry.options.get(CONF_FLOW_POWER_BASE_RATE, FLOW_POWER_DEFAULT_BASE_RATE)
+                custom_pea = entry.options.get(CONF_PEA_CUSTOM_VALUE)
+
+                # Build wholesale price lookup from forecast data
+                wholesale_prices = get_wholesale_lookup(forecast_data)
+
+                _LOGGER.info(
+                    "Applying Flow Power PEA: base_rate=%.1fc, custom_pea=%s",
+                    base_rate,
+                    f"{custom_pea:.1f}c" if custom_pea is not None else "auto"
+                )
+                tariff = apply_flow_power_pea(tariff, wholesale_prices, base_rate, custom_pea)
+            else:
+                # PEA disabled - fall back to network tariff calculation
+                from .tariff_converter import apply_network_tariff
+                _LOGGER.info("Applying network tariff to AEMO wholesale prices (PEA disabled)")
+
+                # Get network tariff config from options
+                # Primary: aemo_to_tariff library with distributor + tariff code
+                # Fallback: Manual rates when use_manual_rates=True or library unavailable
+                tariff = apply_network_tariff(
+                    tariff,
+                    # Library-based pricing (primary)
+                    distributor=entry.options.get(CONF_NETWORK_DISTRIBUTOR),
+                    tariff_code=entry.options.get(CONF_NETWORK_TARIFF_CODE),
+                    use_manual_rates=entry.options.get(CONF_NETWORK_USE_MANUAL_RATES, False),
+                    # Manual pricing (fallback)
+                    tariff_type=entry.options.get(CONF_NETWORK_TARIFF_TYPE, "flat"),
+                    flat_rate=entry.options.get(CONF_NETWORK_FLAT_RATE, 8.0),
+                    peak_rate=entry.options.get(CONF_NETWORK_PEAK_RATE, 15.0),
+                    shoulder_rate=entry.options.get(CONF_NETWORK_SHOULDER_RATE, 5.0),
+                    offpeak_rate=entry.options.get(CONF_NETWORK_OFFPEAK_RATE, 2.0),
+                    peak_start=entry.options.get(CONF_NETWORK_PEAK_START, "16:00"),
+                    peak_end=entry.options.get(CONF_NETWORK_PEAK_END, "21:00"),
+                    offpeak_start=entry.options.get(CONF_NETWORK_OFFPEAK_START, "10:00"),
+                    offpeak_end=entry.options.get(CONF_NETWORK_OFFPEAK_END, "15:00"),
+                    other_fees=entry.options.get(CONF_NETWORK_OTHER_FEES, 1.5),
+                    include_gst=entry.options.get(CONF_NETWORK_INCLUDE_GST, True),
+                )
 
         if electricity_provider == "flow_power" and flow_power_state:
             from .tariff_converter import apply_flow_power_export

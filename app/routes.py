@@ -546,6 +546,31 @@ def settings():
                 logger.info(f"Saving Flow Power price source: {source}")
                 current_user.flow_power_price_source = source
 
+        # Flow Power PEA (Price Efficiency Adjustment) settings
+        # Checkbox - pea_enabled defaults to True if not present in form
+        current_user.pea_enabled = 'pea_enabled' in request.form
+        logger.info(f"Saving PEA enabled: {current_user.pea_enabled}")
+
+        if 'flow_power_base_rate' in submitted_fields:
+            try:
+                base_rate = float(request.form.get('flow_power_base_rate', 34.0))
+                current_user.flow_power_base_rate = base_rate
+                logger.info(f"Saving Flow Power base rate: {base_rate} c/kWh")
+            except (ValueError, TypeError):
+                pass
+
+        if 'pea_custom_value' in submitted_fields:
+            pea_custom = request.form.get('pea_custom_value', '').strip()
+            if pea_custom:
+                try:
+                    current_user.pea_custom_value = float(pea_custom)
+                    logger.info(f"Saving custom PEA: {current_user.pea_custom_value} c/kWh")
+                except (ValueError, TypeError):
+                    current_user.pea_custom_value = None
+            else:
+                current_user.pea_custom_value = None
+                logger.info("Clearing custom PEA (auto-calculate from wholesale)")
+
         # Network Tariff Configuration (for Flow Power + AEMO)
         # Distributor and tariff code for aemo_to_tariff library
         if 'network_distributor' in submitted_fields:
@@ -1911,7 +1936,7 @@ def tou_schedule():
 
     # Convert to Tesla tariff format using 30-min forecast data
     # The actual_interval (from 5-min data) will be injected for the current period only
-    from app.tariff_converter import AmberTariffConverter, apply_flow_power_export, apply_network_tariff
+    from app.tariff_converter import AmberTariffConverter, apply_flow_power_export, apply_network_tariff, apply_flow_power_pea, get_wholesale_lookup
     converter = AmberTariffConverter()
     tariff = converter.convert_amber_to_tesla_tariff(
         forecast_30min,
@@ -1924,14 +1949,25 @@ def tou_schedule():
         logger.error("Failed to convert tariff")
         return jsonify({'error': 'Failed to convert tariff'}), 500
 
-    # Apply network tariff if using AEMO wholesale prices (no network fees included)
+    # Apply pricing adjustments for Flow Power + AEMO (wholesale prices need adjustment)
     use_aemo = (
         current_user.electricity_provider == 'flow_power' and
         current_user.flow_power_price_source == 'aemo'
     )
     if use_aemo:
-        logger.info("Applying network tariff to AEMO wholesale prices")
-        tariff = apply_network_tariff(tariff, current_user)
+        # Check if PEA (Price Efficiency Adjustment) is enabled
+        pea_enabled = getattr(current_user, 'pea_enabled', True)  # Default True for Flow Power
+
+        if pea_enabled:
+            # Use Flow Power PEA pricing model: Base Rate + PEA
+            base_rate = getattr(current_user, 'flow_power_base_rate', 34.0) or 34.0
+            custom_pea = getattr(current_user, 'pea_custom_value', None)
+            wholesale_prices = get_wholesale_lookup(forecast_30min)
+            logger.info(f"Applying Flow Power PEA: base_rate={base_rate}c, custom_pea={custom_pea}")
+            tariff = apply_flow_power_pea(tariff, wholesale_prices, base_rate, custom_pea)
+        else:
+            logger.info("Applying network tariff to AEMO wholesale prices (PEA disabled)")
+            tariff = apply_network_tariff(tariff, current_user)
 
     # Apply Flow Power export rates if user is on Flow Power (for preview display)
     if current_user.electricity_provider == 'flow_power' and current_user.flow_power_state:
@@ -2064,7 +2100,7 @@ def sync_tesla_schedule(tesla_client):
             logger.warning("Failed to fetch site_info from Tesla API, will auto-detect timezone from Amber data")
 
         # Convert Amber prices to Tesla tariff format
-        from app.tariff_converter import AmberTariffConverter, apply_flow_power_export, apply_network_tariff
+        from app.tariff_converter import AmberTariffConverter, apply_flow_power_export, apply_network_tariff, apply_flow_power_pea, get_wholesale_lookup
         converter = AmberTariffConverter()
         tariff = converter.convert_amber_to_tesla_tariff(
             forecast,
@@ -2076,10 +2112,21 @@ def sync_tesla_schedule(tesla_client):
             logger.error("Failed to convert tariff")
             return jsonify({'error': 'Failed to convert Amber prices to Tesla tariff format'}), 500
 
-        # Apply network tariff if using AEMO wholesale prices (no network fees included)
+        # Apply pricing adjustments for Flow Power + AEMO (wholesale prices need adjustment)
         if use_aemo:
-            logger.info("Applying network tariff to AEMO wholesale prices")
-            tariff = apply_network_tariff(tariff, current_user)
+            # Check if PEA (Price Efficiency Adjustment) is enabled
+            pea_enabled = getattr(current_user, 'pea_enabled', True)  # Default True for Flow Power
+
+            if pea_enabled:
+                # Use Flow Power PEA pricing model: Base Rate + PEA
+                base_rate = getattr(current_user, 'flow_power_base_rate', 34.0) or 34.0
+                custom_pea = getattr(current_user, 'pea_custom_value', None)
+                wholesale_prices = get_wholesale_lookup(forecast)
+                logger.info(f"Applying Flow Power PEA: base_rate={base_rate}c, custom_pea={custom_pea}")
+                tariff = apply_flow_power_pea(tariff, wholesale_prices, base_rate, custom_pea)
+            else:
+                logger.info("Applying network tariff to AEMO wholesale prices (PEA disabled)")
+                tariff = apply_network_tariff(tariff, current_user)
 
         # Apply Flow Power export rates if user is on Flow Power
         if current_user.electricity_provider == 'flow_power' and current_user.flow_power_state:

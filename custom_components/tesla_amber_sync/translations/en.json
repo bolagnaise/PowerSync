@@ -113,12 +113,15 @@
       },
       "flow_power_options": {
         "title": "Flow Power Options",
-        "description": "Configure Flow Power wholesale electricity with Happy Hour export rates (5:30pm-7:30pm: 45c NSW/QLD/SA, 35c VIC).\n\nSelect your network tariff from the dropdown. Check 'Use manual rates' to enter rates manually.",
+        "description": "Configure Flow Power wholesale electricity with Happy Hour export rates (5:30pm-7:30pm: 45c NSW/QLD/SA, 35c VIC).\n\nPEA (Price Efficiency Adjustment) uses Flow Power's actual billing: Final Rate = Base Rate + (Wholesale - 9.7c).\n\nNetwork tariff is used when PEA is disabled.",
         "data": {
           "flow_power_state": "State / NEM Region",
           "flow_power_price_source": "Import Price Source",
           "network_tariff_combined": "Network Tariff",
           "network_use_manual_rates": "Use manual rates instead of automatic lookup",
+          "pea_enabled": "Enable PEA Pricing (Recommended)",
+          "flow_power_base_rate": "Base Rate (c/kWh)",
+          "pea_custom_value": "Custom PEA Override (c/kWh, leave empty for auto)",
           "network_tariff_type": "Network Tariff Type (for AEMO)",
           "network_flat_rate": "Network Flat Rate (c/kWh)",
           "network_peak_rate": "Network Peak Rate (c/kWh)",

@@ -401,11 +401,29 @@ def _sync_all_users_internal(websocket_data):
                 error_count += 1
                 continue
 
-            # Apply network tariff if using AEMO wholesale prices (no network fees included)
+            # Apply pricing adjustments for Flow Power + AEMO (wholesale prices need adjustment)
             if user.electricity_provider == 'flow_power' and user.flow_power_price_source == 'aemo':
-                from app.tariff_converter import apply_network_tariff
-                logger.info(f"Applying network tariff to AEMO wholesale prices for {user.email}")
-                tariff = apply_network_tariff(tariff, user)
+                # Check if PEA (Price Efficiency Adjustment) is enabled
+                pea_enabled = getattr(user, 'pea_enabled', True)  # Default True for Flow Power
+
+                if pea_enabled:
+                    # Use Flow Power PEA pricing model: Base Rate + PEA
+                    # PEA replaces network tariff - Flow Power base rate already includes network
+                    from app.tariff_converter import apply_flow_power_pea, get_wholesale_lookup
+
+                    base_rate = getattr(user, 'flow_power_base_rate', 34.0) or 34.0
+                    custom_pea = getattr(user, 'pea_custom_value', None)
+
+                    # Build wholesale price lookup from forecast data
+                    wholesale_prices = get_wholesale_lookup(forecast_30min)
+
+                    logger.info(f"Applying Flow Power PEA to AEMO prices for {user.email}: base_rate={base_rate}c, custom_pea={custom_pea}")
+                    tariff = apply_flow_power_pea(tariff, wholesale_prices, base_rate, custom_pea)
+                else:
+                    # PEA disabled - fall back to network tariff calculation
+                    from app.tariff_converter import apply_network_tariff
+                    logger.info(f"Applying network tariff to AEMO wholesale prices for {user.email} (PEA disabled)")
+                    tariff = apply_network_tariff(tariff, user)
 
             # Apply Flow Power export rates if user is on Flow Power
             if user.electricity_provider == 'flow_power' and user.flow_power_state:

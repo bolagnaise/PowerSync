@@ -296,6 +296,19 @@ FLOW_POWER_HAPPY_HOUR_PERIODS = [
     "PERIOD_19_00",  # 7:00pm - 7:30pm
 ]
 
+# Flow Power PEA (Price Efficiency Adjustment) configuration
+# PEA adjusts pricing based on wholesale market efficiency
+# Formula: PEA = wholesale - market_avg - benchmark = wholesale - 9.7c
+CONF_PEA_ENABLED = "pea_enabled"
+CONF_FLOW_POWER_BASE_RATE = "flow_power_base_rate"
+CONF_PEA_CUSTOM_VALUE = "pea_custom_value"
+
+# PEA Constants
+FLOW_POWER_MARKET_AVG = 8.0       # Market TWAP average (c/kWh)
+FLOW_POWER_BENCHMARK = 1.7       # BPEA - benchmark customer performance (c/kWh)
+FLOW_POWER_PEA_OFFSET = 9.7      # Combined: MARKET_AVG + BENCHMARK (c/kWh)
+FLOW_POWER_DEFAULT_BASE_RATE = 34.0  # Default Flow Power base rate (c/kWh)
+
 # Data coordinator update intervals
 UPDATE_INTERVAL_PRICES = timedelta(minutes=5)  # Amber updates every 5 minutes
 UPDATE_INTERVAL_ENERGY = timedelta(minutes=1)  # Tesla energy data every minute

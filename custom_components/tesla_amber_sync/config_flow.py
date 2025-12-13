@@ -55,6 +55,11 @@ from .const import (
     ELECTRICITY_PROVIDERS,
     FLOW_POWER_STATES,
     FLOW_POWER_PRICE_SOURCES,
+    # Flow Power PEA configuration
+    CONF_PEA_ENABLED,
+    CONF_FLOW_POWER_BASE_RATE,
+    CONF_PEA_CUSTOM_VALUE,
+    FLOW_POWER_DEFAULT_BASE_RATE,
     # Network Tariff configuration
     CONF_NETWORK_DISTRIBUTOR,
     CONF_NETWORK_TARIFF_CODE,
@@ -1008,6 +1013,21 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         default=self._get_option(CONF_NETWORK_INCLUDE_GST, True),
                     ): bool,
                     # End Network Tariff
+                    # Flow Power PEA (Price Efficiency Adjustment)
+                    # When enabled, uses Flow Power's actual billing model: Base Rate + PEA
+                    vol.Optional(
+                        CONF_PEA_ENABLED,
+                        default=self._get_option(CONF_PEA_ENABLED, True),
+                    ): bool,
+                    vol.Optional(
+                        CONF_FLOW_POWER_BASE_RATE,
+                        default=self._get_option(CONF_FLOW_POWER_BASE_RATE, FLOW_POWER_DEFAULT_BASE_RATE),
+                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
+                    vol.Optional(
+                        CONF_PEA_CUSTOM_VALUE,
+                        default=self._get_option(CONF_PEA_CUSTOM_VALUE, None),
+                    ): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=-50.0, max=50.0))),
+                    # End PEA Configuration
                     vol.Optional(
                         CONF_AUTO_SYNC_ENABLED,
                         default=self._get_option(CONF_AUTO_SYNC_ENABLED, True),

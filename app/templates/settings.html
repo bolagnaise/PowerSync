@@ -260,6 +260,63 @@
                         </fieldset>
                     </div>
 
+                    <!-- Flow Power PEA (Price Efficiency Adjustment) Settings -->
+                    <div id="peaSettings" style="margin-top: 1em; {% if current_user.flow_power_price_source != 'aemo' %}display: none;{% endif %}">
+                        <fieldset style="border: 1px solid var(--primary); padding: 1em; border-radius: 0.5em; background: rgba(59, 130, 246, 0.05);">
+                            <legend style="font-weight: bold; color: var(--primary);">⚡ Flow Power PEA Pricing</legend>
+                            <p style="font-size: 0.8em; margin: 0 0 1em 0; color: var(--muted-color);">
+                                PEA (Price Efficiency Adjustment) uses Flow Power's actual billing model. When enabled, your rate is:<br>
+                                <strong>Final Rate = Base Rate + (Wholesale − 9.7c)</strong>
+                            </p>
+
+                            <!-- PEA Enabled Toggle -->
+                            <label style="display: flex; align-items: center; gap: 0.5em; cursor: pointer; margin: 0 0 1em 0;">
+                                <input type="checkbox" id="pea_enabled" name="pea_enabled"
+                                       {% if current_user.pea_enabled is not defined or current_user.pea_enabled %}checked{% endif %}
+                                       onchange="togglePeaSettings()" style="width: auto;">
+                                <span>Enable PEA Pricing (Recommended)</span>
+                            </label>
+
+                            <div id="peaSettingsDetail" style="{% if current_user.pea_enabled is defined and not current_user.pea_enabled %}display: none;{% endif %}">
+                                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1em;">
+                                    <label for="flow_power_base_rate">
+                                        Base Rate (c/kWh)
+                                        <small>Your Flow Power advertised rate (check your plan)</small>
+                                        <input type="number" id="flow_power_base_rate" name="flow_power_base_rate"
+                                               value="{{ current_user.flow_power_base_rate or 34.0 }}" step="0.1" min="0"
+                                               style="max-width: 150px;">
+                                    </label>
+
+                                    <label for="pea_custom_value">
+                                        Custom PEA Override (c/kWh)
+                                        <small>Optional: enter your historical PEA from bills</small>
+                                        <input type="number" id="pea_custom_value" name="pea_custom_value"
+                                               value="{{ current_user.pea_custom_value or '' }}" step="0.1"
+                                               placeholder="Leave blank for auto"
+                                               style="max-width: 150px;">
+                                    </label>
+                                </div>
+
+                                <details style="margin-top: 1em;">
+                                    <summary style="font-size: 0.85em; cursor: pointer;">How does PEA work?</summary>
+                                    <div style="font-size: 0.8em; margin-top: 0.5em; padding: 0.5em; background: rgba(100, 150, 200, 0.1); border-radius: 0.3em;">
+                                        <p style="margin: 0.3em 0;">PEA adjusts your rate based on wholesale prices:</p>
+                                        <ul style="margin: 0.3em 0 0 1.2em; padding: 0;">
+                                            <li style="margin: 0.3em 0;"><strong>Cheap wholesale (-0.5c):</strong> 34 + (-0.5 − 9.7) = <span style="color: #22c55e;">23.8c/kWh</span></li>
+                                            <li style="margin: 0.3em 0;"><strong>Average wholesale (8c):</strong> 34 + (8 − 9.7) = 32.3c/kWh</li>
+                                            <li style="margin: 0.3em 0;"><strong>Expensive wholesale (15c):</strong> 34 + (15 − 9.7) = <span style="color: #ef4444;">39.3c/kWh</span></li>
+                                        </ul>
+                                        <p style="margin: 0.5em 0 0 0;">Import during cheap periods to save money!</p>
+                                    </div>
+                                </details>
+                            </div>
+
+                            <p id="peaDisabledNote" style="font-size: 0.8em; margin: 1em 0 0 0; color: var(--muted-color); {% if current_user.pea_enabled is not defined or current_user.pea_enabled %}display: none;{% endif %}">
+                                ⚠️ PEA disabled - using network tariff settings above instead.
+                            </p>
+                        </fieldset>
+                    </div>
+
                     <article style="background: rgba(100, 200, 150, 0.15); padding: 0.8em; border-radius: 0.5em; margin-top: 1em; border-left: 4px solid #51cf66;">
                         <p style="margin: 0; font-size: 0.85em;">
                             <strong>Flow Power Happy Hour:</strong> 5:30pm - 7:30pm daily<br>
@@ -1308,13 +1365,31 @@
             const priceSource = document.getElementById('flow_power_price_source').value;
             const amberTokenDiv = document.getElementById('flowPowerAmberToken');
             const networkTariffDiv = document.getElementById('networkTariffConfig');
+            const peaSettingsDiv = document.getElementById('peaSettings');
 
             if (amberTokenDiv) {
                 amberTokenDiv.style.display = (priceSource === 'aemo') ? 'none' : 'block';
             }
-            // Show network tariff config only when using AEMO (no network fees in AEMO data)
+            // Show network tariff config and PEA settings only when using AEMO
             if (networkTariffDiv) {
                 networkTariffDiv.style.display = (priceSource === 'aemo') ? 'block' : 'none';
+            }
+            if (peaSettingsDiv) {
+                peaSettingsDiv.style.display = (priceSource === 'aemo') ? 'block' : 'none';
+            }
+        }
+
+        // Toggle PEA settings detail visibility
+        function togglePeaSettings() {
+            const peaEnabled = document.getElementById('pea_enabled').checked;
+            const peaDetail = document.getElementById('peaSettingsDetail');
+            const peaDisabledNote = document.getElementById('peaDisabledNote');
+
+            if (peaDetail) {
+                peaDetail.style.display = peaEnabled ? 'block' : 'none';
+            }
+            if (peaDisabledNote) {
+                peaDisabledNote.style.display = peaEnabled ? 'none' : 'block';
             }
         }
 

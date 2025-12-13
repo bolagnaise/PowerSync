@@ -98,6 +98,12 @@ class User(UserMixin, db.Model):
     flow_power_state = db.Column(db.String(10))  # NEM region: NSW1, VIC1, QLD1, SA1
     flow_power_price_source = db.Column(db.String(20), default='amber')  # 'amber', 'aemo'
 
+    # Flow Power PEA (Price Efficiency Adjustment) Configuration
+    # PEA adjusts pricing based on wholesale prices: Final Rate = Base Rate + (wholesale - 9.7c)
+    flow_power_base_rate = db.Column(db.Float, default=34.0)  # Flow Power base rate in c/kWh
+    pea_enabled = db.Column(db.Boolean, default=True)  # Enable PEA calculation for Flow Power
+    pea_custom_value = db.Column(db.Float, nullable=True)  # Optional fixed PEA override in c/kWh
+
     # Network Tariff Configuration (for Flow Power + AEMO)
     # Primary: Use aemo_to_tariff library with distributor + tariff code
     # Fallback: Manual rate entry when use_manual_rates is True
