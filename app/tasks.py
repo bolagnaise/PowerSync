@@ -488,6 +488,7 @@ def save_price_history():
 def _save_price_history_internal(websocket_data):
     """Internal price history logic shared by both event-driven and cron-fallback paths."""
     from app import db
+    from app.api_clients import AEMOAPIClient
 
     logger.info("=== Starting automatic price history collection ===")
 
@@ -502,38 +503,129 @@ def _save_price_history_internal(websocket_data):
 
     for user in users:
         try:
-            # Skip users without Amber configuration
-            if not user.amber_api_token_encrypted:
-                logger.debug(f"Skipping user {user.email} - no Amber token")
-                continue
-
-            logger.debug(f"Collecting price history for user: {user.email}")
-
-            # Get Amber client
-            amber_client = get_amber_client(user)
-            if not amber_client:
-                logger.warning(f"Failed to get Amber client for user {user.email}")
-                error_count += 1
-                continue
-
-            # Use provided WebSocket data (already fetched by caller)
+            # Check if user is using AEMO price source
+            use_aemo = (
+                user.electricity_provider == 'flow_power' and
+                user.flow_power_price_source == 'aemo'
+            )
 
             prices = None
-            if websocket_data:
-                # WebSocket data received within 60s - convert to list format for price history
-                prices = []
-                if websocket_data.get('general'):
-                    prices.append(websocket_data['general'])
-                if websocket_data.get('feedIn'):
-                    prices.append(websocket_data['feedIn'])
 
-                general_price = websocket_data.get('general', {}).get('perKwh') if websocket_data.get('general') else None
-                feedin_price = websocket_data.get('feedIn', {}).get('perKwh') if websocket_data.get('feedIn') else None
-                logger.info(f"✅ Using WebSocket price for history: general={general_price}¢/kWh, feedIn={feedin_price}¢/kWh")
+            if use_aemo:
+                # AEMO price source - fetch from AEMO API
+                aemo_region = user.flow_power_state
+                if not aemo_region:
+                    logger.debug(f"Skipping user {user.email} - AEMO configured but no region set")
+                    continue
+
+                logger.debug(f"Collecting AEMO price history for user: {user.email} (region: {aemo_region})")
+
+                aemo_client = AEMOAPIClient()
+                price_data = aemo_client.get_region_price(aemo_region)
+
+                if not price_data:
+                    logger.warning(f"Failed to fetch AEMO price for user {user.email}")
+                    error_count += 1
+                    continue
+
+                # Calculate network tariff
+                now = datetime.now()
+                hour, minute = now.hour, now.minute
+
+                network_tariff_type = user.network_tariff_type or 'flat'
+                if network_tariff_type == 'flat':
+                    network_charge_cents = user.network_flat_rate or 8.0
+                else:
+                    time_minutes = hour * 60 + minute
+                    peak_start = user.network_peak_start or '16:00'
+                    peak_end = user.network_peak_end or '21:00'
+                    offpeak_start = user.network_offpeak_start or '10:00'
+                    offpeak_end = user.network_offpeak_end or '15:00'
+
+                    peak_start_mins = int(peak_start.split(':')[0]) * 60 + int(peak_start.split(':')[1])
+                    peak_end_mins = int(peak_end.split(':')[0]) * 60 + int(peak_end.split(':')[1])
+                    offpeak_start_mins = int(offpeak_start.split(':')[0]) * 60 + int(offpeak_start.split(':')[1])
+                    offpeak_end_mins = int(offpeak_end.split(':')[0]) * 60 + int(offpeak_end.split(':')[1])
+
+                    if peak_start_mins <= time_minutes < peak_end_mins:
+                        network_charge_cents = user.network_peak_rate or 15.0
+                    elif offpeak_start_mins <= time_minutes < offpeak_end_mins:
+                        network_charge_cents = user.network_offpeak_rate or 2.0
+                    else:
+                        network_charge_cents = user.network_shoulder_rate or 5.0
+
+                network_other_fees = user.network_other_fees or 1.5
+                network_include_gst = user.network_include_gst if user.network_include_gst is not None else True
+
+                total_network_cents = network_charge_cents + network_other_fees
+                if network_include_gst:
+                    total_network_cents = total_network_cents * 1.10
+
+                # AEMO price is in $/MWh, convert to c/kWh
+                wholesale_cents = price_data.get('price', 0) / 10
+                total_price_cents = wholesale_cents + total_network_cents
+
+                # Calculate feed-in price (Happy Hour check)
+                feedin_cents = 0
+                if (17 * 60 + 30) <= (hour * 60 + minute) < (19 * 60 + 30):
+                    from app.tariff_converter import FLOW_POWER_EXPORT_RATES
+                    export_rate = FLOW_POWER_EXPORT_RATES.get(aemo_region, 0.45)
+                    feedin_cents = export_rate * 100
+
+                # Format as Amber-compatible price records
+                nem_time = datetime.now(timezone.utc)
+                prices = [
+                    {
+                        'channelType': 'general',
+                        'perKwh': round(total_price_cents, 2),
+                        'wholesaleKWHPrice': round(wholesale_cents, 4),
+                        'networkKWHPrice': round(total_network_cents, 4),
+                        'nemTime': nem_time.isoformat(),
+                        'forecast': False,
+                        'source': 'AEMO',
+                    },
+                    {
+                        'channelType': 'feedIn',
+                        'perKwh': round(feedin_cents, 2),
+                        'nemTime': nem_time.isoformat(),
+                        'forecast': False,
+                        'source': 'AEMO',
+                    }
+                ]
+
+                logger.info(f"✅ AEMO price for {user.email}: wholesale={wholesale_cents:.2f}c + network={total_network_cents:.2f}c = {total_price_cents:.2f}c/kWh")
+
             else:
-                # WebSocket timeout - fallback to REST API
-                logger.info(f"⏰ WebSocket timeout - using REST API fallback for price history")
-                prices = amber_client.get_current_prices()
+                # Amber price source - use existing logic
+                if not user.amber_api_token_encrypted:
+                    logger.debug(f"Skipping user {user.email} - no Amber token and not using AEMO")
+                    continue
+
+                logger.debug(f"Collecting Amber price history for user: {user.email}")
+
+                # Get Amber client
+                amber_client = get_amber_client(user)
+                if not amber_client:
+                    logger.warning(f"Failed to get Amber client for user {user.email}")
+                    error_count += 1
+                    continue
+
+                # Use provided WebSocket data (already fetched by caller)
+                if websocket_data:
+                    # WebSocket data received within 60s - convert to list format for price history
+                    prices = []
+                    if websocket_data.get('general'):
+                        prices.append(websocket_data['general'])
+                    if websocket_data.get('feedIn'):
+                        prices.append(websocket_data['feedIn'])
+
+                    general_price = websocket_data.get('general', {}).get('perKwh') if websocket_data.get('general') else None
+                    feedin_price = websocket_data.get('feedIn', {}).get('perKwh') if websocket_data.get('feedIn') else None
+                    logger.info(f"✅ Using WebSocket price for history: general={general_price}¢/kWh, feedIn={feedin_price}¢/kWh")
+                else:
+                    # WebSocket timeout - fallback to REST API
+                    logger.info(f"⏰ WebSocket timeout - using REST API fallback for price history")
+                    prices = amber_client.get_current_prices()
 
             if not prices:
                 logger.warning(f"No current prices available for user {user.email}")
