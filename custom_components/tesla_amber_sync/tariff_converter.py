@@ -749,10 +749,10 @@ def _build_tariff_structure(
         Complete Tesla tariff structure
     """
     # Map provider codes to display names
+    # Note: Globird not included - users set tariff manually, only AEMO spike feature used
     provider_names = {
         "amber": "Amber Electric",
         "flow_power": "Flow Power",
-        "globird": "Globird",
     }
     provider_name = provider_names.get(electricity_provider, "Amber Electric")
     # Build TOU periods

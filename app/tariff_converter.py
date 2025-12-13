@@ -596,10 +596,10 @@ class AmberTariffConverter:
                 demand_charges_sell = base_demand_charges
 
         # Set tariff metadata based on electricity provider
+        # Note: Globird not included - users set tariff manually, only AEMO spike feature used
         provider_names = {
             "amber": "Amber Electric",
             "flow_power": "Flow Power",
-            "globird": "Globird",
         }
         electricity_provider = getattr(user, 'electricity_provider', 'amber') if user else 'amber'
         provider_name = provider_names.get(electricity_provider, "Amber Electric")
