@@ -314,33 +314,33 @@ def convert_amber_to_tesla_tariff(
             advanced_price = point.get("advancedPrice")
             interval_type = point.get("type", "unknown")
 
-            # For ForecastInterval: REQUIRE advancedPrice (no fallback)
+            # For ForecastInterval: Prefer advancedPrice, fall back to perKwh (for AEMO data)
             if interval_type == "ForecastInterval":
-                if not advanced_price:
-                    # Expected for far-future forecasts (>36h) - Amber API doesn't provide advancedPrice
-                    _LOGGER.debug("Skipping ForecastInterval at %s - no advancedPrice (expected for far-future forecasts)", nem_time)
-                    continue
+                if advanced_price:
+                    # Handle dict format (standard: {predicted, low, high})
+                    if isinstance(advanced_price, dict):
+                        if forecast_type not in advanced_price:
+                            available = list(advanced_price.keys())
+                            error_msg = f"Forecast type '{forecast_type}' not found in advancedPrice. Available: {available}"
+                            _LOGGER.error("%s: %s", nem_time, error_msg)
+                            raise ValueError(error_msg)
 
-                # Handle dict format (standard: {predicted, low, high})
-                if isinstance(advanced_price, dict):
-                    if forecast_type not in advanced_price:
-                        available = list(advanced_price.keys())
-                        error_msg = f"Forecast type '{forecast_type}' not found in advancedPrice. Available: {available}"
-                        _LOGGER.error("%s: %s", nem_time, error_msg)
+                        per_kwh_cents = advanced_price[forecast_type]
+                        _LOGGER.debug("%s [ForecastInterval]: advancedPrice.%s=%.2fc/kWh", nem_time, forecast_type, per_kwh_cents)
+
+                    # Handle simple number format (legacy)
+                    elif isinstance(advanced_price, (int, float)):
+                        per_kwh_cents = advanced_price
+                        _LOGGER.debug("%s [ForecastInterval]: advancedPrice=%.2fc/kWh (numeric)", nem_time, per_kwh_cents)
+
+                    else:
+                        error_msg = f"Invalid advancedPrice format at {nem_time}: {type(advanced_price).__name__}"
+                        _LOGGER.error(error_msg)
                         raise ValueError(error_msg)
-
-                    per_kwh_cents = advanced_price[forecast_type]
-                    _LOGGER.debug("%s [ForecastInterval]: advancedPrice.%s=%.2fc/kWh", nem_time, forecast_type, per_kwh_cents)
-
-                # Handle simple number format (legacy)
-                elif isinstance(advanced_price, (int, float)):
-                    per_kwh_cents = advanced_price
-                    _LOGGER.debug("%s [ForecastInterval]: advancedPrice=%.2fc/kWh (numeric)", nem_time, per_kwh_cents)
-
                 else:
-                    error_msg = f"Invalid advancedPrice format at {nem_time}: {type(advanced_price).__name__}"
-                    _LOGGER.error(error_msg)
-                    raise ValueError(error_msg)
+                    # No advancedPrice - use perKwh directly (AEMO data or far-future Amber forecasts)
+                    per_kwh_cents = point.get("perKwh", 0)
+                    _LOGGER.debug("%s [ForecastInterval]: perKwh=%.2fc/kWh (AEMO/wholesale)", nem_time, per_kwh_cents)
 
             # For CurrentInterval: Prefer advancedPrice (Amber retail forecast) over perKwh (AEMO wholesale)
             # For ActualInterval: Use perKwh (actual settled retail price)
@@ -628,25 +628,49 @@ def _build_rolling_24h_tariff(
             lookup_key = (date_str, hour, minute)
 
             # Get general price (buy price)
-            if lookup_key in general_lookup:
+            # Try primary lookup key first, then try both today and tomorrow as fallbacks
+            # This handles AEMO data where all prices are keyed to forecast dates
+            found_in_lookup = lookup_key in general_lookup
+            if not found_in_lookup:
+                # Try today's date first (for AEMO forecasts that start from now)
+                today_key = (today.isoformat(), hour, minute)
+                if today_key in general_lookup:
+                    lookup_key = today_key
+                    found_in_lookup = True
+                else:
+                    # Try tomorrow's date (for AEMO forecasts that extend past midnight)
+                    tomorrow_key = (tomorrow.isoformat(), hour, minute)
+                    if tomorrow_key in general_lookup:
+                        lookup_key = tomorrow_key
+                        found_in_lookup = True
+
+            if found_in_lookup:
                 prices = general_lookup[lookup_key]
                 buy_price = _round_price(sum(prices) / len(prices))
                 # Tesla restriction: No negative prices
                 general_prices[period_key] = max(0, buy_price)
             else:
-                # Fallback: Use today's data when tomorrow's not available
-                fallback_key = (today.isoformat(), hour, minute)
-                if fallback_key in general_lookup:
-                    prices = general_lookup[fallback_key]
-                    general_prices[period_key] = max(0, _round_price(sum(prices) / len(prices)))
-                else:
-                    # Mark as missing - will be counted below
-                    general_prices[period_key] = None
-                    _LOGGER.warning("%s: No price data available", period_key)
+                # Mark as missing - will be counted below
+                general_prices[period_key] = None
+                _LOGGER.warning("%s: No price data available", period_key)
 
             # Get feedin price (sell price)
-            if lookup_key in feedin_lookup:
-                prices = feedin_lookup[lookup_key]
+            # Use same flexible lookup approach for AEMO compatibility
+            feedin_lookup_key = lookup_key  # Start with same key as general
+            found_feedin = feedin_lookup_key in feedin_lookup
+            if not found_feedin:
+                today_key = (today.isoformat(), hour, minute)
+                if today_key in feedin_lookup:
+                    feedin_lookup_key = today_key
+                    found_feedin = True
+                else:
+                    tomorrow_key = (tomorrow.isoformat(), hour, minute)
+                    if tomorrow_key in feedin_lookup:
+                        feedin_lookup_key = tomorrow_key
+                        found_feedin = True
+
+            if found_feedin:
+                prices = feedin_lookup[feedin_lookup_key]
                 sell_price = _round_price(sum(prices) / len(prices))
 
                 # Tesla restriction #1: No negative prices
@@ -658,18 +682,9 @@ def _build_rolling_24h_tariff(
 
                 feedin_prices[period_key] = sell_price
             else:
-                # Fallback: Use today's data when tomorrow's not available
-                fallback_key = (today.isoformat(), hour, minute)
-                if fallback_key in feedin_lookup:
-                    prices = feedin_lookup[fallback_key]
-                    sell_price = max(0, _round_price(sum(prices) / len(prices)))
-                    if period_key in general_prices and general_prices[period_key] is not None:
-                        sell_price = min(sell_price, general_prices[period_key])
-                    feedin_prices[period_key] = sell_price
-                else:
-                    # Mark as missing - will be counted below
-                    feedin_prices[period_key] = None
-                    _LOGGER.warning("%s: No sell price data available", period_key)
+                # Mark as missing - will be counted below
+                feedin_prices[period_key] = None
+                _LOGGER.warning("%s: No sell price data available", period_key)
 
     # Count missing periods and abort if too many are missing
     # This prevents sending bad tariffs when API is unreachable
