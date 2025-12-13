@@ -1621,40 +1621,65 @@ def tou_schedule():
     """Get the rolling 24-hour tariff schedule that will be sent to Tesla"""
     logger.info(f"TOU tariff schedule requested by user: {current_user.email}")
 
-    amber_client = get_amber_client(current_user)
-    if not amber_client:
-        logger.warning("Amber client not available for tariff schedule")
-        return jsonify({'error': 'Amber API not configured'}), 400
+    # Determine price source based on user settings
+    use_aemo = (
+        current_user.electricity_provider == 'flow_power' and
+        current_user.flow_power_price_source == 'aemo'
+    )
 
-    # Step 1: Get current interval prices from WebSocket (real-time) with REST API fallback
-    # This ensures we have the most up-to-date pricing for the current period
-    from flask import current_app
-    ws_client = current_app.config.get('AMBER_WEBSOCKET_CLIENT')
-
-    # Get live prices (WebSocket first, REST API fallback)
-    current_prices = amber_client.get_live_prices(ws_client=ws_client)
-
-    # Convert to actual_interval format for tariff converter
     actual_interval = None
-    if current_prices:
-        actual_interval = {'general': None, 'feedIn': None}
-        for price in current_prices:
-            channel = price.get('channelType')
-            if channel in ['general', 'feedIn']:
-                actual_interval[channel] = price
+    forecast_30min = None
 
-        logger.info(f"TOU Schedule - Live prices from WebSocket: general={actual_interval.get('general', {}).get('perKwh')}¢/kWh, feedIn={actual_interval.get('feedIn', {}).get('perKwh')}¢/kWh")
+    if use_aemo:
+        # Use AEMO data for Flow Power AEMO-only mode
+        aemo_region = current_user.flow_power_state
+        if not aemo_region:
+            logger.error("AEMO price source selected but no region configured")
+            return jsonify({'error': 'AEMO region not configured. Please set your Flow Power state in settings.'}), 400
+
+        logger.info(f"TOU Schedule - Using AEMO price source for region: {aemo_region}")
+        aemo_client = AEMOAPIClient()
+        forecast_30min = aemo_client.get_price_forecast(aemo_region, periods=48)
+        if not forecast_30min:
+            logger.error(f"Failed to fetch AEMO price forecast for {aemo_region}")
+            return jsonify({'error': 'Failed to fetch AEMO price forecast'}), 500
+
+        logger.info(f"Using AEMO forecast for TOU schedule: {len(forecast_30min)} intervals")
     else:
-        logger.warning("TOU Schedule - No live price data available from WebSocket or REST API")
+        # Use Amber API (default)
+        amber_client = get_amber_client(current_user)
+        if not amber_client:
+            logger.warning("Amber client not available for tariff schedule")
+            return jsonify({'error': 'Amber API not configured'}), 400
 
-    # Step 2: Fetch full 48-hour forecast with 30-min resolution for TOU schedule building
-    # (The Amber API doesn't provide 48 hours of 5-min data, so we must use 30-min for full schedule)
-    forecast_30min = amber_client.get_price_forecast(next_hours=48, resolution=30)
-    if not forecast_30min:
-        logger.error("Failed to fetch 48-hour forecast for TOU schedule")
-        return jsonify({'error': 'Failed to fetch price forecast'}), 500
+        # Step 1: Get current interval prices from WebSocket (real-time) with REST API fallback
+        # This ensures we have the most up-to-date pricing for the current period
+        from flask import current_app
+        ws_client = current_app.config.get('AMBER_WEBSOCKET_CLIENT')
 
-    logger.info(f"Using 30-min forecast for TOU schedule: {len(forecast_30min)} intervals")
+        # Get live prices (WebSocket first, REST API fallback)
+        current_prices = amber_client.get_live_prices(ws_client=ws_client)
+
+        # Convert to actual_interval format for tariff converter
+        if current_prices:
+            actual_interval = {'general': None, 'feedIn': None}
+            for price in current_prices:
+                channel = price.get('channelType')
+                if channel in ['general', 'feedIn']:
+                    actual_interval[channel] = price
+
+            logger.info(f"TOU Schedule - Live prices from WebSocket: general={actual_interval.get('general', {}).get('perKwh')}¢/kWh, feedIn={actual_interval.get('feedIn', {}).get('perKwh')}¢/kWh")
+        else:
+            logger.warning("TOU Schedule - No live price data available from WebSocket or REST API")
+
+        # Step 2: Fetch full 48-hour forecast with 30-min resolution for TOU schedule building
+        # (The Amber API doesn't provide 48 hours of 5-min data, so we must use 30-min for full schedule)
+        forecast_30min = amber_client.get_price_forecast(next_hours=48, resolution=30)
+        if not forecast_30min:
+            logger.error("Failed to fetch 48-hour forecast for TOU schedule")
+            return jsonify({'error': 'Failed to fetch price forecast'}), 500
+
+        logger.info(f"Using 30-min forecast for TOU schedule: {len(forecast_30min)} intervals")
 
     # Debug logging to compare with live price display
     if actual_interval:
