@@ -215,45 +215,118 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._selected_provider: str | None = None
         self._aemo_only_mode: bool = False  # True if using AEMO spike only (no Amber)
         self._aemo_data: dict[str, Any] = {}
+        self._flow_power_data: dict[str, Any] = {}
+        self._selected_electricity_provider: str = "amber"
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle the initial step - choose mode."""
+        """Handle the initial step - choose electricity provider."""
         # Check if already configured
         await self.async_set_unique_id(DOMAIN)
         self._abort_if_unique_id_configured()
 
-        return await self.async_step_mode_selection()
+        return await self.async_step_provider_selection()
 
-    async def async_step_mode_selection(
+    async def async_step_provider_selection(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle mode selection - Amber TOU sync or AEMO spike only."""
+        """Handle provider selection - first step in setup."""
         if user_input is not None:
-            mode = user_input.get("mode", "amber")
+            provider = user_input.get(CONF_ELECTRICITY_PROVIDER, "amber")
+            self._selected_electricity_provider = provider
 
-            if mode == "aemo_only":
-                # AEMO-only mode: skip Amber, go to AEMO config then Tesla
+            if provider == "amber":
+                # Amber: Need Amber API token
+                self._aemo_only_mode = False
+                return await self.async_step_amber()
+            elif provider == "flow_power":
+                # Flow Power: Configure region and price source first
+                self._aemo_only_mode = False
+                return await self.async_step_flow_power_setup()
+            elif provider == "globird":
+                # Globird: AEMO spike only mode
                 self._aemo_only_mode = True
-                self._amber_data = {}  # No Amber API token needed
+                self._amber_data = {}
                 return await self.async_step_aemo_config()
             else:
-                # Amber mode: standard flow with optional AEMO
+                # Default to Amber
                 self._aemo_only_mode = False
                 return await self.async_step_amber()
 
         return self.async_show_form(
-            step_id="mode_selection",
+            step_id="provider_selection",
             data_schema=vol.Schema({
-                vol.Required("mode", default="amber"): vol.In({
-                    "amber": "Amber TOU Sync (Real-time prices + optional spike detection)",
-                    "aemo_only": "AEMO Spike Detection Only (No Amber subscription needed)",
-                }),
+                vol.Required(CONF_ELECTRICITY_PROVIDER, default="amber"): vol.In(ELECTRICITY_PROVIDERS),
             }),
             description_placeholders={
-                "amber_desc": "Full price sync with Amber Electric",
-                "aemo_desc": "Spike detection using AEMO wholesale prices",
+                "amber_desc": "Full price sync with Amber Electric API",
+                "flow_power_desc": "Flow Power with AEMO wholesale or Amber pricing",
+                "globird_desc": "AEMO spike detection for VPP exports",
+            },
+        )
+
+    async def async_step_flow_power_setup(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle Flow Power specific setup - region, price source, network tariff."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            # Store Flow Power configuration
+            self._flow_power_data = user_input
+
+            # Check if using AEMO as price source (no Amber needed)
+            price_source = user_input.get(CONF_FLOW_POWER_PRICE_SOURCE, "amber")
+
+            if price_source == "aemo":
+                # AEMO wholesale - no Amber API needed
+                self._amber_data = {}
+                self._aemo_only_mode = False  # Not spike-only, just using AEMO for pricing
+                return await self.async_step_tesla_provider()
+            else:
+                # Using Amber API for pricing - need Amber token
+                return await self.async_step_amber()
+
+        return self.async_show_form(
+            step_id="flow_power_setup",
+            data_schema=vol.Schema({
+                vol.Required(CONF_FLOW_POWER_STATE, default="QLD1"): vol.In(FLOW_POWER_STATES),
+                vol.Required(CONF_FLOW_POWER_PRICE_SOURCE, default="aemo"): vol.In(FLOW_POWER_PRICE_SOURCES),
+                # Network Tariff Configuration
+                vol.Optional(CONF_NETWORK_TARIFF_TYPE, default="flat"): vol.In(NETWORK_TARIFF_TYPES),
+                vol.Optional(CONF_NETWORK_FLAT_RATE, default=8.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.0, max=50.0)
+                ),
+                vol.Optional(CONF_NETWORK_PEAK_RATE, default=15.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.0, max=50.0)
+                ),
+                vol.Optional(CONF_NETWORK_SHOULDER_RATE, default=5.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.0, max=50.0)
+                ),
+                vol.Optional(CONF_NETWORK_OFFPEAK_RATE, default=2.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.0, max=50.0)
+                ),
+                vol.Optional(CONF_NETWORK_PEAK_START, default="16:00"): vol.In(
+                    {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}
+                ),
+                vol.Optional(CONF_NETWORK_PEAK_END, default="21:00"): vol.In(
+                    {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}
+                ),
+                vol.Optional(CONF_NETWORK_OFFPEAK_START, default="10:00"): vol.In(
+                    {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}
+                ),
+                vol.Optional(CONF_NETWORK_OFFPEAK_END, default="15:00"): vol.In(
+                    {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}
+                ),
+                vol.Optional(CONF_NETWORK_OTHER_FEES, default=3.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.0, max=20.0)
+                ),
+                vol.Optional(CONF_NETWORK_INCLUDE_GST, default=True): bool,
+            }),
+            errors=errors,
+            description_placeholders={
+                "rate_hint": "Enter rates in cents/kWh (e.g., 19.37 not $0.19)",
             },
         )
 
@@ -272,6 +345,9 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if validation_result["success"]:
                 self._amber_data = user_input
                 self._amber_sites = validation_result.get("sites", [])
+                # Flow Power with Amber pricing skips AEMO config, goes straight to Tesla
+                if self._selected_electricity_provider == "flow_power":
+                    return await self.async_step_tesla_provider()
                 # Go to AEMO config (optional for Amber mode)
                 return await self.async_step_aemo_config()
             else:
@@ -585,6 +661,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 **self._teslemetry_data,
                 **self._site_data,
                 **self._aemo_data,  # Include AEMO configuration
+                **self._flow_power_data,  # Include Flow Power configuration
+                CONF_ELECTRICITY_PROVIDER: self._selected_electricity_provider,
             }
 
             # Add demand charge configuration if enabled
@@ -606,8 +684,13 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data[CONF_DAILY_SUPPLY_CHARGE] = user_input.get(CONF_DAILY_SUPPLY_CHARGE, 0.0)
             data[CONF_MONTHLY_SUPPLY_CHARGE] = user_input.get(CONF_MONTHLY_SUPPLY_CHARGE, 0.0)
 
-            # Set appropriate title based on mode
-            title = "Tesla AEMO Spike" if self._aemo_only_mode else "Tesla Sync"
+            # Set appropriate title based on provider
+            if self._aemo_only_mode:
+                title = "Tesla AEMO Spike"
+            elif self._selected_electricity_provider == "flow_power":
+                title = "Tesla Sync (Flow Power)"
+            else:
+                title = "Tesla Sync"
             return self.async_create_entry(title=title, data=data)
 
         # Build the form schema

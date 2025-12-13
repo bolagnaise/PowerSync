@@ -3,7 +3,33 @@
     "step": {
       "user": {
         "title": "Tesla Sync Setup",
-        "description": "Configure Tesla Sync to automatically sync Amber Electric pricing to your Tesla Powerwall."
+        "description": "Configure Tesla Sync to automatically sync electricity pricing to your Tesla Powerwall."
+      },
+      "provider_selection": {
+        "title": "Select Electricity Provider",
+        "description": "Choose your electricity provider:\n\n**Amber Electric**: Full real-time price sync using Amber API.\n\n**Flow Power**: Wholesale electricity with Happy Hour exports. Choose AEMO or Amber pricing.\n\n**Globird/VPP**: AEMO spike detection for VPP exports.",
+        "data": {
+          "electricity_provider": "Electricity Provider"
+        }
+      },
+      "flow_power_setup": {
+        "title": "Flow Power Configuration",
+        "description": "Configure your Flow Power settings. Enter network (DNSP) rates in **cents/kWh** - if your tariff shows $0.19/kWh, enter 19.\n\n{rate_hint}",
+        "data": {
+          "flow_power_state": "State / NEM Region",
+          "flow_power_price_source": "Price Source",
+          "network_tariff_type": "Network Tariff Type",
+          "network_flat_rate": "Flat Network Rate (c/kWh)",
+          "network_peak_rate": "Peak Rate (c/kWh)",
+          "network_shoulder_rate": "Shoulder Rate (c/kWh)",
+          "network_offpeak_rate": "Off-Peak Rate (c/kWh)",
+          "network_peak_start": "Peak Start Time",
+          "network_peak_end": "Peak End Time",
+          "network_offpeak_start": "Off-Peak Start Time",
+          "network_offpeak_end": "Off-Peak End Time",
+          "network_other_fees": "Other Fees (c/kWh)",
+          "network_include_gst": "Include GST (10%)"
+        }
       },
       "amber": {
         "title": "Amber Electric Configuration",
