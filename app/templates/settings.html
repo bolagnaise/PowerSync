@@ -6,20 +6,182 @@
         <h2>Configure your API credentials and preferences</h2>
     </hgroup>
 
-    <!-- Electricity Provider Selection - First thing to configure -->
+    <!-- Electricity Provider - Contains all provider-specific settings -->
     <article>
         <header><strong>Electricity Provider</strong></header>
-        <p>Select your electricity provider. This determines how prices are sourced and export rates are calculated.</p>
-        <form action="{{ url_for('main.settings') }}" method="post" style="margin-bottom: 0;">
+        <p>Select your electricity provider and configure its settings.</p>
+
+        <form action="{{ url_for('main.settings') }}" method="post" novalidate>
             {{ form.hidden_tag() }}
-            <label for="electricity_provider_top">
+
+            <label for="electricity_provider">
                 Provider
-                <select id="electricity_provider_top" name="electricity_provider" onchange="this.form.submit()">
+                <select id="electricity_provider" name="electricity_provider" onchange="toggleProviderSettings()">
                     <option value="amber" {% if not current_user.electricity_provider or current_user.electricity_provider == 'amber' %}selected{% endif %}>Amber Electric</option>
                     <option value="flow_power" {% if current_user.electricity_provider == 'flow_power' %}selected{% endif %}>Flow Power</option>
                     <option value="globird" {% if current_user.electricity_provider == 'globird' %}selected{% endif %}>Globird</option>
                 </select>
             </label>
+
+            <!-- Amber Electric Settings -->
+            <div id="amberSettings" style="margin-top: 1em; {% if current_user.electricity_provider not in [None, '', 'amber'] %}display: none;{% endif %}">
+                <fieldset>
+                    <legend>Amber Electric Settings</legend>
+                    <p style="font-size: 0.85em; margin: 0 0 1em 0; color: var(--muted-color);">
+                        Amber provides real-time wholesale electricity prices. Your Tesla will automatically adjust based on current prices.
+                    </p>
+
+                    <label for="amber_token">
+                        {{ form.amber_token.label }}
+                        <small>Get this from your <a href="https://app.amber.com.au/developers" target="_blank">Amber developer settings</a>.</small>
+                    </label>
+                    <div style="display: flex; align-items: center; gap: 0.5em;">
+                        {{ form.amber_token(size=64, type='password', class='secure-field', style='width: 100%;') }}
+                        <button type="button" onclick="toggleVisibility('amber_token', this)"
+                                style="background: none; border: none; cursor: pointer; padding: 0.5em;
+                                       font-size: 1.2em; color: var(--muted-color); flex-shrink: 0; width: 40px;"
+                                aria-label="Toggle visibility" title="Show/Hide API Token">
+                            👁️
+                        </button>
+                    </div>
+                </fieldset>
+            </div>
+
+            <!-- Flow Power Settings -->
+            <div id="flowPowerSettings" style="margin-top: 1em; {% if current_user.electricity_provider != 'flow_power' %}display: none;{% endif %}">
+                <fieldset>
+                    <legend>Flow Power Settings</legend>
+                    <p style="font-size: 0.85em; margin: 0 0 1em 0; color: var(--muted-color);">
+                        Configure your Flow Power wholesale electricity plan with Happy Hour export rates.
+                    </p>
+
+                    <label for="flow_power_state">
+                        State / NEM Region
+                        <small>Determines your Happy Hour export rate</small>
+                        <select id="flow_power_state" name="flow_power_state">
+                            <option value="NSW1" {% if current_user.flow_power_state == 'NSW1' %}selected{% endif %}>New South Wales (45c export)</option>
+                            <option value="VIC1" {% if current_user.flow_power_state == 'VIC1' %}selected{% endif %}>Victoria (35c export)</option>
+                            <option value="QLD1" {% if current_user.flow_power_state == 'QLD1' %}selected{% endif %}>Queensland (45c export)</option>
+                            <option value="SA1" {% if current_user.flow_power_state == 'SA1' %}selected{% endif %}>South Australia (45c export)</option>
+                        </select>
+                    </label>
+
+                    <label for="flow_power_price_source" style="margin-top: 0.5em;">
+                        Import Price Source
+                        <small>Where to get wholesale electricity prices</small>
+                        <select id="flow_power_price_source" name="flow_power_price_source" onchange="toggleFlowPowerAmberToken()">
+                            <option value="amber" {% if not current_user.flow_power_price_source or current_user.flow_power_price_source == 'amber' %}selected{% endif %}>Amber API</option>
+                            <option value="aemo" {% if current_user.flow_power_price_source == 'aemo' %}selected{% endif %}>AEMO Wholesale (no API key needed)</option>
+                        </select>
+                    </label>
+
+                    <!-- Amber token for Flow Power (shown when using Amber as price source) -->
+                    <div id="flowPowerAmberToken" style="margin-top: 1em; {% if current_user.flow_power_price_source == 'aemo' %}display: none;{% endif %}">
+                        <label for="amber_token_fp">
+                            Amber API Token
+                            <small>Required when using Amber API as price source. Get from <a href="https://app.amber.com.au/developers" target="_blank">Amber developer settings</a>.</small>
+                        </label>
+                        <div style="display: flex; align-items: center; gap: 0.5em;">
+                            {{ form.amber_token(size=64, type='password', class='secure-field', style='width: 100%;', id='amber_token_fp') }}
+                            <button type="button" onclick="toggleVisibility('amber_token_fp', this)"
+                                    style="background: none; border: none; cursor: pointer; padding: 0.5em;
+                                           font-size: 1.2em; color: var(--muted-color); flex-shrink: 0; width: 40px;"
+                                    aria-label="Toggle visibility" title="Show/Hide API Token">
+                                👁️
+                            </button>
+                        </div>
+                    </div>
+
+                    <article style="background: rgba(100, 200, 150, 0.15); padding: 0.8em; border-radius: 0.5em; margin-top: 1em; border-left: 4px solid #51cf66;">
+                        <p style="margin: 0; font-size: 0.85em;">
+                            <strong>Flow Power Happy Hour:</strong> 5:30pm - 7:30pm daily<br>
+                            <strong>Export rate during Happy Hour:</strong>
+                            {% if current_user.flow_power_state == 'VIC1' %}35c/kWh{% else %}45c/kWh{% endif %}<br>
+                            <strong>Export rate outside Happy Hour:</strong> 0c/kWh
+                        </p>
+                    </article>
+                </fieldset>
+            </div>
+
+            <!-- Globird Settings (AEMO Spike Detection) -->
+            <div id="globirdSettings" style="margin-top: 1em; {% if current_user.electricity_provider != 'globird' %}display: none;{% endif %}">
+                <fieldset>
+                    <legend>Globird - AEMO Spike Detection</legend>
+                    <p style="font-size: 0.85em; margin: 0 0 1em 0; color: var(--muted-color);">
+                        Monitor AEMO wholesale prices and automatically export during price spikes.
+                    </p>
+
+                    {% if current_user.sync_enabled %}
+                    <article style="background: rgba(255, 165, 0, 0.15); padding: 1em; border-radius: 0.5em; margin-bottom: 1em; border-left: 4px solid orange;">
+                        <p style="margin: 0; font-size: 0.85em;">
+                            ⚠️ <strong>Note:</strong> AEMO spike detection is automatically disabled when Amber auto sync is enabled.
+                        </p>
+                    </article>
+                    {% endif %}
+
+                    <label for="aemo_spike_detection_enabled">
+                        <input type="checkbox" id="aemo_spike_detection_enabled" name="aemo_spike_detection_enabled"
+                               {% if form.aemo_spike_detection_enabled.data %}checked{% endif %}
+                               onchange="toggleGlobirdAemoFields(this.checked)">
+                        Enable AEMO Spike Detection
+                    </label>
+
+                    <div id="globird-aemo-fields" style="{% if not form.aemo_spike_detection_enabled.data %}display: none;{% endif %} margin-top: 1em;">
+                        <label for="aemo_region">
+                            {{ form.aemo_region.label }}
+                            <small>Select your NEM region</small>
+                            <select id="aemo_region" name="aemo_region">
+                                <option value="">Select Region...</option>
+                                <option value="NSW1" {% if form.aemo_region.data == 'NSW1' %}selected{% endif %}>NSW - New South Wales</option>
+                                <option value="QLD1" {% if form.aemo_region.data == 'QLD1' %}selected{% endif %}>QLD - Queensland</option>
+                                <option value="VIC1" {% if form.aemo_region.data == 'VIC1' %}selected{% endif %}>VIC - Victoria</option>
+                                <option value="SA1" {% if form.aemo_region.data == 'SA1' %}selected{% endif %}>SA - South Australia</option>
+                                <option value="TAS1" {% if form.aemo_region.data == 'TAS1' %}selected{% endif %}>TAS - Tasmania</option>
+                            </select>
+                        </label>
+
+                        <label for="aemo_spike_threshold" style="margin-top: 0.5em;">
+                            {{ form.aemo_spike_threshold.label }}
+                            <small>{{ form.aemo_spike_threshold.description }}</small>
+                            <input type="number" id="aemo_spike_threshold" name="aemo_spike_threshold"
+                                   value="{{ form.aemo_spike_threshold.data or 300 }}" step="0.01" min="0"
+                                   placeholder="300.00" style="max-width: 200px;">
+                        </label>
+
+                        {% if current_user.aemo_spike_detection_enabled %}
+                        <article style="background: rgba(100, 200, 150, 0.1); padding: 1em; border-radius: 0.5em; margin-top: 1em;">
+                            <p style="margin: 0; font-size: 0.85em;"><strong>Status:</strong></p>
+                            <ul style="margin: 0.5em 0 0 1.5em; padding: 0; font-size: 0.85em;">
+                                <li>Region: <strong>{{ current_user.aemo_region or 'Not set' }}</strong></li>
+                                <li>Threshold: <strong>${{ '%.2f'|format(current_user.aemo_spike_threshold or 0) }}/MWh</strong></li>
+                                {% if current_user.aemo_last_price %}
+                                <li>Last Price: <strong>${{ '%.2f'|format(current_user.aemo_last_price) }}/MWh</strong>
+                                    {% if current_user.aemo_in_spike_mode %}
+                                        <span style="color: #dc3545;">⚠️ IN SPIKE MODE</span>
+                                    {% else %}
+                                        <span style="color: #28a745;">✓ Normal</span>
+                                    {% endif %}
+                                </li>
+                                {% endif %}
+                            </ul>
+                        </article>
+                        {% endif %}
+
+                        <details style="margin-top: 1em;">
+                            <summary style="font-size: 0.85em;">How It Works</summary>
+                            <div style="font-size: 0.8em; margin-top: 0.5em; padding: 0.5em; background: rgba(100, 200, 150, 0.05); border-radius: 0.3em;">
+                                <ol style="margin: 0 0 0 1.2em; padding: 0;">
+                                    <li>Checks AEMO prices every 5 minutes</li>
+                                    <li>When price ≥ threshold: Backs up tariff & uploads spike tariff</li>
+                                    <li>When price < threshold: Restores original tariff</li>
+                                </ol>
+                            </div>
+                        </details>
+                    </div>
+                </fieldset>
+            </div>
+
+            <button type="submit" class="primary" style="margin-top: 1em;">Save Provider Settings</button>
         </form>
     </article>
 
@@ -336,161 +498,12 @@
         {% endif %}
     </article>
 
-    <!-- API Configuration Section -->
+    <!-- Tesla Configuration Section -->
     <article>
-        <header><strong>API Configuration</strong></header>
-        <p>Configure your API credentials and energy site information.</p>
+        <header><strong>Tesla Configuration</strong></header>
+        <p>Configure your Tesla API credentials and energy site.</p>
         <form action="{{ url_for('main.settings') }}" method="post" novalidate>
             {{ form.hidden_tag() }}
-
-            <fieldset id="amberFieldset" style="{% if current_user.electricity_provider == 'globird' %}display: none;{% endif %}">
-                <legend>Amber API Token</legend>
-                <label for="amber_token">
-                    {{ form.amber_token.label }}
-                    <small>Get this from your Amber developer settings. Required for Amber Electric and Flow Power (if using Amber as price source).</small>
-                </label>
-                <div style="display: flex; align-items: center; gap: 0.5em;">
-                    {{ form.amber_token(size=64, type='password', class='secure-field', style='width: 100%;') }}
-                    <button type="button" onclick="toggleVisibility('amber_token', this)"
-                            style="background: none; border: none; cursor: pointer; padding: 0.5em;
-                                   font-size: 1.2em; color: var(--muted-color); flex-shrink: 0; width: 40px;"
-                            aria-label="Toggle visibility" title="Show/Hide API Token">
-                        👁️
-                    </button>
-                </div>
-            </fieldset>
-
-            <fieldset id="flowPowerFieldset" style="margin-top: 1em; {% if current_user.electricity_provider != 'flow_power' %}display: none;{% endif %}">
-                <legend>Flow Power</legend>
-                <p style="font-size: 0.85em; margin: 0 0 1em 0; color: var(--muted-color);">
-                    Configure your Flow Power wholesale electricity settings.
-                </p>
-
-                <label for="flow_power_state">
-                    State / NEM Region
-                    <small>Determines your Happy Hour export rate (VIC: 35c, Others: 45c)</small>
-                    <select id="flow_power_state" name="flow_power_state">
-                        <option value="NSW1" {% if current_user.flow_power_state == 'NSW1' %}selected{% endif %}>New South Wales (45c export)</option>
-                        <option value="VIC1" {% if current_user.flow_power_state == 'VIC1' %}selected{% endif %}>Victoria (35c export)</option>
-                        <option value="QLD1" {% if current_user.flow_power_state == 'QLD1' %}selected{% endif %}>Queensland (45c export)</option>
-                        <option value="SA1" {% if current_user.flow_power_state == 'SA1' %}selected{% endif %}>South Australia (45c export)</option>
-                    </select>
-                </label>
-
-                <label for="flow_power_price_source" style="margin-top: 0.5em;">
-                    Import Price Source
-                    <small>Where to get wholesale electricity prices for import</small>
-                    <select id="flow_power_price_source" name="flow_power_price_source">
-                        <option value="amber" {% if not current_user.flow_power_price_source or current_user.flow_power_price_source == 'amber' %}selected{% endif %}>Amber API (requires Amber token above)</option>
-                        <option value="aemo" {% if current_user.flow_power_price_source == 'aemo' %}selected{% endif %}>AEMO Wholesale (no API key needed)</option>
-                    </select>
-                </label>
-
-                <article style="background: rgba(100, 200, 150, 0.15); padding: 0.8em; border-radius: 0.5em; margin-top: 1em; border-left: 4px solid #51cf66;">
-                    <p style="margin: 0; font-size: 0.85em;">
-                        <strong>Flow Power Happy Hour:</strong> 5:30pm - 7:30pm daily<br>
-                        <strong>Export rate during Happy Hour:</strong>
-                        {% if current_user.flow_power_state == 'VIC1' %}35c/kWh{% else %}45c/kWh{% endif %}<br>
-                        <strong>Export rate outside Happy Hour:</strong> 0c/kWh
-                    </p>
-                </article>
-            </fieldset>
-
-            <fieldset id="globirdFieldset" style="margin-top: 1em; {% if current_user.electricity_provider != 'globird' %}display: none;{% endif %}">
-                <legend>Globird - AEMO Spike Detection</legend>
-                <p style="font-size: 0.85em; margin: 0 0 1em 0; color: var(--muted-color);">
-                    Monitor AEMO NEM wholesale electricity prices and automatically switch to export mode during price spikes.
-                    When the price exceeds your threshold, the system saves your current tariff and uploads a spike tariff that
-                    encourages battery export. When prices return to normal, your original tariff is restored.
-                </p>
-
-                {% if current_user.sync_enabled %}
-                <article style="background: rgba(255, 165, 0, 0.15); padding: 1em; border-radius: 0.5em; margin-bottom: 1em; border-left: 4px solid orange;">
-                    <p style="margin: 0; font-size: 0.85em;">
-                        ⚠️ <strong>Note:</strong> AEMO spike detection is automatically disabled when Amber auto sync is enabled.
-                        To use spike detection, disable auto sync from the Dashboard first.
-                    </p>
-                </article>
-                {% endif %}
-
-                <label for="globird_aemo_spike_detection_enabled">
-                    <input type="checkbox" id="globird_aemo_spike_detection_enabled" name="aemo_spike_detection_enabled"
-                           {% if form.aemo_spike_detection_enabled.data %}checked{% endif %}
-                           onchange="toggleGlobirdAemoFields(this.checked)">
-                    Enable AEMO Spike Detection
-                </label>
-
-                <div id="globird-aemo-fields" style="{% if not form.aemo_spike_detection_enabled.data %}display: none;{% endif %} margin-top: 1em;">
-                    <label for="globird_aemo_region">
-                        {{ form.aemo_region.label }}
-                        <small>Select your NEM region for monitoring wholesale electricity prices</small>
-                        <select id="globird_aemo_region" name="aemo_region">
-                            <option value="">Select Region...</option>
-                            <option value="NSW1" {% if form.aemo_region.data == 'NSW1' %}selected{% endif %}>NSW - New South Wales</option>
-                            <option value="QLD1" {% if form.aemo_region.data == 'QLD1' %}selected{% endif %}>QLD - Queensland</option>
-                            <option value="VIC1" {% if form.aemo_region.data == 'VIC1' %}selected{% endif %}>VIC - Victoria</option>
-                            <option value="SA1" {% if form.aemo_region.data == 'SA1' %}selected{% endif %}>SA - South Australia</option>
-                            <option value="TAS1" {% if form.aemo_region.data == 'TAS1' %}selected{% endif %}>TAS - Tasmania</option>
-                        </select>
-                    </label>
-
-                    <label for="globird_aemo_spike_threshold">
-                        {{ form.aemo_spike_threshold.label }}
-                        <small>{{ form.aemo_spike_threshold.description }}</small>
-                        <input type="number" id="globird_aemo_spike_threshold" name="aemo_spike_threshold"
-                               value="{{ form.aemo_spike_threshold.data or 300 }}" step="0.01" min="0"
-                               placeholder="300.00" style="max-width: 200px;">
-                    </label>
-
-                    {% if current_user.aemo_spike_detection_enabled %}
-                    <article style="background: rgba(100, 200, 150, 0.1); padding: 1em; border-radius: 0.5em; margin-top: 1em;">
-                        <p style="margin: 0; font-size: 0.85em;"><strong>Status:</strong></p>
-                        <ul style="margin: 0.5em 0 0 1.5em; padding: 0; font-size: 0.85em;">
-                            <li>Region: <strong>{{ current_user.aemo_region or 'Not set' }}</strong></li>
-                            <li>Threshold: <strong>${{ '%.2f'|format(current_user.aemo_spike_threshold or 0) }}/MWh</strong></li>
-                            {% if current_user.aemo_last_price %}
-                            <li>Last Price: <strong>${{ '%.2f'|format(current_user.aemo_last_price) }}/MWh</strong>
-                                {% if current_user.aemo_in_spike_mode %}
-                                    <span style="color: #dc3545;">⚠️ IN SPIKE MODE</span>
-                                {% else %}
-                                    <span style="color: #28a745;">✓ Normal</span>
-                                {% endif %}
-                            </li>
-                            {% endif %}
-                            {% if current_user.aemo_last_check %}
-                            <li>Last Check: {{ (current_user.aemo_last_check | user_timezone).strftime('%Y-%m-%d %H:%M:%S') }}</li>
-                            {% endif %}
-                        </ul>
-                    </article>
-                    {% endif %}
-
-                    <details style="margin-top: 1em;">
-                        <summary style="font-size: 0.85em;">How It Works</summary>
-                        <div style="font-size: 0.8em; margin-top: 0.5em; padding: 0.5em; background: rgba(100, 200, 150, 0.05); border-radius: 0.3em;">
-                            <p style="margin: 0 0 0.5em 0;"><strong>Monitoring:</strong></p>
-                            <ol style="margin: 0 0 0.5em 1.2em; padding: 0;">
-                                <li>Every 5 minutes, checks AEMO NEM wholesale prices for your region</li>
-                                <li>Prices are in $/MWh (e.g., $300/MWh = 30c/kWh)</li>
-                            </ol>
-
-                            <p style="margin: 0.5em 0;"><strong>Spike Detection:</strong></p>
-                            <ol style="margin: 0 0 0.5em 1.2em; padding: 0;">
-                                <li>When price >= threshold: Saves your current tariff to "Pre-Spike Backup"</li>
-                                <li>Uploads a spike tariff with very high sell rates to encourage export</li>
-                                <li>Tesla Powerwall sees high feed-in rates and exports battery to grid</li>
-                            </ol>
-
-                            <p style="margin: 0.5em 0;"><strong>Return to Normal:</strong></p>
-                            <ol style="margin: 0 0 0.5em 1.2em; padding: 0;">
-                                <li>When price < threshold: Restores your saved tariff</li>
-                                <li>Battery returns to normal operation</li>
-                            </ol>
-
-                            <p style="margin: 0.5em 0 0 0;"><strong>Note:</strong> This works alongside Amber sync. Spike detection temporarily overrides your rates during high-price events.</p>
-                        </div>
-                    </details>
-                </div>
-            </fieldset>
 
             <fieldset style="margin-top: 1em;">
                 <legend>Teslemetry (Optional)</legend>
@@ -1269,25 +1282,35 @@
             }
         }
 
-        function toggleProviderOptions() {
+        // Toggle provider-specific settings based on electricity provider selection
+        function toggleProviderSettings() {
             const provider = document.getElementById('electricity_provider').value;
-            const amberFieldset = document.getElementById('amberFieldset');
-            const flowPowerFieldset = document.getElementById('flowPowerFieldset');
-            const globirdFieldset = document.getElementById('globirdFieldset');
+            const amberSettings = document.getElementById('amberSettings');
+            const flowPowerSettings = document.getElementById('flowPowerSettings');
+            const globirdSettings = document.getElementById('globirdSettings');
 
-            // Hide all provider-specific fieldsets first
-            amberFieldset.style.display = 'none';
-            flowPowerFieldset.style.display = 'none';
-            globirdFieldset.style.display = 'none';
+            // Hide all provider-specific settings first
+            if (amberSettings) amberSettings.style.display = 'none';
+            if (flowPowerSettings) flowPowerSettings.style.display = 'none';
+            if (globirdSettings) globirdSettings.style.display = 'none';
 
-            // Show the selected provider's fieldset
+            // Show the selected provider's settings
             if (provider === 'flow_power') {
-                flowPowerFieldset.style.display = 'block';
+                if (flowPowerSettings) flowPowerSettings.style.display = 'block';
             } else if (provider === 'globird') {
-                globirdFieldset.style.display = 'block';
+                if (globirdSettings) globirdSettings.style.display = 'block';
             } else {
                 // Default to Amber
-                amberFieldset.style.display = 'block';
+                if (amberSettings) amberSettings.style.display = 'block';
+            }
+        }
+
+        // Toggle Amber token field in Flow Power settings based on price source
+        function toggleFlowPowerAmberToken() {
+            const priceSource = document.getElementById('flow_power_price_source').value;
+            const amberTokenDiv = document.getElementById('flowPowerAmberToken');
+            if (amberTokenDiv) {
+                amberTokenDiv.style.display = (priceSource === 'aemo') ? 'none' : 'block';
             }
         }
 
