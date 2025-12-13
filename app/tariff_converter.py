@@ -391,11 +391,11 @@ class AmberTariffConverter:
                     # Tesla restriction: No negative prices - clamp to 0
                     if buy_price < 0:
                         logger.debug(f"{period_key}: Buy price adjusted: {buy_price:.4f} -> 0.0000 (negative->zero)")
-                        general_prices[period_key] = 0
-                    else:
-                        general_prices[period_key] = buy_price
-                        last_valid_buy_price = buy_price  # Track for fallback
-                        logger.debug(f"{period_key} (using {hour:02d}:{minute:02d} price): ${buy_price:.4f}")
+                        buy_price = 0
+
+                    general_prices[period_key] = buy_price
+                    last_valid_buy_price = buy_price  # Track for fallback (always update, even if clamped to 0)
+                    logger.debug(f"{period_key} (using {hour:02d}:{minute:02d} price): ${buy_price:.4f}")
                 else:
                     # No data found - use fallback price if available
                     # This commonly happens with AEMO forecast which only provides ~20 hours ahead

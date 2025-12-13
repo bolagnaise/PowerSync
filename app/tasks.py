@@ -401,6 +401,12 @@ def _sync_all_users_internal(websocket_data):
                 error_count += 1
                 continue
 
+            # Apply network tariff if using AEMO wholesale prices (no network fees included)
+            if user.electricity_provider == 'flow_power' and user.flow_power_price_source == 'aemo':
+                from app.tariff_converter import apply_network_tariff
+                logger.info(f"Applying network tariff to AEMO wholesale prices for {user.email}")
+                tariff = apply_network_tariff(tariff, user)
+
             # Apply Flow Power export rates if user is on Flow Power
             if user.electricity_provider == 'flow_power' and user.flow_power_state:
                 from app.tariff_converter import apply_flow_power_export
