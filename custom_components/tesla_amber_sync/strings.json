@@ -203,6 +203,12 @@
       },
       "tariff_schedule": {
         "name": "Tariff Schedule"
+      },
+      "flow_power_price": {
+        "name": "Flow Power Import Price"
+      },
+      "flow_power_export_price": {
+        "name": "Flow Power Export Price"
       }
     },
     "switch": {

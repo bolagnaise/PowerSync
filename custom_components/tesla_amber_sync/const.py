@@ -370,6 +370,10 @@ SENSOR_TYPE_TARIFF_SCHEDULE = "tariff_schedule"
 # Solar curtailment sensor
 SENSOR_TYPE_SOLAR_CURTAILMENT = "solar_curtailment"
 
+# Flow Power price sensors
+SENSOR_TYPE_FLOW_POWER_PRICE = "flow_power_price"
+SENSOR_TYPE_FLOW_POWER_EXPORT_PRICE = "flow_power_export_price"
+
 # Attributes
 ATTR_LAST_SYNC = "last_sync"
 ATTR_SYNC_STATUS = "sync_status"
