@@ -64,6 +64,7 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 ### Advanced Features
 - ⚡ **AEMO Spike Detection** - Automatically monitors Australian wholesale electricity prices and switches to spike tariff during extreme price events (configurable threshold). Includes intelligent operation mode switching - automatically saves your current Powerwall mode and switches to autonomous (TOU) mode during spikes, then restores your original mode when prices normalize
 - 🌞 **Solar Curtailment** - Automatically prevents solar export during negative pricing periods (≤0c/kWh). When Amber feed-in prices go negative, the system sets Powerwall export to "never" to avoid paying to export, then restores to "battery_ok" when prices return to positive
+- 📤 **Export Price Boost** - Artificially increase export prices to trigger Powerwall exports at lower price points. Useful when prices are in the 20-25c range where Tesla's algorithm may not trigger exports
 - 🔌 **Flow Power + AEMO Support** - Full support for Flow Power and other wholesale electricity retailers using direct AEMO NEM pricing with configurable network tariffs
 - 🎯 **Custom TOU Schedules** - Create and manage custom time-of-use schedules for any electricity provider (not just Amber)
 - 💾 **Saved TOU Profiles** - Backup, restore, and manage multiple tariff configurations
@@ -117,6 +118,45 @@ Prevents paying to export solar during negative pricing periods common with Ambe
 - Default: Disabled (opt-in feature)
 
 This feature is particularly useful with Amber's wholesale pricing to avoid paying to export your solar during oversupply periods.
+
+### Export Price Boost
+
+Artificially increases export prices sent to Tesla to trigger Powerwall exports at lower price points. This is useful when Amber export prices are in the 20-25c range where Tesla's algorithm may not trigger exports due to its internal hysteresis.
+
+**How It Works:**
+The feature adds a configurable offset to export prices and/or sets a minimum floor price, but only during a specified time window (default 5pm-9pm evening peak).
+
+**Configuration Options:**
+| Setting | Description | Default |
+|---------|-------------|---------|
+| Enable Export Price Boost | Toggle the feature on/off | Off |
+| Price Offset (c/kWh) | Fixed amount added to all export prices | 0 |
+| Minimum Price (c/kWh) | Floor for export prices | 0 |
+| Boost Start Time | When to start applying boost | 17:00 |
+| Boost End Time | When to stop applying boost | 21:00 |
+
+**Example Calculation:**
+```
+Amber export price: 18c/kWh
+With offset=5c and min=20c:
+→ 18 + 5 = 23c (above min, so Tesla sees 23c)
+
+Amber export price: 12c/kWh
+With offset=5c and min=20c:
+→ 12 + 5 = 17c (below min, so Tesla sees 20c floor)
+```
+
+**Use Cases:**
+- Force Powerwall to export during evening peak when prices are moderate (20-25c)
+- Overcome Tesla's internal decision-making that may not export at certain price points
+- Maximize battery revenue during predictable high-demand periods
+
+**Note:** The boosted price is only what Tesla sees for decision-making - you still get paid the actual Amber export rate. This feature tricks the Powerwall into exporting when it otherwise wouldn't.
+
+**Configuration:**
+- Enable/disable in Amber Settings (Flask web interface)
+- Enable/disable during Home Assistant integration options flow
+- Default: Disabled (opt-in feature)
 
 ### Flow Power + AEMO Wholesale Pricing
 
