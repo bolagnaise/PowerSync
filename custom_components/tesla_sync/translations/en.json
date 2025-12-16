@@ -114,6 +114,9 @@
           "demand_artificial_price_enabled": "Artificial Price Increase (ALPHA)",
           "daily_supply_charge": "Daily Supply Charge ($)",
           "monthly_supply_charge": "Monthly Supply Charge ($)"
+        },
+        "data_description": {
+          "demand_artificial_price_enabled": "Artificially increases the current price by $2 during demand charge periods to encourage battery discharge"
         }
       },
       "flow_power_options": {
