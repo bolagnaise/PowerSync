@@ -106,6 +106,17 @@
                         </label>
                     </div>
 
+                    <div style="margin-top: 1em;">
+                        <label for="export_boost_threshold">
+                            Activation Threshold (c/kWh)
+                            <small>Boost won't apply if actual price is below this (0 = always apply)</small>
+                            <input type="number" id="export_boost_threshold" name="export_boost_threshold"
+                                   value="{{ current_user.export_boost_threshold or 0 }}"
+                                   step="0.1" min="0" max="50"
+                                   style="width: 100%;">
+                        </label>
+                    </div>
+
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1em; margin-top: 1em;">
                         <label for="export_boost_start">
                             Boost Start Time
@@ -125,7 +136,7 @@
                     </div>
 
                     <p style="font-size: 0.75em; margin: 1em 0 0 0; color: var(--muted-color);">
-                        Example: With offset=5c and min=20c, an 18c export becomes 23c (18+5). A 12c export becomes 20c (floor).
+                        Example: With offset=5c, min=20c, threshold=10c: an 18c export becomes 23c (18+5). A 12c export becomes 20c (floor). A 5c export stays at 5c (below threshold, boost skipped).
                     </p>
                 </div>
                 <details style="margin-top: 0.5em;">
@@ -135,6 +146,7 @@
                         <ul style="margin: 0.3em 0 0 1.2em; padding: 0;">
                             <li style="margin: 0.5em 0;"><strong>Price Offset:</strong> Adds this amount to all export prices (e.g., +5c makes 20c appear as 25c to Tesla)</li>
                             <li style="margin: 0.5em 0;"><strong>Minimum Price:</strong> Sets a floor price (e.g., 20c minimum ensures prices never appear lower)</li>
+                            <li style="margin: 0.5em 0;"><strong>Activation Threshold:</strong> Boost only applies if actual price is at or above this value (e.g., 10c threshold skips boost for very low/negative prices)</li>
                             <li style="margin: 0.5em 0;"><strong>Time Window:</strong> Only applies boost during these hours (typically peak export times)</li>
                         </ul>
                     </div>

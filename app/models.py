@@ -62,6 +62,7 @@ class User(UserMixin, db.Model):
     export_min_price = db.Column(db.Float, default=0.0)  # Minimum export price floor in c/kWh
     export_boost_start = db.Column(db.String(5), default='17:00')  # Start time for boost (HH:MM)
     export_boost_end = db.Column(db.String(5), default='21:00')  # End time for boost (HH:MM)
+    export_boost_threshold = db.Column(db.Float, default=0.0)  # Min price to activate boost (c/kWh) - boost skipped if actual price below this
 
     # Demand Charge Configuration
     enable_demand_charges = db.Column(db.Boolean, default=False)

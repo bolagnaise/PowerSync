@@ -295,6 +295,7 @@ def _repair_missing_columns(db, logger):
         ('export_min_price', 'FLOAT', '0.0'),
         ('export_boost_start', 'VARCHAR(5)', "'17:00'"),
         ('export_boost_end', 'VARCHAR(5)', "'21:00'"),
+        ('export_boost_threshold', 'FLOAT', '0.0'),  # Activation threshold
         # Flow Power PEA fields (546b2ceef0e5)
         ('flow_power_base_rate', 'FLOAT', 'NULL'),
         ('pea_enabled', 'BOOLEAN', 'NULL'),

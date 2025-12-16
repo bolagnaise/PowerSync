@@ -1467,6 +1467,7 @@ def apply_export_boost(
     min_price_cents: float = 0.0,
     boost_start: str = "17:00",
     boost_end: str = "21:00",
+    activation_threshold_cents: float = 0.0,
 ) -> dict[str, Any]:
     """
     Apply export price boost to trigger Powerwall exports at lower price points.
@@ -1475,7 +1476,8 @@ def apply_export_boost(
     value and is more willing to discharge. Useful when actual export prices are
     in the 20-25c range where Tesla's algorithm may not trigger exports.
 
-    The boost is only applied during the configured time window.
+    The boost is only applied during the configured time window, and only if the
+    actual price is at or above the activation threshold.
 
     Args:
         tariff: Tesla tariff structure with energy_charges containing sell_prices
@@ -1483,18 +1485,24 @@ def apply_export_boost(
         min_price_cents: Minimum export price floor (c/kWh)
         boost_start: Time to start applying boost (HH:MM format)
         boost_end: Time to stop applying boost (HH:MM format)
+        activation_threshold_cents: Minimum actual price to activate boost (c/kWh)
+                                   If actual price is below this, boost is skipped
 
     Returns:
         Modified tariff with boosted export prices
 
     Example:
         Amber says export = 18c
-        With offset_cents=5, min_price_cents=20:
+        With offset_cents=5, min_price_cents=20, activation_threshold_cents=10:
         → Tesla sees 23c (18 + 5 = 23, above min)
 
         Amber says export = 12c
-        With offset_cents=5, min_price_cents=20:
+        With offset_cents=5, min_price_cents=20, activation_threshold_cents=10:
         → Tesla sees 20c (12 + 5 = 17, below min, so use min)
+
+        Amber says export = 5c
+        With offset_cents=5, min_price_cents=20, activation_threshold_cents=10:
+        → Tesla sees 5c (below threshold, boost skipped)
     """
     if offset_cents == 0 and min_price_cents == 0:
         _LOGGER.debug("Export boost disabled (offset=0, min=0)")
@@ -1528,11 +1536,12 @@ def apply_export_boost(
                 boost_periods.add(f"PERIOD_{hour:02d}_{minute:02d}")
 
     _LOGGER.debug(
-        "Export boost active for %d periods (%s to %s): offset=%.1fc, min=%.1fc",
-        len(boost_periods), boost_start, boost_end, offset_cents, min_price_cents
+        "Export boost active for %d periods (%s to %s): offset=%.1fc, min=%.1fc, threshold=%.1fc",
+        len(boost_periods), boost_start, boost_end, offset_cents, min_price_cents, activation_threshold_cents
     )
 
     modified_count = 0
+    skipped_count = 0
     boosted_prices: list[float] = []
 
     # Process each season in the tariff
@@ -1546,6 +1555,15 @@ def apply_export_boost(
 
             original_dollars = sell_prices[period]
             original_cents = original_dollars * 100
+
+            # Skip boost if actual price is below activation threshold
+            if activation_threshold_cents > 0 and original_cents < activation_threshold_cents:
+                skipped_count += 1
+                _LOGGER.debug(
+                    "%s: Boost skipped - actual price %.2fc below threshold %.1fc",
+                    period, original_cents, activation_threshold_cents
+                )
+                continue
 
             # Apply offset
             boosted_cents = original_cents + offset_cents
@@ -1577,9 +1595,15 @@ def apply_export_boost(
     # Log summary
     if boosted_prices:
         avg_boost = sum(boosted_prices) / len(boosted_prices)
+        skip_msg = f", {skipped_count} skipped (below threshold)" if skipped_count > 0 else ""
         _LOGGER.info(
-            "Export boost applied to %d periods: avg=%.1fc/kWh, range=[%.1fc to %.1fc]",
-            modified_count, avg_boost, min(boosted_prices), max(boosted_prices)
+            "Export boost applied to %d periods%s: avg=%.1fc/kWh, range=[%.1fc to %.1fc]",
+            modified_count, skip_msg, avg_boost, min(boosted_prices), max(boosted_prices)
+        )
+    elif skipped_count > 0:
+        _LOGGER.info(
+            "Export boost: %d periods skipped (below threshold %.1fc)",
+            skipped_count, activation_threshold_cents
         )
     else:
         _LOGGER.info("Export boost: no periods modified (prices already meet criteria)")

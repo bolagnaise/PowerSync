@@ -66,8 +66,10 @@ from .const import (
     CONF_EXPORT_MIN_PRICE,
     CONF_EXPORT_BOOST_START,
     CONF_EXPORT_BOOST_END,
+    CONF_EXPORT_BOOST_THRESHOLD,
     DEFAULT_EXPORT_BOOST_START,
     DEFAULT_EXPORT_BOOST_END,
+    DEFAULT_EXPORT_BOOST_THRESHOLD,
     # Network Tariff configuration
     CONF_NETWORK_DISTRIBUTOR,
     CONF_NETWORK_TARIFF_CODE,
@@ -885,6 +887,10 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_EXPORT_BOOST_END,
                         default=self._get_option(CONF_EXPORT_BOOST_END, DEFAULT_EXPORT_BOOST_END),
                     ): str,
+                    vol.Optional(
+                        CONF_EXPORT_BOOST_THRESHOLD,
+                        default=self._get_option(CONF_EXPORT_BOOST_THRESHOLD, DEFAULT_EXPORT_BOOST_THRESHOLD),
+                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0)),
                     vol.Optional(
                         CONF_DEMAND_CHARGE_ENABLED,
                         default=self._get_option(CONF_DEMAND_CHARGE_ENABLED, False),

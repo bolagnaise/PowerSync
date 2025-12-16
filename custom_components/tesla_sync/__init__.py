@@ -82,8 +82,10 @@ from .const import (
     CONF_EXPORT_MIN_PRICE,
     CONF_EXPORT_BOOST_START,
     CONF_EXPORT_BOOST_END,
+    CONF_EXPORT_BOOST_THRESHOLD,
     DEFAULT_EXPORT_BOOST_START,
     DEFAULT_EXPORT_BOOST_END,
+    DEFAULT_EXPORT_BOOST_THRESHOLD,
 )
 from .coordinator import (
     AmberPriceCoordinator,
@@ -1569,11 +1571,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 min_price = entry.options.get(CONF_EXPORT_MIN_PRICE, 0) or 0
                 boost_start = entry.options.get(CONF_EXPORT_BOOST_START, DEFAULT_EXPORT_BOOST_START)
                 boost_end = entry.options.get(CONF_EXPORT_BOOST_END, DEFAULT_EXPORT_BOOST_END)
+                threshold = entry.options.get(CONF_EXPORT_BOOST_THRESHOLD, DEFAULT_EXPORT_BOOST_THRESHOLD)
                 _LOGGER.info(
-                    "Applying export boost: offset=%.1fc, min=%.1fc, window=%s-%s",
-                    offset, min_price, boost_start, boost_end
+                    "Applying export boost: offset=%.1fc, min=%.1fc, threshold=%.1fc, window=%s-%s",
+                    offset, min_price, threshold, boost_start, boost_end
                 )
-                tariff = apply_export_boost(tariff, offset, min_price, boost_start, boost_end)
+                tariff = apply_export_boost(tariff, offset, min_price, boost_start, boost_end, threshold)
 
         # Store tariff schedule in hass.data for the sensor to read
         from datetime import datetime as dt

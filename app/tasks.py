@@ -441,8 +441,9 @@ def _sync_all_users_internal(websocket_data):
                 min_price = getattr(user, 'export_min_price', 0) or 0
                 boost_start = getattr(user, 'export_boost_start', '17:00') or '17:00'
                 boost_end = getattr(user, 'export_boost_end', '21:00') or '21:00'
-                logger.info(f"Applying export boost for {user.email}: offset={offset}c, min={min_price}c, window={boost_start}-{boost_end}")
-                tariff = apply_export_boost(tariff, offset, min_price, boost_start, boost_end)
+                threshold = getattr(user, 'export_boost_threshold', 0) or 0
+                logger.info(f"Applying export boost for {user.email}: offset={offset}c, min={min_price}c, threshold={threshold}c, window={boost_start}-{boost_end}")
+                tariff = apply_export_boost(tariff, offset, min_price, boost_start, boost_end, threshold)
 
             logger.info(f"Applying tariff for {user.email} with {len(tariff.get('energy_charges', {}).get('Summer', {}).get('rates', {}))} rate periods")
 

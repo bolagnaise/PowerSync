@@ -385,12 +385,14 @@ CONF_EXPORT_MIN_PRICE = "export_min_price"
 CONF_EXPORT_BOOST_ENABLED = "export_boost_enabled"
 CONF_EXPORT_BOOST_START = "export_boost_start"
 CONF_EXPORT_BOOST_END = "export_boost_end"
+CONF_EXPORT_BOOST_THRESHOLD = "export_boost_threshold"  # Min price to activate boost
 
 # Default values for export boost
 DEFAULT_EXPORT_PRICE_OFFSET = 0.0  # c/kWh
 DEFAULT_EXPORT_MIN_PRICE = 0.0     # c/kWh
 DEFAULT_EXPORT_BOOST_START = "17:00"
 DEFAULT_EXPORT_BOOST_END = "21:00"
+DEFAULT_EXPORT_BOOST_THRESHOLD = 0.0  # c/kWh (0 = always apply boost)
 
 # Attributes
 ATTR_LAST_SYNC = "last_sync"

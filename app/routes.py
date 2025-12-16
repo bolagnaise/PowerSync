@@ -867,6 +867,12 @@ def amber_settings():
         if 'export_boost_end' in request.form:
             current_user.export_boost_end = request.form.get('export_boost_end', '21:00')
 
+        if 'export_boost_threshold' in request.form:
+            try:
+                current_user.export_boost_threshold = float(request.form.get('export_boost_threshold', 0))
+            except (ValueError, TypeError):
+                pass
+
         try:
             db.session.commit()
             logger.info(f"Amber settings saved successfully: forecast_type={form.amber_forecast_type.data}, site_id={current_user.amber_site_id}")
@@ -2003,8 +2009,9 @@ def tou_schedule():
         min_price = getattr(current_user, 'export_min_price', 0) or 0
         boost_start = getattr(current_user, 'export_boost_start', '17:00') or '17:00'
         boost_end = getattr(current_user, 'export_boost_end', '21:00') or '21:00'
-        logger.info(f"Preview: Applying export boost: offset={offset}c, min={min_price}c, window={boost_start}-{boost_end}")
-        tariff = apply_export_boost(tariff, offset, min_price, boost_start, boost_end)
+        threshold = getattr(current_user, 'export_boost_threshold', 0) or 0
+        logger.info(f"Preview: Applying export boost: offset={offset}c, min={min_price}c, threshold={threshold}c, window={boost_start}-{boost_end}")
+        tariff = apply_export_boost(tariff, offset, min_price, boost_start, boost_end, threshold)
 
     # Extract tariff periods for display
     energy_rates = tariff.get('energy_charges', {}).get('Summer', {}).get('rates', {})
@@ -2176,8 +2183,9 @@ def sync_tesla_schedule(tesla_client):
             min_price = getattr(current_user, 'export_min_price', 0) or 0
             boost_start = getattr(current_user, 'export_boost_start', '17:00') or '17:00'
             boost_end = getattr(current_user, 'export_boost_end', '21:00') or '21:00'
-            logger.info(f"Applying export boost: offset={offset}c, min={min_price}c, window={boost_start}-{boost_end}")
-            tariff = apply_export_boost(tariff, offset, min_price, boost_start, boost_end)
+            threshold = getattr(current_user, 'export_boost_threshold', 0) or 0
+            logger.info(f"Applying export boost: offset={offset}c, min={min_price}c, threshold={threshold}c, window={boost_start}-{boost_end}")
+            tariff = apply_export_boost(tariff, offset, min_price, boost_start, boost_end, threshold)
 
         num_periods = len(tariff.get('energy_charges', {}).get('Summer', {}).get('rates', {}))
         logger.info(f"Applying TESLA SYNC tariff with {num_periods} rate periods")
