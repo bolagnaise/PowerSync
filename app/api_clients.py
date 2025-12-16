@@ -10,6 +10,10 @@ from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
 
+# Version and User-Agent for API identification
+TESLA_SYNC_VERSION = "2.0.0"
+TESLA_SYNC_USER_AGENT = f"TeslaSync/{TESLA_SYNC_VERSION}"
+
 
 class TeslaAPIClientBase(ABC):
     """Abstract base class for Tesla API clients (Fleet API, Teslemetry, etc.)"""
@@ -351,7 +355,8 @@ class FleetAPIClient(TeslaAPIClientBase):
         self.base_url = self.BASE_URL
         self.headers = {
             "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "User-Agent": TESLA_SYNC_USER_AGENT,
         }
         logger.info("FleetAPIClient initialized (direct Tesla Fleet API)")
 
@@ -968,7 +973,8 @@ class TeslemetryAPIClient(TeslaAPIClientBase):
         self.base_url = self.BASE_URL
         self.headers = {
             "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "User-Agent": TESLA_SYNC_USER_AGENT,
         }
         logger.info("TeslemetryAPIClient initialized")
 

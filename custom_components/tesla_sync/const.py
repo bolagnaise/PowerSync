@@ -4,6 +4,10 @@ from datetime import timedelta
 # Integration domain
 DOMAIN = "tesla_sync"
 
+# Version and User-Agent for API identification
+TESLA_SYNC_VERSION = "2.0.0"
+TESLA_SYNC_USER_AGENT = f"TeslaSync/{TESLA_SYNC_VERSION} HomeAssistant"
+
 # Configuration keys
 CONF_AMBER_API_TOKEN = "amber_api_token"
 CONF_AMBER_SITE_ID = "amber_site_id"
