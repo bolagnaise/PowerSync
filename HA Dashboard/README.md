@@ -1,4 +1,4 @@
-# Home Assistant Dashboard for Tesla Amber Sync
+# Home Assistant Dashboard for Tesla Sync
 
 A pre-built Lovelace dashboard for visualizing your Tesla Powerwall and Amber Electric data.
 
@@ -31,11 +31,11 @@ Install these from HACS before setting up the dashboard:
 1. In Home Assistant, go to **Settings → Dashboards**
 2. Click **+ Add Dashboard**
 3. Choose **New dashboard from scratch**
-4. Give it a name (e.g., "Tesla Amber Sync")
+4. Give it a name (e.g., "Tesla Sync")
 5. Click **Create**
 6. Open the new dashboard and click the three dots menu → **Edit Dashboard**
 7. Click the three dots menu again → **Raw configuration editor**
-8. Delete any existing content and paste the entire contents of `tesla_amber_sync_dashboard.yaml`
+8. Delete any existing content and paste the entire contents of `tesla_sync_dashboard.yaml`
 9. Click **Save**
 
 ### Method 2: Add as a View to Existing Dashboard
@@ -43,7 +43,7 @@ Install these from HACS before setting up the dashboard:
 1. Open your existing dashboard
 2. Click the three dots menu → **Edit Dashboard**
 3. Click the three dots menu → **Raw configuration editor**
-4. Add the view from `tesla_amber_sync_dashboard.yaml` to your existing views array
+4. Add the view from `tesla_sync_dashboard.yaml` to your existing views array
 5. Click **Save**
 
 ## Customization
@@ -90,7 +90,7 @@ Install the **card-mod** HACS integration for full styling support.
 
 ### Charts showing no data
 
-- Ensure the Tesla Amber Sync integration is properly configured
+- Ensure the Tesla Sync integration is properly configured
 - Check that entity names match your actual entities (see below)
 - Wait for the integration to collect some data (may take 5-10 minutes)
 - Trigger a sync via the "Sync Now" service or wait for automatic sync
@@ -107,7 +107,7 @@ To find your actual entity IDs:
 
 Common entity ID patterns:
 - `sensor.tariff_schedule` (if no device prefix)
-- `sensor.tesla_amber_sync_tariff_schedule` (with integration prefix)
+- `sensor.tesla_sync_tariff_schedule` (with integration prefix)
 - `sensor.<site_name>_tariff_schedule` (with site name prefix)
 
 ### TOU Schedule Chart Not Updating

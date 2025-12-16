@@ -39,7 +39,7 @@ A Home Assistant custom integration that synchronizes Amber Electric pricing wit
 
 ### Manual
 
-1. Copy `custom_components/tesla_amber_sync/` to your HA config directory
+1. Copy `custom_components/tesla_sync/` to your HA config directory
 2. Restart Home Assistant
 
 ## Configuration
@@ -76,10 +76,10 @@ A Home Assistant custom integration that synchronizes Amber Electric pricing wit
 
 ```yaml
 # Manually sync TOU schedule
-service: tesla_amber_sync.sync_tou_schedule
+service: tesla_sync.sync_tou_schedule
 
 # Refresh data immediately
-service: tesla_amber_sync.sync_now
+service: tesla_sync.sync_now
 ```
 
 ## Example Automation
@@ -117,7 +117,7 @@ automation:
 ```yaml
 logger:
   logs:
-    custom_components.tesla_amber_sync: debug
+    custom_components.tesla_sync: debug
 ```
 
 ## Support

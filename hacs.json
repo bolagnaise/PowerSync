@@ -1,5 +1,5 @@
 {
-  "name": "Tesla Amber Sync",
+  "name": "Tesla Sync",
   "render_readme": true,
   "domains": ["sensor", "switch"],
   "homeassistant": "2024.8.0"

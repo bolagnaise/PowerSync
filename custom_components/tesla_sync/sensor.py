@@ -497,7 +497,7 @@ class AEMOSpikeSensor(SensorEntity):
         return {}
 
 
-SIGNAL_TARIFF_UPDATED = "tesla_amber_sync_tariff_updated_{}"
+SIGNAL_TARIFF_UPDATED = "tesla_sync_tariff_updated_{}"
 
 
 class TariffScheduleSensor(SensorEntity):
@@ -591,7 +591,7 @@ class TariffScheduleSensor(SensorEntity):
         return attributes
 
 
-SIGNAL_CURTAILMENT_UPDATED = "tesla_amber_sync_curtailment_updated_{}"
+SIGNAL_CURTAILMENT_UPDATED = "tesla_sync_curtailment_updated_{}"
 
 
 class SolarCurtailmentSensor(SensorEntity):

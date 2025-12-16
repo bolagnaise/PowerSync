@@ -61,7 +61,7 @@ app/
 ├── tasks.py             # Background tasks (sync, curtailment, spikes)
 └── templates/           # Jinja2 templates
 
-custom_components/tesla_amber_sync/  # Home Assistant integration
+custom_components/tesla_sync/  # Home Assistant integration
 ├── __init__.py          # HA setup, services
 ├── coordinator.py       # Data coordinator
 ├── sensor.py            # HA sensor entities
@@ -139,7 +139,7 @@ flask shell
 
 ## Home Assistant Integration
 
-Located in `custom_components/tesla_amber_sync/`:
+Located in `custom_components/tesla_sync/`:
 - Uses Amber WebSocket for real-time price updates
 - Supports both Teslemetry and Tesla Fleet API
 - Creates sensors for prices, energy flow, battery status

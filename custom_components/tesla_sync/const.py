@@ -2,7 +2,7 @@
 from datetime import timedelta
 
 # Integration domain
-DOMAIN = "tesla_amber_sync"
+DOMAIN = "tesla_sync"
 
 # Configuration keys
 CONF_AMBER_API_TOKEN = "amber_api_token"

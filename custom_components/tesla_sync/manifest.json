@@ -1,6 +1,6 @@
 {
-  "domain": "tesla_amber_sync",
-  "name": "Tesla Amber Sync",
+  "domain": "tesla_sync",
+  "name": "Tesla Sync",
   "codeowners": ["@benboller"],
   "config_flow": true,
   "dependencies": [],

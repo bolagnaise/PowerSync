@@ -1282,7 +1282,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await store.async_save({"cached_export_rule": new_rule})
         _LOGGER.debug(f"Persisted cached_export_rule='{new_rule}' to storage")
         # Signal sensor to update
-        async_dispatcher_send(hass, f"tesla_amber_sync_curtailment_updated_{entry.entry_id}")
+        async_dispatcher_send(hass, f"tesla_sync_curtailment_updated_{entry.entry_id}")
 
     # Set up platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -1611,7 +1611,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("No buy prices in tariff schedule!")
 
         # Signal the tariff schedule sensor to update
-        async_dispatcher_send(hass, f"tesla_amber_sync_tariff_updated_{entry.entry_id}")
+        async_dispatcher_send(hass, f"tesla_sync_tariff_updated_{entry.entry_id}")
 
         # Send tariff to Tesla via Teslemetry or Fleet API
         # Get fresh token in case it was refreshed by tesla_fleet integration

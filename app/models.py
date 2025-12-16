@@ -156,7 +156,7 @@ class User(UserMixin, db.Model):
         totp = pyotp.TOTP(self.totp_secret)
         return totp.provisioning_uri(
             name=self.email,
-            issuer_name="Tesla Amber Sync"
+            issuer_name="Tesla Sync"
         )
 
     def verify_totp(self, token):

@@ -405,10 +405,10 @@ You can disable automatic syncing by turning off the switch, and re-enable it an
 
 ```yaml
 # Manually sync TOU schedule
-service: tesla_amber_sync.sync_tou_schedule
+service: tesla_sync.sync_tou_schedule
 
 # Refresh data from Amber and Teslemetry
-service: tesla_amber_sync.sync_now
+service: tesla_sync.sync_now
 ```
 
 ### Example Automations (Optional)
@@ -427,7 +427,7 @@ automation:
         entity_id: sensor.current_electricity_price
         above: 0.30
     action:
-      - service: tesla_amber_sync.sync_tou_schedule
+      - service: tesla_sync.sync_tou_schedule
 ```
 
 **Disable auto-sync during off-peak hours:**
@@ -440,7 +440,7 @@ automation:
     action:
       - service: switch.turn_off
         target:
-          entity_id: switch.tesla_amber_sync_auto_sync
+          entity_id: switch.tesla_sync_auto_sync
 
   - alias: "Enable Auto-Sync in Morning"
     trigger:
@@ -449,12 +449,12 @@ automation:
     action:
       - service: switch.turn_on
         target:
-          entity_id: switch.tesla_amber_sync_auto_sync
+          entity_id: switch.tesla_sync_auto_sync
 ```
 
 ### Pre-built Dashboard (Optional)
 
-A pre-built Lovelace dashboard is included for visualizing all Tesla Amber Sync data.
+A pre-built Lovelace dashboard is included for visualizing all Tesla Sync data.
 
 **Required HACS Frontend Cards:**
 - `power-flow-card-plus` - Real-time energy flow visualization
@@ -462,7 +462,7 @@ A pre-built Lovelace dashboard is included for visualizing all Tesla Amber Sync 
 
 **Installation:**
 1. Install the required HACS cards (HACS → Frontend → search for each card)
-2. Copy the dashboard YAML from `custom_components/tesla_amber_sync/dashboard/tesla_amber_sync_dashboard.yaml`
+2. Copy the dashboard YAML from `custom_components/tesla_sync/dashboard/tesla_sync_dashboard.yaml`
 3. In Home Assistant: Settings → Dashboards → Add Dashboard → "New dashboard from scratch"
 4. Edit the new dashboard → 3 dots menu → "Raw configuration editor"
 5. Paste the YAML content and save

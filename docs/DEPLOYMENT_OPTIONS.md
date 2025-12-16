@@ -80,7 +80,7 @@ See [UNRAID_SETUP.md](UNRAID_SETUP.md) for detailed instructions.
 4. Configure via UI
 
 #### Manual Installation
-1. Copy `custom_components/tesla_amber_sync/` to HA config
+1. Copy `custom_components/tesla_sync/` to HA config
 2. Restart Home Assistant
 3. Add integration via Settings → Devices & Services
 
