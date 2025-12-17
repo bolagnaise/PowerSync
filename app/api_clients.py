@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 logger = logging.getLogger(__name__)
 
 # Version and User-Agent for API identification
-TESLA_SYNC_VERSION = "2.0.0"
+TESLA_SYNC_VERSION = "2.1.0"
 TESLA_SYNC_USER_AGENT = f"TeslaSync/{TESLA_SYNC_VERSION}"
 
 
