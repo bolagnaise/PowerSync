@@ -655,6 +655,137 @@
         </form>
     </article>
 
+    <!-- Mobile App Integration -->
+    <article>
+        <header><strong>Mobile App Integration</strong></header>
+        <p>Connect the Tesla Sync mobile app to fetch battery health data.</p>
+
+        <div id="battery-health-token-section">
+            {% if current_user.battery_health_api_token %}
+            <div style="padding: 0.8em; background: rgba(0, 255, 0, 0.1); border-radius: 0.5em; margin-bottom: 1em;">
+                <p style="margin: 0; color: #51cf66; font-size: 0.9em;">✅ <strong>API Token Active</strong></p>
+                <p style="margin: 0.5em 0 0 0; font-size: 0.85em;">
+                    Token: <code id="battery-health-token" style="font-size: 0.8em;">{{ current_user.battery_health_api_token[:8] }}...{{ current_user.battery_health_api_token[-4:] }}</code>
+                    <button type="button" onclick="copyBatteryHealthToken()" style="margin-left: 0.5em; padding: 0.2em 0.5em; font-size: 0.8em;">Copy Full Token</button>
+                </p>
+            </div>
+
+            <div style="display: flex; gap: 0.5em;">
+                <button type="button" onclick="regenerateBatteryHealthToken()" class="outline" style="flex: 1;">
+                    Regenerate Token
+                </button>
+                <button type="button" onclick="revokeBatteryHealthToken()" class="outline secondary" style="flex: 1;">
+                    Revoke Token
+                </button>
+            </div>
+            {% else %}
+            <div style="padding: 0.8em; background: rgba(150, 150, 150, 0.1); border-radius: 0.5em; margin-bottom: 1em;">
+                <p style="margin: 0; color: #999; font-size: 0.9em;">⭕ <strong>No API Token</strong></p>
+                <p style="margin: 0.3em 0 0 0; font-size: 0.8em;">Generate a token to connect the mobile app.</p>
+            </div>
+
+            <button type="button" onclick="generateBatteryHealthToken()" class="outline primary" style="width: 100%;">
+                Generate API Token
+            </button>
+            {% endif %}
+        </div>
+
+        <p id="battery-health-token-status" style="font-size: 0.8em; margin-top: 0.5em; display: none;"></p>
+
+        <details style="margin-top: 1em;">
+            <summary style="font-size: 0.85em;">Mobile App Setup</summary>
+            <div style="font-size: 0.8em; margin-top: 0.5em; padding: 0.5em; background: rgba(100, 200, 150, 0.05); border-radius: 0.3em;">
+                <ol style="margin: 0.3em 0 0 1.2em; padding: 0;">
+                    <li style="margin: 0.3em 0;">Install the Tesla Sync Health app on your iPhone</li>
+                    <li style="margin: 0.3em 0;">Open Settings in the app</li>
+                    <li style="margin: 0.3em 0;">Enter your server URL and the API token above</li>
+                    <li style="margin: 0.3em 0;">Use "Fetch from Cloud" to get actual battery capacity</li>
+                </ol>
+            </div>
+        </details>
+    </article>
+
+    <script>
+        // Battery Health Token Management
+        async function generateBatteryHealthToken() {
+            const status = document.getElementById('battery-health-token-status');
+            status.style.display = 'block';
+            status.innerHTML = '<span style="color: #fcc419;">Generating token...</span>';
+
+            try {
+                const response = await fetch('/api/battery-health/generate-token', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                const data = await response.json();
+
+                if (data.token) {
+                    status.innerHTML = '<span style="color: #51cf66;">✓ Token generated! Copy it now - it won\'t be shown again in full.</span>';
+                    // Reload page to show the new token section
+                    setTimeout(() => location.reload(), 1500);
+                } else {
+                    status.innerHTML = '<span style="color: #ff6b6b;">✗ ' + (data.error || 'Failed to generate token') + '</span>';
+                }
+            } catch (error) {
+                status.innerHTML = '<span style="color: #ff6b6b;">✗ Error: ' + error.message + '</span>';
+            }
+        }
+
+        async function regenerateBatteryHealthToken() {
+            if (!confirm('Regenerate API token? The old token will stop working immediately.')) {
+                return;
+            }
+            await generateBatteryHealthToken();
+        }
+
+        async function revokeBatteryHealthToken() {
+            if (!confirm('Revoke API token? The mobile app will no longer be able to connect.')) {
+                return;
+            }
+
+            const status = document.getElementById('battery-health-token-status');
+            status.style.display = 'block';
+            status.innerHTML = '<span style="color: #fcc419;">Revoking token...</span>';
+
+            try {
+                const response = await fetch('/api/battery-health/revoke-token', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                const data = await response.json();
+
+                if (data.success) {
+                    status.innerHTML = '<span style="color: #51cf66;">✓ Token revoked</span>';
+                    setTimeout(() => location.reload(), 1000);
+                } else {
+                    status.innerHTML = '<span style="color: #ff6b6b;">✗ ' + (data.error || 'Failed to revoke token') + '</span>';
+                }
+            } catch (error) {
+                status.innerHTML = '<span style="color: #ff6b6b;">✗ Error: ' + error.message + '</span>';
+            }
+        }
+
+        async function copyBatteryHealthToken() {
+            try {
+                const response = await fetch('/api/battery-health/generate-token', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                const data = await response.json();
+
+                if (data.token) {
+                    await navigator.clipboard.writeText(data.token);
+                    const status = document.getElementById('battery-health-token-status');
+                    status.style.display = 'block';
+                    status.innerHTML = '<span style="color: #51cf66;">✓ Token copied to clipboard!</span>';
+                    setTimeout(() => { status.style.display = 'none'; }, 3000);
+                }
+            } catch (error) {
+                alert('Failed to copy token: ' + error.message);
+            }
+        }
+    </script>
+
     <!-- AEMO Spike Testing (separate from main form) - Only for Globird users -->
     {% if current_user.electricity_provider == 'globird' and current_user.aemo_spike_detection_enabled %}
     <article>
