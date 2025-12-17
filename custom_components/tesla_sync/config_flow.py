@@ -351,8 +351,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if validation_result["success"]:
                 self._amber_data = user_input
                 self._amber_sites = validation_result.get("sites", [])
-                # Go straight to Tesla provider - no AEMO config needed for Amber users
-                return await self.async_step_tesla_provider()
+                # Go to Amber settings (export boost, etc.) before Tesla provider
+                return await self.async_step_amber_settings()
             else:
                 errors["base"] = validation_result.get("error", "unknown")
 
@@ -369,6 +369,44 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={
                 "amber_url": "https://app.amber.com.au/developers",
             },
+        )
+
+    async def async_step_amber_settings(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle Amber-specific settings (export boost, etc.) during initial setup."""
+        if user_input is not None:
+            # Store Amber settings in _amber_data
+            self._amber_data[CONF_EXPORT_BOOST_ENABLED] = user_input.get(CONF_EXPORT_BOOST_ENABLED, False)
+            self._amber_data[CONF_EXPORT_PRICE_OFFSET] = user_input.get(CONF_EXPORT_PRICE_OFFSET, 0.0)
+            self._amber_data[CONF_EXPORT_MIN_PRICE] = user_input.get(CONF_EXPORT_MIN_PRICE, 0.0)
+            self._amber_data[CONF_EXPORT_BOOST_START] = user_input.get(CONF_EXPORT_BOOST_START, DEFAULT_EXPORT_BOOST_START)
+            self._amber_data[CONF_EXPORT_BOOST_END] = user_input.get(CONF_EXPORT_BOOST_END, DEFAULT_EXPORT_BOOST_END)
+            self._amber_data[CONF_EXPORT_BOOST_THRESHOLD] = user_input.get(CONF_EXPORT_BOOST_THRESHOLD, DEFAULT_EXPORT_BOOST_THRESHOLD)
+
+            # Continue to Tesla provider selection
+            return await self.async_step_tesla_provider()
+
+        data_schema = vol.Schema(
+            {
+                vol.Optional(CONF_EXPORT_BOOST_ENABLED, default=False): bool,
+                vol.Optional(CONF_EXPORT_PRICE_OFFSET, default=0.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.0, max=50.0)
+                ),
+                vol.Optional(CONF_EXPORT_MIN_PRICE, default=0.0): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.0, max=100.0)
+                ),
+                vol.Optional(CONF_EXPORT_BOOST_START, default=DEFAULT_EXPORT_BOOST_START): str,
+                vol.Optional(CONF_EXPORT_BOOST_END, default=DEFAULT_EXPORT_BOOST_END): str,
+                vol.Optional(CONF_EXPORT_BOOST_THRESHOLD, default=DEFAULT_EXPORT_BOOST_THRESHOLD): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.0, max=50.0)
+                ),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="amber_settings",
+            data_schema=data_schema,
         )
 
     async def async_step_tesla_provider(
