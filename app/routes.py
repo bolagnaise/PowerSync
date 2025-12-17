@@ -4427,7 +4427,7 @@ def api_battery_health_from_cloud():
             }), 404
 
         # Use first energy site (or user's selected site if configured)
-        site_id = user.tesla_site_id or energy_sites[0].get('energy_site_id')
+        site_id = user.tesla_energy_site_id or energy_sites[0].get('energy_site_id')
 
         # Get live status for battery capacity data
         live_status = tesla_client.get_site_status(site_id)
