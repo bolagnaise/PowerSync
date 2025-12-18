@@ -423,7 +423,7 @@
             <div style="padding: 0.75em; background: var(--card-sectionning-background-color); border-radius: 0.5em;">
                 <label style="display: flex; align-items: center; gap: 0.5em; cursor: pointer; margin: 0;">
                     <input type="checkbox" id="spike_protection_enabled" name="spike_protection_enabled"
-                           {% if current_user.spike_protection_enabled is not false %}checked{% endif %}
+                           {% if current_user.spike_protection_enabled %}checked{% endif %}
                            style="width: auto;">
                     <span><strong>Spike Protection</strong></span>
                 </label>

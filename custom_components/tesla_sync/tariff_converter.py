@@ -232,7 +232,7 @@ def convert_amber_to_tesla_tariff(
     demand_charge_days: str = "All Days",
     demand_artificial_price_enabled: bool = False,
     electricity_provider: str = "amber",
-    spike_protection_enabled: bool = True,
+    spike_protection_enabled: bool = False,
 ) -> dict[str, Any] | None:
     """
     Convert Amber price forecast to Tesla tariff format.
@@ -520,7 +520,7 @@ def _build_rolling_24h_tariff(
     feedin_lookup: dict[tuple[str, int, int], list[float]],
     detected_tz: Any = None,
     current_actual_interval: dict[str, Any] | None = None,
-    spike_protection_enabled: bool = True,
+    spike_protection_enabled: bool = False,
 ) -> tuple[dict[str, float], dict[str, float]]:
     """
     Build a rolling 24-hour tariff where past periods use tomorrow's prices.

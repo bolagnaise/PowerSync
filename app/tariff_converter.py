@@ -487,7 +487,7 @@ class AmberTariffConverter:
         #
         # EXCEPTION: If current buy price is negative or very low (< $0.05/kWh), allow charging
         # because getting paid to consume electricity is always profitable.
-        spike_protection_enabled = getattr(user, 'spike_protection_enabled', True) if user else True
+        spike_protection_enabled = getattr(user, 'spike_protection_enabled', False) if user else False
         if spike_protection_enabled and current_actual_interval:
             spike_status = current_actual_interval.get('general', {}).get('spikeStatus', 'none')
             if spike_status in ['potential', 'spike']:

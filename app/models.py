@@ -105,7 +105,7 @@ class User(UserMixin, db.Model):
     # Amber Spike Protection (anti-arbitrage)
     # When Amber reports spikeStatus='potential' or 'spike', inflate buy prices to max(sell)+$1
     # This prevents Powerwall from charging from grid during spikes to arbitrage
-    spike_protection_enabled = db.Column(db.Boolean, default=True)
+    spike_protection_enabled = db.Column(db.Boolean, default=False)
 
     # Manual Discharge Mode (Force Discharge button)
     manual_discharge_active = db.Column(db.Boolean, default=False)  # Currently in manual discharge mode

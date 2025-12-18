@@ -1604,10 +1604,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
         )
 
-        # Get spike protection setting (Amber only, default enabled)
+        # Get spike protection setting (Amber only, opt-in feature)
         spike_protection_enabled = entry.options.get(
             CONF_SPIKE_PROTECTION_ENABLED,
-            entry.data.get(CONF_SPIKE_PROTECTION_ENABLED, True)
+            entry.data.get(CONF_SPIKE_PROTECTION_ENABLED, False)
         )
 
         # Convert prices to Tesla tariff format

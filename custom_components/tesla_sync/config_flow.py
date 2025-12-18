@@ -909,7 +909,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     ): bool,
                     vol.Optional(
                         CONF_SPIKE_PROTECTION_ENABLED,
-                        default=self._get_option(CONF_SPIKE_PROTECTION_ENABLED, True),
+                        default=self._get_option(CONF_SPIKE_PROTECTION_ENABLED, False),
                     ): bool,
                     vol.Optional(
                         CONF_EXPORT_BOOST_ENABLED,
