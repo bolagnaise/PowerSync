@@ -14,6 +14,74 @@ logger = logging.getLogger(__name__)
 TESLA_SYNC_VERSION = "2.2.0"
 TESLA_SYNC_USER_AGENT = f"TeslaSync/{TESLA_SYNC_VERSION}"
 
+# Transient HTTP errors that should trigger retry
+TRANSIENT_STATUS_CODES = {502, 503, 504}
+MAX_RETRIES = 3
+RETRY_BACKOFF_BASE = 2  # Exponential backoff: 2s, 4s, 8s
+
+
+def request_with_retry(method, url, max_retries=MAX_RETRIES, **kwargs):
+    """
+    Make an HTTP request with retry logic for transient errors.
+
+    Retries on:
+    - 502 Bad Gateway
+    - 503 Service Unavailable
+    - 504 Gateway Timeout
+    - Connection errors
+    - Timeout errors
+
+    Uses exponential backoff: 2s, 4s, 8s between retries.
+
+    Args:
+        method: HTTP method ('get', 'post', 'put', etc.)
+        url: Request URL
+        max_retries: Maximum number of retry attempts
+        **kwargs: Additional arguments passed to requests
+
+    Returns:
+        Response object on success, or raises the last exception on failure
+    """
+    last_exception = None
+    request_func = getattr(requests, method.lower())
+
+    for attempt in range(max_retries + 1):
+        try:
+            response = request_func(url, **kwargs)
+
+            # Check for transient errors
+            if response.status_code in TRANSIENT_STATUS_CODES:
+                if attempt < max_retries:
+                    wait_time = RETRY_BACKOFF_BASE ** (attempt + 1)
+                    logger.warning(
+                        f"Transient error {response.status_code} on attempt {attempt + 1}/{max_retries + 1}, "
+                        f"retrying in {wait_time}s..."
+                    )
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(
+                        f"Transient error {response.status_code} persisted after {max_retries + 1} attempts"
+                    )
+
+            return response
+
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_exception = e
+            if attempt < max_retries:
+                wait_time = RETRY_BACKOFF_BASE ** (attempt + 1)
+                logger.warning(
+                    f"Request failed on attempt {attempt + 1}/{max_retries + 1} ({type(e).__name__}), "
+                    f"retrying in {wait_time}s..."
+                )
+                time.sleep(wait_time)
+            else:
+                logger.error(f"Request failed after {max_retries + 1} attempts: {e}")
+                raise
+
+    # If we get here, we exhausted retries on transient status codes
+    return response
+
 
 class TeslaAPIClientBase(ABC):
     """Abstract base class for Tesla API clients (Fleet API, Teslemetry, etc.)"""
@@ -889,7 +957,8 @@ class FleetAPIClient(TeslaAPIClientBase):
         """
         Set the electricity tariff/rate plan for the site via Fleet API
 
-        Uses the time_of_use_settings endpoint with tariff_content_v2
+        Uses the time_of_use_settings endpoint with tariff_content_v2.
+        Includes retry logic for transient errors (502, 503, 504, timeouts).
 
         Args:
             site_id: Energy site ID
@@ -919,8 +988,12 @@ class FleetAPIClient(TeslaAPIClientBase):
                 else:
                     logger.warning(f"DEBUG: No tou_periods in tariff being sent!")
 
-            response = requests.post(
-                f"{self.base_url}/api/1/energy_sites/{site_id}/time_of_use_settings",
+            url = f"{self.base_url}/api/1/energy_sites/{site_id}/time_of_use_settings"
+
+            # Use retry logic for transient errors (502, 503, 504, timeouts)
+            response = request_with_retry(
+                'post',
+                url,
                 headers=self.headers,
                 json=payload,
                 timeout=30
@@ -929,8 +1002,9 @@ class FleetAPIClient(TeslaAPIClientBase):
             # Auto-refresh on 401
             if response.status_code == 401 and self.refresh_token:
                 self.refresh_access_token()
-                response = requests.post(
-                    f"{self.base_url}/api/1/energy_sites/{site_id}/time_of_use_settings",
+                response = request_with_retry(
+                    'post',
+                    url,
                     headers=self.headers,
                     json=payload,
                     timeout=30
@@ -1463,7 +1537,8 @@ class TeslemetryAPIClient(TeslaAPIClientBase):
         """
         Set the electricity tariff/rate plan for the site
 
-        Uses the time_of_use_settings endpoint with tariff_content_v2
+        Uses the time_of_use_settings endpoint with tariff_content_v2.
+        Includes retry logic for transient errors (502, 503, 504, timeouts).
 
         Args:
             site_id: Energy site ID
@@ -1493,8 +1568,12 @@ class TeslemetryAPIClient(TeslaAPIClientBase):
                 else:
                     logger.warning(f"DEBUG: No tou_periods in tariff being sent!")
 
-            response = requests.post(
-                f"{self.base_url}/api/1/energy_sites/{site_id}/time_of_use_settings",
+            url = f"{self.base_url}/api/1/energy_sites/{site_id}/time_of_use_settings"
+
+            # Use retry logic for transient errors (502, 503, 504, timeouts)
+            response = request_with_retry(
+                'post',
+                url,
                 headers=self.headers,
                 json=payload,
                 timeout=30  # Longer timeout for tariff updates

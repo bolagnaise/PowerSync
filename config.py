@@ -44,3 +44,13 @@ class Config:
     default_db_path = os.path.join(basedir, 'data', 'app.db') if os.path.exists(os.path.join(basedir, 'data')) else os.path.join(basedir, 'app.db')
     SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or 'sqlite:///' + default_db_path
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+
+    # SQLite-specific settings to reduce locking issues
+    # Increase busy timeout to 30 seconds (default is 5 seconds)
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        'connect_args': {
+            'timeout': 30,  # SQLite busy timeout in seconds
+            'check_same_thread': False,  # Allow multi-threaded access
+        },
+        'pool_pre_ping': True,  # Verify connections before use
+    }

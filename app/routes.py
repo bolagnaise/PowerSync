@@ -12,6 +12,7 @@ from app.route_helpers import (
     require_amber_client,
     require_tesla_site_id,
     db_transaction,
+    db_commit_with_retry,
     start_background_task,
     restore_tariff_background
 )
@@ -2990,7 +2991,7 @@ def api_force_discharge(tesla_client):
             # Extend the duration
             new_expires_at = datetime.utcnow() + timedelta(minutes=duration_minutes)
             current_user.manual_discharge_expires_at = new_expires_at
-            db.session.commit()
+            db_commit_with_retry()
             logger.info(f"Extended discharge mode to {new_expires_at}")
             return jsonify({
                 'success': True,
@@ -3044,7 +3045,7 @@ def api_force_discharge(tesla_client):
             # Update user state
             current_user.manual_discharge_active = True
             current_user.manual_discharge_expires_at = expires_at
-            db.session.commit()
+            db_commit_with_retry()
 
             # Force Powerwall to apply the tariff immediately
             from app.tasks import force_tariff_refresh
@@ -3162,7 +3163,7 @@ def api_restore_normal(tesla_client):
         current_user.aemo_in_spike_mode = False
         current_user.aemo_spike_test_mode = False
         current_user.aemo_spike_start_time = None
-        db.session.commit()
+        db_commit_with_retry()
 
         message = 'Normal operation restored'
         if restore_method == 'amber_sync':

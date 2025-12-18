@@ -120,17 +120,64 @@ def require_tesla_site_id(f):
 # Database Transaction Helper
 # ============================================================================
 
+def db_commit_with_retry(max_retries=3, retry_delay=0.5):
+    """Commit database session with retry logic for SQLite locking.
+
+    SQLite can return "database is locked" errors when multiple processes
+    try to write simultaneously. This function retries the commit with
+    exponential backoff.
+
+    Args:
+        max_retries: Maximum number of retry attempts (default: 3)
+        retry_delay: Initial delay between retries in seconds (default: 0.5)
+
+    Raises:
+        Exception: The last exception if all retries fail
+    """
+    import sqlite3
+
+    last_exception = None
+    for attempt in range(max_retries + 1):
+        try:
+            db.session.commit()
+            return  # Success
+        except Exception as e:
+            last_exception = e
+            # Check if it's a SQLite locking error
+            is_locked = (
+                'database is locked' in str(e).lower() or
+                (hasattr(e, 'orig') and isinstance(e.orig, sqlite3.OperationalError))
+            )
+
+            if is_locked and attempt < max_retries:
+                wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                logger.warning(
+                    f"Database locked on attempt {attempt + 1}/{max_retries + 1}, "
+                    f"retrying in {wait_time}s..."
+                )
+                db.session.rollback()
+                time.sleep(wait_time)
+            else:
+                # Not a locking error or out of retries
+                db.session.rollback()
+                raise
+
+    # Should not reach here, but just in case
+    raise last_exception
+
+
 @contextmanager
-def db_transaction(success_msg=None, error_msg=None, logger_context=None):
+def db_transaction(success_msg=None, error_msg=None, logger_context=None, retry_on_lock=True):
     """Context manager for database transactions with error handling
 
     Automatically commits on success, rolls back on error, handles logging
-    and flash messages.
+    and flash messages. Includes retry logic for SQLite database locking.
 
     Args:
         success_msg: Flash message to show on successful commit
         error_msg: Flash message to show on error
         logger_context: Context string for log messages
+        retry_on_lock: Whether to retry on SQLite locking errors (default: True)
 
     Usage:
         try:
@@ -146,7 +193,10 @@ def db_transaction(success_msg=None, error_msg=None, logger_context=None):
     """
     try:
         yield
-        db.session.commit()
+        if retry_on_lock:
+            db_commit_with_retry()
+        else:
+            db.session.commit()
         if success_msg:
             flash(success_msg)
         if logger_context:
