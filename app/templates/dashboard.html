@@ -43,6 +43,52 @@
         </div>
     </article>
 
+    <!-- Manual Discharge Controls -->
+    <article id="discharge-controls" style="max-width: 800px; padding: 0.75rem; margin: 0 auto 1rem auto;">
+        <header style="margin-bottom: 0.5rem; text-align: center;"><strong>🔋 Manual Battery Control</strong></header>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+            <div style="text-align: center;">
+                <button id="force-discharge-btn" onclick="showDischargeModal()" class="contrast" style="width: 100%; padding: 0.75rem;">
+                    ⚡ Force Discharge
+                </button>
+            </div>
+            <div style="text-align: center;">
+                <button id="restore-normal-btn" onclick="restoreNormal()" class="secondary" style="width: 100%; padding: 0.75rem;">
+                    🔄 Restore Normal
+                </button>
+            </div>
+        </div>
+        <div id="discharge-status" style="display: none; margin-top: 0.75rem; padding: 0.5rem; border-radius: 0.5rem; background: rgba(234, 179, 8, 0.2); text-align: center;">
+            <span id="discharge-status-text"></span>
+        </div>
+    </article>
+
+    <!-- Force Discharge Modal -->
+    <dialog id="discharge-modal">
+        <article style="max-width: 400px;">
+            <header>
+                <button aria-label="Close" rel="prev" onclick="closeDischargeModal()"></button>
+                <strong>⚡ Force Discharge</strong>
+            </header>
+            <p>Select how long to force battery discharge. The battery will export at maximum rate during this period.</p>
+            <label for="discharge-duration">Duration</label>
+            <select id="discharge-duration">
+                <option value="15">15 minutes</option>
+                <option value="30" selected>30 minutes</option>
+                <option value="45">45 minutes</option>
+                <option value="60">1 hour</option>
+                <option value="75">1 hour 15 min</option>
+                <option value="90">1 hour 30 min</option>
+                <option value="105">1 hour 45 min</option>
+                <option value="120">2 hours</option>
+            </select>
+            <footer>
+                <button class="secondary" onclick="closeDischargeModal()">Cancel</button>
+                <button onclick="activateForceDischarge()">Activate</button>
+            </footer>
+        </article>
+    </dialog>
+
     <!-- AEMO Wholesale Price Monitor -->
     <article id="aemo-price-monitor" style="display: none; background: linear-gradient(135deg, #065f46 0%, #047857 100%); color: white; padding: 1.5em; margin-top: 2rem;">
         <header style="text-align: center; margin-bottom: 1em;">
@@ -286,6 +332,152 @@
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-crosshair@2.0.0/dist/chartjs-plugin-crosshair.min.js"></script>
 
     <script>
+        // ========================================
+        // DISCHARGE CONTROL FUNCTIONS
+        // ========================================
+
+        // Show discharge duration modal
+        function showDischargeModal() {
+            document.getElementById('discharge-modal').showModal();
+        }
+
+        // Close discharge modal
+        function closeDischargeModal() {
+            document.getElementById('discharge-modal').close();
+        }
+
+        // Activate force discharge
+        async function activateForceDischarge() {
+            const duration = document.getElementById('discharge-duration').value;
+            const btn = document.getElementById('force-discharge-btn');
+
+            btn.setAttribute('aria-busy', 'true');
+            btn.disabled = true;
+
+            try {
+                const response = await fetch('/api/force-discharge', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ duration_minutes: parseInt(duration) })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    closeDischargeModal();
+                    updateDischargeStatus(true, result.expires_at, duration);
+                    showNotification('Force discharge activated for ' + duration + ' minutes', 'success');
+                } else {
+                    showNotification('Error: ' + (result.error || 'Failed to activate discharge'), 'error');
+                }
+            } catch (error) {
+                showNotification('Error: ' + error.message, 'error');
+            } finally {
+                btn.removeAttribute('aria-busy');
+                btn.disabled = false;
+            }
+        }
+
+        // Restore normal operation
+        async function restoreNormal() {
+            const btn = document.getElementById('restore-normal-btn');
+
+            btn.setAttribute('aria-busy', 'true');
+            btn.disabled = true;
+
+            try {
+                const response = await fetch('/api/restore-normal', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    updateDischargeStatus(false);
+                    showNotification('Normal operation restored', 'success');
+                } else {
+                    showNotification('Error: ' + (result.error || 'Failed to restore'), 'error');
+                }
+            } catch (error) {
+                showNotification('Error: ' + error.message, 'error');
+            } finally {
+                btn.removeAttribute('aria-busy');
+                btn.disabled = false;
+            }
+        }
+
+        // Update discharge status display
+        function updateDischargeStatus(active, expiresAt, durationMinutes) {
+            const statusDiv = document.getElementById('discharge-status');
+            const statusText = document.getElementById('discharge-status-text');
+            const dischargeBtn = document.getElementById('force-discharge-btn');
+            const restoreBtn = document.getElementById('restore-normal-btn');
+
+            if (active) {
+                const expiry = new Date(expiresAt);
+                const timeStr = expiry.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                statusDiv.style.display = 'block';
+                statusDiv.style.background = 'rgba(234, 179, 8, 0.2)';
+                statusText.innerHTML = '⚡ <strong>Force Discharge Active</strong> - Expires at ' + timeStr + ' (' + durationMinutes + ' min)';
+                dischargeBtn.classList.remove('contrast');
+                dischargeBtn.classList.add('outline');
+                dischargeBtn.innerHTML = '⚡ Discharging...';
+            } else {
+                statusDiv.style.display = 'none';
+                dischargeBtn.classList.remove('outline');
+                dischargeBtn.classList.add('contrast');
+                dischargeBtn.innerHTML = '⚡ Force Discharge';
+            }
+        }
+
+        // Check current discharge status on page load
+        async function checkDischargeStatus() {
+            try {
+                const response = await fetch('/api/discharge-status');
+                const status = await response.json();
+
+                if (status.active) {
+                    updateDischargeStatus(true, status.expires_at, status.remaining_minutes);
+                }
+            } catch (error) {
+                console.error('Error checking discharge status:', error);
+            }
+        }
+
+        // Simple notification function
+        function showNotification(message, type) {
+            // Create notification element
+            const notification = document.createElement('div');
+            notification.style.cssText = `
+                position: fixed;
+                top: 1rem;
+                right: 1rem;
+                padding: 1rem 1.5rem;
+                border-radius: 0.5rem;
+                color: white;
+                font-weight: bold;
+                z-index: 9999;
+                animation: slideIn 0.3s ease;
+                background: ${type === 'success' ? '#22c55e' : '#ef4444'};
+            `;
+            notification.textContent = message;
+            document.body.appendChild(notification);
+
+            // Remove after 3 seconds
+            setTimeout(() => {
+                notification.style.animation = 'slideOut 0.3s ease';
+                setTimeout(() => notification.remove(), 300);
+            }, 3000);
+        }
+
+        // Check discharge status on page load
+        document.addEventListener('DOMContentLoaded', checkDischargeStatus);
+
+        // ========================================
+        // PRICE CHANNEL FUNCTIONS
+        // ========================================
+
         // Track selected price channel (general = import, feedIn = export)
         let selectedChannel = 'general';
 
