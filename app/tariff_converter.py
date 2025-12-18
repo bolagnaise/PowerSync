@@ -97,6 +97,7 @@ class AmberTariffConverter:
         # Build timestamp-indexed price lookup: (date, hour, minute) -> price
         general_lookup = {}  # (date_str, hour, minute) -> [prices]
         feedin_lookup = {}
+        spike_lookup = {}  # (date_str, hour, minute) -> spikeStatus ('potential' or 'spike')
 
         # Count interval types for logging
         interval_types = {}
@@ -222,6 +223,12 @@ class AmberTariffConverter:
                     if lookup_key not in general_lookup:
                         general_lookup[lookup_key] = []
                     general_lookup[lookup_key].append(per_kwh_dollars)
+
+                    # Track spike status for this period (from general channel)
+                    spike_status = point.get('spikeStatus', 'none')
+                    if spike_status in ['potential', 'spike']:
+                        spike_lookup[lookup_key] = spike_status
+
                 elif channel_type == 'feedIn':
                     if lookup_key not in feedin_lookup:
                         feedin_lookup[lookup_key] = []
@@ -239,9 +246,13 @@ class AmberTariffConverter:
             logger.debug(f"Lookup dates available: {dates_in_lookup}")
             logger.debug(f"Lookup keys sample: {times_sample}")
 
+        # Log any spike periods detected
+        if spike_lookup:
+            logger.info(f"⚡ Amber spike status detected for {len(spike_lookup)} periods: {spike_lookup}")
+
         # Now build the rolling 24-hour tariff
         general_prices, feedin_prices = self._build_rolling_24h_tariff(
-            general_lookup, feedin_lookup, user, detected_tz, current_actual_interval
+            general_lookup, feedin_lookup, user, detected_tz, current_actual_interval, spike_lookup
         )
 
         # If too many periods are missing, abort sync to preserve last good tariff
@@ -256,7 +267,7 @@ class AmberTariffConverter:
 
         return tariff
 
-    def _build_rolling_24h_tariff(self, general_lookup: Dict, feedin_lookup: Dict, user=None, detected_tz=None, current_actual_interval: Dict = None) -> tuple:
+    def _build_rolling_24h_tariff(self, general_lookup: Dict, feedin_lookup: Dict, user=None, detected_tz=None, current_actual_interval: Dict = None, spike_lookup: Dict = None) -> tuple:
         """
         Build a rolling 24-hour tariff where past periods use tomorrow's prices
 
@@ -271,6 +282,7 @@ class AmberTariffConverter:
             general_lookup: Dict of (date, hour, minute) -> [prices] for buy prices
             feedin_lookup: Dict of (date, hour, minute) -> [prices] for sell prices
             user: User object with demand charge settings
+            spike_lookup: Dict of (date, hour, minute) -> spike status for periods with spikes
             detected_tz: Timezone detected from Amber data timestamps
             current_actual_interval: Dict with 'general' and 'feedIn' ActualInterval data (optional)
                                     If provided, uses this for the current 30-min period
@@ -480,86 +492,53 @@ class AmberTariffConverter:
                 feedin_prices[key] = 0
 
         # SPIKE PROTECTION: Prevent grid charging during Amber price spikes
-        # When Amber reports spikeStatus='potential' or 'spike', the Powerwall may see an
+        # When Amber reports spikeStatus='potential' or 'spike' for a period, the Powerwall may see an
         # arbitrage opportunity (cheap now, expensive later) and charge from grid.
-        # This defeats the purpose of buying cheap and selling high during the spike.
-        # Solution: Override buy prices to max(all_sell_prices) + $1.00 to eliminate arbitrage.
+        # Solution: Override buy prices to max(all_sell_prices) + $1.00 for periods Amber marks as spikes.
         #
-        # EXCEPTION: If current buy price is negative or very low (< $0.05/kWh), allow charging
+        # EXCEPTION: If a period's buy price is negative or very low (< $0.05/kWh), allow charging
         # because getting paid to consume electricity is always profitable.
         spike_protection_enabled = getattr(user, 'spike_protection_enabled', False) if user else False
-        if spike_protection_enabled and current_actual_interval:
-            spike_status = current_actual_interval.get('general', {}).get('spikeStatus', 'none')
-            if spike_status in ['potential', 'spike']:
-                # Check current actual buy price - if negative/very low, skip protection
-                # (we want to charge when import prices are negative - free electricity!)
-                current_buy_cents = current_actual_interval.get('general', {}).get('perKwh', 0)
-                current_buy_dollars = current_buy_cents / 100
+        if spike_protection_enabled and spike_lookup:
+            # Find maximum sell price across all periods (for override calculation)
+            max_sell_price = max(feedin_prices.values()) if feedin_prices else 0
+            override_buy = max_sell_price + 1.00
 
-                # Threshold: Only apply spike protection if current price > $0.05/kWh
-                # Below this, charging is essentially free or profitable
-                NEGATIVE_PRICE_THRESHOLD = 0.05
+            NEGATIVE_PRICE_THRESHOLD = 0.05
+            periods_overridden = 0
+            periods_skipped_low_price = 0
 
-                if current_buy_dollars < NEGATIVE_PRICE_THRESHOLD:
-                    logger.info(
-                        f"⚡ SPIKE DETECTED (status={spike_status}) but current buy price is "
-                        f"${current_buy_dollars:.4f}/kWh (below ${NEGATIVE_PRICE_THRESHOLD}) - "
-                        f"ALLOWING charging (negative/low price opportunity)"
-                    )
-                else:
-                    # Only override ADJACENT periods (current + next 2 hours = 4 periods)
-                    # This prevents immediate arbitrage but allows charging later when spike is over
-                    SPIKE_PROTECTION_PERIODS = 4  # 2 hours of protection
+            # Build set of period keys that have spike status
+            # spike_lookup keys are (date, hour, minute), we need to map to PERIOD_HH_MM
+            spike_period_keys = set()
+            for (date_str, hour, minute), status in spike_lookup.items():
+                period_key = f"PERIOD_{hour:02d}_{minute:02d}"
+                spike_period_keys.add(period_key)
 
-                    # Find maximum sell price across all periods (for override calculation)
-                    max_sell_price = max(feedin_prices.values()) if feedin_prices else 0
+            logger.info(f"⚡ Amber reports spikes for periods: {sorted(spike_period_keys)}")
 
-                    # Override buy prices to max(sell) + $1.00
-                    override_buy = max_sell_price + 1.00
-                    periods_overridden = 0
-                    periods_skipped_low_price = 0
-                    periods_skipped_not_adjacent = 0
+            for period_key, buy_price in list(general_prices.items()):
+                # Only protect periods that Amber marks as having a spike
+                if period_key not in spike_period_keys:
+                    continue
 
-                    # Build list of periods to protect (current + next N)
-                    # Period keys are like PERIOD_HH_MM
-                    protected_periods = set()
-                    current_total_minutes = current_hour * 60 + current_minute
+                # Skip negative/very low prices - we want to allow charging during those
+                if buy_price < NEGATIVE_PRICE_THRESHOLD:
+                    periods_skipped_low_price += 1
+                    logger.info(f"{period_key}: Spike period but price ${buy_price:.4f} is low - allowing charging")
+                    continue
 
-                    for i in range(SPIKE_PROTECTION_PERIODS + 1):  # +1 to include current
-                        # Calculate period time (30-min increments)
-                        period_minutes = current_total_minutes + (i * 30)
-                        # Handle day rollover
-                        period_minutes = period_minutes % (24 * 60)
-                        period_hour = period_minutes // 60
-                        period_min = period_minutes % 60
-                        # Round to 30-min boundary
-                        period_min = 0 if period_min < 30 else 30
-                        protected_periods.add(f"PERIOD_{period_hour:02d}_{period_min:02d}")
+                if override_buy > buy_price:
+                    logger.info(f"{period_key}: SPIKE OVERRIDE - BUY ${buy_price:.4f} -> ${override_buy:.4f} (max_sell=${max_sell_price:.4f})")
+                    general_prices[period_key] = override_buy
+                    periods_overridden += 1
 
-                    logger.info(f"Spike protection covering periods: {sorted(protected_periods)}")
-
-                    for period_key, buy_price in list(general_prices.items()):
-                        # Only protect adjacent periods
-                        if period_key not in protected_periods:
-                            periods_skipped_not_adjacent += 1
-                            continue
-
-                        # Skip negative/very low prices - we want to allow charging during those
-                        if buy_price < NEGATIVE_PRICE_THRESHOLD:
-                            periods_skipped_low_price += 1
-                            continue
-
-                        if override_buy > buy_price:
-                            logger.info(f"{period_key}: SPIKE OVERRIDE - BUY ${buy_price:.4f} -> ${override_buy:.4f} (max_sell=${max_sell_price:.4f})")
-                            general_prices[period_key] = override_buy
-                            periods_overridden += 1
-
-                    logger.warning(
-                        f"⚡ SPIKE PROTECTION ACTIVE (status={spike_status}): "
-                        f"Overriding {periods_overridden} buy prices to ${override_buy:.4f}/kWh for next 2 hours "
-                        f"(max_sell=${max_sell_price:.4f} + $1.00 margin)"
-                        f"{f' (skipped {periods_skipped_low_price} low-price periods)' if periods_skipped_low_price else ''}"
-                    )
+            if periods_overridden > 0:
+                logger.warning(
+                    f"⚡ SPIKE PROTECTION ACTIVE: Overriding {periods_overridden} spike periods to ${override_buy:.4f}/kWh "
+                    f"(max_sell=${max_sell_price:.4f} + $1.00 margin)"
+                    f"{f' (skipped {periods_skipped_low_price} low-price periods)' if periods_skipped_low_price else ''}"
+                )
 
         # Apply artificial price increase during demand periods if enabled (ALPHA feature)
         if user and getattr(user, 'demand_artificial_price_enabled', False) and getattr(user, 'enable_demand_charges', False):
