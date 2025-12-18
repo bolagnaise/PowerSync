@@ -44,20 +44,6 @@
                             👁️
                         </button>
                     </div>
-
-                    <!-- Spike Protection -->
-                    <div style="margin-top: 1em; padding: 0.75em; background: var(--card-sectionning-background-color); border-radius: 0.5em;">
-                        <label style="display: flex; align-items: center; gap: 0.5em; cursor: pointer; margin: 0;">
-                            <input type="checkbox" id="spike_protection_enabled" name="spike_protection_enabled"
-                                   {% if current_user.spike_protection_enabled is not false %}checked{% endif %}
-                                   style="width: auto;">
-                            <span><strong>Spike Protection</strong></span>
-                        </label>
-                        <p style="font-size: 0.75em; color: var(--muted-color); margin: 0.5em 0 0 1.5em;">
-                            When Amber detects a price spike, artificially inflate buy prices to prevent
-                            Powerwall from charging from grid (stops arbitrage behavior during spikes).
-                        </p>
-                    </div>
                 </fieldset>
             </div>
 
@@ -423,6 +409,34 @@
             <button type="submit" class="primary" style="margin-top: 1em;">Save Provider Settings</button>
         </form>
     </article>
+
+    <!-- Amber Settings - Only shown for Amber users -->
+    {% if not current_user.electricity_provider or current_user.electricity_provider == 'amber' %}
+    <article>
+        <header><strong>Amber Settings</strong></header>
+        <p>Configure Amber-specific features for your Powerwall.</p>
+
+        <form action="{{ url_for('main.settings') }}" method="post" novalidate>
+            {{ form.hidden_tag() }}
+
+            <!-- Spike Protection -->
+            <div style="padding: 0.75em; background: var(--card-sectionning-background-color); border-radius: 0.5em;">
+                <label style="display: flex; align-items: center; gap: 0.5em; cursor: pointer; margin: 0;">
+                    <input type="checkbox" id="spike_protection_enabled" name="spike_protection_enabled"
+                           {% if current_user.spike_protection_enabled is not false %}checked{% endif %}
+                           style="width: auto;">
+                    <span><strong>Spike Protection</strong></span>
+                </label>
+                <p style="font-size: 0.75em; color: var(--muted-color); margin: 0.5em 0 0 1.5em;">
+                    When Amber detects a price spike, artificially inflate buy prices to prevent
+                    Powerwall from charging from grid (stops arbitrage behavior during spikes).
+                </p>
+            </div>
+
+            <button type="submit" class="primary" style="margin-top: 1em;">Save Amber Settings</button>
+        </form>
+    </article>
+    {% endif %}
 
     <!-- Tesla Configuration - Combined Section -->
     <article>

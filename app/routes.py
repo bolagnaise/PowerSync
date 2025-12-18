@@ -535,8 +535,8 @@ def settings():
                 logger.info(f"Saving electricity provider: {provider}")
                 current_user.electricity_provider = provider
 
-        # Amber Spike Protection (checkbox - only saved when Amber form is submitted)
-        if 'electricity_provider' in submitted_fields:
+        # Amber Spike Protection (checkbox - saved from either electricity provider form or Amber settings form)
+        if 'spike_protection_enabled' in submitted_fields or 'electricity_provider' in submitted_fields:
             current_user.spike_protection_enabled = 'spike_protection_enabled' in request.form
             logger.info(f"Saving spike protection enabled: {current_user.spike_protection_enabled}")
 
