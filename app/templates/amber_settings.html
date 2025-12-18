@@ -73,6 +73,31 @@
             </fieldset>
 
             <fieldset>
+                <legend>Spike Protection</legend>
+                <p style="font-size: 0.85em; margin: 0 0 1em 0; color: var(--muted-color);">
+                    Prevent Powerwall from charging from grid during Amber price spikes. Stops arbitrage behavior that would otherwise charge during high-cost spike periods.
+                </p>
+
+                <label for="spike_protection_enabled" style="display: flex; align-items: center; gap: 0.5em; cursor: pointer;">
+                    <input type="checkbox" id="spike_protection_enabled" name="spike_protection_enabled"
+                           {% if current_user.spike_protection_enabled %}checked{% endif %}>
+                    <span>Enable Spike Protection</span>
+                </label>
+
+                <details style="margin-top: 0.5em;">
+                    <summary style="font-size: 0.85em;">How does spike protection work?</summary>
+                    <div style="font-size: 0.8em; margin-top: 0.5em; padding: 0.5em; background: rgba(100, 150, 200, 0.05); border-radius: 0.3em;">
+                        <p style="margin: 0.3em 0;">When Amber detects a price spike, the Powerwall may see an arbitrage opportunity and charge from grid. This defeats the purpose of avoiding high prices.</p>
+                        <ul style="margin: 0.3em 0 0 1.2em; padding: 0;">
+                            <li style="margin: 0.5em 0;"><strong>How it works:</strong> When Amber reports 'potential' or 'spike' status for a period, buy prices are overridden to max(sell) + $1/kWh - eliminating any arbitrage profit.</li>
+                            <li style="margin: 0.5em 0;"><strong>Exception:</strong> If import price is negative or very low (&lt;5c/kWh), charging is still allowed since you're being paid to consume.</li>
+                            <li style="margin: 0.5em 0;"><strong>Per-period:</strong> Only affects periods that Amber identifies as having spike status, not a fixed time window.</li>
+                        </ul>
+                    </div>
+                </details>
+            </fieldset>
+
+            <fieldset>
                 <legend>Export Price Boost</legend>
                 <p style="font-size: 0.85em; margin: 0 0 1em 0; color: var(--muted-color);">
                     Artificially increase export prices to trigger Powerwall exports. Useful when prices are in the 20-25c range where Tesla may not export.

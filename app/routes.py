@@ -879,6 +879,10 @@ def amber_settings():
             except (ValueError, TypeError):
                 pass
 
+        # Spike Protection setting
+        current_user.spike_protection_enabled = 'spike_protection_enabled' in request.form
+        logger.info(f"Saving spike protection enabled: {current_user.spike_protection_enabled}")
+
         try:
             db.session.commit()
             logger.info(f"Amber settings saved successfully: forecast_type={form.amber_forecast_type.data}, site_id={current_user.amber_site_id}")
