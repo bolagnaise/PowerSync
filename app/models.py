@@ -107,6 +107,13 @@ class User(UserMixin, db.Model):
     # This prevents Powerwall from charging from grid during spikes to arbitrage
     spike_protection_enabled = db.Column(db.Boolean, default=False)
 
+    # Settled Prices Only Mode
+    # When enabled, skips the initial forecast sync at :00 seconds and only syncs when:
+    # - WebSocket delivers actual/settled prices, OR
+    # - REST API check at :35/:60 seconds (when prices are settled)
+    # This avoids syncing predicted prices that may differ from actual settled prices
+    settled_prices_only = db.Column(db.Boolean, default=False)
+
     # Manual Discharge Mode (Force Discharge button)
     manual_discharge_active = db.Column(db.Boolean, default=False)  # Currently in manual discharge mode
     manual_discharge_expires_at = db.Column(db.DateTime, nullable=True)  # When to auto-restore normal operation

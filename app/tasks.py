@@ -423,6 +423,12 @@ def _sync_all_users_internal(websocket_data, sync_mode='initial_forecast'):
                 logger.debug(f"Skipping user {user.email} - AEMO mode but no region configured")
                 continue
 
+            # Settled Prices Only mode: Skip initial forecast sync (Stage 1)
+            # Only sync when WebSocket or REST API delivers actual/settled prices (Stage 2/3/4)
+            if sync_mode == 'initial_forecast' and getattr(user, 'settled_prices_only', False) and not use_aemo:
+                logger.info(f"⏭️  Skipping initial forecast sync for {user.email} - settled prices only mode enabled")
+                continue
+
             logger.info(f"Syncing schedule for user: {user.email} (price source: {'AEMO' if use_aemo else 'Amber'})")
 
             # Get API clients

@@ -883,6 +883,10 @@ def amber_settings():
         current_user.spike_protection_enabled = 'spike_protection_enabled' in request.form
         logger.info(f"Saving spike protection enabled: {current_user.spike_protection_enabled}")
 
+        # Settled Prices Only setting
+        current_user.settled_prices_only = 'settled_prices_only' in request.form
+        logger.info(f"Saving settled prices only: {current_user.settled_prices_only}")
+
         try:
             db.session.commit()
             logger.info(f"Amber settings saved successfully: forecast_type={form.amber_forecast_type.data}, site_id={current_user.amber_site_id}")
