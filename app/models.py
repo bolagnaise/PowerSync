@@ -119,6 +119,11 @@ class User(UserMixin, db.Model):
     manual_discharge_expires_at = db.Column(db.DateTime, nullable=True)  # When to auto-restore normal operation
     manual_discharge_saved_tariff_id = db.Column(db.Integer, db.ForeignKey('saved_tou_profile.id', use_alter=True), nullable=True)
 
+    # Manual Charge Mode (Force Charge button)
+    manual_charge_active = db.Column(db.Boolean, default=False)  # Currently in manual charge mode
+    manual_charge_expires_at = db.Column(db.DateTime, nullable=True)  # When to auto-restore normal operation
+    manual_charge_saved_tariff_id = db.Column(db.Integer, db.ForeignKey('saved_tou_profile.id', use_alter=True), nullable=True)
+
     # Electricity Provider Configuration
     electricity_provider = db.Column(db.String(20), default='amber')  # 'amber', 'flow_power', 'globird'
     flow_power_state = db.Column(db.String(10))  # NEM region: NSW1, VIC1, QLD1, SA1
@@ -164,6 +169,7 @@ class User(UserMixin, db.Model):
     saved_tou_profiles = db.relationship('SavedTOUProfile', backref='user', lazy='dynamic', cascade='all, delete-orphan', foreign_keys='SavedTOUProfile.user_id')
     aemo_saved_tariff = db.relationship('SavedTOUProfile', foreign_keys=[aemo_saved_tariff_id], post_update=True)
     manual_discharge_saved_tariff = db.relationship('SavedTOUProfile', foreign_keys=[manual_discharge_saved_tariff_id], post_update=True)
+    manual_charge_saved_tariff = db.relationship('SavedTOUProfile', foreign_keys=[manual_charge_saved_tariff_id], post_update=True)
 
     def set_password(self, password):
         self.password_hash = generate_password_hash(password)

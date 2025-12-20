@@ -43,10 +43,15 @@
         </div>
     </article>
 
-    <!-- Manual Discharge Controls -->
+    <!-- Manual Battery Controls -->
     <article id="discharge-controls" style="max-width: 800px; padding: 0.75rem; margin: 0 auto 1rem auto;">
         <header style="margin-bottom: 0.5rem; text-align: center;"><strong>🔋 Manual Battery Control</strong></header>
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.75rem;">
+            <div style="text-align: center;">
+                <button id="force-charge-btn" onclick="showChargeModal()" class="primary" style="width: 100%; padding: 0.75rem;">
+                    🔌 Force Charge
+                </button>
+            </div>
             <div style="text-align: center;">
                 <button id="force-discharge-btn" onclick="showDischargeModal()" class="contrast" style="width: 100%; padding: 0.75rem;">
                     ⚡ Force Discharge
@@ -84,6 +89,31 @@
             <footer>
                 <button class="secondary" onclick="closeDischargeModal()">Cancel</button>
                 <button onclick="activateForceDischarge()">Activate</button>
+            </footer>
+        </article>
+    </dialog>
+
+    <!-- Force Charge Modal -->
+    <dialog id="charge-modal">
+        <article style="max-width: 400px;">
+            <header>
+                <strong>🔌 Force Charge</strong>
+            </header>
+            <p>Select how long to force battery charging from grid. The battery will charge at maximum rate during this period.</p>
+            <label for="charge-duration">Duration</label>
+            <select id="charge-duration">
+                <option value="15">15 minutes</option>
+                <option value="30" selected>30 minutes</option>
+                <option value="45">45 minutes</option>
+                <option value="60">1 hour</option>
+                <option value="75">1 hour 15 min</option>
+                <option value="90">1 hour 30 min</option>
+                <option value="105">1 hour 45 min</option>
+                <option value="120">2 hours</option>
+            </select>
+            <footer>
+                <button class="secondary" onclick="closeChargeModal()">Cancel</button>
+                <button onclick="activateForceCharge()">Activate</button>
             </footer>
         </article>
     </dialog>
@@ -438,9 +468,85 @@
 
                 if (status.active) {
                     updateDischargeStatus(true, status.expires_at, status.remaining_minutes);
+                } else if (status.charge_active) {
+                    updateChargeStatus(true, status.charge_expires_at, status.charge_remaining_minutes);
                 }
             } catch (error) {
                 console.error('Error checking discharge status:', error);
+            }
+        }
+
+        // ========================================
+        // CHARGE CONTROL FUNCTIONS
+        // ========================================
+
+        // Show charge duration modal
+        function showChargeModal() {
+            document.getElementById('charge-modal').showModal();
+        }
+
+        // Close charge modal
+        function closeChargeModal() {
+            document.getElementById('charge-modal').close();
+        }
+
+        // Activate force charge
+        async function activateForceCharge() {
+            const duration = document.getElementById('charge-duration').value;
+            const btn = document.getElementById('force-charge-btn');
+
+            btn.setAttribute('aria-busy', 'true');
+            btn.disabled = true;
+
+            try {
+                const response = await fetch('/api/force-charge', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ duration_minutes: parseInt(duration) })
+                });
+
+                const result = await response.json();
+
+                if (result.success) {
+                    closeChargeModal();
+                    updateChargeStatus(true, result.expires_at, duration);
+                    showNotification('Force charge activated for ' + duration + ' minutes', 'success');
+                } else {
+                    showNotification('Error: ' + (result.error || 'Failed to activate charge'), 'error');
+                }
+            } catch (error) {
+                showNotification('Error: ' + error.message, 'error');
+            } finally {
+                btn.removeAttribute('aria-busy');
+                btn.disabled = false;
+            }
+        }
+
+        // Update charge status display
+        function updateChargeStatus(active, expiresAt, durationMinutes) {
+            const statusDiv = document.getElementById('discharge-status');
+            const statusText = document.getElementById('discharge-status-text');
+            const chargeBtn = document.getElementById('force-charge-btn');
+            const dischargeBtn = document.getElementById('force-discharge-btn');
+
+            if (active) {
+                const expiry = new Date(expiresAt);
+                const timeStr = expiry.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                statusDiv.style.display = 'block';
+                statusDiv.style.background = 'rgba(59, 130, 246, 0.2)';
+                statusText.innerHTML = '🔌 <strong>Force Charge Active</strong> - Expires at ' + timeStr + ' (' + durationMinutes + ' min)';
+                chargeBtn.classList.remove('primary');
+                chargeBtn.classList.add('outline');
+                chargeBtn.innerHTML = '🔌 Charging...';
+                // Reset discharge button state
+                dischargeBtn.classList.remove('outline');
+                dischargeBtn.classList.add('contrast');
+                dischargeBtn.innerHTML = '⚡ Force Discharge';
+            } else {
+                statusDiv.style.display = 'none';
+                chargeBtn.classList.remove('outline');
+                chargeBtn.classList.add('primary');
+                chargeBtn.innerHTML = '🔌 Force Charge';
             }
         }
 

@@ -412,6 +412,18 @@ def _sync_all_users_internal(websocket_data, sync_mode='initial_forecast'):
                     logger.info(f"⏭️  Skipping user {user.email} - Force discharge active")
                 continue
 
+            # Skip users who have force charge active - don't overwrite the charge tariff
+            if getattr(user, 'manual_charge_active', False):
+                expires_at = getattr(user, 'manual_charge_expires_at', None)
+                if expires_at:
+                    from datetime import datetime, timezone
+                    now = datetime.now(timezone.utc)
+                    remaining = (expires_at - now).total_seconds() / 60
+                    logger.info(f"⏭️  Skipping user {user.email} - Force charge active ({remaining:.1f} min remaining)")
+                else:
+                    logger.info(f"⏭️  Skipping user {user.email} - Force charge active")
+                continue
+
             # Determine if user is using AEMO-only mode
             use_aemo = (
                 user.electricity_provider == 'flow_power' and
@@ -721,6 +733,80 @@ def check_manual_discharge_expiry():
 
     if expired_users:
         logger.info(f"Processed {len(expired_users)} expired discharge modes")
+
+
+def check_manual_charge_expiry():
+    """
+    Check for expired manual charge modes and auto-restore normal operation.
+
+    This should run every minute to catch expired charge timers.
+    """
+    from app import db
+    from app.models import User, SavedTOUProfile
+    from app.api_clients import get_tesla_client
+    import json
+
+    logger.debug("Checking for expired manual charge modes...")
+
+    now = datetime.now(timezone.utc)
+
+    # Find users with active charge that has expired
+    expired_users = User.query.filter(
+        User.manual_charge_active == True,
+        User.manual_charge_expires_at <= now
+    ).all()
+
+    for user in expired_users:
+        logger.info(f"Manual charge expired for {user.email} - auto-restoring normal operation")
+
+        try:
+            # Get Tesla client
+            tesla_client = get_tesla_client(user)
+            if not tesla_client:
+                logger.error(f"No Tesla client available for {user.email} - cannot auto-restore")
+                continue
+
+            # Check if user has Amber configured (should sync instead of restore static tariff)
+            use_amber_sync = bool(user.amber_api_token_encrypted and user.auto_sync_enabled)
+
+            if use_amber_sync:
+                # For Amber users, trigger a sync to get fresh prices
+                logger.info(f"Amber user {user.email} - triggering price sync for restore")
+                # The sync will happen on the next scheduled sync
+            else:
+                # Restore saved tariff
+                backup_profile = None
+                if user.manual_charge_saved_tariff_id:
+                    backup_profile = SavedTOUProfile.query.get(user.manual_charge_saved_tariff_id)
+                else:
+                    backup_profile = SavedTOUProfile.query.filter_by(
+                        user_id=user.id,
+                        is_default=True
+                    ).first()
+
+                if backup_profile:
+                    tariff = json.loads(backup_profile.tariff_json)
+                    result = tesla_client.set_tariff_rate(user.tesla_energy_site_id, tariff)
+
+                    if result:
+                        force_tariff_refresh(tesla_client, user.tesla_energy_site_id)
+                        logger.info(f"Restored tariff from profile {backup_profile.id} for {user.email}")
+                    else:
+                        logger.error(f"Failed to restore tariff for {user.email}")
+
+            # Clear charge state
+            user.manual_charge_active = False
+            user.manual_charge_expires_at = None
+            db.session.commit()
+            logger.info(f"Manual charge cleared for {user.email}")
+
+        except Exception as e:
+            logger.error(f"Error auto-restoring charge for {user.email}: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+
+    if expired_users:
+        logger.info(f"Processed {len(expired_users)} expired charge modes")
 
 
 def save_price_history_with_websocket_data(websocket_data):
@@ -1656,6 +1742,155 @@ def create_discharge_tariff(duration_minutes=30):
         },
         "sell_tariff": {
             "name": f"Force Discharge Export ({duration_minutes}min)",
+            "utility": "Tesla Sync",
+            "daily_charges": [{"name": "Charge"}],
+            "demand_charges": {
+                "ALL": {"rates": {"ALL": 0}},
+                "Summer": {},
+                "Winter": {}
+            },
+            "energy_charges": {
+                "ALL": {"rates": {"ALL": 0}},
+                "Summer": {"rates": sell_rates},
+                "Winter": {}
+            },
+            "seasons": {
+                "Summer": {
+                    "fromMonth": 1,
+                    "toMonth": 12,
+                    "fromDay": 1,
+                    "toDay": 31,
+                    "tou_periods": tou_periods
+                },
+                "Winter": {
+                    "fromDay": 0,
+                    "toDay": 0,
+                    "fromMonth": 0,
+                    "toMonth": 0,
+                    "tou_periods": {}
+                }
+            }
+        }
+    }
+
+    return tariff
+
+
+def create_charge_tariff(duration_minutes=30):
+    """
+    Create a Tesla tariff optimized for forced battery charging from grid.
+
+    Uses very low buy rates (0c/kWh) during charge window to encourage charging
+    and zero sell rates to prevent export. Outside the window, uses very high
+    buy rates ($10/kWh) to discourage charging.
+
+    Args:
+        duration_minutes: Duration of charge window in minutes
+
+    Returns:
+        dict: Tesla tariff JSON with low buy rates for charging
+    """
+    # Rates during charge window - free to buy, no sell incentive
+    buy_rate_charge = 0.00    # $0/kWh - maximum incentive to charge
+    sell_rate_charge = 0.00   # $0/kWh - no incentive to export
+
+    # Rates outside charge window - expensive to buy, no sell
+    buy_rate_normal = 10.00   # $10/kWh - huge disincentive to charge
+    sell_rate_normal = 0.00   # $0/kWh - no incentive to export
+
+    logger.info(f"Creating charge tariff: buy=${buy_rate_charge}/kWh during charge, ${buy_rate_normal}/kWh outside for {duration_minutes} min")
+
+    # Build rates dictionaries for all 48 x 30-minute periods (24 hours)
+    buy_rates = {}
+    sell_rates = {}
+    tou_periods = {}
+
+    # Get current time to determine charge window
+    now = datetime.now()
+    current_period_index = (now.hour * 2) + (1 if now.minute >= 30 else 0)
+
+    # Calculate how many 30-min periods the charge covers
+    charge_periods = (duration_minutes + 29) // 30  # Round up
+    charge_start = current_period_index
+    charge_end = (current_period_index + charge_periods) % 48
+
+    logger.info(f"Charge window: periods {charge_start} to {charge_end} (current time: {now.hour:02d}:{now.minute:02d})")
+
+    for i in range(48):
+        hour = i // 2
+        minute = 30 if i % 2 else 0
+        period_name = f"{hour:02d}:{minute:02d}"
+
+        # Check if this period is in the charge window
+        is_charge_period = False
+        if charge_start < charge_end:
+            is_charge_period = charge_start <= i < charge_end
+        else:  # Wrap around midnight
+            is_charge_period = i >= charge_start or i < charge_end
+
+        # Set rates based on whether we're in charge window
+        if is_charge_period:
+            buy_rates[period_name] = buy_rate_charge
+            sell_rates[period_name] = sell_rate_charge
+        else:
+            buy_rates[period_name] = buy_rate_normal
+            sell_rates[period_name] = sell_rate_normal
+
+        # Calculate end time (30 minutes later)
+        if minute == 0:
+            to_hour = hour
+            to_minute = 30
+        else:  # minute == 30
+            to_hour = (hour + 1) % 24  # Wrap around at midnight
+            to_minute = 0
+
+        # TOU period definition for seasons
+        tou_periods[period_name] = {
+            "periods": [{
+                "fromDayOfWeek": 0,
+                "toDayOfWeek": 6,
+                "fromHour": hour,
+                "fromMinute": minute,
+                "toHour": to_hour,
+                "toMinute": to_minute
+            }]
+        }
+
+    # Create Tesla tariff structure
+    tariff = {
+        "name": f"Force Charge ({duration_minutes}min)",
+        "utility": "Tesla Sync",
+        "code": f"CHARGE_{duration_minutes}",
+        "currency": "AUD",
+        "daily_charges": [{"name": "Supply Charge"}],
+        "demand_charges": {
+            "ALL": {"rates": {"ALL": 0}},
+            "Summer": {},
+            "Winter": {}
+        },
+        "energy_charges": {
+            "ALL": {"rates": {"ALL": 0}},
+            "Summer": {"rates": buy_rates},
+            "Winter": {}
+        },
+        "seasons": {
+            "Summer": {
+                "fromMonth": 1,
+                "toMonth": 12,
+                "fromDay": 1,
+                "toDay": 31,
+                "tou_periods": tou_periods
+            },
+            "Winter": {
+                "fromDay": 0,
+                "toDay": 0,
+                "fromMonth": 0,
+                "toMonth": 0,
+                "tou_periods": {}
+            }
+        },
+        "sell_tariff": {
+            "name": f"Force Charge Export ({duration_minutes}min)",
             "utility": "Tesla Sync",
             "daily_charges": [{"name": "Charge"}],
             "demand_charges": {
