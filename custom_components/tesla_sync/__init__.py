@@ -2947,6 +2947,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             }
             api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
 
+            # IMMEDIATELY switch to self_consumption to stop any ongoing export/import
+            # This ensures discharge stops right away, before tariff restoration completes
+            if force_discharge_state.get("active") or force_charge_state.get("active"):
+                _LOGGER.info("Immediately switching to self_consumption to stop forced charge/discharge")
+                async with session.post(
+                    f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                    headers=headers,
+                    json={"default_real_mode": "self_consumption"},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 200:
+                        _LOGGER.info("Switched to self_consumption mode - export/import stopped")
+                    else:
+                        _LOGGER.warning(f"Could not switch to self_consumption: {response.status}")
+
             # Check if user is using Amber (restore via sync instead of saved tariff)
             electricity_provider = entry.options.get(
                 CONF_ELECTRICITY_PROVIDER,

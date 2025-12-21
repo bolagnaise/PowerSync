@@ -80,7 +80,7 @@ views:
               data:
                 duration: "{{ states('input_select.force_charge_duration') | int }}"
               confirmation:
-                text: "Force charge for {{ states('input_select.force_charge_duration') }} minutes?"
+                text: "Force charge for the selected duration?"
           # Force Discharge
           - type: template
             icon: mdi:timer-outline
@@ -99,7 +99,7 @@ views:
               data:
                 duration: "{{ states('input_select.force_discharge_duration') | int }}"
               confirmation:
-                text: "Force discharge for {{ states('input_select.force_discharge_duration') }} minutes?"
+                text: "Force discharge for the selected duration?"
           # Restore Normal
           - type: template
             icon: mdi:battery-sync
