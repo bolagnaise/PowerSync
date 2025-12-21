@@ -500,6 +500,22 @@ class AmberTariffConverter:
         if spike_protection_enabled and spike_lookup:
             # Find maximum sell price across all periods (for override calculation)
             max_sell_price = max(feedin_prices.values()) if feedin_prices else 0
+
+            # Account for Export Boost: if enabled, the final sell prices will be higher
+            # We must set buy price above the BOOSTED sell price, not original
+            export_boost_enabled = getattr(user, 'export_boost_enabled', False) if user else False
+            if export_boost_enabled:
+                export_offset = (getattr(user, 'export_price_offset', 0) or 0) / 100  # cents to dollars
+                export_min = (getattr(user, 'export_min_price', 0) or 0) / 100  # cents to dollars
+                # Calculate what the max boosted sell price will be after export boost is applied
+                max_boosted_sell = max(max_sell_price + export_offset, export_min)
+                logger.info(
+                    f"⚡ Export boost enabled - adjusting spike protection: "
+                    f"max_sell ${max_sell_price:.4f} -> max_boosted ${max_boosted_sell:.4f} "
+                    f"(offset=${export_offset:.4f}, min=${export_min:.4f})"
+                )
+                max_sell_price = max_boosted_sell
+
             override_buy = max_sell_price + 1.00
             periods_overridden = 0
 

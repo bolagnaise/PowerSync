@@ -233,6 +233,9 @@ def convert_amber_to_tesla_tariff(
     demand_artificial_price_enabled: bool = False,
     electricity_provider: str = "amber",
     spike_protection_enabled: bool = False,
+    export_boost_enabled: bool = False,
+    export_price_offset: float = 0.0,
+    export_min_price: float = 0.0,
 ) -> dict[str, Any] | None:
     """
     Convert Amber price forecast to Tesla tariff format.
@@ -430,7 +433,10 @@ def convert_amber_to_tesla_tariff(
     # Build the rolling 24-hour tariff
     general_prices, feedin_prices = _build_rolling_24h_tariff(
         general_lookup, feedin_lookup, detected_tz, current_actual_interval,
-        spike_protection_enabled=spike_protection_enabled, spike_lookup=spike_lookup
+        spike_protection_enabled=spike_protection_enabled, spike_lookup=spike_lookup,
+        export_boost_enabled=export_boost_enabled,
+        export_price_offset=export_price_offset,
+        export_min_price=export_min_price,
     )
 
     # If too many periods are missing, abort sync to preserve last good tariff
@@ -533,6 +539,9 @@ def _build_rolling_24h_tariff(
     current_actual_interval: dict[str, Any] | None = None,
     spike_protection_enabled: bool = False,
     spike_lookup: dict[tuple[str, int, int], str] | None = None,
+    export_boost_enabled: bool = False,
+    export_price_offset: float = 0.0,
+    export_min_price: float = 0.0,
 ) -> tuple[dict[str, float], dict[str, float]]:
     """
     Build a rolling 24-hour tariff where past periods use tomorrow's prices.
@@ -771,6 +780,20 @@ def _build_rolling_24h_tariff(
     if spike_protection_enabled and spike_lookup:
         # Find maximum sell price across all periods (for override calculation)
         max_sell_price = max(feedin_prices.values()) if feedin_prices else 0
+
+        # Account for Export Boost: if enabled, the final sell prices will be higher
+        # We must set buy price above the BOOSTED sell price, not original
+        if export_boost_enabled:
+            export_offset_dollars = export_price_offset / 100  # cents to dollars
+            export_min_dollars = export_min_price / 100  # cents to dollars
+            # Calculate what the max boosted sell price will be after export boost is applied
+            max_boosted_sell = max(max_sell_price + export_offset_dollars, export_min_dollars)
+            _LOGGER.info(
+                "Export boost enabled - adjusting spike protection: "
+                "max_sell $%.4f -> max_boosted $%.4f (offset=$%.4f, min=$%.4f)",
+                max_sell_price, max_boosted_sell, export_offset_dollars, export_min_dollars
+            )
+            max_sell_price = max_boosted_sell
 
         # Override buy prices to max(sell) + $1.00
         override_buy = max_sell_price + 1.00
