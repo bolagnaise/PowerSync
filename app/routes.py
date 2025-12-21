@@ -2,7 +2,7 @@
 from flask import render_template, flash, redirect, url_for, request, Blueprint, jsonify, session, current_app, send_file
 from flask_login import login_user, logout_user, current_user, login_required
 from app import db, cache
-from app.models import User, PriceRecord, SavedTOUProfile
+from app.models import User, PriceRecord, SavedTOUProfile, BatteryHealthHistory
 from app.forms import LoginForm, RegistrationForm, SettingsForm, DemandChargeForm, AmberSettingsForm, TwoFactorSetupForm, TwoFactorVerifyForm, TwoFactorDisableForm, ChangePasswordForm
 from app.utils import encrypt_token, decrypt_token
 from app.api_clients import get_amber_client, get_tesla_client, AEMOAPIClient
@@ -4823,19 +4823,52 @@ def api_battery_health_update():
 
     # Update battery health fields
     try:
-        user.battery_original_capacity_wh = data.get('originalCapacityWh')
-        user.battery_current_capacity_wh = data.get('currentCapacityWh')
-        user.battery_degradation_percent = data.get('degradationPercent')
-        user.battery_count = data.get('batteryCount')
+        original_capacity = data.get('originalCapacityWh')
+        current_capacity = data.get('currentCapacityWh')
+        degradation = data.get('degradationPercent')
+        battery_count = data.get('batteryCount', 1)
+        scanned_at_str = data.get('scannedAt')
+        pack_data = data.get('packData')  # Optional per-pack data
+
+        # Parse scanned_at timestamp or use current time
+        if scanned_at_str:
+            try:
+                scanned_at = datetime.fromisoformat(scanned_at_str.replace('Z', '+00:00'))
+            except ValueError:
+                scanned_at = datetime.utcnow()
+        else:
+            scanned_at = datetime.utcnow()
+
+        # Update user's current battery health
+        user.battery_original_capacity_wh = original_capacity
+        user.battery_current_capacity_wh = current_capacity
+        user.battery_degradation_percent = degradation
+        user.battery_count = battery_count
         user.battery_health_updated = datetime.utcnow()
 
+        # Calculate health percent
+        health_percent = (current_capacity / original_capacity * 100) if original_capacity else 100
+
+        # Save to history
+        import json
+        history_entry = BatteryHealthHistory(
+            user_id=user.id,
+            scanned_at=scanned_at,
+            rated_capacity_wh=original_capacity,
+            actual_capacity_wh=current_capacity,
+            health_percent=health_percent,
+            degradation_percent=degradation or 0,
+            battery_count=battery_count,
+            pack_data=json.dumps(pack_data) if pack_data else None
+        )
+        db.session.add(history_entry)
         db.session.commit()
 
-        logger.info(f"Battery health updated for user {user.email}: {user.battery_degradation_percent}% degradation")
+        logger.info(f"Battery health updated for user {user.email}: {degradation}% degradation, saved to history")
 
         return jsonify({
             'status': 'ok',
-            'message': 'Battery health updated successfully'
+            'message': 'Battery health updated and saved to history'
         })
 
     except Exception as e:
@@ -4865,8 +4898,82 @@ def api_battery_health_get(api_user=None, **kwargs):
         'currentCapacityWh': user.battery_current_capacity_wh,
         'degradationPercent': user.battery_degradation_percent,
         'batteryCount': user.battery_count,
-        'updatedAt': user.battery_health_updated.isoformat() if user.battery_health_updated else None
+        'updatedAt': user.battery_health_updated.isoformat() if user.battery_health_updated else None,
+        'installDate': user.powerwall_install_date.isoformat() if user.powerwall_install_date else None
     })
+
+
+@bp.route('/api/battery-health/history', methods=['GET'])
+@login_required
+def api_battery_health_history():
+    """
+    Get battery health history for degradation graph.
+
+    Returns all historical readings sorted by scan date.
+    """
+    history = BatteryHealthHistory.query.filter_by(
+        user_id=current_user.id
+    ).order_by(BatteryHealthHistory.scanned_at.asc()).all()
+
+    # Build data points for the graph
+    data_points = []
+    for record in history:
+        data_points.append({
+            'date': record.scanned_at.isoformat(),
+            'healthPercent': round(record.health_percent, 2),
+            'degradationPercent': round(record.degradation_percent, 2),
+            'actualCapacityWh': record.actual_capacity_wh,
+            'ratedCapacityWh': record.rated_capacity_wh,
+            'batteryCount': record.battery_count
+        })
+
+    # Add install date as the starting point (100% health)
+    install_date = current_user.powerwall_install_date
+    rated_capacity = current_user.battery_original_capacity_wh
+    battery_count = current_user.battery_count or 1
+
+    return jsonify({
+        'installDate': install_date.isoformat() if install_date else None,
+        'ratedCapacityWh': rated_capacity,
+        'batteryCount': battery_count,
+        'history': data_points
+    })
+
+
+@bp.route('/api/battery-health/install-date', methods=['POST'])
+@login_required
+def api_battery_health_set_install_date():
+    """
+    Set the Powerwall installation date.
+
+    Request body:
+    {
+        "installDate": "2024-01-15"
+    }
+    """
+    data = request.get_json()
+    if not data or not data.get('installDate'):
+        return jsonify({'error': 'installDate is required'}), 400
+
+    try:
+        from datetime import date
+        install_date = date.fromisoformat(data['installDate'])
+        current_user.powerwall_install_date = install_date
+        db.session.commit()
+
+        logger.info(f"Set Powerwall install date for {current_user.email}: {install_date}")
+
+        return jsonify({
+            'status': 'ok',
+            'message': 'Install date saved',
+            'installDate': install_date.isoformat()
+        })
+    except ValueError as e:
+        return jsonify({'error': f'Invalid date format: {e}'}), 400
+    except Exception as e:
+        logger.error(f"Error setting install date: {e}")
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
 
 
 @bp.route('/api/battery-health/generate-token', methods=['POST'])

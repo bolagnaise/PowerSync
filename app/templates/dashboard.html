@@ -195,6 +195,61 @@
     </article>
     {% endif %}
 
+    <!-- Battery Health & Degradation -->
+    <article id="battery-health-section">
+        <header>
+            <strong>Battery Health</strong>
+            <div style="float: right; font-size: 0.85em;">
+                <span id="battery-health-last-updated" style="opacity: 0.7;">--</span>
+            </div>
+        </header>
+        <div id="battery-health-content">
+            <div id="battery-health-loading">
+                <p>Loading battery health data...</p>
+            </div>
+            <div id="battery-health-no-data" style="display: none; text-align: center; padding: 2em;">
+                <p style="opacity: 0.7;">No battery health data available yet.</p>
+                <p style="font-size: 0.9em;">Use the <a href="/settings#mobile-app">Tesla Sync mobile app</a> to scan your Powerwall battery health.</p>
+            </div>
+            <div id="battery-health-data" style="display: none;">
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1em; margin-bottom: 1.5em;">
+                    <div style="text-align: center; padding: 1em; background: rgba(0, 128, 0, 0.1); border-radius: 8px;">
+                        <div style="font-size: 0.85em; opacity: 0.8;">Health</div>
+                        <div id="health-percent" style="font-size: 2em; font-weight: bold; color: #22c55e;">--%</div>
+                    </div>
+                    <div style="text-align: center; padding: 1em; background: rgba(0, 0, 0, 0.05); border-radius: 8px;">
+                        <div style="font-size: 0.85em; opacity: 0.8;">Degradation</div>
+                        <div id="degradation-percent" style="font-size: 2em; font-weight: bold;">--%</div>
+                    </div>
+                    <div style="text-align: center; padding: 1em; background: rgba(0, 0, 0, 0.05); border-radius: 8px;">
+                        <div style="font-size: 0.85em; opacity: 0.8;">Actual Capacity</div>
+                        <div id="actual-capacity" style="font-size: 1.5em; font-weight: bold;">-- kWh</div>
+                    </div>
+                    <div style="text-align: center; padding: 1em; background: rgba(0, 0, 0, 0.05); border-radius: 8px;">
+                        <div style="font-size: 0.85em; opacity: 0.8;">Rated Capacity</div>
+                        <div id="rated-capacity" style="font-size: 1.5em; font-weight: bold;">-- kWh</div>
+                    </div>
+                </div>
+                <!-- Install Date -->
+                <div style="margin-bottom: 1em; padding: 0.75em; background: rgba(0, 0, 0, 0.03); border-radius: 8px;">
+                    <div style="display: flex; align-items: center; gap: 1em; flex-wrap: wrap;">
+                        <label for="install-date-input" style="margin: 0; font-size: 0.9em;">Install Date:</label>
+                        <input type="date" id="install-date-input" style="padding: 0.4em; font-size: 0.9em;">
+                        <button id="save-install-date-btn" class="secondary" style="font-size: 0.85em; padding: 0.4em 0.8em;">Save</button>
+                        <span id="install-date-status" style="font-size: 0.85em;"></span>
+                    </div>
+                </div>
+                <!-- Degradation Graph -->
+                <details id="degradation-graph-details" open>
+                    <summary style="cursor: pointer; font-weight: bold;">Degradation Over Time</summary>
+                    <div style="margin-top: 1em;">
+                        <canvas id="degradationChart" style="max-height: 300px;"></canvas>
+                    </div>
+                </details>
+            </div>
+        </div>
+    </article>
+
     <!-- Tariff Schedule (Amber Only) -->
     {% if has_amber_token %}
     <article id="tou-schedule-section">
@@ -2520,6 +2575,259 @@
         fetchEnergySummaries();
         document.getElementById('summary-period-selector').addEventListener('change', fetchEnergySummaries);
         document.getElementById('refresh-summaries-btn').addEventListener('click', fetchEnergySummaries);
+
+        // ========================================
+        // BATTERY HEALTH FUNCTIONS
+        // ========================================
+
+        let degradationChart = null;
+
+        async function loadBatteryHealth() {
+            try {
+                const response = await fetch('/api/battery-health');
+                const data = await response.json();
+
+                document.getElementById('battery-health-loading').style.display = 'none';
+
+                if (!data.has_data) {
+                    document.getElementById('battery-health-no-data').style.display = 'block';
+                    document.getElementById('battery-health-data').style.display = 'none';
+                    return;
+                }
+
+                document.getElementById('battery-health-no-data').style.display = 'none';
+                document.getElementById('battery-health-data').style.display = 'block';
+
+                // Calculate health percent
+                const healthPercent = data.currentCapacityWh && data.originalCapacityWh
+                    ? (data.currentCapacityWh / data.originalCapacityWh * 100).toFixed(1)
+                    : '--';
+                const degradationPercent = data.degradationPercent
+                    ? data.degradationPercent.toFixed(1)
+                    : '--';
+
+                // Update display
+                document.getElementById('health-percent').textContent = healthPercent + '%';
+                document.getElementById('degradation-percent').textContent = degradationPercent + '%';
+                document.getElementById('actual-capacity').textContent = data.currentCapacityWh
+                    ? (data.currentCapacityWh / 1000).toFixed(2) + ' kWh'
+                    : '-- kWh';
+                document.getElementById('rated-capacity').textContent = data.originalCapacityWh
+                    ? (data.originalCapacityWh / 1000).toFixed(2) + ' kWh'
+                    : '-- kWh';
+
+                // Set install date if available
+                if (data.installDate) {
+                    document.getElementById('install-date-input').value = data.installDate;
+                }
+
+                // Update last updated timestamp
+                if (data.updatedAt) {
+                    const updated = new Date(data.updatedAt);
+                    document.getElementById('battery-health-last-updated').textContent =
+                        'Last scan: ' + updated.toLocaleDateString() + ' ' + updated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                }
+
+                // Color the health percent based on value
+                const healthEl = document.getElementById('health-percent');
+                const health = parseFloat(healthPercent);
+                if (health >= 95) {
+                    healthEl.style.color = '#22c55e'; // Green
+                } else if (health >= 90) {
+                    healthEl.style.color = '#84cc16'; // Lime
+                } else if (health >= 80) {
+                    healthEl.style.color = '#eab308'; // Yellow
+                } else {
+                    healthEl.style.color = '#ef4444'; // Red
+                }
+
+                // Load history for graph
+                loadBatteryHealthHistory();
+
+            } catch (error) {
+                console.error('Error loading battery health:', error);
+                document.getElementById('battery-health-loading').style.display = 'none';
+                document.getElementById('battery-health-no-data').style.display = 'block';
+            }
+        }
+
+        async function loadBatteryHealthHistory() {
+            try {
+                const response = await fetch('/api/battery-health/history');
+                const data = await response.json();
+
+                if (!data.history || data.history.length === 0) {
+                    // No history data, hide the graph
+                    document.getElementById('degradation-graph-details').style.display = 'none';
+                    return;
+                }
+
+                document.getElementById('degradation-graph-details').style.display = 'block';
+
+                // Build chart data
+                const chartData = [];
+
+                // Add install date as starting point (100% health, 0% degradation)
+                if (data.installDate) {
+                    chartData.push({
+                        x: new Date(data.installDate),
+                        y: 100,
+                        degradation: 0
+                    });
+                }
+
+                // Add historical data points
+                for (const record of data.history) {
+                    chartData.push({
+                        x: new Date(record.date),
+                        y: record.healthPercent,
+                        degradation: record.degradationPercent
+                    });
+                }
+
+                // Destroy existing chart if it exists
+                if (degradationChart) {
+                    degradationChart.destroy();
+                }
+
+                // Create the chart
+                const ctx = document.getElementById('degradationChart').getContext('2d');
+                degradationChart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        datasets: [{
+                            label: 'Health %',
+                            data: chartData,
+                            borderColor: '#22c55e',
+                            backgroundColor: 'rgba(34, 197, 94, 0.1)',
+                            fill: true,
+                            tension: 0.3,
+                            pointRadius: 6,
+                            pointHoverRadius: 8
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: true,
+                        scales: {
+                            x: {
+                                type: 'time',
+                                time: {
+                                    unit: 'month',
+                                    displayFormats: {
+                                        month: 'MMM yyyy'
+                                    }
+                                },
+                                title: {
+                                    display: true,
+                                    text: 'Date'
+                                }
+                            },
+                            y: {
+                                min: 80,
+                                max: 102,
+                                title: {
+                                    display: true,
+                                    text: 'Health %'
+                                },
+                                ticks: {
+                                    callback: function(value) {
+                                        return value + '%';
+                                    }
+                                }
+                            }
+                        },
+                        plugins: {
+                            tooltip: {
+                                callbacks: {
+                                    title: function(context) {
+                                        const date = new Date(context[0].parsed.x);
+                                        return date.toLocaleDateString('en-AU', { year: 'numeric', month: 'long', day: 'numeric' });
+                                    },
+                                    label: function(context) {
+                                        const point = context.raw;
+                                        return [
+                                            'Health: ' + point.y.toFixed(1) + '%',
+                                            'Degradation: ' + point.degradation.toFixed(1) + '%'
+                                        ];
+                                    }
+                                }
+                            },
+                            legend: {
+                                display: false
+                            },
+                            annotation: {
+                                annotations: {
+                                    warrantyLine: {
+                                        type: 'line',
+                                        yMin: 80,
+                                        yMax: 80,
+                                        borderColor: 'rgba(239, 68, 68, 0.5)',
+                                        borderWidth: 2,
+                                        borderDash: [5, 5],
+                                        label: {
+                                            display: true,
+                                            content: 'Warranty Threshold (80%)',
+                                            position: 'start',
+                                            backgroundColor: 'rgba(239, 68, 68, 0.8)',
+                                            font: { size: 10 }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+
+            } catch (error) {
+                console.error('Error loading battery health history:', error);
+            }
+        }
+
+        async function saveInstallDate() {
+            const dateInput = document.getElementById('install-date-input');
+            const statusEl = document.getElementById('install-date-status');
+            const saveBtn = document.getElementById('save-install-date-btn');
+
+            if (!dateInput.value) {
+                statusEl.textContent = 'Please select a date';
+                statusEl.style.color = '#ef4444';
+                return;
+            }
+
+            saveBtn.setAttribute('aria-busy', 'true');
+            saveBtn.disabled = true;
+
+            try {
+                const response = await fetch('/api/battery-health/install-date', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ installDate: dateInput.value })
+                });
+
+                const result = await response.json();
+
+                if (result.status === 'ok') {
+                    statusEl.textContent = 'Saved!';
+                    statusEl.style.color = '#22c55e';
+                    // Reload the history to update the graph
+                    loadBatteryHealthHistory();
+                } else {
+                    statusEl.textContent = result.error || 'Failed to save';
+                    statusEl.style.color = '#ef4444';
+                }
+            } catch (error) {
+                statusEl.textContent = 'Error: ' + error.message;
+                statusEl.style.color = '#ef4444';
+            } finally {
+                saveBtn.removeAttribute('aria-busy');
+                saveBtn.disabled = false;
+            }
+        }
+
+        // Initialize battery health on page load
+        document.addEventListener('DOMContentLoaded', loadBatteryHealth);
+        document.getElementById('save-install-date-btn').addEventListener('click', saveInstallDate);
     </script>
 
     <style>

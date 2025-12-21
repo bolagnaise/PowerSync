@@ -162,6 +162,7 @@ class User(UserMixin, db.Model):
     battery_count = db.Column(db.Integer, nullable=True)  # Number of Powerwall units
     battery_health_updated = db.Column(db.DateTime, nullable=True)  # When health was last updated
     battery_health_api_token = db.Column(db.String(64), nullable=True)  # API token for mobile app sync
+    powerwall_install_date = db.Column(db.Date, nullable=True)  # When Powerwall was installed
 
     # Relationships
     price_records = db.relationship('PriceRecord', backref='user', lazy='dynamic')
@@ -359,3 +360,35 @@ class SavedTOUProfile(db.Model):
 
     def __repr__(self):
         return f'<SavedTOUProfile {self.name} - {self.tariff_name}>'
+
+
+class BatteryHealthHistory(db.Model):
+    """Stores historical battery health readings from mobile app scans"""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+
+    # Scan timestamp
+    scanned_at = db.Column(db.DateTime, index=True, nullable=False)
+
+    # Capacity data (in Wh)
+    rated_capacity_wh = db.Column(db.Float, nullable=False)  # Rated capacity (13.5 kWh per PW3)
+    actual_capacity_wh = db.Column(db.Float, nullable=False)  # Actual measured capacity
+
+    # Calculated metrics
+    health_percent = db.Column(db.Float, nullable=False)  # (actual/rated) * 100
+    degradation_percent = db.Column(db.Float, nullable=False)  # (1 - actual/rated) * 100
+
+    # Battery configuration
+    battery_count = db.Column(db.Integer, nullable=False)
+
+    # Per-pack data (JSON array of individual pack readings)
+    pack_data = db.Column(db.Text, nullable=True)  # JSON: [{packId, capacityWh, healthPercent}, ...]
+
+    # Record metadata
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    # Relationship
+    user = db.relationship('User', backref=db.backref('battery_health_history', lazy='dynamic'))
+
+    def __repr__(self):
+        return f'<BatteryHealthHistory {self.scanned_at} - {self.health_percent}%>'
