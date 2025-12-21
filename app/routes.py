@@ -3329,6 +3329,11 @@ def api_restore_normal(tesla_client):
 
         restore_method = 'none'
 
+        # IMMEDIATELY switch to self_consumption to stop any ongoing export/import
+        # This ensures discharge/charge stops right away, before tariff restoration completes
+        logger.info("Immediately switching to self_consumption to stop forced charge/discharge")
+        tesla_client.set_operation_mode(current_user.tesla_energy_site_id, 'self_consumption')
+
         # Check if user has Amber configured (should sync instead of restore static tariff)
         use_amber_sync = bool(current_user.amber_api_token_encrypted and current_user.sync_enabled)
 
@@ -3336,8 +3341,10 @@ def api_restore_normal(tesla_client):
             # For Amber users, trigger a sync to get fresh prices
             logger.info(f"Amber user - triggering price sync for {current_user.email}")
             from app.tasks import _sync_all_users_internal
-            # Run sync in background
+            # Run sync in background - this will upload new tariff and set operation mode
             _sync_all_users_internal(None, sync_mode='initial_forecast')
+            # Switch back to autonomous mode after sync completes
+            tesla_client.set_operation_mode(current_user.tesla_energy_site_id, 'autonomous')
             restore_method = 'amber_sync'
         else:
             # Restore saved tariff
