@@ -31,6 +31,54 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 
+def get_user_from_api_token():
+    """
+    Get user from Bearer token in Authorization header.
+    Returns None if no valid token found.
+    """
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Bearer '):
+        return None
+
+    token = auth_header.split(' ', 1)[1]
+    if not token:
+        return None
+
+    # Find user by API token (battery_health_api_token is used for mobile app auth)
+    user = User.query.filter_by(battery_health_api_token=token).first()
+    return user
+
+
+def get_authenticated_user():
+    """
+    Get the authenticated user from either session login or Bearer token.
+    Returns the user if authenticated, None otherwise.
+    """
+    # First check session login
+    if current_user.is_authenticated:
+        return current_user
+
+    # Then check Bearer token
+    return get_user_from_api_token()
+
+
+def api_auth_required(f):
+    """
+    Decorator that allows either session login OR Bearer token authentication.
+    Use this for API endpoints that should be accessible from both web and mobile.
+    """
+    from functools import wraps
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        user = get_authenticated_user()
+        if not user:
+            return jsonify({'error': 'Authentication required'}), 401
+        # Make the user available as 'api_user' in the function
+        kwargs['api_user'] = user
+        return f(*args, **kwargs)
+    return decorated_function
+
+
 def get_powerwall_timezone(user, default='Australia/Brisbane'):
     """
     Get the Powerwall's timezone from Tesla API.
@@ -1061,11 +1109,14 @@ def select_tesla_energy_site():
 
 
 @bp.route('/api/amber/current-price')
-@login_required
 @require_amber_client
-def amber_current_price(amber_client):
-    """Get current Amber electricity price using WebSocket (real-time) with REST API fallback"""
-    logger.info(f"Current price requested by user: {current_user.email}")
+def amber_current_price(amber_client, api_user=None, **kwargs):
+    """Get current Amber electricity price using WebSocket (real-time) with REST API fallback
+
+    Supports both session login and Bearer token authentication.
+    """
+    user = api_user or current_user
+    logger.info(f"Current price requested by user: {user.email}")
 
     # Get WebSocket client from Flask app config
     from flask import current_app
@@ -1087,7 +1138,7 @@ def amber_current_price(amber_client):
             nem_time = datetime.fromisoformat(price_data['nemTime'].replace('Z', '+00:00'))
 
             record = PriceRecord(
-                user_id=current_user.id,
+                user_id=user.id,
                 per_kwh=price_data.get('perKwh'),
                 spot_per_kwh=price_data.get('spotPerKwh'),
                 wholesale_kwh_price=price_data.get('wholesaleKWHPrice'),
@@ -1105,7 +1156,7 @@ def amber_current_price(amber_client):
             # Add display time for the interval using Powerwall's timezone
             # For ActualInterval: use the actual interval's time range (nemTime - duration)
             # For CurrentInterval: use current browser time bucket
-            user_tz = ZoneInfo(get_powerwall_timezone(current_user))
+            user_tz = ZoneInfo(get_powerwall_timezone(user))
 
             if price_data.get('type') == 'ActualInterval':
                 # Use actual interval's time range from the API
@@ -1315,15 +1366,19 @@ def current_price():
 
 
 @bp.route('/api/amber/5min-forecast')
-@login_required
-def amber_5min_forecast():
-    """Get 5-minute interval forecast for the next few hours"""
+@api_auth_required
+def amber_5min_forecast(api_user=None, **kwargs):
+    """Get 5-minute interval forecast for the next few hours
+
+    Supports both session login and Bearer token authentication.
+    """
+    user = api_user or current_user
     # Allow requesting more hours for the 30-min forecast view (default: 1 hour)
     hours = request.args.get('hours', 1, type=int)
     hours = min(hours, 4)  # Cap at 4 hours to avoid excessive API calls
-    logger.info(f"5-minute forecast requested by user: {current_user.email} (hours={hours})")
+    logger.info(f"5-minute forecast requested by user: {user.email} (hours={hours})")
 
-    amber_client = get_amber_client(current_user)
+    amber_client = get_amber_client(user)
     if not amber_client:
         logger.warning("Amber client not available for 5-min forecast")
         return jsonify({'error': 'Amber API not configured'}), 400
@@ -1335,7 +1390,7 @@ def amber_5min_forecast():
         return jsonify({'error': 'Failed to fetch 5-minute forecast'}), 500
 
     # Convert nemTime to user's local timezone for each interval
-    user_tz = ZoneInfo(get_powerwall_timezone(current_user))
+    user_tz = ZoneInfo(get_powerwall_timezone(user))
 
     # Get current time in user's timezone to filter out past intervals
     now_utc = datetime.now(timezone.utc)
@@ -1378,7 +1433,7 @@ def amber_5min_forecast():
     result = {
         'fetch_time': datetime.utcnow().isoformat(),
         'total_intervals': len(forecast),
-        'forecast_type': current_user.amber_forecast_type or 'predicted',
+        'forecast_type': user.amber_forecast_type or 'predicted',
         'general': general_intervals,
         'feedIn': feedin_intervals
     }
@@ -1531,22 +1586,24 @@ def amber_debug_forecast():
 
 
 @bp.route('/api/tesla/status')
-@login_required
 @require_tesla_client
 @require_tesla_site_id
-@cache.cached(timeout=60, key_prefix=lambda: f'tesla_status_{current_user.id}')
-def tesla_status(tesla_client):
-    """Get Tesla Powerwall status including firmware version"""
-    logger.info(f"Tesla status requested by user: {current_user.email}")
+def tesla_status(tesla_client, api_user=None, **kwargs):
+    """Get Tesla Powerwall status including firmware version
+
+    Supports both session login and Bearer token authentication.
+    """
+    user = api_user or current_user
+    logger.info(f"Tesla status requested by user: {user.email}")
 
     # Get live status
-    site_status = tesla_client.get_site_status(current_user.tesla_energy_site_id)
+    site_status = tesla_client.get_site_status(user.tesla_energy_site_id)
     if not site_status:
         logger.error("Failed to fetch Tesla site status")
         return jsonify({'error': 'Failed to fetch site status'}), 500
 
     # Get site info for firmware version
-    site_info = tesla_client.get_site_info(current_user.tesla_energy_site_id)
+    site_info = tesla_client.get_site_info(user.tesla_energy_site_id)
 
     # Add firmware version to response if available
     if site_info:
@@ -1778,12 +1835,15 @@ def energy_history():
 
 
 @bp.route('/api/energy-calendar-history')
-@login_required
 @require_tesla_client
 @require_tesla_site_id
-def energy_calendar_history(tesla_client):
-    """Get historical energy summaries from Tesla calendar history API"""
-    logger.info(f"Energy calendar history requested by user: {current_user.email}")
+def energy_calendar_history(tesla_client, api_user=None, **kwargs):
+    """Get historical energy summaries from Tesla calendar history API
+
+    Supports both session login and Bearer token authentication.
+    """
+    user = api_user or current_user
+    logger.info(f"Energy calendar history requested by user: {user.email}")
 
     # Get parameters
     period = request.args.get('period', 'month')  # day, week, month, year, lifetime
@@ -1797,7 +1857,7 @@ def energy_calendar_history(tesla_client):
         from zoneinfo import ZoneInfo
         try:
             # Parse YYYY-MM-DD and convert to datetime with user's timezone
-            user_tz = ZoneInfo(get_powerwall_timezone(current_user))
+            user_tz = ZoneInfo(get_powerwall_timezone(user))
             dt = datetime.strptime(end_date_str, '%Y-%m-%d')
             end_dt = dt.replace(hour=23, minute=59, second=59, tzinfo=user_tz)
             end_date = end_dt.isoformat()
@@ -1806,11 +1866,11 @@ def energy_calendar_history(tesla_client):
 
     # Fetch calendar history
     history = tesla_client.get_calendar_history(
-        site_id=current_user.tesla_energy_site_id,
+        site_id=user.tesla_energy_site_id,
         kind='energy',
         period=period,
         end_date=end_date,
-        timezone=get_powerwall_timezone(current_user)
+        timezone=get_powerwall_timezone(user)
     )
 
     if not history:
@@ -1826,7 +1886,7 @@ def energy_calendar_history(tesla_client):
         from datetime import datetime, timedelta
         from zoneinfo import ZoneInfo
 
-        user_tz = ZoneInfo(get_powerwall_timezone(current_user))
+        user_tz = ZoneInfo(get_powerwall_timezone(user))
         now = datetime.now(user_tz)
 
         # Calculate cutoff date based on period
@@ -1873,26 +1933,30 @@ def energy_calendar_history(tesla_client):
 
 
 @bp.route('/api/tou-schedule')
-@login_required
-def tou_schedule():
-    """Get the rolling 24-hour tariff schedule that will be sent to Tesla"""
+@api_auth_required
+def tou_schedule(api_user=None, **kwargs):
+    """Get the rolling 24-hour tariff schedule that will be sent to Tesla
+
+    Supports both session login and Bearer token authentication.
+    """
+    user = api_user or current_user
     # Check for cache bypass (used after settings changes)
     bypass_cache = request.args.get('refresh') == '1'
 
     if not bypass_cache:
         # Try to get from cache
-        cache_key = f'tou_schedule_{current_user.id}'
+        cache_key = f'tou_schedule_{user.id}'
         cached_result = cache.get(cache_key)
         if cached_result:
-            logger.debug(f"TOU schedule served from cache for user: {current_user.email}")
+            logger.debug(f"TOU schedule served from cache for user: {user.email}")
             return cached_result
 
-    logger.info(f"TOU tariff schedule requested by user: {current_user.email} (bypass_cache={bypass_cache})")
+    logger.info(f"TOU tariff schedule requested by user: {user.email} (bypass_cache={bypass_cache})")
 
     # Determine price source based on user settings
     use_aemo = (
-        current_user.electricity_provider == 'flow_power' and
-        current_user.flow_power_price_source == 'aemo'
+        user.electricity_provider == 'flow_power' and
+        user.flow_power_price_source == 'aemo'
     )
 
     actual_interval = None
@@ -1900,7 +1964,7 @@ def tou_schedule():
 
     if use_aemo:
         # Use AEMO data for Flow Power AEMO-only mode
-        aemo_region = current_user.flow_power_state
+        aemo_region = user.flow_power_state
         if not aemo_region:
             logger.error("AEMO price source selected but no region configured")
             return jsonify({'error': 'AEMO region not configured. Please set your Flow Power state in settings.'}), 400
@@ -1917,7 +1981,7 @@ def tou_schedule():
         logger.info(f"Using AEMO forecast for TOU schedule: {len(forecast_30min)} intervals")
     else:
         # Use Amber API (default)
-        amber_client = get_amber_client(current_user)
+        amber_client = get_amber_client(user)
         if not amber_client:
             logger.warning("Amber client not available for tariff schedule")
             return jsonify({'error': 'Amber API not configured'}), 400
@@ -1962,9 +2026,9 @@ def tou_schedule():
     # Fetch Powerwall timezone from Tesla API (most accurate)
     # This ensures correct timezone handling for TOU schedule alignment
     powerwall_timezone = None
-    tesla_client = get_tesla_client(current_user)
-    if tesla_client and current_user.tesla_energy_site_id:
-        site_info = tesla_client.get_site_info(current_user.tesla_energy_site_id)
+    tesla_client = get_tesla_client(user)
+    if tesla_client and user.tesla_energy_site_id:
+        site_info = tesla_client.get_site_info(user.tesla_energy_site_id)
         if site_info:
             powerwall_timezone = site_info.get('installation_time_zone')
             if powerwall_timezone:
@@ -1982,7 +2046,7 @@ def tou_schedule():
     converter = AmberTariffConverter()
     tariff = converter.convert_amber_to_tesla_tariff(
         forecast_30min,
-        user=current_user,
+        user=user,
         powerwall_timezone=powerwall_timezone,
         current_actual_interval=actual_interval
     )
@@ -1992,38 +2056,38 @@ def tou_schedule():
         return jsonify({'error': 'Failed to convert tariff'}), 500
 
     # Apply Flow Power PEA pricing (works with both AEMO and Amber price sources)
-    if current_user.electricity_provider == 'flow_power':
+    if user.electricity_provider == 'flow_power':
         # Check if PEA (Price Efficiency Adjustment) is enabled
-        pea_enabled = getattr(current_user, 'pea_enabled', True)  # Default True for Flow Power
+        pea_enabled = getattr(user, 'pea_enabled', True)  # Default True for Flow Power
 
         if pea_enabled:
             # Use Flow Power PEA pricing model: Base Rate + PEA
             # Works with both AEMO (raw wholesale) and Amber (wholesaleKWHPrice forecast)
-            base_rate = getattr(current_user, 'flow_power_base_rate', 34.0) or 34.0
-            custom_pea = getattr(current_user, 'pea_custom_value', None)
+            base_rate = getattr(user, 'flow_power_base_rate', 34.0) or 34.0
+            custom_pea = getattr(user, 'pea_custom_value', None)
             wholesale_prices = get_wholesale_lookup(forecast_30min)
-            price_source = current_user.flow_power_price_source or 'amber'
+            price_source = user.flow_power_price_source or 'amber'
             logger.info(f"Applying Flow Power PEA ({price_source}): base_rate={base_rate}c, custom_pea={custom_pea}")
             tariff = apply_flow_power_pea(tariff, wholesale_prices, base_rate, custom_pea)
-        elif current_user.flow_power_price_source == 'aemo':
+        elif user.flow_power_price_source == 'aemo':
             # PEA disabled + AEMO: fall back to network tariff calculation
             # (Amber prices already include network fees, no fallback needed)
             logger.info("Applying network tariff to AEMO wholesale prices (PEA disabled)")
-            tariff = apply_network_tariff(tariff, current_user)
+            tariff = apply_network_tariff(tariff, user)
 
     # Apply Flow Power export rates if user is on Flow Power (for preview display)
-    if current_user.electricity_provider == 'flow_power' and current_user.flow_power_state:
-        logger.info(f"Preview: Applying Flow Power export rates for state: {current_user.flow_power_state}")
-        tariff = apply_flow_power_export(tariff, current_user.flow_power_state)
+    if user.electricity_provider == 'flow_power' and user.flow_power_state:
+        logger.info(f"Preview: Applying Flow Power export rates for state: {user.flow_power_state}")
+        tariff = apply_flow_power_export(tariff, user.flow_power_state)
 
     # Apply export price boost for Amber users (if enabled)
-    if current_user.electricity_provider == 'amber' and getattr(current_user, 'export_boost_enabled', False):
+    if user.electricity_provider == 'amber' and getattr(user, 'export_boost_enabled', False):
         from app.tariff_converter import apply_export_boost
-        offset = getattr(current_user, 'export_price_offset', 0) or 0
-        min_price = getattr(current_user, 'export_min_price', 0) or 0
-        boost_start = getattr(current_user, 'export_boost_start', '17:00') or '17:00'
-        boost_end = getattr(current_user, 'export_boost_end', '21:00') or '21:00'
-        threshold = getattr(current_user, 'export_boost_threshold', 0) or 0
+        offset = getattr(user, 'export_price_offset', 0) or 0
+        min_price = getattr(user, 'export_min_price', 0) or 0
+        boost_start = getattr(user, 'export_boost_start', '17:00') or '17:00'
+        boost_end = getattr(user, 'export_boost_end', '21:00') or '21:00'
+        threshold = getattr(user, 'export_boost_threshold', 0) or 0
         logger.info(f"Preview: Applying export boost: offset={offset}c, min={min_price}c, threshold={threshold}c, window={boost_start}-{boost_end}")
         tariff = apply_export_boost(tariff, offset, min_price, boost_start, boost_end, threshold)
 
@@ -2034,7 +2098,7 @@ def tou_schedule():
     # Get current time in user's timezone to mark current period
     from datetime import datetime
     from zoneinfo import ZoneInfo
-    user_tz = ZoneInfo(get_powerwall_timezone(current_user))
+    user_tz = ZoneInfo(get_powerwall_timezone(user))
     now = datetime.now(user_tz)
     current_hour = now.hour
     current_minute_bucket = 0 if now.minute < 30 else 30
@@ -2088,7 +2152,7 @@ def tou_schedule():
     })
 
     # Cache the result for 5 minutes (unless bypassed)
-    cache_key = f'tou_schedule_{current_user.id}'
+    cache_key = f'tou_schedule_{user.id}'
     cache.set(cache_key, result, timeout=300)
 
     return result
@@ -4774,12 +4838,15 @@ def api_battery_health_update():
 
 
 @bp.route('/api/battery-health', methods=['GET'])
-@login_required
-def api_battery_health_get():
+@api_auth_required
+def api_battery_health_get(api_user=None, **kwargs):
     """
     Get current battery health data for the logged-in user.
+
+    Supports both session login and Bearer token authentication.
     """
-    if not current_user.battery_health_updated:
+    user = api_user or current_user
+    if not user.battery_health_updated:
         return jsonify({
             'has_data': False,
             'message': 'No battery health data available'
@@ -4787,11 +4854,11 @@ def api_battery_health_get():
 
     return jsonify({
         'has_data': True,
-        'originalCapacityWh': current_user.battery_original_capacity_wh,
-        'currentCapacityWh': current_user.battery_current_capacity_wh,
-        'degradationPercent': current_user.battery_degradation_percent,
-        'batteryCount': current_user.battery_count,
-        'updatedAt': current_user.battery_health_updated.isoformat() if current_user.battery_health_updated else None
+        'originalCapacityWh': user.battery_original_capacity_wh,
+        'currentCapacityWh': user.battery_current_capacity_wh,
+        'degradationPercent': user.battery_degradation_percent,
+        'batteryCount': user.battery_count,
+        'updatedAt': user.battery_health_updated.isoformat() if user.battery_health_updated else None
     })
 
 

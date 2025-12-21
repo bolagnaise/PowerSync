@@ -20,6 +20,30 @@ from app import db
 logger = logging.getLogger(__name__)
 
 
+def get_api_user():
+    """
+    Get the authenticated user from either session login or Bearer token.
+    For API endpoints that need to support both web and mobile access.
+
+    Returns the user if authenticated, None otherwise.
+    """
+    # First check session login
+    if current_user.is_authenticated:
+        return current_user
+
+    # Then check Bearer token
+    from app.models import User
+    auth_header = request.headers.get('Authorization')
+    if auth_header and auth_header.startswith('Bearer '):
+        token = auth_header.split(' ', 1)[1]
+        if token:
+            user = User.query.filter_by(battery_health_api_token=token).first()
+            if user:
+                return user
+
+    return None
+
+
 # ============================================================================
 # API Client Validation Decorators
 # ============================================================================
@@ -29,21 +53,31 @@ def require_tesla_client(f):
 
     Validates that a Tesla API client can be created for the current user.
     If not available, returns appropriate error response based on request type.
-    Injects tesla_client as a keyword argument to the decorated function.
+    Injects tesla_client and api_user as keyword arguments to the decorated function.
+
+    Supports both session login and Bearer token authentication.
 
     Usage:
         @bp.route('/api/tesla/something')
-        @login_required
+        @login_required  # or @api_login_required for token support
         @require_tesla_client
-        def my_route(tesla_client):
+        def my_route(tesla_client, api_user=None):
             # tesla_client is guaranteed to be available here
+            # api_user is the authenticated user (from session or token)
             pass
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
         from app.api_clients import get_tesla_client
 
-        tesla_client = get_tesla_client(current_user)
+        # Get user from session or Bearer token
+        user = get_api_user()
+        if not user:
+            if request.is_json or request.path.startswith('/api/'):
+                return jsonify({'error': 'Authentication required'}), 401
+            return redirect(url_for('main.login'))
+
+        tesla_client = get_tesla_client(user)
         if not tesla_client:
             logger.warning(f"Tesla client not available for {f.__name__}")
             if request.is_json or request.path.startswith('/api/'):
@@ -51,6 +85,7 @@ def require_tesla_client(f):
             flash('Please configure your Tesla API credentials first.')
             return redirect(url_for('main.settings'))
 
+        kwargs['api_user'] = user
         return f(tesla_client=tesla_client, *args, **kwargs)
 
     return decorated_function
@@ -61,21 +96,31 @@ def require_amber_client(f):
 
     Validates that an Amber API client can be created for the current user.
     If not available, returns appropriate error response based on request type.
-    Injects amber_client as a keyword argument to the decorated function.
+    Injects amber_client and api_user as keyword arguments to the decorated function.
+
+    Supports both session login and Bearer token authentication.
 
     Usage:
         @bp.route('/api/amber/something')
-        @login_required
+        @login_required  # or @api_login_required for token support
         @require_amber_client
-        def my_route(amber_client):
+        def my_route(amber_client, api_user=None):
             # amber_client is guaranteed to be available here
+            # api_user is the authenticated user (from session or token)
             pass
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
         from app.api_clients import get_amber_client
 
-        amber_client = get_amber_client(current_user)
+        # Get user from session or Bearer token
+        user = get_api_user()
+        if not user:
+            if request.is_json or request.path.startswith('/api/'):
+                return jsonify({'error': 'Authentication required'}), 401
+            return redirect(url_for('main.login'))
+
+        amber_client = get_amber_client(user)
         if not amber_client:
             logger.warning(f"Amber client not available for {f.__name__}")
             if request.is_json or request.path.startswith('/api/'):
@@ -83,6 +128,7 @@ def require_amber_client(f):
             flash('Please configure your Amber API credentials first.')
             return redirect(url_for('main.settings'))
 
+        kwargs['api_user'] = user
         return f(amber_client=amber_client, *args, **kwargs)
 
     return decorated_function
@@ -94,22 +140,35 @@ def require_tesla_site_id(f):
     Validates that the current user has a Tesla energy site ID configured.
     If not available, returns appropriate error response based on request type.
 
+    Supports both session login and Bearer token authentication.
+
     Usage:
         @bp.route('/api/tesla/something')
-        @login_required
+        @login_required  # or use require_tesla_client which handles auth
         @require_tesla_site_id
-        def my_route():
+        def my_route(api_user=None):
             # site ID is guaranteed to be configured here
             pass
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if not current_user.tesla_energy_site_id:
+        # Get user from kwargs (set by require_tesla_client) or from session/token
+        user = kwargs.get('api_user') or get_api_user()
+        if not user:
+            if request.is_json or request.path.startswith('/api/'):
+                return jsonify({'error': 'Authentication required'}), 401
+            return redirect(url_for('main.login'))
+
+        if not user.tesla_energy_site_id:
             logger.warning(f"No Tesla site ID configured for {f.__name__}")
             if request.is_json or request.path.startswith('/api/'):
                 return jsonify({'error': 'No Tesla site ID configured'}), 400
             flash('Please configure your Tesla energy site ID first.')
             return redirect(url_for('main.settings'))
+
+        # Ensure api_user is in kwargs
+        if 'api_user' not in kwargs:
+            kwargs['api_user'] = user
 
         return f(*args, **kwargs)
 
