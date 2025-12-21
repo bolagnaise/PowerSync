@@ -5200,6 +5200,175 @@ def api_battery_health_from_cloud():
         }), 500
 
 
+# ============================================================================
+# Push Notification Endpoints
+# ============================================================================
+
+@bp.route('/api/push/register', methods=['POST'])
+def api_push_register():
+    """
+    Register device for push notifications.
+
+    Authentication: Bearer token in Authorization header
+
+    Request body:
+    {
+        "deviceToken": "apns-device-token-string",
+        "platform": "ios"  # Currently only iOS supported
+    }
+
+    Response:
+    {
+        "success": true,
+        "message": "Device registered for push notifications"
+    }
+    """
+    from app.route_helpers import get_api_user
+
+    user = get_api_user()
+    if not user:
+        return jsonify({'success': False, 'error': 'Unauthorized'}), 401
+
+    data = request.get_json()
+    if not data:
+        return jsonify({'success': False, 'error': 'No data provided'}), 400
+
+    device_token = data.get('deviceToken')
+    platform = data.get('platform', 'ios')
+
+    if not device_token:
+        return jsonify({'success': False, 'error': 'deviceToken is required'}), 400
+
+    if platform != 'ios':
+        return jsonify({'success': False, 'error': 'Only iOS platform is currently supported'}), 400
+
+    try:
+        user.apns_device_token = device_token
+        user.push_notifications_enabled = True
+        db.session.commit()
+
+        logger.info(f"Registered push token for user {user.email}: {device_token[:20]}...")
+
+        return jsonify({
+            'success': True,
+            'message': 'Device registered for push notifications'
+        })
+
+    except Exception as e:
+        logger.error(f"Error registering push token: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@bp.route('/api/push/settings', methods=['GET', 'POST'])
+def api_push_settings():
+    """
+    Get or update push notification settings.
+
+    Authentication: Bearer token in Authorization header
+
+    GET Response:
+    {
+        "enabled": true,
+        "firmwareUpdates": true
+    }
+
+    POST Request:
+    {
+        "enabled": true,
+        "firmwareUpdates": true
+    }
+    """
+    from app.route_helpers import get_api_user
+
+    user = get_api_user()
+    if not user:
+        return jsonify({'success': False, 'error': 'Unauthorized'}), 401
+
+    if request.method == 'GET':
+        return jsonify({
+            'enabled': user.push_notifications_enabled if user.push_notifications_enabled is not None else True,
+            'firmwareUpdates': user.notify_firmware_updates if user.notify_firmware_updates is not None else True
+        })
+
+    # POST - update settings
+    data = request.get_json()
+    if not data:
+        return jsonify({'success': False, 'error': 'No data provided'}), 400
+
+    try:
+        if 'enabled' in data:
+            user.push_notifications_enabled = bool(data['enabled'])
+        if 'firmwareUpdates' in data:
+            user.notify_firmware_updates = bool(data['firmwareUpdates'])
+
+        db.session.commit()
+
+        logger.info(f"Updated push settings for {user.email}: enabled={user.push_notifications_enabled}, firmware={user.notify_firmware_updates}")
+
+        return jsonify({
+            'success': True,
+            'enabled': user.push_notifications_enabled,
+            'firmwareUpdates': user.notify_firmware_updates
+        })
+
+    except Exception as e:
+        logger.error(f"Error updating push settings: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@bp.route('/api/firmware/status', methods=['GET'])
+def api_firmware_status():
+    """
+    Get current Powerwall firmware version.
+
+    Authentication: Bearer token in Authorization header
+
+    Response:
+    {
+        "version": "25.10.1",
+        "lastChecked": "2024-12-21T12:00:00Z"
+    }
+    """
+    from app.route_helpers import get_api_user
+    from app.api_clients import get_tesla_client
+
+    user = get_api_user()
+    if not user:
+        return jsonify({'success': False, 'error': 'Unauthorized'}), 401
+
+    # Return cached version first
+    cached_version = user.powerwall_firmware_version
+    last_checked = user.powerwall_firmware_updated
+
+    # Try to get fresh version from Tesla API
+    if user.tesla_energy_site_id:
+        try:
+            tesla_client = get_tesla_client(user)
+            if tesla_client:
+                site_info = tesla_client.get_site_info(user.tesla_energy_site_id)
+                if site_info and site_info.get('version'):
+                    current_version = site_info.get('version')
+
+                    # Check for change and notify
+                    from app.push_notifications import check_and_notify_firmware_change
+                    check_and_notify_firmware_change(user, current_version)
+
+                    return jsonify({
+                        'version': current_version,
+                        'lastChecked': datetime.utcnow().isoformat() + 'Z'
+                    })
+        except Exception as e:
+            logger.warning(f"Error fetching firmware version: {e}")
+
+    # Fall back to cached version
+    return jsonify({
+        'version': cached_version,
+        'lastChecked': last_checked.isoformat() + 'Z' if last_checked else None
+    })
+
+
 @bp.route('/api/powerwall/register-key', methods=['POST'])
 def api_powerwall_register_key():
     """

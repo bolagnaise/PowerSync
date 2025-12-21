@@ -548,6 +548,15 @@ def _sync_all_users_internal(websocket_data, sync_mode='initial_forecast'):
                     logger.info(f"Using Powerwall timezone: {powerwall_tz}")
                 else:
                     logger.warning(f"No installation_time_zone in site_info for {user.email}")
+
+                # Check for firmware updates and notify if changed
+                firmware_version = site_info.get('version')
+                if firmware_version:
+                    try:
+                        from app.push_notifications import check_and_notify_firmware_change
+                        check_and_notify_firmware_change(user, firmware_version)
+                    except Exception as e:
+                        logger.warning(f"Error checking firmware change: {e}")
             else:
                 logger.warning(f"Failed to fetch site_info for {user.email}")
 

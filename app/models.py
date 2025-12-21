@@ -168,6 +168,15 @@ class User(UserMixin, db.Model):
     battery_health_api_token = db.Column(db.String(64), nullable=True)  # API token for mobile app sync
     powerwall_install_date = db.Column(db.Date, nullable=True)  # When Powerwall was installed
 
+    # Firmware Tracking
+    powerwall_firmware_version = db.Column(db.String(50), nullable=True)  # Current firmware version
+    powerwall_firmware_updated = db.Column(db.DateTime, nullable=True)  # When firmware was last checked
+
+    # Push Notifications (for mobile app)
+    apns_device_token = db.Column(db.String(200), nullable=True)  # iOS APNs device token
+    push_notifications_enabled = db.Column(db.Boolean, default=True)  # Enable/disable push notifications
+    notify_firmware_updates = db.Column(db.Boolean, default=True)  # Notify on firmware changes
+
     # Relationships
     price_records = db.relationship('PriceRecord', backref='user', lazy='dynamic')
     energy_records = db.relationship('EnergyRecord', backref='user', lazy='dynamic')
