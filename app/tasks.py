@@ -628,6 +628,11 @@ def _sync_all_users_internal(websocket_data, sync_mode='initial_forecast'):
             if result:
                 logger.info(f"✅ Successfully synced schedule for user {user.email}")
 
+                # Alpha: Force mode toggle for faster Powerwall response
+                if getattr(user, 'force_tariff_mode_toggle', False):
+                    logger.info(f"🔄 Force mode toggle enabled for {user.email} - switching modes")
+                    force_tariff_refresh(tesla_client, user.tesla_energy_site_id, wait_seconds=5)
+
                 # Update user's last_update timestamp and tariff hash
                 user.last_update_time = datetime.now(timezone.utc)
                 user.last_update_status = f"Auto-sync successful ({sync_mode})"

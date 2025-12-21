@@ -44,6 +44,28 @@
                             👁️
                         </button>
                     </div>
+
+                    <!-- Alpha: Force Mode Toggle -->
+                    <details style="margin-top: 1.5em;">
+                        <summary style="font-size: 0.9em; cursor: pointer; color: var(--primary);">
+                            🧪 Alpha Options
+                        </summary>
+                        <div style="margin-top: 1em; padding: 1em; background: rgba(255, 193, 7, 0.1); border-radius: 0.5em; border-left: 4px solid #ffc107;">
+                            <label for="force_tariff_mode_toggle" style="margin: 0;">
+                                <input type="checkbox" id="force_tariff_mode_toggle" name="force_tariff_mode_toggle"
+                                       {% if current_user.force_tariff_mode_toggle %}checked{% endif %}>
+                                Force mode toggle after tariff sync
+                            </label>
+                            <p style="font-size: 0.8em; margin: 0.5em 0 0 1.75em; color: var(--muted-color);">
+                                After uploading a new tariff, briefly switch Powerwall to self-consumption mode then back to
+                                Time-Based Control. This forces the Powerwall to immediately recalculate its behavior based
+                                on the new tariff, rather than waiting for the next internal refresh cycle.
+                            </p>
+                            <p style="font-size: 0.75em; margin: 0.5em 0 0 1.75em; color: var(--muted-color); font-style: italic;">
+                                ⚠️ Alpha feature - may cause brief interruption to battery behavior during mode switch.
+                            </p>
+                        </div>
+                    </details>
                 </fieldset>
             </div>
 

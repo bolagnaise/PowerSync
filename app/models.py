@@ -55,6 +55,10 @@ class User(UserMixin, db.Model):
     current_export_rule_updated = db.Column(db.DateTime)  # When the export rule was last updated
     last_tariff_hash = db.Column(db.String(32))  # MD5 hash of last synced tariff for deduplication
 
+    # Alpha: Force mode toggle after tariff sync
+    # Toggle to self_consumption then back to TOU after tariff upload for faster PW response
+    force_tariff_mode_toggle = db.Column(db.Boolean, default=False)
+
     # Export Price Boost Configuration
     # Artificially increase export prices to trigger Powerwall exports at lower price points
     export_boost_enabled = db.Column(db.Boolean, default=False)

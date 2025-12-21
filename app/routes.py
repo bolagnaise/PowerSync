@@ -935,6 +935,10 @@ def amber_settings():
         current_user.settled_prices_only = 'settled_prices_only' in request.form
         logger.info(f"Saving settled prices only: {current_user.settled_prices_only}")
 
+        # Alpha: Force tariff mode toggle setting
+        current_user.force_tariff_mode_toggle = 'force_tariff_mode_toggle' in request.form
+        logger.info(f"Saving force tariff mode toggle: {current_user.force_tariff_mode_toggle}")
+
         try:
             db.session.commit()
             logger.info(f"Amber settings saved successfully: forecast_type={form.amber_forecast_type.data}, site_id={current_user.amber_site_id}")
