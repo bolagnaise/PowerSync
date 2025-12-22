@@ -1814,37 +1814,60 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 entry.data.get(CONF_FORCE_TARIFF_MODE_TOGGLE, False)
             )
             if force_mode_toggle and sync_mode != 'initial_forecast':
-                _LOGGER.info("🔄 Force mode toggle enabled - switching modes for faster PW response")
                 try:
                     site_id = entry.data[CONF_TESLA_ENERGY_SITE_ID]
                     api_base = TESLEMETRY_API_BASE_URL if current_provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
                     headers = {"Authorization": f"Bearer {current_token}", "Content-Type": "application/json"}
                     session = async_get_clientsession(hass)
 
-                    # Switch to self_consumption
-                    async with session.post(
-                        f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                    # Check if Powerwall is already exporting or charging - if so, skip the toggle
+                    async with session.get(
+                        f"{api_base}/api/1/energy_sites/{site_id}/live_status",
                         headers=headers,
-                        json={"default_real_mode": "self_consumption"},
-                        timeout=aiohttp.ClientTimeout(total=30),
+                        timeout=aiohttp.ClientTimeout(total=10),
                     ) as response:
                         if response.status == 200:
-                            _LOGGER.debug("Switched to self_consumption mode")
-
-                    # Wait briefly
-                    await asyncio.sleep(5)
-
-                    # Switch back to autonomous
-                    async with session.post(
-                        f"{api_base}/api/1/energy_sites/{site_id}/operation",
-                        headers=headers,
-                        json={"default_real_mode": "autonomous"},
-                        timeout=aiohttp.ClientTimeout(total=30),
-                    ) as response:
-                        if response.status == 200:
-                            _LOGGER.info("🔄 Force mode toggle complete - switched back to autonomous")
+                            data = await response.json()
+                            site_status = data.get("response", {})
+                            grid_power = site_status.get("grid_power", 0)
+                            battery_power = site_status.get("battery_power", 0)
                         else:
-                            _LOGGER.warning(f"Could not switch back to autonomous: {response.status}")
+                            grid_power = 0
+                            battery_power = 0
+
+                    if grid_power < 0:
+                        # Negative grid_power means exporting - already doing what we want
+                        _LOGGER.info(f"⏭️  Skipping force toggle - already exporting ({abs(grid_power):.0f}W to grid)")
+                    elif battery_power < 0:
+                        # Negative battery_power means charging - already doing what we want
+                        _LOGGER.info(f"⏭️  Skipping force toggle - battery already charging ({abs(battery_power):.0f}W)")
+                    else:
+                        _LOGGER.info(f"🔄 Force mode toggle - grid: {grid_power:.0f}W, battery: {battery_power:.0f}W")
+
+                        # Switch to self_consumption
+                        async with session.post(
+                            f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                            headers=headers,
+                            json={"default_real_mode": "self_consumption"},
+                            timeout=aiohttp.ClientTimeout(total=30),
+                        ) as response:
+                            if response.status == 200:
+                                _LOGGER.debug("Switched to self_consumption mode")
+
+                        # Wait briefly
+                        await asyncio.sleep(5)
+
+                        # Switch back to autonomous
+                        async with session.post(
+                            f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                            headers=headers,
+                            json={"default_real_mode": "autonomous"},
+                            timeout=aiohttp.ClientTimeout(total=30),
+                        ) as response:
+                            if response.status == 200:
+                                _LOGGER.info("🔄 Force mode toggle complete - switched back to autonomous")
+                            else:
+                                _LOGGER.warning(f"Could not switch back to autonomous: {response.status}")
                 except Exception as e:
                     _LOGGER.warning(f"Force mode toggle failed: {e}")
 
