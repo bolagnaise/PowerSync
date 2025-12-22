@@ -276,6 +276,15 @@ login.login_view = 'main.login' # Redirect to login page if user is not authenti
 cache = Cache()
 
 
+@login.unauthorized_handler
+def unauthorized_callback():
+    """Handle unauthorized access - return JSON for API routes, redirect for web routes."""
+    from flask import request, jsonify, redirect, url_for
+    if request.is_json or request.path.startswith('/api/'):
+        return jsonify({'error': 'Session expired. Please refresh the page and log in again.'}), 401
+    return redirect(url_for('main.login'))
+
+
 def _repair_missing_columns(db, logger):
     """
     Repair schema if columns are missing but alembic_version says migration is done.
