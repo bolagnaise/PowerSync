@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/images/logo.png" alt="Tesla Sync Logo" width="400"/>
+  <img src="https://raw.githubusercontent.com/bolagnaise/tesla-sync/main/logo.png" alt="Tesla Sync Logo" width="400"/>
 
   # Tesla Sync
 
