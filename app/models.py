@@ -127,6 +127,7 @@ class User(UserMixin, db.Model):
     manual_charge_active = db.Column(db.Boolean, default=False)  # Currently in manual charge mode
     manual_charge_expires_at = db.Column(db.DateTime, nullable=True)  # When to auto-restore normal operation
     manual_charge_saved_tariff_id = db.Column(db.Integer, db.ForeignKey('saved_tou_profile.id', use_alter=True), nullable=True)
+    manual_charge_saved_backup_reserve = db.Column(db.Integer, nullable=True)  # Backup reserve % to restore after charge
 
     # Electricity Provider Configuration
     electricity_provider = db.Column(db.String(20), default='amber')  # 'amber', 'flow_power', 'globird'

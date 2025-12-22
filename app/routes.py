@@ -3286,6 +3286,22 @@ def api_force_charge(tesla_client):
                 current_user.manual_charge_saved_tariff_id = backup_profile.id
                 logger.info(f"Saved current tariff as backup with ID {backup_profile.id}")
 
+        # Save current backup reserve and set to 100% to force charging
+        site_info = tesla_client.get_site_info(current_user.tesla_energy_site_id)
+        if site_info:
+            current_backup_reserve = site_info.get('backup_reserve_percent')
+            if current_backup_reserve is not None:
+                current_user.manual_charge_saved_backup_reserve = current_backup_reserve
+                logger.info(f"Saved current backup reserve: {current_backup_reserve}%")
+
+        # Set backup reserve to 100% to force charging from grid
+        logger.info("Setting backup reserve to 100% to force charging...")
+        backup_result = tesla_client.set_backup_reserve(current_user.tesla_energy_site_id, 100)
+        if backup_result:
+            logger.info("Set backup reserve to 100%")
+        else:
+            logger.warning("Failed to set backup reserve to 100%")
+
         # Create charge tariff (free buy rate to encourage charging)
         # Uses $0/kWh buy rate during window, $10/kWh outside, $0/kWh sell
         from app.tasks import create_charge_tariff
@@ -3427,11 +3443,22 @@ def api_restore_normal(tesla_client):
                 logger.warning(f"No backup tariff found for {current_user.email}")
                 restore_method = 'no_backup'
 
+        # Restore saved backup reserve if it was saved during force charge
+        saved_backup_reserve = getattr(current_user, 'manual_charge_saved_backup_reserve', None)
+        if was_in_charge and saved_backup_reserve is not None:
+            logger.info(f"Restoring backup reserve to {saved_backup_reserve}%")
+            backup_result = tesla_client.set_backup_reserve(current_user.tesla_energy_site_id, saved_backup_reserve)
+            if backup_result:
+                logger.info(f"Restored backup reserve to {saved_backup_reserve}%")
+            else:
+                logger.warning(f"Failed to restore backup reserve to {saved_backup_reserve}%")
+
         # Clear all discharge/charge/spike states
         current_user.manual_discharge_active = False
         current_user.manual_discharge_expires_at = None
         current_user.manual_charge_active = False
         current_user.manual_charge_expires_at = None
+        current_user.manual_charge_saved_backup_reserve = None
         current_user.aemo_in_spike_mode = False
         current_user.aemo_spike_test_mode = False
         current_user.aemo_spike_start_time = None

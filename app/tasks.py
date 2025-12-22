@@ -819,9 +819,20 @@ def check_manual_charge_expiry():
                     else:
                         logger.error(f"Failed to restore tariff for {user.email}")
 
+            # Restore saved backup reserve if it was saved during force charge
+            saved_backup_reserve = getattr(user, 'manual_charge_saved_backup_reserve', None)
+            if saved_backup_reserve is not None:
+                logger.info(f"Restoring backup reserve to {saved_backup_reserve}% for {user.email}")
+                backup_result = tesla_client.set_backup_reserve(user.tesla_energy_site_id, saved_backup_reserve)
+                if backup_result:
+                    logger.info(f"Restored backup reserve to {saved_backup_reserve}%")
+                else:
+                    logger.warning(f"Failed to restore backup reserve to {saved_backup_reserve}%")
+
             # Clear charge state
             user.manual_charge_active = False
             user.manual_charge_expires_at = None
+            user.manual_charge_saved_backup_reserve = None
             db.session.commit()
             logger.info(f"Manual charge cleared for {user.email}")
 

@@ -2403,6 +2403,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "active": False,
         "saved_tariff": None,
         "saved_operation_mode": None,
+        "saved_backup_reserve": None,
         "expires_at": None,
         "cancel_expiry_timer": None,
     }
@@ -2720,7 +2721,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     else:
                         _LOGGER.warning("Could not save current tariff: %s", response.status)
 
-                # Step 2: Get and save current operation mode
+                # Step 2: Get and save current operation mode and backup reserve
                 async with session.get(
                     f"{api_base}/api/1/energy_sites/{site_id}/site_info",
                     headers=headers,
@@ -2728,8 +2729,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ) as response:
                     if response.status == 200:
                         data = await response.json()
-                        force_charge_state["saved_operation_mode"] = data.get("response", {}).get("default_real_mode")
-                        _LOGGER.info("Saved operation mode: %s", force_charge_state["saved_operation_mode"])
+                        site_info = data.get("response", {})
+                        force_charge_state["saved_operation_mode"] = site_info.get("default_real_mode")
+                        force_charge_state["saved_backup_reserve"] = site_info.get("backup_reserve_percent")
+                        _LOGGER.info("Saved operation mode: %s, backup reserve: %s%%",
+                                     force_charge_state["saved_operation_mode"],
+                                     force_charge_state["saved_backup_reserve"])
 
             # Step 3: Switch to autonomous mode for best charging behavior
             if force_charge_state.get("saved_operation_mode") != "autonomous":
@@ -2744,6 +2749,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _LOGGER.info("Switched to autonomous mode")
                     else:
                         _LOGGER.warning("Could not switch operation mode: %s", response.status)
+
+            # Step 3b: Set backup reserve to 100% to force charging
+            _LOGGER.info("Setting backup reserve to 100%% to force charging...")
+            async with session.post(
+                f"{api_base}/api/1/energy_sites/{site_id}/backup",
+                headers=headers,
+                json={"backup_reserve_percent": 100},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status == 200:
+                    _LOGGER.info("Set backup reserve to 100%%")
+                else:
+                    _LOGGER.warning("Could not set backup reserve: %s", response.status)
 
             # Step 4: Create and upload charge tariff (free import, no export incentive)
             charge_tariff = _create_charge_tariff(duration)
@@ -3025,6 +3043,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 else:
                     _LOGGER.warning(f"Could not restore operation mode: {response.status}")
 
+            # Restore backup reserve if it was saved during force charge
+            saved_backup_reserve = force_charge_state.get("saved_backup_reserve")
+            if saved_backup_reserve is not None:
+                _LOGGER.info(f"Restoring backup reserve to: {saved_backup_reserve}%")
+                async with session.post(
+                    f"{api_base}/api/1/energy_sites/{site_id}/backup",
+                    headers=headers,
+                    json={"backup_reserve_percent": saved_backup_reserve},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 200:
+                        _LOGGER.info(f"Restored backup reserve to {saved_backup_reserve}%")
+                    else:
+                        _LOGGER.warning(f"Could not restore backup reserve: {response.status}")
+
             # Clear discharge state
             force_discharge_state["active"] = False
             force_discharge_state["saved_tariff"] = None
@@ -3035,6 +3068,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             force_charge_state["active"] = False
             force_charge_state["saved_tariff"] = None
             force_charge_state["saved_operation_mode"] = None
+            force_charge_state["saved_backup_reserve"] = None
             force_charge_state["expires_at"] = None
 
             _LOGGER.info("✅ NORMAL OPERATION RESTORED")
