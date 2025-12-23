@@ -307,6 +307,113 @@ views:
               border-left: 4px solid #4CAF50;
               {% endif %}
             }
+      # Battery Health Card - shows overall and individual battery health
+      # Auto-detects number of batteries (up to 4) from sensor attributes
+      - type: custom:apexcharts-card
+        header:
+          show: true
+          title: Battery Health
+          show_states: true
+        chart_type: radialBar
+        series:
+          - entity: sensor.battery_health
+            name: Overall
+            color: '#4CAF50'
+          - entity: sensor.battery_health
+            name: Battery 1
+            color: '#2196F3'
+            attribute: battery_1_health_percent
+          - entity: sensor.battery_health
+            name: Battery 2
+            color: '#FF9800'
+            attribute: battery_2_health_percent
+          - entity: sensor.battery_health
+            name: Battery 3
+            color: '#9C27B0'
+            attribute: battery_3_health_percent
+          - entity: sensor.battery_health
+            name: Battery 4
+            color: '#00BCD4'
+            attribute: battery_4_health_percent
+        apex_config:
+          chart:
+            height: 280
+          plotOptions:
+            radialBar:
+              offsetY: -10
+              startAngle: -135
+              endAngle: 135
+              hollow:
+                size: '40%'
+              track:
+                background: '#333'
+                strokeWidth: '100%'
+              dataLabels:
+                name:
+                  fontSize: '14px'
+                  offsetY: 20
+                value:
+                  fontSize: '24px'
+                  offsetY: -15
+                  formatter: |
+                    EVAL:function(val) {
+                      return val.toFixed(1) + '%';
+                    }
+          legend:
+            show: true
+            position: bottom
+            fontSize: '12px'
+          fill:
+            type: gradient
+            gradient:
+              shade: dark
+              type: horizontal
+              shadeIntensity: 0.5
+              gradientToColors:
+                - '#8BC34A'
+                - '#03A9F4'
+                - '#FFC107'
+                - '#E040FB'
+                - '#00E5FF'
+              stops:
+                - 0
+                - 100
+      # Battery Health Details - capacity info
+      - type: markdown
+        content: >-
+          ## Battery Capacity Details
+
+          {% set health = states('sensor.battery_health') %}
+          {% set original = state_attr('sensor.battery_health', 'original_capacity_kwh') %}
+          {% set current = state_attr('sensor.battery_health', 'current_capacity_kwh') %}
+          {% set count = state_attr('sensor.battery_health', 'battery_count') %}
+          {% set scan = state_attr('sensor.battery_health', 'last_scan') %}
+          {% if health != 'unavailable' and health != 'unknown' %}
+          | Metric | Value |
+          |--------|-------|
+          | Overall Health | **{{ health }}%** |
+          | Original Capacity | {{ original }} kWh |
+          | Current Capacity | {{ current }} kWh |
+          | Battery Count | {{ count }} |
+          {% for i in range(1, 5) %}
+          {% set batt_health = state_attr('sensor.battery_health', 'battery_' ~ i ~ '_health_percent') %}
+          {% set batt_current = state_attr('sensor.battery_health', 'battery_' ~ i ~ '_current_kwh') %}
+          {% set batt_original = state_attr('sensor.battery_health', 'battery_' ~ i ~ '_original_kwh') %}
+          {% if batt_health is not none %}
+          | Battery {{ i }} | {{ batt_health }}% ({{ batt_current }}/{{ batt_original }} kWh) |
+          {% endif %}
+          {% endfor %}
+
+          *Last scan: {{ scan }}*
+          {% else %}
+          No battery health data available. Scan from the Tesla Sync Mobile app while connected to Powerwall WiFi.
+          {% endif %}
+        card_mod:
+          style: |
+            ha-card {
+              background: linear-gradient(135deg, rgba(76, 175, 80, 0.1) 0%, rgba(33, 150, 243, 0.05) 100%);
+              border-left: 4px solid #4CAF50;
+            }
       - type: custom:apexcharts-card
         header:
           show: true

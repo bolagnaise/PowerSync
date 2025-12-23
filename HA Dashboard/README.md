@@ -9,6 +9,7 @@ The dashboard includes:
 - **Battery Control** - Force charge, force discharge, and restore normal buttons with duration selectors
 - **Power Flow Card** - Real-time energy flow visualization
 - **Price Charts** - Amber prices and TOU schedule sent to Tesla
+- **Battery Health** - Radial chart showing overall and individual battery health (up to 4 batteries)
 - **Energy Charts** - Solar, Battery, Grid, and Home load graphs
 - **Solar Curtailment Status** - Shows when export is blocked due to negative prices
 
@@ -83,6 +84,7 @@ The dashboard uses these default entity names. If your entities have different n
 | `sensor.home_load` | Home consumption power |
 | `sensor.tariff_schedule` | TOU schedule sensor |
 | `sensor.solar_curtailment` | Curtailment status sensor |
+| `sensor.battery_health` | Battery health from mobile app TEDAPI scan |
 
 ### Chart Heights
 
