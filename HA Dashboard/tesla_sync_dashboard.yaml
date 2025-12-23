@@ -307,32 +307,43 @@ views:
               border-left: 4px solid #4CAF50;
               {% endif %}
             }
-      # Battery Health Details
+      # Battery Health Details with colored bars
       - type: markdown
         content: |
           ## Battery Health
-          {% set health = states('sensor.battery_health') %}
+          {% set health = states('sensor.battery_health') | float(0) %}
           {% set original = state_attr('sensor.battery_health', 'original_capacity_kwh') %}
           {% set current = state_attr('sensor.battery_health', 'current_capacity_kwh') %}
-          {% set count = state_attr('sensor.battery_health', 'battery_count') %}
+          {% set count = state_attr('sensor.battery_health', 'battery_count') | int(0) %}
           {% set scan = state_attr('sensor.battery_health', 'last_scan') %}
-          {%- if health != 'unavailable' and health != 'unknown' %}
-          | Metric | Value |
-          |--------|-------|
-          | Overall Health | **{{ health }}%** |
-          | Original Capacity | {{ original }} kWh |
-          | Current Capacity | {{ current }} kWh |
-          | Battery Count | {{ count }} |
-          {%- for i in range(1, 5) %}
-          {%- set batt_health = state_attr('sensor.battery_health', 'battery_' ~ i ~ '_health_percent') %}
+          {% set colors = ['#4CAF50', '#2196F3', '#FF9800', '#9C27B0', '#00BCD4'] %}
+          {%- if states('sensor.battery_health') not in ['unavailable', 'unknown'] %}
+          <div style="margin-bottom: 16px;">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+              <span><strong>Overall</strong></span>
+              <span><strong>{{ health }}%</strong></span>
+            </div>
+            <div style="background: #333; border-radius: 4px; height: 24px; overflow: hidden;">
+              <div style="background: {{ colors[0] }}; width: {{ [health / 1.15, 100] | min }}%; height: 100%; border-radius: 4px;"></div>
+            </div>
+            <div style="font-size: 11px; color: #888; margin-top: 2px;">{{ current }} / {{ original }} kWh</div>
+          </div>
+          {%- for i in range(1, count + 1) %}
+          {%- set batt_health = state_attr('sensor.battery_health', 'battery_' ~ i ~ '_health_percent') | float(0) %}
           {%- set batt_current = state_attr('sensor.battery_health', 'battery_' ~ i ~ '_current_kwh') %}
           {%- set batt_original = state_attr('sensor.battery_health', 'battery_' ~ i ~ '_original_kwh') %}
-          {%- if batt_health is not none %}
-          | Battery {{ i }} | {{ batt_health }}% ({{ batt_current }}/{{ batt_original }} kWh) |
-          {%- endif %}
+          <div style="margin-bottom: 12px;">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+              <span>Battery {{ i }}</span>
+              <span>{{ batt_health }}%</span>
+            </div>
+            <div style="background: #333; border-radius: 4px; height: 16px; overflow: hidden;">
+              <div style="background: {{ colors[i] }}; width: {{ [batt_health / 1.15, 100] | min }}%; height: 100%; border-radius: 4px;"></div>
+            </div>
+            <div style="font-size: 10px; color: #888; margin-top: 2px;">{{ batt_current }} / {{ batt_original }} kWh</div>
+          </div>
           {%- endfor %}
-
-          *Last scan: {{ scan }}*
+          <div style="font-size: 11px; color: #666; margin-top: 12px;">Last scan: {{ scan }}</div>
           {%- else %}
           No battery health data available. Scan from the Tesla Sync Mobile app while connected to Powerwall WiFi.
           {%- endif %}
