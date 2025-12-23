@@ -307,6 +307,72 @@ views:
               border-left: 4px solid #4CAF50;
               {% endif %}
             }
+      # Battery Health Card - shows overall and individual battery health
+      - type: custom:apexcharts-card
+        header:
+          show: true
+          title: Battery Health
+          show_states: true
+        chart_type: line
+        series:
+          - entity: sensor.battery_health
+            name: Overall
+            color: '#4CAF50'
+            stroke_width: 3
+            group_by:
+              func: last
+              duration: 1d
+          - entity: sensor.battery_health
+            name: Battery 1
+            color: '#2196F3'
+            attribute: battery_1_health_percent
+            stroke_width: 2
+            group_by:
+              func: last
+              duration: 1d
+          - entity: sensor.battery_health
+            name: Battery 2
+            color: '#FF9800'
+            attribute: battery_2_health_percent
+            stroke_width: 2
+            group_by:
+              func: last
+              duration: 1d
+          - entity: sensor.battery_health
+            name: Battery 3
+            color: '#9C27B0'
+            attribute: battery_3_health_percent
+            stroke_width: 2
+            group_by:
+              func: last
+              duration: 1d
+          - entity: sensor.battery_health
+            name: Battery 4
+            color: '#00BCD4'
+            attribute: battery_4_health_percent
+            stroke_width: 2
+            group_by:
+              func: last
+              duration: 1d
+        graph_span: 30d
+        span:
+          end: now
+        apex_config:
+          chart:
+            height: 200
+          yaxis:
+            min: 90
+            max: 110
+            labels:
+              formatter: |
+                EVAL:function(val) {
+                  return val + '%';
+                }
+          legend:
+            show: true
+            position: bottom
+          stroke:
+            curve: smooth
       # Battery Health Details - capacity info
       - type: markdown
         content: >-
