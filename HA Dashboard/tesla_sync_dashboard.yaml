@@ -314,7 +314,6 @@ views:
           show: true
           title: Battery Health
           show_states: false
-        chart_type: bar
         all_series_config:
           stroke_width: 0
         series:
