@@ -106,8 +106,9 @@ def _get_export_price(data):
         return None
     for price in data.get("current", []):
         if price.get("channelType") == "feedIn":
-            # Amber returns negative for feed-in, negate to show earnings
-            return -price.get("perKwh", 0) / 100
+            # Export price should always be positive (what you earn)
+            # Amber uses negative to indicate earnings, so use abs()
+            return abs(price.get("perKwh", 0)) / 100
     return None
 
 
