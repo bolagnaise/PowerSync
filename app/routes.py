@@ -2191,7 +2191,7 @@ def tou_schedule(api_user=None, **kwargs):
 @login_required
 @require_tesla_client
 @require_tesla_site_id
-def sync_tesla_schedule(tesla_client):
+def sync_tesla_schedule(tesla_client, api_user=None):
     """Apply the TOU schedule to Tesla Powerwall"""
     logger.info(f"Tesla schedule sync requested by user: {current_user.email}")
 
@@ -2660,7 +2660,7 @@ def test_tariff_comparison():
 @bp.route('/api/test/find-tesla-sites')
 @login_required
 @require_tesla_client
-def test_find_tesla_sites(tesla_client):
+def test_find_tesla_sites(tesla_client, api_user=None):
     """Helper to find Tesla energy site IDs"""
     try:
         # Get all energy sites
@@ -2840,7 +2840,7 @@ def download_logs():
 @login_required
 @require_tesla_client
 @require_tesla_site_id
-def test_aemo_spike(tesla_client):
+def test_aemo_spike(tesla_client, api_user=None):
     """Test/simulate AEMO price spike mode"""
     from app.tasks import create_spike_tariff
     from app.models import SavedTOUProfile
@@ -3057,7 +3057,7 @@ def test_aemo_restore():
 @login_required
 @require_tesla_client
 @require_tesla_site_id
-def api_force_discharge(tesla_client):
+def api_force_discharge(tesla_client, api_user=None):
     """
     Force discharge mode - switches to autonomous mode with high export tariff.
 
@@ -3196,7 +3196,7 @@ def api_force_discharge(tesla_client):
 @login_required
 @require_tesla_client
 @require_tesla_site_id
-def api_force_charge(tesla_client):
+def api_force_charge(tesla_client, api_user=None):
     """
     Force charge mode - switches to autonomous mode with free import tariff.
 
@@ -3356,7 +3356,7 @@ def api_force_charge(tesla_client):
 @login_required
 @require_tesla_client
 @require_tesla_site_id
-def api_restore_normal(tesla_client):
+def api_restore_normal(tesla_client, api_user=None):
     """
     Restore normal operation - restores saved tariff or triggers Amber sync.
 
@@ -3563,7 +3563,7 @@ def api_discharge_status():
 @login_required
 @require_tesla_client
 @require_tesla_site_id
-def current_tou_rate(tesla_client):
+def current_tou_rate(tesla_client, api_user=None):
     """View current TOU rate from Tesla and manage saved profiles"""
     logger.info(f"User {current_user.email} accessing Current TOU Rate page")
 
@@ -3596,7 +3596,7 @@ def current_tou_rate(tesla_client):
 @login_required
 @require_tesla_client
 @require_tesla_site_id
-def save_current_tou_rate(tesla_client):
+def save_current_tou_rate(tesla_client, api_user=None):
     """Save the current TOU rate from Tesla to database"""
     import json
 
@@ -3656,7 +3656,7 @@ def save_current_tou_rate(tesla_client):
 @login_required
 @require_tesla_client
 @require_tesla_site_id
-def restore_tou_rate(profile_id, tesla_client):
+def restore_tou_rate(profile_id, tesla_client, api_user=None):
     """Restore a saved TOU rate profile to Tesla (async)"""
     import json
     import threading
@@ -3770,7 +3770,7 @@ def set_default_tou_profile(profile_id):
 @login_required
 @require_tesla_client
 @require_tesla_site_id
-def api_current_tou_rate_raw(tesla_client):
+def api_current_tou_rate_raw(tesla_client, api_user=None):
     """API endpoint to get the raw current TOU tariff JSON"""
     site_id = current_user.tesla_energy_site_id
 
@@ -3789,7 +3789,7 @@ def api_current_tou_rate_raw(tesla_client):
 @login_required
 @require_tesla_client
 @require_tesla_site_id
-def api_debug_site_info(tesla_client):
+def api_debug_site_info(tesla_client, api_user=None):
     """Debug endpoint to see full site_info response from Tesla"""
     site_id = current_user.tesla_energy_site_id
 
