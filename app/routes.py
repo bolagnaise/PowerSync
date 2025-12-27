@@ -3578,7 +3578,8 @@ def api_powerwall_settings(tesla_client, api_user=None):
         "backup_reserve": 20,
         "operation_mode": "autonomous",
         "grid_export_rule": "pv_only",
-        "grid_charging_enabled": true
+        "grid_charging_enabled": true,
+        "solar_curtailment_enabled": false
     }
     """
     user = api_user or current_user
@@ -3590,15 +3591,25 @@ def api_powerwall_settings(tesla_client, api_user=None):
         if not site_info:
             return jsonify({'success': False, 'error': 'Failed to get site info'}), 500
 
-        # Get grid import/export settings
+        # Get grid import/export settings from Tesla API
         grid_settings = tesla_client.get_grid_import_export(site_id)
+        api_export_rule = grid_settings.get('customer_preferred_export_rule', 'pv_only') if grid_settings else 'pv_only'
+
+        # If solar curtailment is enabled, use server's target rule (more accurate than stale API)
+        # The server updates this every 5 mins based on price
+        if user.solar_curtailment_enabled and user.current_export_rule:
+            export_rule = user.current_export_rule
+            logger.debug(f"Using server's target export rule '{export_rule}' (API reported '{api_export_rule}')")
+        else:
+            export_rule = api_export_rule
 
         return jsonify({
             'success': True,
             'backup_reserve': site_info.get('backup_reserve_percent', 0),
             'operation_mode': site_info.get('default_real_mode', 'autonomous'),
-            'grid_export_rule': grid_settings.get('customer_preferred_export_rule', 'pv_only') if grid_settings else 'pv_only',
-            'grid_charging_enabled': not grid_settings.get('disallow_charge_from_grid_with_solar_installed', False) if grid_settings else True
+            'grid_export_rule': export_rule,
+            'grid_charging_enabled': not grid_settings.get('disallow_charge_from_grid_with_solar_installed', False) if grid_settings else True,
+            'solar_curtailment_enabled': user.solar_curtailment_enabled or False
         })
     except Exception as e:
         logger.error(f"Error getting Powerwall settings: {e}")

@@ -1248,13 +1248,32 @@ class PowerwallSettingsView(HomeAssistantView):
 
             # Get grid settings from components
             components = site_info.get("components", {})
-            grid_export_rule = components.get("customer_preferred_export_rule") or site_info.get("customer_preferred_export_rule", "pv_only")
+            api_export_rule = components.get("customer_preferred_export_rule") or site_info.get("customer_preferred_export_rule", "pv_only")
             disallow_charge = components.get("disallow_charge_from_grid_with_solar_installed", False)
 
             # Handle VPP users where export rule might not be set
-            if grid_export_rule is None:
+            if api_export_rule is None:
                 non_export = components.get("non_export_configured", False)
-                grid_export_rule = "never" if non_export else "battery_ok"
+                api_export_rule = "never" if non_export else "battery_ok"
+
+            # Check if solar curtailment is enabled - if so, use server's target rule
+            # (more accurate than stale Tesla API values)
+            solar_curtailment_enabled = entry.options.get(
+                CONF_SOLAR_CURTAILMENT_ENABLED,
+                entry.data.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
+            )
+
+            if solar_curtailment_enabled:
+                # Use cached rule (what server is targeting) if available
+                entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                cached_rule = entry_data.get("cached_export_rule")
+                if cached_rule:
+                    grid_export_rule = cached_rule
+                    _LOGGER.debug(f"Using server's target export rule '{cached_rule}' (API reported '{api_export_rule}')")
+                else:
+                    grid_export_rule = api_export_rule
+            else:
+                grid_export_rule = api_export_rule
 
             result = {
                 "success": True,
@@ -1262,6 +1281,7 @@ class PowerwallSettingsView(HomeAssistantView):
                 "operation_mode": operation_mode,
                 "grid_export_rule": grid_export_rule,
                 "grid_charging_enabled": not disallow_charge,
+                "solar_curtailment_enabled": solar_curtailment_enabled,
             }
 
             _LOGGER.info(f"✅ Powerwall settings: reserve={backup_reserve}%, mode={operation_mode}, export={grid_export_rule}")
