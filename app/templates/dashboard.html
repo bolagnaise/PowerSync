@@ -2601,9 +2601,14 @@
                 const healthPercent = data.currentCapacityWh && data.originalCapacityWh
                     ? (data.currentCapacityWh / data.originalCapacityWh * 100).toFixed(1)
                     : '--';
-                const degradationPercent = data.degradationPercent
-                    ? data.degradationPercent.toFixed(1)
-                    : '--';
+                // Calculate degradation: 100 - health percent (handle 0 which is falsy)
+                let degradationPercent = '--';
+                if (data.degradationPercent !== null && data.degradationPercent !== undefined) {
+                    degradationPercent = data.degradationPercent.toFixed(1);
+                } else if (healthPercent !== '--') {
+                    // Calculate from health if not provided
+                    degradationPercent = (100 - parseFloat(healthPercent)).toFixed(1);
+                }
 
                 // Update display
                 document.getElementById('health-percent').textContent = healthPercent + '%';
@@ -2714,7 +2719,8 @@
                         scales: {
                             x: {
                                 type: 'time',
-                                min: chartData.length > 0 ? chartData[0].x : undefined,
+                                bounds: 'data',
+                                min: chartData.length > 0 ? chartData[0].x.getTime() : undefined,
                                 time: {
                                     unit: 'month',
                                     displayFormats: {
@@ -2724,6 +2730,9 @@
                                 title: {
                                     display: true,
                                     text: 'Date'
+                                },
+                                ticks: {
+                                    source: 'data'
                                 }
                             },
                             y: {
