@@ -2716,12 +2716,19 @@
                     options: {
                         responsive: true,
                         maintainAspectRatio: true,
+                        layout: {
+                            padding: {
+                                left: 0,
+                                right: 10
+                            }
+                        },
                         scales: {
                             x: {
                                 type: 'time',
                                 bounds: 'data',
                                 offset: false,
                                 min: chartData.length > 0 ? chartData[0].x.getTime() : undefined,
+                                max: chartData.length > 0 ? chartData[chartData.length - 1].x.getTime() : undefined,
                                 time: {
                                     unit: 'month',
                                     displayFormats: {
@@ -2738,6 +2745,9 @@
                                 },
                                 grid: {
                                     offset: false
+                                },
+                                afterFit: function(scale) {
+                                    scale.paddingLeft = 0;
                                 }
                             },
                             y: {
