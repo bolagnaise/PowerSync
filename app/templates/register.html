@@ -1,36 +1,44 @@
-html
 {% extends "base.html" %}
 
 {% block content %}
-    <h1>Register</h1>
-    <form action="" method="post" novalidate>
-        {{ form.hidden_tag() }}
-        
-        <label for="email">
-            {{ form.email.label }}
-            {{ form.email(size=32) }}
-            {% for error in form.email.errors %}
-            <small style="color: red;">{{ error }}</small>
-            {% endfor %}
-        </label>
-        
-        <label for="password">
-            {{ form.password.label }}
-            {{ form.password(size=32) }}
-            {% for error in form.password.errors %}
-            <small style="color: red;">{{ error }}</small>
-            {% endfor %}
-        </label>
-        
-        <label for="password2">
-            {{ form.password2.label }}
-            {{ form.password2(size=32) }}
-            {% for error in form.password2.errors %}
-            <small style="color: red;">{{ error }}</small>
-            {% endfor %}
-        </label>
+<div class="auth-container">
+    <article class="auth-card">
+        <hgroup>
+            <h1>Register</h1>
+            <h2>Create your PowerSync account</h2>
+        </hgroup>
 
-        {{ form.submit() }}
-    </form>
-    <p>Already have an account? <a href="{{ url_for('main.login') }}">Click to Sign In!</a></p>
+        <form action="" method="post" novalidate>
+            {{ form.hidden_tag() }}
+
+            <label for="email">
+                {{ form.email.label }}
+                {{ form.email(size=32) }}
+                {% for error in form.email.errors %}
+                <small class="error-text">{{ error }}</small>
+                {% endfor %}
+            </label>
+
+            <label for="password">
+                {{ form.password.label }}
+                {{ form.password(size=32) }}
+                {% for error in form.password.errors %}
+                <small class="error-text">{{ error }}</small>
+                {% endfor %}
+            </label>
+
+            <label for="password2">
+                {{ form.password2.label }}
+                {{ form.password2(size=32) }}
+                {% for error in form.password2.errors %}
+                <small class="error-text">{{ error }}</small>
+                {% endfor %}
+            </label>
+
+            {{ form.submit() }}
+        </form>
+
+        <p class="auth-link">Already have an account? <a href="{{ url_for('main.login') }}">Click to Sign In!</a></p>
+    </article>
+</div>
 {% endblock %}

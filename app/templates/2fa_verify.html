@@ -13,7 +13,7 @@
                 {{ form.token.label }}
                 {{ form.token(size=6, maxlength=6, autocomplete="one-time-code", inputmode="numeric", pattern="[0-9]*", style="text-align: center; font-size: 1.5em; letter-spacing: 0.3em; max-width: 200px;") }}
                 {% for error in form.token.errors %}
-                <small style="color: red;">{{ error }}</small>
+                <small class="error-text">{{ error }}</small>
                 {% endfor %}
             </label>
 

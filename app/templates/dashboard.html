@@ -16,27 +16,27 @@
     <article id="connection-status" style="max-width: 800px; padding: 0.75rem; margin: 0 auto 1rem auto;">
         <header style="margin-bottom: 0.5rem; text-align: center;"><strong>Connection Status</strong></header>
         <div style="display: grid; grid-template-columns: {% if solar_curtailment_enabled %}1fr 1fr 1fr{% else %}1fr 1fr{% endif %}; gap: 0.75rem;">
-            <div id="amber-status" style="padding: 0.5rem; border-radius: 0.5rem; background: rgba(150, 150, 150, 0.1);">
+            <div id="amber-status" class="status-box">
                 <h4 style="margin: 0 0 0.25em 0; font-size: 0.85em;">⚡ Amber Electric</h4>
                 <div id="amber-status-content">
-                    <p style="margin: 0; font-size: 0.8em;">Checking connection...</p>
+                    <p style="margin: 0; font-size: 0.8em;" class="text-muted">Checking connection...</p>
                 </div>
             </div>
-            <div id="tesla-status" style="padding: 0.5rem; border-radius: 0.5rem; background: rgba(150, 150, 150, 0.1);">
+            <div id="tesla-status" class="status-box">
                 <h4 style="margin: 0 0 0.25em 0; font-size: 0.85em;">🔋 Tesla Energy
-                    <span style="font-weight: normal; font-size: 0.85em; opacity: 0.7;">
+                    <span style="font-weight: normal; font-size: 0.85em;" class="text-muted">
                         via {% if tesla_api_provider == 'fleet_api' %}Fleet API{% else %}Teslemetry{% endif %}
                     </span>
                 </h4>
                 <div id="tesla-status-content">
-                    <p style="margin: 0; font-size: 0.8em;">Checking connection...</p>
+                    <p style="margin: 0; font-size: 0.8em;" class="text-muted">Checking connection...</p>
                 </div>
             </div>
             {% if solar_curtailment_enabled %}
-            <div id="curtailment-status" style="padding: 0.5rem; border-radius: 0.5rem; background: rgba(150, 150, 150, 0.1);">
+            <div id="curtailment-status" class="status-box">
                 <h4 style="margin: 0 0 0.25em 0; font-size: 0.85em;">🌞 Solar Curtailment</h4>
                 <div id="curtailment-status-content">
-                    <p style="margin: 0; font-size: 0.8em;">Checking status...</p>
+                    <p style="margin: 0; font-size: 0.8em;" class="text-muted">Checking status...</p>
                 </div>
             </div>
             {% endif %}
@@ -119,7 +119,7 @@
     </dialog>
 
     <!-- AEMO Wholesale Price Monitor -->
-    <article id="aemo-price-monitor" style="display: none; background: linear-gradient(135deg, #065f46 0%, #047857 100%); color: white; padding: 1.5em; margin-top: 2rem;">
+    <article id="aemo-price-monitor" style="display: none; background: var(--ps-surface-elevated); padding: 1.5em; margin-top: 2rem; border-left: 4px solid var(--ps-success);">
         <header style="text-align: center; margin-bottom: 1em;">
             <strong style="font-size: 0.9em; text-transform: uppercase; letter-spacing: 1px;">⚡ AEMO Wholesale Price</strong>
             <div id="aemo-region" style="font-size: 0.9em; font-weight: normal; margin-top: 0.3em; opacity: 0.9;">--</div>
@@ -148,7 +148,7 @@
 
     <!-- 5-Minute Detailed Billing Window (Amber Only) -->
     {% if has_amber_token %}
-    <article id="five-min-pricing" style="background: linear-gradient(135deg, #1e3a8a 0%, #1e40af 100%); color: white; padding: 1.5em;">
+    <article id="five-min-pricing" style="background: var(--ps-surface-elevated); padding: 1.5em; border-left: 4px solid var(--ps-primary);">
         <header style="text-align: center; margin-bottom: 1em;">
             <strong style="font-size: 0.9em; text-transform: uppercase; letter-spacing: 1px;">☀️ Amber Live 5 Min Price</strong>
             <div style="font-size: 0.75em; opacity: 0.8; margin-top: 0.2em;">
@@ -157,20 +157,20 @@
             <div id="current-interval-time" style="font-size: 1.1em; font-weight: bold; margin-top: 0.3em;">--:-- - --:--</div>
         </header>
         <div style="display: flex; justify-content: center; gap: 2em; margin-bottom: 1.5em;">
-            <div id="import-selector" onclick="selectPriceChannel('general')" style="text-align: center; cursor: pointer; transition: transform 0.2s;">
-                <div id="import-circle" style="background: rgba(253, 224, 71, 0.95); color: #1e3a8a; border-radius: 50%; width: 180px; height: 180px; display: flex; flex-direction: column; justify-content: center; align-items: center; margin: 0 auto; box-shadow: 0 4px 6px rgba(0,0,0,0.2); padding: 0 0.5em;">
-                    <div id="current-general-price" style="font-size: 3.5em; font-weight: bold; line-height: 1;">--¢</div>
-                    <div style="font-size: 0.9em; margin-top: 0.2em;">/kWh</div>
-                    <div id="current-renewables" style="font-size: 0.8em; margin-top: 0.5em; opacity: 0.8;">--% renewable</div>
+            <div id="import-selector" onclick="selectPriceChannel('general')" class="price-gauge" style="cursor: pointer;">
+                <div id="import-circle" class="price-circle import">
+                    <div id="current-general-price" class="price-value">--¢</div>
+                    <div class="price-unit">/kWh</div>
+                    <div id="current-renewables" class="price-label">--% renewable</div>
                 </div>
-                <div style="margin-top: 0.5em; font-size: 0.85em; opacity: 0.9;">IMPORT ✓</div>
+                <div class="text-sm text-secondary" style="margin-top: 0.5em;">IMPORT ✓</div>
             </div>
-            <div id="export-selector" onclick="selectPriceChannel('feedIn')" style="text-align: center; cursor: pointer; transition: transform 0.2s;">
-                <div style="background: #fbbf24; color: #1e3a8a; border-radius: 50%; width: 180px; height: 180px; display: flex; flex-direction: column; justify-content: center; align-items: center; margin: 0 auto; box-shadow: 0 4px 6px rgba(0,0,0,0.2);">
-                    <div id="current-feedin-price" style="font-size: 3.5em; font-weight: bold; line-height: 1;">--¢</div>
-                    <div style="font-size: 0.9em; margin-top: 0.2em;">/kWh</div>
+            <div id="export-selector" onclick="selectPriceChannel('feedIn')" class="price-gauge" style="cursor: pointer;">
+                <div class="price-circle export">
+                    <div id="current-feedin-price" class="price-value">--¢</div>
+                    <div class="price-unit">/kWh</div>
                 </div>
-                <div style="margin-top: 0.5em; font-size: 0.85em; opacity: 0.9;">FEED-IN</div>
+                <div class="text-sm text-secondary" style="margin-top: 0.5em;">FEED-IN</div>
             </div>
         </div>
         <!-- 30 Min Forecast - Amber style horizontal scrollable row -->

@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -9,6 +9,8 @@
     <link rel="apple-touch-icon" sizes="512x512" href="{{ url_for('static', filename='icon-512.png') }}">
     <!-- Pico.css for clean, modern styling with zero effort -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@1/css/pico.min.css">
+    <!-- PowerSync theme (matches mobile app design) -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/powersync.css') }}">
 
     <!-- Mobile-responsive CSS -->
     <style>
@@ -257,9 +259,11 @@
     <main class="container">
       {% with messages = get_flashed_messages() %}
       {% if messages %}
+      <div class="flash-messages">
         {% for message in messages %}
-        <article style="background-color: var(--primary-focus);">{{ message }}</article>
+        <div class="alert alert-info">{{ message }}</div>
         {% endfor %}
+      </div>
       {% endif %}
       {% endwith %}
       

@@ -3,8 +3,8 @@
 {% block content %}
     <h1>Reset Account</h1>
 
-    <article style="background: rgba(255, 0, 0, 0.1); border-left: 4px solid #e74c3c;">
-        <header style="color: #e74c3c;"><strong>Warning: This action cannot be undone!</strong></header>
+    <article class="alert alert-danger">
+        <header><strong>Warning: This action cannot be undone!</strong></header>
         <p>Resetting your account will permanently delete:</p>
         <ul>
             <li>Your login credentials</li>
@@ -32,9 +32,9 @@
                 <input type="text" id="confirm" name="confirm" required placeholder="RESET" style="text-transform: uppercase;">
             </label>
 
-            <div style="display: flex; gap: 1em; margin-top: 1em;">
+            <div class="button-group">
                 <a href="{{ url_for('main.login') }}" role="button" class="outline">Cancel</a>
-                <button type="submit" style="background: #e74c3c;">Reset Account</button>
+                <button type="submit" class="danger">Reset Account</button>
             </div>
         </form>
     </article>
