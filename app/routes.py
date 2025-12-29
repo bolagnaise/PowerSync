@@ -1768,16 +1768,20 @@ def price_history():
 
 
 @bp.route('/api/energy-history')
-@login_required
-def energy_history():
-    """Get historical energy usage data for graphing"""
+@api_auth_required
+def energy_history(api_user=None, **kwargs):
+    """Get historical energy usage data for graphing
+
+    Supports both session login and Bearer token authentication.
+    """
     from datetime import datetime, timezone, timedelta
     from zoneinfo import ZoneInfo
 
-    logger.info(f"Energy history requested by user: {current_user.email}")
+    user = api_user or current_user
+    logger.info(f"Energy history requested by user: {user.email}")
 
     # Get user's timezone
-    user_tz = ZoneInfo(get_powerwall_timezone(current_user))
+    user_tz = ZoneInfo(get_powerwall_timezone(user))
 
     # Get timeframe parameter (default to 'day')
     timeframe = request.args.get('timeframe', 'day')
@@ -1807,7 +1811,7 @@ def energy_history():
 
         # Query records for the specified day
         records = EnergyRecord.query.filter(
-            EnergyRecord.user_id == current_user.id,
+            EnergyRecord.user_id == user.id,
             EnergyRecord.timestamp >= start_of_day_utc,
             EnergyRecord.timestamp <= end_of_day_utc
         ).order_by(
@@ -1818,7 +1822,7 @@ def energy_history():
         # Get last 30 days of data
         limit = 720  # 30 days * 24 hours
         records = EnergyRecord.query.filter_by(
-            user_id=current_user.id
+            user_id=user.id
         ).order_by(
             EnergyRecord.timestamp.desc()
         ).limit(limit).all()
@@ -1827,7 +1831,7 @@ def energy_history():
         # Get last 365 days of data
         limit = 8760  # 365 days * 24 hours
         records = EnergyRecord.query.filter_by(
-            user_id=current_user.id
+            user_id=user.id
         ).order_by(
             EnergyRecord.timestamp.desc()
         ).limit(limit).all()
