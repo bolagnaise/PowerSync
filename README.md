@@ -520,16 +520,21 @@ A pre-built Lovelace dashboard is included for visualizing all PowerSync data.
 4. Edit the new dashboard → 3 dots menu → "Raw configuration editor"
 5. Paste the YAML content and save
 
-**Required Helper Entity:**
+**Required Helper Entities:**
 
-The Force Discharge controls require an `input_select` helper for duration selection:
+The Force Charge and Force Discharge controls require `input_select` helpers for duration selection:
 
 1. Go to **Settings → Devices & Services → Helpers**
 2. Click **+ Create Helper → Dropdown**
-3. Configure:
-   - Name: `force_discharge_duration` (creates entity `input_select.force_discharge_duration`)
+3. Create the first helper:
+   - Name: `force_charge_duration` (creates entity `input_select.force_charge_duration`)
    - Options: `15`, `30`, `45`, `60`, `90`, `120`
 4. Click **Create**
+5. Click **+ Create Helper → Dropdown** again
+6. Create the second helper:
+   - Name: `force_discharge_duration` (creates entity `input_select.force_discharge_duration`)
+   - Options: `15`, `30`, `45`, `60`, `90`, `120`
+7. Click **Create**
 
 **Dashboard Features:**
 - Current price gauge with color-coded severity
