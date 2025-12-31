@@ -3,7 +3,7 @@
 
   # PowerSync
 
-  Intelligent Tesla Powerwall energy management for Australia. Automatically sync with Amber Electric or Flow Power (AEMO wholesale) dynamic pricing, create custom TOU schedules for any provider, and capitalize on AEMO wholesale price spikes to maximize your battery's earning potential.
+  Intelligent battery energy management for Australia. Supports **Tesla Powerwall** and **Sigenergy** battery systems. Automatically sync with Amber Electric or Flow Power (AEMO wholesale) dynamic pricing, create custom TOU schedules for any provider, and capitalize on AEMO wholesale price spikes to maximize your battery's earning potential.
 
   <a href="https://paypal.me/benboller" target="_blank"><img src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" alt="Buy Me A Coffee" style="height: 41px !important;width: 174px !important;box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;-webkit-box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;" ></a>
 
@@ -20,8 +20,12 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 
 ## Features
 
+### Supported Battery Systems
+- 🔋 **Tesla Powerwall** - Full support via Fleet API or Teslemetry proxy
+- ⚡ **Sigenergy** - Full support via Sigenergy Cloud API with DC solar curtailment via Modbus TCP
+
 ### Core Functionality
-- 🔋 **Automatic TOU Tariff Sync** - Updates Tesla Powerwall with Amber Electric pricing every 5 minutes
+- 🔋 **Automatic TOU Tariff Sync** - Updates your battery system with Amber Electric pricing every 5 minutes
 - 📊 **Real-time Pricing Dashboard** - Monitor current and historical electricity prices with live updates
 - ⚡ **Near Real-Time Energy Monitoring** - Energy usage charts update every 30 seconds
 - 🌏 **Timezone Support** - Auto-detects timezone from Amber data for accurate time display across all Australian states
@@ -230,6 +234,45 @@ Amber export price: 35c/kWh
 - Enable/disable in Amber Settings (Flask web interface)
 - Enable/disable during Home Assistant integration options flow
 - Default: Disabled (opt-in feature)
+
+### Sigenergy Battery System Support
+
+Full support for Sigenergy DC-coupled battery systems as an alternative to Tesla Powerwall.
+
+**Features:**
+- **Tariff Sync via Cloud API** - Uploads Amber pricing to Sigenergy Cloud using the same 30-minute TOU format
+- **DC Solar Curtailment** - Controls DC solar via Modbus TCP during negative prices (load-following mode)
+- **Load-Following Curtailment** - Sets export limit to 0 instead of full PV shutdown, so solar continues to power house and charge battery
+
+**How DC Curtailment Works:**
+Unlike full solar shutdown, Sigenergy uses **load-following mode** (zero export):
+
+| Mode | What Happens |
+|------|--------------|
+| **Full Shutdown** | PV limit = 0 → Solar stops completely |
+| **Load Following** (used) | Export limit = 0 → Solar powers house + charges battery, no grid export |
+
+This is smarter because:
+- ✅ Solar continues powering the house
+- ✅ Battery still charges from solar
+- ✅ Only grid export is blocked during negative prices
+
+**Modbus Registers Used:**
+- `plant_grid_point_maximum_export_limitation` (40038) - Sets export limit to 0kW for curtailment
+- Reference: [TypQxQ/Sigenergy-Local-Modbus](https://github.com/TypQxQ/Sigenergy-Local-Modbus)
+
+**Configuration (Home Assistant):**
+1. Select **Sigenergy** as your battery system (first step in config flow)
+2. Enter Sigenergy Cloud credentials (captured from browser dev tools)
+3. Select your Sigenergy station
+4. Optionally enable DC curtailment and enter Modbus IP address
+
+**Configuration (Flask Web App):**
+1. Go to Settings → Battery System → Select "Sigenergy"
+2. Follow the credential capture wizard (requires browser dev tools)
+3. Validate credentials and select your station
+
+**Note:** Sigenergy is a **DC-coupled** battery system. If you have an AC-coupled solar inverter from another brand (Sungrow, Fronius, etc.) connected to your Sigenergy system, you can configure AC-coupled inverter curtailment separately.
 
 ### Force Mode Toggle (Alpha)
 
