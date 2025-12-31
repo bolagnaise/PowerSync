@@ -68,6 +68,14 @@ class User(UserMixin, db.Model):
     export_boost_end = db.Column(db.String(5), default='21:00')  # End time for boost (HH:MM)
     export_boost_threshold = db.Column(db.Float, default=0.0)  # Min price to activate boost (c/kWh) - boost skipped if actual price below this
 
+    # Chip Mode Configuration
+    # Prevents Powerwall from exporting during configured hours unless price exceeds threshold
+    # Inverse of Export Boost - sets export price to 0 to suppress exports, except on price spikes
+    chip_mode_enabled = db.Column(db.Boolean, default=False)
+    chip_mode_start = db.Column(db.String(5), default='22:00')  # Start time for anti-export (HH:MM)
+    chip_mode_end = db.Column(db.String(5), default='06:00')  # End time for anti-export (HH:MM)
+    chip_mode_threshold = db.Column(db.Float, default=30.0)  # Price threshold (c/kWh) - allow export only above this
+
     # Demand Charge Configuration
     enable_demand_charges = db.Column(db.Boolean, default=False)
     peak_demand_rate = db.Column(db.Float, default=0.0)

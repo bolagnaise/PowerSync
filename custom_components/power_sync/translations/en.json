@@ -57,13 +57,19 @@
           "export_min_price": "Minimum Price (c/kWh)",
           "export_boost_start": "Boost Start Time (HH:MM)",
           "export_boost_end": "Boost End Time (HH:MM)",
-          "export_boost_threshold": "Activation Threshold (c/kWh)"
+          "export_boost_threshold": "Activation Threshold (c/kWh)",
+          "chip_mode_enabled": "Enable Chip Mode",
+          "chip_mode_start": "Chip Mode Start Time (HH:MM)",
+          "chip_mode_end": "Chip Mode End Time (HH:MM)",
+          "chip_mode_threshold": "Price Threshold (c/kWh)"
         },
         "data_description": {
           "spike_protection_enabled": "When Amber detects a price spike, artificially inflate buy prices to prevent Powerwall from charging from grid",
           "settled_prices_only": "Skip forecast sync at :00 and only sync when actual prices arrive at :35/:60",
           "force_tariff_mode_toggle": "After uploading a new tariff, briefly toggle Powerwall mode to force immediate recalculation",
-          "export_boost_threshold": "Boost only applies if actual price is at or above this value (0 = always apply)"
+          "export_boost_threshold": "Boost only applies if actual price is at or above this value (0 = always apply)",
+          "chip_mode_enabled": "Suppress exports during configured hours unless price exceeds threshold (inverse of Export Boost)",
+          "chip_mode_threshold": "Allow exports only when price is at or above this value"
         }
       },
       "teslemetry": {
@@ -135,6 +141,10 @@
           "export_boost_start": "Boost Start Time (HH:MM)",
           "export_boost_end": "Boost End Time (HH:MM)",
           "export_boost_threshold": "Boost Activation Threshold (c/kWh)",
+          "chip_mode_enabled": "Enable Chip Mode",
+          "chip_mode_start": "Chip Mode Start Time (HH:MM)",
+          "chip_mode_end": "Chip Mode End Time (HH:MM)",
+          "chip_mode_threshold": "Price Threshold (c/kWh)",
           "demand_charge_enabled": "Enable Demand Charge Tracking",
           "demand_charge_rate": "Demand Charge Rate ($/kW)",
           "demand_charge_start_time": "Peak Period Start Time (HH:MM)",
@@ -150,7 +160,9 @@
           "spike_protection_enabled": "When Amber detects a price spike, artificially inflate buy prices to prevent Powerwall from charging from grid (stops arbitrage behavior)",
           "settled_prices_only": "Skip the initial forecast sync at :00 and only sync when actual/settled prices arrive at :35/:60 seconds. Use this if forecast prices differ significantly from settled prices.",
           "demand_artificial_price_enabled": "Artificially increases the current price by $2 during demand charge periods to encourage battery discharge",
-          "export_boost_threshold": "Boost will only apply if actual export price is at or above this value (0 = always apply)"
+          "export_boost_threshold": "Boost will only apply if actual export price is at or above this value (0 = always apply)",
+          "chip_mode_enabled": "Suppress exports during configured hours unless price exceeds threshold (inverse of Export Boost)",
+          "chip_mode_threshold": "Allow exports only when price is at or above this value"
         }
       },
       "flow_power_options": {

@@ -96,15 +96,23 @@ from .const import (
     CONF_EXPORT_BOOST_START,
     CONF_EXPORT_BOOST_END,
     CONF_EXPORT_BOOST_THRESHOLD,
+    DEFAULT_EXPORT_BOOST_START,
+    DEFAULT_EXPORT_BOOST_END,
+    DEFAULT_EXPORT_BOOST_THRESHOLD,
+    # Chip Mode configuration (inverse of export boost)
+    CONF_CHIP_MODE_ENABLED,
+    CONF_CHIP_MODE_START,
+    CONF_CHIP_MODE_END,
+    CONF_CHIP_MODE_THRESHOLD,
+    DEFAULT_CHIP_MODE_START,
+    DEFAULT_CHIP_MODE_END,
+    DEFAULT_CHIP_MODE_THRESHOLD,
     # Spike protection configuration
     CONF_SPIKE_PROTECTION_ENABLED,
     # Settled prices only mode
     CONF_SETTLED_PRICES_ONLY,
     # Alpha: Force tariff mode toggle
     CONF_FORCE_TARIFF_MODE_TOGGLE,
-    DEFAULT_EXPORT_BOOST_START,
-    DEFAULT_EXPORT_BOOST_END,
-    DEFAULT_EXPORT_BOOST_THRESHOLD,
 )
 from .coordinator import (
     AmberPriceCoordinator,
@@ -1979,6 +1987,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     offset, min_price, threshold, boost_start, boost_end
                 )
                 tariff = apply_export_boost(tariff, offset, min_price, boost_start, boost_end, threshold)
+
+            # Apply Chip Mode for Amber users (if enabled) - suppress exports unless above threshold
+            chip_mode_enabled = entry.options.get(CONF_CHIP_MODE_ENABLED, False)
+            if chip_mode_enabled:
+                from .tariff_converter import apply_chip_mode
+                chip_start = entry.options.get(CONF_CHIP_MODE_START, DEFAULT_CHIP_MODE_START)
+                chip_end = entry.options.get(CONF_CHIP_MODE_END, DEFAULT_CHIP_MODE_END)
+                chip_threshold = entry.options.get(CONF_CHIP_MODE_THRESHOLD, DEFAULT_CHIP_MODE_THRESHOLD)
+                _LOGGER.info(
+                    "Applying Chip Mode: window=%s-%s, threshold=%.1fc",
+                    chip_start, chip_end, chip_threshold
+                )
+                tariff = apply_chip_mode(tariff, chip_start, chip_end, chip_threshold)
 
         # Store tariff schedule in hass.data for the sensor to read
         from datetime import datetime as dt

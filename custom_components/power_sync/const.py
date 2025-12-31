@@ -426,6 +426,19 @@ DEFAULT_EXPORT_BOOST_START = "17:00"
 DEFAULT_EXPORT_BOOST_END = "21:00"
 DEFAULT_EXPORT_BOOST_THRESHOLD = 0.0  # c/kWh (0 = always apply boost)
 
+# Chip Mode configuration
+# Inverse of Export Boost - prevents exports unless price exceeds threshold
+# Useful for overnight stability while still capturing price spikes
+CONF_CHIP_MODE_ENABLED = "chip_mode_enabled"
+CONF_CHIP_MODE_START = "chip_mode_start"
+CONF_CHIP_MODE_END = "chip_mode_end"
+CONF_CHIP_MODE_THRESHOLD = "chip_mode_threshold"
+
+# Default values for Chip Mode
+DEFAULT_CHIP_MODE_START = "22:00"
+DEFAULT_CHIP_MODE_END = "06:00"
+DEFAULT_CHIP_MODE_THRESHOLD = 30.0  # c/kWh (allow export only above this)
+
 # Amber Spike Protection configuration
 # Prevents Powerwall from charging from grid during price spikes
 # When Amber reports spikeStatus='potential' or 'spike', override buy prices

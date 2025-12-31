@@ -935,6 +935,22 @@ def amber_settings():
             except (ValueError, TypeError):
                 pass
 
+        # Chip Mode settings (inverse of export boost - suppress exports unless above threshold)
+        current_user.chip_mode_enabled = 'chip_mode_enabled' in request.form
+        logger.info(f"Saving Chip Mode enabled: {current_user.chip_mode_enabled}")
+
+        if 'chip_mode_start' in request.form:
+            current_user.chip_mode_start = request.form.get('chip_mode_start', '22:00')
+
+        if 'chip_mode_end' in request.form:
+            current_user.chip_mode_end = request.form.get('chip_mode_end', '06:00')
+
+        if 'chip_mode_threshold' in request.form:
+            try:
+                current_user.chip_mode_threshold = float(request.form.get('chip_mode_threshold', 30.0))
+            except (ValueError, TypeError):
+                pass
+
         # Spike Protection setting
         current_user.spike_protection_enabled = 'spike_protection_enabled' in request.form
         logger.info(f"Saving spike protection enabled: {current_user.spike_protection_enabled}")
@@ -2154,6 +2170,15 @@ def tou_schedule(api_user=None, **kwargs):
         logger.info(f"Preview: Applying export boost: offset={offset}c, min={min_price}c, threshold={threshold}c, window={boost_start}-{boost_end}")
         tariff = apply_export_boost(tariff, offset, min_price, boost_start, boost_end, threshold)
 
+    # Apply Chip Mode for Amber users (if enabled) - suppress exports unless above threshold
+    if user.electricity_provider == 'amber' and getattr(user, 'chip_mode_enabled', False):
+        from app.tariff_converter import apply_chip_mode
+        chip_start = getattr(user, 'chip_mode_start', '22:00') or '22:00'
+        chip_end = getattr(user, 'chip_mode_end', '06:00') or '06:00'
+        chip_threshold = getattr(user, 'chip_mode_threshold', 30.0) or 30.0
+        logger.info(f"Preview: Applying Chip Mode: window={chip_start}-{chip_end}, threshold={chip_threshold}c")
+        tariff = apply_chip_mode(tariff, chip_start, chip_end, chip_threshold)
+
     # Extract tariff periods for display
     energy_rates = tariff.get('energy_charges', {}).get('Summer', {}).get('rates', {})
     feedin_rates = tariff.get('sell_tariff', {}).get('energy_charges', {}).get('Summer', {}).get('rates', {})
@@ -2327,6 +2352,15 @@ def sync_tesla_schedule(tesla_client, api_user=None):
             threshold = getattr(current_user, 'export_boost_threshold', 0) or 0
             logger.info(f"Applying export boost: offset={offset}c, min={min_price}c, threshold={threshold}c, window={boost_start}-{boost_end}")
             tariff = apply_export_boost(tariff, offset, min_price, boost_start, boost_end, threshold)
+
+        # Apply Chip Mode for Amber users (if enabled) - suppress exports unless above threshold
+        if current_user.electricity_provider == 'amber' and getattr(current_user, 'chip_mode_enabled', False):
+            from app.tariff_converter import apply_chip_mode
+            chip_start = getattr(current_user, 'chip_mode_start', '22:00') or '22:00'
+            chip_end = getattr(current_user, 'chip_mode_end', '06:00') or '06:00'
+            chip_threshold = getattr(current_user, 'chip_mode_threshold', 30.0) or 30.0
+            logger.info(f"Applying Chip Mode: window={chip_start}-{chip_end}, threshold={chip_threshold}c")
+            tariff = apply_chip_mode(tariff, chip_start, chip_end, chip_threshold)
 
         num_periods = len(tariff.get('energy_charges', {}).get('Summer', {}).get('rates', {}))
         logger.info(f"Applying POWER SYNC tariff with {num_periods} rate periods")

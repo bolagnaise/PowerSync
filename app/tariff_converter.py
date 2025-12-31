@@ -1544,3 +1544,110 @@ def apply_export_boost(
         logger.info("Export boost: no periods modified (prices already meet criteria)")
 
     return tariff
+
+
+def apply_chip_mode(
+    tariff: Dict,
+    chip_start: str = "22:00",
+    chip_end: str = "06:00",
+    threshold_cents: float = 30.0,
+) -> Dict:
+    """
+    Apply Chip Mode - prevent Powerwall from exporting unless price exceeds threshold.
+
+    During the configured time window, this sets export prices to 0 (or very low)
+    so Tesla's algorithm won't export. However, if the actual price is at or above
+    the threshold, the original price is preserved to capture price spikes.
+
+    This is the inverse of Export Boost:
+    - Export Boost: Artificially increases prices to encourage export
+    - Chip Mode: Sets prices to 0 to suppress export, except on spikes
+
+    Args:
+        tariff: Tesla tariff structure with energy_charges containing sell_prices
+        chip_start: Time to start suppressing exports (HH:MM format)
+        chip_end: Time to stop suppressing exports (HH:MM format)
+        threshold_cents: Price threshold (c/kWh) - only allow export above this
+
+    Returns:
+        Modified tariff with suppressed export prices (except spikes)
+
+    Example:
+        Amber says export = 8c, threshold = 30c
+        → Tesla sees 0c (suppressed - don't export)
+
+        Amber says export = 35c, threshold = 30c
+        → Tesla sees 35c (above threshold - allow export)
+    """
+    # Parse time window
+    try:
+        start_parts = chip_start.split(":")
+        start_hour, start_minute = int(start_parts[0]), int(start_parts[1])
+        end_parts = chip_end.split(":")
+        end_hour, end_minute = int(end_parts[0]), int(end_parts[1])
+    except (ValueError, IndexError) as err:
+        logger.error(f"Invalid Chip Mode time format: {err}")
+        return tariff
+
+    # Build list of periods within the time window
+    chip_periods = set()
+    for hour in range(24):
+        for minute in [0, 30]:
+            period_minutes = hour * 60 + minute
+            start_minutes = start_hour * 60 + start_minute
+            end_minutes = end_hour * 60 + end_minute
+
+            # Handle overnight windows (e.g., 22:00 to 06:00)
+            if end_minutes <= start_minutes:
+                in_window = period_minutes >= start_minutes or period_minutes < end_minutes
+            else:
+                in_window = start_minutes <= period_minutes < end_minutes
+
+            if in_window:
+                chip_periods.add(f"PERIOD_{hour:02d}_{minute:02d}")
+
+    logger.debug(
+        f"Chip Mode active for {len(chip_periods)} periods ({chip_start} to {chip_end}): "
+        f"threshold={threshold_cents:.1f}c"
+    )
+
+    suppressed_count = 0
+    allowed_count = 0
+
+    # Process sell prices in the sell_tariff structure
+    sell_tariff = tariff.get("sell_tariff", {})
+    for season, season_data in sell_tariff.get("energy_charges", {}).items():
+        sell_prices = season_data.get("rates", {})
+
+        for period in chip_periods:
+            if period not in sell_prices:
+                continue
+
+            original_dollars = sell_prices[period]
+            original_cents = original_dollars * 100
+
+            # If price is at or above threshold, allow export (keep original price)
+            if original_cents >= threshold_cents:
+                allowed_count += 1
+                logger.debug(
+                    f"{period}: Chip Mode ALLOW - price {original_cents:.2f}c >= threshold {threshold_cents:.1f}c"
+                )
+                continue
+
+            # Price is below threshold - suppress export by setting price to 0
+            suppressed_count += 1
+            logger.debug(
+                f"{period}: Chip Mode SUPPRESS - price {original_cents:.2f}c < threshold {threshold_cents:.1f}c → 0c"
+            )
+            sell_prices[period] = 0.0
+
+    # Log summary
+    if suppressed_count > 0 or allowed_count > 0:
+        logger.info(
+            f"Chip Mode: {suppressed_count} periods suppressed (export blocked), "
+            f"{allowed_count} periods allowed (above {threshold_cents:.1f}c threshold)"
+        )
+    else:
+        logger.info("Chip Mode: no periods in configured window")
+
+    return tariff

@@ -203,6 +203,66 @@
             </fieldset>
 
             <fieldset>
+                <legend>Chip Mode</legend>
+                <p style="font-size: 0.85em; margin: 0 0 1em 0; color: var(--muted-color);">
+                    Prevent Powerwall from exporting during configured hours unless the price exceeds your threshold. Useful for overnight stability while still capturing price spikes.
+                </p>
+
+                <label for="chip_mode_enabled" style="display: flex; align-items: center; gap: 0.5em; cursor: pointer;">
+                    <input type="checkbox" id="chip_mode_enabled" name="chip_mode_enabled"
+                           {% if current_user.chip_mode_enabled %}checked{% endif %}
+                           onchange="toggleChipModeDetails()">
+                    <span>Enable Chip Mode</span>
+                </label>
+
+                <div id="chipModeDetails" style="margin-top: 1em; {% if not current_user.chip_mode_enabled %}display: none;{% endif %}">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1em;">
+                        <label for="chip_mode_start">
+                            Start Time
+                            <small>When to start suppressing exports</small>
+                            <input type="time" id="chip_mode_start" name="chip_mode_start"
+                                   value="{{ current_user.chip_mode_start or '22:00' }}"
+                                   style="width: 100%;">
+                        </label>
+
+                        <label for="chip_mode_end">
+                            End Time
+                            <small>When to stop suppressing exports</small>
+                            <input type="time" id="chip_mode_end" name="chip_mode_end"
+                                   value="{{ current_user.chip_mode_end or '06:00' }}"
+                                   style="width: 100%;">
+                        </label>
+                    </div>
+
+                    <div style="margin-top: 1em;">
+                        <label for="chip_mode_threshold">
+                            Price Threshold (c/kWh)
+                            <small>Allow exports only when price is at or above this value</small>
+                            <input type="number" id="chip_mode_threshold" name="chip_mode_threshold"
+                                   value="{{ current_user.chip_mode_threshold or 30 }}"
+                                   step="1" min="0" max="200"
+                                   style="width: 100%;">
+                        </label>
+                    </div>
+
+                    <p style="font-size: 0.75em; margin: 1em 0 0 0; color: var(--muted-color);">
+                        Example: With threshold=30c between 22:00-06:00: if export price is 8c, Tesla sees 0c (no export). If export price spikes to 35c, Tesla sees 35c (allows export).
+                    </p>
+                </div>
+                <details style="margin-top: 0.5em;">
+                    <summary style="font-size: 0.85em;">When should I use this?</summary>
+                    <div style="font-size: 0.8em; margin-top: 0.5em; padding: 0.5em; background: rgba(100, 150, 200, 0.05); border-radius: 0.3em;">
+                        <p style="margin: 0.3em 0;">Chip Mode is the inverse of Export Boost. Use it to keep your battery stable overnight while still capturing unexpected price spikes.</p>
+                        <ul style="margin: 0.3em 0 0 1.2em; padding: 0;">
+                            <li style="margin: 0.5em 0;"><strong>Time Window:</strong> Typically overnight (22:00-06:00) when you want the battery to stay charged</li>
+                            <li style="margin: 0.5em 0;"><strong>Price Threshold:</strong> Set above normal overnight prices (e.g., 30c). Exports blocked below this, allowed above</li>
+                            <li style="margin: 0.5em 0;"><strong>Spike Capture:</strong> If a sudden price spike exceeds your threshold, Powerwall can still export to capitalise</li>
+                        </ul>
+                    </div>
+                </details>
+            </fieldset>
+
+            <fieldset>
                 <legend>🧪 Alpha Options</legend>
                 <p style="font-size: 0.85em; margin: 0 0 1em 0; color: var(--muted-color);">
                     Experimental features that may improve Powerwall responsiveness.
@@ -244,6 +304,14 @@
         function toggleExportBoostDetails() {
             const enabled = document.getElementById('export_boost_enabled').checked;
             const details = document.getElementById('exportBoostDetails');
+            if (details) {
+                details.style.display = enabled ? 'block' : 'none';
+            }
+        }
+
+        function toggleChipModeDetails() {
+            const enabled = document.getElementById('chip_mode_enabled').checked;
+            const details = document.getElementById('chipModeDetails');
             if (details) {
                 details.style.display = enabled ? 'block' : 'none';
             }

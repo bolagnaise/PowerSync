@@ -70,6 +70,14 @@ from .const import (
     DEFAULT_EXPORT_BOOST_START,
     DEFAULT_EXPORT_BOOST_END,
     DEFAULT_EXPORT_BOOST_THRESHOLD,
+    # Chip Mode configuration (inverse of export boost)
+    CONF_CHIP_MODE_ENABLED,
+    CONF_CHIP_MODE_START,
+    CONF_CHIP_MODE_END,
+    CONF_CHIP_MODE_THRESHOLD,
+    DEFAULT_CHIP_MODE_START,
+    DEFAULT_CHIP_MODE_END,
+    DEFAULT_CHIP_MODE_THRESHOLD,
     # Spike protection configuration
     CONF_SPIKE_PROTECTION_ENABLED,
     # Settled prices only mode
@@ -433,6 +441,11 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._amber_data[CONF_EXPORT_BOOST_START] = user_input.get(CONF_EXPORT_BOOST_START, DEFAULT_EXPORT_BOOST_START)
             self._amber_data[CONF_EXPORT_BOOST_END] = user_input.get(CONF_EXPORT_BOOST_END, DEFAULT_EXPORT_BOOST_END)
             self._amber_data[CONF_EXPORT_BOOST_THRESHOLD] = user_input.get(CONF_EXPORT_BOOST_THRESHOLD, DEFAULT_EXPORT_BOOST_THRESHOLD)
+            # Chip Mode settings (inverse of export boost)
+            self._amber_data[CONF_CHIP_MODE_ENABLED] = user_input.get(CONF_CHIP_MODE_ENABLED, False)
+            self._amber_data[CONF_CHIP_MODE_START] = user_input.get(CONF_CHIP_MODE_START, DEFAULT_CHIP_MODE_START)
+            self._amber_data[CONF_CHIP_MODE_END] = user_input.get(CONF_CHIP_MODE_END, DEFAULT_CHIP_MODE_END)
+            self._amber_data[CONF_CHIP_MODE_THRESHOLD] = user_input.get(CONF_CHIP_MODE_THRESHOLD, DEFAULT_CHIP_MODE_THRESHOLD)
 
             # Continue to Tesla provider selection
             return await self.async_step_tesla_provider()
@@ -455,6 +468,13 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional(CONF_EXPORT_BOOST_END, default=DEFAULT_EXPORT_BOOST_END): str,
                 vol.Optional(CONF_EXPORT_BOOST_THRESHOLD, default=DEFAULT_EXPORT_BOOST_THRESHOLD): vol.All(
                     vol.Coerce(float), vol.Range(min=0.0, max=50.0)
+                ),
+                # Chip Mode settings (inverse of export boost - suppress exports unless above threshold)
+                vol.Optional(CONF_CHIP_MODE_ENABLED, default=False): bool,
+                vol.Optional(CONF_CHIP_MODE_START, default=DEFAULT_CHIP_MODE_START): str,
+                vol.Optional(CONF_CHIP_MODE_END, default=DEFAULT_CHIP_MODE_END): str,
+                vol.Optional(CONF_CHIP_MODE_THRESHOLD, default=DEFAULT_CHIP_MODE_THRESHOLD): vol.All(
+                    vol.Coerce(float), vol.Range(min=0.0, max=200.0)
                 ),
             }
         )
@@ -1027,6 +1047,23 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_EXPORT_BOOST_THRESHOLD,
                         default=self._get_option(CONF_EXPORT_BOOST_THRESHOLD, DEFAULT_EXPORT_BOOST_THRESHOLD),
                     ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0)),
+                    # Chip Mode (inverse of export boost)
+                    vol.Optional(
+                        CONF_CHIP_MODE_ENABLED,
+                        default=self._get_option(CONF_CHIP_MODE_ENABLED, False),
+                    ): bool,
+                    vol.Optional(
+                        CONF_CHIP_MODE_START,
+                        default=self._get_option(CONF_CHIP_MODE_START, DEFAULT_CHIP_MODE_START),
+                    ): str,
+                    vol.Optional(
+                        CONF_CHIP_MODE_END,
+                        default=self._get_option(CONF_CHIP_MODE_END, DEFAULT_CHIP_MODE_END),
+                    ): str,
+                    vol.Optional(
+                        CONF_CHIP_MODE_THRESHOLD,
+                        default=self._get_option(CONF_CHIP_MODE_THRESHOLD, DEFAULT_CHIP_MODE_THRESHOLD),
+                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=200.0)),
                     vol.Optional(
                         CONF_DEMAND_CHARGE_ENABLED,
                         default=self._get_option(CONF_DEMAND_CHARGE_ENABLED, False),
