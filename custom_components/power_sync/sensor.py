@@ -663,7 +663,7 @@ class SolarCurtailmentSensor(SensorEntity):
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_{SENSOR_TYPE_SOLAR_CURTAILMENT}"
         self._attr_has_entity_name = True
-        self._attr_name = "Solar Curtailment"
+        self._attr_name = "DC Solar Curtailment"
         self._attr_icon = "mdi:solar-power-variant"
         self._unsub_dispatcher = None
 

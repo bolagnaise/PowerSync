@@ -78,7 +78,7 @@
             </fieldset>
 
             <fieldset>
-                <legend>Solar Curtailment</legend>
+                <legend>DC Solar Curtailment</legend>
                 <label for="solar_curtailment_enabled">
                     {{ form.solar_curtailment_enabled() }}
                     {{ form.solar_curtailment_enabled.label }}
@@ -117,6 +117,10 @@
                             <select id="inverter_brand" name="inverter_brand">
                                 <option value="">Select brand...</option>
                                 <option value="sungrow" {% if current_user.inverter_brand == 'sungrow' %}selected{% endif %}>Sungrow</option>
+                                <option value="fronius" {% if current_user.inverter_brand == 'fronius' %}selected{% endif %}>Fronius</option>
+                                <option value="goodwe" {% if current_user.inverter_brand == 'goodwe' %}selected{% endif %}>GoodWe</option>
+                                <option value="huawei" {% if current_user.inverter_brand == 'huawei' %}selected{% endif %}>Huawei</option>
+                                <option value="enphase" {% if current_user.inverter_brand == 'enphase' %}selected{% endif %}>Enphase</option>
                             </select>
                         </label>
                         <label for="inverter_model">

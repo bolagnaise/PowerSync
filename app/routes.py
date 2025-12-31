@@ -463,14 +463,13 @@ def api_inverter_status():
         if not controller:
             return jsonify({'enabled': True, 'error': 'Failed to create inverter controller'})
 
-        # Run async function in sync context
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            state = loop.run_until_complete(controller.get_status())
-            loop.run_until_complete(controller.disconnect())
-        finally:
-            loop.close()
+        # Run async function in sync context using asyncio.run()
+        async def get_status_and_disconnect():
+            state = await controller.get_status()
+            await controller.disconnect()
+            return state
+
+        state = asyncio.run(get_status_and_disconnect())
 
         return jsonify({
             'enabled': True,
