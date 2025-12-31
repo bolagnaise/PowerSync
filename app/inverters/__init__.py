@@ -16,6 +16,7 @@ INVERTER_BRANDS = {
     "fronius": "Fronius",
     "goodwe": "GoodWe",
     "huawei": "Huawei",
+    "enphase": "Enphase",
 }
 
 # Fronius models (SunSpec Modbus)
@@ -82,6 +83,34 @@ HUAWEI_MODELS = {
     **HUAWEI_L1_MODELS,
     **HUAWEI_M1_MODELS,
     **HUAWEI_M2_MODELS,
+}
+
+# Enphase microinverter systems (via IQ Gateway/Envoy REST API)
+# Reference: https://github.com/pyenphase/pyenphase
+# Note: Requires JWT token for firmware 7.x+, DPEL requires installer access
+ENPHASE_GATEWAY_MODELS = {
+    "envoy": "Envoy (Legacy)",
+    "envoy-s": "Envoy-S",
+    "envoy-s-metered": "Envoy-S Metered",
+    "iq-gateway": "IQ Gateway",
+    "iq-gateway-metered": "IQ Gateway Metered",
+}
+
+ENPHASE_MICROINVERTER_MODELS = {
+    "iq7": "IQ7 Series",
+    "iq7+": "IQ7+ Series",
+    "iq7a": "IQ7A Series",
+    "iq7x": "IQ7X Series",
+    "iq8": "IQ8 Series",
+    "iq8+": "IQ8+ Series",
+    "iq8a": "IQ8A Series",
+    "iq8m": "IQ8M Series",
+    "iq8h": "IQ8H Series",
+}
+
+# Combined Enphase models (show gateway models in dropdown)
+ENPHASE_MODELS = {
+    **ENPHASE_GATEWAY_MODELS,
 }
 
 # Sungrow SG series (string inverters) - single phase residential
@@ -225,6 +254,18 @@ def get_inverter_controller(
     if brand_lower == "huawei":
         from .huawei import HuaweiController
         return HuaweiController(
+            host=host,
+            port=port,
+            slave_id=slave_id,
+            model=model,
+        )
+
+    if brand_lower == "enphase":
+        from .enphase import EnphaseController
+        # Enphase uses HTTPS on port 443, not Modbus
+        if port == 502:
+            port = 443
+        return EnphaseController(
             host=host,
             port=port,
             slave_id=slave_id,
