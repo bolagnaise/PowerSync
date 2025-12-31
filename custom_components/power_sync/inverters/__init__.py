@@ -15,6 +15,7 @@ INVERTER_BRANDS = {
     "sungrow": "Sungrow",
     "fronius": "Fronius",
     "goodwe": "GoodWe",
+    "huawei": "Huawei",
 }
 
 # Fronius models (SunSpec Modbus)
@@ -35,6 +36,52 @@ GOODWE_MODELS = {
     "bh": "BH Series (Hybrid)",
     "es": "ES Series (Hybrid)",
     "em": "EM Series (Hybrid)",
+}
+
+# Huawei SUN2000 series (via Smart Dongle Modbus TCP)
+# Reference: https://github.com/wlcrs/huawei-solar-lib
+# L1 Series (Single Phase Hybrid)
+HUAWEI_L1_MODELS = {
+    "sun2000-2ktl-l1": "SUN2000-2KTL-L1",
+    "sun2000-3ktl-l1": "SUN2000-3KTL-L1",
+    "sun2000-3.68ktl-l1": "SUN2000-3.68KTL-L1",
+    "sun2000-4ktl-l1": "SUN2000-4KTL-L1",
+    "sun2000-4.6ktl-l1": "SUN2000-4.6KTL-L1",
+    "sun2000-5ktl-l1": "SUN2000-5KTL-L1",
+    "sun2000-6ktl-l1": "SUN2000-6KTL-L1",
+}
+
+# M0/M1 Series (Three Phase)
+HUAWEI_M1_MODELS = {
+    "sun2000-3ktl-m0": "SUN2000-3KTL-M0",
+    "sun2000-4ktl-m0": "SUN2000-4KTL-M0",
+    "sun2000-5ktl-m0": "SUN2000-5KTL-M0",
+    "sun2000-6ktl-m0": "SUN2000-6KTL-M0",
+    "sun2000-8ktl-m0": "SUN2000-8KTL-M0",
+    "sun2000-10ktl-m0": "SUN2000-10KTL-M0",
+    "sun2000-3ktl-m1": "SUN2000-3KTL-M1",
+    "sun2000-4ktl-m1": "SUN2000-4KTL-M1",
+    "sun2000-5ktl-m1": "SUN2000-5KTL-M1",
+    "sun2000-6ktl-m1": "SUN2000-6KTL-M1",
+    "sun2000-8ktl-m1": "SUN2000-8KTL-M1",
+    "sun2000-10ktl-m1": "SUN2000-10KTL-M1",
+}
+
+# M2 Series (Three Phase, Higher Power)
+HUAWEI_M2_MODELS = {
+    "sun2000-8ktl-m2": "SUN2000-8KTL-M2",
+    "sun2000-10ktl-m2": "SUN2000-10KTL-M2",
+    "sun2000-12ktl-m2": "SUN2000-12KTL-M2",
+    "sun2000-15ktl-m2": "SUN2000-15KTL-M2",
+    "sun2000-17ktl-m2": "SUN2000-17KTL-M2",
+    "sun2000-20ktl-m2": "SUN2000-20KTL-M2",
+}
+
+# Combined Huawei models
+HUAWEI_MODELS = {
+    **HUAWEI_L1_MODELS,
+    **HUAWEI_M1_MODELS,
+    **HUAWEI_M2_MODELS,
 }
 
 # Sungrow SG series (string inverters) - single phase residential
@@ -169,6 +216,15 @@ def get_inverter_controller(
         if slave_id == 1:
             slave_id = 247
         return GoodWeController(
+            host=host,
+            port=port,
+            slave_id=slave_id,
+            model=model,
+        )
+
+    if brand_lower == "huawei":
+        from .huawei import HuaweiController
+        return HuaweiController(
             host=host,
             port=port,
             slave_id=slave_id,
