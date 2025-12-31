@@ -34,6 +34,11 @@ class User(UserMixin, db.Model):
     sigenergy_access_token_encrypted = db.Column(db.LargeBinary)  # OAuth access token
     sigenergy_refresh_token_encrypted = db.Column(db.LargeBinary)  # OAuth refresh token
     sigenergy_token_expires_at = db.Column(db.DateTime)  # Token expiry timestamp
+    # Sigenergy DC Curtailment via Modbus TCP
+    sigenergy_dc_curtailment_enabled = db.Column(db.Boolean, default=False)
+    sigenergy_modbus_host = db.Column(db.String(50))  # IP address of Sigenergy system
+    sigenergy_modbus_port = db.Column(db.Integer, default=502)  # Modbus TCP port
+    sigenergy_modbus_slave_id = db.Column(db.Integer, default=1)  # Modbus slave/unit ID
 
     # Fleet API Credentials (for direct Tesla Fleet API)
     fleet_api_client_id_encrypted = db.Column(db.LargeBinary)

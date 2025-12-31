@@ -826,6 +826,53 @@
                         </div>
                     </details>
                 </fieldset>
+
+                <!-- Sigenergy DC Curtailment via Modbus TCP -->
+                <fieldset style="margin-top: 1em;">
+                    <legend>DC Solar Curtailment (Modbus TCP)</legend>
+                    <p style="font-size: 0.85em; color: var(--muted-color); margin-bottom: 1em;">
+                        Control solar export during negative pricing via local Modbus connection. This sets the export limit to 0kW (load-following mode) while allowing solar to continue powering your home.
+                    </p>
+
+                    <label for="sigenergy_dc_curtailment_enabled">
+                        {{ form.sigenergy_dc_curtailment_enabled() }}
+                        Enable DC Solar Curtailment
+                    </label>
+                    <small style="display: block; margin-top: -0.5em; margin-bottom: 1em; color: var(--muted-color);">
+                        {{ form.sigenergy_dc_curtailment_enabled.description }}
+                    </small>
+
+                    <div id="sigenergy-modbus-fields" style="{% if not form.sigenergy_dc_curtailment_enabled.data %}display: none;{% endif %}">
+                        <label for="sigenergy_modbus_host">
+                            Sigenergy IP Address
+                            {{ form.sigenergy_modbus_host(placeholder="192.168.1.100", style="width: 100%;") }}
+                        </label>
+                        <small style="display: block; margin-top: -0.5em; margin-bottom: 1em; color: var(--muted-color);">
+                            {{ form.sigenergy_modbus_host.description }}
+                        </small>
+
+                        <div style="display: flex; gap: 1em;">
+                            <div style="flex: 1;">
+                                <label for="sigenergy_modbus_port">
+                                    Modbus Port
+                                    {{ form.sigenergy_modbus_port(style="width: 100%;") }}
+                                </label>
+                                <small style="display: block; margin-top: -0.5em; color: var(--muted-color);">
+                                    {{ form.sigenergy_modbus_port.description }}
+                                </small>
+                            </div>
+                            <div style="flex: 1;">
+                                <label for="sigenergy_modbus_slave_id">
+                                    Slave ID
+                                    {{ form.sigenergy_modbus_slave_id(style="width: 100%;") }}
+                                </label>
+                                <small style="display: block; margin-top: -0.5em; color: var(--muted-color);">
+                                    {{ form.sigenergy_modbus_slave_id.description }}
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+                </fieldset>
             </div><!-- End Sigenergy Settings -->
 
             {{ form.submit(class_="primary", style="margin-top: 1em;") }}
@@ -847,6 +894,23 @@
                 sigenergySettings.style.display = 'none';
             }
         }
+
+        // Sigenergy Modbus Fields Toggle
+        function toggleSigenergyModbusFields() {
+            const checkbox = document.getElementById('sigenergy_dc_curtailment_enabled');
+            const modbusFields = document.getElementById('sigenergy-modbus-fields');
+            if (checkbox && modbusFields) {
+                modbusFields.style.display = checkbox.checked ? 'block' : 'none';
+            }
+        }
+
+        // Initialize Modbus fields toggle on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            const checkbox = document.getElementById('sigenergy_dc_curtailment_enabled');
+            if (checkbox) {
+                checkbox.addEventListener('change', toggleSigenergyModbusFields);
+            }
+        });
 
         // Sigenergy Credential Validation
         async function validateSigenergyCredentials() {

@@ -904,6 +904,21 @@ def settings():
             logger.info(f"Saving AEMO spike threshold: ${form.aemo_spike_threshold.data}/MWh")
             current_user.aemo_spike_threshold = float(form.aemo_spike_threshold.data)
 
+        # Sigenergy DC Curtailment Modbus settings
+        if 'sigenergy_dc_curtailment_enabled' in submitted_fields:
+            current_user.sigenergy_dc_curtailment_enabled = form.sigenergy_dc_curtailment_enabled.data
+            logger.info(f"Saving Sigenergy DC curtailment enabled: {form.sigenergy_dc_curtailment_enabled.data}")
+        if 'sigenergy_modbus_host' in submitted_fields:
+            if form.sigenergy_modbus_host.data:
+                current_user.sigenergy_modbus_host = form.sigenergy_modbus_host.data.strip()
+                logger.info(f"Saving Sigenergy Modbus host: {current_user.sigenergy_modbus_host}")
+            else:
+                current_user.sigenergy_modbus_host = None
+        if 'sigenergy_modbus_port' in submitted_fields:
+            current_user.sigenergy_modbus_port = form.sigenergy_modbus_port.data or 502
+        if 'sigenergy_modbus_slave_id' in submitted_fields:
+            current_user.sigenergy_modbus_slave_id = form.sigenergy_modbus_slave_id.data or 1
+
         # Flow Power / Electricity Provider settings
         if 'electricity_provider' in submitted_fields:
             provider = request.form.get('electricity_provider')
@@ -1085,6 +1100,12 @@ def settings():
     form.aemo_region.data = current_user.aemo_region or ''
     form.aemo_spike_threshold.data = current_user.aemo_spike_threshold or 300.0
     logger.debug(f"AEMO enabled: {form.aemo_spike_detection_enabled.data}, Region: {form.aemo_region.data}, Threshold: ${form.aemo_spike_threshold.data}")
+
+    # Pre-populate Sigenergy Modbus settings
+    form.sigenergy_dc_curtailment_enabled.data = current_user.sigenergy_dc_curtailment_enabled or False
+    form.sigenergy_modbus_host.data = current_user.sigenergy_modbus_host or ''
+    form.sigenergy_modbus_port.data = current_user.sigenergy_modbus_port or 502
+    form.sigenergy_modbus_slave_id.data = current_user.sigenergy_modbus_slave_id or 1
 
     logger.info(f"Rendering settings page - Has Amber token: {bool(current_user.amber_api_token_encrypted)}, Has Teslemetry key: {bool(current_user.teslemetry_api_key_encrypted)}, Tesla Site ID: {current_user.tesla_energy_site_id}")
 

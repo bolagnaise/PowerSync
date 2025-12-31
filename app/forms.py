@@ -59,6 +59,21 @@ class SettingsForm(FlaskForm):
     sigenergy_station_id = StringField('Sigenergy Station ID',
         description='Station ID (auto-populated after credential validation)')
 
+    # Sigenergy DC Curtailment via Modbus TCP
+    sigenergy_dc_curtailment_enabled = BooleanField('Enable DC Solar Curtailment',
+        description='Control solar export via Modbus TCP during negative pricing')
+    sigenergy_modbus_host = StringField('Sigenergy IP Address',
+        validators=[Optional()],
+        description='Local IP address of your Sigenergy system (e.g., 192.168.1.100)')
+    sigenergy_modbus_port = IntegerField('Modbus Port',
+        validators=[Optional(), NumberRange(min=1, max=65535)],
+        default=502,
+        description='Modbus TCP port (default: 502)')
+    sigenergy_modbus_slave_id = IntegerField('Modbus Slave ID',
+        validators=[Optional(), NumberRange(min=1, max=247)],
+        default=1,
+        description='Modbus slave/unit ID (default: 1)')
+
     # AEMO Spike Detection
     aemo_spike_detection_enabled = BooleanField('Enable AEMO Spike Detection')
     aemo_region = SelectField('AEMO Region', choices=[
