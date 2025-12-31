@@ -14,6 +14,7 @@ _LOGGER = logging.getLogger(__name__)
 INVERTER_BRANDS = {
     "sungrow": "Sungrow",
     "fronius": "Fronius",
+    "goodwe": "GoodWe",
 }
 
 # Fronius models (SunSpec Modbus)
@@ -23,6 +24,17 @@ FRONIUS_MODELS = {
     "symo": "Symo (Three Phase)",
     "gen24": "Gen24 / Tauro",
     "eco": "Eco",
+}
+
+# GoodWe models (ET/EH/BT/BH series support export limiting)
+# Note: DT/D-NS series do NOT support export limiting via Modbus
+GOODWE_MODELS = {
+    "et": "ET Series (Hybrid)",
+    "eh": "EH Series (Hybrid)",
+    "bt": "BT Series (Hybrid)",
+    "bh": "BH Series (Hybrid)",
+    "es": "ES Series (Hybrid)",
+    "em": "EM Series (Hybrid)",
 }
 
 # Sungrow SG series (string inverters) - single phase residential
@@ -145,6 +157,18 @@ def get_inverter_controller(
     if brand_lower == "fronius":
         from .fronius import FroniusController
         return FroniusController(
+            host=host,
+            port=port,
+            slave_id=slave_id,
+            model=model,
+        )
+
+    if brand_lower == "goodwe":
+        from .goodwe import GoodWeController
+        # GoodWe default slave ID is 247
+        if slave_id == 1:
+            slave_id = 247
+        return GoodWeController(
             host=host,
             port=port,
             slave_id=slave_id,

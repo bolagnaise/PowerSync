@@ -479,6 +479,7 @@ CONF_INVERTER_SLAVE_ID = "inverter_slave_id"
 INVERTER_BRANDS = {
     "sungrow": "Sungrow",
     "fronius": "Fronius",
+    "goodwe": "GoodWe",
 }
 
 # Fronius models (SunSpec Modbus)
@@ -487,6 +488,17 @@ FRONIUS_MODELS = {
     "symo": "Symo (Three Phase)",
     "gen24": "Gen24 / Tauro",
     "eco": "Eco",
+}
+
+# GoodWe models (ET/EH/BT/BH series support export limiting)
+# Note: DT/D-NS series do NOT support export limiting via Modbus
+GOODWE_MODELS = {
+    "et": "ET Series (Hybrid)",
+    "eh": "EH Series (Hybrid)",
+    "bt": "BT Series (Hybrid)",
+    "bh": "BH Series (Hybrid)",
+    "es": "ES Series (Hybrid)",
+    "em": "EM Series (Hybrid)",
 }
 
 # Sungrow SG series (string inverters) - single phase residential
