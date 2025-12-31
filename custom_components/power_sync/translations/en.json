@@ -3,14 +3,16 @@
     "step": {
       "user": {
         "title": "PowerSync Setup",
-        "description": "Configure PowerSync to automatically sync electricity pricing to your Powerwall."
+        "description": "Configure PowerSync to automatically sync electricity pricing to your Powerwall.",
+        "submit_button": "Next"
       },
       "provider_selection": {
         "title": "Select Electricity Provider",
         "description": "Choose your electricity provider:\n\n**Amber Electric**: Full real-time price sync using Amber API.\n\n**Flow Power**: Wholesale electricity with Happy Hour exports. Choose AEMO or Amber pricing.\n\n**Globird/VPP**: AEMO spike detection for VPP exports.",
         "data": {
           "electricity_provider": "Electricity Provider"
-        }
+        },
+        "submit_button": "Next"
       },
       "flow_power_setup": {
         "title": "Flow Power Configuration",
@@ -36,14 +38,16 @@
           "pea_custom_value": "Custom PEA Override (c/kWh, leave empty for auto)",
           "auto_sync_enabled": "Enable automatic TOU schedule syncing",
           "solar_curtailment_enabled": "Enable Solar Curtailment (stop export at negative prices)"
-        }
+        },
+        "submit_button": "Next"
       },
       "amber": {
         "title": "Amber Electric Configuration",
         "description": "Enter your Amber Electric API token. You can get this from {amber_url}",
         "data": {
           "amber_api_token": "Amber API Token"
-        }
+        },
+        "submit_button": "Next"
       },
       "amber_settings": {
         "title": "Amber Settings",
@@ -70,14 +74,16 @@
           "export_boost_threshold": "Boost only applies if actual price is at or above this value (0 = always apply)",
           "chip_mode_enabled": "Suppress exports during configured hours unless price exceeds threshold (inverse of Export Boost)",
           "chip_mode_threshold": "Allow exports only when price is at or above this value"
-        }
+        },
+        "submit_button": "Next"
       },
       "teslemetry": {
         "title": "Teslemetry Configuration",
         "description": "Enter your Teslemetry API token. You can get this from {teslemetry_url}",
         "data": {
           "teslemetry_api_token": "Teslemetry API Token"
-        }
+        },
+        "submit_button": "Next"
       },
       "site_selection": {
         "title": "Site Selection",
@@ -88,7 +94,8 @@
           "auto_sync_enabled": "Enable automatic TOU schedule syncing",
           "amber_forecast_type": "Amber Forecast Type",
           "solar_curtailment_enabled": "Enable Solar Curtailment (stop export at negative prices)"
-        }
+        },
+        "submit_button": "Submit"
       },
       "demand_charges": {
         "title": "Demand Charge Configuration (Optional)",
@@ -102,7 +109,8 @@
           "demand_charge_billing_day": "Billing Cycle Day (1-28)",
           "demand_charge_apply_to": "Apply Demand Charge To",
           "demand_artificial_price_enabled": "Artificial Price Increase (ALPHA)"
-        }
+        },
+        "submit_button": "Submit"
       }
     },
     "error": {

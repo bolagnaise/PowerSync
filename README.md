@@ -31,6 +31,7 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 - 🌞 **Solar Curtailment** - Automatically prevents solar export during negative pricing periods (≤0c/kWh). When Amber feed-in prices go negative, the system sets Powerwall export to "never" to avoid paying to export, then restores to "battery_ok" when prices return to positive
 - 🛡️ **Spike Protection** - Prevents Powerwall from charging from grid during Amber price spikes. Overrides buy prices when Amber detects spike status to eliminate arbitrage opportunities
 - 📤 **Export Price Boost** - Artificially increase export prices to trigger Powerwall exports at lower price points. Useful when prices are in the 20-25c range where Tesla's algorithm may not trigger exports
+- 🔒 **Chip Mode** - Suppress battery exports during configured hours unless price exceeds a threshold. Keeps your battery stable overnight while still capturing unexpected price spikes (inverse of Export Boost)
 - 🔌 **Flow Power + AEMO Support** - Full support for Flow Power and other wholesale electricity retailers using direct AEMO NEM pricing with configurable network tariffs
 - 🎯 **Custom TOU Schedules** - Create and manage custom time-of-use schedules for any electricity provider (not just Amber)
 - 💾 **Saved TOU Profiles** - Backup, restore, and manage multiple tariff configurations
@@ -177,6 +178,53 @@ Amber export price: -3c/kWh
 - Use activation threshold to skip boosting very low or negative prices where exporting doesn't make financial sense
 
 **Note:** The boosted price is only what Tesla sees for decision-making - you still get paid the actual Amber export rate. This feature tricks the Powerwall into exporting when it otherwise wouldn't.
+
+**Configuration:**
+- Enable/disable in Amber Settings (Flask web interface)
+- Enable/disable during Home Assistant integration options flow
+- Default: Disabled (opt-in feature)
+
+### Chip Mode
+
+Suppress battery exports during configured hours (typically overnight) unless the price exceeds a threshold. This is the inverse of Export Price Boost - instead of encouraging exports, it prevents them while still allowing you to capture unexpected price spikes.
+
+**The Problem:**
+Tesla's algorithm may decide to export your battery overnight based on price signals you don't want to respond to. This drains your battery when you'd rather keep it charged for morning use or to capture genuine price spikes.
+
+**How It Works:**
+During the configured time window (default 10pm-6am), the system sets export prices to $0 for Tesla:
+- Tesla sees $0 export rate → Battery won't export (no profit incentive)
+- **Exception:** If the actual price exceeds your threshold (e.g., 30c), the original price is preserved
+- This allows capturing unexpected overnight spikes while keeping the battery stable otherwise
+
+**Configuration Options:**
+| Setting | Description | Default |
+|---------|-------------|---------|
+| Enable Chip Mode | Toggle the feature on/off | Off |
+| Start Time | When to start suppressing exports | 22:00 |
+| End Time | When to stop suppressing exports | 06:00 |
+| Price Threshold (c/kWh) | Allow exports only above this price | 30 |
+
+**Example:**
+```
+With threshold=30c between 22:00-06:00:
+
+Amber export price: 8c/kWh
+→ 8 < 30 (below threshold)
+→ Tesla sees $0 (export suppressed)
+
+Amber export price: 35c/kWh
+→ 35 >= 30 (above threshold)
+→ Tesla sees 35c (export allowed)
+```
+
+**Use Cases:**
+- Keep battery charged overnight for morning peak usage
+- Prevent Tesla's algorithm from exporting during low-value periods
+- Still capture genuine price spikes (e.g., unexpected demand events)
+- Works with Amber SmartShift to let Amber manage overnight charging while preventing unwanted exports
+
+**Note:** Like Export Price Boost, the modified price is only what Tesla sees for decision-making - your actual earnings are based on real Amber rates.
 
 **Configuration:**
 - Enable/disable in Amber Settings (Flask web interface)
