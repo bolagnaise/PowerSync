@@ -1158,16 +1158,28 @@ class CalendarHistoryView(HomeAssistantView):
             )
 
         # Transform time_series to match mobile app format
+        # Include both normalized fields AND detailed Tesla breakdown fields
         time_series = []
         for entry_data in history.get("time_series", []):
             time_series.append({
                 "timestamp": entry_data.get("timestamp", ""),
+                # Normalized fields for compatibility
                 "solar_generation": entry_data.get("solar_energy_exported", 0),
                 "battery_discharge": entry_data.get("battery_energy_exported", 0),
                 "battery_charge": entry_data.get("battery_energy_imported", 0),
                 "grid_import": entry_data.get("grid_energy_imported", 0),
                 "grid_export": entry_data.get("grid_energy_exported_from_solar", 0) + entry_data.get("grid_energy_exported_from_battery", 0),
                 "home_consumption": entry_data.get("consumer_energy_imported_from_grid", 0) + entry_data.get("consumer_energy_imported_from_solar", 0) + entry_data.get("consumer_energy_imported_from_battery", 0),
+                # Detailed breakdown fields from Tesla API (for detail screens)
+                "solar_energy_exported": entry_data.get("solar_energy_exported", 0),
+                "battery_energy_exported": entry_data.get("battery_energy_exported", 0),
+                "battery_energy_imported_from_grid": entry_data.get("battery_energy_imported_from_grid", 0),
+                "battery_energy_imported_from_solar": entry_data.get("battery_energy_imported_from_solar", 0),
+                "consumer_energy_imported_from_grid": entry_data.get("consumer_energy_imported_from_grid", 0),
+                "consumer_energy_imported_from_solar": entry_data.get("consumer_energy_imported_from_solar", 0),
+                "consumer_energy_imported_from_battery": entry_data.get("consumer_energy_imported_from_battery", 0),
+                "grid_energy_exported_from_solar": entry_data.get("grid_energy_exported_from_solar", 0),
+                "grid_energy_exported_from_battery": entry_data.get("grid_energy_exported_from_battery", 0),
             })
 
         result = {
@@ -3562,16 +3574,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return {"success": False, "error": "Failed to fetch calendar history from Tesla API"}
 
         # Transform time_series to match mobile app format
+        # Include both normalized fields AND detailed Tesla breakdown fields
         time_series = []
         for entry_data in history.get("time_series", []):
             time_series.append({
                 "timestamp": entry_data.get("timestamp", ""),
+                # Normalized fields for compatibility
                 "solar_generation": entry_data.get("solar_energy_exported", 0),
                 "battery_discharge": entry_data.get("battery_energy_exported", 0),
                 "battery_charge": entry_data.get("battery_energy_imported", 0),
                 "grid_import": entry_data.get("grid_energy_imported", 0),
                 "grid_export": entry_data.get("grid_energy_exported_from_solar", 0) + entry_data.get("grid_energy_exported_from_battery", 0),
                 "home_consumption": entry_data.get("consumer_energy_imported_from_grid", 0) + entry_data.get("consumer_energy_imported_from_solar", 0) + entry_data.get("consumer_energy_imported_from_battery", 0),
+                # Detailed breakdown fields from Tesla API (for detail screens)
+                "solar_energy_exported": entry_data.get("solar_energy_exported", 0),
+                "battery_energy_exported": entry_data.get("battery_energy_exported", 0),
+                "battery_energy_imported_from_grid": entry_data.get("battery_energy_imported_from_grid", 0),
+                "battery_energy_imported_from_solar": entry_data.get("battery_energy_imported_from_solar", 0),
+                "consumer_energy_imported_from_grid": entry_data.get("consumer_energy_imported_from_grid", 0),
+                "consumer_energy_imported_from_solar": entry_data.get("consumer_energy_imported_from_solar", 0),
+                "consumer_energy_imported_from_battery": entry_data.get("consumer_energy_imported_from_battery", 0),
+                "grid_energy_exported_from_solar": entry_data.get("grid_energy_exported_from_solar", 0),
+                "grid_energy_exported_from_battery": entry_data.get("grid_energy_exported_from_battery", 0),
             })
 
         result = {
