@@ -904,10 +904,7 @@ def settings():
             logger.info(f"Saving AEMO spike threshold: ${form.aemo_spike_threshold.data}/MWh")
             current_user.aemo_spike_threshold = float(form.aemo_spike_threshold.data)
 
-        # Sigenergy DC Curtailment Modbus settings
-        if 'sigenergy_dc_curtailment_enabled' in submitted_fields:
-            current_user.sigenergy_dc_curtailment_enabled = form.sigenergy_dc_curtailment_enabled.data
-            logger.info(f"Saving Sigenergy DC curtailment enabled: {form.sigenergy_dc_curtailment_enabled.data}")
+        # Sigenergy Modbus settings
         if 'sigenergy_modbus_host' in submitted_fields:
             if form.sigenergy_modbus_host.data:
                 current_user.sigenergy_modbus_host = form.sigenergy_modbus_host.data.strip()
@@ -1102,7 +1099,6 @@ def settings():
     logger.debug(f"AEMO enabled: {form.aemo_spike_detection_enabled.data}, Region: {form.aemo_region.data}, Threshold: ${form.aemo_spike_threshold.data}")
 
     # Pre-populate Sigenergy Modbus settings
-    form.sigenergy_dc_curtailment_enabled.data = current_user.sigenergy_dc_curtailment_enabled or False
     form.sigenergy_modbus_host.data = current_user.sigenergy_modbus_host or ''
     form.sigenergy_modbus_port.data = current_user.sigenergy_modbus_port or 502
     form.sigenergy_modbus_slave_id.data = current_user.sigenergy_modbus_slave_id or 1
@@ -6535,3 +6531,658 @@ def api_health():
         'service': 'PowerSync',
         'timestamp': datetime.utcnow().isoformat()
     })
+
+
+# ============================================
+# SIGENERGY CONTROL API (for mobile app)
+# ============================================
+
+@bp.route('/api/sigenergy/settings')
+@login_required
+def api_sigenergy_settings():
+    """
+    Get current Sigenergy control settings/limits.
+
+    Returns JSON:
+    {
+        "success": true,
+        "charge_rate_limit_kw": 10.0,
+        "discharge_rate_limit_kw": 10.0,
+        "export_limit_kw": null,  // null = unlimited
+        "solar_curtailment_enabled": false
+    }
+    """
+    from app.route_helpers import get_api_user
+    user = get_api_user()
+    if not user and current_user.is_authenticated:
+        user = current_user
+    if not user:
+        return jsonify({'error': 'Authentication required'}), 401
+
+    # Check if user has Sigenergy configured
+    if user.battery_system != 'sigenergy':
+        return jsonify({
+            'success': False,
+            'error': 'Sigenergy not configured as battery system'
+        }), 400
+
+    if not user.sigenergy_modbus_host:
+        return jsonify({
+            'success': False,
+            'error': 'Sigenergy Modbus host not configured'
+        }), 400
+
+    from app.sigenergy_modbus import get_sigenergy_modbus_client
+
+    try:
+        client = get_sigenergy_modbus_client(user)
+        if not client:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to create Sigenergy client'
+            }), 500
+
+        limits = client.get_current_limits()
+        if 'error' in limits:
+            return jsonify({
+                'success': False,
+                'error': limits['error']
+            }), 500
+
+        return jsonify({
+            'success': True,
+            'charge_rate_limit_kw': limits.get('charge_rate_limit_kw'),
+            'discharge_rate_limit_kw': limits.get('discharge_rate_limit_kw'),
+            'export_limit_kw': limits.get('export_limit_kw'),
+            'solar_curtailment_enabled': user.solar_curtailment_enabled or False
+        })
+
+    except Exception as e:
+        logger.error(f"Error getting Sigenergy settings: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@bp.route('/api/sigenergy/set-charge-rate', methods=['POST'])
+@login_required
+def api_sigenergy_set_charge_rate():
+    """
+    Set Sigenergy battery charge rate limit.
+
+    Request JSON:
+    {
+        "limit_kw": 5.0  // 0-10 kW
+    }
+    """
+    from app.route_helpers import get_api_user
+    user = get_api_user()
+    if not user and current_user.is_authenticated:
+        user = current_user
+    if not user:
+        return jsonify({'error': 'Authentication required'}), 401
+
+    if user.battery_system != 'sigenergy' or not user.sigenergy_modbus_host:
+        return jsonify({
+            'success': False,
+            'error': 'Sigenergy not configured'
+        }), 400
+
+    data = request.get_json() or {}
+    limit_kw = data.get('limit_kw')
+
+    if limit_kw is None:
+        return jsonify({
+            'success': False,
+            'error': 'limit_kw is required'
+        }), 400
+
+    try:
+        limit_kw = float(limit_kw)
+        if limit_kw < 0 or limit_kw > 15:
+            return jsonify({
+                'success': False,
+                'error': 'limit_kw must be between 0 and 15'
+            }), 400
+    except (ValueError, TypeError):
+        return jsonify({
+            'success': False,
+            'error': 'limit_kw must be a number'
+        }), 400
+
+    from app.sigenergy_modbus import get_sigenergy_modbus_client
+
+    try:
+        client = get_sigenergy_modbus_client(user)
+        if not client:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to create Sigenergy client'
+            }), 500
+
+        success = client.set_charge_rate_limit(limit_kw)
+
+        if success:
+            logger.info(f"Set Sigenergy charge rate to {limit_kw} kW for {user.email}")
+            return jsonify({
+                'success': True,
+                'message': f'Charge rate limit set to {limit_kw} kW'
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to set charge rate limit via Modbus'
+            }), 500
+
+    except Exception as e:
+        logger.error(f"Error setting Sigenergy charge rate: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@bp.route('/api/sigenergy/set-discharge-rate', methods=['POST'])
+@login_required
+def api_sigenergy_set_discharge_rate():
+    """
+    Set Sigenergy battery discharge rate limit.
+
+    Request JSON:
+    {
+        "limit_kw": 5.0  // 0-10 kW
+    }
+    """
+    from app.route_helpers import get_api_user
+    user = get_api_user()
+    if not user and current_user.is_authenticated:
+        user = current_user
+    if not user:
+        return jsonify({'error': 'Authentication required'}), 401
+
+    if user.battery_system != 'sigenergy' or not user.sigenergy_modbus_host:
+        return jsonify({
+            'success': False,
+            'error': 'Sigenergy not configured'
+        }), 400
+
+    data = request.get_json() or {}
+    limit_kw = data.get('limit_kw')
+
+    if limit_kw is None:
+        return jsonify({
+            'success': False,
+            'error': 'limit_kw is required'
+        }), 400
+
+    try:
+        limit_kw = float(limit_kw)
+        if limit_kw < 0 or limit_kw > 15:
+            return jsonify({
+                'success': False,
+                'error': 'limit_kw must be between 0 and 15'
+            }), 400
+    except (ValueError, TypeError):
+        return jsonify({
+            'success': False,
+            'error': 'limit_kw must be a number'
+        }), 400
+
+    from app.sigenergy_modbus import get_sigenergy_modbus_client
+
+    try:
+        client = get_sigenergy_modbus_client(user)
+        if not client:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to create Sigenergy client'
+            }), 500
+
+        success = client.set_discharge_rate_limit(limit_kw)
+
+        if success:
+            logger.info(f"Set Sigenergy discharge rate to {limit_kw} kW for {user.email}")
+            return jsonify({
+                'success': True,
+                'message': f'Discharge rate limit set to {limit_kw} kW'
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to set discharge rate limit via Modbus'
+            }), 500
+
+    except Exception as e:
+        logger.error(f"Error setting Sigenergy discharge rate: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@bp.route('/api/sigenergy/set-export-limit', methods=['POST'])
+@login_required
+def api_sigenergy_set_export_limit():
+    """
+    Set Sigenergy grid export limit.
+
+    Request JSON:
+    {
+        "limit_kw": 5.0,  // 0-10 kW, or null for unlimited
+        "unlimited": false  // If true, sets unlimited export
+    }
+    """
+    from app.route_helpers import get_api_user
+    user = get_api_user()
+    if not user and current_user.is_authenticated:
+        user = current_user
+    if not user:
+        return jsonify({'error': 'Authentication required'}), 401
+
+    if user.battery_system != 'sigenergy' or not user.sigenergy_modbus_host:
+        return jsonify({
+            'success': False,
+            'error': 'Sigenergy not configured'
+        }), 400
+
+    data = request.get_json() or {}
+    unlimited = data.get('unlimited', False)
+    limit_kw = data.get('limit_kw')
+
+    from app.sigenergy_modbus import get_sigenergy_modbus_client
+
+    try:
+        client = get_sigenergy_modbus_client(user)
+        if not client:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to create Sigenergy client'
+            }), 500
+
+        if unlimited:
+            success = client.restore_export_limit()
+            message = 'Export limit set to unlimited'
+        else:
+            if limit_kw is None:
+                return jsonify({
+                    'success': False,
+                    'error': 'limit_kw is required when unlimited is false'
+                }), 400
+
+            try:
+                limit_kw = float(limit_kw)
+                if limit_kw < 0 or limit_kw > 15:
+                    return jsonify({
+                        'success': False,
+                        'error': 'limit_kw must be between 0 and 15'
+                    }), 400
+            except (ValueError, TypeError):
+                return jsonify({
+                    'success': False,
+                    'error': 'limit_kw must be a number'
+                }), 400
+
+            success = client.set_export_limit(limit_kw)
+            message = f'Export limit set to {limit_kw} kW'
+
+        if success:
+            logger.info(f"Set Sigenergy export limit for {user.email}: {message}")
+            return jsonify({
+                'success': True,
+                'message': message
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to set export limit via Modbus'
+            }), 500
+
+    except Exception as e:
+        logger.error(f"Error setting Sigenergy export limit: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@bp.route('/api/sigenergy/force-charge', methods=['POST'])
+@login_required
+def api_sigenergy_force_charge():
+    """
+    Force charge mode for Sigenergy - maximizes grid charging.
+
+    Strategy:
+    - Set export limit to 0 kW (prevent export)
+    - Set charge rate to max (10 kW)
+    - Set discharge rate to 0 kW (prevent discharge)
+
+    Request JSON:
+    {
+        "duration_minutes": 30  // Optional: 15, 30, 45, 60, 75, 90, 105, 120. Default: 30
+    }
+    """
+    from app.route_helpers import get_api_user
+    user = get_api_user()
+    if not user and current_user.is_authenticated:
+        user = current_user
+    if not user:
+        return jsonify({'error': 'Authentication required'}), 401
+
+    if user.battery_system != 'sigenergy' or not user.sigenergy_modbus_host:
+        return jsonify({
+            'success': False,
+            'error': 'Sigenergy not configured'
+        }), 400
+
+    data = request.get_json() or {}
+    duration_minutes = data.get('duration_minutes', 30)
+
+    try:
+        duration_minutes = int(duration_minutes)
+    except (ValueError, TypeError):
+        duration_minutes = 30
+
+    valid_durations = [15, 30, 45, 60, 75, 90, 105, 120]
+    if duration_minutes not in valid_durations:
+        return jsonify({
+            'success': False,
+            'error': f'Invalid duration. Must be one of: {valid_durations}'
+        }), 400
+
+    logger.info(f"Sigenergy force charge requested by {user.email} for {duration_minutes} minutes")
+
+    # Check if already in charge mode
+    if user.manual_charge_active:
+        new_expires_at = datetime.utcnow() + timedelta(minutes=duration_minutes)
+        user.manual_charge_expires_at = new_expires_at
+        db_commit_with_retry()
+        logger.info(f"Extended Sigenergy charge mode to {new_expires_at}")
+        return jsonify({
+            'success': True,
+            'message': f'Charge mode extended for {duration_minutes} minutes',
+            'expires_at': new_expires_at.isoformat() + 'Z',
+            'already_active': True
+        })
+
+    from app.sigenergy_modbus import get_sigenergy_modbus_client, SigenergyModbusClient
+
+    try:
+        client = get_sigenergy_modbus_client(user)
+        if not client:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to create Sigenergy client'
+            }), 500
+
+        # Force charge strategy:
+        # 1. Set export to 0 (prevent solar export)
+        # 2. Set charge rate to max
+        # 3. Set discharge rate to 0 (prevent battery discharge)
+
+        export_success = client.set_export_limit(0)
+        if not export_success:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to set export limit to 0'
+            }), 500
+
+        charge_success = client.set_charge_rate_limit(SigenergyModbusClient.DEFAULT_MAX_RATE_KW)
+        if not charge_success:
+            # Try to restore export limit
+            client.restore_export_limit()
+            return jsonify({
+                'success': False,
+                'error': 'Failed to set charge rate to max'
+            }), 500
+
+        discharge_success = client.set_discharge_rate_limit(0)
+        if not discharge_success:
+            # Try to restore defaults
+            client.restore_export_limit()
+            client.set_charge_rate_limit(SigenergyModbusClient.DEFAULT_MAX_RATE_KW)
+            return jsonify({
+                'success': False,
+                'error': 'Failed to set discharge rate to 0'
+            }), 500
+
+        # All successful - update user state
+        expires_at = datetime.utcnow() + timedelta(minutes=duration_minutes)
+        user.manual_charge_active = True
+        user.manual_charge_expires_at = expires_at
+        user.manual_discharge_active = False  # Clear any discharge mode
+        user.manual_discharge_expires_at = None
+        db_commit_with_retry()
+
+        logger.info(f"Sigenergy force charge activated for {user.email} until {expires_at}")
+
+        return jsonify({
+            'success': True,
+            'message': f'Force charge activated for {duration_minutes} minutes',
+            'expires_at': expires_at.isoformat() + 'Z',
+            'duration_minutes': duration_minutes
+        })
+
+    except Exception as e:
+        logger.error(f"Error in Sigenergy force charge: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        db.session.rollback()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@bp.route('/api/sigenergy/force-discharge', methods=['POST'])
+@login_required
+def api_sigenergy_force_discharge():
+    """
+    Force discharge mode for Sigenergy - maximizes battery discharge to grid.
+
+    Strategy:
+    - Set export limit to unlimited
+    - Set discharge rate to max (10 kW)
+    - Set charge rate to 0 kW (prevent charging)
+
+    Request JSON:
+    {
+        "duration_minutes": 30  // Optional: 15, 30, 45, 60, 75, 90, 105, 120. Default: 30
+    }
+    """
+    from app.route_helpers import get_api_user
+    user = get_api_user()
+    if not user and current_user.is_authenticated:
+        user = current_user
+    if not user:
+        return jsonify({'error': 'Authentication required'}), 401
+
+    if user.battery_system != 'sigenergy' or not user.sigenergy_modbus_host:
+        return jsonify({
+            'success': False,
+            'error': 'Sigenergy not configured'
+        }), 400
+
+    data = request.get_json() or {}
+    duration_minutes = data.get('duration_minutes', 30)
+
+    try:
+        duration_minutes = int(duration_minutes)
+    except (ValueError, TypeError):
+        duration_minutes = 30
+
+    valid_durations = [15, 30, 45, 60, 75, 90, 105, 120]
+    if duration_minutes not in valid_durations:
+        return jsonify({
+            'success': False,
+            'error': f'Invalid duration. Must be one of: {valid_durations}'
+        }), 400
+
+    logger.info(f"Sigenergy force discharge requested by {user.email} for {duration_minutes} minutes")
+
+    # Check if already in discharge mode
+    if user.manual_discharge_active:
+        new_expires_at = datetime.utcnow() + timedelta(minutes=duration_minutes)
+        user.manual_discharge_expires_at = new_expires_at
+        db_commit_with_retry()
+        logger.info(f"Extended Sigenergy discharge mode to {new_expires_at}")
+        return jsonify({
+            'success': True,
+            'message': f'Discharge mode extended for {duration_minutes} minutes',
+            'expires_at': new_expires_at.isoformat() + 'Z',
+            'already_active': True
+        })
+
+    from app.sigenergy_modbus import get_sigenergy_modbus_client, SigenergyModbusClient
+
+    try:
+        client = get_sigenergy_modbus_client(user)
+        if not client:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to create Sigenergy client'
+            }), 500
+
+        # Force discharge strategy:
+        # 1. Set export to unlimited (allow all export)
+        # 2. Set discharge rate to max
+        # 3. Set charge rate to 0 (prevent charging from grid)
+
+        export_success = client.restore_export_limit()  # Unlimited
+        if not export_success:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to set export limit to unlimited'
+            }), 500
+
+        discharge_success = client.set_discharge_rate_limit(SigenergyModbusClient.DEFAULT_MAX_RATE_KW)
+        if not discharge_success:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to set discharge rate to max'
+            }), 500
+
+        charge_success = client.set_charge_rate_limit(0)
+        if not charge_success:
+            # Try to restore discharge rate
+            client.set_discharge_rate_limit(SigenergyModbusClient.DEFAULT_MAX_RATE_KW)
+            return jsonify({
+                'success': False,
+                'error': 'Failed to set charge rate to 0'
+            }), 500
+
+        # All successful - update user state
+        expires_at = datetime.utcnow() + timedelta(minutes=duration_minutes)
+        user.manual_discharge_active = True
+        user.manual_discharge_expires_at = expires_at
+        user.manual_charge_active = False  # Clear any charge mode
+        user.manual_charge_expires_at = None
+        db_commit_with_retry()
+
+        logger.info(f"Sigenergy force discharge activated for {user.email} until {expires_at}")
+
+        return jsonify({
+            'success': True,
+            'message': f'Force discharge activated for {duration_minutes} minutes',
+            'expires_at': expires_at.isoformat() + 'Z',
+            'duration_minutes': duration_minutes
+        })
+
+    except Exception as e:
+        logger.error(f"Error in Sigenergy force discharge: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        db.session.rollback()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
+@bp.route('/api/sigenergy/restore-normal', methods=['POST'])
+@login_required
+def api_sigenergy_restore_normal():
+    """
+    Restore normal operation for Sigenergy - sets all limits to defaults.
+
+    Restores:
+    - Export limit to unlimited
+    - Charge rate to max (10 kW)
+    - Discharge rate to max (10 kW)
+    """
+    from app.route_helpers import get_api_user
+    user = get_api_user()
+    if not user and current_user.is_authenticated:
+        user = current_user
+    if not user:
+        return jsonify({'error': 'Authentication required'}), 401
+
+    if user.battery_system != 'sigenergy' or not user.sigenergy_modbus_host:
+        return jsonify({
+            'success': False,
+            'error': 'Sigenergy not configured'
+        }), 400
+
+    logger.info(f"Sigenergy restore normal requested by {user.email}")
+
+    # Check if already in normal mode
+    was_in_discharge = user.manual_discharge_active
+    was_in_charge = getattr(user, 'manual_charge_active', False)
+
+    if not was_in_discharge and not was_in_charge:
+        return jsonify({
+            'success': True,
+            'message': 'Already in normal operation',
+            'method': 'none'
+        })
+
+    from app.sigenergy_modbus import get_sigenergy_modbus_client, SigenergyModbusClient
+
+    try:
+        client = get_sigenergy_modbus_client(user)
+        if not client:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to create Sigenergy client'
+            }), 500
+
+        # Restore all limits to defaults
+        export_success = client.restore_export_limit()
+        charge_success = client.set_charge_rate_limit(SigenergyModbusClient.DEFAULT_MAX_RATE_KW)
+        discharge_success = client.set_discharge_rate_limit(SigenergyModbusClient.DEFAULT_MAX_RATE_KW)
+
+        if not all([export_success, charge_success, discharge_success]):
+            return jsonify({
+                'success': False,
+                'error': 'Failed to restore some limits via Modbus',
+                'export_restored': export_success,
+                'charge_restored': charge_success,
+                'discharge_restored': discharge_success
+            }), 500
+
+        # Clear all manual mode flags
+        user.manual_discharge_active = False
+        user.manual_discharge_expires_at = None
+        user.manual_charge_active = False
+        user.manual_charge_expires_at = None
+        db_commit_with_retry()
+
+        logger.info(f"Sigenergy normal operation restored for {user.email}")
+
+        return jsonify({
+            'success': True,
+            'message': 'Normal operation restored',
+            'method': 'modbus_restore',
+            'was_in_discharge': was_in_discharge,
+            'was_in_charge': was_in_charge
+        })
+
+    except Exception as e:
+        logger.error(f"Error in Sigenergy restore normal: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        db.session.rollback()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500

@@ -19,6 +19,8 @@ class SigenergyModbusClient:
     # Modbus register addresses (documentation addresses - 40001 for pymodbus)
     # Holding registers (read/write) - base 40001
     REG_GRID_EXPORT_LIMIT = 37  # 40038 - Grid export limit (U32, gain 1000)
+    REG_ESS_MAX_CHARGE_LIMIT = 31    # 40032 - Max charge rate (U32, gain 1000, kW)
+    REG_ESS_MAX_DISCHARGE_LIMIT = 33  # 40034 - Max discharge rate (U32, gain 1000, kW)
 
     # Input registers (read-only) - base 30001
     REG_PV_POWER = 34           # 30035 - PV power (S32, gain 1000, kW)
@@ -31,6 +33,7 @@ class SigenergyModbusClient:
     GAIN_POWER = 1000  # kW → scaled value
     GAIN_SOC = 10      # % → scaled value
     EXPORT_LIMIT_UNLIMITED = 0xFFFFFFFE
+    DEFAULT_MAX_RATE_KW = 10.0  # Default max charge/discharge rate in kW
 
     def __init__(self, host: str, port: int = 502, slave_id: int = 1):
         """Initialize Sigenergy Modbus client.
@@ -227,6 +230,133 @@ class SigenergyModbusClient:
         except Exception as e:
             logger.error(f"Error restoring export limit: {e}")
             return False
+
+        finally:
+            self.disconnect()
+
+    def set_charge_rate_limit(self, limit_kw: float) -> bool:
+        """Set the maximum battery charge rate.
+
+        Args:
+            limit_kw: Charge rate limit in kW (0 to disable charging, max ~10 kW).
+
+        Returns:
+            True on success, False on failure.
+        """
+        try:
+            if not self.connect():
+                return False
+
+            # Convert kW to scaled value (gain 1000)
+            limit_scaled = int(limit_kw * self.GAIN_POWER)
+
+            # U32 requires 2 registers (high word, low word)
+            high_word = (limit_scaled >> 16) & 0xFFFF
+            low_word = limit_scaled & 0xFFFF
+
+            success = self._write_holding_registers(self.REG_ESS_MAX_CHARGE_LIMIT, [high_word, low_word])
+
+            if success:
+                logger.info(f"Set Sigenergy charge rate limit to {limit_kw} kW")
+            else:
+                logger.error(f"Failed to set Sigenergy charge rate limit")
+
+            return success
+
+        except Exception as e:
+            logger.error(f"Error setting charge rate limit: {e}")
+            return False
+
+        finally:
+            self.disconnect()
+
+    def set_discharge_rate_limit(self, limit_kw: float) -> bool:
+        """Set the maximum battery discharge rate.
+
+        Args:
+            limit_kw: Discharge rate limit in kW (0 to disable discharging, max ~10 kW).
+
+        Returns:
+            True on success, False on failure.
+        """
+        try:
+            if not self.connect():
+                return False
+
+            # Convert kW to scaled value (gain 1000)
+            limit_scaled = int(limit_kw * self.GAIN_POWER)
+
+            # U32 requires 2 registers (high word, low word)
+            high_word = (limit_scaled >> 16) & 0xFFFF
+            low_word = limit_scaled & 0xFFFF
+
+            success = self._write_holding_registers(self.REG_ESS_MAX_DISCHARGE_LIMIT, [high_word, low_word])
+
+            if success:
+                logger.info(f"Set Sigenergy discharge rate limit to {limit_kw} kW")
+            else:
+                logger.error(f"Failed to set Sigenergy discharge rate limit")
+
+            return success
+
+        except Exception as e:
+            logger.error(f"Error setting discharge rate limit: {e}")
+            return False
+
+        finally:
+            self.disconnect()
+
+    def get_current_limits(self) -> dict:
+        """Get current charge/discharge/export limits.
+
+        Returns:
+            dict with current limits:
+            - charge_rate_limit_kw: Current charge rate limit in kW
+            - discharge_rate_limit_kw: Current discharge rate limit in kW
+            - export_limit_kw: Current export limit in kW (None if unlimited)
+        """
+        try:
+            if not self.connect():
+                return {"error": "Failed to connect to Sigenergy"}
+
+            result = {}
+
+            # Read charge rate limit (U32, 2 registers)
+            charge_regs = self._read_holding_registers(self.REG_ESS_MAX_CHARGE_LIMIT, 2)
+            if charge_regs and len(charge_regs) >= 2:
+                charge_limit = self._to_unsigned32(charge_regs[0], charge_regs[1])
+                result['charge_rate_limit_kw'] = charge_limit / self.GAIN_POWER
+            else:
+                result['charge_rate_limit_kw'] = None
+
+            # Read discharge rate limit (U32, 2 registers)
+            discharge_regs = self._read_holding_registers(self.REG_ESS_MAX_DISCHARGE_LIMIT, 2)
+            if discharge_regs and len(discharge_regs) >= 2:
+                discharge_limit = self._to_unsigned32(discharge_regs[0], discharge_regs[1])
+                result['discharge_rate_limit_kw'] = discharge_limit / self.GAIN_POWER
+            else:
+                result['discharge_rate_limit_kw'] = None
+
+            # Read export limit (U32, 2 registers)
+            export_regs = self._read_holding_registers(self.REG_GRID_EXPORT_LIMIT, 2)
+            if export_regs and len(export_regs) >= 2:
+                export_limit = self._to_unsigned32(export_regs[0], export_regs[1])
+                if export_limit >= self.EXPORT_LIMIT_UNLIMITED:
+                    result['export_limit_kw'] = None  # Unlimited
+                else:
+                    result['export_limit_kw'] = export_limit / self.GAIN_POWER
+            else:
+                result['export_limit_kw'] = None
+
+            logger.debug(f"Sigenergy limits: charge={result['charge_rate_limit_kw']}kW "
+                        f"discharge={result['discharge_rate_limit_kw']}kW "
+                        f"export={result['export_limit_kw']}kW")
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Error getting current limits: {e}")
+            return {"error": str(e)}
 
         finally:
             self.disconnect()
