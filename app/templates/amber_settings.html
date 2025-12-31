@@ -98,6 +98,94 @@
             </fieldset>
 
             <fieldset>
+                <legend>AC-Coupled Inverter Curtailment</legend>
+                <p style="font-size: 0.85em; margin: 0 0 1em 0; color: var(--muted-color);">
+                    Direct control of your solar inverter via Modbus TCP for AC-coupled systems. Works alongside Tesla curtailment above.
+                </p>
+
+                <label for="inverter_curtailment_enabled" style="display: flex; align-items: center; gap: 0.5em; cursor: pointer;">
+                    <input type="checkbox" id="inverter_curtailment_enabled" name="inverter_curtailment_enabled"
+                           {% if current_user.inverter_curtailment_enabled %}checked{% endif %}
+                           onchange="toggleInverterDetails()">
+                    <span>Enable Direct Inverter Curtailment</span>
+                </label>
+
+                <div id="inverterDetails" style="margin-top: 1em; {% if not current_user.inverter_curtailment_enabled %}display: none;{% endif %}">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1em;">
+                        <label for="inverter_brand">
+                            <span>Inverter Brand</span>
+                            <select id="inverter_brand" name="inverter_brand">
+                                <option value="">Select brand...</option>
+                                <option value="sungrow" {% if current_user.inverter_brand == 'sungrow' %}selected{% endif %}>Sungrow</option>
+                            </select>
+                        </label>
+                        <label for="inverter_model">
+                            <span>Inverter Model</span>
+                            <select id="inverter_model" name="inverter_model">
+                                <option value="">Select model...</option>
+                                <option value="sg5" {% if current_user.inverter_model == 'sg5' %}selected{% endif %}>SG5.0RS</option>
+                                <option value="sg8" {% if current_user.inverter_model == 'sg8' %}selected{% endif %}>SG8.0RS</option>
+                                <option value="sg10" {% if current_user.inverter_model == 'sg10' %}selected{% endif %}>SG10RS</option>
+                                <option value="sg12" {% if current_user.inverter_model == 'sg12' %}selected{% endif %}>SG12RS</option>
+                                <option value="sg15" {% if current_user.inverter_model == 'sg15' %}selected{% endif %}>SG15RS</option>
+                                <option value="sg20" {% if current_user.inverter_model == 'sg20' %}selected{% endif %}>SG20RS</option>
+                            </select>
+                        </label>
+                    </div>
+
+                    <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 1em; margin-top: 1em;">
+                        <label for="inverter_host">
+                            <span>IP Address</span>
+                            <input type="text" id="inverter_host" name="inverter_host"
+                                   value="{{ current_user.inverter_host or '' }}"
+                                   placeholder="192.168.1.100">
+                        </label>
+                        <label for="inverter_port">
+                            <span>Port</span>
+                            <input type="number" id="inverter_port" name="inverter_port"
+                                   value="{{ current_user.inverter_port or 502 }}"
+                                   min="1" max="65535">
+                        </label>
+                        <label for="inverter_slave_id">
+                            <span>Slave ID</span>
+                            <input type="number" id="inverter_slave_id" name="inverter_slave_id"
+                                   value="{{ current_user.inverter_slave_id or 1 }}"
+                                   min="1" max="247">
+                        </label>
+                    </div>
+
+                    <div style="margin-top: 1em;">
+                        <button type="button" class="secondary" onclick="testInverterConnection()" id="testInverterBtn">
+                            Test Connection
+                        </button>
+                        <span id="inverterTestResult" style="margin-left: 1em; font-size: 0.9em;"></span>
+                    </div>
+
+                    {% if current_user.inverter_last_state %}
+                    <p style="font-size: 0.8em; color: var(--muted-color); margin-top: 1em;">
+                        Last state: <strong>{{ current_user.inverter_last_state }}</strong>
+                        {% if current_user.inverter_last_state_updated %}
+                        ({{ current_user.inverter_last_state_updated.strftime('%Y-%m-%d %H:%M:%S') }})
+                        {% endif %}
+                    </p>
+                    {% endif %}
+                </div>
+
+                <details style="margin-top: 0.5em;">
+                    <summary style="font-size: 0.85em;">How does inverter curtailment work?</summary>
+                    <div style="font-size: 0.8em; margin-top: 0.5em; padding: 0.5em; background: rgba(100, 150, 200, 0.05); border-radius: 0.3em;">
+                        <p style="margin: 0.3em 0;">For AC-coupled solar systems, the solar inverter feeds directly into your home AC, bypassing the Powerwall. This means Tesla's export rule doesn't stop your solar from exporting.</p>
+                        <ul style="margin: 0.3em 0 0 1.2em; padding: 0;">
+                            <li style="margin: 0.5em 0;"><strong>During negative prices (≤0c/kWh):</strong> Shuts down the inverter via Modbus TCP to stop solar production entirely.</li>
+                            <li style="margin: 0.5em 0;"><strong>During positive prices (>0c/kWh):</strong> Restores the inverter to normal operation.</li>
+                            <li style="margin: 0.5em 0;"><strong>Sungrow:</strong> Uses WiNet-S dongle for Modbus TCP communication.</li>
+                        </ul>
+                        <p style="margin: 0.5em 0 0 0; font-style: italic;">Uses the same price threshold as Tesla curtailment (< 1c/kWh export earnings).</p>
+                    </div>
+                </details>
+            </fieldset>
+
+            <fieldset>
                 <legend>Spike Protection</legend>
                 <p style="font-size: 0.85em; margin: 0 0 1em 0; color: var(--muted-color);">
                     Prevent Powerwall from charging from grid during Amber price spikes. Stops arbitrage behavior that would otherwise charge during high-cost spike periods.
@@ -314,6 +402,57 @@
             const details = document.getElementById('chipModeDetails');
             if (details) {
                 details.style.display = enabled ? 'block' : 'none';
+            }
+        }
+
+        function toggleInverterDetails() {
+            const enabled = document.getElementById('inverter_curtailment_enabled').checked;
+            const details = document.getElementById('inverterDetails');
+            if (details) {
+                details.style.display = enabled ? 'block' : 'none';
+            }
+        }
+
+        async function testInverterConnection() {
+            const btn = document.getElementById('testInverterBtn');
+            const result = document.getElementById('inverterTestResult');
+            const host = document.getElementById('inverter_host').value;
+            const port = document.getElementById('inverter_port').value;
+            const slaveId = document.getElementById('inverter_slave_id').value;
+            const brand = document.getElementById('inverter_brand').value;
+
+            if (!host || !brand) {
+                result.innerHTML = '<span style="color: #ff6b6b;">Please enter IP address and select brand</span>';
+                return;
+            }
+
+            btn.disabled = true;
+            btn.innerHTML = 'Testing...';
+            result.innerHTML = '';
+
+            try {
+                const response = await fetch('/api/inverter/test', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        brand: brand,
+                        host: host,
+                        port: parseInt(port) || 502,
+                        slave_id: parseInt(slaveId) || 1
+                    })
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    result.innerHTML = '<span style="color: #51cf66;">' + data.message + '</span>';
+                } else {
+                    result.innerHTML = '<span style="color: #ff6b6b;">' + (data.error || 'Connection failed') + '</span>';
+                }
+            } catch (error) {
+                result.innerHTML = '<span style="color: #ff6b6b;">Error: ' + error.message + '</span>';
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = 'Test Connection';
             }
         }
     </script>

@@ -145,10 +145,18 @@
   "options": {
     "step": {
       "init": {
-        "title": "Select Electricity Provider",
-        "description": "Choose your electricity provider to configure provider-specific settings.",
+        "title": "PowerSync Settings",
+        "description": "Configure your electricity provider and Tesla API connection.",
         "data": {
-          "electricity_provider": "Electricity Provider"
+          "electricity_provider": "Electricity Provider",
+          "tesla_api_provider": "Tesla API Provider"
+        }
+      },
+      "teslemetry_token": {
+        "title": "Teslemetry Configuration",
+        "description": "Enter your Teslemetry API token. You can get this from https://teslemetry.com",
+        "data": {
+          "teslemetry_api_token": "Teslemetry API Token"
         }
       },
       "amber_options": {
@@ -180,10 +188,17 @@
           "demand_charge_apply_to": "Apply Demand Charge To",
           "demand_artificial_price_enabled": "Artificial Price Increase (ALPHA)",
           "daily_supply_charge": "Daily Supply Charge ($)",
-          "monthly_supply_charge": "Monthly Supply Charge ($)"
+          "monthly_supply_charge": "Monthly Supply Charge ($)",
+          "inverter_curtailment_enabled": "Enable AC-Coupled Inverter Curtailment",
+          "inverter_brand": "Inverter Brand",
+          "inverter_model": "Inverter Model",
+          "inverter_host": "Inverter IP Address",
+          "inverter_port": "Modbus Port",
+          "inverter_slave_id": "Modbus Slave ID"
         },
         "data_description": {
           "spike_protection_enabled": "When Amber detects a price spike, artificially inflate buy prices to prevent Powerwall from charging from grid (stops arbitrage behavior)",
+          "inverter_curtailment_enabled": "Shutdown AC-coupled solar inverter when feed-in price is negative (stops solar export that bypasses Powerwall)",
           "settled_prices_only": "Skip the initial forecast sync at :00 and only sync when actual/settled prices arrive at :35/:60 seconds. Use this if forecast prices differ significantly from settled prices.",
           "force_tariff_mode_toggle": "After uploading a new tariff, briefly switch Powerwall to self-consumption mode then back to Time-Based Control. This forces immediate recalculation of battery behavior (~5 second interruption).",
           "demand_artificial_price_enabled": "Artificially increases the current price by $2 during demand charge periods to encourage battery discharge",
@@ -275,6 +290,9 @@
       },
       "flow_power_export_price": {
         "name": "Flow Power Export Price"
+      },
+      "inverter_status": {
+        "name": "Inverter Status"
       }
     },
     "switch": {

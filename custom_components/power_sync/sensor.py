@@ -54,6 +54,10 @@ from .const import (
     SENSOR_TYPE_FLOW_POWER_PRICE,
     SENSOR_TYPE_FLOW_POWER_EXPORT_PRICE,
     SENSOR_TYPE_BATTERY_HEALTH,
+    SENSOR_TYPE_INVERTER_STATUS,
+    CONF_INVERTER_CURTAILMENT_ENABLED,
+    CONF_INVERTER_BRAND,
+    CONF_INVERTER_HOST,
     CONF_DEMAND_CHARGE_ENABLED,
     CONF_DEMAND_CHARGE_RATE,
     CONF_DEMAND_CHARGE_START_TIME,
@@ -358,6 +362,20 @@ async def async_setup_entry(
             )
         )
         _LOGGER.info("Solar curtailment sensor added")
+
+    # Add inverter status sensor if inverter curtailment is enabled
+    inverter_enabled = entry.options.get(
+        CONF_INVERTER_CURTAILMENT_ENABLED,
+        entry.data.get(CONF_INVERTER_CURTAILMENT_ENABLED, False)
+    )
+    if inverter_enabled:
+        entities.append(
+            InverterStatusSensor(
+                hass=hass,
+                entry=entry,
+            )
+        )
+        _LOGGER.info("Inverter status sensor added")
 
     # Add Flow Power price sensors if Flow Power provider is selected
     electricity_provider = entry.options.get(
@@ -729,6 +747,90 @@ class SolarCurtailmentSensor(SensorEntity):
             "feedin_price": feedin_price,
             "export_earnings": export_earnings,
             "description": "Export blocked due to negative feed-in price" if self._is_curtailed() else "Normal solar export allowed",
+        }
+
+
+class InverterStatusSensor(SensorEntity):
+    """Sensor for displaying AC-coupled inverter status."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialize the sensor."""
+        self.hass = hass
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_{SENSOR_TYPE_INVERTER_STATUS}"
+        self._attr_has_entity_name = True
+        self._attr_name = "Inverter Status"
+        self._attr_icon = "mdi:solar-panel"
+        self._unsub_dispatcher = None
+
+    async def async_added_to_hass(self) -> None:
+        """Run when entity is added to hass."""
+        await super().async_added_to_hass()
+
+        @callback
+        def _handle_curtailment_update():
+            """Handle curtailment update signal (inverter state may change too)."""
+            self.async_write_ha_state()
+
+        # Subscribe to curtailment update signal
+        self._unsub_dispatcher = async_dispatcher_connect(
+            self.hass,
+            SIGNAL_CURTAILMENT_UPDATED.format(self._entry.entry_id),
+            _handle_curtailment_update,
+        )
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Run when entity is removed from hass."""
+        if self._unsub_dispatcher:
+            self._unsub_dispatcher()
+
+    def _get_config_value(self, key: str, default=None):
+        """Get config value from options first, then data."""
+        return self._entry.options.get(key, self._entry.data.get(key, default))
+
+    @property
+    def native_value(self) -> str:
+        """Return the inverter status."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        inverter_state = entry_data.get("inverter_last_state")
+
+        if inverter_state == "curtailed":
+            return "Curtailed"
+        elif inverter_state == "running":
+            return "Running"
+        else:
+            return "Unknown"
+
+    @property
+    def icon(self) -> str:
+        """Return the icon based on state."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        inverter_state = entry_data.get("inverter_last_state")
+
+        if inverter_state == "curtailed":
+            return "mdi:solar-panel-large"  # Darker icon when curtailed
+        return "mdi:solar-panel"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return additional attributes."""
+        inverter_enabled = self._get_config_value(CONF_INVERTER_CURTAILMENT_ENABLED, False)
+        inverter_brand = self._get_config_value(CONF_INVERTER_BRAND, "sungrow")
+        inverter_host = self._get_config_value(CONF_INVERTER_HOST, "")
+
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        inverter_state = entry_data.get("inverter_last_state")
+
+        return {
+            "enabled": inverter_enabled,
+            "brand": inverter_brand,
+            "host": inverter_host,
+            "last_state": inverter_state,
+            "description": "Inverter shutdown to prevent negative export" if inverter_state == "curtailed" else "Inverter operating normally",
         }
 
 

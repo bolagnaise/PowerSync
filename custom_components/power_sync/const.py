@@ -464,3 +464,35 @@ ATTR_NETWORK_PRICE = "network_price"
 ATTR_AEMO_REGION = "aemo_region"
 ATTR_AEMO_THRESHOLD = "aemo_threshold"
 ATTR_SPIKE_START_TIME = "spike_start_time"
+
+# AC-Coupled Inverter Curtailment configuration
+# Direct control of solar inverters for AC-coupled systems where Tesla
+# curtailment alone cannot prevent grid export (solar bypasses Powerwall)
+CONF_INVERTER_CURTAILMENT_ENABLED = "inverter_curtailment_enabled"
+CONF_INVERTER_BRAND = "inverter_brand"
+CONF_INVERTER_MODEL = "inverter_model"
+CONF_INVERTER_HOST = "inverter_host"
+CONF_INVERTER_PORT = "inverter_port"
+CONF_INVERTER_SLAVE_ID = "inverter_slave_id"
+
+# Supported inverter brands
+INVERTER_BRANDS = {
+    "sungrow": "Sungrow",
+}
+
+# Sungrow model options
+SUNGROW_MODELS = {
+    "sg5": "SG5.0RS",
+    "sg8": "SG8.0RS",
+    "sg10": "SG10RS",
+    "sg12": "SG12RS",
+    "sg15": "SG15RS",
+    "sg20": "SG20RS",
+}
+
+# Default inverter configuration
+DEFAULT_INVERTER_PORT = 502
+DEFAULT_INVERTER_SLAVE_ID = 1
+
+# Inverter status sensor
+SENSOR_TYPE_INVERTER_STATUS = "inverter_status"

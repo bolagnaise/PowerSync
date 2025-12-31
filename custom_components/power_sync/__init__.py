@@ -113,7 +113,17 @@ from .const import (
     CONF_SETTLED_PRICES_ONLY,
     # Alpha: Force tariff mode toggle
     CONF_FORCE_TARIFF_MODE_TOGGLE,
+    # AC-Coupled Inverter Curtailment configuration
+    CONF_INVERTER_CURTAILMENT_ENABLED,
+    CONF_INVERTER_BRAND,
+    CONF_INVERTER_MODEL,
+    CONF_INVERTER_HOST,
+    CONF_INVERTER_PORT,
+    CONF_INVERTER_SLAVE_ID,
+    DEFAULT_INVERTER_PORT,
+    DEFAULT_INVERTER_SLAVE_ID,
 )
+from .inverters import get_inverter_controller
 from .coordinator import (
     AmberPriceCoordinator,
     TeslaEnergyCoordinator,
@@ -1606,6 +1616,87 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Signal sensor to update
         async_dispatcher_send(hass, f"power_sync_curtailment_updated_{entry.entry_id}")
 
+    # Helper function for AC-coupled inverter curtailment
+    async def apply_inverter_curtailment(curtail: bool) -> bool:
+        """Apply or remove inverter curtailment for AC-coupled solar systems.
+
+        Args:
+            curtail: True to curtail (shutdown inverter), False to restore normal operation
+
+        Returns:
+            True if operation succeeded, False otherwise
+        """
+        inverter_enabled = entry.options.get(
+            CONF_INVERTER_CURTAILMENT_ENABLED,
+            entry.data.get(CONF_INVERTER_CURTAILMENT_ENABLED, False)
+        )
+
+        if not inverter_enabled:
+            return True  # Not enabled, nothing to do
+
+        inverter_brand = entry.options.get(
+            CONF_INVERTER_BRAND,
+            entry.data.get(CONF_INVERTER_BRAND, "sungrow")
+        )
+        inverter_host = entry.options.get(
+            CONF_INVERTER_HOST,
+            entry.data.get(CONF_INVERTER_HOST, "")
+        )
+        inverter_port = entry.options.get(
+            CONF_INVERTER_PORT,
+            entry.data.get(CONF_INVERTER_PORT, DEFAULT_INVERTER_PORT)
+        )
+        inverter_slave_id = entry.options.get(
+            CONF_INVERTER_SLAVE_ID,
+            entry.data.get(CONF_INVERTER_SLAVE_ID, DEFAULT_INVERTER_SLAVE_ID)
+        )
+        inverter_model = entry.options.get(
+            CONF_INVERTER_MODEL,
+            entry.data.get(CONF_INVERTER_MODEL)
+        )
+
+        if not inverter_host:
+            _LOGGER.warning("Inverter curtailment enabled but no host configured")
+            return False
+
+        try:
+            controller = get_inverter_controller(
+                brand=inverter_brand,
+                host=inverter_host,
+                port=inverter_port,
+                slave_id=inverter_slave_id,
+                model=inverter_model,
+            )
+
+            if not controller:
+                _LOGGER.error(f"Unsupported inverter brand: {inverter_brand}")
+                return False
+
+            if curtail:
+                _LOGGER.info(f"🔴 Curtailing inverter at {inverter_host}")
+                success = await controller.curtail()
+                if success:
+                    _LOGGER.info(f"✅ Inverter curtailed successfully")
+                    # Store last state
+                    hass.data[DOMAIN][entry.entry_id]["inverter_last_state"] = "curtailed"
+                else:
+                    _LOGGER.error(f"❌ Failed to curtail inverter")
+                return success
+            else:
+                _LOGGER.info(f"🟢 Restoring inverter at {inverter_host}")
+                success = await controller.restore()
+                if success:
+                    _LOGGER.info(f"✅ Inverter restored successfully")
+                    # Store last state
+                    hass.data[DOMAIN][entry.entry_id]["inverter_last_state"] = "running"
+                else:
+                    _LOGGER.error(f"❌ Failed to restore inverter")
+                return success
+
+        except Exception as e:
+            _LOGGER.error(f"Error controlling inverter: {e}", exc_info=True)
+            return False
+
     # Set up platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
@@ -2360,6 +2451,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                         _LOGGER.info(f"✅ CURTAILMENT APPLIED: Export rule changed '{current_export_rule}' → 'never'")
                         await update_cached_export_rule("never")
+
+                        # Also curtail AC-coupled inverter if configured
+                        await apply_inverter_curtailment(curtail=True)
+
                         _LOGGER.info(f"📊 Action summary: Curtailment active (earnings: {export_earnings:.2f}c/kWh, export: 'never')")
 
                     except Exception as err:
@@ -2425,6 +2520,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                         _LOGGER.info(f"✅ CURTAILMENT REMOVED: Export restored 'never' → 'battery_ok'")
                         await update_cached_export_rule("battery_ok")
+
+                        # Also restore AC-coupled inverter if configured
+                        await apply_inverter_curtailment(curtail=False)
+
                         _LOGGER.info(f"📊 Action summary: Restored to normal (earnings: {export_earnings:.2f}c/kWh, export: 'battery_ok')")
 
                     except Exception as err:
@@ -2597,6 +2696,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                         _LOGGER.info(f"✅ CURTAILMENT APPLIED: Export rule changed '{current_export_rule}' → 'never'")
                         await update_cached_export_rule("never")
+
+                        # Also curtail AC-coupled inverter if configured
+                        await apply_inverter_curtailment(curtail=True)
+
                         _LOGGER.info(f"📊 Action summary: Curtailment active (earnings: {export_earnings:.2f}c/kWh, export: 'never')")
 
                     except Exception as err:
@@ -2661,6 +2764,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                         _LOGGER.info(f"✅ CURTAILMENT REMOVED: Export restored 'never' → 'battery_ok'")
                         await update_cached_export_rule("battery_ok")
+
+                        # Also restore AC-coupled inverter if configured
+                        await apply_inverter_curtailment(curtail=False)
+
                         _LOGGER.info(f"📊 Action summary: Restored to normal (earnings: {export_earnings:.2f}c/kWh, export: 'battery_ok')")
 
                     except Exception as err:

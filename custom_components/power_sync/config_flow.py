@@ -84,6 +84,17 @@ from .const import (
     CONF_SETTLED_PRICES_ONLY,
     # Alpha: Force tariff mode toggle
     CONF_FORCE_TARIFF_MODE_TOGGLE,
+    # Inverter curtailment configuration
+    CONF_INVERTER_CURTAILMENT_ENABLED,
+    CONF_INVERTER_BRAND,
+    CONF_INVERTER_MODEL,
+    CONF_INVERTER_HOST,
+    CONF_INVERTER_PORT,
+    CONF_INVERTER_SLAVE_ID,
+    INVERTER_BRANDS,
+    SUNGROW_MODELS,
+    DEFAULT_INVERTER_PORT,
+    DEFAULT_INVERTER_SLAVE_ID,
     # Network Tariff configuration
     CONF_NETWORK_DISTRIBUTOR,
     CONF_NETWORK_TARIFF_CODE,
@@ -949,11 +960,31 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step 1: Select electricity provider."""
+        """Step 1: Select electricity provider and Tesla API provider."""
         if user_input is not None:
-            # Store provider selection and route to provider-specific step
+            # Store provider selections
             self._provider = user_input.get(CONF_ELECTRICITY_PROVIDER, "amber")
+            self._tesla_provider = user_input.get(CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_TESLEMETRY)
 
+            # Check if switching to Teslemetry and need token
+            current_tesla_provider = self.config_entry.data.get(CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_TESLEMETRY)
+            current_teslemetry_token = self.config_entry.data.get(CONF_TESLEMETRY_API_TOKEN)
+
+            if self._tesla_provider == TESLA_PROVIDER_TESLEMETRY and (
+                current_tesla_provider != TESLA_PROVIDER_TESLEMETRY or not current_teslemetry_token
+            ):
+                # Need to get Teslemetry token
+                return await self.async_step_teslemetry_token()
+
+            # Update config entry data with new Tesla provider
+            if self._tesla_provider != current_tesla_provider:
+                new_data = dict(self.config_entry.data)
+                new_data[CONF_TESLA_API_PROVIDER] = self._tesla_provider
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data=new_data
+                )
+
+            # Route to provider-specific step
             if self._provider == "amber":
                 return await self.async_step_amber_options()
             elif self._provider == "flow_power":
@@ -962,6 +993,13 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 return await self.async_step_globird_options()
 
         current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
+        current_tesla_provider = self.config_entry.data.get(CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_TESLEMETRY)
+
+        # Build Tesla provider choices
+        tesla_providers = {
+            TESLA_PROVIDER_FLEET_API: "Tesla Fleet API (Free - requires Tesla Fleet integration)",
+            TESLA_PROVIDER_TESLEMETRY: "Teslemetry (~$4/month - easier setup)",
+        }
 
         return self.async_show_form(
             step_id="init",
@@ -971,8 +1009,65 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_ELECTRICITY_PROVIDER,
                         default=current_provider,
                     ): vol.In(ELECTRICITY_PROVIDERS),
+                    vol.Required(
+                        CONF_TESLA_API_PROVIDER,
+                        default=current_tesla_provider,
+                    ): vol.In(tesla_providers),
                 }
             ),
+        )
+
+    async def async_step_teslemetry_token(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step to enter Teslemetry API token."""
+        errors = {}
+
+        if user_input is not None:
+            token = user_input.get(CONF_TESLEMETRY_API_TOKEN, "").strip()
+
+            if not token:
+                errors["base"] = "no_token_provided"
+            else:
+                # Validate token by testing API
+                session = async_get_clientsession(self.hass)
+                headers = {"Authorization": f"Bearer {token}"}
+
+                try:
+                    async with session.get(
+                        f"{TESLEMETRY_API_BASE_URL}/api/1/products",
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=10)
+                    ) as response:
+                        if response.status == 200:
+                            # Token is valid, update config entry data
+                            new_data = dict(self.config_entry.data)
+                            new_data[CONF_TESLA_API_PROVIDER] = TESLA_PROVIDER_TESLEMETRY
+                            new_data[CONF_TESLEMETRY_API_TOKEN] = token
+                            self.hass.config_entries.async_update_entry(
+                                self.config_entry, data=new_data
+                            )
+
+                            # Route to provider-specific step
+                            if self._provider == "amber":
+                                return await self.async_step_amber_options()
+                            elif self._provider == "flow_power":
+                                return await self.async_step_flow_power_options()
+                            elif self._provider == "globird":
+                                return await self.async_step_globird_options()
+                        else:
+                            errors["base"] = "invalid_auth"
+                except Exception:
+                    errors["base"] = "cannot_connect"
+
+        return self.async_show_form(
+            step_id="teslemetry_token",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_TESLEMETRY_API_TOKEN): str,
+                }
+            ),
+            errors=errors,
         )
 
     async def async_step_amber_options(
@@ -1104,6 +1199,31 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_MONTHLY_SUPPLY_CHARGE,
                         default=self._get_option(CONF_MONTHLY_SUPPLY_CHARGE, 0.0),
                     ): vol.Coerce(float),
+                    # AC-Coupled Inverter Curtailment (for direct solar control)
+                    vol.Optional(
+                        CONF_INVERTER_CURTAILMENT_ENABLED,
+                        default=self._get_option(CONF_INVERTER_CURTAILMENT_ENABLED, False),
+                    ): bool,
+                    vol.Optional(
+                        CONF_INVERTER_BRAND,
+                        default=self._get_option(CONF_INVERTER_BRAND, "sungrow"),
+                    ): vol.In(INVERTER_BRANDS),
+                    vol.Optional(
+                        CONF_INVERTER_MODEL,
+                        default=self._get_option(CONF_INVERTER_MODEL, "sg10"),
+                    ): vol.In(SUNGROW_MODELS),
+                    vol.Optional(
+                        CONF_INVERTER_HOST,
+                        default=self._get_option(CONF_INVERTER_HOST, ""),
+                    ): str,
+                    vol.Optional(
+                        CONF_INVERTER_PORT,
+                        default=self._get_option(CONF_INVERTER_PORT, DEFAULT_INVERTER_PORT),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
+                    vol.Optional(
+                        CONF_INVERTER_SLAVE_ID,
+                        default=self._get_option(CONF_INVERTER_SLAVE_ID, DEFAULT_INVERTER_SLAVE_ID),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=1, max=247)),
                 }
             ),
         )

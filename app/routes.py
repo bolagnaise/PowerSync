@@ -440,6 +440,168 @@ def api_curtailment_status():
     })
 
 
+# =============================================================================
+# Inverter Curtailment API Endpoints
+# =============================================================================
+
+@bp.route('/api/inverter/status')
+@login_required
+def api_inverter_status():
+    """Get current inverter status for AC-coupled curtailment"""
+    import asyncio
+
+    if not current_user.inverter_curtailment_enabled:
+        return jsonify({'enabled': False, 'message': 'Inverter curtailment not enabled'})
+
+    if not current_user.inverter_host or not current_user.inverter_brand:
+        return jsonify({'enabled': True, 'error': 'Inverter not configured'})
+
+    try:
+        from app.inverters import get_inverter_controller_from_user
+
+        controller = get_inverter_controller_from_user(current_user)
+        if not controller:
+            return jsonify({'enabled': True, 'error': 'Failed to create inverter controller'})
+
+        # Run async function in sync context
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            state = loop.run_until_complete(controller.get_status())
+            loop.run_until_complete(controller.disconnect())
+        finally:
+            loop.close()
+
+        return jsonify({
+            'enabled': True,
+            'brand': current_user.inverter_brand,
+            'model': current_user.inverter_model,
+            'host': current_user.inverter_host,
+            **state.to_dict()
+        })
+
+    except Exception as e:
+        logger.error(f"Error getting inverter status: {e}")
+        return jsonify({'enabled': True, 'error': str(e)}), 500
+
+
+@bp.route('/api/inverter/test', methods=['POST'])
+@login_required
+def api_inverter_test():
+    """Test connection to inverter"""
+    import asyncio
+
+    data = request.get_json() or {}
+    brand = data.get('brand')
+    host = data.get('host')
+    port = data.get('port', 502)
+    slave_id = data.get('slave_id', 1)
+
+    if not brand or not host:
+        return jsonify({'success': False, 'error': 'Brand and host are required'})
+
+    try:
+        from app.inverters import get_inverter_controller
+
+        controller = get_inverter_controller(
+            brand=brand,
+            host=host,
+            port=port,
+            slave_id=slave_id
+        )
+
+        if not controller:
+            return jsonify({'success': False, 'error': f'Unsupported inverter brand: {brand}'})
+
+        # Run async function in sync context
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            success, message = loop.run_until_complete(controller.test_connection())
+        finally:
+            loop.close()
+
+        return jsonify({'success': success, 'message': message})
+
+    except Exception as e:
+        logger.error(f"Error testing inverter connection: {e}")
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@bp.route('/api/inverter/curtail', methods=['POST'])
+@login_required
+def api_inverter_curtail():
+    """Manually trigger inverter curtailment"""
+    import asyncio
+    from datetime import datetime
+
+    if not current_user.inverter_curtailment_enabled:
+        return jsonify({'success': False, 'error': 'Inverter curtailment not enabled'})
+
+    try:
+        from app.inverters import get_inverter_controller_from_user
+
+        controller = get_inverter_controller_from_user(current_user)
+        if not controller:
+            return jsonify({'success': False, 'error': 'Failed to create inverter controller'})
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            success = loop.run_until_complete(controller.curtail())
+            loop.run_until_complete(controller.disconnect())
+        finally:
+            loop.close()
+
+        if success:
+            current_user.inverter_last_state = 'curtailed'
+            current_user.inverter_last_state_updated = datetime.utcnow()
+            db.session.commit()
+
+        return jsonify({'success': success, 'state': 'curtailed' if success else 'unknown'})
+
+    except Exception as e:
+        logger.error(f"Error curtailing inverter: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@bp.route('/api/inverter/restore', methods=['POST'])
+@login_required
+def api_inverter_restore():
+    """Manually restore inverter to normal operation"""
+    import asyncio
+    from datetime import datetime
+
+    if not current_user.inverter_curtailment_enabled:
+        return jsonify({'success': False, 'error': 'Inverter curtailment not enabled'})
+
+    try:
+        from app.inverters import get_inverter_controller_from_user
+
+        controller = get_inverter_controller_from_user(current_user)
+        if not controller:
+            return jsonify({'success': False, 'error': 'Failed to create inverter controller'})
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            success = loop.run_until_complete(controller.restore())
+            loop.run_until_complete(controller.disconnect())
+        finally:
+            loop.close()
+
+        if success:
+            current_user.inverter_last_state = 'online'
+            current_user.inverter_last_state_updated = datetime.utcnow()
+            db.session.commit()
+
+        return jsonify({'success': success, 'state': 'online' if success else 'unknown'})
+
+    except Exception as e:
+        logger.error(f"Error restoring inverter: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @bp.route('/api/aemo-price')
 @login_required
 @cache.cached(timeout=60, key_prefix=lambda: f'aemo_price_{current_user.id}')
@@ -950,6 +1112,31 @@ def amber_settings():
                 current_user.chip_mode_threshold = float(request.form.get('chip_mode_threshold', 30.0))
             except (ValueError, TypeError):
                 pass
+
+        # AC-Coupled Inverter Curtailment settings
+        current_user.inverter_curtailment_enabled = 'inverter_curtailment_enabled' in request.form
+        logger.info(f"Saving inverter curtailment enabled: {current_user.inverter_curtailment_enabled}")
+
+        if 'inverter_brand' in request.form:
+            current_user.inverter_brand = request.form.get('inverter_brand', '') or None
+
+        if 'inverter_model' in request.form:
+            current_user.inverter_model = request.form.get('inverter_model', '') or None
+
+        if 'inverter_host' in request.form:
+            current_user.inverter_host = request.form.get('inverter_host', '') or None
+
+        if 'inverter_port' in request.form:
+            try:
+                current_user.inverter_port = int(request.form.get('inverter_port', 502))
+            except (ValueError, TypeError):
+                current_user.inverter_port = 502
+
+        if 'inverter_slave_id' in request.form:
+            try:
+                current_user.inverter_slave_id = int(request.form.get('inverter_slave_id', 1))
+            except (ValueError, TypeError):
+                current_user.inverter_slave_id = 1
 
         # Spike Protection setting
         current_user.spike_protection_enabled = 'spike_protection_enabled' in request.form
@@ -2191,6 +2378,48 @@ def tou_schedule(api_user=None, **kwargs):
     current_hour = now.hour
     current_minute_bucket = 0 if now.minute < 30 else 30
 
+    # Get Chip Mode settings for display indication
+    chip_mode_enabled = user.electricity_provider == 'amber' and getattr(user, 'chip_mode_enabled', False)
+    chip_start = getattr(user, 'chip_mode_start', '22:00') or '22:00'
+    chip_end = getattr(user, 'chip_mode_end', '06:00') or '06:00'
+    chip_threshold = getattr(user, 'chip_mode_threshold', 30.0) or 30.0
+
+    # Get Export Boost settings for display indication
+    export_boost_enabled = user.electricity_provider == 'amber' and getattr(user, 'export_boost_enabled', False)
+    boost_start = getattr(user, 'export_boost_start', '17:00') or '17:00'
+    boost_end = getattr(user, 'export_boost_end', '21:00') or '21:00'
+    boost_threshold = getattr(user, 'export_boost_threshold', 0) or 0
+
+    def is_in_time_window(hour: int, minute: int, start_time: str, end_time: str) -> bool:
+        """Check if a time falls within a time window"""
+        try:
+            start_h, start_m = map(int, start_time.split(':'))
+            end_h, end_m = map(int, end_time.split(':'))
+            start_mins = start_h * 60 + start_m
+            end_mins = end_h * 60 + end_m
+            current_mins = hour * 60 + minute
+
+            if start_mins <= end_mins:
+                # Same day window (e.g., 09:00 to 17:00)
+                return start_mins <= current_mins < end_mins
+            else:
+                # Overnight window (e.g., 22:00 to 06:00)
+                return current_mins >= start_mins or current_mins < end_mins
+        except (ValueError, AttributeError):
+            return False
+
+    def is_in_chip_window(hour: int, minute: int) -> bool:
+        """Check if a time falls within the chip mode window"""
+        if not chip_mode_enabled:
+            return False
+        return is_in_time_window(hour, minute, chip_start, chip_end)
+
+    def is_in_boost_window(hour: int, minute: int) -> bool:
+        """Check if a time falls within the export boost window"""
+        if not export_boost_enabled:
+            return False
+        return is_in_time_window(hour, minute, boost_start, boost_end)
+
     # Build periods for display
     periods = []
     for hour in range(24):
@@ -2203,14 +2432,24 @@ def tou_schedule(api_user=None, **kwargs):
                 # Check if current period is using ActualInterval pricing
                 uses_actual_interval = is_current and actual_interval is not None
 
+                # Check if chip mode is suppressing exports for this period
+                sell_price_cents = feedin_rates.get(period_key, 0) * 100
+                chip_mode_suppressed = is_in_chip_window(hour, minute) and sell_price_cents < 1.0
+
+                # Check if export boost is active for this period
+                # Export boost is active when in the boost window and sell price has been boosted
+                export_boost_active = is_in_boost_window(hour, minute) and sell_price_cents >= boost_threshold
+
                 periods.append({
                     'time': f"{hour:02d}:{minute:02d}",
                     'hour': hour,
                     'minute': minute,
                     'buy_price': energy_rates[period_key] * 100,  # Convert back to cents
-                    'sell_price': feedin_rates.get(period_key, 0) * 100,
+                    'sell_price': sell_price_cents,
                     'is_current': is_current,
-                    'uses_actual_interval': uses_actual_interval
+                    'uses_actual_interval': uses_actual_interval,
+                    'chip_mode_suppressed': chip_mode_suppressed,
+                    'export_boost_active': export_boost_active
                 })
 
     # Calculate stats

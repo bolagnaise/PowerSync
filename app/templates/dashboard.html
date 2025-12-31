@@ -1764,21 +1764,37 @@
                         // Use is_current flag from backend (calculated in user's timezone)
                         const isCurrentPeriod = period.is_current || false;
                         const usesActualInterval = period.uses_actual_interval || false;
+                        const chipModeSuppressed = period.chip_mode_suppressed || false;
+                        const exportBoostActive = period.export_boost_active || false;
 
-                        // Add visual indicators for current period
-                        const rowStyle = isCurrentPeriod
-                            ? 'border-bottom: 1px solid #333; background: rgba(81, 207, 102, 0.15); border-left: 3px solid #51cf66;'
-                            : 'border-bottom: 1px solid #333;';
+                        // Add visual indicators for current period, chip mode, and export boost
+                        let rowStyle = 'border-bottom: 1px solid #333;';
+                        if (isCurrentPeriod) {
+                            rowStyle = 'border-bottom: 1px solid #333; background: rgba(81, 207, 102, 0.15); border-left: 3px solid #51cf66;';
+                        } else if (chipModeSuppressed) {
+                            rowStyle = 'border-bottom: 1px solid #333; background: rgba(255, 193, 7, 0.1);';
+                        } else if (exportBoostActive) {
+                            rowStyle = 'border-bottom: 1px solid #333; background: rgba(0, 191, 255, 0.1);';
+                        }
 
                         // Show ActualInterval indicator if current period uses it
-                        const timeDisplay = isCurrentPeriod
-                            ? (usesActualInterval
+                        let timeDisplay = period.time;
+                        if (isCurrentPeriod) {
+                            timeDisplay = usesActualInterval
                                 ? `<strong>▶ ${period.time}</strong> <span style="color: #22c55e; font-size: 0.8em;">⚡ Live</span>`
-                                : `<strong>▶ ${period.time}</strong>`)
-                            : period.time;
+                                : `<strong>▶ ${period.time}</strong>`;
+                        }
+
+                        // Show Chip Mode or Export Boost indicator
+                        let modeIndicator = '';
+                        if (chipModeSuppressed) {
+                            modeIndicator = '<span style="color: #ffc107; font-size: 0.8em; margin-left: 0.5em;" title="Chip Mode: Export suppressed">🔒</span>';
+                        } else if (exportBoostActive) {
+                            modeIndicator = '<span style="color: #00bfff; font-size: 0.8em; margin-left: 0.5em;" title="Export Boost: Price boosted">🚀</span>';
+                        }
 
                         html += `<tr style="${rowStyle}">
-                            <td style="padding: 0.5em;">${timeDisplay}</td>
+                            <td style="padding: 0.5em;">${timeDisplay}${modeIndicator}</td>
                             <td style="text-align: right; padding: 0.5em; color: ${buyColor}; font-weight: bold;">
                                 ${period.buy_price.toFixed(2)}
                             </td>
@@ -1790,9 +1806,20 @@
 
                     html += `</tbody></table></div>`;
 
+                    // Check if any periods have chip mode or export boost active
+                    const hasChipMode = periods.some(p => p.chip_mode_suppressed);
+                    const hasExportBoost = periods.some(p => p.export_boost_active);
+                    const chipModeLegend = hasChipMode
+                        ? '<span style="color: #ffc107;">🔒</span> Chip Mode (export suppressed) &nbsp;'
+                        : '';
+                    const exportBoostLegend = hasExportBoost
+                        ? '<span style="color: #00bfff;">🚀</span> Export Boost (price boosted) &nbsp;'
+                        : '';
+
                     html += `<p style="font-size: 0.8em; color: #666; margin-top: 1em;">
                         <span style="color: #51cf66;">▶</span> Current period &nbsp;
                         <span style="color: #22c55e;">⚡ Live</span> = Using ActualInterval (5-min actual price) &nbsp;
+                        ${chipModeLegend}${exportBoostLegend}
                         <span style="color: #51cf66;">●</span> Green = Good price &nbsp;
                         <span style="color: #ff6b6b;">●</span> Red = High price &nbsp;
                         <span style="color: #fff;">●</span> White = Average

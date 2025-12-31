@@ -2055,6 +2055,64 @@ def create_charge_tariff(duration_minutes=30):
     return tariff
 
 
+def _apply_inverter_curtailment(user, curtail: bool = True):
+    """
+    Apply or remove inverter curtailment for AC-coupled solar systems.
+
+    This is a non-blocking helper that runs inverter control in a separate thread
+    to avoid blocking the main curtailment task.
+
+    Args:
+        user: User model instance with inverter configuration
+        curtail: True to curtail (stop inverter), False to restore (start inverter)
+    """
+    import asyncio
+    from datetime import datetime
+    from app import db
+
+    if not getattr(user, 'inverter_curtailment_enabled', False):
+        return
+
+    if not user.inverter_host or not user.inverter_brand:
+        logger.warning(f"Inverter curtailment enabled but not configured for {user.email}")
+        return
+
+    action = "curtailing" if curtail else "restoring"
+    logger.info(f"🔌 INVERTER: {action.upper()} inverter for {user.email} ({user.inverter_brand} at {user.inverter_host})")
+
+    try:
+        from app.inverters import get_inverter_controller_from_user
+
+        controller = get_inverter_controller_from_user(user)
+        if not controller:
+            logger.error(f"Failed to create inverter controller for {user.email}")
+            return
+
+        # Run async function in sync context
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            if curtail:
+                success = loop.run_until_complete(controller.curtail())
+            else:
+                success = loop.run_until_complete(controller.restore())
+            loop.run_until_complete(controller.disconnect())
+        finally:
+            loop.close()
+
+        if success:
+            new_state = 'curtailed' if curtail else 'online'
+            user.inverter_last_state = new_state
+            user.inverter_last_state_updated = datetime.utcnow()
+            db.session.commit()
+            logger.info(f"✅ INVERTER: Successfully {action} inverter for {user.email} (state: {new_state})")
+        else:
+            logger.error(f"❌ INVERTER: Failed to {action[:-3]} inverter for {user.email}")
+
+    except Exception as e:
+        logger.error(f"❌ INVERTER ERROR: Failed to {action[:-3]} inverter for {user.email}: {e}", exc_info=True)
+
+
 def solar_curtailment_check():
     """
     Monitor Amber export prices and curtail solar export when price is below 1c/kWh
@@ -2196,6 +2254,10 @@ def solar_curtailment_check():
                     user.current_export_rule_updated = datetime.utcnow()
                     db.session.commit()
 
+                # Also apply inverter curtailment if enabled (for AC-coupled systems)
+                if getattr(user, 'inverter_curtailment_enabled', False):
+                    _apply_inverter_curtailment(user, curtail=True)
+
                 success_count += 1
                 logger.info(f"📊 Action summary: Curtailment active (earnings: {export_earnings:.2f}c/kWh, export: 'never')")
 
@@ -2228,9 +2290,18 @@ def solar_curtailment_check():
                     user.current_export_rule = 'battery_ok'
                     user.current_export_rule_updated = datetime.utcnow()
                     db.session.commit()
+
+                    # Also restore inverter if curtailment is enabled (for AC-coupled systems)
+                    if getattr(user, 'inverter_curtailment_enabled', False):
+                        _apply_inverter_curtailment(user, curtail=False)
+
                     logger.info(f"📊 Action summary: Restored to normal (earnings: {export_earnings:.2f}c/kWh, export: 'battery_ok')")
                     success_count += 1
                 else:
+                    # Even if Tesla export rule unchanged, check if inverter needs restoring
+                    if getattr(user, 'inverter_curtailment_enabled', False) and getattr(user, 'inverter_last_state', None) == 'curtailed':
+                        _apply_inverter_curtailment(user, curtail=False)
+
                     logger.debug(f"Already in normal mode (export='{current_export_rule}') - no action needed for {user.email}")
                     logger.info(f"📊 Action summary: No change needed (earnings: {export_earnings:.2f}c/kWh, export: '{current_export_rule}')")
                     success_count += 1

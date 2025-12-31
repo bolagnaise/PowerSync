@@ -76,6 +76,17 @@ class User(UserMixin, db.Model):
     chip_mode_end = db.Column(db.String(5), default='06:00')  # End time for anti-export (HH:MM)
     chip_mode_threshold = db.Column(db.Float, default=30.0)  # Price threshold (c/kWh) - allow export only above this
 
+    # AC-Coupled Inverter Curtailment Configuration
+    # Direct control of solar inverters via Modbus TCP for AC-coupled systems
+    inverter_curtailment_enabled = db.Column(db.Boolean, default=False)
+    inverter_brand = db.Column(db.String(50))  # 'sungrow', 'fronius', etc.
+    inverter_model = db.Column(db.String(50))  # 'sg10', 'sg5', etc.
+    inverter_host = db.Column(db.String(100))  # IP address of inverter/gateway
+    inverter_port = db.Column(db.Integer, default=502)  # Modbus TCP port
+    inverter_slave_id = db.Column(db.Integer, default=1)  # Modbus slave ID
+    inverter_last_state = db.Column(db.String(20))  # Last known state: 'online', 'curtailed', 'offline'
+    inverter_last_state_updated = db.Column(db.DateTime)  # When state was last updated
+
     # Demand Charge Configuration
     enable_demand_charges = db.Column(db.Boolean, default=False)
     peak_demand_rate = db.Column(db.Float, default=0.0)
