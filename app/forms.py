@@ -131,7 +131,7 @@ class DemandChargeForm(FlaskForm):
     demand_artificial_price_enabled = BooleanField(
         'Artificial Price Increase (ALPHA)',
         default=False,
-        description='When enabled, adds $2/kWh to import prices during your configured demand periods. This discourages the Powerwall from importing grid energy during peak times, helping reduce demand charges. This is an experimental feature.'
+        description='When enabled, adds $2/kWh to import prices during your configured demand periods. This discourages your battery from importing grid energy during peak times, helping reduce demand charges. This is an experimental feature.'
     )
 
     submit = SubmitField('Save Demand Charges')
@@ -155,7 +155,7 @@ class AmberSettingsForm(FlaskForm):
 
     # Solar curtailment toggle
     solar_curtailment_enabled = BooleanField('Enable DC Solar Curtailment',
-    description='Prevent solar export when Amber feed-in price is 0c or negative. Automatically sets Powerwall export to "never" during negative pricing periods to avoid paying to export.')
+    description='Prevent solar export when Amber feed-in price is 0c or negative. Automatically prevents solar export during negative pricing periods to avoid paying to export.')
 
     submit = SubmitField('Save Amber Settings')
 

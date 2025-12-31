@@ -518,11 +518,18 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Handle Amber-specific settings (export boost, spike protection, etc.) during initial setup."""
+        # Check if Tesla is selected (force mode toggle only applies to Tesla)
+        is_tesla = self._selected_battery_system != BATTERY_SYSTEM_SIGENERGY
+
         if user_input is not None:
             # Store Amber settings in _amber_data
             self._amber_data[CONF_SPIKE_PROTECTION_ENABLED] = user_input.get(CONF_SPIKE_PROTECTION_ENABLED, False)
             self._amber_data[CONF_SETTLED_PRICES_ONLY] = user_input.get(CONF_SETTLED_PRICES_ONLY, False)
-            self._amber_data[CONF_FORCE_TARIFF_MODE_TOGGLE] = user_input.get(CONF_FORCE_TARIFF_MODE_TOGGLE, False)
+            # Force tariff mode toggle only applies to Tesla
+            if is_tesla:
+                self._amber_data[CONF_FORCE_TARIFF_MODE_TOGGLE] = user_input.get(CONF_FORCE_TARIFF_MODE_TOGGLE, False)
+            else:
+                self._amber_data[CONF_FORCE_TARIFF_MODE_TOGGLE] = False
             self._amber_data[CONF_EXPORT_BOOST_ENABLED] = user_input.get(CONF_EXPORT_BOOST_ENABLED, False)
             self._amber_data[CONF_EXPORT_PRICE_OFFSET] = user_input.get(CONF_EXPORT_PRICE_OFFSET, 0.0)
             self._amber_data[CONF_EXPORT_MIN_PRICE] = user_input.get(CONF_EXPORT_MIN_PRICE, 0.0)
@@ -541,34 +548,41 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 return await self.async_step_tesla_provider()
 
-        data_schema = vol.Schema(
-            {
-                # Spike and price protection settings
-                vol.Optional(CONF_SPIKE_PROTECTION_ENABLED, default=False): bool,
-                vol.Optional(CONF_SETTLED_PRICES_ONLY, default=False): bool,
-                vol.Optional(CONF_FORCE_TARIFF_MODE_TOGGLE, default=False): bool,
-                # Export boost settings
-                vol.Optional(CONF_EXPORT_BOOST_ENABLED, default=False): bool,
-                vol.Optional(CONF_EXPORT_PRICE_OFFSET, default=0.0): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.0, max=50.0)
-                ),
-                vol.Optional(CONF_EXPORT_MIN_PRICE, default=0.0): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.0, max=100.0)
-                ),
-                vol.Optional(CONF_EXPORT_BOOST_START, default=DEFAULT_EXPORT_BOOST_START): str,
-                vol.Optional(CONF_EXPORT_BOOST_END, default=DEFAULT_EXPORT_BOOST_END): str,
-                vol.Optional(CONF_EXPORT_BOOST_THRESHOLD, default=DEFAULT_EXPORT_BOOST_THRESHOLD): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.0, max=50.0)
-                ),
-                # Chip Mode settings (inverse of export boost - suppress exports unless above threshold)
-                vol.Optional(CONF_CHIP_MODE_ENABLED, default=False): bool,
-                vol.Optional(CONF_CHIP_MODE_START, default=DEFAULT_CHIP_MODE_START): str,
-                vol.Optional(CONF_CHIP_MODE_END, default=DEFAULT_CHIP_MODE_END): str,
-                vol.Optional(CONF_CHIP_MODE_THRESHOLD, default=DEFAULT_CHIP_MODE_THRESHOLD): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.0, max=200.0)
-                ),
-            }
-        )
+        # Build schema - force mode toggle only shown for Tesla
+        schema_dict = {
+            # Spike and price protection settings
+            vol.Optional(CONF_SPIKE_PROTECTION_ENABLED, default=False): bool,
+            vol.Optional(CONF_SETTLED_PRICES_ONLY, default=False): bool,
+        }
+
+        # Only show force mode toggle for Tesla (it's a Tesla-specific feature)
+        if is_tesla:
+            schema_dict[vol.Optional(CONF_FORCE_TARIFF_MODE_TOGGLE, default=False)] = bool
+
+        # Export boost settings
+        schema_dict.update({
+            vol.Optional(CONF_EXPORT_BOOST_ENABLED, default=False): bool,
+            vol.Optional(CONF_EXPORT_PRICE_OFFSET, default=0.0): vol.All(
+                vol.Coerce(float), vol.Range(min=0.0, max=50.0)
+            ),
+            vol.Optional(CONF_EXPORT_MIN_PRICE, default=0.0): vol.All(
+                vol.Coerce(float), vol.Range(min=0.0, max=100.0)
+            ),
+            vol.Optional(CONF_EXPORT_BOOST_START, default=DEFAULT_EXPORT_BOOST_START): str,
+            vol.Optional(CONF_EXPORT_BOOST_END, default=DEFAULT_EXPORT_BOOST_END): str,
+            vol.Optional(CONF_EXPORT_BOOST_THRESHOLD, default=DEFAULT_EXPORT_BOOST_THRESHOLD): vol.All(
+                vol.Coerce(float), vol.Range(min=0.0, max=50.0)
+            ),
+            # Chip Mode settings (inverse of export boost - suppress exports unless above threshold)
+            vol.Optional(CONF_CHIP_MODE_ENABLED, default=False): bool,
+            vol.Optional(CONF_CHIP_MODE_START, default=DEFAULT_CHIP_MODE_START): str,
+            vol.Optional(CONF_CHIP_MODE_END, default=DEFAULT_CHIP_MODE_END): str,
+            vol.Optional(CONF_CHIP_MODE_THRESHOLD, default=DEFAULT_CHIP_MODE_THRESHOLD): vol.All(
+                vol.Coerce(float), vol.Range(min=0.0, max=200.0)
+            ),
+        })
+
+        data_schema = vol.Schema(schema_dict)
 
         return self.async_show_form(
             step_id="amber_settings",
@@ -1335,6 +1349,10 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Step 2a: Amber Electric specific options."""
+        # Check if Tesla is selected (force mode toggle only applies to Tesla)
+        battery_system = self.config_entry.data.get(CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA)
+        is_tesla = battery_system != BATTERY_SYSTEM_SIGENERGY
+
         if user_input is not None:
             # Check if solar curtailment is being disabled
             was_curtailment_enabled = self._get_option(CONF_SOLAR_CURTAILMENT_ENABLED, False)
@@ -1347,6 +1365,10 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             self._amber_options = user_input
             self._amber_options[CONF_ELECTRICITY_PROVIDER] = "amber"
 
+            # Force tariff mode toggle only applies to Tesla - set to False for Sigenergy
+            if not is_tesla:
+                self._amber_options[CONF_FORCE_TARIFF_MODE_TOGGLE] = False
+
             # Check if AC-coupled inverter curtailment needs configuration
             # Route to inverter setup if:
             # 1. User is enabling inverter curtailment now, OR
@@ -1357,126 +1379,133 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             # No inverter curtailment - save and exit
             return self.async_create_entry(title="", data=self._amber_options)
 
+        # Build schema dict - conditionally include force mode toggle for Tesla only
+        schema_dict = {
+            vol.Optional(
+                CONF_AUTO_SYNC_ENABLED,
+                default=self._get_option(CONF_AUTO_SYNC_ENABLED, True),
+            ): bool,
+            vol.Optional(
+                CONF_AMBER_FORECAST_TYPE,
+                default=self._get_option(CONF_AMBER_FORECAST_TYPE, "predicted"),
+            ): vol.In({
+                "predicted": "Predicted (Default)",
+                "low": "Low (Conservative)",
+                "high": "High (Optimistic)"
+            }),
+            vol.Optional(
+                CONF_SOLAR_CURTAILMENT_ENABLED,
+                default=self._get_option(CONF_SOLAR_CURTAILMENT_ENABLED, False),
+            ): bool,
+            vol.Optional(
+                CONF_SPIKE_PROTECTION_ENABLED,
+                default=self._get_option(CONF_SPIKE_PROTECTION_ENABLED, False),
+            ): bool,
+            vol.Optional(
+                CONF_SETTLED_PRICES_ONLY,
+                default=self._get_option(CONF_SETTLED_PRICES_ONLY, False),
+            ): bool,
+        }
+
+        # Only show force mode toggle for Tesla (it's a Tesla-specific feature)
+        if is_tesla:
+            schema_dict[vol.Optional(
+                CONF_FORCE_TARIFF_MODE_TOGGLE,
+                default=self._get_option(CONF_FORCE_TARIFF_MODE_TOGGLE, False),
+            )] = bool
+
+        schema_dict.update({
+            vol.Optional(
+                CONF_EXPORT_BOOST_ENABLED,
+                default=self._get_option(CONF_EXPORT_BOOST_ENABLED, False),
+            ): bool,
+            vol.Optional(
+                CONF_EXPORT_PRICE_OFFSET,
+                default=self._get_option(CONF_EXPORT_PRICE_OFFSET, 0.0),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0)),
+            vol.Optional(
+                CONF_EXPORT_MIN_PRICE,
+                default=self._get_option(CONF_EXPORT_MIN_PRICE, 0.0),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
+            vol.Optional(
+                CONF_EXPORT_BOOST_START,
+                default=self._get_option(CONF_EXPORT_BOOST_START, DEFAULT_EXPORT_BOOST_START),
+            ): str,
+            vol.Optional(
+                CONF_EXPORT_BOOST_END,
+                default=self._get_option(CONF_EXPORT_BOOST_END, DEFAULT_EXPORT_BOOST_END),
+            ): str,
+            vol.Optional(
+                CONF_EXPORT_BOOST_THRESHOLD,
+                default=self._get_option(CONF_EXPORT_BOOST_THRESHOLD, DEFAULT_EXPORT_BOOST_THRESHOLD),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0)),
+            # Chip Mode (inverse of export boost)
+            vol.Optional(
+                CONF_CHIP_MODE_ENABLED,
+                default=self._get_option(CONF_CHIP_MODE_ENABLED, False),
+            ): bool,
+            vol.Optional(
+                CONF_CHIP_MODE_START,
+                default=self._get_option(CONF_CHIP_MODE_START, DEFAULT_CHIP_MODE_START),
+            ): str,
+            vol.Optional(
+                CONF_CHIP_MODE_END,
+                default=self._get_option(CONF_CHIP_MODE_END, DEFAULT_CHIP_MODE_END),
+            ): str,
+            vol.Optional(
+                CONF_CHIP_MODE_THRESHOLD,
+                default=self._get_option(CONF_CHIP_MODE_THRESHOLD, DEFAULT_CHIP_MODE_THRESHOLD),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=200.0)),
+            vol.Optional(
+                CONF_DEMAND_CHARGE_ENABLED,
+                default=self._get_option(CONF_DEMAND_CHARGE_ENABLED, False),
+            ): bool,
+            vol.Optional(
+                CONF_DEMAND_CHARGE_RATE,
+                default=self._get_option(CONF_DEMAND_CHARGE_RATE, 10.0),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
+            vol.Optional(
+                CONF_DEMAND_CHARGE_START_TIME,
+                default=self._get_option(CONF_DEMAND_CHARGE_START_TIME, "14:00"),
+            ): str,
+            vol.Optional(
+                CONF_DEMAND_CHARGE_END_TIME,
+                default=self._get_option(CONF_DEMAND_CHARGE_END_TIME, "20:00"),
+            ): str,
+            vol.Optional(
+                CONF_DEMAND_CHARGE_DAYS,
+                default=self._get_option(CONF_DEMAND_CHARGE_DAYS, "All Days"),
+            ): vol.In(["All Days", "Weekdays Only", "Weekends Only"]),
+            vol.Optional(
+                CONF_DEMAND_CHARGE_BILLING_DAY,
+                default=self._get_option(CONF_DEMAND_CHARGE_BILLING_DAY, 1),
+            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=28)),
+            vol.Optional(
+                CONF_DEMAND_CHARGE_APPLY_TO,
+                default=self._get_option(CONF_DEMAND_CHARGE_APPLY_TO, "Buy Only"),
+            ): vol.In(["Buy Only", "Sell Only", "Both"]),
+            vol.Optional(
+                CONF_DEMAND_ARTIFICIAL_PRICE,
+                default=self._get_option(CONF_DEMAND_ARTIFICIAL_PRICE, False),
+            ): bool,
+            vol.Optional(
+                CONF_DAILY_SUPPLY_CHARGE,
+                default=self._get_option(CONF_DAILY_SUPPLY_CHARGE, 0.0),
+            ): vol.Coerce(float),
+            vol.Optional(
+                CONF_MONTHLY_SUPPLY_CHARGE,
+                default=self._get_option(CONF_MONTHLY_SUPPLY_CHARGE, 0.0),
+            ): vol.Coerce(float),
+            # AC-Coupled Inverter Curtailment toggle (configuration in separate steps)
+            vol.Optional(
+                CONF_INVERTER_CURTAILMENT_ENABLED,
+                default=self._get_option(CONF_INVERTER_CURTAILMENT_ENABLED, False),
+            ): bool,
+        })
+
         return self.async_show_form(
             step_id="amber_options",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(
-                        CONF_AUTO_SYNC_ENABLED,
-                        default=self._get_option(CONF_AUTO_SYNC_ENABLED, True),
-                    ): bool,
-                    vol.Optional(
-                        CONF_AMBER_FORECAST_TYPE,
-                        default=self._get_option(CONF_AMBER_FORECAST_TYPE, "predicted"),
-                    ): vol.In({
-                        "predicted": "Predicted (Default)",
-                        "low": "Low (Conservative)",
-                        "high": "High (Optimistic)"
-                    }),
-                    vol.Optional(
-                        CONF_SOLAR_CURTAILMENT_ENABLED,
-                        default=self._get_option(CONF_SOLAR_CURTAILMENT_ENABLED, False),
-                    ): bool,
-                    vol.Optional(
-                        CONF_SPIKE_PROTECTION_ENABLED,
-                        default=self._get_option(CONF_SPIKE_PROTECTION_ENABLED, False),
-                    ): bool,
-                    vol.Optional(
-                        CONF_SETTLED_PRICES_ONLY,
-                        default=self._get_option(CONF_SETTLED_PRICES_ONLY, False),
-                    ): bool,
-                    vol.Optional(
-                        CONF_FORCE_TARIFF_MODE_TOGGLE,
-                        default=self._get_option(CONF_FORCE_TARIFF_MODE_TOGGLE, False),
-                    ): bool,
-                    vol.Optional(
-                        CONF_EXPORT_BOOST_ENABLED,
-                        default=self._get_option(CONF_EXPORT_BOOST_ENABLED, False),
-                    ): bool,
-                    vol.Optional(
-                        CONF_EXPORT_PRICE_OFFSET,
-                        default=self._get_option(CONF_EXPORT_PRICE_OFFSET, 0.0),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0)),
-                    vol.Optional(
-                        CONF_EXPORT_MIN_PRICE,
-                        default=self._get_option(CONF_EXPORT_MIN_PRICE, 0.0),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
-                    vol.Optional(
-                        CONF_EXPORT_BOOST_START,
-                        default=self._get_option(CONF_EXPORT_BOOST_START, DEFAULT_EXPORT_BOOST_START),
-                    ): str,
-                    vol.Optional(
-                        CONF_EXPORT_BOOST_END,
-                        default=self._get_option(CONF_EXPORT_BOOST_END, DEFAULT_EXPORT_BOOST_END),
-                    ): str,
-                    vol.Optional(
-                        CONF_EXPORT_BOOST_THRESHOLD,
-                        default=self._get_option(CONF_EXPORT_BOOST_THRESHOLD, DEFAULT_EXPORT_BOOST_THRESHOLD),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0)),
-                    # Chip Mode (inverse of export boost)
-                    vol.Optional(
-                        CONF_CHIP_MODE_ENABLED,
-                        default=self._get_option(CONF_CHIP_MODE_ENABLED, False),
-                    ): bool,
-                    vol.Optional(
-                        CONF_CHIP_MODE_START,
-                        default=self._get_option(CONF_CHIP_MODE_START, DEFAULT_CHIP_MODE_START),
-                    ): str,
-                    vol.Optional(
-                        CONF_CHIP_MODE_END,
-                        default=self._get_option(CONF_CHIP_MODE_END, DEFAULT_CHIP_MODE_END),
-                    ): str,
-                    vol.Optional(
-                        CONF_CHIP_MODE_THRESHOLD,
-                        default=self._get_option(CONF_CHIP_MODE_THRESHOLD, DEFAULT_CHIP_MODE_THRESHOLD),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=200.0)),
-                    vol.Optional(
-                        CONF_DEMAND_CHARGE_ENABLED,
-                        default=self._get_option(CONF_DEMAND_CHARGE_ENABLED, False),
-                    ): bool,
-                    vol.Optional(
-                        CONF_DEMAND_CHARGE_RATE,
-                        default=self._get_option(CONF_DEMAND_CHARGE_RATE, 10.0),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
-                    vol.Optional(
-                        CONF_DEMAND_CHARGE_START_TIME,
-                        default=self._get_option(CONF_DEMAND_CHARGE_START_TIME, "14:00"),
-                    ): str,
-                    vol.Optional(
-                        CONF_DEMAND_CHARGE_END_TIME,
-                        default=self._get_option(CONF_DEMAND_CHARGE_END_TIME, "20:00"),
-                    ): str,
-                    vol.Optional(
-                        CONF_DEMAND_CHARGE_DAYS,
-                        default=self._get_option(CONF_DEMAND_CHARGE_DAYS, "All Days"),
-                    ): vol.In(["All Days", "Weekdays Only", "Weekends Only"]),
-                    vol.Optional(
-                        CONF_DEMAND_CHARGE_BILLING_DAY,
-                        default=self._get_option(CONF_DEMAND_CHARGE_BILLING_DAY, 1),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=1, max=28)),
-                    vol.Optional(
-                        CONF_DEMAND_CHARGE_APPLY_TO,
-                        default=self._get_option(CONF_DEMAND_CHARGE_APPLY_TO, "Buy Only"),
-                    ): vol.In(["Buy Only", "Sell Only", "Both"]),
-                    vol.Optional(
-                        CONF_DEMAND_ARTIFICIAL_PRICE,
-                        default=self._get_option(CONF_DEMAND_ARTIFICIAL_PRICE, False),
-                    ): bool,
-                    vol.Optional(
-                        CONF_DAILY_SUPPLY_CHARGE,
-                        default=self._get_option(CONF_DAILY_SUPPLY_CHARGE, 0.0),
-                    ): vol.Coerce(float),
-                    vol.Optional(
-                        CONF_MONTHLY_SUPPLY_CHARGE,
-                        default=self._get_option(CONF_MONTHLY_SUPPLY_CHARGE, 0.0),
-                    ): vol.Coerce(float),
-                    # AC-Coupled Inverter Curtailment toggle (configuration in separate steps)
-                    vol.Optional(
-                        CONF_INVERTER_CURTAILMENT_ENABLED,
-                        default=self._get_option(CONF_INVERTER_CURTAILMENT_ENABLED, False),
-                    ): bool,
-                }
-            ),
+            data_schema=vol.Schema(schema_dict),
         )
 
     async def async_step_inverter_brand(

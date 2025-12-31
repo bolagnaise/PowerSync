@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "PowerSync Setup",
-        "description": "Configure PowerSync to automatically sync electricity pricing to your Powerwall.",
+        "description": "Configure PowerSync to automatically sync electricity pricing to your battery system.",
         "submit_button": "Next"
       },
       "provider_selection": {
@@ -51,7 +51,7 @@
       },
       "amber_settings": {
         "title": "Amber Settings",
-        "description": "Configure spike protection and export boost settings.\n\nSpike protection prevents grid charging during high prices.\nExport boost triggers Powerwall exports at lower price points.",
+        "description": "Configure spike protection and export boost settings.\n\nSpike protection prevents grid charging during high prices.\nExport boost triggers battery exports at lower price points.",
         "data": {
           "spike_protection_enabled": "Enable Spike Protection",
           "settled_prices_only": "Settled Prices Only (skip forecast sync)",
@@ -68,9 +68,9 @@
           "chip_mode_threshold": "Price Threshold (c/kWh)"
         },
         "data_description": {
-          "spike_protection_enabled": "When Amber detects a price spike, artificially inflate buy prices to prevent Powerwall from charging from grid",
+          "spike_protection_enabled": "When Amber detects a price spike, artificially inflate buy prices to prevent your battery from charging from grid",
           "settled_prices_only": "Skip forecast sync at :00 and only sync when actual prices arrive at :35/:60",
-          "force_tariff_mode_toggle": "After uploading a new tariff, briefly toggle Powerwall mode to force immediate recalculation",
+          "force_tariff_mode_toggle": "After uploading a new tariff, briefly toggle operation mode to force immediate recalculation (Tesla only)",
           "export_boost_threshold": "Boost only applies if actual price is at or above this value (0 = always apply)",
           "chip_mode_enabled": "Suppress exports during configured hours unless price exceeds threshold (inverse of Export Boost)",
           "chip_mode_threshold": "Allow exports only when price is at or above this value"
@@ -79,7 +79,7 @@
       },
       "aemo_config": {
         "title": "AEMO Spike Detection",
-        "description": "Configure AEMO wholesale price spike detection. When prices spike above your threshold, the Powerwall will be configured to export energy to the grid.\n\n{threshold_hint}",
+        "description": "Configure AEMO wholesale price spike detection. When prices spike above your threshold, your battery will be configured to export energy to the grid.\n\n{threshold_hint}",
         "data": {
           "aemo_spike_enabled": "Enable AEMO Spike Detection",
           "aemo_region": "NEM Region",
@@ -244,10 +244,10 @@
           "inverter_slave_id": "Modbus Slave ID"
         },
         "data_description": {
-          "spike_protection_enabled": "When Amber detects a price spike, artificially inflate buy prices to prevent Powerwall from charging from grid (stops arbitrage behavior)",
-          "inverter_curtailment_enabled": "Shutdown AC-coupled solar inverter when feed-in price is negative (stops solar export that bypasses Powerwall)",
+          "spike_protection_enabled": "When Amber detects a price spike, artificially inflate buy prices to prevent your battery from charging from grid (stops arbitrage behavior)",
+          "inverter_curtailment_enabled": "Shutdown AC-coupled solar inverter when feed-in price is negative (stops solar export that bypasses your battery)",
           "settled_prices_only": "Skip the initial forecast sync at :00 and only sync when actual/settled prices arrive at :35/:60 seconds. Use this if forecast prices differ significantly from settled prices.",
-          "force_tariff_mode_toggle": "After uploading a new tariff, briefly switch Powerwall to self-consumption mode then back to Time-Based Control. This forces immediate recalculation of battery behavior (~5 second interruption).",
+          "force_tariff_mode_toggle": "After uploading a new tariff, briefly toggle operation mode to force immediate recalculation of battery behavior (Tesla only, ~5 second interruption).",
           "demand_artificial_price_enabled": "Artificially increases the current price by $2 during demand charge periods to encourage battery discharge",
           "export_boost_threshold": "Boost will only apply if actual export price is at or above this value (0 = always apply)",
           "chip_mode_enabled": "Suppress exports during configured hours unless price exceeds threshold (inverse of Export Boost)",
@@ -280,7 +280,7 @@
       },
       "globird_options": {
         "title": "Globird - AEMO Spike Detection",
-        "description": "Configure AEMO wholesale price spike detection. When prices spike above your threshold, the Powerwall will export to the grid.",
+        "description": "Configure AEMO wholesale price spike detection. When prices spike above your threshold, your battery will export to the grid.",
         "data": {
           "aemo_region": "AEMO NEM Region",
           "aemo_spike_threshold": "Spike Threshold ($/MWh)"
