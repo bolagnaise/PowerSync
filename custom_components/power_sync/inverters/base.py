@@ -29,16 +29,21 @@ class InverterState:
     power_output_w: Optional[float] = None
     power_limit_percent: Optional[int] = None
     error_message: Optional[str] = None
+    # Extended attributes from register readings
+    attributes: Optional[dict] = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for API responses."""
-        return {
+        result = {
             "status": self.status.value,
             "is_curtailed": self.is_curtailed,
             "power_output_w": self.power_output_w,
             "power_limit_percent": self.power_limit_percent,
             "error_message": self.error_message,
         }
+        if self.attributes:
+            result.update(self.attributes)
+        return result
 
 
 class InverterController(ABC):

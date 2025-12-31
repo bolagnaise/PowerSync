@@ -25,9 +25,10 @@ class SungrowController(InverterController):
     """
 
     # Modbus register addresses (0-indexed for pymodbus)
-    REGISTER_RUN_MODE = 5005          # Register 5006 in 1-indexed docs
-    REGISTER_POWER_LIMIT_TOGGLE = 5006  # Register 5007
-    REGISTER_POWER_LIMIT_PERCENT = 5007  # Register 5008
+    # Documentation register - 1 = pymodbus address
+    REGISTER_RUN_MODE = 5005          # 5006 - Run mode control
+    REGISTER_POWER_LIMIT_TOGGLE = 5006  # 5007
+    REGISTER_POWER_LIMIT_PERCENT = 5007  # 5008
 
     # Run mode values
     RUN_MODE_SHUTDOWN = 206  # Stop inverter
@@ -49,6 +50,27 @@ class SungrowController(InverterController):
     STATE_SHUTDOWN = 0x1200
     STATE_FAULT = 0x1300
     STATE_MAINTAIN = 0x1500
+
+    # ===== SG Series Register Addresses (0-indexed) =====
+    # Energy generation
+    REG_DAILY_YIELD = 5002             # 5003 - Daily power yields (kWh * 0.1)
+    REG_TOTAL_YIELD = 5003             # 5004-5005 - Total power yields (kWh * 0.1, U32)
+
+    # Power readings
+    REG_TOTAL_DC_POWER = 5016          # 5017-5018 - Total DC power (W, U32)
+
+    # MPPT readings
+    REG_MPPT1_VOLTAGE = 5010           # 5011 - MPPT1 voltage (V * 0.1)
+    REG_MPPT1_CURRENT = 5011           # 5012 - MPPT1 current (A * 0.1)
+    REG_MPPT2_VOLTAGE = 5012           # 5013 - MPPT2 voltage (V * 0.1)
+    REG_MPPT2_CURRENT = 5013           # 5014 - MPPT2 current (A * 0.1)
+
+    # Temperature
+    REG_INVERTER_TEMP = 5007           # 5008 - Inverter temperature (°C * 0.1, signed)
+
+    # Grid
+    REG_PHASE_A_VOLTAGE = 5018         # 5019 - Phase A voltage (V * 0.1)
+    REG_GRID_FREQUENCY = 5035          # 5036 - Grid frequency (Hz * 0.1)
 
     # Timeout for Modbus operations
     TIMEOUT_SECONDS = 10.0
@@ -165,17 +187,78 @@ class SungrowController(InverterController):
             )
 
             if result.isError():
-                _LOGGER.error(f"Modbus read error at register {address}: {result}")
+                _LOGGER.debug(f"Modbus read error at register {address}: {result}")
                 return None
 
             return result.registers
 
         except ModbusException as e:
-            _LOGGER.error(f"Modbus exception reading register {address}: {e}")
+            _LOGGER.debug(f"Modbus exception reading register {address}: {e}")
             return None
         except Exception as e:
-            _LOGGER.error(f"Error reading register {address}: {e}")
+            _LOGGER.debug(f"Error reading register {address}: {e}")
             return None
+
+    def _to_signed16(self, value: int) -> int:
+        """Convert unsigned 16-bit to signed."""
+        if value >= 0x8000:
+            return value - 0x10000
+        return value
+
+    def _to_unsigned32(self, high: int, low: int) -> int:
+        """Convert two unsigned 16-bit registers to unsigned 32-bit."""
+        return (high << 16) | low
+
+    async def _read_all_registers(self) -> dict:
+        """Read all SG series registers and return as attributes dict."""
+        attrs = {}
+
+        try:
+            # Read daily yield
+            daily_yield = await self._read_register(self.REG_DAILY_YIELD, 1)
+            if daily_yield:
+                attrs["daily_pv_generation"] = round(daily_yield[0] * 0.1, 2)
+
+            # Read total yield (32-bit)
+            total_yield = await self._read_register(self.REG_TOTAL_YIELD, 2)
+            if total_yield and len(total_yield) >= 2:
+                attrs["total_pv_generation"] = round(self._to_unsigned32(total_yield[0], total_yield[1]) * 0.1, 1)
+
+            # Read DC power (32-bit)
+            dc_power = await self._read_register(self.REG_TOTAL_DC_POWER, 2)
+            if dc_power and len(dc_power) >= 2:
+                attrs["dc_power"] = self._to_unsigned32(dc_power[0], dc_power[1])
+
+            # Read MPPT values
+            mppt_regs = await self._read_register(self.REG_MPPT1_VOLTAGE, 4)
+            if mppt_regs and len(mppt_regs) >= 4:
+                attrs["mppt1_voltage"] = round(mppt_regs[0] * 0.1, 1)
+                attrs["mppt1_current"] = round(mppt_regs[1] * 0.1, 1)
+                attrs["mppt2_voltage"] = round(mppt_regs[2] * 0.1, 1)
+                attrs["mppt2_current"] = round(mppt_regs[3] * 0.1, 1)
+                # Calculate MPPT power
+                attrs["mppt1_power"] = round(attrs["mppt1_voltage"] * attrs["mppt1_current"], 0)
+                attrs["mppt2_power"] = round(attrs["mppt2_voltage"] * attrs["mppt2_current"], 0)
+
+            # Read inverter temperature
+            inv_temp = await self._read_register(self.REG_INVERTER_TEMP, 1)
+            if inv_temp:
+                attrs["inverter_temperature"] = round(self._to_signed16(inv_temp[0]) * 0.1, 1)
+
+            # Read grid voltage
+            voltage = await self._read_register(self.REG_PHASE_A_VOLTAGE, 1)
+            if voltage:
+                attrs["grid_voltage"] = round(voltage[0] * 0.1, 1)
+
+            # Read grid frequency
+            freq = await self._read_register(self.REG_GRID_FREQUENCY, 1)
+            if freq:
+                attrs["grid_frequency"] = round(freq[0] * 0.1, 2)
+
+        except Exception as e:
+            _LOGGER.warning(f"Error reading some registers: {e}")
+
+        return attrs
 
     async def curtail(self) -> bool:
         """Stop the Sungrow inverter to prevent solar export.
@@ -261,7 +344,7 @@ class SungrowController(InverterController):
         """Get current status of the Sungrow inverter.
 
         Returns:
-            InverterState with current status
+            InverterState with current status and register attributes
         """
         try:
             # Ensure connected
@@ -271,6 +354,9 @@ class SungrowController(InverterController):
                     is_curtailed=False,
                     error_message="Failed to connect to inverter",
                 )
+
+            # Read all available registers
+            attrs = await self._read_all_registers()
 
             # Read running state register
             state_regs = await self._read_register(self.REGISTER_RUNNING_STATE, 1)
@@ -296,17 +382,26 @@ class SungrowController(InverterController):
 
             if running_state == self.STATE_RUNNING:
                 status = InverterStatus.ONLINE
+                attrs["running_state"] = "running"
             elif running_state == self.STATE_FAULT:
                 status = InverterStatus.ERROR
+                attrs["running_state"] = "fault"
             elif is_curtailed:
                 status = InverterStatus.CURTAILED
+                attrs["running_state"] = "stopped"
             else:
                 status = InverterStatus.UNKNOWN
+                attrs["running_state"] = "unknown"
+
+            # Add model info
+            attrs["model"] = self.model or "SG Series"
+            attrs["host"] = self.host
 
             self._last_state = InverterState(
                 status=status,
                 is_curtailed=is_curtailed,
                 power_output_w=float(power_output) if power_output else None,
+                attributes=attrs,
             )
 
             return self._last_state

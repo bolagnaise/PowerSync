@@ -29,23 +29,50 @@ class SungrowSHController(InverterController):
     """
 
     # Modbus register addresses (0-indexed for pymodbus)
-    # Register 13000 in documentation = address 12999 in pymodbus
-    REGISTER_SYSTEM_STATE = 12999
+    # Documentation register - 1 = pymodbus address
+    REGISTER_SYSTEM_STATE = 12999      # 13000 - System state control
 
     # System state control values
     STATE_STOP = 0xCE   # 206 - Stop inverter
     STATE_START = 0xCF  # 207 - Start inverter
 
-    # Status registers for reading inverter state
-    # These may need adjustment based on actual SH series register map
-    REGISTER_RUNNING_STATE = 13000     # Nominal running state
-    REGISTER_TOTAL_ACTIVE_POWER = 13033  # Total active power (W)
-
-    # Running state values (may differ from SG series)
+    # Running state register and values
+    REGISTER_RUNNING_STATE = 12999     # 13000 - Running state
     RUNNING_STATE_STOP = 0x8000
     RUNNING_STATE_STANDBY = 0x1400
     RUNNING_STATE_RUNNING = 0x0002
     RUNNING_STATE_FAULT = 0x1300
+
+    # ===== SH Series Register Addresses (0-indexed) =====
+    # PV Generation
+    REG_DAILY_PV = 13000               # 13001 - Daily PV generation (kWh * 0.1)
+    REG_TOTAL_PV = 13001               # 13002-13003 - Total PV generation (kWh * 0.1, U32)
+
+    # Power readings
+    REG_LOAD_POWER = 13006             # 13007-13008 - Load power (W, I32)
+    REG_EXPORT_POWER = 13008           # 13009-13010 - Export power (W, I32)
+    REG_TOTAL_ACTIVE_POWER = 13032     # 13033-13034 - Total active power (W, I32)
+
+    # Battery
+    REG_BATTERY_VOLTAGE = 13018        # 13019 - Battery voltage (V * 0.1)
+    REG_BATTERY_CURRENT = 13019        # 13020 - Battery current (A * 0.1, signed)
+    REG_BATTERY_POWER = 13020          # 13021 - Battery power (W, signed)
+    REG_BATTERY_LEVEL = 13021          # 13022 - Battery level (% * 0.1)
+    REG_BATTERY_SOH = 13022            # 13023 - Battery state of health (% * 0.1)
+    REG_BATTERY_TEMP = 13023           # 13024 - Battery temperature (°C * 0.1, signed)
+    REG_DAILY_BATTERY_DISCHARGE = 13024  # 13025 - Daily battery discharge (kWh * 0.1)
+    REG_DAILY_BATTERY_CHARGE = 13038   # 13039 - Daily battery charge (kWh * 0.1)
+
+    # Energy accounting
+    REG_DAILY_IMPORT = 13034           # 13035 - Daily imported energy (kWh * 0.1)
+    REG_DAILY_EXPORT = 13043           # 13044 - Daily exported energy (kWh * 0.1)
+
+    # Temperature
+    REG_INVERTER_TEMP = 5006           # 5007 - Inverter temperature (°C * 0.1, signed)
+
+    # Grid
+    REG_GRID_FREQUENCY = 5035          # 5036 - Grid frequency (Hz * 0.1)
+    REG_PHASE_A_VOLTAGE = 5018         # 5019 - Phase A voltage (V * 0.1)
 
     # Timeout for Modbus operations
     TIMEOUT_SECONDS = 10.0
@@ -162,17 +189,109 @@ class SungrowSHController(InverterController):
             )
 
             if result.isError():
-                _LOGGER.error(f"Modbus read error at register {address}: {result}")
+                _LOGGER.debug(f"Modbus read error at register {address}: {result}")
                 return None
 
             return result.registers
 
         except ModbusException as e:
-            _LOGGER.error(f"Modbus exception reading register {address}: {e}")
+            _LOGGER.debug(f"Modbus exception reading register {address}: {e}")
             return None
         except Exception as e:
-            _LOGGER.error(f"Error reading register {address}: {e}")
+            _LOGGER.debug(f"Error reading register {address}: {e}")
             return None
+
+    def _to_signed16(self, value: int) -> int:
+        """Convert unsigned 16-bit to signed."""
+        if value >= 0x8000:
+            return value - 0x10000
+        return value
+
+    def _to_signed32(self, high: int, low: int) -> int:
+        """Convert two unsigned 16-bit registers to signed 32-bit."""
+        value = (high << 16) | low
+        if value >= 0x80000000:
+            return value - 0x100000000
+        return value
+
+    def _to_unsigned32(self, high: int, low: int) -> int:
+        """Convert two unsigned 16-bit registers to unsigned 32-bit."""
+        return (high << 16) | low
+
+    async def _read_all_registers(self) -> dict:
+        """Read all SH series registers and return as attributes dict."""
+        attrs = {}
+
+        try:
+            # Read battery registers (13019-13025) in one batch
+            battery_regs = await self._read_register(self.REG_BATTERY_VOLTAGE, 7)
+            if battery_regs and len(battery_regs) >= 7:
+                attrs["battery_voltage"] = round(battery_regs[0] * 0.1, 1)
+                attrs["battery_current"] = round(self._to_signed16(battery_regs[1]) * 0.1, 1)
+                attrs["battery_power"] = self._to_signed16(battery_regs[2])
+                attrs["battery_level"] = round(battery_regs[3] * 0.1, 1)
+                attrs["battery_soh"] = round(battery_regs[4] * 0.1, 1)
+                attrs["battery_temperature"] = round(self._to_signed16(battery_regs[5]) * 0.1, 1)
+                attrs["daily_battery_discharge"] = round(battery_regs[6] * 0.1, 2)
+
+            # Read daily PV generation
+            daily_pv = await self._read_register(self.REG_DAILY_PV, 1)
+            if daily_pv:
+                attrs["daily_pv_generation"] = round(daily_pv[0] * 0.1, 2)
+
+            # Read total PV generation (32-bit)
+            total_pv = await self._read_register(self.REG_TOTAL_PV, 2)
+            if total_pv and len(total_pv) >= 2:
+                attrs["total_pv_generation"] = round(self._to_unsigned32(total_pv[0], total_pv[1]) * 0.1, 1)
+
+            # Read load power (32-bit signed)
+            load_power = await self._read_register(self.REG_LOAD_POWER, 2)
+            if load_power and len(load_power) >= 2:
+                attrs["load_power"] = self._to_signed32(load_power[0], load_power[1])
+
+            # Read export power (32-bit signed)
+            export_power = await self._read_register(self.REG_EXPORT_POWER, 2)
+            if export_power and len(export_power) >= 2:
+                attrs["export_power"] = self._to_signed32(export_power[0], export_power[1])
+
+            # Read total active power (32-bit signed)
+            active_power = await self._read_register(self.REG_TOTAL_ACTIVE_POWER, 2)
+            if active_power and len(active_power) >= 2:
+                attrs["active_power"] = self._to_signed32(active_power[0], active_power[1])
+
+            # Read daily import/export
+            daily_import = await self._read_register(self.REG_DAILY_IMPORT, 1)
+            if daily_import:
+                attrs["daily_import"] = round(daily_import[0] * 0.1, 2)
+
+            daily_export = await self._read_register(self.REG_DAILY_EXPORT, 1)
+            if daily_export:
+                attrs["daily_export"] = round(daily_export[0] * 0.1, 2)
+
+            # Read daily battery charge
+            daily_charge = await self._read_register(self.REG_DAILY_BATTERY_CHARGE, 1)
+            if daily_charge:
+                attrs["daily_battery_charge"] = round(daily_charge[0] * 0.1, 2)
+
+            # Read inverter temperature (from 5xxx range)
+            inv_temp = await self._read_register(self.REG_INVERTER_TEMP, 1)
+            if inv_temp:
+                attrs["inverter_temperature"] = round(self._to_signed16(inv_temp[0]) * 0.1, 1)
+
+            # Read grid frequency
+            grid_freq = await self._read_register(self.REG_GRID_FREQUENCY, 1)
+            if grid_freq:
+                attrs["grid_frequency"] = round(grid_freq[0] * 0.1, 2)
+
+            # Read phase A voltage
+            voltage = await self._read_register(self.REG_PHASE_A_VOLTAGE, 1)
+            if voltage:
+                attrs["grid_voltage"] = round(voltage[0] * 0.1, 1)
+
+        except Exception as e:
+            _LOGGER.warning(f"Error reading some registers: {e}")
+
+        return attrs
 
     async def curtail(self) -> bool:
         """Stop the Sungrow SH inverter to prevent solar export.
@@ -248,7 +367,7 @@ class SungrowSHController(InverterController):
         """Get current status of the Sungrow SH inverter.
 
         Returns:
-            InverterState with current status
+            InverterState with current status and register attributes
         """
         try:
             # Ensure connected
@@ -259,11 +378,39 @@ class SungrowSHController(InverterController):
                     error_message="Failed to connect to inverter",
                 )
 
-            # For SH series, status reading may need adjustment
-            # For now, return a basic online status if connected
+            # Read all available registers
+            attrs = await self._read_all_registers()
+
+            # Determine status based on running state
+            running_state = await self._read_register(self.REGISTER_RUNNING_STATE, 1)
+            status = InverterStatus.ONLINE
+            is_curtailed = False
+
+            if running_state:
+                state_value = running_state[0]
+                if state_value == self.RUNNING_STATE_STOP:
+                    status = InverterStatus.CURTAILED
+                    is_curtailed = True
+                elif state_value == self.RUNNING_STATE_FAULT:
+                    status = InverterStatus.ERROR
+                elif state_value == self.RUNNING_STATE_STANDBY:
+                    status = InverterStatus.ONLINE
+                    attrs["running_state"] = "standby"
+                else:
+                    attrs["running_state"] = "running"
+
+            # Add model info
+            attrs["model"] = self.model or "SH Series"
+            attrs["host"] = self.host
+
+            # Get power output from active_power if available
+            power_output = attrs.get("active_power")
+
             self._last_state = InverterState(
-                status=InverterStatus.ONLINE,
-                is_curtailed=False,
+                status=status,
+                is_curtailed=is_curtailed,
+                power_output_w=power_output,
+                attributes=attrs,
             )
 
             return self._last_state

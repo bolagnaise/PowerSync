@@ -57,6 +57,7 @@ from .const import (
     SENSOR_TYPE_INVERTER_STATUS,
     CONF_INVERTER_CURTAILMENT_ENABLED,
     CONF_INVERTER_BRAND,
+    CONF_INVERTER_MODEL,
     CONF_INVERTER_HOST,
     CONF_DEMAND_CHARGE_ENABLED,
     CONF_DEMAND_CHARGE_RATE,
@@ -817,21 +818,31 @@ class InverterStatusSensor(SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return additional attributes."""
+        """Return additional attributes including register data."""
         inverter_enabled = self._get_config_value(CONF_INVERTER_CURTAILMENT_ENABLED, False)
         inverter_brand = self._get_config_value(CONF_INVERTER_BRAND, "sungrow")
         inverter_host = self._get_config_value(CONF_INVERTER_HOST, "")
+        inverter_model = self._get_config_value(CONF_INVERTER_MODEL, "")
 
         entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
         inverter_state = entry_data.get("inverter_last_state")
 
-        return {
+        # Base attributes
+        attrs = {
             "enabled": inverter_enabled,
             "brand": inverter_brand,
             "host": inverter_host,
+            "model": inverter_model,
             "last_state": inverter_state,
             "description": "Inverter shutdown to prevent negative export" if inverter_state == "curtailed" else "Inverter operating normally",
         }
+
+        # Add register attributes if available (from Modbus readings)
+        inverter_attrs = entry_data.get("inverter_attributes", {})
+        if inverter_attrs:
+            attrs.update(inverter_attrs)
+
+        return attrs
 
 
 class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):

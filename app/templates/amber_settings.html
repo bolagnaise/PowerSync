@@ -148,9 +148,9 @@
                         </label>
                         <label for="inverter_slave_id">
                             <span>Slave ID</span>
-                            <input type="number" id="inverter_slave_id" name="inverter_slave_id"
+                            <input type="text" id="inverter_slave_id" name="inverter_slave_id"
                                    value="{{ current_user.inverter_slave_id or 1 }}"
-                                   min="1" max="247">
+                                   placeholder="1" inputmode="numeric" pattern="[0-9]*">
                         </label>
                     </div>
 
