@@ -1544,13 +1544,13 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             final_data[CONF_INVERTER_HOST] = user_input.get(CONF_INVERTER_HOST, "")
             final_data[CONF_INVERTER_PORT] = user_input.get(CONF_INVERTER_PORT, DEFAULT_INVERTER_PORT)
 
-            # Only include slave ID for Modbus brands (not Enphase)
-            if self._inverter_brand != "enphase":
+            # Only include slave ID for Modbus brands (not Enphase/Zeversolar which use HTTP)
+            if self._inverter_brand not in ("enphase", "zeversolar"):
                 final_data[CONF_INVERTER_SLAVE_ID] = user_input.get(
                     CONF_INVERTER_SLAVE_ID, DEFAULT_INVERTER_SLAVE_ID
                 )
             else:
-                final_data[CONF_INVERTER_SLAVE_ID] = 1  # Default for Enphase
+                final_data[CONF_INVERTER_SLAVE_ID] = 1  # Default for HTTP-based inverters
 
             return self.async_create_entry(title="", data=final_data)
 

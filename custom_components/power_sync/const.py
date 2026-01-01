@@ -519,6 +519,7 @@ INVERTER_BRANDS = {
     "goodwe": "GoodWe",
     "huawei": "Huawei",
     "enphase": "Enphase",
+    "zeversolar": "Zeversolar",
 }
 
 # Fronius models (SunSpec Modbus)
