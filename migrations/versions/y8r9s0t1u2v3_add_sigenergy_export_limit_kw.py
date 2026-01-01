@@ -1,4 +1,4 @@
-"""Add sigenergy_export_limit_kw column for smart curtailment
+"""Add missing columns for smart curtailment and inverter tracking
 
 Revision ID: y8r9s0t1u2v3
 Revises: x7q8r9s0t1u2
@@ -19,8 +19,10 @@ depends_on = None
 def upgrade():
     with op.batch_alter_table('user', schema=None) as batch_op:
         batch_op.add_column(sa.Column('sigenergy_export_limit_kw', sa.Float(), nullable=True))
+        batch_op.add_column(sa.Column('inverter_power_limit_w', sa.Integer(), nullable=True))
 
 
 def downgrade():
     with op.batch_alter_table('user', schema=None) as batch_op:
+        batch_op.drop_column('inverter_power_limit_w')
         batch_op.drop_column('sigenergy_export_limit_kw')
