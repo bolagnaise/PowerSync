@@ -220,6 +220,12 @@
                         <button type="button" class="secondary" onclick="testInverterConnection()" id="testInverterBtn">
                             Test Connection
                         </button>
+                        <button type="button" class="secondary" onclick="curtailInverter()" id="curtailInverterBtn" style="margin-left: 0.5em; background: #d9534f; border-color: #d9534f;">
+                            🔴 Curtail
+                        </button>
+                        <button type="button" class="secondary" onclick="restoreInverter()" id="restoreInverterBtn" style="margin-left: 0.5em; background: #5cb85c; border-color: #5cb85c;">
+                            🟢 Restore
+                        </button>
                         <span id="inverterTestResult" style="margin-left: 1em; font-size: 0.9em;"></span>
                     </div>
 
@@ -627,6 +633,62 @@
             } finally {
                 btn.disabled = false;
                 btn.innerHTML = 'Test Connection';
+            }
+        }
+
+        async function curtailInverter() {
+            const btn = document.getElementById('curtailInverterBtn');
+            const result = document.getElementById('inverterTestResult');
+
+            btn.disabled = true;
+            btn.innerHTML = 'Curtailing...';
+            result.innerHTML = '';
+
+            try {
+                const response = await fetch('/api/inverter/curtail', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'}
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    result.innerHTML = '<span style="color: #51cf66;">Inverter curtailed successfully</span>';
+                } else {
+                    result.innerHTML = '<span style="color: #ff6b6b;">' + (data.error || 'Curtail failed') + '</span>';
+                }
+            } catch (error) {
+                result.innerHTML = '<span style="color: #ff6b6b;">Error: ' + error.message + '</span>';
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '🔴 Curtail';
+            }
+        }
+
+        async function restoreInverter() {
+            const btn = document.getElementById('restoreInverterBtn');
+            const result = document.getElementById('inverterTestResult');
+
+            btn.disabled = true;
+            btn.innerHTML = 'Restoring...';
+            result.innerHTML = '';
+
+            try {
+                const response = await fetch('/api/inverter/restore', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'}
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    result.innerHTML = '<span style="color: #51cf66;">Inverter restored successfully</span>';
+                } else {
+                    result.innerHTML = '<span style="color: #ff6b6b;">' + (data.error || 'Restore failed') + '</span>';
+                }
+            } catch (error) {
+                result.innerHTML = '<span style="color: #ff6b6b;">Error: ' + error.message + '</span>';
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '🟢 Restore';
             }
         }
     </script>
