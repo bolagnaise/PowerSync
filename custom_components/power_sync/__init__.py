@@ -1662,7 +1662,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         For AC-coupled systems, we only curtail the inverter when:
         1. Import price is negative (cheaper to buy power than generate it), OR
-        2. Battery is at 99%+ (can't absorb more solar) AND export is unprofitable
+        2. Export earnings are negative (paying to export - avoid exporting excess), OR
+        3. Battery is at 99%+ (can't absorb more solar) AND export is unprofitable
 
         If the battery can still absorb power, let the solar charge it even if export price is low.
 
@@ -1678,14 +1679,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info(f"🔌 AC-COUPLED: Import price negative ({import_price:.2f}c/kWh) - should curtail")
             return True
 
-        # Check 2: Get battery SOC - only curtail if battery is full (99%+)
+        # Check 2: If export earnings are negative, curtail (paying to export excess solar)
+        # This prevents exporting at negative prices even if battery isn't full
+        if export_earnings is not None and export_earnings < 0:
+            _LOGGER.info(f"🔌 AC-COUPLED: Export earnings negative ({export_earnings:.2f}c/kWh) - should curtail to avoid paying to export")
+            return True
+
+        # Check 3: Get battery SOC - only curtail if battery is full (99%+)
         battery_soc = await get_battery_soc()
 
         if battery_soc is None:
             _LOGGER.debug("Could not get battery SOC - not curtailing AC solar (conservative approach)")
             return False
 
-        # Only curtail if battery is at 99%+ AND export is unprofitable (< 1c/kWh)
+        # Check 4: Only curtail if battery is at 99%+ AND export is unprofitable (< 1c/kWh)
         if battery_soc >= 99:
             if export_earnings is not None and export_earnings < 1:
                 _LOGGER.info(f"🔌 AC-COUPLED: Battery full ({battery_soc:.0f}%) AND export unprofitable ({export_earnings:.2f}c/kWh) - should curtail")

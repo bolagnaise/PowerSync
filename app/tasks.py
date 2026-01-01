@@ -2173,8 +2173,9 @@ def _check_ac_coupled_curtailment(user, import_price: float = None, export_earni
     Smart curtailment logic for AC-coupled solar systems.
 
     For AC-coupled systems, we only curtail the inverter when:
-    1. Battery is at 99%+ (can't absorb more solar) AND export is unprofitable, OR
-    2. Import price is negative (cheaper to buy power than generate it)
+    1. Import price is negative (cheaper to buy power than generate it), OR
+    2. Export earnings are negative (paying to export - avoid exporting excess), OR
+    3. Battery is at 99%+ (can't absorb more solar) AND export is unprofitable
 
     If the battery can still absorb power, let the solar charge it even if export price is low.
 
@@ -2196,7 +2197,13 @@ def _check_ac_coupled_curtailment(user, import_price: float = None, export_earni
         logger.info(f"🔌 AC-COUPLED: Import price negative ({import_price:.2f}c/kWh) - should curtail for {user.email}")
         return True
 
-    # Check 2: Get battery SOC - only curtail if battery is full (99%+)
+    # Check 2: If export earnings are negative, curtail (paying to export excess solar)
+    # This prevents exporting at negative prices even if battery isn't full
+    if export_earnings is not None and export_earnings < 0:
+        logger.info(f"🔌 AC-COUPLED: Export earnings negative ({export_earnings:.2f}c/kWh) - should curtail to avoid paying to export for {user.email}")
+        return True
+
+    # Check 3: Get battery SOC - only curtail if battery is full (99%+)
     battery_soc = None
     battery_system = getattr(user, 'battery_system', 'tesla') or 'tesla'
 
@@ -2225,7 +2232,7 @@ def _check_ac_coupled_curtailment(user, import_price: float = None, export_earni
         logger.debug(f"Could not get battery SOC - not curtailing AC solar for {user.email}")
         return False
 
-    # Only curtail if battery is at 99%+ AND export is unprofitable (< 1c/kWh)
+    # Check 4: Only curtail if battery is at 99%+ AND export is unprofitable (< 1c/kWh)
     if battery_soc >= 99:
         if export_earnings is not None and export_earnings < 1:
             logger.info(f"🔌 AC-COUPLED: Battery full ({battery_soc}%) AND export unprofitable ({export_earnings:.2f}c/kWh) - should curtail for {user.email}")
