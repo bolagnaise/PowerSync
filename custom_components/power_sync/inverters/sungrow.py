@@ -389,6 +389,14 @@ class SungrowController(InverterController):
             elif is_curtailed:
                 status = InverterStatus.CURTAILED
                 attrs["running_state"] = "stopped"
+            elif running_state == 0xFFFF or running_state == 65535:
+                # Register not available on this model - infer from power output
+                if power_output is not None and power_output > 0:
+                    status = InverterStatus.ONLINE
+                    attrs["running_state"] = "running"
+                else:
+                    status = InverterStatus.ONLINE
+                    attrs["running_state"] = "idle"
             else:
                 status = InverterStatus.UNKNOWN
                 attrs["running_state"] = "unknown"
