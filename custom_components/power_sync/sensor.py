@@ -24,7 +24,9 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util import dt as dt_util
+from datetime import timedelta
 
 from .const import (
     DOMAIN,
@@ -761,7 +763,11 @@ class SolarCurtailmentSensor(SensorEntity):
 
 
 class InverterStatusSensor(SensorEntity):
-    """Sensor for displaying AC-coupled inverter status."""
+    """Sensor for displaying AC-coupled inverter status.
+
+    Actively polls the inverter to get real-time status rather than
+    relying only on cached state from curtailment operations.
+    """
 
     def __init__(
         self,
@@ -776,6 +782,9 @@ class InverterStatusSensor(SensorEntity):
         self._attr_name = "Inverter Status"
         self._attr_icon = "mdi:solar-panel"
         self._unsub_dispatcher = None
+        self._unsub_interval = None
+        self._cached_state = None
+        self._cached_attrs = {}
 
     async def async_added_to_hass(self) -> None:
         """Run when entity is added to hass."""
@@ -784,7 +793,8 @@ class InverterStatusSensor(SensorEntity):
         @callback
         def _handle_curtailment_update():
             """Handle curtailment update signal (inverter state may change too)."""
-            self.async_write_ha_state()
+            # Schedule a poll to get updated state
+            self.hass.async_create_task(self._async_poll_inverter())
 
         # Subscribe to curtailment update signal
         self._unsub_dispatcher = async_dispatcher_connect(
@@ -793,10 +803,93 @@ class InverterStatusSensor(SensorEntity):
             _handle_curtailment_update,
         )
 
+        # Do initial poll
+        await self._async_poll_inverter()
+
+        # Set up periodic polling (every 5 minutes)
+        async def _periodic_poll(_now=None):
+            await self._async_poll_inverter()
+
+        self._unsub_interval = async_track_time_interval(
+            self.hass,
+            _periodic_poll,
+            timedelta(minutes=5),
+        )
+
     async def async_will_remove_from_hass(self) -> None:
         """Run when entity is removed from hass."""
         if self._unsub_dispatcher:
             self._unsub_dispatcher()
+        if self._unsub_interval:
+            self._unsub_interval()
+
+    async def _async_poll_inverter(self) -> None:
+        """Poll the inverter to get current status."""
+        from .inverters import get_inverter_controller
+
+        inverter_enabled = self._get_config_value(CONF_INVERTER_CURTAILMENT_ENABLED, False)
+        if not inverter_enabled:
+            self._cached_state = "disabled"
+            self.async_write_ha_state()
+            return
+
+        inverter_brand = self._get_config_value(CONF_INVERTER_BRAND, "sungrow")
+        inverter_host = self._get_config_value(CONF_INVERTER_HOST, "")
+        inverter_port = self._get_config_value(CONF_INVERTER_PORT, 502)
+        inverter_slave_id = self._get_config_value(CONF_INVERTER_SLAVE_ID, 1)
+        inverter_model = self._get_config_value(CONF_INVERTER_MODEL)
+
+        if not inverter_host:
+            self._cached_state = "not_configured"
+            self.async_write_ha_state()
+            return
+
+        try:
+            controller = get_inverter_controller(
+                brand=inverter_brand,
+                host=inverter_host,
+                port=inverter_port,
+                slave_id=inverter_slave_id,
+                model=inverter_model,
+            )
+
+            if not controller:
+                self._cached_state = "error"
+                self._cached_attrs = {"error": f"Unsupported brand: {inverter_brand}"}
+                self.async_write_ha_state()
+                return
+
+            # Get status from inverter
+            state = await controller.get_status()
+            await controller.disconnect()
+
+            # Update cached state based on inverter response
+            if state.status.value == "offline":
+                self._cached_state = "offline"
+            elif state.is_curtailed:
+                self._cached_state = "curtailed"
+            else:
+                self._cached_state = "running"
+
+            # Store attributes from inverter
+            self._cached_attrs = state.attributes or {}
+            self._cached_attrs["power_limit_percent"] = state.power_limit_percent
+            self._cached_attrs["power_output_w"] = state.power_output_w
+
+            # Also update hass.data for consistency with curtailment logic
+            entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+            if entry_data:
+                entry_data["inverter_last_state"] = self._cached_state
+                entry_data["inverter_attributes"] = self._cached_attrs
+
+            _LOGGER.debug(f"Inverter poll: state={self._cached_state}, attrs={self._cached_attrs}")
+
+        except Exception as e:
+            _LOGGER.warning(f"Error polling inverter: {e}")
+            self._cached_state = "error"
+            self._cached_attrs = {"error": str(e)}
+
+        self.async_write_ha_state()
 
     def _get_config_value(self, key: str, default=None):
         """Get config value from options first, then data."""
@@ -805,24 +898,30 @@ class InverterStatusSensor(SensorEntity):
     @property
     def native_value(self) -> str:
         """Return the inverter status."""
-        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
-        inverter_state = entry_data.get("inverter_last_state")
-
-        if inverter_state == "curtailed":
+        if self._cached_state == "curtailed":
             return "Curtailed"
-        elif inverter_state == "running":
-            return "Running"
+        elif self._cached_state == "running":
+            return "Normal"
+        elif self._cached_state == "offline":
+            return "Offline"
+        elif self._cached_state == "disabled":
+            return "Disabled"
+        elif self._cached_state == "not_configured":
+            return "Not Configured"
+        elif self._cached_state == "error":
+            return "Error"
         else:
             return "Unknown"
 
     @property
     def icon(self) -> str:
         """Return the icon based on state."""
-        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
-        inverter_state = entry_data.get("inverter_last_state")
-
-        if inverter_state == "curtailed":
+        if self._cached_state == "curtailed":
             return "mdi:solar-panel-large"  # Darker icon when curtailed
+        elif self._cached_state == "offline":
+            return "mdi:solar-panel-variant-outline"
+        elif self._cached_state in ("error", "not_configured", "disabled"):
+            return "mdi:solar-panel-variant"
         return "mdi:solar-panel"
 
     @property
@@ -833,23 +932,31 @@ class InverterStatusSensor(SensorEntity):
         inverter_host = self._get_config_value(CONF_INVERTER_HOST, "")
         inverter_model = self._get_config_value(CONF_INVERTER_MODEL, "")
 
-        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
-        inverter_state = entry_data.get("inverter_last_state")
-
         # Base attributes
         attrs = {
             "enabled": inverter_enabled,
             "brand": inverter_brand,
             "host": inverter_host,
             "model": inverter_model,
-            "last_state": inverter_state,
-            "description": "Inverter shutdown to prevent negative export" if inverter_state == "curtailed" else "Inverter operating normally",
+            "state": self._cached_state,
         }
 
-        # Add register attributes if available (from Modbus readings)
-        inverter_attrs = entry_data.get("inverter_attributes", {})
-        if inverter_attrs:
-            attrs.update(inverter_attrs)
+        # Add description based on state
+        if self._cached_state == "curtailed":
+            attrs["description"] = "Inverter power limited to prevent negative export"
+        elif self._cached_state == "running":
+            attrs["description"] = "Inverter operating normally"
+        elif self._cached_state == "offline":
+            attrs["description"] = "Cannot reach inverter"
+        elif self._cached_state == "disabled":
+            attrs["description"] = "Inverter curtailment not enabled"
+        elif self._cached_state == "not_configured":
+            attrs["description"] = "Inverter host not configured"
+        else:
+            attrs["description"] = "Status unknown"
+
+        # Add cached attributes from inverter polling
+        attrs.update(self._cached_attrs)
 
         return attrs
 

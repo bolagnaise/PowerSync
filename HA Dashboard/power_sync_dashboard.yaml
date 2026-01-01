@@ -8,7 +8,7 @@ views:
       - type: horizontal-stack
         cards:
           - type: gauge
-            entity: sensor.power_sync_current_import_price
+            entity: sensor.current_import_price
             name: Import
             unit: $/kWh
             min: 0
@@ -24,7 +24,7 @@ views:
                   height: 140px;
                 }
           - type: gauge
-            entity: sensor.power_sync_current_export_price
+            entity: sensor.current_export_price
             name: Export Earnings
             unit: $/kWh
             min: -0.10
@@ -40,7 +40,7 @@ views:
                   height: 140px;
                 }
           - type: gauge
-            entity: sensor.power_sync_battery_level
+            entity: sensor.battery_level
             name: Battery
             unit: '%'
             min: 0
@@ -126,23 +126,23 @@ views:
       - type: custom:power-flow-card-plus
         entities:
           battery:
-            entity: sensor.power_sync_battery_power
-            state_of_charge: sensor.power_sync_battery_level
+            entity: sensor.battery_power
+            state_of_charge: sensor.battery_level
             name: Battery
             color_icon: true
             display_state: two_way
           grid:
-            entity: sensor.power_sync_grid_power
+            entity: sensor.grid_power
             name: Grid
             color_icon: true
             display_state: two_way
           solar:
-            entity: sensor.power_sync_solar_power
+            entity: sensor.solar_power
             name: Solar
             color_icon: true
             display_state: one_way
           home:
-            entity: sensor.power_sync_home_load
+            entity: sensor.home_load
             name: Home
             color_icon: true
         watt_threshold: 0
@@ -171,7 +171,7 @@ views:
                     return (val * 100).toFixed(0) + '¢';
                   }
         series:
-          - entity: sensor.power_sync_current_import_price
+          - entity: sensor.current_import_price
             name: Import
             type: line
             color: '#FF9800'
@@ -180,7 +180,7 @@ views:
             group_by:
               func: avg
               duration: 5min
-          - entity: sensor.power_sync_current_export_price
+          - entity: sensor.current_export_price
             name: Export Earnings
             type: line
             color: '#4CAF50'
@@ -219,7 +219,7 @@ views:
                     return (val * 100).toFixed(0) + '¢';
                   }
         series:
-          - entity: sensor.power_sync_tariff_schedule
+          - entity: sensor.tariff_schedule
             name: Buy Price
             type: line
             color: '#FF9800'
@@ -247,7 +247,7 @@ views:
               }
 
               return data;
-          - entity: sensor.power_sync_tariff_schedule
+          - entity: sensor.tariff_schedule
             name: Sell Price
             type: line
             color: '#4CAF50'
@@ -294,8 +294,8 @@ views:
             content: >-
               ## DC Solar (Tesla)
 
-              {% set state = states('sensor.power_sync_solar_curtailment') %}
-              {% set export_rule = state_attr('sensor.power_sync_solar_curtailment', 'export_rule') %}
+              {% set state = states('sensor.solar_curtailment') %}
+              {% set export_rule = state_attr('sensor.solar_curtailment', 'export_rule') %}
               {% if state == 'Active' %}
               <ha-icon icon="mdi:solar-power-variant-outline" style="color: #F44336;"></ha-icon>
               **CURTAILED**
@@ -315,7 +315,7 @@ views:
               style: |
                 ha-card {
                   height: 160px;
-                  {% set state = states('sensor.power_sync_solar_curtailment') %}
+                  {% set state = states('sensor.solar_curtailment') %}
                   {% if state == 'Active' %}
                   background: linear-gradient(135deg, rgba(244, 67, 54, 0.1) 0%, rgba(244, 67, 54, 0.05) 100%);
                   border-left: 4px solid #F44336;
@@ -329,9 +329,9 @@ views:
             content: >-
               ## AC Inverter
 
-              {% set state = states('sensor.power_sync_inverter_status') %}
-              {% set power_limit = state_attr('sensor.power_sync_inverter_status', 'power_limit_percent') %}
-              {% set brand = state_attr('sensor.power_sync_inverter_status', 'brand') %}
+              {% set state = states('sensor.inverter_status') %}
+              {% set power_limit = state_attr('sensor.inverter_status', 'power_limit_percent') %}
+              {% set brand = state_attr('sensor.inverter_status', 'brand') %}
               {% if state == 'unavailable' or state == 'unknown' %}
               <ha-icon icon="mdi:solar-panel" style="color: #9E9E9E;"></ha-icon>
               **Not Configured**
@@ -361,7 +361,7 @@ views:
               style: |
                 ha-card {
                   height: 160px;
-                  {% set state = states('sensor.power_sync_inverter_status') %}
+                  {% set state = states('sensor.inverter_status') %}
                   {% if state == 'Curtailed' %}
                   background: linear-gradient(135deg, rgba(244, 67, 54, 0.1) 0%, rgba(244, 67, 54, 0.05) 100%);
                   border-left: 4px solid #F44336;
@@ -380,7 +380,7 @@ views:
       - type: horizontal-stack
         cards:
           - type: gauge
-            entity: sensor.power_sync_battery_health
+            entity: sensor.battery_health
             name: Overall
             unit: '%'
             min: 0
@@ -391,7 +391,7 @@ views:
               yellow: 85
               red: 0
           - type: gauge
-            entity: sensor.power_sync_battery_health
+            entity: sensor.battery_health
             attribute: battery_1_health_percent
             name: Battery 1
             unit: '%'
@@ -403,7 +403,7 @@ views:
               yellow: 85
               red: 0
           - type: gauge
-            entity: sensor.power_sync_battery_health
+            entity: sensor.battery_health
             attribute: battery_2_health_percent
             name: Battery 2
             unit: '%'
@@ -415,7 +415,7 @@ views:
               yellow: 85
               red: 0
           - type: gauge
-            entity: sensor.power_sync_battery_health
+            entity: sensor.battery_health
             attribute: battery_3_health_percent
             name: Battery 3
             unit: '%'
@@ -429,10 +429,10 @@ views:
       # Battery Capacity Details
       - type: markdown
         content: |
-          {% set original = state_attr('sensor.power_sync_battery_health', 'original_capacity_kwh') %}
-          {% set current = state_attr('sensor.power_sync_battery_health', 'current_capacity_kwh') %}
-          {% set scan = state_attr('sensor.power_sync_battery_health', 'last_scan') %}
-          {%- if states('sensor.power_sync_battery_health') not in ['unavailable', 'unknown'] %}
+          {% set original = state_attr('sensor.battery_health', 'original_capacity_kwh') %}
+          {% set current = state_attr('sensor.battery_health', 'current_capacity_kwh') %}
+          {% set scan = state_attr('sensor.battery_health', 'last_scan') %}
+          {%- if states('sensor.battery_health') not in ['unavailable', 'unknown'] %}
           **Capacity:** {{ current }} / {{ original }} kWh | **Last scan:** {{ scan[:10] if scan else 'N/A' }}
           {%- else %}
           Scan from the PowerSync Mobile app while connected to Powerwall WiFi.
@@ -446,7 +446,7 @@ views:
         span:
           start: day
         series:
-          - entity: sensor.power_sync_solar_power
+          - entity: sensor.solar_power
             name: Solar
             type: area
             color: '#FFD700'
@@ -469,7 +469,7 @@ views:
         span:
           start: day
         series:
-          - entity: sensor.power_sync_battery_power
+          - entity: sensor.battery_power
             name: Battery
             type: area
             color: '#2196F3'
@@ -490,7 +490,7 @@ views:
         span:
           start: day
         series:
-          - entity: sensor.power_sync_grid_power
+          - entity: sensor.grid_power
             name: Grid
             type: area
             color: '#F44336'
@@ -511,7 +511,7 @@ views:
         span:
           start: day
         series:
-          - entity: sensor.power_sync_home_load
+          - entity: sensor.home_load
             name: Home
             type: area
             color: '#9C27B0'
