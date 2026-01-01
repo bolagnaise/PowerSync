@@ -297,14 +297,12 @@ views:
               {% set state = states('sensor.solar_curtailment') %}
               {% set export_rule = state_attr('sensor.solar_curtailment', 'export_rule') %}
               {% if state == 'Active' %}
-              <ha-icon icon="mdi:solar-power-variant-outline" style="color: #F44336;"></ha-icon>
               **CURTAILED**
 
               Export blocked (negative price)
 
               Rule: `{{ export_rule }}`
               {% else %}
-              <ha-icon icon="mdi:solar-power-variant" style="color: #4CAF50;"></ha-icon>
               **Normal**
 
               Export allowed
@@ -333,24 +331,20 @@ views:
               {% set power_limit = state_attr('sensor.inverter_status', 'power_limit_percent') %}
               {% set brand = state_attr('sensor.inverter_status', 'brand') %}
               {% if state == 'unavailable' or state == 'unknown' %}
-              <ha-icon icon="mdi:solar-panel" style="color: #9E9E9E;"></ha-icon>
               **Not Configured**
 
               Enable in integration settings
               {% elif state == 'Curtailed' %}
-              <ha-icon icon="mdi:solar-panel" style="color: #F44336;"></ha-icon>
               **CURTAILED**
 
               {% if power_limit %}Power: {{ power_limit }}%{% endif %}
 
               {{ brand | title if brand else '' }}
               {% elif state == 'Offline' %}
-              <ha-icon icon="mdi:solar-panel" style="color: #FF9800;"></ha-icon>
               **Offline**
 
               Cannot reach inverter
               {% else %}
-              <ha-icon icon="mdi:solar-panel" style="color: #4CAF50;"></ha-icon>
               **Normal**
 
               {% if power_limit %}Power: {{ power_limit }}%{% endif %}
