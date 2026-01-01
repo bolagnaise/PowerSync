@@ -2174,7 +2174,7 @@ def _check_ac_coupled_curtailment(user, import_price: float = None, export_earni
 
     For AC-coupled systems, we only curtail the inverter when:
     1. Import price is negative (cheaper to buy power than generate it), OR
-    2. Export earnings are negative (paying to export - avoid exporting excess), OR
+    2. Actually exporting (grid_power < 0) AND export earnings are negative, OR
     3. Battery is at 99%+ (can't absorb more solar) AND export is unprofitable
 
     If the battery can still absorb power, let the solar charge it even if export price is low.
@@ -2197,14 +2197,9 @@ def _check_ac_coupled_curtailment(user, import_price: float = None, export_earni
         logger.info(f"🔌 AC-COUPLED: Import price negative ({import_price:.2f}c/kWh) - should curtail for {user.email}")
         return True
 
-    # Check 2: If export earnings are negative, curtail (paying to export excess solar)
-    # This prevents exporting at negative prices even if battery isn't full
-    if export_earnings is not None and export_earnings < 0:
-        logger.info(f"🔌 AC-COUPLED: Export earnings negative ({export_earnings:.2f}c/kWh) - should curtail to avoid paying to export for {user.email}")
-        return True
-
-    # Check 3: Get battery SOC - only curtail if battery is full (99%+)
+    # Get live site data for grid_power and battery_soc
     battery_soc = None
+    grid_power = None
     battery_system = getattr(user, 'battery_system', 'tesla') or 'tesla'
 
     try:
@@ -2215,7 +2210,8 @@ def _check_ac_coupled_curtailment(user, import_price: float = None, export_earni
                     site_status = tesla_client.get_live_site_data(user.tesla_energy_site_id)
                     if site_status:
                         battery_soc = site_status.get('percentage_charged', 0)
-                        logger.debug(f"Tesla battery SOC: {battery_soc}% for {user.email}")
+                        grid_power = site_status.get('grid_power', 0)  # Negative = exporting
+                        logger.debug(f"Tesla live status: SOC={battery_soc}%, grid={grid_power}W for {user.email}")
 
         elif battery_system == 'sigenergy':
             # For Sigenergy, we could get SOC via Modbus if needed
@@ -2224,15 +2220,26 @@ def _check_ac_coupled_curtailment(user, import_price: float = None, export_earni
             return False
 
     except Exception as e:
-        logger.warning(f"Failed to get battery SOC for AC curtailment check: {e}")
-        # If we can't get SOC, be conservative and don't curtail
+        logger.warning(f"Failed to get live site data for AC curtailment check: {e}")
+        # If we can't get data, be conservative and don't curtail
         return False
 
     if battery_soc is None:
         logger.debug(f"Could not get battery SOC - not curtailing AC solar for {user.email}")
         return False
 
-    # Check 4: Only curtail if battery is at 99%+ AND export is unprofitable (< 1c/kWh)
+    # Check 2: If actually exporting (grid_power < 0) AND export earnings are negative
+    # Only curtail when we're actually paying to export, not just when export price is negative
+    if grid_power is not None and grid_power < 0:  # Negative = exporting
+        if export_earnings is not None and export_earnings < 0:
+            logger.info(f"🔌 AC-COUPLED: Exporting {abs(grid_power):.0f}W at negative price ({export_earnings:.2f}c/kWh) - should curtail for {user.email}")
+            return True
+        else:
+            logger.debug(f"Exporting {abs(grid_power):.0f}W but price is OK ({export_earnings:.2f}c/kWh) - not curtailing for {user.email}")
+    else:
+        logger.debug(f"Not exporting (grid={grid_power}W) - no need to curtail for negative export for {user.email}")
+
+    # Check 3: Only curtail if battery is at 99%+ AND export is unprofitable (< 1c/kWh)
     if battery_soc >= 99:
         if export_earnings is not None and export_earnings < 1:
             logger.info(f"🔌 AC-COUPLED: Battery full ({battery_soc}%) AND export unprofitable ({export_earnings:.2f}c/kWh) - should curtail for {user.email}")

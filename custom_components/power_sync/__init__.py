@@ -1616,17 +1616,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Signal sensor to update
         async_dispatcher_send(hass, f"power_sync_curtailment_updated_{entry.entry_id}")
 
-    # Helper function to get battery SOC from Tesla API
-    async def get_battery_soc() -> float | None:
-        """Get current battery SOC from Tesla API.
+    # Helper function to get live status from Tesla API
+    async def get_live_status() -> dict | None:
+        """Get current live status from Tesla API.
 
         Returns:
-            Battery SOC percentage (0-100) or None if unavailable
+            Dict with battery_soc, grid_power, solar_power, etc. or None if unavailable
+            grid_power: Negative = exporting to grid, Positive = importing from grid
         """
         try:
             current_token, current_provider = token_getter()
             if not current_token:
-                _LOGGER.debug("No Tesla API token available for battery SOC check")
+                _LOGGER.debug("No Tesla API token available for live status check")
                 return None
 
             session = async_get_clientsession(hass)
@@ -1644,15 +1645,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 if response.status == 200:
                     data = await response.json()
                     site_status = data.get("response", {})
-                    battery_soc = site_status.get("percentage_charged")
-                    if battery_soc is not None:
-                        _LOGGER.debug(f"Battery SOC from Tesla API: {battery_soc}%")
-                        return float(battery_soc)
+                    result = {
+                        "battery_soc": site_status.get("percentage_charged"),
+                        "grid_power": site_status.get("grid_power"),  # Negative = exporting
+                        "solar_power": site_status.get("solar_power"),
+                        "battery_power": site_status.get("battery_power"),  # Negative = charging
+                        "load_power": site_status.get("load_power"),
+                    }
+                    _LOGGER.debug(f"Live status: SOC={result['battery_soc']}%, grid={result['grid_power']}W, solar={result['solar_power']}W")
+                    return result
                 else:
                     _LOGGER.debug(f"Failed to get live_status: {response.status}")
 
         except Exception as e:
-            _LOGGER.debug(f"Error getting battery SOC: {e}")
+            _LOGGER.debug(f"Error getting live status: {e}")
 
         return None
 
@@ -1662,7 +1668,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         For AC-coupled systems, we only curtail the inverter when:
         1. Import price is negative (cheaper to buy power than generate it), OR
-        2. Export earnings are negative (paying to export - avoid exporting excess), OR
+        2. Actually exporting (grid_power < 0) AND export earnings are negative, OR
         3. Battery is at 99%+ (can't absorb more solar) AND export is unprofitable
 
         If the battery can still absorb power, let the solar charge it even if export price is low.
@@ -1679,21 +1685,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info(f"🔌 AC-COUPLED: Import price negative ({import_price:.2f}c/kWh) - should curtail")
             return True
 
-        # Check 2: If export earnings are negative, curtail (paying to export excess solar)
-        # This prevents exporting at negative prices even if battery isn't full
-        if export_earnings is not None and export_earnings < 0:
-            _LOGGER.info(f"🔌 AC-COUPLED: Export earnings negative ({export_earnings:.2f}c/kWh) - should curtail to avoid paying to export")
-            return True
+        # Get live status for grid_power and battery_soc
+        live_status = await get_live_status()
 
-        # Check 3: Get battery SOC - only curtail if battery is full (99%+)
-        battery_soc = await get_battery_soc()
-
-        if battery_soc is None:
-            _LOGGER.debug("Could not get battery SOC - not curtailing AC solar (conservative approach)")
+        if live_status is None:
+            _LOGGER.debug("Could not get live status - not curtailing AC solar (conservative approach)")
             return False
 
-        # Check 4: Only curtail if battery is at 99%+ AND export is unprofitable (< 1c/kWh)
-        if battery_soc >= 99:
+        grid_power = live_status.get("grid_power")
+        battery_soc = live_status.get("battery_soc")
+
+        # Check 2: If actually exporting (grid_power < 0) AND export earnings are negative
+        # Only curtail when we're actually paying to export, not just when export price is negative
+        if grid_power is not None and grid_power < 0:  # Negative = exporting
+            if export_earnings is not None and export_earnings < 0:
+                _LOGGER.info(f"🔌 AC-COUPLED: Exporting {abs(grid_power):.0f}W at negative price ({export_earnings:.2f}c/kWh) - should curtail")
+                return True
+            else:
+                _LOGGER.debug(f"Exporting {abs(grid_power):.0f}W but price is OK ({export_earnings:.2f}c/kWh) - not curtailing")
+        else:
+            _LOGGER.debug(f"Not exporting (grid={grid_power}W) - no need to curtail for negative export")
+
+        # Check 3: Only curtail if battery is at 99%+ AND export is unprofitable (< 1c/kWh)
+        if battery_soc is not None and battery_soc >= 99:
             if export_earnings is not None and export_earnings < 1:
                 _LOGGER.info(f"🔌 AC-COUPLED: Battery full ({battery_soc:.0f}%) AND export unprofitable ({export_earnings:.2f}c/kWh) - should curtail")
                 return True
@@ -1701,7 +1715,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.debug(f"Battery full ({battery_soc:.0f}%) but export still profitable ({export_earnings:.2f}c/kWh) - not curtailing")
                 return False
         else:
-            _LOGGER.debug(f"Battery not full ({battery_soc:.0f}%) - solar can charge battery, not curtailing")
+            _LOGGER.debug(f"Battery not full ({battery_soc}%) - solar can charge battery, not curtailing")
             return False
 
     # Helper function for AC-coupled inverter curtailment
