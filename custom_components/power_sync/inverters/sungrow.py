@@ -17,20 +17,69 @@ from .base import InverterController, InverterState, InverterStatus
 _LOGGER = logging.getLogger(__name__)
 
 
+# Register maps for different Sungrow model families
+# Each map contains: (address, count, scale_factor)
+# count=1 for 16-bit, count=2 for 32-bit little-endian
+REGISTER_MAPS = {
+    # SG10RS and newer models (tested on SG10RS)
+    "sg10rs": {
+        "daily_yield": (5002, 1, 0.1),       # kWh
+        "total_yield": (5003, 2, 0.1),       # kWh, 32-bit LE
+        "dc_power": (5016, 2, 1),            # W, 32-bit LE
+        "mppt1_voltage": (5010, 1, 0.1),     # V
+        "mppt1_current": (5011, 1, 0.1),     # A
+        "mppt2_voltage": (5012, 1, 0.1),     # V
+        "mppt2_current": (5013, 1, 0.1),     # A
+        "temperature": (5007, 1, 0.1),       # °C (signed)
+        "grid_voltage": (5018, 1, 0.1),      # V
+        "grid_frequency": (5035, 1, 0.1),    # Hz
+        "running_state": (5037, 1, 1),       # State code
+        "power_limit_toggle": (5006, 1, 1),  # Holding register
+        "power_limit_percent": (5007, 1, 0.1),  # Holding register, /10
+    },
+    # SG.05RS and older models (tested on SG.05RS)
+    "sg05rs": {
+        "daily_yield": (5003, 1, 0.1),       # kWh
+        "total_yield": (5004, 1, 0.1),       # kWh, 16-bit only
+        "dc_power": (5031, 1, 1),            # W, 16-bit (active power)
+        "mppt1_voltage": (5011, 1, 0.1),     # V
+        "mppt1_current": (5012, 1, 0.1),     # A
+        "mppt2_voltage": (5013, 1, 0.1),     # V
+        "mppt2_current": (5014, 1, 0.1),     # A
+        "temperature": (5001, 1, 1),         # °C (no scale)
+        "grid_voltage": (5019, 1, 0.1),      # V
+        "grid_frequency": (5036, 1, 0.1),    # Hz
+        "running_state": None,               # Not available - infer from power
+        "power_limit_toggle": (5147, 1, 1),  # Holding register (different!)
+        "power_limit_percent": None,         # Not found in scan
+    },
+}
+
+# Model name to register map mapping
+MODEL_MAP = {
+    "sg10rs": "sg10rs",
+    "sg10": "sg10rs",
+    "sg8rs": "sg10rs",
+    "sg5rs": "sg05rs",
+    "sg5.0rs": "sg05rs",
+    "sg05rs": "sg05rs",
+    "sg3rs": "sg05rs",
+    "sg3.0rs": "sg05rs",
+}
+
+
 class SungrowController(InverterController):
     """Controller for Sungrow SG series inverters via Modbus TCP.
 
     Uses Modbus TCP to communicate with the inverter through
     the WiNet-S WiFi/Ethernet dongle.
+
+    Supports multiple model families with different register maps:
+    - SG10RS family: SG8RS, SG10RS (newer register layout)
+    - SG.05RS family: SG3.0RS, SG5.0RS (older register layout)
     """
 
-    # Modbus register addresses (0-indexed for pymodbus)
-    # Documentation register - 1 = pymodbus address
-    REGISTER_RUN_MODE = 5005          # 5006 - Run mode control
-    REGISTER_POWER_LIMIT_TOGGLE = 5006  # 5007
-    REGISTER_POWER_LIMIT_PERCENT = 5007  # 5008
-
-    # Run mode values
+    # Run mode values (for curtailment control)
     RUN_MODE_SHUTDOWN = 206  # Stop inverter
     RUN_MODE_ENABLED = 207   # Normal operation
 
@@ -38,11 +87,7 @@ class SungrowController(InverterController):
     POWER_LIMIT_DISABLED = 85   # 0x55
     POWER_LIMIT_ENABLED = 170   # 0xAA
 
-    # Status registers for reading inverter state
-    REGISTER_RUNNING_STATE = 5037     # Current running state
-    REGISTER_TOTAL_ACTIVE_POWER = 5016  # Total active power (W)
-
-    # Running state values (varies by model - SG10RS uses 0x0000 for running)
+    # Running state values (varies by model)
     STATE_RUNNING = 0x0000       # Normal operation (SG10RS)
     STATE_RUNNING_ALT = 0x0002   # Normal operation (some models)
     STATE_STOP = 0x8000
@@ -52,26 +97,8 @@ class SungrowController(InverterController):
     STATE_FAULT = 0x1300
     STATE_MAINTAIN = 0x1500
 
-    # ===== SG Series Register Addresses (0-indexed) =====
-    # Energy generation
-    REG_DAILY_YIELD = 5002             # 5003 - Daily power yields (kWh * 0.1)
-    REG_TOTAL_YIELD = 5003             # 5004-5005 - Total power yields (kWh * 0.1, U32)
-
-    # Power readings
-    REG_TOTAL_DC_POWER = 5016          # 5017-5018 - Total DC power (W, U32)
-
-    # MPPT readings
-    REG_MPPT1_VOLTAGE = 5010           # 5011 - MPPT1 voltage (V * 0.1)
-    REG_MPPT1_CURRENT = 5011           # 5012 - MPPT1 current (A * 0.1)
-    REG_MPPT2_VOLTAGE = 5012           # 5013 - MPPT2 voltage (V * 0.1)
-    REG_MPPT2_CURRENT = 5013           # 5014 - MPPT2 current (A * 0.1)
-
-    # Temperature
-    REG_INVERTER_TEMP = 5007           # 5008 - Inverter temperature (°C * 0.1, signed)
-
-    # Grid
-    REG_PHASE_A_VOLTAGE = 5018         # 5019 - Phase A voltage (V * 0.1)
-    REG_GRID_FREQUENCY = 5035          # 5036 - Grid frequency (Hz * 0.1)
+    # Run mode register (common across models)
+    REGISTER_RUN_MODE = 5005
 
     # Timeout for Modbus operations
     TIMEOUT_SECONDS = 10.0
@@ -89,11 +116,17 @@ class SungrowController(InverterController):
             host: IP address of WiNet-S dongle
             port: Modbus TCP port (default: 502)
             slave_id: Modbus slave ID (default: 1)
-            model: Sungrow model (e.g., 'sg10')
+            model: Sungrow model (e.g., 'sg10rs', 'sg5.0rs')
         """
         super().__init__(host, port, slave_id, model)
         self._client: Optional[AsyncModbusTcpClient] = None
         self._lock = asyncio.Lock()
+
+        # Select register map based on model
+        model_key = (model or "").lower().replace(".", "").replace("-", "").replace(" ", "")
+        map_name = MODEL_MAP.get(model_key, "sg10rs")  # Default to sg10rs
+        self._reg_map = REGISTER_MAPS[map_name]
+        _LOGGER.info(f"Sungrow controller using register map '{map_name}' for model '{model}'")
 
     async def connect(self) -> bool:
         """Connect to the Sungrow inverter via Modbus TCP."""
@@ -266,69 +299,110 @@ class SungrowController(InverterController):
         _LOGGER.debug(f"Input register read failed at {address}, trying holding registers")
         return await self._read_register(address, count)
 
-    async def _read_all_registers(self) -> dict:
-        """Read all SG series registers and return as attributes dict.
+    async def _read_register_from_map(self, key: str, use_holding: bool = False) -> Optional[tuple]:
+        """Read a register using the model-specific register map.
 
-        Tries input registers first, then falls back to holding registers
-        for compatibility with different Sungrow models/firmware.
+        Args:
+            key: Register key name (e.g., 'dc_power', 'daily_yield')
+            use_holding: If True, use holding registers instead of input
+
+        Returns:
+            Tuple of (raw_value, scaled_value) or None if not available/failed
+        """
+        reg_info = self._reg_map.get(key)
+        if not reg_info:
+            return None
+
+        address, count, scale = reg_info
+
+        if use_holding:
+            regs = await self._read_register(address, count)
+        else:
+            regs = await self._read_any_register(address, count)
+
+        if not regs:
+            return None
+
+        # Convert based on register count
+        if count == 2:
+            raw_value = self._to_unsigned32(regs)
+        else:
+            raw_value = regs[0]
+
+        scaled_value = raw_value * scale
+        return (raw_value, scaled_value)
+
+    async def _read_all_registers(self) -> dict:
+        """Read all registers using model-specific register map.
+
+        Automatically uses the correct register addresses based on the
+        detected model family (SG10RS vs SG.05RS, etc.).
         """
         attrs = {}
 
         try:
-            # Read DC power (32-bit) - this is the most important reading
-            dc_power = await self._read_any_register(self.REG_TOTAL_DC_POWER, 2)
-            if dc_power and len(dc_power) >= 2:
-                attrs["dc_power"] = self._to_unsigned32(dc_power)
-                _LOGGER.debug(f"Sungrow DC power: {attrs['dc_power']}W")
+            # Read DC/Active power - most important reading
+            power_result = await self._read_register_from_map("dc_power")
+            if power_result:
+                attrs["dc_power"] = int(power_result[1])
+                _LOGGER.debug(f"Sungrow power: {attrs['dc_power']}W")
             else:
-                _LOGGER.warning(f"Failed to read DC power from register {self.REG_TOTAL_DC_POWER}")
+                _LOGGER.warning("Failed to read power register")
 
             # Read daily yield
-            daily_yield = await self._read_any_register(self.REG_DAILY_YIELD, 1)
-            if daily_yield:
-                attrs["daily_pv_generation"] = round(daily_yield[0] * 0.1, 2)
+            daily_result = await self._read_register_from_map("daily_yield")
+            if daily_result:
+                attrs["daily_pv_generation"] = round(daily_result[1], 2)
 
-            # Read total yield (32-bit)
-            total_yield = await self._read_any_register(self.REG_TOTAL_YIELD, 2)
-            if total_yield and len(total_yield) >= 2:
-                attrs["total_pv_generation"] = round(self._to_unsigned32(total_yield) * 0.1, 1)
+            # Read total yield
+            total_result = await self._read_register_from_map("total_yield")
+            if total_result:
+                attrs["total_pv_generation"] = round(total_result[1], 1)
 
             # Read MPPT values
-            mppt_regs = await self._read_any_register(self.REG_MPPT1_VOLTAGE, 4)
-            if mppt_regs and len(mppt_regs) >= 4:
-                attrs["mppt1_voltage"] = round(mppt_regs[0] * 0.1, 1)
-                attrs["mppt1_current"] = round(mppt_regs[1] * 0.1, 1)
-                attrs["mppt2_voltage"] = round(mppt_regs[2] * 0.1, 1)
-                attrs["mppt2_current"] = round(mppt_regs[3] * 0.1, 1)
-                # Calculate MPPT power
+            mppt1_v = await self._read_register_from_map("mppt1_voltage")
+            mppt1_i = await self._read_register_from_map("mppt1_current")
+            if mppt1_v and mppt1_i:
+                attrs["mppt1_voltage"] = round(mppt1_v[1], 1)
+                attrs["mppt1_current"] = round(mppt1_i[1], 1)
                 attrs["mppt1_power"] = round(attrs["mppt1_voltage"] * attrs["mppt1_current"], 0)
+
+            mppt2_v = await self._read_register_from_map("mppt2_voltage")
+            mppt2_i = await self._read_register_from_map("mppt2_current")
+            if mppt2_v and mppt2_i:
+                attrs["mppt2_voltage"] = round(mppt2_v[1], 1)
+                attrs["mppt2_current"] = round(mppt2_i[1], 1)
                 attrs["mppt2_power"] = round(attrs["mppt2_voltage"] * attrs["mppt2_current"], 0)
 
-            # Read inverter temperature
-            inv_temp = await self._read_any_register(self.REG_INVERTER_TEMP, 1)
-            if inv_temp:
-                attrs["inverter_temperature"] = round(self._to_signed16(inv_temp[0]) * 0.1, 1)
+            # Read temperature
+            temp_result = await self._read_register_from_map("temperature")
+            if temp_result:
+                # Some models use signed values
+                temp_scale = self._reg_map["temperature"][2]
+                if temp_scale < 1:  # If scaled, treat as signed
+                    attrs["inverter_temperature"] = round(self._to_signed16(temp_result[0]) * temp_scale, 1)
+                else:
+                    attrs["inverter_temperature"] = temp_result[1]
 
             # Read grid voltage
-            voltage = await self._read_any_register(self.REG_PHASE_A_VOLTAGE, 1)
-            if voltage:
-                attrs["grid_voltage"] = round(voltage[0] * 0.1, 1)
+            voltage_result = await self._read_register_from_map("grid_voltage")
+            if voltage_result:
+                attrs["grid_voltage"] = round(voltage_result[1], 1)
 
             # Read grid frequency
-            freq = await self._read_any_register(self.REG_GRID_FREQUENCY, 1)
-            if freq:
-                attrs["grid_frequency"] = round(freq[0] * 0.1, 2)
+            freq_result = await self._read_register_from_map("grid_frequency")
+            if freq_result:
+                attrs["grid_frequency"] = round(freq_result[1], 2)
 
-            # Read power limit settings (holding registers - these are configurable)
-            limit_toggle = await self._read_register(self.REGISTER_POWER_LIMIT_TOGGLE, 1)
+            # Read power limit settings (holding registers)
+            limit_toggle = await self._read_register_from_map("power_limit_toggle", use_holding=True)
             if limit_toggle:
-                attrs["power_limit_enabled"] = limit_toggle[0] == 170  # 0xAA = enabled
+                attrs["power_limit_enabled"] = limit_toggle[0] == self.POWER_LIMIT_ENABLED
                 _LOGGER.debug(f"Sungrow power limit toggle: {limit_toggle[0]}")
 
-            limit_percent = await self._read_register(self.REGISTER_POWER_LIMIT_PERCENT, 1)
+            limit_percent = await self._read_register_from_map("power_limit_percent", use_holding=True)
             if limit_percent:
-                # Value is stored as percentage * 10 (e.g., 1000 = 100%)
-                attrs["power_limit_percent"] = min(limit_percent[0] / 10, 100)
+                attrs["power_limit_percent"] = min(limit_percent[1], 100)
                 _LOGGER.debug(f"Sungrow power limit percent: {attrs['power_limit_percent']}%")
 
             _LOGGER.info(f"Sungrow register read complete: {len(attrs)} attributes collected")
@@ -436,48 +510,56 @@ class SungrowController(InverterController):
             # Read all available registers
             attrs = await self._read_all_registers()
 
-            # Read running state register (input register for status data)
-            state_regs = await self._read_input_register(self.REGISTER_RUNNING_STATE, 1)
-
-            if state_regs is None:
-                return InverterState(
-                    status=InverterStatus.ERROR,
-                    is_curtailed=False,
-                    error_message="Failed to read inverter state",
-                )
-
-            running_state = state_regs[0]
-            # Use dc_power from attrs (already read as 32-bit value)
+            # Get power output from attrs
             power_output = attrs.get("dc_power")
 
-            # Determine status based on running state
-            is_curtailed = running_state in (
-                self.STATE_STOP,
-                self.STATE_SHUTDOWN,
-                self.STATE_STANDBY,
-                self.STATE_INITIAL_STANDBY,
-            )
+            # Read running state register if available for this model
+            running_state_reg = self._reg_map.get("running_state")
+            running_state = None
+            is_curtailed = False
 
-            if running_state in (self.STATE_RUNNING, self.STATE_RUNNING_ALT):
-                status = InverterStatus.ONLINE
-                attrs["running_state"] = "running"
-            elif running_state == self.STATE_FAULT:
-                status = InverterStatus.ERROR
-                attrs["running_state"] = "fault"
-            elif is_curtailed:
-                status = InverterStatus.CURTAILED
-                attrs["running_state"] = "stopped"
-            elif running_state == 0xFFFF or running_state == 65535:
-                # Register not available on this model - infer from power output
+            if running_state_reg:
+                state_regs = await self._read_input_register(running_state_reg[0], 1)
+                if state_regs:
+                    running_state = state_regs[0]
+
+            # Determine status based on running state (if available) or power output
+            if running_state is not None:
+                is_curtailed = running_state in (
+                    self.STATE_STOP,
+                    self.STATE_SHUTDOWN,
+                    self.STATE_STANDBY,
+                    self.STATE_INITIAL_STANDBY,
+                )
+
+                if running_state in (self.STATE_RUNNING, self.STATE_RUNNING_ALT):
+                    status = InverterStatus.ONLINE
+                    attrs["running_state"] = "running"
+                elif running_state == self.STATE_FAULT:
+                    status = InverterStatus.ERROR
+                    attrs["running_state"] = "fault"
+                elif is_curtailed:
+                    status = InverterStatus.CURTAILED
+                    attrs["running_state"] = "stopped"
+                elif running_state == 0xFFFF or running_state == 65535:
+                    # Register returned invalid value - infer from power output
+                    if power_output is not None and power_output > 0:
+                        status = InverterStatus.ONLINE
+                        attrs["running_state"] = "running"
+                    else:
+                        status = InverterStatus.ONLINE
+                        attrs["running_state"] = "idle"
+                else:
+                    status = InverterStatus.UNKNOWN
+                    attrs["running_state"] = f"unknown (0x{running_state:04X})"
+            else:
+                # No running state register - infer from power output (e.g., SG.05RS)
                 if power_output is not None and power_output > 0:
                     status = InverterStatus.ONLINE
                     attrs["running_state"] = "running"
                 else:
                     status = InverterStatus.ONLINE
                     attrs["running_state"] = "idle"
-            else:
-                status = InverterStatus.UNKNOWN
-                attrs["running_state"] = "unknown"
 
             # Add model info
             attrs["model"] = self.model or "SG Series"
