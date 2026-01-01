@@ -791,11 +791,13 @@ class InverterStatusSensor(SensorEntity):
     async def async_added_to_hass(self) -> None:
         """Run when entity is added to hass."""
         await super().async_added_to_hass()
+        _LOGGER.info("InverterStatusSensor added to hass - setting up polling")
 
         @callback
         def _handle_curtailment_update():
             """Handle curtailment update signal (inverter state may change too)."""
             # Schedule a poll to get updated state
+            _LOGGER.debug("Curtailment update signal received - scheduling inverter poll")
             self.hass.async_create_task(self._async_poll_inverter())
 
         # Subscribe to curtailment update signal
@@ -806,17 +808,20 @@ class InverterStatusSensor(SensorEntity):
         )
 
         # Do initial poll
+        _LOGGER.info("Performing initial inverter poll")
         await self._async_poll_inverter()
 
-        # Set up periodic polling (every 5 minutes)
+        # Set up periodic polling (every 2 minutes)
         async def _periodic_poll(_now=None):
+            _LOGGER.debug("Periodic inverter poll triggered")
             await self._async_poll_inverter()
 
         self._unsub_interval = async_track_time_interval(
             self.hass,
             _periodic_poll,
-            timedelta(minutes=5),
+            timedelta(minutes=2),
         )
+        _LOGGER.info("Inverter polling scheduled every 2 minutes")
 
     async def async_will_remove_from_hass(self) -> None:
         """Run when entity is removed from hass."""
@@ -831,6 +836,7 @@ class InverterStatusSensor(SensorEntity):
 
         inverter_enabled = self._get_config_value(CONF_INVERTER_CURTAILMENT_ENABLED, False)
         if not inverter_enabled:
+            _LOGGER.debug("Inverter curtailment not enabled - skipping poll")
             self._cached_state = "disabled"
             self.async_write_ha_state()
             return
@@ -842,9 +848,12 @@ class InverterStatusSensor(SensorEntity):
         inverter_model = self._get_config_value(CONF_INVERTER_MODEL)
 
         if not inverter_host:
+            _LOGGER.debug("Inverter host not configured - skipping poll")
             self._cached_state = "not_configured"
             self.async_write_ha_state()
             return
+
+        _LOGGER.debug(f"Polling inverter: {inverter_brand} at {inverter_host}:{inverter_port}")
 
         try:
             controller = get_inverter_controller(
@@ -856,6 +865,7 @@ class InverterStatusSensor(SensorEntity):
             )
 
             if not controller:
+                _LOGGER.warning(f"Failed to create controller for {inverter_brand}")
                 self._cached_state = "error"
                 self._cached_attrs = {"error": f"Unsupported brand: {inverter_brand}"}
                 self.async_write_ha_state()
@@ -877,6 +887,8 @@ class InverterStatusSensor(SensorEntity):
             self._cached_attrs = state.attributes or {}
             self._cached_attrs["power_limit_percent"] = state.power_limit_percent
             self._cached_attrs["power_output_w"] = state.power_output_w
+            self._cached_attrs["brand"] = inverter_brand
+            self._cached_attrs["last_poll"] = dt_util.now().isoformat()
 
             # Also update hass.data for consistency with curtailment logic
             entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
@@ -884,12 +896,12 @@ class InverterStatusSensor(SensorEntity):
                 entry_data["inverter_last_state"] = self._cached_state
                 entry_data["inverter_attributes"] = self._cached_attrs
 
-            _LOGGER.debug(f"Inverter poll: state={self._cached_state}, attrs={self._cached_attrs}")
+            _LOGGER.info(f"Inverter poll: state={self._cached_state}, power={state.power_limit_percent}%")
 
         except Exception as e:
-            _LOGGER.warning(f"Error polling inverter: {e}")
+            _LOGGER.warning(f"Error polling inverter {inverter_host}: {e}")
             self._cached_state = "error"
-            self._cached_attrs = {"error": str(e)}
+            self._cached_attrs = {"error": str(e), "brand": inverter_brand}
 
         self.async_write_ha_state()
 
