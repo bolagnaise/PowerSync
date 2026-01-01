@@ -456,7 +456,6 @@ views:
             type: area
             color: '#FFD700'
             stroke_width: 2
-            extend_to: end
             group_by:
               func: avg
               duration: 5min
@@ -479,7 +478,6 @@ views:
             type: area
             color: '#2196F3'
             stroke_width: 2
-            extend_to: end
             group_by:
               func: avg
               duration: 5min
@@ -500,7 +498,6 @@ views:
             type: area
             color: '#F44336'
             stroke_width: 2
-            extend_to: end
             group_by:
               func: avg
               duration: 5min
@@ -521,7 +518,6 @@ views:
             type: area
             color: '#9C27B0'
             stroke_width: 2
-            extend_to: end
             group_by:
               func: avg
               duration: 5min
