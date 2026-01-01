@@ -56,13 +56,28 @@ views:
                   height: 140px;
                 }
       # Battery Control Buttons
-      # NOTE: Requires input_select helpers. Create via Settings > Devices > Helpers > Dropdown
-      #       Helper 1: Name: Force Discharge Duration | Options: 15, 30, 45, 60, 90, 120
-      #       Helper 2: Name: Force Charge Duration | Options: 15, 30, 45, 60, 90, 120
+      # SETUP REQUIRED:
+      # 1. Create input_select helpers via Settings > Devices > Helpers > Dropdown:
+      #    - Name: Force Charge Duration | Entity ID: input_select.force_charge_duration | Options: 15, 30, 45, 60, 90, 120
+      #    - Name: Force Discharge Duration | Entity ID: input_select.force_discharge_duration | Options: 15, 30, 45, 60, 90, 120
+      # 2. Create scripts in configuration.yaml or via Settings > Automations & Scenes > Scripts:
+      #    script:
+      #      power_sync_force_charge:
+      #        alias: "PowerSync Force Charge"
+      #        sequence:
+      #          - service: power_sync.force_charge
+      #            data:
+      #              duration: "{{ states('input_select.force_charge_duration') | int }}"
+      #      power_sync_force_discharge:
+      #        alias: "PowerSync Force Discharge"
+      #        sequence:
+      #          - service: power_sync.force_discharge
+      #            data:
+      #              duration: "{{ states('input_select.force_discharge_duration') | int }}"
       - type: custom:mushroom-chips-card
         alignment: center
         chips:
-          # Force Charge
+          # Force Charge Duration Selector
           - type: template
             icon: mdi:timer-outline
             icon_color: blue
@@ -70,18 +85,17 @@ views:
             tap_action:
               action: more-info
               entity: input_select.force_charge_duration
+          # Force Charge Button
           - type: template
             icon: mdi:battery-charging
             icon_color: blue
             content: Force Charge
             tap_action:
               action: call-service
-              service: power_sync.force_charge
-              data:
-                duration: "{{ states('input_select.force_charge_duration') | int }}"
+              service: script.power_sync_force_charge
               confirmation:
-                text: "Force charge for the selected duration?"
-          # Force Discharge
+                text: "Force charge for {{ states('input_select.force_charge_duration') }} minutes?"
+          # Force Discharge Duration Selector
           - type: template
             icon: mdi:timer-outline
             icon_color: orange
@@ -89,17 +103,16 @@ views:
             tap_action:
               action: more-info
               entity: input_select.force_discharge_duration
+          # Force Discharge Button
           - type: template
             icon: mdi:battery-arrow-down
             icon_color: orange
             content: Force Discharge
             tap_action:
               action: call-service
-              service: power_sync.force_discharge
-              data:
-                duration: "{{ states('input_select.force_discharge_duration') | int }}"
+              service: script.power_sync_force_discharge
               confirmation:
-                text: "Force discharge for the selected duration?"
+                text: "Force discharge for {{ states('input_select.force_discharge_duration') }} minutes?"
           # Restore Normal
           - type: template
             icon: mdi:battery-sync
