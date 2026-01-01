@@ -1585,8 +1585,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
         }
 
-        # Only show Slave ID for Modbus brands (not Enphase which uses REST API)
-        if brand != "enphase":
+        # Only show Slave ID for Modbus brands (not Enphase/Zeversolar which use HTTP)
+        if brand not in ("enphase", "zeversolar"):
             schema_dict[vol.Required(
                 CONF_INVERTER_SLAVE_ID,
                 default=current_slave_id,

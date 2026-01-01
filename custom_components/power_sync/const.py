@@ -614,6 +614,17 @@ ENPHASE_MODELS = {
     **ENPHASE_GATEWAY_MODELS,
 }
 
+# Zeversolar models (via HTTP API to built-in web interface)
+# Uses POST to /pwrlim.cgi for power limiting
+ZEVERSOLAR_MODELS = {
+    "tlc5000": "TLC5000",
+    "tlc6000": "TLC6000",
+    "tlc8000": "TLC8000",
+    "tlc10000": "TLC10000",
+    "zeversolair-mini-3000": "Zeversolair Mini 3000",
+    "zeversolair-tl3000": "Zeversolair TL3000",
+}
+
 # Sungrow SG series (string inverters) - single phase residential
 SUNGROW_SG_MODELS = {
     "sg2.5rs": "SG2.5RS",
@@ -703,6 +714,7 @@ def get_models_for_brand(brand: str) -> dict[str, str]:
         "goodwe": GOODWE_MODELS,
         "huawei": HUAWEI_MODELS,
         "enphase": ENPHASE_MODELS,
+        "zeversolar": ZEVERSOLAR_MODELS,
     }
     return brand_models.get(brand.lower(), SUNGROW_MODELS)
 
@@ -715,5 +727,6 @@ def get_brand_defaults(brand: str) -> dict[str, int]:
         "goodwe": {"port": 502, "slave_id": 247},
         "huawei": {"port": 502, "slave_id": 1},
         "enphase": {"port": 443, "slave_id": 1},
+        "zeversolar": {"port": 80, "slave_id": 1},
     }
     return defaults.get(brand.lower(), {"port": 502, "slave_id": 1})
