@@ -64,8 +64,9 @@ REGISTER_MAPS = {
 
 # Model name to register map mapping
 # Keys are normalized (lowercase, no dots/dashes/spaces) to match model_key
+# ALL SG residential RS series (SG2.5RS to SG20RS) use the same register layout
 MODEL_MAP = {
-    # SG10RS family (newer register layout) - larger residential models
+    # All SG.xRS residential string inverters use sg10rs register map
     "sg10rs": "sg10rs",
     "sg10": "sg10rs",
     "sg8rs": "sg10rs",
@@ -79,17 +80,17 @@ MODEL_MAP = {
     "sg170rs": "sg10rs",   # Normalized SG17RS
     "sg20rs": "sg10rs",
     "sg200rs": "sg10rs",   # Normalized SG20RS
-    # SG.05RS family (older register layout) - smaller residential models
-    "sg5rs": "sg05rs",
-    "sg50rs": "sg05rs",    # Normalized SG5.0RS
-    "sg05rs": "sg05rs",
-    "sg3rs": "sg05rs",
-    "sg30rs": "sg05rs",    # Normalized SG3.0RS
-    "sg36rs": "sg05rs",    # Normalized SG3.6RS
-    "sg25rs": "sg05rs",    # Normalized SG2.5RS
-    "sg40rs": "sg05rs",    # Normalized SG4.0RS
-    "sg60rs": "sg05rs",    # Normalized SG6.0RS
-    "sg70rs": "sg05rs",    # Normalized SG7.0RS
+    # Smaller residential models - SAME register layout as sg10rs
+    "sg5rs": "sg10rs",
+    "sg50rs": "sg10rs",    # Normalized SG5.0RS
+    "sg05rs": "sg10rs",
+    "sg3rs": "sg10rs",
+    "sg30rs": "sg10rs",    # Normalized SG3.0RS
+    "sg36rs": "sg10rs",    # Normalized SG3.6RS
+    "sg25rs": "sg10rs",    # Normalized SG2.5RS
+    "sg40rs": "sg10rs",    # Normalized SG4.0RS
+    "sg60rs": "sg10rs",    # Normalized SG6.0RS
+    "sg70rs": "sg10rs",    # Normalized SG7.0RS
 }
 
 
