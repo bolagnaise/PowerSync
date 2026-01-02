@@ -122,6 +122,7 @@ from .const import (
     CONF_INVERTER_HOST,
     CONF_INVERTER_PORT,
     CONF_INVERTER_SLAVE_ID,
+    CONF_INVERTER_TOKEN,
     CONF_INVERTER_RESTORE_SOC,
     DEFAULT_INVERTER_PORT,
     DEFAULT_INVERTER_SLAVE_ID,
@@ -2000,6 +2001,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_INVERTER_MODEL,
             entry.data.get(CONF_INVERTER_MODEL)
         )
+        inverter_token = entry.options.get(
+            CONF_INVERTER_TOKEN,
+            entry.data.get(CONF_INVERTER_TOKEN)
+        )
 
         if not inverter_host:
             _LOGGER.warning("Inverter curtailment enabled but no host configured")
@@ -2012,6 +2017,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 port=inverter_port,
                 slave_id=inverter_slave_id,
                 model=inverter_model,
+                token=inverter_token,
             )
 
             if not controller:
@@ -4207,6 +4213,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_INVERTER_MODEL,
             entry.data.get(CONF_INVERTER_MODEL)
         )
+        inverter_token = entry.options.get(
+            CONF_INVERTER_TOKEN,
+            entry.data.get(CONF_INVERTER_TOKEN)
+        )
 
         if not inverter_host:
             _LOGGER.warning("No inverter host configured")
@@ -4219,6 +4229,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 port=inverter_port,
                 slave_id=inverter_slave_id,
                 model=inverter_model,
+                token=inverter_token,
             )
 
             home_load_w = None
@@ -4301,6 +4312,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_INVERTER_MODEL,
             entry.data.get(CONF_INVERTER_MODEL)
         )
+        inverter_token = entry.options.get(
+            CONF_INVERTER_TOKEN,
+            entry.data.get(CONF_INVERTER_TOKEN)
+        )
 
         if not inverter_host:
             _LOGGER.warning("No inverter host configured")
@@ -4313,6 +4328,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 port=inverter_port,
                 slave_id=inverter_slave_id,
                 model=inverter_model,
+                token=inverter_token,
             )
 
             _LOGGER.info(f"🟢 Restoring {inverter_brand} inverter at {inverter_host}")

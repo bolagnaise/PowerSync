@@ -111,6 +111,7 @@ from .const import (
     CONF_INVERTER_HOST,
     CONF_INVERTER_PORT,
     CONF_INVERTER_SLAVE_ID,
+    CONF_INVERTER_TOKEN,
     CONF_INVERTER_RESTORE_SOC,
     INVERTER_BRANDS,
     DEFAULT_INVERTER_PORT,
@@ -1554,6 +1555,10 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             else:
                 final_data[CONF_INVERTER_SLAVE_ID] = 1  # Default for HTTP-based inverters
 
+            # Include JWT token for Enphase (required for firmware 7.x+)
+            if self._inverter_brand == "enphase":
+                final_data[CONF_INVERTER_TOKEN] = user_input.get(CONF_INVERTER_TOKEN, "")
+
             # Restore SOC threshold for AC inverter curtailment
             final_data[CONF_INVERTER_RESTORE_SOC] = user_input.get(
                 CONF_INVERTER_RESTORE_SOC, DEFAULT_INVERTER_RESTORE_SOC
@@ -1598,6 +1603,14 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_INVERTER_SLAVE_ID,
                 default=current_slave_id,
             )] = vol.All(vol.Coerce(int), vol.Range(min=1, max=247))
+
+        # Show JWT token field for Enphase (required for firmware 7.x+)
+        if brand == "enphase":
+            current_token = self._get_option(CONF_INVERTER_TOKEN, "")
+            schema_dict[vol.Optional(
+                CONF_INVERTER_TOKEN,
+                default=current_token,
+            )] = str
 
         # Restore SOC threshold - restore inverter when battery drops below this %
         current_restore_soc = self._get_option(CONF_INVERTER_RESTORE_SOC, DEFAULT_INVERTER_RESTORE_SOC)

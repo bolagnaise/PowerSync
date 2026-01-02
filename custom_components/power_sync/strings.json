@@ -301,12 +301,14 @@
           "inverter_host": "IP Address / Hostname",
           "inverter_port": "Port",
           "inverter_slave_id": "Modbus Slave ID",
+          "inverter_token": "JWT Token",
           "inverter_restore_soc": "Restore SOC Threshold (%)"
         },
         "data_description": {
           "inverter_host": "Local IP address of your inverter or gateway",
           "inverter_port": "502 for Modbus (Sungrow, Fronius, GoodWe, Huawei), 443 for Enphase",
           "inverter_slave_id": "Usually 1. GoodWe uses 247 by default.",
+          "inverter_token": "Enphase JWT token for firmware 7.x+. Get from https://entrez.enphaseenergy.com/",
           "inverter_restore_soc": "Restore inverter when battery drops below this %. Ensures battery stays topped up before evening peak. Default: 98%"
         }
       }
