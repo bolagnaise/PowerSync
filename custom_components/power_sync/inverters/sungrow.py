@@ -473,7 +473,11 @@ class SungrowController(InverterController):
 
         return attrs
 
-    async def curtail(self, home_load_w: Optional[int] = None) -> bool:
+    async def curtail(
+        self,
+        home_load_w: Optional[float] = None,
+        rated_capacity_w: Optional[float] = None,
+    ) -> bool:
         """Curtail the Sungrow inverter using power limiting.
 
         Uses power limit registers to set output percentage.
@@ -484,6 +488,7 @@ class SungrowController(InverterController):
             home_load_w: Home load in watts for load-following. If provided,
                         sets power limit to match home load (no export).
                         If None or 0, sets to 0% (full shutdown).
+            rated_capacity_w: Inverter rated capacity (unused, for interface compat).
 
         Returns:
             True if curtailment successful

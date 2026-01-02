@@ -195,7 +195,11 @@ class GoodWeController(InverterController):
         """Convert two unsigned 16-bit registers to unsigned 32-bit."""
         return (high << 16) | low
 
-    async def curtail(self) -> bool:
+    async def curtail(
+        self,
+        home_load_w: Optional[float] = None,
+        rated_capacity_w: Optional[float] = None,
+    ) -> bool:
         """Enable load following curtailment on the GoodWe inverter.
 
         Sets export limit to 0W to enable load following mode,

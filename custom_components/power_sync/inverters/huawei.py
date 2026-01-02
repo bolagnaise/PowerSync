@@ -239,7 +239,11 @@ class HuaweiController(InverterController):
         low = value & 0xFFFF
         return [high, low]
 
-    async def curtail(self) -> bool:
+    async def curtail(
+        self,
+        home_load_w: Optional[float] = None,
+        rated_capacity_w: Optional[float] = None,
+    ) -> bool:
         """Enable load following curtailment on the Huawei inverter.
 
         Sets active power control mode to zero export, which allows

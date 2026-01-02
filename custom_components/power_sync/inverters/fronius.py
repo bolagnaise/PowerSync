@@ -169,42 +169,82 @@ class FroniusController(InverterController):
             return value - 0x10000
         return value
 
-    async def curtail(self) -> bool:
+    async def curtail(
+        self,
+        home_load_w: Optional[float] = None,
+        rated_capacity_w: Optional[float] = None,
+    ) -> bool:
         """Enable load following curtailment on the Fronius inverter.
 
-        Sets power limit to 0% which activates the pre-configured
-        0W export limit, causing the inverter to match home consumption.
+        Two modes available:
+        1. Simple mode (WMaxLim_Ena=0): Disables power limiting, falls back to
+           inverter's soft export limit. Requires 0W soft limit configured.
+        2. Fallback mode: If home_load_w and rated_capacity_w provided, calculates
+           power limit percentage to match home consumption.
+
+        Args:
+            home_load_w: Current home load in watts (for fallback mode)
+            rated_capacity_w: Inverter rated capacity in watts (for fallback mode)
 
         Returns:
             True if curtailment successful
         """
-        _LOGGER.info(f"Curtailing Fronius inverter at {self.host} (load following mode)")
-
         try:
             if not await self.connect():
                 _LOGGER.error("Cannot curtail: failed to connect to inverter")
                 return False
 
-            # Step 1: Set power limit to 0% (triggers load following)
-            success = await self._write_register(self.REG_WMAXLIMPCT, 0)
-            if not success:
-                _LOGGER.error("Failed to set power limit")
-                return False
+            # Determine which mode to use
+            use_fallback = home_load_w is not None and rated_capacity_w is not None and rated_capacity_w > 0
 
-            # Step 2: Disable reversion timeout (stay curtailed indefinitely)
-            success = await self._write_register(self.REG_WMAXLIMPCT_RVRT, 0)
-            if not success:
-                _LOGGER.warning("Failed to disable reversion timeout")
-                # Continue anyway - curtailment may still work
+            if use_fallback:
+                # Fallback mode: Calculate power limit percentage based on home load
+                # This works for users without 0W soft export limit configured
+                target_percent = min(100, max(0, (home_load_w / rated_capacity_w) * 100))
+                target_value = int(target_percent * 100)  # SunSpec uses 0-10000 scale
 
-            # Step 3: Enable power limiting
-            success = await self._write_register(self.REG_WMAXLIM_ENA, 1)
-            if not success:
-                _LOGGER.error("Failed to enable power limiting")
-                return False
+                _LOGGER.info(
+                    f"Curtailing Fronius at {self.host} using power limit mode: "
+                    f"home_load={home_load_w}W, rated={rated_capacity_w}W, target={target_percent:.1f}%"
+                )
+
+                # Set power limit percentage
+                success = await self._write_register(self.REG_WMAXLIMPCT, target_value)
+                if not success:
+                    _LOGGER.error("Failed to set power limit percentage")
+                    return False
+
+                await asyncio.sleep(0.1)  # Small delay between writes
+
+                # Disable reversion timeout (stay curtailed indefinitely)
+                success = await self._write_register(self.REG_WMAXLIMPCT_RVRT, 0)
+                if not success:
+                    _LOGGER.warning("Failed to disable reversion timeout")
+
+                await asyncio.sleep(0.1)
+
+                # Enable power limiting
+                success = await self._write_register(self.REG_WMAXLIM_ENA, 1)
+                if not success:
+                    _LOGGER.error("Failed to enable power limiting")
+                    return False
+
+            else:
+                # Simple mode: Disable power limiting to use soft export limit
+                # This only works if inverter has 0W soft export limit configured
+                _LOGGER.info(
+                    f"Curtailing Fronius at {self.host} using simple mode "
+                    f"(requires 0W soft export limit configured)"
+                )
+
+                # Disable power limiting - inverter falls back to soft export limit
+                success = await self._write_register(self.REG_WMAXLIM_ENA, 0)
+                if not success:
+                    _LOGGER.error("Failed to disable power limiting")
+                    return False
 
             _LOGGER.info(f"Successfully curtailed Fronius inverter at {self.host}")
-            await asyncio.sleep(1)  # Brief delay for inverter to process
+            await asyncio.sleep(0.5)  # Brief delay for inverter to process
             return True
 
         except Exception as e:
@@ -214,7 +254,10 @@ class FroniusController(InverterController):
     async def restore(self) -> bool:
         """Restore normal operation of the Fronius inverter.
 
-        Disables power limiting, returning to normal export behavior.
+        Enables power limiting at 100% to allow full export.
+        This works for both curtailment modes:
+        - Simple mode: Re-enables power limiting, overriding soft export limit
+        - Fallback mode: Sets limit back to 100%
 
         Returns:
             True if restore successful
@@ -226,17 +269,23 @@ class FroniusController(InverterController):
                 _LOGGER.error("Cannot restore: failed to connect to inverter")
                 return False
 
-            # Disable power limiting - returns to normal operation
-            success = await self._write_register(self.REG_WMAXLIM_ENA, 0)
+            # Set power limit to 100%
+            success = await self._write_register(self.REG_WMAXLIMPCT, 10000)
             if not success:
-                _LOGGER.error("Failed to disable power limiting")
+                _LOGGER.error("Failed to set power limit to 100%")
                 return False
 
-            # Also set power limit back to 100% for safety
-            await self._write_register(self.REG_WMAXLIMPCT, 10000)
+            await asyncio.sleep(0.1)
+
+            # Enable power limiting at 100% - this overrides the soft export limit
+            # and allows full export regardless of which curtailment mode was used
+            success = await self._write_register(self.REG_WMAXLIM_ENA, 1)
+            if not success:
+                _LOGGER.error("Failed to enable power limiting")
+                return False
 
             _LOGGER.info(f"Successfully restored Fronius inverter at {self.host}")
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
             return True
 
         except Exception as e:

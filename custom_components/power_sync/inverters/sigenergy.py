@@ -252,7 +252,11 @@ class SigenergyController(InverterController):
             return self._to_unsigned32(regs[0], regs[1])
         return None
 
-    async def curtail(self, home_load_w: int = None) -> bool:
+    async def curtail(
+        self,
+        home_load_w: Optional[float] = None,
+        rated_capacity_w: Optional[float] = None,
+    ) -> bool:
         """Curtail solar export using load-following mode.
 
         If home_load_w is provided, sets export limit to match home load.
@@ -263,6 +267,7 @@ class SigenergyController(InverterController):
 
         Args:
             home_load_w: Optional home load in watts for load-following mode
+            rated_capacity_w: Inverter rated capacity (unused, for interface compat)
 
         Returns:
             True if curtailment successful

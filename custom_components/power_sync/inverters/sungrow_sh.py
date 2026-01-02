@@ -307,7 +307,11 @@ class SungrowSHController(InverterController):
 
         return attrs
 
-    async def curtail(self) -> bool:
+    async def curtail(
+        self,
+        home_load_w: Optional[float] = None,
+        rated_capacity_w: Optional[float] = None,
+    ) -> bool:
         """Enable load following curtailment on the Sungrow SH inverter.
 
         Uses export power limiting (0W) to enable load following mode,

@@ -95,11 +95,19 @@ class InverterController(ABC):
         pass
 
     @abstractmethod
-    async def curtail(self) -> bool:
+    async def curtail(
+        self,
+        home_load_w: Optional[float] = None,
+        rated_capacity_w: Optional[float] = None,
+    ) -> bool:
         """Curtail (stop/limit) inverter production.
 
         This should stop or severely limit solar production
         to prevent export during negative price periods.
+
+        Args:
+            home_load_w: Current home load in watts (for load-following)
+            rated_capacity_w: Inverter rated capacity in watts (for percentage calc)
 
         Returns:
             True if curtailment successful, False otherwise

@@ -199,7 +199,11 @@ class ZeversolarController(InverterController):
         _LOGGER.info(f"Setting Zeversolar power limit to {watts}W ({percent}% of {self.ac_capacity_w}W)")
         return await self._set_power_limit(percent)
 
-    async def curtail(self, home_load_w: int = None) -> bool:
+    async def curtail(
+        self,
+        home_load_w: Optional[float] = None,
+        rated_capacity_w: Optional[float] = None,
+    ) -> bool:
         """Curtail inverter production.
 
         If home_load_w is provided, uses load-following mode (limits to home load).
@@ -207,6 +211,7 @@ class ZeversolarController(InverterController):
 
         Args:
             home_load_w: Optional home load in watts for load-following mode
+            rated_capacity_w: Inverter rated capacity (unused, for interface compat)
 
         Returns:
             True if successful, False otherwise

@@ -269,7 +269,11 @@ class EnphaseController(InverterController):
 
         return await self._put(self.ENDPOINT_DER_SETTINGS, current)
 
-    async def curtail(self) -> bool:
+    async def curtail(
+        self,
+        home_load_w: Optional[float] = None,
+        rated_capacity_w: Optional[float] = None,
+    ) -> bool:
         """Enable load following curtailment on the Enphase system.
 
         Sets export limit to 0W via DPEL or DER settings.
