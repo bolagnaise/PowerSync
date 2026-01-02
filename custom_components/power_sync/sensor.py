@@ -811,7 +811,7 @@ class InverterStatusSensor(SensorEntity):
         _LOGGER.info("Performing initial inverter poll")
         await self._async_poll_inverter()
 
-        # Set up periodic polling (every 2 minutes)
+        # Set up periodic polling (every 30 seconds for responsive load-following)
         async def _periodic_poll(_now=None):
             _LOGGER.debug("Periodic inverter poll triggered")
             await self._async_poll_inverter()
@@ -819,9 +819,9 @@ class InverterStatusSensor(SensorEntity):
         self._unsub_interval = async_track_time_interval(
             self.hass,
             _periodic_poll,
-            timedelta(minutes=2),
+            timedelta(seconds=30),
         )
-        _LOGGER.info("Inverter polling scheduled every 2 minutes")
+        _LOGGER.info("Inverter polling scheduled every 30 seconds")
 
     async def async_will_remove_from_hass(self) -> None:
         """Run when entity is removed from hass."""
