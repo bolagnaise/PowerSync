@@ -1926,15 +1926,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if live_status and live_status.get("load_power"):
                         home_load_w = int(live_status.get("load_power", 0))
                         # Add battery charge rate if battery is charging
-                        # battery_power > 0 means charging (consuming power from solar)
+                        # battery_power < 0 means charging (negative = consuming power from solar)
+                        # battery_power > 0 means discharging (positive = providing power)
                         battery_power = live_status.get("battery_power", 0) or 0
-                        battery_charge_w = max(0, int(battery_power))  # Only add if charging
-                        if battery_charge_w > 0:
+                        # Negate to get positive charge rate (e.g., -2580W charging → 2580W)
+                        battery_charge_w = max(0, -int(battery_power))
+                        if battery_charge_w > 50:  # At least 50W charging
                             total_load_w = home_load_w + battery_charge_w
                             _LOGGER.info(f"🔌 LOAD-FOLLOWING: Home={home_load_w}W + Battery charging={battery_charge_w}W = {total_load_w}W")
                             home_load_w = total_load_w
                         else:
-                            _LOGGER.info(f"🔌 LOAD-FOLLOWING: Home load is {home_load_w}W (battery not charging)")
+                            _LOGGER.info(f"🔌 LOAD-FOLLOWING: Home load is {home_load_w}W (battery not charging or <50W)")
 
                 _LOGGER.info(f"🔴 Curtailing inverter at {inverter_host}")
 

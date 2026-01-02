@@ -2332,15 +2332,17 @@ def _apply_inverter_curtailment(user, curtail: bool = True):
                 if site_status:
                     home_load_w = int(site_status.get('load_power', 0))
                     # Add battery charge rate if battery is charging
-                    # battery_power > 0 means charging (consuming power from solar)
+                    # battery_power < 0 means charging (negative = consuming power from solar)
+                    # battery_power > 0 means discharging (positive = providing power)
                     battery_power = site_status.get('battery_power', 0) or 0
-                    battery_charge_w = max(0, int(battery_power))  # Only add if charging
-                    if battery_charge_w > 0:
+                    # Negate to get positive charge rate (e.g., -2580W charging → 2580W)
+                    battery_charge_w = max(0, -int(battery_power))
+                    if battery_charge_w > 50:  # At least 50W charging
                         total_load_w = home_load_w + battery_charge_w
                         logger.info(f"🔌 LOAD-FOLLOWING: Home={home_load_w}W + Battery charging={battery_charge_w}W = {total_load_w}W for {user.email}")
                         home_load_w = total_load_w
                     else:
-                        logger.info(f"🔌 LOAD-FOLLOWING: Home load is {home_load_w}W (battery not charging) for {user.email}")
+                        logger.info(f"🔌 LOAD-FOLLOWING: Home load is {home_load_w}W (battery not charging or <50W) for {user.email}")
         except Exception as e:
             logger.warning(f"Failed to get home load for load-following: {e}")
             # Fall back to full curtailment if we can't get home load
