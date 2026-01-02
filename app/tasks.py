@@ -2372,12 +2372,11 @@ def _apply_inverter_curtailment(user, curtail: bool = True):
             logger.error(f"Failed to create inverter controller for {user.email}")
             return
 
-        # Run async function in sync context using asyncio.run()
-        # This properly creates and manages event loop in thread pool threads
+        # Run async function in sync context - create new event loop for thread
         async def run_inverter_action():
             try:
                 if curtail:
-                    # Pass home_load_w for load-following (Zeversolar)
+                    # Pass home_load_w for load-following (Zeversolar/Sungrow)
                     # Other inverters ignore this parameter
                     if hasattr(controller.curtail, '__code__') and 'home_load_w' in controller.curtail.__code__.co_varnames:
                         result = await controller.curtail(home_load_w=home_load_w)
@@ -2391,7 +2390,12 @@ def _apply_inverter_curtailment(user, curtail: bool = True):
                 logger.error(f"Error during inverter action: {e}")
                 return False
 
-        success = asyncio.run(run_inverter_action())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            success = loop.run_until_complete(run_inverter_action())
+        finally:
+            loop.close()
 
         if success:
             new_state = 'curtailed' if curtail else 'online'

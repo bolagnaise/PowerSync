@@ -463,13 +463,18 @@ def api_inverter_status():
         if not controller:
             return jsonify({'enabled': True, 'error': 'Failed to create inverter controller'})
 
-        # Run async function in sync context using asyncio.run()
+        # Run async function in sync context - create new event loop for thread
         async def get_status_and_disconnect():
             state = await controller.get_status()
             await controller.disconnect()
             return state
 
-        state = asyncio.run(get_status_and_disconnect())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            state = loop.run_until_complete(get_status_and_disconnect())
+        finally:
+            loop.close()
 
         return jsonify({
             'enabled': True,
@@ -512,8 +517,13 @@ def api_inverter_test():
         if not controller:
             return jsonify({'success': False, 'error': f'Unsupported inverter brand: {brand}'})
 
-        # Run async function in sync context using asyncio.run()
-        success, message = asyncio.run(controller.test_connection())
+        # Run async function in sync context - create new event loop for thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            success, message = loop.run_until_complete(controller.test_connection())
+        finally:
+            loop.close()
 
         return jsonify({'success': success, 'message': message})
 
@@ -567,7 +577,7 @@ def api_inverter_curtail():
         if not controller:
             return jsonify({'success': False, 'error': 'Failed to create inverter controller'})
 
-        # Run async function in sync context using asyncio.run()
+        # Run async function in sync context - create new event loop for thread
         async def do_curtail():
             # Check if controller supports home_load_w parameter
             if home_load_w is not None and hasattr(controller.curtail, '__code__') and 'home_load_w' in controller.curtail.__code__.co_varnames:
@@ -577,7 +587,13 @@ def api_inverter_curtail():
             await controller.disconnect()
             return result
 
-        success = asyncio.run(do_curtail())
+        # Use new_event_loop for thread safety in Flask
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            success = loop.run_until_complete(do_curtail())
+        finally:
+            loop.close()
 
         if success:
             current_user.inverter_last_state = 'curtailed'
@@ -627,7 +643,7 @@ def api_inverter_set_power_limit():
         if not controller:
             return jsonify({'success': False, 'error': 'Failed to create inverter controller'})
 
-        # Run async function in sync context using asyncio.run()
+        # Run async function in sync context - create new event loop for thread
         async def do_set_limit():
             if power_limit_w is not None:
                 result = await controller.set_power_limit_watts(int(power_limit_w))
@@ -636,7 +652,12 @@ def api_inverter_set_power_limit():
             await controller.disconnect()
             return result
 
-        success = asyncio.run(do_set_limit())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            success = loop.run_until_complete(do_set_limit())
+        finally:
+            loop.close()
 
         if success:
             current_user.inverter_last_state = 'curtailed' if (percent is not None and percent < 100) or (power_limit_w is not None and power_limit_w < controller.ac_capacity_w) else 'online'
@@ -673,13 +694,18 @@ def api_inverter_restore():
         if not controller:
             return jsonify({'success': False, 'error': 'Failed to create inverter controller'})
 
-        # Run async function in sync context using asyncio.run()
+        # Run async function in sync context - create new event loop for thread
         async def do_restore():
             result = await controller.restore()
             await controller.disconnect()
             return result
 
-        success = asyncio.run(do_restore())
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            success = loop.run_until_complete(do_restore())
+        finally:
+            loop.close()
 
         if success:
             current_user.inverter_last_state = 'online'
