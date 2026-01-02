@@ -581,6 +581,17 @@ class SungrowController(InverterController):
 
             success = False
 
+            # Always try to clear any stuck run mode first
+            # This addresses inverters that may have been put into shutdown mode
+            run_mode_success = await self._write_register(
+                self.REGISTER_RUN_MODE,
+                self.RUN_MODE_ENABLED,
+            )
+            if run_mode_success:
+                _LOGGER.debug(f"Run mode enabled (wrote {self.RUN_MODE_ENABLED} to {self.REGISTER_RUN_MODE})")
+            else:
+                _LOGGER.debug("Could not set run mode (may not be supported on this model)")
+
             if power_limit_toggle_reg and power_limit_percent_reg:
                 # Use power limiting - set to 100%
                 # Set limit to 100% (register value 1000, since it's /10)
@@ -591,14 +602,10 @@ class SungrowController(InverterController):
                 if percent_success:
                     _LOGGER.debug(f"Power limit set to 100% (wrote 1000 to {power_limit_percent_reg[0]})")
 
-                success = percent_success
+                success = percent_success or run_mode_success
             else:
-                # Fallback to run mode enable
-                _LOGGER.debug("Power limit registers not available, using run mode enable")
-                success = await self._write_register(
-                    self.REGISTER_RUN_MODE,
-                    self.RUN_MODE_ENABLED,
-                )
+                # Only run mode available
+                success = run_mode_success
 
             if success:
                 _LOGGER.info(f"Successfully restored Sungrow inverter at {self.host}")
