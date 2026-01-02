@@ -436,6 +436,16 @@ class SigenergyController(InverterController):
                 else:
                     attrs["pv_power_limit_kw"] = "unlimited"
 
+            # If we couldn't read ANY meaningful registers, the inverter is likely sleeping/offline
+            if not attrs or len(attrs) == 0:
+                _LOGGER.debug("Sigenergy: No register data - inverter likely sleeping")
+                return InverterState(
+                    status=InverterStatus.OFFLINE,
+                    is_curtailed=False,
+                    error_message="No register data (inverter sleeping)",
+                    attributes={"host": self.host, "model": self.model or "Sigenergy"},
+                )
+
             # Determine overall status
             if is_curtailed:
                 status = InverterStatus.CURTAILED

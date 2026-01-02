@@ -428,6 +428,16 @@ class HuaweiController(InverterController):
             # Read all available registers
             attrs = await self._read_all_registers()
 
+            # If we couldn't read ANY registers, the inverter is likely sleeping/offline
+            if not attrs or len(attrs) == 0:
+                _LOGGER.debug("Huawei: No register data - inverter likely sleeping")
+                return InverterState(
+                    status=InverterStatus.OFFLINE,
+                    is_curtailed=False,
+                    error_message="No register data (inverter sleeping)",
+                    attributes={"host": self.host, "model": self.model or "SUN2000"},
+                )
+
             # Determine status from device status code
             status = InverterStatus.ONLINE
             is_curtailed = False

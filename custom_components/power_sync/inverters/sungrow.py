@@ -646,6 +646,17 @@ class SungrowController(InverterController):
             # Get power output from attrs
             power_output = attrs.get("dc_power")
 
+            # If we couldn't read ANY registers, the inverter is likely sleeping/offline
+            # This happens at night when Modbus connection succeeds but reads timeout
+            if not attrs or len(attrs) == 0:
+                _LOGGER.debug("Sungrow: No register data - inverter likely sleeping")
+                return InverterState(
+                    status=InverterStatus.OFFLINE,
+                    is_curtailed=False,
+                    error_message="No register data (inverter sleeping)",
+                    attributes={"host": self.host, "model": self.model or "SG Series"},
+                )
+
             # Read running state register if available for this model
             running_state_reg = self._reg_map.get("running_state")
             running_state = None

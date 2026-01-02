@@ -435,6 +435,16 @@ class EnphaseController(InverterController):
             # Read all available data
             attrs = await self._read_all_data()
 
+            # If we couldn't read ANY data, the gateway may be unreachable
+            if not attrs or len(attrs) == 0:
+                _LOGGER.debug("Enphase: No data - gateway may be unreachable")
+                return InverterState(
+                    status=InverterStatus.OFFLINE,
+                    is_curtailed=False,
+                    error_message="No data from gateway",
+                    attributes={"host": self.host, "model": self.model or "IQ Gateway"},
+                )
+
             # Determine status
             status = InverterStatus.ONLINE
             is_curtailed = False

@@ -366,6 +366,16 @@ class GoodWeController(InverterController):
             # Read all available registers
             attrs = await self._read_all_registers()
 
+            # If we couldn't read ANY registers, the inverter is likely sleeping/offline
+            if not attrs or len(attrs) == 0:
+                _LOGGER.debug("GoodWe: No register data - inverter likely sleeping")
+                return InverterState(
+                    status=InverterStatus.OFFLINE,
+                    is_curtailed=False,
+                    error_message="No register data (inverter sleeping)",
+                    attributes={"host": self.host, "model": self.model or "ET/EH Series"},
+                )
+
             # Read work mode
             work_mode = await self._read_register(self.REG_WORK_MODE, 1)
             status = InverterStatus.ONLINE
