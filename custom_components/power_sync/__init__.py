@@ -1671,7 +1671,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         For AC-coupled systems, we only curtail the inverter when:
         1. Import price is negative (cheaper to buy power than generate it), OR
         2. Actually exporting (grid_power < 0) AND export earnings are negative, OR
-        3. Battery is full (99%+) AND export is unprofitable, OR
+        3. Battery is full (100%) AND export is unprofitable, OR
         4. Solar producing but battery NOT charging AND exporting at negative price
 
         Args:
@@ -1760,7 +1760,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Smart curtailment logic for DC-coupled solar (Tesla Powerwall export rule).
 
         For DC-coupled systems, we only curtail (set export='never') when:
-        1. Battery is full (99%+), OR
+        1. Battery is full (100%), OR
         2. Battery is NOT charging (not absorbing solar)
 
         If the battery is actively charging and not full, solar is being used
