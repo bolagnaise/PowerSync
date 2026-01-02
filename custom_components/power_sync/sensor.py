@@ -696,10 +696,22 @@ class SolarCurtailmentSensor(SensorEntity):
             _handle_curtailment_update,
         )
 
+        # Also subscribe to Amber coordinator updates so state updates when prices change
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        amber_coordinator = entry_data.get("amber_coordinator")
+        if amber_coordinator:
+            self._unsub_amber = amber_coordinator.async_add_listener(
+                _handle_curtailment_update
+            )
+        else:
+            self._unsub_amber = None
+
     async def async_will_remove_from_hass(self) -> None:
         """Run when entity is removed from hass."""
         if self._unsub_dispatcher:
             self._unsub_dispatcher()
+        if hasattr(self, '_unsub_amber') and self._unsub_amber:
+            self._unsub_amber()
 
     def _get_feedin_price(self) -> float | None:
         """Get current feed-in price from Amber coordinator."""
