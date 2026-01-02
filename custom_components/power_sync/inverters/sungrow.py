@@ -122,6 +122,7 @@ class SungrowController(InverterController):
     STATE_SHUTDOWN = 0x1200
     STATE_FAULT = 0x1300
     STATE_MAINTAIN = 0x1500
+    STATE_STARTUP = 0x1600       # Startup/initializing after restore
 
     # Run mode register (common across models)
     REGISTER_RUN_MODE = 5005
@@ -663,6 +664,11 @@ class SungrowController(InverterController):
                 if running_state in (self.STATE_RUNNING, self.STATE_RUNNING_ALT):
                     status = InverterStatus.ONLINE
                     attrs["running_state"] = "running"
+                elif running_state in (self.STATE_STARTUP, self.STATE_MAINTAIN):
+                    # Inverter is starting up or in maintenance - treat as online
+                    status = InverterStatus.ONLINE
+                    attrs["running_state"] = "starting"
+                    _LOGGER.debug(f"Sungrow starting up: 0x{running_state:04X}")
                 elif running_state == self.STATE_FAULT:
                     # Log the fault state for debugging
                     _LOGGER.warning(f"Sungrow running_state=0x{running_state:04X} (fault), power={power_output}W")
