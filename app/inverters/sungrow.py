@@ -63,15 +63,33 @@ REGISTER_MAPS = {
 }
 
 # Model name to register map mapping
+# Keys are normalized (lowercase, no dots/dashes/spaces) to match model_key
 MODEL_MAP = {
+    # SG10RS family (newer register layout) - larger residential models
     "sg10rs": "sg10rs",
     "sg10": "sg10rs",
     "sg8rs": "sg10rs",
+    "sg80rs": "sg10rs",    # Normalized SG8.0RS
+    "sg100rs": "sg10rs",   # Normalized SG10.0RS
+    "sg12rs": "sg10rs",
+    "sg120rs": "sg10rs",   # Normalized SG12RS
+    "sg15rs": "sg10rs",
+    "sg150rs": "sg10rs",   # Normalized SG15RS
+    "sg17rs": "sg10rs",
+    "sg170rs": "sg10rs",   # Normalized SG17RS
+    "sg20rs": "sg10rs",
+    "sg200rs": "sg10rs",   # Normalized SG20RS
+    # SG.05RS family (older register layout) - smaller residential models
     "sg5rs": "sg05rs",
-    "sg5.0rs": "sg05rs",
+    "sg50rs": "sg05rs",    # Normalized SG5.0RS
     "sg05rs": "sg05rs",
     "sg3rs": "sg05rs",
-    "sg3.0rs": "sg05rs",
+    "sg30rs": "sg05rs",    # Normalized SG3.0RS
+    "sg36rs": "sg05rs",    # Normalized SG3.6RS
+    "sg25rs": "sg05rs",    # Normalized SG2.5RS
+    "sg40rs": "sg05rs",    # Normalized SG4.0RS
+    "sg60rs": "sg05rs",    # Normalized SG6.0RS
+    "sg70rs": "sg05rs",    # Normalized SG7.0RS
 }
 
 
