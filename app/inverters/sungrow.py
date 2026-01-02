@@ -438,15 +438,19 @@ class SungrowController(InverterController):
 
         return attrs
 
-    async def curtail(self) -> bool:
+    async def curtail(self, home_load_w: Optional[int] = None) -> bool:
         """Stop the Sungrow inverter to prevent solar export.
 
-        Writes shutdown command (206) to the run mode register.
+        Uses power limit registers to set output to 0%.
+        Falls back to run mode shutdown if power limit not available.
+
+        Args:
+            home_load_w: Ignored for Sungrow (on/off only, no load-following)
 
         Returns:
             True if curtailment successful
         """
-        _LOGGER.info(f"Curtailing Sungrow inverter at {self.host} (shutdown mode)")
+        _LOGGER.info(f"Curtailing Sungrow inverter at {self.host} (power limit 0%)")
 
         try:
             # Ensure connected
@@ -454,11 +458,38 @@ class SungrowController(InverterController):
                 _LOGGER.error("Cannot curtail: failed to connect to inverter")
                 return False
 
-            # Write shutdown command to run mode register
-            success = await self._write_register(
-                self.REGISTER_RUN_MODE,
-                self.RUN_MODE_SHUTDOWN,
-            )
+            # Get the power limit registers for this model
+            power_limit_toggle_reg = self._reg_map.get("power_limit_toggle")
+            power_limit_percent_reg = self._reg_map.get("power_limit_percent")
+
+            success = False
+
+            if power_limit_toggle_reg and power_limit_percent_reg:
+                # Use power limiting - enable limit and set to 0%
+                # First enable power limiting
+                toggle_success = await self._write_register(
+                    power_limit_toggle_reg[0],
+                    self.POWER_LIMIT_ENABLED,
+                )
+                if toggle_success:
+                    _LOGGER.debug(f"Power limit enabled (wrote {self.POWER_LIMIT_ENABLED} to {power_limit_toggle_reg[0]})")
+
+                # Then set limit to 0% (register value 0, since it's /10)
+                percent_success = await self._write_register(
+                    power_limit_percent_reg[0],
+                    0,  # 0% output
+                )
+                if percent_success:
+                    _LOGGER.debug(f"Power limit set to 0% (wrote 0 to {power_limit_percent_reg[0]})")
+
+                success = toggle_success and percent_success
+            else:
+                # Fallback to run mode shutdown
+                _LOGGER.debug("Power limit registers not available, using run mode shutdown")
+                success = await self._write_register(
+                    self.REGISTER_RUN_MODE,
+                    self.RUN_MODE_SHUTDOWN,
+                )
 
             if success:
                 _LOGGER.info(f"Successfully curtailed Sungrow inverter at {self.host}")
@@ -466,7 +497,7 @@ class SungrowController(InverterController):
                 await asyncio.sleep(1)  # Brief delay for inverter to process
                 state = await self.get_status()
                 if state.is_curtailed:
-                    _LOGGER.info("Curtailment verified - inverter is in shutdown state")
+                    _LOGGER.info("Curtailment verified - inverter output limited to 0%")
                 else:
                     _LOGGER.warning("Curtailment command sent but state not verified")
             else:
@@ -481,12 +512,13 @@ class SungrowController(InverterController):
     async def restore(self) -> bool:
         """Restore normal operation of the Sungrow inverter.
 
-        Writes enable command (207) to the run mode register.
+        Sets power limit to 100% (full output).
+        Falls back to run mode enable if power limit not available.
 
         Returns:
             True if restore successful
         """
-        _LOGGER.info(f"Restoring Sungrow inverter at {self.host} to normal operation")
+        _LOGGER.info(f"Restoring Sungrow inverter at {self.host} (power limit 100%)")
 
         try:
             # Ensure connected
@@ -494,11 +526,30 @@ class SungrowController(InverterController):
                 _LOGGER.error("Cannot restore: failed to connect to inverter")
                 return False
 
-            # Write enable command to run mode register
-            success = await self._write_register(
-                self.REGISTER_RUN_MODE,
-                self.RUN_MODE_ENABLED,
-            )
+            # Get the power limit registers for this model
+            power_limit_toggle_reg = self._reg_map.get("power_limit_toggle")
+            power_limit_percent_reg = self._reg_map.get("power_limit_percent")
+
+            success = False
+
+            if power_limit_toggle_reg and power_limit_percent_reg:
+                # Use power limiting - set to 100%
+                # Set limit to 100% (register value 1000, since it's /10)
+                percent_success = await self._write_register(
+                    power_limit_percent_reg[0],
+                    1000,  # 100% output (1000/10 = 100)
+                )
+                if percent_success:
+                    _LOGGER.debug(f"Power limit set to 100% (wrote 1000 to {power_limit_percent_reg[0]})")
+
+                success = percent_success
+            else:
+                # Fallback to run mode enable
+                _LOGGER.debug("Power limit registers not available, using run mode enable")
+                success = await self._write_register(
+                    self.REGISTER_RUN_MODE,
+                    self.RUN_MODE_ENABLED,
+                )
 
             if success:
                 _LOGGER.info(f"Successfully restored Sungrow inverter at {self.host}")
@@ -506,7 +557,7 @@ class SungrowController(InverterController):
                 await asyncio.sleep(1)  # Brief delay for inverter to process
                 state = await self.get_status()
                 if not state.is_curtailed:
-                    _LOGGER.info("Restore verified - inverter is running")
+                    _LOGGER.info("Restore verified - inverter at full output")
                 else:
                     _LOGGER.warning("Restore command sent but state not verified - may take time to start")
             else:
@@ -595,6 +646,14 @@ class SungrowController(InverterController):
             power_limit_pct = attrs.get("power_limit_percent", 100)
             if not attrs.get("power_limit_enabled", False):
                 power_limit_pct = 100  # If limit not enabled, it's effectively 100%
+
+            # Also check power limit for curtailment detection
+            # If power limit is < 5%, consider it curtailed regardless of running_state
+            if power_limit_pct < 5:
+                is_curtailed = True
+                status = InverterStatus.CURTAILED
+                attrs["running_state"] = "curtailed"
+                _LOGGER.debug(f"Sungrow curtailed via power limit: {power_limit_pct}%")
 
             self._last_state = InverterState(
                 status=status,
