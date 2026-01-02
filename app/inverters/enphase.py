@@ -75,10 +75,16 @@ class EnphaseController(InverterController):
         self._password = password
         self._serial = serial
         self._session: Optional[aiohttp.ClientSession] = None
-        self._lock = asyncio.Lock()
+        self._lock: Optional[asyncio.Lock] = None  # Created lazily in async context
         self._firmware_version: Optional[str] = None
         self._envoy_serial: Optional[str] = None
         self._dpel_supported: Optional[bool] = None
+
+    def _get_lock(self) -> asyncio.Lock:
+        """Get or create the asyncio lock (lazy initialization for Flask compatibility)."""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     def _get_ssl_context(self) -> ssl.SSLContext:
         """Get SSL context that accepts self-signed certificates."""
@@ -89,7 +95,7 @@ class EnphaseController(InverterController):
 
     async def connect(self) -> bool:
         """Connect to the Enphase IQ Gateway."""
-        async with self._lock:
+        async with self._get_lock():
             try:
                 if self._session and not self._session.closed:
                     return True
@@ -124,7 +130,7 @@ class EnphaseController(InverterController):
 
     async def disconnect(self) -> None:
         """Disconnect from the Enphase IQ Gateway."""
-        async with self._lock:
+        async with self._get_lock():
             if self._session:
                 await self._session.close()
                 self._session = None

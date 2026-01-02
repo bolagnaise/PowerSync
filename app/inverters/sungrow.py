@@ -146,7 +146,7 @@ class SungrowController(InverterController):
         """
         super().__init__(host, port, slave_id, model)
         self._client: Optional[AsyncModbusTcpClient] = None
-        self._lock = asyncio.Lock()
+        self._lock: Optional[asyncio.Lock] = None  # Created lazily in async context
 
         # Select register map based on model
         model_key = (model or "").lower().replace(".", "").replace("-", "").replace(" ", "")
@@ -156,6 +156,12 @@ class SungrowController(InverterController):
         # Parse rated capacity from model name for load-following
         self._rated_capacity_w = self._parse_capacity_from_model(model)
         _LOGGER.info(f"Sungrow controller using register map '{map_name}' for model '{model}' (capacity: {self._rated_capacity_w}W)")
+
+    def _get_lock(self) -> asyncio.Lock:
+        """Get or create the asyncio lock (lazy initialization for Flask compatibility)."""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     def _parse_capacity_from_model(self, model: Optional[str]) -> int:
         """Parse rated capacity in watts from model name.
@@ -190,7 +196,7 @@ class SungrowController(InverterController):
 
     async def connect(self) -> bool:
         """Connect to the Sungrow inverter via Modbus TCP."""
-        async with self._lock:
+        async with self._get_lock():
             try:
                 if self._client and self._client.connected:
                     return True
@@ -217,7 +223,7 @@ class SungrowController(InverterController):
 
     async def disconnect(self) -> None:
         """Disconnect from the Sungrow inverter."""
-        async with self._lock:
+        async with self._get_lock():
             if self._client:
                 self._client.close()
                 self._client = None

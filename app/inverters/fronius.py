@@ -72,11 +72,17 @@ class FroniusController(InverterController):
         """
         super().__init__(host, port, slave_id, model)
         self._client: Optional[AsyncModbusTcpClient] = None
-        self._lock = asyncio.Lock()
+        self._lock: Optional[asyncio.Lock] = None  # Created lazily in async context
+
+    def _get_lock(self) -> asyncio.Lock:
+        """Get or create the asyncio lock (lazy initialization for Flask compatibility)."""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     async def connect(self) -> bool:
         """Connect to the Fronius inverter via Modbus TCP."""
-        async with self._lock:
+        async with self._get_lock():
             try:
                 if self._client and self._client.connected:
                     return True
@@ -103,7 +109,7 @@ class FroniusController(InverterController):
 
     async def disconnect(self) -> None:
         """Disconnect from the Fronius inverter."""
-        async with self._lock:
+        async with self._get_lock():
             if self._client:
                 self._client.close()
                 self._client = None
