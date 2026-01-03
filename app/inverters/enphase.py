@@ -221,7 +221,12 @@ class EnphaseController(InverterController):
                     _LOGGER.error(f"Authentication required for {endpoint}")
                     return False
                 else:
-                    _LOGGER.debug(f"POST {endpoint} returned status {response.status}")
+                    # Log response body for debugging 400 errors
+                    try:
+                        body = await response.text()
+                        _LOGGER.debug(f"POST {endpoint} returned status {response.status}: {body[:200]}")
+                    except:
+                        _LOGGER.debug(f"POST {endpoint} returned status {response.status}")
                     return False
 
         except aiohttp.ClientError as e:
@@ -243,24 +248,29 @@ class EnphaseController(InverterController):
             async with self._session.get(url, headers=self._get_headers()) as response:
                 if response.status == 200:
                     text = await response.text()
+                    _LOGGER.debug(f"Enphase /info response: {text[:500]}")
                     # Parse XML response
                     try:
                         root = ET.fromstring(text)
-                        # Extract device info from XML
+                        # Extract device info from XML - search all descendants
                         info = {}
-                        for child in root:
+                        for elem in root.iter():
                             # Remove namespace prefix if present
-                            tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
-                            if child.text:
-                                info[tag] = child.text.strip()
+                            tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+                            if elem.text and elem.text.strip():
+                                info[tag] = elem.text.strip()
+
+                        _LOGGER.debug(f"Enphase parsed info: {info}")
+
                         if info:
-                            # Map common fields
+                            # Map common fields from Enphase XML
                             return {
-                                "serial": info.get("sn") or info.get("serial"),
-                                "software": info.get("software") or info.get("version"),
-                                "model": info.get("pn") or info.get("model"),
+                                "serial": info.get("sn") or info.get("serial") or info.get("device_sn"),
+                                "software": info.get("software") or info.get("version") or info.get("imeter_fw_version"),
+                                "model": info.get("pn") or info.get("model") or info.get("part_num"),
                             }
-                    except ET.ParseError:
+                    except ET.ParseError as e:
+                        _LOGGER.debug(f"XML parse error: {e}")
                         # Not XML, try JSON
                         try:
                             import json
