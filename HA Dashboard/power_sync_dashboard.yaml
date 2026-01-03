@@ -323,31 +323,39 @@ views:
                   {% endif %}
                 }
           # AC-Coupled Inverter Status
+          # Sleep detection: night (sun below horizon) + low power (< 100W) = sleep mode
           - type: custom:mushroom-template-card
             entity: sensor.inverter_status
             primary: AC Inverter
             secondary: >-
-              {% set state = states('sensor.inverter_status') | lower %}
+              {% set raw_state = states('sensor.inverter_status') | lower %}
               {% set power = state_attr('sensor.inverter_status', 'power_limit_percent') %}
-              {% set power_w = state_attr('sensor.inverter_status', 'power_output_w') %}
+              {% set power_w = state_attr('sensor.inverter_status', 'power_output_w') | float(0) %}
               {% set brand = state_attr('sensor.inverter_status', 'brand') %}
+              {% set is_night = states('sun.sun') == 'below_horizon' %}
+              {% set is_sleep = is_night and power_w < 100 and raw_state in ['running', 'online'] %}
+              {% set state = 'sleep' if is_sleep else raw_state %}
               {% if state == 'unavailable' or state == 'unknown' %}
               Not configured
               {% elif state == 'curtailed' %}
               CURTAILED{% if power %} - {{ power }}%{% endif %}
               {% elif state == 'sleep' %}
-              Sleep{% if power_w and power_w > 0 %} (PID recovery){% endif %}
+              Sleep{% if power_w > 0 %} (PID recovery){% endif %}
               {% elif state == 'offline' %}
               Offline - Cannot reach
               {% elif state == 'error' %}
               Error - Check logs
-              {% elif state == 'online' %}
-              {{ brand | title if brand else 'Online' }}{% if power_w %} - {{ power_w }}W{% endif %}
+              {% elif state in ['online', 'running'] %}
+              {{ brand | title if brand else 'Online' }}{% if power_w %} - {{ power_w | int }}W{% endif %}
               {% else %}
               {{ brand | title if brand else 'Normal' }}{% if power %} - {{ power }}%{% endif %}
               {% endif %}
             icon: >-
-              {% set state = states('sensor.inverter_status') | lower %}
+              {% set raw_state = states('sensor.inverter_status') | lower %}
+              {% set power_w = state_attr('sensor.inverter_status', 'power_output_w') | float(0) %}
+              {% set is_night = states('sun.sun') == 'below_horizon' %}
+              {% set is_sleep = is_night and power_w < 100 and raw_state in ['running', 'online'] %}
+              {% set state = 'sleep' if is_sleep else raw_state %}
               {% if state == 'sleep' %}
               mdi:moon-waning-crescent
               {% elif state == 'error' %}
@@ -356,7 +364,11 @@ views:
               mdi:solar-panel
               {% endif %}
             icon_color: >-
-              {% set state = states('sensor.inverter_status') | lower %}
+              {% set raw_state = states('sensor.inverter_status') | lower %}
+              {% set power_w = state_attr('sensor.inverter_status', 'power_output_w') | float(0) %}
+              {% set is_night = states('sun.sun') == 'below_horizon' %}
+              {% set is_sleep = is_night and power_w < 100 and raw_state in ['running', 'online'] %}
+              {% set state = 'sleep' if is_sleep else raw_state %}
               {% if state == 'curtailed' %}
               red
               {% elif state == 'sleep' %}
@@ -387,7 +399,11 @@ views:
             card_mod:
               style: |
                 ha-card {
-                  {% set state = states('sensor.inverter_status') | lower %}
+                  {% set raw_state = states('sensor.inverter_status') | lower %}
+                  {% set power_w = state_attr('sensor.inverter_status', 'power_output_w') | float(0) %}
+                  {% set is_night = states('sun.sun') == 'below_horizon' %}
+                  {% set is_sleep = is_night and power_w < 100 and raw_state in ['running', 'online'] %}
+                  {% set state = 'sleep' if is_sleep else raw_state %}
                   {% if state == 'curtailed' %}
                   background: linear-gradient(135deg, rgba(244, 67, 54, 0.15) 0%, rgba(244, 67, 54, 0.05) 100%);
                   {% elif state == 'sleep' %}
