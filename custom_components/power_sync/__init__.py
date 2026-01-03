@@ -1446,6 +1446,120 @@ class PowerwallTypeView(HomeAssistantView):
             )
 
 
+class InverterStatusView(HomeAssistantView):
+    """HTTP view to get AC-coupled inverter status for mobile app."""
+
+    url = "/api/power_sync/inverter_status"
+    name = "api:power_sync:inverter_status"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request for inverter status."""
+        _LOGGER.info("☀️ Inverter status HTTP request")
+
+        # Find the power_sync entry
+        entry = None
+        for config_entry in self._hass.config_entries.async_entries(DOMAIN):
+            entry = config_entry
+            break
+
+        if not entry:
+            return web.json_response(
+                {"success": False, "error": "PowerSync not configured"},
+                status=503
+            )
+
+        # Check if inverter curtailment is enabled
+        inverter_enabled = entry.options.get(
+            CONF_INVERTER_CURTAILMENT_ENABLED,
+            entry.data.get(CONF_INVERTER_CURTAILMENT_ENABLED, False)
+        )
+
+        if not inverter_enabled:
+            return web.json_response({
+                "success": True,
+                "enabled": False,
+                "message": "Inverter curtailment not enabled"
+            })
+
+        # Get inverter configuration
+        inverter_brand = entry.options.get(
+            CONF_INVERTER_BRAND,
+            entry.data.get(CONF_INVERTER_BRAND, "sungrow")
+        )
+        inverter_host = entry.options.get(
+            CONF_INVERTER_HOST,
+            entry.data.get(CONF_INVERTER_HOST, "")
+        )
+        inverter_port = entry.options.get(
+            CONF_INVERTER_PORT,
+            entry.data.get(CONF_INVERTER_PORT, DEFAULT_INVERTER_PORT)
+        )
+        inverter_slave_id = entry.options.get(
+            CONF_INVERTER_SLAVE_ID,
+            entry.data.get(CONF_INVERTER_SLAVE_ID, DEFAULT_INVERTER_SLAVE_ID)
+        )
+        inverter_model = entry.options.get(
+            CONF_INVERTER_MODEL,
+            entry.data.get(CONF_INVERTER_MODEL)
+        )
+        inverter_token = entry.options.get(
+            CONF_INVERTER_TOKEN,
+            entry.data.get(CONF_INVERTER_TOKEN)
+        )
+
+        if not inverter_host:
+            return web.json_response({
+                "success": True,
+                "enabled": True,
+                "error": "Inverter not configured (no host)"
+            })
+
+        try:
+            controller = get_inverter_controller(
+                brand=inverter_brand,
+                host=inverter_host,
+                port=inverter_port,
+                slave_id=inverter_slave_id,
+                model=inverter_model,
+                token=inverter_token,
+            )
+
+            if not controller:
+                return web.json_response({
+                    "success": False,
+                    "enabled": True,
+                    "error": f"Unsupported inverter brand: {inverter_brand}"
+                })
+
+            # Get status from controller
+            state = await controller.get_status()
+            await controller.disconnect()
+
+            result = {
+                "success": True,
+                "enabled": True,
+                "brand": inverter_brand,
+                "model": inverter_model,
+                "host": inverter_host,
+                **state.to_dict()
+            }
+
+            _LOGGER.info(f"✅ Inverter status: {state.status.value}, curtailed: {state.is_curtailed}")
+            return web.json_response(result)
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting inverter status: {e}", exc_info=True)
+            return web.json_response(
+                {"success": False, "enabled": True, "error": str(e)},
+                status=500
+            )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PowerSync from a config entry."""
     _LOGGER.info("=" * 60)
@@ -4438,6 +4552,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register HTTP endpoint for Powerwall type (for mobile app Settings)
     hass.http.register_view(PowerwallTypeView(hass))
     _LOGGER.info("🔋 Powerwall type HTTP endpoint registered at /api/power_sync/powerwall_type")
+
+    # Register HTTP endpoint for Inverter status (for mobile app Solar controls)
+    hass.http.register_view(InverterStatusView(hass))
+    _LOGGER.info("☀️ Inverter status HTTP endpoint registered at /api/power_sync/inverter_status")
 
     # ======================================================================
     # SYNC BATTERY HEALTH SERVICE (from mobile app TEDAPI scans)
