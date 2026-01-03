@@ -684,7 +684,8 @@ class SungrowController(InverterController):
 
             # Determine status based on running state (if available) or power output
             if running_state is not None:
-                is_curtailed = running_state in (
+                # Check if inverter is stopped/sleeping (NOT curtailment!)
+                is_stopped = running_state in (
                     self.STATE_STOP,
                     self.STATE_SHUTDOWN,
                     self.STATE_STANDBY,
@@ -702,9 +703,11 @@ class SungrowController(InverterController):
                 elif running_state == self.STATE_FAULT:
                     status = InverterStatus.ERROR
                     attrs["running_state"] = "fault"
-                elif is_curtailed:
-                    status = InverterStatus.CURTAILED
+                elif is_stopped:
+                    # Stopped/standby = OFFLINE (will be converted to SLEEP at night by API layer)
+                    status = InverterStatus.OFFLINE
                     attrs["running_state"] = "stopped"
+                    _LOGGER.debug(f"Sungrow stopped/standby: 0x{running_state:04X}")
                 elif running_state == 0xFFFF or running_state == 65535:
                     # Register returned invalid value - infer from power output
                     if power_output is not None and power_output > 0:
