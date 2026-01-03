@@ -996,7 +996,12 @@ class InverterStatusSensor(SensorEntity):
         elif self._cached_state == "running":
             attrs["description"] = "Inverter operating normally"
         elif self._cached_state == "offline":
-            attrs["description"] = "Cannot reach inverter"
+            # Check if inverter is sleeping (stopped) vs actually unreachable
+            running_state = self._cached_attrs.get("running_state", "")
+            if running_state == "stopped":
+                attrs["description"] = "Inverter sleeping (nighttime)"
+            else:
+                attrs["description"] = "Cannot reach inverter"
         elif self._cached_state == "error":
             attrs["description"] = "Inverter reported fault condition"
         elif self._cached_state == "disabled":
