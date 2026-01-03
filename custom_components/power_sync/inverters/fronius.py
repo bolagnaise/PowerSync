@@ -73,6 +73,9 @@ class FroniusController(InverterController):
         super().__init__(host, port, slave_id, model)
         self._client: Optional[AsyncModbusTcpClient] = None
         self._lock = asyncio.Lock()
+        # Detect which parameter name pymodbus version uses for slave/unit ID
+        # pymodbus 2.x uses 'unit', pymodbus 3.x uses 'slave'
+        self._slave_param_name: Optional[str] = None
 
     async def connect(self) -> bool:
         """Connect to the Fronius inverter via Modbus TCP."""
@@ -110,6 +113,13 @@ class FroniusController(InverterController):
             self._connected = False
             _LOGGER.debug(f"Disconnected from Fronius inverter at {self.host}")
 
+    def _get_slave_kwargs(self) -> dict:
+        """Get the correct keyword argument for slave/unit ID based on pymodbus version."""
+        if self._slave_param_name:
+            return {self._slave_param_name: self.slave_id}
+        # Default to 'slave' for pymodbus 3.x, will be corrected on first use if wrong
+        return {"slave": self.slave_id}
+
     async def _write_register(self, address: int, value: int) -> bool:
         """Write a value to a Modbus register."""
         if not self._client or not self._client.connected:
@@ -117,11 +127,38 @@ class FroniusController(InverterController):
                 return False
 
         try:
-            result = await self._client.write_register(
-                address=address,
-                value=value,
-                slave=self.slave_id,
-            )
+            # Try with detected parameter name, or detect on first use
+            try:
+                result = await self._client.write_register(
+                    address=address,
+                    value=value,
+                    **self._get_slave_kwargs(),
+                )
+                # If successful and we haven't detected yet, remember this works
+                if not self._slave_param_name:
+                    self._slave_param_name = "slave"
+            except TypeError as e:
+                error_msg = str(e)
+                if "slave" in error_msg:
+                    # pymodbus version uses 'unit' instead of 'slave'
+                    self._slave_param_name = "unit"
+                    _LOGGER.debug("Detected pymodbus using 'unit' parameter")
+                    result = await self._client.write_register(
+                        address=address,
+                        value=value,
+                        unit=self.slave_id,
+                    )
+                elif "unit" in error_msg:
+                    # pymodbus version uses 'slave' instead of 'unit'
+                    self._slave_param_name = "slave"
+                    _LOGGER.debug("Detected pymodbus using 'slave' parameter")
+                    result = await self._client.write_register(
+                        address=address,
+                        value=value,
+                        slave=self.slave_id,
+                    )
+                else:
+                    raise
 
             if result.isError():
                 _LOGGER.error(f"Modbus write error at register {address}: {result}")
@@ -144,11 +181,38 @@ class FroniusController(InverterController):
                 return None
 
         try:
-            result = await self._client.read_holding_registers(
-                address=address,
-                count=count,
-                slave=self.slave_id,
-            )
+            # Try with detected parameter name, or detect on first use
+            try:
+                result = await self._client.read_holding_registers(
+                    address=address,
+                    count=count,
+                    **self._get_slave_kwargs(),
+                )
+                # If successful and we haven't detected yet, remember this works
+                if not self._slave_param_name:
+                    self._slave_param_name = "slave"
+            except TypeError as e:
+                error_msg = str(e)
+                if "slave" in error_msg:
+                    # pymodbus version uses 'unit' instead of 'slave'
+                    self._slave_param_name = "unit"
+                    _LOGGER.debug("Detected pymodbus using 'unit' parameter")
+                    result = await self._client.read_holding_registers(
+                        address=address,
+                        count=count,
+                        unit=self.slave_id,
+                    )
+                elif "unit" in error_msg:
+                    # pymodbus version uses 'slave' instead of 'unit'
+                    self._slave_param_name = "slave"
+                    _LOGGER.debug("Detected pymodbus using 'slave' parameter")
+                    result = await self._client.read_holding_registers(
+                        address=address,
+                        count=count,
+                        slave=self.slave_id,
+                    )
+                else:
+                    raise
 
             if result.isError():
                 _LOGGER.debug(f"Modbus read error at register {address}: {result}")
