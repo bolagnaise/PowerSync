@@ -334,16 +334,26 @@ views:
               Not configured
               {% elif state == 'Curtailed' %}
               CURTAILED{% if power %} - {{ power }}%{% endif %}
+              {% elif state == 'Sleep' %}
+              Sleep - Nighttime
               {% elif state == 'Offline' %}
               Offline - Cannot reach
               {% else %}
               {{ brand | title if brand else 'Normal' }}{% if power %} - {{ power }}%{% endif %}
               {% endif %}
-            icon: mdi:solar-panel
+            icon: >-
+              {% set state = states('sensor.inverter_status') %}
+              {% if state == 'Sleep' %}
+              mdi:moon-waning-crescent
+              {% else %}
+              mdi:solar-panel
+              {% endif %}
             icon_color: >-
               {% set state = states('sensor.inverter_status') %}
               {% if state == 'Curtailed' %}
               red
+              {% elif state == 'Sleep' %}
+              blue-grey
               {% elif state == 'Offline' %}
               orange
               {% elif state == 'unavailable' or state == 'unknown' %}
@@ -373,6 +383,8 @@ views:
                   {% set state = states('sensor.inverter_status') %}
                   {% if state == 'Curtailed' %}
                   background: linear-gradient(135deg, rgba(244, 67, 54, 0.15) 0%, rgba(244, 67, 54, 0.05) 100%);
+                  {% elif state == 'Sleep' %}
+                  background: linear-gradient(135deg, rgba(96, 125, 139, 0.15) 0%, rgba(96, 125, 139, 0.05) 100%);
                   {% elif state == 'Offline' %}
                   background: linear-gradient(135deg, rgba(255, 152, 0, 0.15) 0%, rgba(255, 152, 0, 0.05) 100%);
                   {% elif state == 'unavailable' or state == 'unknown' %}
