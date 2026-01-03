@@ -332,8 +332,9 @@ views:
               {% set power = state_attr('sensor.inverter_status', 'power_limit_percent') %}
               {% set power_w = state_attr('sensor.inverter_status', 'power_output_w') | float(0) %}
               {% set brand = state_attr('sensor.inverter_status', 'brand') %}
+              {% set running = state_attr('sensor.inverter_status', 'running_state') | default('') | lower %}
               {% set is_night = states('sun.sun') == 'below_horizon' %}
-              {% set is_sleep = is_night and power_w < 100 and raw_state in ['running', 'online', 'normal'] %}
+              {% set is_sleep = is_night and (power_w < 100 or running == 'stopped') and raw_state not in ['offline', 'error', 'unavailable', 'unknown'] %}
               {% set state = 'sleep' if is_sleep else raw_state %}
               {% if state == 'unavailable' or state == 'unknown' %}
               Not configured
@@ -353,8 +354,9 @@ views:
             icon: >-
               {% set raw_state = states('sensor.inverter_status') | lower %}
               {% set power_w = state_attr('sensor.inverter_status', 'power_output_w') | float(0) %}
+              {% set running = state_attr('sensor.inverter_status', 'running_state') | default('') | lower %}
               {% set is_night = states('sun.sun') == 'below_horizon' %}
-              {% set is_sleep = is_night and power_w < 100 and raw_state in ['running', 'online', 'normal'] %}
+              {% set is_sleep = is_night and (power_w < 100 or running == 'stopped') and raw_state not in ['offline', 'error', 'unavailable', 'unknown'] %}
               {% set state = 'sleep' if is_sleep else raw_state %}
               {% if state == 'sleep' %}
               mdi:moon-waning-crescent
@@ -366,8 +368,9 @@ views:
             icon_color: >-
               {% set raw_state = states('sensor.inverter_status') | lower %}
               {% set power_w = state_attr('sensor.inverter_status', 'power_output_w') | float(0) %}
+              {% set running = state_attr('sensor.inverter_status', 'running_state') | default('') | lower %}
               {% set is_night = states('sun.sun') == 'below_horizon' %}
-              {% set is_sleep = is_night and power_w < 100 and raw_state in ['running', 'online', 'normal'] %}
+              {% set is_sleep = is_night and (power_w < 100 or running == 'stopped') and raw_state not in ['offline', 'error', 'unavailable', 'unknown'] %}
               {% set state = 'sleep' if is_sleep else raw_state %}
               {% if state == 'curtailed' %}
               red
@@ -401,8 +404,9 @@ views:
                 ha-card {
                   {% set raw_state = states('sensor.inverter_status') | lower %}
                   {% set power_w = state_attr('sensor.inverter_status', 'power_output_w') | float(0) %}
+                  {% set running = state_attr('sensor.inverter_status', 'running_state') | default('') | lower %}
                   {% set is_night = states('sun.sun') == 'below_horizon' %}
-                  {% set is_sleep = is_night and power_w < 100 and raw_state in ['running', 'online', 'normal'] %}
+                  {% set is_sleep = is_night and (power_w < 100 or running == 'stopped') and raw_state not in ['offline', 'error', 'unavailable', 'unknown'] %}
                   {% set state = 'sleep' if is_sleep else raw_state %}
                   {% if state == 'curtailed' %}
                   background: linear-gradient(135deg, rgba(244, 67, 54, 0.15) 0%, rgba(244, 67, 54, 0.05) 100%);
