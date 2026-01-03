@@ -9,6 +9,7 @@ Reference: https://github.com/pyenphase/pyenphase
 import asyncio
 import logging
 import ssl
+import xml.etree.ElementTree as ET
 from typing import Optional
 from datetime import datetime, timedelta
 
@@ -151,7 +152,9 @@ class EnphaseController(InverterController):
         try:
             async with self._session.get(url, headers=self._get_headers()) as response:
                 if response.status == 200:
-                    return await response.json()
+                    # Use content_type=None to accept any Content-Type header
+                    # Enphase gateways often return incorrect mimetypes
+                    return await response.json(content_type=None)
                 elif response.status == 401:
                     _LOGGER.debug(f"Authentication required for {endpoint}")
                     return None
@@ -196,10 +199,42 @@ class EnphaseController(InverterController):
 
     async def _get_info(self) -> Optional[dict]:
         """Get device info from the IQ Gateway."""
-        # Try info endpoint first (doesn't require auth on most firmware)
-        info = await self._get(self.ENDPOINT_INFO)
-        if info:
-            return info
+        # Try info endpoint first - returns XML on most firmware
+        try:
+            if not self._session:
+                if not await self.connect():
+                    return None
+
+            url = f"https://{self.host}:{self.port}{self.ENDPOINT_INFO}"
+            async with self._session.get(url, headers=self._get_headers()) as response:
+                if response.status == 200:
+                    text = await response.text()
+                    # Parse XML response
+                    try:
+                        root = ET.fromstring(text)
+                        # Extract device info from XML
+                        info = {}
+                        for child in root:
+                            # Remove namespace prefix if present
+                            tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+                            if child.text:
+                                info[tag] = child.text.strip()
+                        if info:
+                            # Map common fields
+                            return {
+                                "serial": info.get("sn") or info.get("serial"),
+                                "software": info.get("software") or info.get("version"),
+                                "model": info.get("pn") or info.get("model"),
+                            }
+                    except ET.ParseError:
+                        # Not XML, try JSON
+                        try:
+                            import json
+                            return json.loads(text)
+                        except json.JSONDecodeError:
+                            _LOGGER.debug(f"Could not parse /info response as XML or JSON")
+        except Exception as e:
+            _LOGGER.debug(f"Error getting /info: {e}")
 
         # Try home.json as fallback
         home = await self._get(self.ENDPOINT_HOME)
