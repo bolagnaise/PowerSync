@@ -329,15 +329,20 @@ views:
             secondary: >-
               {% set state = states('sensor.inverter_status') | lower %}
               {% set power = state_attr('sensor.inverter_status', 'power_limit_percent') %}
+              {% set power_w = state_attr('sensor.inverter_status', 'power_output_w') %}
               {% set brand = state_attr('sensor.inverter_status', 'brand') %}
               {% if state == 'unavailable' or state == 'unknown' %}
               Not configured
               {% elif state == 'curtailed' %}
               CURTAILED{% if power %} - {{ power }}%{% endif %}
               {% elif state == 'sleep' %}
-              Sleep - Nighttime
+              Sleep{% if power_w and power_w > 0 %} (PID recovery){% endif %}
               {% elif state == 'offline' %}
               Offline - Cannot reach
+              {% elif state == 'error' %}
+              Error - Check logs
+              {% elif state == 'online' %}
+              {{ brand | title if brand else 'Online' }}{% if power_w %} - {{ power_w }}W{% endif %}
               {% else %}
               {{ brand | title if brand else 'Normal' }}{% if power %} - {{ power }}%{% endif %}
               {% endif %}
@@ -345,6 +350,8 @@ views:
               {% set state = states('sensor.inverter_status') | lower %}
               {% if state == 'sleep' %}
               mdi:moon-waning-crescent
+              {% elif state == 'error' %}
+              mdi:alert-octagon
               {% else %}
               mdi:solar-panel
               {% endif %}
@@ -354,7 +361,7 @@ views:
               red
               {% elif state == 'sleep' %}
               blue-grey
-              {% elif state == 'offline' %}
+              {% elif state == 'offline' or state == 'error' %}
               orange
               {% elif state == 'unavailable' or state == 'unknown' %}
               disabled
@@ -365,14 +372,14 @@ views:
               {% set state = states('sensor.inverter_status') | lower %}
               {% if state == 'curtailed' %}
               mdi:close-circle
-              {% elif state == 'offline' %}
+              {% elif state == 'offline' or state == 'error' %}
               mdi:alert-circle
               {% endif %}
             badge_color: >-
               {% set state = states('sensor.inverter_status') | lower %}
               {% if state == 'curtailed' %}
               red
-              {% elif state == 'offline' %}
+              {% elif state == 'offline' or state == 'error' %}
               orange
               {% endif %}
             tap_action:
@@ -385,7 +392,7 @@ views:
                   background: linear-gradient(135deg, rgba(244, 67, 54, 0.15) 0%, rgba(244, 67, 54, 0.05) 100%);
                   {% elif state == 'sleep' %}
                   background: linear-gradient(135deg, rgba(96, 125, 139, 0.15) 0%, rgba(96, 125, 139, 0.05) 100%);
-                  {% elif state == 'offline' %}
+                  {% elif state == 'offline' or state == 'error' %}
                   background: linear-gradient(135deg, rgba(255, 152, 0, 0.15) 0%, rgba(255, 152, 0, 0.05) 100%);
                   {% elif state == 'unavailable' or state == 'unknown' %}
                   background: linear-gradient(135deg, rgba(158, 158, 158, 0.1) 0%, rgba(158, 158, 158, 0.05) 100%);
