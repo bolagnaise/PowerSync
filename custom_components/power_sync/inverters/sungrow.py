@@ -17,6 +17,9 @@ from .base import InverterController, InverterState, InverterStatus
 
 _LOGGER = logging.getLogger(__name__)
 
+# Suppress pymodbus DEBUG spam (connection retry loops)
+logging.getLogger("pymodbus").setLevel(logging.WARNING)
+
 # pymodbus 3.9+ changed 'slave' parameter to 'device_id'
 # Detect which parameter name to use based on version
 _pymodbus_version = tuple(int(x) for x in pymodbus.__version__.split(".")[:2])
@@ -127,8 +130,9 @@ class SungrowController(InverterController):
     # Run mode register (common across models)
     REGISTER_RUN_MODE = 5005
 
-    # Timeout for Modbus operations
-    TIMEOUT_SECONDS = 10.0
+    # Timeout for Modbus operations (short to fail fast when inverter is sleeping)
+    TIMEOUT_SECONDS = 3.0
+    CONNECT_TIMEOUT_SECONDS = 2.0
 
     def __init__(
         self,
@@ -196,24 +200,45 @@ class SungrowController(InverterController):
                 if self._client and self._client.connected:
                     return True
 
+                # Create client with auto-reconnect DISABLED to prevent spam
+                # when inverter is sleeping/offline
                 self._client = AsyncModbusTcpClient(
                     host=self.host,
                     port=self.port,
                     timeout=self.TIMEOUT_SECONDS,
+                    retries=1,  # Only retry once
+                    reconnect_delay=0,  # Disable auto-reconnect
                 )
 
-                connected = await self._client.connect()
+                # Use asyncio.wait_for to enforce a strict connection timeout
+                try:
+                    connected = await asyncio.wait_for(
+                        self._client.connect(),
+                        timeout=self.CONNECT_TIMEOUT_SECONDS
+                    )
+                except asyncio.TimeoutError:
+                    _LOGGER.debug(f"Connection timeout to Sungrow inverter at {self.host}:{self.port}")
+                    self._client.close()
+                    self._client = None
+                    return False
+
                 if connected:
                     self._connected = True
                     _LOGGER.info(f"Connected to Sungrow inverter at {self.host}:{self.port}")
                 else:
-                    _LOGGER.error(f"Failed to connect to Sungrow inverter at {self.host}:{self.port}")
+                    _LOGGER.debug(f"Failed to connect to Sungrow inverter at {self.host}:{self.port}")
+                    if self._client:
+                        self._client.close()
+                        self._client = None
 
                 return connected
 
             except Exception as e:
-                _LOGGER.error(f"Error connecting to Sungrow inverter: {e}")
+                _LOGGER.debug(f"Error connecting to Sungrow inverter: {e}")
                 self._connected = False
+                if self._client:
+                    self._client.close()
+                    self._client = None
                 return False
 
     async def disconnect(self) -> None:
