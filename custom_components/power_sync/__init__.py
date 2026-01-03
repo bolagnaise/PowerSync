@@ -1554,18 +1554,35 @@ class InverterStatusView(HomeAssistantView):
 
         except Exception as e:
             _LOGGER.error(f"Error getting inverter status: {e}", exc_info=True)
-            # Return 200 with offline status so mobile app can show the card
+            # Determine if it's likely nighttime (inverter sleep) vs actual offline
+            # Use sun.sun entity if available for accurate sunrise/sunset
+            is_night = False
+            try:
+                sun_state = self._hass.states.get("sun.sun")
+                if sun_state:
+                    is_night = sun_state.state == "below_horizon"
+                else:
+                    # Fallback to hour-based check (6pm-6am)
+                    from datetime import datetime
+                    local_hour = datetime.now().hour
+                    is_night = local_hour >= 18 or local_hour < 6
+            except Exception:
+                pass
+
+            status = "sleep" if is_night else "offline"
+            description = "Inverter in sleep mode (night)" if is_night else "Cannot reach inverter"
+
             return web.json_response({
                 "success": True,
                 "enabled": True,
-                "status": "offline",
+                "status": status,
                 "is_curtailed": False,
                 "power_output_w": None,
                 "power_limit_percent": None,
                 "brand": inverter_brand,
                 "model": inverter_model,
                 "host": inverter_host,
-                "error_message": str(e)
+                "error_message": description
             })
 
 

@@ -486,17 +486,30 @@ def api_inverter_status():
 
     except Exception as e:
         logger.error(f"Error getting inverter status: {e}")
-        # Return 200 with error info so mobile app can show "offline" status
+        # Determine if it's likely nighttime (inverter sleep) vs actual offline
+        from datetime import datetime
+        import pytz
+        try:
+            tz = pytz.timezone(current_user.timezone or 'Australia/Sydney')
+            local_hour = datetime.now(tz).hour
+            # Consider 6pm-6am as "night" when inverter sleep is expected
+            is_night = local_hour >= 18 or local_hour < 6
+            status = 'sleep' if is_night else 'offline'
+            description = 'Inverter in sleep mode (night)' if is_night else 'Cannot reach inverter'
+        except Exception:
+            status = 'offline'
+            description = 'Cannot reach inverter'
+
         return jsonify({
             'enabled': True,
-            'status': 'offline',
+            'status': status,
             'is_curtailed': False,
             'power_output_w': None,
             'power_limit_percent': None,
             'brand': current_user.inverter_brand,
             'model': current_user.inverter_model,
             'host': current_user.inverter_host,
-            'error_message': str(e)
+            'error_message': description
         })
 
 
