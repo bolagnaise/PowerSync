@@ -7,6 +7,7 @@ Reference: https://github.com/pyenphase/pyenphase
            https://github.com/Matthew1471/Enphase-API
 """
 import asyncio
+import json
 import logging
 import ssl
 import xml.etree.ElementTree as ET
@@ -40,12 +41,15 @@ class EnphaseController(InverterController):
     ENDPOINT_PCS_SETTINGS = "/ivp/ss/pcs_settings"
     ENDPOINT_HOME = "/home.json"
 
-    # Token endpoints (Enphase cloud)
-    ENPHASE_TOKEN_URL = "https://enlighten.enphaseenergy.com/login/login.json"
-    ENPHASE_ENTREZ_URL = "https://entrez.enphaseenergy.com/tokens"
+    # Enlighten cloud endpoints for token retrieval
+    ENLIGHTEN_LOGIN_URL = "https://enlighten.enphaseenergy.com/login/login.json"
+    ENLIGHTEN_TOKEN_URL = "https://entrez.enphaseenergy.com/tokens"
 
     # Timeout for HTTP operations
     TIMEOUT_SECONDS = 30.0
+
+    # Token refresh interval (tokens are valid for ~12 hours, refresh at 11)
+    TOKEN_REFRESH_HOURS = 11
 
     def __init__(
         self,
@@ -66,9 +70,9 @@ class EnphaseController(InverterController):
             slave_id: Not used for Enphase (interface compatibility)
             model: Envoy model (e.g., 'envoy-s-metered', 'iq-gateway')
             token: JWT token for authentication (if already obtained)
-            username: Enlighten username (for token retrieval)
-            password: Enlighten password (for token retrieval)
-            serial: Envoy serial number (for token retrieval)
+            username: Enlighten username/email (for cloud token retrieval)
+            password: Enlighten password (for cloud token retrieval)
+            serial: Envoy serial number (for token retrieval, auto-detected if not provided)
         """
         super().__init__(host, port, slave_id, model)
         self._token = token
@@ -76,16 +80,145 @@ class EnphaseController(InverterController):
         self._password = password
         self._serial = serial
         self._session: Optional[aiohttp.ClientSession] = None
+        self._cloud_session: Optional[aiohttp.ClientSession] = None
         self._lock: Optional[asyncio.Lock] = None  # Created lazily in async context
         self._firmware_version: Optional[str] = None
         self._envoy_serial: Optional[str] = None
         self._dpel_supported: Optional[bool] = None
+        self._token_obtained_at: Optional[datetime] = None
+        self._enlighten_session_id: Optional[str] = None
 
     def _get_lock(self) -> asyncio.Lock:
         """Get or create the asyncio lock (lazy initialization for Flask compatibility)."""
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock
+
+    async def _get_enlighten_session(self) -> Optional[str]:
+        """Authenticate with Enlighten cloud and get session ID.
+
+        Returns:
+            Session ID if successful, None otherwise
+        """
+        if not self._username or not self._password:
+            _LOGGER.debug("No Enlighten credentials provided")
+            return None
+
+        try:
+            if not self._cloud_session:
+                self._cloud_session = aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=30.0)
+                )
+
+            login_data = {
+                "user[email]": self._username,
+                "user[password]": self._password,
+            }
+
+            async with self._cloud_session.post(
+                self.ENLIGHTEN_LOGIN_URL,
+                data=login_data,
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    session_id = result.get("session_id")
+                    if session_id:
+                        _LOGGER.info("Successfully authenticated with Enlighten cloud")
+                        self._enlighten_session_id = session_id
+                        return session_id
+                    else:
+                        _LOGGER.error(f"Enlighten login response missing session_id: {result}")
+                else:
+                    text = await response.text()
+                    _LOGGER.error(f"Enlighten login failed with status {response.status}: {text[:200]}")
+
+        except Exception as e:
+            _LOGGER.error(f"Error authenticating with Enlighten: {e}")
+
+        return None
+
+    async def _get_token_from_cloud(self, serial: str) -> Optional[str]:
+        """Get JWT token from Enlighten cloud for the specified Envoy.
+
+        Args:
+            serial: Envoy serial number
+
+        Returns:
+            JWT token if successful, None otherwise
+        """
+        if not self._enlighten_session_id:
+            session_id = await self._get_enlighten_session()
+            if not session_id:
+                return None
+        else:
+            session_id = self._enlighten_session_id
+
+        try:
+            if not self._cloud_session:
+                self._cloud_session = aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=30.0)
+                )
+
+            # Request token for this Envoy
+            token_data = {
+                "session_id": session_id,
+                "serial_num": serial,
+                "username": self._username,
+            }
+
+            async with self._cloud_session.post(
+                self.ENLIGHTEN_TOKEN_URL,
+                json=token_data,
+            ) as response:
+                if response.status == 200:
+                    token = await response.text()
+                    token = token.strip()
+                    if token and len(token) > 100:  # JWT tokens are long
+                        _LOGGER.info(f"Successfully obtained JWT token from Enlighten for Envoy {serial}")
+                        self._token = token
+                        self._token_obtained_at = datetime.now()
+                        return token
+                    else:
+                        _LOGGER.error(f"Invalid token response from Enlighten: {token[:100]}")
+                else:
+                    text = await response.text()
+                    _LOGGER.error(f"Enlighten token request failed with status {response.status}: {text[:200]}")
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting token from Enlighten: {e}")
+
+        return None
+
+    async def _ensure_token(self) -> bool:
+        """Ensure we have a valid JWT token, fetching from cloud if needed.
+
+        Returns:
+            True if we have a valid token
+        """
+        # If we have a token and it's not too old, use it
+        if self._token:
+            if self._token_obtained_at:
+                age = datetime.now() - self._token_obtained_at
+                if age < timedelta(hours=self.TOKEN_REFRESH_HOURS):
+                    return True
+                _LOGGER.info("JWT token expired, refreshing from Enlighten cloud")
+            else:
+                # Token was provided externally, assume it's valid
+                return True
+
+        # Need to get token from cloud
+        if not self._username or not self._password:
+            _LOGGER.debug("No Enlighten credentials, cannot fetch token")
+            return False
+
+        # Get serial from Envoy if not provided
+        serial = self._serial or self._envoy_serial
+        if not serial:
+            _LOGGER.warning("Cannot fetch token: Envoy serial number not known")
+            return False
+
+        token = await self._get_token_from_cloud(serial)
+        return token is not None
 
     def _get_ssl_context(self) -> ssl.SSLContext:
         """Get SSL context that accepts self-signed certificates."""
@@ -119,6 +252,14 @@ class EnphaseController(InverterController):
                         f"Connected to Enphase IQ Gateway at {self.host} "
                         f"(serial: {self._envoy_serial}, firmware: {self._firmware_version})"
                     )
+
+                    # Fetch JWT token from Enlighten cloud if credentials provided
+                    if self._username and self._password and not self._token:
+                        serial = self._serial or self._envoy_serial
+                        if serial:
+                            _LOGGER.info(f"Fetching JWT token from Enlighten cloud for Envoy {serial}")
+                            await self._get_token_from_cloud(serial)
+
                     return True
                 else:
                     _LOGGER.error(f"Failed to connect to Enphase IQ Gateway at {self.host}")
@@ -135,6 +276,9 @@ class EnphaseController(InverterController):
             if self._session:
                 await self._session.close()
                 self._session = None
+            if self._cloud_session:
+                await self._cloud_session.close()
+                self._cloud_session = None
             self._connected = False
             _LOGGER.debug(f"Disconnected from Enphase IQ Gateway at {self.host}")
 
