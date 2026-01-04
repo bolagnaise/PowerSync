@@ -717,8 +717,15 @@ class SungrowController(InverterController):
                         status = InverterStatus.ONLINE
                         attrs["running_state"] = "idle"
                 else:
-                    status = InverterStatus.UNKNOWN
-                    attrs["running_state"] = f"unknown (0x{running_state:04X})"
+                    # Unknown running state - infer from power output
+                    # If producing power, treat as online
+                    if power_output is not None and power_output > 50:
+                        status = InverterStatus.ONLINE
+                        attrs["running_state"] = "running"
+                        logger.debug(f"Sungrow unknown state 0x{running_state:04X} but producing {power_output}W - treating as online")
+                    else:
+                        status = InverterStatus.UNKNOWN
+                        attrs["running_state"] = f"unknown (0x{running_state:04X})"
             else:
                 # No running state register - infer from power output (e.g., SG.05RS)
                 if power_output is not None and power_output > 0:
