@@ -119,6 +119,7 @@ class SungrowController(InverterController):
     # Running state values (varies by model)
     STATE_RUNNING = 0x0000       # Normal operation (SG10RS)
     STATE_RUNNING_ALT = 0x0002   # Normal operation (some models)
+    STATE_RUNNING_ALT2 = 0x8200  # Normal operation (SG5.0RS and others)
     STATE_STOP = 0x8000
     STATE_STANDBY = 0xA000
     STATE_INITIAL_STANDBY = 0x1400
@@ -703,7 +704,7 @@ class SungrowController(InverterController):
                     self.STATE_INITIAL_STANDBY,
                 )
 
-                if running_state in (self.STATE_RUNNING, self.STATE_RUNNING_ALT):
+                if running_state in (self.STATE_RUNNING, self.STATE_RUNNING_ALT, self.STATE_RUNNING_ALT2):
                     status = InverterStatus.ONLINE
                     attrs["running_state"] = "running"
                 elif running_state in (self.STATE_STARTUP, self.STATE_MAINTAIN):
