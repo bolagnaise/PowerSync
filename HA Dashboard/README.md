@@ -75,15 +75,16 @@ The dashboard uses these default entity names. If your entities have different n
 
 | Default Entity | Description |
 |---------------|-------------|
-| `sensor.amber_general_price` | Amber import price |
-| `sensor.amber_feed_in_price` | Amber feed-in price |
+| `sensor.current_import_price` | Amber import price ($/kWh) |
+| `sensor.current_export_price` | Amber feed-in/export price ($/kWh) |
 | `sensor.battery_level` | Powerwall battery percentage |
-| `sensor.battery_power` | Powerwall charge/discharge power |
-| `sensor.solar_power` | Solar generation power |
-| `sensor.grid_power` | Grid import/export power |
-| `sensor.home_load` | Home consumption power |
-| `sensor.tariff_schedule` | TOU schedule sensor |
-| `sensor.solar_curtailment` | Curtailment status sensor |
+| `sensor.battery_power` | Powerwall charge/discharge power (kW) |
+| `sensor.solar_power` | Solar generation power (kW) |
+| `sensor.grid_power` | Grid import/export power (kW) |
+| `sensor.home_load` | Home consumption power (kW) |
+| `sensor.tariff_schedule` | TOU schedule sent to Tesla |
+| `sensor.dc_solar_curtailment` | DC solar curtailment status (Tesla) |
+| `sensor.inverter_status` | AC-coupled inverter status |
 | `sensor.battery_health` | Battery health from mobile app TEDAPI scan |
 
 ### Chart Heights
