@@ -294,23 +294,26 @@ async def validate_sigenergy_credentials(
             _LOGGER.error(f"Sigenergy auth failed: {auth_result['error']}")
             return {"success": False, "error": "invalid_auth"}
 
-        # Get stations
-        stations_result = await client.get_stations()
-        if "error" in stations_result:
-            _LOGGER.error(f"Sigenergy get stations failed: {stations_result['error']}")
-            return {"success": False, "error": "no_stations"}
-
-        stations = stations_result.get("stations", [])
-        if not stations:
-            return {"success": False, "error": "no_stations"}
-
-        return {
+        # Authentication succeeded - save tokens
+        result = {
             "success": True,
-            "stations": stations,
+            "auth_success": True,
             "access_token": auth_result.get("access_token"),
             "refresh_token": auth_result.get("refresh_token"),
             "expires_at": auth_result.get("expires_at"),
         }
+
+        # Try to get stations (may fail with 404 on some accounts)
+        stations_result = await client.get_stations()
+        if "error" in stations_result:
+            _LOGGER.warning(f"Sigenergy get stations failed: {stations_result['error']} - manual station ID required")
+            result["stations"] = []
+            result["stations_error"] = stations_result["error"]
+        else:
+            stations = stations_result.get("stations", [])
+            result["stations"] = stations
+
+        return result
 
     except Exception as err:
         _LOGGER.exception("Unexpected error validating Sigenergy credentials: %s", err)
@@ -665,12 +668,14 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_sigenergy_station(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle Sigenergy station selection."""
+        """Handle Sigenergy station selection or manual entry."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
             station_id = user_input.get(CONF_SIGENERGY_STATION_ID)
             if station_id:
+                # Strip any whitespace
+                station_id = str(station_id).strip()
                 self._sigenergy_data[CONF_SIGENERGY_STATION_ID] = station_id
                 # Go to DC curtailment configuration
                 return await self.async_step_sigenergy_dc_curtailment()
@@ -684,8 +689,19 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             station_name = station.get("stationName") or station.get("name") or f"Station {station_id}"
             station_options[station_id] = station_name
 
+        # If no stations found via API, show manual entry form
         if not station_options:
-            return self.async_abort(reason="no_stations")
+            return self.async_show_form(
+                step_id="sigenergy_station",
+                data_schema=vol.Schema({
+                    vol.Required(CONF_SIGENERGY_STATION_ID): str,
+                }),
+                errors=errors,
+                description_placeholders={
+                    "station_help": "Station list unavailable. Enter your Station ID manually. "
+                    "To find it, ask SigenAI 'Tell me my StationID' in the Sigenergy app.",
+                },
+            )
 
         return self.async_show_form(
             step_id="sigenergy_station",

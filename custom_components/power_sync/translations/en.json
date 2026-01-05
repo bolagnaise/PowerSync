@@ -111,10 +111,10 @@
         "submit_button": "Validate"
       },
       "sigenergy_station": {
-        "title": "Select Sigenergy Station",
-        "description": "Select your Sigenergy station to configure for price sync.",
+        "title": "Sigenergy Station",
+        "description": "Select or enter your Sigenergy Station ID.\n\nIf the station list is unavailable, enter your Station ID manually. To find it, ask SigenAI 'Tell me my StationID' in the Sigenergy app.",
         "data": {
-          "sigenergy_station_id": "Sigenergy Station"
+          "sigenergy_station_id": "Station ID"
         },
         "submit_button": "Next"
       },
