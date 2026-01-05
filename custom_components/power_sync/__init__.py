@@ -127,6 +127,8 @@ from .const import (
     DEFAULT_INVERTER_PORT,
     DEFAULT_INVERTER_SLAVE_ID,
     DEFAULT_INVERTER_RESTORE_SOC,
+    # Sigenergy configuration
+    CONF_SIGENERGY_STATION_ID,
 )
 from .inverters import get_inverter_controller
 from .coordinator import (
@@ -1706,47 +1708,56 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ws_client=ws_client,  # Pass WebSocket client to coordinator
         )
 
-    # Get initial Tesla API token and provider
-    # Use get_tesla_api_token() which fetches fresh from tesla_fleet if available
-    tesla_api_token, tesla_api_provider = get_tesla_api_token(hass, entry)
+    # Check if this is a Sigenergy setup (no Tesla needed)
+    is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
+    tesla_coordinator = None
+    token_getter = None  # Will be set for Tesla users
 
-    if not tesla_api_token:
-        _LOGGER.error("No Tesla API credentials available (neither Fleet API nor Teslemetry)")
-        raise ConfigEntryNotReady("No Tesla API credentials configured")
-
-    if tesla_api_provider == TESLA_PROVIDER_FLEET_API:
-        _LOGGER.info(
-            "Detected Tesla Fleet integration - using Fleet API tokens for site %s",
-            entry.data[CONF_TESLA_ENERGY_SITE_ID]
-        )
+    if is_sigenergy:
+        _LOGGER.info("Running in Sigenergy mode - Tesla credentials not required")
     else:
-        _LOGGER.info("Using Teslemetry API for site %s", entry.data[CONF_TESLA_ENERGY_SITE_ID])
+        # Get initial Tesla API token and provider
+        # Use get_tesla_api_token() which fetches fresh from tesla_fleet if available
+        tesla_api_token, tesla_api_provider = get_tesla_api_token(hass, entry)
 
-    # Create token getter that always fetches fresh token (handles token refresh)
-    # This is called before each API request to ensure we use the latest token
-    def token_getter():
-        return get_tesla_api_token(hass, entry)
+        if not tesla_api_token:
+            _LOGGER.error("No Tesla API credentials available (neither Fleet API nor Teslemetry)")
+            raise ConfigEntryNotReady("No Tesla API credentials configured")
 
-    tesla_coordinator = TeslaEnergyCoordinator(
-        hass,
-        entry.data[CONF_TESLA_ENERGY_SITE_ID],
-        tesla_api_token,
-        api_provider=tesla_api_provider,
-        token_getter=token_getter,
-    )
+        if tesla_api_provider == TESLA_PROVIDER_FLEET_API:
+            _LOGGER.info(
+                "Detected Tesla Fleet integration - using Fleet API tokens for site %s",
+                entry.data[CONF_TESLA_ENERGY_SITE_ID]
+            )
+        else:
+            _LOGGER.info("Using Teslemetry API for site %s", entry.data[CONF_TESLA_ENERGY_SITE_ID])
+
+        # Create token getter that always fetches fresh token (handles token refresh)
+        # This is called before each API request to ensure we use the latest token
+        def token_getter():
+            return get_tesla_api_token(hass, entry)
+
+        tesla_coordinator = TeslaEnergyCoordinator(
+            hass,
+            entry.data[CONF_TESLA_ENERGY_SITE_ID],
+            tesla_api_token,
+            api_provider=tesla_api_provider,
+            token_getter=token_getter,
+        )
 
     # Fetch initial data
     if amber_coordinator:
         await amber_coordinator.async_config_entry_first_refresh()
-    await tesla_coordinator.async_config_entry_first_refresh()
+    if tesla_coordinator:
+        await tesla_coordinator.async_config_entry_first_refresh()
 
-    # Initialize demand charge coordinator if enabled
+    # Initialize demand charge coordinator if enabled (Tesla only - requires grid power data)
     demand_charge_coordinator = None
     demand_charge_enabled = entry.options.get(
         CONF_DEMAND_CHARGE_ENABLED,
         entry.data.get(CONF_DEMAND_CHARGE_ENABLED, False)
     )
-    if demand_charge_enabled:
+    if demand_charge_enabled and tesla_coordinator:
         demand_charge_rate = entry.options.get(
             CONF_DEMAND_CHARGE_RATE,
             entry.data.get(CONF_DEMAND_CHARGE_RATE, 10.0)
