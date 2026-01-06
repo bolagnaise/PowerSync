@@ -202,7 +202,7 @@
       "invalid_device_id": "Device ID must be exactly 13 digits.",
       "no_stations": "No Sigenergy stations found for this account.",
       "no_station_selected": "Please select a Sigenergy station.",
-      "modbus_host_required": "IP address is required when DC curtailment is enabled.",
+      "modbus_host_required": "Sigenergy IP address is required for energy data.",
       "unknown": "An unexpected error occurred. Please try again."
     },
     "abort": {
@@ -219,6 +219,21 @@
         "data": {
           "electricity_provider": "Electricity Provider",
           "tesla_api_provider": "Tesla API Provider"
+        }
+      },
+      "init_sigenergy": {
+        "title": "PowerSync Settings",
+        "description": "Configure your electricity provider and Sigenergy Modbus connection.\n\n**Modbus connection is required** to read real-time energy data from your Sigenergy system.",
+        "data": {
+          "electricity_provider": "Electricity Provider",
+          "sigenergy_modbus_host": "Sigenergy IP Address",
+          "sigenergy_modbus_port": "Modbus Port",
+          "sigenergy_modbus_slave_id": "Modbus Slave ID",
+          "sigenergy_dc_curtailment_enabled": "Enable DC Solar Curtailment"
+        },
+        "data_description": {
+          "sigenergy_modbus_host": "Local IP address of your Sigenergy inverter (e.g., 192.168.1.100)",
+          "sigenergy_dc_curtailment_enabled": "Allow PowerSync to limit DC solar production during negative prices"
         }
       },
       "teslemetry_token": {

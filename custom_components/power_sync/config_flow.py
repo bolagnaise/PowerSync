@@ -1263,7 +1263,20 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step 1: Select electricity provider and Tesla API provider."""
+        """Step 1: Select electricity provider and battery-specific settings."""
+        # Detect battery system type
+        battery_system = self.config_entry.data.get(CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA)
+        is_sigenergy = battery_system == BATTERY_SYSTEM_SIGENERGY
+
+        if is_sigenergy:
+            return await self.async_step_init_sigenergy(user_input)
+        else:
+            return await self.async_step_init_tesla(user_input)
+
+    async def async_step_init_tesla(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step 1 for Tesla users: Select electricity provider and Tesla API provider."""
         if user_input is not None:
             # Store provider selections
             self._provider = user_input.get(CONF_ELECTRICITY_PROVIDER, "amber")
@@ -1318,6 +1331,80 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     ): vol.In(tesla_providers),
                 }
             ),
+        )
+
+    async def async_step_init_sigenergy(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step 1 for Sigenergy users: Configure Modbus connection and DC curtailment."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            # Validate Modbus host
+            modbus_host = user_input.get(CONF_SIGENERGY_MODBUS_HOST, "").strip()
+            if not modbus_host:
+                errors["base"] = "modbus_host_required"
+            else:
+                # Store provider and Sigenergy settings
+                self._provider = user_input.get(CONF_ELECTRICITY_PROVIDER, "amber")
+
+                # Update config entry data with Sigenergy Modbus settings
+                new_data = dict(self.config_entry.data)
+                new_data[CONF_SIGENERGY_MODBUS_HOST] = modbus_host
+                new_data[CONF_SIGENERGY_MODBUS_PORT] = user_input.get(
+                    CONF_SIGENERGY_MODBUS_PORT, DEFAULT_SIGENERGY_MODBUS_PORT
+                )
+                new_data[CONF_SIGENERGY_MODBUS_SLAVE_ID] = user_input.get(
+                    CONF_SIGENERGY_MODBUS_SLAVE_ID, DEFAULT_SIGENERGY_MODBUS_SLAVE_ID
+                )
+                new_data[CONF_SIGENERGY_DC_CURTAILMENT_ENABLED] = user_input.get(
+                    CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False
+                )
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data=new_data
+                )
+
+                # Route to provider-specific step
+                if self._provider == "amber":
+                    return await self.async_step_amber_options()
+                elif self._provider == "flow_power":
+                    return await self.async_step_flow_power_options()
+                elif self._provider == "globird":
+                    return await self.async_step_globird_options()
+
+        current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
+        current_modbus_host = self._get_option(CONF_SIGENERGY_MODBUS_HOST, "")
+        current_modbus_port = self._get_option(CONF_SIGENERGY_MODBUS_PORT, DEFAULT_SIGENERGY_MODBUS_PORT)
+        current_modbus_slave_id = self._get_option(CONF_SIGENERGY_MODBUS_SLAVE_ID, DEFAULT_SIGENERGY_MODBUS_SLAVE_ID)
+        current_dc_curtailment = self._get_option(CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False)
+
+        return self.async_show_form(
+            step_id="init_sigenergy",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_ELECTRICITY_PROVIDER,
+                        default=current_provider,
+                    ): vol.In(ELECTRICITY_PROVIDERS),
+                    vol.Required(
+                        CONF_SIGENERGY_MODBUS_HOST,
+                        default=current_modbus_host,
+                    ): str,
+                    vol.Optional(
+                        CONF_SIGENERGY_MODBUS_PORT,
+                        default=current_modbus_port,
+                    ): int,
+                    vol.Optional(
+                        CONF_SIGENERGY_MODBUS_SLAVE_ID,
+                        default=current_modbus_slave_id,
+                    ): int,
+                    vol.Optional(
+                        CONF_SIGENERGY_DC_CURTAILMENT_ENABLED,
+                        default=current_dc_curtailment,
+                    ): bool,
+                }
+            ),
+            errors=errors,
         )
 
     async def async_step_teslemetry_token(
