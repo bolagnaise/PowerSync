@@ -465,9 +465,16 @@ def convert_amber_prices_to_sigenergy(
             end_hour = hour
             if end_minute >= 60:
                 end_minute = 0
-                end_hour = (hour + 1) % 24
+                end_hour = hour + 1
+                # Sigenergy uses "24:00" for midnight, not "00:00"
+                if end_hour == 24:
+                    end_hour_str = "24"
+                else:
+                    end_hour_str = f"{end_hour:02d}"
+            else:
+                end_hour_str = f"{end_hour:02d}"
 
-            time_range = f"{hour:02d}:{minute:02d}-{end_hour:02d}:{end_minute:02d}"
+            time_range = f"{hour:02d}:{minute:02d}-{end_hour_str}:{end_minute:02d}"
 
             # SPECIAL CASE: Use ActualInterval for current period if available
             # This captures short-term (5-min) price spikes that would otherwise be averaged out
