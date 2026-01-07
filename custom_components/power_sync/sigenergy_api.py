@@ -372,12 +372,16 @@ class SigenergyAPIClient:
 def convert_amber_prices_to_sigenergy(
     amber_prices: list[dict],
     price_type: str = "buy",
+    forecast_type: str = "predicted",
 ) -> list[dict]:
     """Convert Amber price data to Sigenergy timeRange format.
 
+    Uses same price extraction logic as Tesla tariff converter for consistency.
+
     Args:
-        amber_prices: List of Amber price intervals with nemTime/startTime/endTime and perKwh/spotPerKwh
+        amber_prices: List of Amber price intervals with nemTime/startTime/endTime and perKwh
         price_type: 'buy' for import prices, 'sell' for export prices
+        forecast_type: Amber forecast type to use ('predicted', 'low', 'high')
 
     Returns:
         List of {timeRange: "HH:MM-HH:MM", price: float} in cents
@@ -404,19 +408,42 @@ def convert_amber_prices_to_sigenergy(
         slot_minute = 0 if dt.minute < 30 else 30
         slot_key = f"{dt.hour:02d}:{slot_minute:02d}"
 
-        # Get the price (in cents)
-        # Amber uses perKwh for both general (buy) and feedIn (sell) channels
-        # For sell prices, we take absolute value since Sigenergy expects positive values
-        if price_type == "sell":
-            # feedIn perKwh is negative (you receive money), take absolute value
-            price_value = abs(price.get("perKwh", price.get("spotPerKwh", 0)))
-        else:
-            price_value = price.get("perKwh", price.get("advancedPrice", 0))
+        # Price extraction - matches Tesla tariff converter logic
+        # - ActualInterval (past): Use perKwh (actual settled price)
+        # - CurrentInterval (now): Use perKwh or advancedPrice
+        # - ForecastInterval (future): Use advancedPrice (with forecast type selection)
+        interval_type = price.get("type", "unknown")
+        advanced_price = price.get("advancedPrice")
 
-        # Store the price (last one wins for overlapping 5-min intervals)
+        if interval_type == "ForecastInterval" and advanced_price:
+            # ForecastInterval: Prefer advancedPrice with forecast type selection
+            if isinstance(advanced_price, dict):
+                # Dict format: {predicted, low, high}
+                per_kwh_cents = advanced_price.get(forecast_type, advanced_price.get("predicted", 0))
+            elif isinstance(advanced_price, (int, float)):
+                # Numeric format (legacy)
+                per_kwh_cents = advanced_price
+            else:
+                per_kwh_cents = price.get("perKwh", 0)
+        elif interval_type == "CurrentInterval" and advanced_price:
+            # CurrentInterval with advancedPrice available
+            if isinstance(advanced_price, dict):
+                per_kwh_cents = advanced_price.get(forecast_type, advanced_price.get("predicted", 0))
+            else:
+                per_kwh_cents = advanced_price if isinstance(advanced_price, (int, float)) else price.get("perKwh", 0)
+        else:
+            # ActualInterval or fallback: Use perKwh (actual retail price)
+            per_kwh_cents = price.get("perKwh", 0)
+
+        # For sell prices (feedIn channel), Amber uses negative values (you receive money)
+        # Sigenergy expects positive values, so we negate (same as Tesla converter)
+        if price_type == "sell":
+            per_kwh_cents = -per_kwh_cents
+
+        # Store the price (average overlapping 5-min intervals)
         if slot_key not in slots:
             slots[slot_key] = []
-        slots[slot_key].append(price_value)
+        slots[slot_key].append(per_kwh_cents)
 
     # Build the timeRange array (48 slots for 24 hours)
     result = []

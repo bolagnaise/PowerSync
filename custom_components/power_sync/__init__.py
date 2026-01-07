@@ -2591,13 +2591,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("No forecast data available for Sigenergy tariff sync")
             return
 
+        # Get forecast type from options (same as Tesla sync)
+        forecast_type = entry.options.get(
+            CONF_FORECAST_TYPE, entry.data.get(CONF_FORECAST_TYPE, "predicted")
+        )
+        _LOGGER.info(f"Sigenergy sync using forecast type: {forecast_type}")
+
         # Convert Amber forecast to Sigenergy format using existing converter
         # Filter by channel type for buy/sell prices
         general_prices = [p for p in forecast_data if p.get("channelType") == "general"]
         feedin_prices = [p for p in forecast_data if p.get("channelType") == "feedIn"]
 
-        buy_prices = convert_amber_prices_to_sigenergy(general_prices, price_type="buy")
-        sell_prices = convert_amber_prices_to_sigenergy(feedin_prices, price_type="sell")
+        buy_prices = convert_amber_prices_to_sigenergy(general_prices, price_type="buy", forecast_type=forecast_type)
+        sell_prices = convert_amber_prices_to_sigenergy(feedin_prices, price_type="sell", forecast_type=forecast_type)
 
         if not buy_prices:
             _LOGGER.warning("No buy prices converted for Sigenergy sync")
