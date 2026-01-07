@@ -2611,6 +2611,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 device_id=device_id,
             )
 
+            # Authenticate first to get access token
+            auth_result = await client.authenticate()
+            if "error" in auth_result:
+                _LOGGER.error(f"❌ Sigenergy authentication failed: {auth_result['error']}")
+                return
+
             _LOGGER.info(f"Syncing {len(buy_prices)} price periods to Sigenergy station {station_id}")
 
             result = await client.set_tariff_rate(
