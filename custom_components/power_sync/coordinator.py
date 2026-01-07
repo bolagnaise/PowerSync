@@ -1045,7 +1045,13 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
             # Power values in kW from Modbus, we keep them in kW for sensors
             solar_kw = attrs.get("pv_power_kw", 0)
             grid_kw = attrs.get("grid_power_kw", 0)  # Positive = importing, negative = exporting
-            battery_kw = attrs.get("battery_power_kw", 0)  # Positive = discharging, negative = charging
+
+            # Sigenergy battery sign convention is OPPOSITE to Tesla:
+            # Sigenergy Modbus: Positive = charging (into battery), Negative = discharging (out of battery)
+            # Tesla/PowerSync: Positive = discharging (out of battery), Negative = charging (into battery)
+            # So we negate the value to match Tesla convention
+            battery_kw_raw = attrs.get("battery_power_kw", 0)
+            battery_kw = -battery_kw_raw  # Flip sign to match Tesla convention
 
             # Calculate home load from energy balance:
             # Load = Solar + Battery_Discharge + Grid_Import

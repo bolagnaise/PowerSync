@@ -429,10 +429,14 @@ class SigenergyModbusClient:
             else:
                 result['percentage_charged'] = 0
 
-            # Read battery power (S32, 2 registers) - positive = discharging, negative = charging
+            # Read battery power (S32, 2 registers)
+            # Sigenergy Modbus: Positive = charging (into battery), Negative = discharging (out of battery)
+            # Tesla/PowerSync convention: Positive = discharging, Negative = charging
+            # So we negate the value to match Tesla convention
             battery_regs = self._read_input_registers(self.REG_ESS_POWER, 2)
             if battery_regs and len(battery_regs) >= 2:
-                battery_power_kw = self._to_signed32(battery_regs[0], battery_regs[1]) / self.GAIN_POWER
+                battery_power_kw_raw = self._to_signed32(battery_regs[0], battery_regs[1]) / self.GAIN_POWER
+                battery_power_kw = -battery_power_kw_raw  # Flip sign to match Tesla convention
                 result['battery_power'] = battery_power_kw * 1000  # Convert to W
             else:
                 result['battery_power'] = 0
@@ -441,7 +445,7 @@ class SigenergyModbusClient:
             # Load = Solar + Grid + Battery (with proper signs)
             # Solar: positive = generating
             # Grid: positive = importing, negative = exporting
-            # Battery: positive = discharging, negative = charging
+            # Battery: positive = discharging, negative = charging (after sign flip)
             solar_w = result.get('solar_power', 0)
             grid_w = result.get('grid_power', 0)
             battery_w = result.get('battery_power', 0)
