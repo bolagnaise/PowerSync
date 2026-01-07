@@ -32,7 +32,10 @@ class SigenergyController(InverterController):
     for DC solar curtailment control.
     """
 
-    # Modbus register addresses (documentation addresses - 40001 for pymodbus)
+    # Modbus register addresses (documentation addresses - base for pymodbus)
+    # Two register sets: Plant-level (30001/40001 base) and Inverter-level (30501/31001 base)
+
+    # === PLANT-LEVEL REGISTERS ===
     # Holding registers (read/write) - base 40001
     # Register 40036 → pymodbus address 35
     REG_PV_MAX_POWER_LIMIT = 35           # 40036 - PV max power limit (U32, gain 1000, kW)
@@ -48,9 +51,19 @@ class SigenergyController(InverterController):
     REG_PV_POWER = 34                     # 30035 - PV power (S32, gain 1000, kW)
     REG_ACTIVE_POWER = 30                 # 30031 - Active power (S32, gain 1000, kW)
     REG_ESS_SOC = 13                      # 30014 - Battery SOC (U16, gain 10, %)
+    REG_ESS_POWER = 36                    # 30037 - Battery power (S32, gain 1000, kW)
     REG_RUNNING_STATE = 50                # 30051 - Plant running state (U16)
     REG_GRID_SENSOR_POWER = 4             # 30005 - Grid sensor active power (S32, gain 1000, kW)
     REG_EMS_WORK_MODE = 2                 # 30003 - EMS work mode (U16)
+
+    # === INVERTER-LEVEL REGISTERS (fallback if plant registers don't work) ===
+    # Some Sigenergy systems only expose inverter-level registers
+    # Input registers - base 30001 but offset by 500+ for inverter
+    REG_INV_SOC = 600                     # 30601 - Inverter battery SOC (U16, gain 10, %)
+    REG_INV_SOH = 601                     # 30602 - Inverter battery SOH (U16, gain 10, %)
+    REG_INV_ACTIVE_POWER = 586            # 30587 - Inverter active power (S32, gain 1000, kW)
+    REG_INV_ESS_POWER = 598               # 30599 - Inverter battery power (S32, gain 1000, kW)
+    REG_INV_PV_POWER = 1034               # 31035 - Inverter PV power (S32, gain 1000, kW)
 
     # Constants
     GAIN_POWER = 1000  # kW → scaled value (multiply to write, divide to read)
@@ -66,15 +79,19 @@ class SigenergyController(InverterController):
     ACTIVE_POWER_PCT_ZERO = 0     # 0% active power
 
     # Default Modbus settings
+    # Sigenergy uses different slave IDs for different register levels:
+    # - Plant-level registers (30001-30099): Slave ID 247
+    # - Inverter-level registers (30500+): Slave ID 1 (or specific inverter address)
     DEFAULT_PORT = 502
-    DEFAULT_SLAVE_ID = 1
+    DEFAULT_SLAVE_ID = 247  # Plant address - will auto-switch to 1 for inverter registers
+    DEFAULT_INVERTER_SLAVE_ID = 1  # Default inverter address
     TIMEOUT_SECONDS = 10.0
 
     def __init__(
         self,
         host: str,
         port: int = 502,
-        slave_id: int = 1,
+        slave_id: int = 247,
         model: Optional[str] = None,
     ):
         """Initialize Sigenergy controller.
@@ -82,13 +99,15 @@ class SigenergyController(InverterController):
         Args:
             host: IP address of Sigenergy system
             port: Modbus TCP port (default: 502)
-            slave_id: Modbus slave ID (default: 1)
+            slave_id: Modbus slave ID (default: 247 for plant registers)
             model: Sigenergy model (optional)
         """
         super().__init__(host, port, slave_id, model)
         self._client: Optional[AsyncModbusTcpClient] = None
         self._lock: Optional[asyncio.Lock] = None  # Created lazily in async context
         self._original_pv_limit: Optional[int] = None  # Store original limit for restore
+        self._use_inverter_registers: Optional[bool] = None  # None=unknown, True=inverter, False=plant
+        self._inverter_slave_id = self.DEFAULT_INVERTER_SLAVE_ID  # Slave ID for inverter-level registers
 
     def _get_lock(self) -> asyncio.Lock:
         """Get or create the asyncio lock (lazy initialization for Flask compatibility)."""
@@ -201,12 +220,13 @@ class SigenergyController(InverterController):
             _LOGGER.debug(f"Error reading holding register {address}: {e}")
             return None
 
-    async def _read_input_registers(self, address: int, count: int = 1) -> Optional[list]:
+    async def _read_input_registers(self, address: int, count: int = 1, slave_id: Optional[int] = None) -> Optional[list]:
         """Read values from input registers.
 
         Args:
             address: Starting register address (0-indexed)
             count: Number of registers to read
+            slave_id: Optional slave ID override (default: self.slave_id)
 
         Returns:
             List of register values or None on error
@@ -215,24 +235,26 @@ class SigenergyController(InverterController):
             if not await self.connect():
                 return None
 
+        effective_slave = slave_id if slave_id is not None else self.slave_id
+
         try:
             result = await self._client.read_input_registers(
                 address=address,
                 count=count,
-                **{_SLAVE_PARAM: self.slave_id},
+                **{_SLAVE_PARAM: effective_slave},
             )
 
             if result.isError():
-                _LOGGER.debug(f"Modbus read error at input register {address}: {result}")
+                _LOGGER.debug(f"Modbus read error at input register {address} [slave={effective_slave}]: {result}")
                 return None
 
             return result.registers
 
         except ModbusException as e:
-            _LOGGER.debug(f"Modbus exception reading input register {address}: {e}")
+            _LOGGER.debug(f"Modbus exception reading input register {address} [slave={effective_slave}]: {e}")
             return None
         except Exception as e:
-            _LOGGER.debug(f"Error reading input register {address}: {e}")
+            _LOGGER.debug(f"Error reading input register {address} [slave={effective_slave}]: {e}")
             return None
 
     def _to_signed32(self, high: int, low: int) -> int:
@@ -372,8 +394,90 @@ class SigenergyController(InverterController):
             _LOGGER.error(f"Error restoring Sigenergy: {e}")
             return False
 
+    async def _read_plant_registers(self) -> dict:
+        """Try to read plant-level registers."""
+        attrs = {}
+        success_count = 0
+
+        # Read PV power (S32, 2 registers)
+        pv_power_regs = await self._read_input_registers(self.REG_PV_POWER, 2)
+        if pv_power_regs and len(pv_power_regs) >= 2:
+            pv_power_kw = self._to_signed32(pv_power_regs[0], pv_power_regs[1]) / self.GAIN_POWER
+            attrs["pv_power_kw"] = round(pv_power_kw, 2)
+            attrs["pv_power_w"] = pv_power_kw * 1000
+            success_count += 1
+
+        # Read battery SOC (U16)
+        soc_regs = await self._read_input_registers(self.REG_ESS_SOC, 1)
+        if soc_regs:
+            attrs["battery_soc"] = round(soc_regs[0] / self.GAIN_SOC, 1)
+            success_count += 1
+
+        # Read grid sensor power (S32, 2 registers)
+        grid_power_regs = await self._read_input_registers(self.REG_GRID_SENSOR_POWER, 2)
+        if grid_power_regs and len(grid_power_regs) >= 2:
+            grid_power_kw = self._to_signed32(grid_power_regs[0], grid_power_regs[1]) / self.GAIN_POWER
+            attrs["grid_power_kw"] = round(grid_power_kw, 2)
+            success_count += 1
+
+        # Read battery power (S32, 2 registers)
+        ess_power_regs = await self._read_input_registers(self.REG_ESS_POWER, 2)
+        if ess_power_regs and len(ess_power_regs) >= 2:
+            ess_power_kw = self._to_signed32(ess_power_regs[0], ess_power_regs[1]) / self.GAIN_POWER
+            attrs["battery_power_kw"] = round(ess_power_kw, 2)
+            success_count += 1
+
+        attrs["_success_count"] = success_count
+        attrs["_register_level"] = "plant"
+        return attrs
+
+    async def _read_inverter_registers(self) -> dict:
+        """Try to read inverter-level registers (fallback).
+
+        Uses inverter slave ID (default: 1) instead of plant slave ID (247).
+        """
+        attrs = {}
+        success_count = 0
+        inv_slave = self._inverter_slave_id
+        _LOGGER.debug(f"Reading inverter registers with slave ID {inv_slave}")
+
+        # Read inverter PV power (S32, 2 registers)
+        pv_power_regs = await self._read_input_registers(self.REG_INV_PV_POWER, 2, slave_id=inv_slave)
+        if pv_power_regs and len(pv_power_regs) >= 2:
+            pv_power_kw = self._to_signed32(pv_power_regs[0], pv_power_regs[1]) / self.GAIN_POWER
+            attrs["pv_power_kw"] = round(pv_power_kw, 2)
+            attrs["pv_power_w"] = pv_power_kw * 1000
+            success_count += 1
+
+        # Read inverter battery SOC (U16)
+        soc_regs = await self._read_input_registers(self.REG_INV_SOC, 1, slave_id=inv_slave)
+        if soc_regs:
+            attrs["battery_soc"] = round(soc_regs[0] / self.GAIN_SOC, 1)
+            success_count += 1
+
+        # Read inverter active power (S32, 2 registers) - use as grid proxy
+        active_power_regs = await self._read_input_registers(self.REG_INV_ACTIVE_POWER, 2, slave_id=inv_slave)
+        if active_power_regs and len(active_power_regs) >= 2:
+            active_power_kw = self._to_signed32(active_power_regs[0], active_power_regs[1]) / self.GAIN_POWER
+            attrs["active_power_kw"] = round(active_power_kw, 2)
+            success_count += 1
+
+        # Read inverter battery power (S32, 2 registers)
+        ess_power_regs = await self._read_input_registers(self.REG_INV_ESS_POWER, 2, slave_id=inv_slave)
+        if ess_power_regs and len(ess_power_regs) >= 2:
+            ess_power_kw = self._to_signed32(ess_power_regs[0], ess_power_regs[1]) / self.GAIN_POWER
+            attrs["battery_power_kw"] = round(ess_power_kw, 2)
+            success_count += 1
+
+        attrs["_success_count"] = success_count
+        attrs["_register_level"] = "inverter"
+        attrs["_inverter_slave_id"] = inv_slave
+        return attrs
+
     async def get_status(self) -> InverterState:
         """Get current status of the Sigenergy system.
+
+        Tries plant-level registers first, falls back to inverter-level if those fail.
 
         Returns:
             InverterState with current status and power readings
@@ -388,62 +492,60 @@ class SigenergyController(InverterController):
 
             attrs = {}
 
-            # Read PV power (S32, 2 registers)
-            pv_power_regs = await self._read_input_registers(self.REG_PV_POWER, 2)
-            pv_power_w = None
-            if pv_power_regs and len(pv_power_regs) >= 2:
-                pv_power_kw = self._to_signed32(pv_power_regs[0], pv_power_regs[1]) / self.GAIN_POWER
-                pv_power_w = pv_power_kw * 1000
-                attrs["pv_power_kw"] = round(pv_power_kw, 2)
+            # Determine which register set to use
+            if self._use_inverter_registers is None:
+                # First time - try plant registers, then inverter if plant fails
+                plant_attrs = await self._read_plant_registers()
+                if plant_attrs.get("_success_count", 0) >= 2:
+                    attrs = plant_attrs
+                    self._use_inverter_registers = False
+                    _LOGGER.info("Sigenergy: Using plant-level registers")
+                else:
+                    # Try inverter-level registers with inverter slave ID
+                    inv_attrs = await self._read_inverter_registers()
+                    if inv_attrs.get("_success_count", 0) >= 2:
+                        attrs = inv_attrs
+                        self._use_inverter_registers = True
+                        _LOGGER.info(f"Sigenergy: Using inverter-level registers with slave ID {self._inverter_slave_id} (plant registers unavailable)")
+                    else:
+                        # Neither worked - return what we have
+                        attrs = plant_attrs if plant_attrs.get("_success_count", 0) > inv_attrs.get("_success_count", 0) else inv_attrs
+                        _LOGGER.warning(f"Sigenergy: Limited register access (plant={plant_attrs.get('_success_count', 0)}, inverter={inv_attrs.get('_success_count', 0)})")
+            elif self._use_inverter_registers:
+                attrs = await self._read_inverter_registers()
+            else:
+                attrs = await self._read_plant_registers()
 
-            # Read active power (S32, 2 registers)
-            active_power_regs = await self._read_input_registers(self.REG_ACTIVE_POWER, 2)
-            if active_power_regs and len(active_power_regs) >= 2:
-                active_power_kw = self._to_signed32(active_power_regs[0], active_power_regs[1]) / self.GAIN_POWER
-                attrs["active_power_kw"] = round(active_power_kw, 2)
+            # Clean up internal tracking fields
+            attrs.pop("_success_count", None)
+            register_level = attrs.pop("_register_level", "unknown")
+            attrs.pop("_inverter_slave_id", None)
 
-            # Read grid sensor power (S32, 2 registers)
-            grid_power_regs = await self._read_input_registers(self.REG_GRID_SENSOR_POWER, 2)
-            if grid_power_regs and len(grid_power_regs) >= 2:
-                grid_power_kw = self._to_signed32(grid_power_regs[0], grid_power_regs[1]) / self.GAIN_POWER
-                attrs["grid_power_kw"] = round(grid_power_kw, 2)
-
-            # Read battery SOC (U16)
-            soc_regs = await self._read_input_registers(self.REG_ESS_SOC, 1)
-            if soc_regs:
-                attrs["battery_soc"] = round(soc_regs[0] / self.GAIN_SOC, 1)
-
-            # Read EMS work mode (U16)
-            ems_regs = await self._read_input_registers(self.REG_EMS_WORK_MODE, 1)
-            if ems_regs:
-                attrs["ems_work_mode"] = ems_regs[0]
-
-            # Read running state (U16)
-            state_regs = await self._read_input_registers(self.REG_RUNNING_STATE, 1)
-            if state_regs:
-                attrs["running_state"] = state_regs[0]
-
-            # Read current export limit to determine curtailment status (load-following mode)
-            export_limit_regs = await self._read_holding_registers(self.REG_GRID_EXPORT_LIMIT, 2)
+            # Read export limit for curtailment status (only available at plant level)
             export_limit = None
             is_curtailed = False
-            if export_limit_regs and len(export_limit_regs) >= 2:
-                export_limit = self._to_unsigned32(export_limit_regs[0], export_limit_regs[1])
-                # Curtailed (load-following) if export limit is 0 or very low
-                is_curtailed = export_limit < 100  # Less than 0.1 kW threshold
-                if export_limit < self.EXPORT_LIMIT_UNLIMITED:
-                    attrs["export_limit_kw"] = round(export_limit / self.GAIN_POWER, 2)
-                else:
-                    attrs["export_limit_kw"] = "unlimited"
+            if not self._use_inverter_registers:
+                export_limit_regs = await self._read_holding_registers(self.REG_GRID_EXPORT_LIMIT, 2)
+                if export_limit_regs and len(export_limit_regs) >= 2:
+                    export_limit = self._to_unsigned32(export_limit_regs[0], export_limit_regs[1])
+                    is_curtailed = export_limit < 100  # Less than 0.1 kW threshold
+                    if export_limit < self.EXPORT_LIMIT_UNLIMITED:
+                        attrs["export_limit_kw"] = round(export_limit / self.GAIN_POWER, 2)
+                    else:
+                        attrs["export_limit_kw"] = "unlimited"
 
-            # Also read PV limit for reference
-            pv_limit_regs = await self._read_holding_registers(self.REG_PV_MAX_POWER_LIMIT, 2)
-            if pv_limit_regs and len(pv_limit_regs) >= 2:
-                pv_limit = self._to_unsigned32(pv_limit_regs[0], pv_limit_regs[1])
-                if pv_limit < self.EXPORT_LIMIT_UNLIMITED:
-                    attrs["pv_power_limit_kw"] = round(pv_limit / self.GAIN_POWER, 2)
-                else:
-                    attrs["pv_power_limit_kw"] = "unlimited"
+            # If we couldn't read ANY meaningful registers, the inverter is likely sleeping/offline
+            if not attrs or len(attrs) == 0:
+                _LOGGER.debug("Sigenergy: No register data - inverter likely sleeping")
+                return InverterState(
+                    status=InverterStatus.OFFLINE,
+                    is_curtailed=False,
+                    error_message="No register data (inverter sleeping)",
+                    attributes={"host": self.host, "model": self.model or "Sigenergy"},
+                )
+
+            # Get PV power for status determination
+            pv_power_w = attrs.get("pv_power_w")
 
             # Determine overall status
             if is_curtailed:
@@ -457,9 +559,9 @@ class SigenergyController(InverterController):
             # Add model info
             attrs["model"] = self.model or "Sigenergy"
             attrs["host"] = self.host
+            attrs["register_level"] = register_level
 
             # In load-following mode, PV is not limited - only export is
-            # So power_limit_percent is always 100 (export limit doesn't reduce PV)
             self._last_state = InverterState(
                 status=status,
                 is_curtailed=is_curtailed,

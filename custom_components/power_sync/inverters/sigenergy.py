@@ -229,24 +229,26 @@ class SigenergyController(InverterController):
             if not await self.connect():
                 return None
 
+        effective_slave = slave_id if slave_id is not None else self.slave_id
+
         try:
             result = await self._client.read_input_registers(
                 address=address,
                 count=count,
-                **{_SLAVE_PARAM: slave_id if slave_id is not None else self.slave_id},
+                **{_SLAVE_PARAM: effective_slave},
             )
 
             if result.isError():
-                _LOGGER.debug(f"Modbus read error at input register {address} (slave {slave_id or self.slave_id}): {result}")
+                _LOGGER.debug(f"Modbus read error at input register {address} [slave={effective_slave}]: {result}")
                 return None
 
             return result.registers
 
         except ModbusException as e:
-            _LOGGER.debug(f"Modbus exception reading input register {address}: {e}")
+            _LOGGER.debug(f"Modbus exception reading input register {address} [slave={effective_slave}]: {e}")
             return None
         except Exception as e:
-            _LOGGER.debug(f"Error reading input register {address}: {e}")
+            _LOGGER.debug(f"Error reading input register {address} [slave={effective_slave}]: {e}")
             return None
 
     def _to_signed32(self, high: int, low: int) -> int:
@@ -436,6 +438,7 @@ class SigenergyController(InverterController):
         attrs = {}
         success_count = 0
         inv_slave = self._inverter_slave_id
+        _LOGGER.debug(f"Reading inverter registers with slave ID {inv_slave}")
 
         # Read inverter PV power (S32, 2 registers)
         pv_power_regs = await self._read_input_registers(self.REG_INV_PV_POWER, 2, slave_id=inv_slave)
