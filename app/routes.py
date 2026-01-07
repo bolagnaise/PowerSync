@@ -2884,15 +2884,66 @@ def energy_history(api_user=None, **kwargs):
 
 
 @bp.route('/api/energy-calendar-history')
-@require_tesla_client
-@require_tesla_site_id
-def energy_calendar_history(tesla_client, api_user=None, **kwargs):
-    """Get historical energy summaries from Tesla calendar history API
+@api_auth_required
+def energy_calendar_history_unified(api_user=None, **kwargs):
+    """Get historical energy summaries - routes to appropriate backend.
+
+    For Sigenergy users: Uses Modbus energy registers
+    For Tesla users: Uses Tesla calendar history API
 
     Supports both session login and Bearer token authentication.
     """
     user = api_user or current_user
     logger.info(f"Energy calendar history requested by user: {user.email}")
+
+    # Route Sigenergy users to Modbus energy summary
+    if user.battery_system == 'sigenergy':
+        if not user.sigenergy_modbus_host:
+            return jsonify({'error': 'Sigenergy Modbus not configured'}), 400
+
+        from app.sigenergy_modbus import get_sigenergy_modbus_client
+        client = get_sigenergy_modbus_client(user)
+        if not client:
+            return jsonify({'error': 'Failed to create Sigenergy Modbus client'}), 500
+
+        summary = client.get_energy_summary()
+        if 'error' in summary:
+            return jsonify(summary), 500
+
+        # Format as calendar history response for app compatibility
+        from datetime import datetime
+        now = datetime.now().isoformat()
+        return jsonify({
+            'period': request.args.get('period', 'day'),
+            'time_series': [{
+                'timestamp': now,
+                'solar_energy_exported': summary.get('total_pv_energy_kwh', 0) * 1000,  # kWh to Wh
+                'grid_energy_imported': summary.get('total_grid_import_kwh', 0) * 1000,
+                'grid_energy_exported_from_solar': summary.get('total_grid_export_kwh', 0) * 1000,
+                'battery_energy_exported': summary.get('total_battery_discharged_kwh', 0) * 1000,
+                'battery_energy_imported_from_grid': summary.get('total_battery_charged_kwh', 0) * 500,
+                'battery_energy_imported_from_solar': summary.get('total_battery_charged_kwh', 0) * 500,
+                'consumer_energy_imported_from_grid': summary.get('total_load_energy_kwh', 0) * 1000,
+            }],
+            'totals': {
+                'total_solar_wh': summary.get('total_pv_energy_kwh', 0) * 1000,
+                'total_grid_import_wh': summary.get('total_grid_import_kwh', 0) * 1000,
+                'total_grid_export_wh': summary.get('total_grid_export_kwh', 0) * 1000,
+                'total_battery_charge_wh': summary.get('total_battery_charged_kwh', 0) * 1000,
+                'total_battery_discharge_wh': summary.get('total_battery_discharged_kwh', 0) * 1000,
+                'total_home_wh': summary.get('total_load_energy_kwh', 0) * 1000,
+                'daily_load_wh': summary.get('daily_load_energy_kwh', 0) * 1000,
+            },
+            'source': 'sigenergy_modbus'
+        })
+
+    # Tesla users - need Tesla client
+    tesla_client = get_tesla_client(user)
+    if not tesla_client:
+        return jsonify({'error': 'Tesla API not configured'}), 400
+
+    if not user.tesla_energy_site_id:
+        return jsonify({'error': 'Tesla Energy Site ID not configured'}), 400
 
     # Get parameters
     period = request.args.get('period', 'month')  # day, week, month, year, lifetime
@@ -6315,8 +6366,33 @@ def api_battery_health_get(api_user=None, **kwargs):
     Get current battery health data for the logged-in user.
 
     Supports both session login and Bearer token authentication.
+    For Sigenergy users, fetches SOH from Modbus registers.
     """
     user = api_user or current_user
+
+    # For Sigenergy users, get battery health from Modbus
+    if user.battery_system == 'sigenergy' and user.sigenergy_modbus_host:
+        from app.sigenergy_modbus import get_sigenergy_modbus_client
+        client = get_sigenergy_modbus_client(user)
+        if client:
+            health = client.get_battery_health()
+            if health and 'error' not in health:
+                soh = health.get('battery_soh', 100)
+                capacity_kwh = health.get('battery_capacity_kwh', 0)
+                return jsonify({
+                    'has_data': True,
+                    'originalCapacityWh': capacity_kwh * 1000,  # Convert kWh to Wh
+                    'currentCapacityWh': capacity_kwh * 1000 * (soh / 100),  # Estimate current from SOH
+                    'degradationPercent': round(100 - soh, 2),
+                    'batteryCount': 1,  # Sigenergy typically 1 unit
+                    'healthPercent': soh,
+                    'individualBatteries': None,
+                    'updatedAt': None,
+                    'installDate': None,
+                    'source': 'sigenergy_modbus'
+                })
+        # Fall through to no data if Modbus fails
+
     if not user.battery_health_updated:
         return jsonify({
             'has_data': False,
