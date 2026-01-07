@@ -26,7 +26,7 @@ CONF_TESLA_ENERGY_SITE_ID = "tesla_energy_site_id"
 CONF_AUTO_SYNC_ENABLED = "auto_sync_enabled"
 CONF_TIMEZONE = "timezone"
 CONF_AMBER_FORECAST_TYPE = "amber_forecast_type"
-CONF_SOLAR_CURTAILMENT_ENABLED = "solar_curtailment_enabled"
+CONF_BATTERY_CURTAILMENT_ENABLED = "battery_curtailment_enabled"
 
 # Battery System Selection
 CONF_BATTERY_SYSTEM = "battery_system"
@@ -506,7 +506,7 @@ ATTR_SPIKE_START_TIME = "spike_start_time"
 # AC-Coupled Inverter Curtailment configuration
 # Direct control of solar inverters for AC-coupled systems where Tesla
 # curtailment alone cannot prevent grid export (solar bypasses Powerwall)
-CONF_INVERTER_CURTAILMENT_ENABLED = "inverter_curtailment_enabled"
+CONF_AC_INVERTER_CURTAILMENT_ENABLED = "ac_inverter_curtailment_enabled"
 CONF_INVERTER_BRAND = "inverter_brand"
 CONF_INVERTER_MODEL = "inverter_model"
 CONF_INVERTER_HOST = "inverter_host"

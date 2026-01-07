@@ -71,7 +71,7 @@ from .const import (
     CONF_DEMAND_CHARGE_DAYS,
     CONF_DEMAND_CHARGE_BILLING_DAY,
     CONF_AEMO_SPIKE_ENABLED,
-    CONF_SOLAR_CURTAILMENT_ENABLED,
+    CONF_BATTERY_CURTAILMENT_ENABLED,
     CONF_ELECTRICITY_PROVIDER,
     CONF_FLOW_POWER_STATE,
     CONF_PEA_ENABLED,
@@ -373,8 +373,8 @@ async def async_setup_entry(
 
     # Add solar curtailment sensor if curtailment is enabled
     curtailment_enabled = entry.options.get(
-        CONF_SOLAR_CURTAILMENT_ENABLED,
-        entry.data.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
+        CONF_BATTERY_CURTAILMENT_ENABLED,
+        entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
     )
     if curtailment_enabled:
         entities.append(
@@ -769,8 +769,8 @@ class SolarCurtailmentSensor(SensorEntity):
         entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
         cached_rule = entry_data.get("cached_export_rule")
         curtailment_enabled = self._entry.options.get(
-            CONF_SOLAR_CURTAILMENT_ENABLED,
-            self._entry.data.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
+            CONF_BATTERY_CURTAILMENT_ENABLED,
+            self._entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
         )
         feedin_price = self._get_feedin_price()
         export_earnings = -feedin_price if feedin_price is not None else None

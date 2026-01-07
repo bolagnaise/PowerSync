@@ -36,7 +36,7 @@ from .const import (
     CONF_DEMAND_ARTIFICIAL_PRICE,
     CONF_DAILY_SUPPLY_CHARGE,
     CONF_MONTHLY_SUPPLY_CHARGE,
-    CONF_SOLAR_CURTAILMENT_ENABLED,
+    CONF_BATTERY_CURTAILMENT_ENABLED,
     CONF_TESLA_API_PROVIDER,
     CONF_FLEET_API_ACCESS_TOKEN,
     TESLA_PROVIDER_TESLEMETRY,
@@ -1342,8 +1342,8 @@ class PowerwallSettingsView(HomeAssistantView):
             # Check if solar curtailment is enabled - if so, use server's target rule
             # (more accurate than stale Tesla API values)
             solar_curtailment_enabled = entry.options.get(
-                CONF_SOLAR_CURTAILMENT_ENABLED,
-                entry.data.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
+                CONF_BATTERY_CURTAILMENT_ENABLED,
+                entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
             )
 
             if solar_curtailment_enabled:
@@ -1706,8 +1706,8 @@ class ConfigView(HomeAssistantView):
             # Build features dict based on configuration
             features = {
                 "solar_curtailment": entry.options.get(
-                    CONF_SOLAR_CURTAILMENT_ENABLED,
-                    entry.data.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
+                    CONF_BATTERY_CURTAILMENT_ENABLED,
+                    entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
                 ),
                 "inverter_control": entry.options.get(
                     CONF_INVERTER_CURTAILMENT_ENABLED,
@@ -3059,8 +3059,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """
         # Check if curtailment is enabled
         curtailment_enabled = entry.options.get(
-            CONF_SOLAR_CURTAILMENT_ENABLED,
-            entry.data.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
+            CONF_BATTERY_CURTAILMENT_ENABLED,
+            entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
         )
 
         if not curtailment_enabled:
@@ -3356,8 +3356,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """
         # Check if curtailment is enabled
         curtailment_enabled = entry.options.get(
-            CONF_SOLAR_CURTAILMENT_ENABLED,
-            entry.data.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
+            CONF_BATTERY_CURTAILMENT_ENABLED,
+            entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
         )
 
         if not curtailment_enabled:
@@ -4499,8 +4499,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.info(f"✅ Grid export rule set to {rule}")
                     # If solar curtailment is enabled, mark this as a manual override
                     solar_curtailment_enabled = entry.options.get(
-                        CONF_SOLAR_CURTAILMENT_ENABLED,
-                        entry.data.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
+                        CONF_BATTERY_CURTAILMENT_ENABLED,
+                        entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
                     )
                     if solar_curtailment_enabled:
                         entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
@@ -4962,8 +4962,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 # Check if solar curtailment is enabled
                 solar_curtailment_enabled = entry.options.get(
-                    CONF_SOLAR_CURTAILMENT_ENABLED,
-                    entry.data.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
+                    CONF_BATTERY_CURTAILMENT_ENABLED,
+                    entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
                 )
 
                 # Skip if neither feature is enabled

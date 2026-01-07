@@ -37,11 +37,11 @@
           "flow_power_base_rate": "Base Rate (c/kWh)",
           "pea_custom_value": "Custom PEA Override (c/kWh, leave empty for auto)",
           "auto_sync_enabled": "Enable automatic TOU schedule syncing",
-          "solar_curtailment_enabled": "Enable DC Solar Curtailment (stop export at negative prices)"
+          "battery_curtailment_enabled": "Enable Battery Export Curtailment"
         },
         "data_description": {
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices",
-          "solar_curtailment_enabled": "Automatically stop battery exports and DC solar production when feed-in prices go negative to avoid paying to export"
+          "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. This is the MAIN toggle - must be enabled for curtailment to work."
         },
         "submit_button": "Next"
       },
@@ -157,12 +157,12 @@
           "amber_site_id": "Amber Site (if you have multiple)",
           "auto_sync_enabled": "Enable automatic TOU schedule syncing",
           "amber_forecast_type": "Amber Forecast Type",
-          "solar_curtailment_enabled": "Enable DC Solar Curtailment (stop export at negative prices)"
+          "battery_curtailment_enabled": "Enable Battery Export Curtailment"
         },
         "data_description": {
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices",
           "amber_forecast_type": "Which Amber price forecast to use: Predicted (balanced), Low/Aggressive (assumes cheaper prices), High/Conservative (assumes higher prices)",
-          "solar_curtailment_enabled": "Automatically stop battery exports and DC solar production when feed-in prices go negative to avoid paying to export"
+          "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. This is the MAIN toggle - must be enabled for curtailment to work."
         },
         "submit_button": "Submit"
       },
@@ -225,7 +225,7 @@
         "data": {
           "auto_sync_enabled": "Enable automatic TOU schedule syncing",
           "amber_forecast_type": "Amber Forecast Type",
-          "solar_curtailment_enabled": "Enable DC Solar Curtailment (stop export at negative prices)",
+          "battery_curtailment_enabled": "Enable Battery Export Curtailment",
           "spike_protection_enabled": "Enable Spike Protection (prevent grid charging during spikes)",
           "settled_prices_only": "Settled Prices Only (skip forecast sync)",
           "force_tariff_mode_toggle": "Force Mode Toggle (ALPHA) - faster PW response",
@@ -249,7 +249,7 @@
           "demand_artificial_price_enabled": "Artificial Price Increase (ALPHA)",
           "daily_supply_charge": "Daily Supply Charge ($)",
           "monthly_supply_charge": "Monthly Supply Charge ($)",
-          "inverter_curtailment_enabled": "Enable AC-Coupled Inverter Curtailment",
+          "ac_inverter_curtailment_enabled": "Enable AC-Coupled Inverter Shutdown",
           "inverter_brand": "Inverter Brand",
           "inverter_model": "Inverter Model",
           "inverter_host": "Inverter IP Address",
@@ -259,9 +259,9 @@
         "data_description": {
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices",
           "amber_forecast_type": "Which Amber price forecast to use: Predicted (balanced), Low/Aggressive (assumes cheaper prices), High/Conservative (assumes higher prices)",
-          "solar_curtailment_enabled": "Automatically stop battery exports and DC solar production when feed-in prices go negative to avoid paying to export",
+          "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. Sets Tesla to self-consumption mode or Sigenergy export limit to 0. This is the MAIN toggle - must be enabled for curtailment to work.",
           "spike_protection_enabled": "When Amber detects a price spike, artificially inflate buy prices to prevent your battery from charging from grid (stops arbitrage behavior)",
-          "inverter_curtailment_enabled": "Shutdown AC-coupled solar inverter when feed-in price is negative (stops solar export that bypasses your battery)",
+          "ac_inverter_curtailment_enabled": "Shutdown AC-coupled solar inverter (Fronius, Sungrow, GoodWe, Enphase, etc.) when feed-in price is negative. Use this if your solar bypasses the battery and exports directly to grid. Requires inverter IP configuration.",
           "settled_prices_only": "Skip the initial forecast sync at :00 and only sync when actual/settled prices arrive at :35/:60 seconds. Use this if forecast prices differ significantly from settled prices.",
           "force_tariff_mode_toggle": "After uploading a new tariff, briefly toggle operation mode to force immediate recalculation of battery behavior (Tesla only, ~5 second interruption)",
           "export_boost_enabled": "Artificially increase sell prices during configured hours to encourage battery export during high-value periods",
@@ -284,7 +284,7 @@
           "flow_power_base_rate": "Base Rate (c/kWh)",
           "pea_custom_value": "Custom PEA Override (c/kWh, leave empty for auto)",
           "auto_sync_enabled": "Enable automatic TOU schedule syncing",
-          "solar_curtailment_enabled": "Enable DC Solar Curtailment (stop export at negative prices)",
+          "battery_curtailment_enabled": "Enable Battery Export Curtailment",
           "demand_charge_enabled": "Enable Demand Charge Tracking",
           "demand_charge_rate": "Demand Charge Rate ($/kW)",
           "demand_charge_start_time": "Peak Period Start Time (HH:MM)",
@@ -297,8 +297,22 @@
         },
         "data_description": {
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices",
-          "solar_curtailment_enabled": "Automatically stop battery exports and DC solar production when feed-in prices go negative to avoid paying to export",
+          "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. Sets Tesla to self-consumption mode or Sigenergy export limit to 0. This is the MAIN toggle - must be enabled for curtailment to work.",
           "demand_charge_enabled": "Track your peak grid draw during demand charge periods and calculate monthly capacity fees based on your highest 30-minute average"
+        }
+      },
+      "curtailment_options": {
+        "title": "Negative FIT Curtailment Settings",
+        "description": "Configure automatic curtailment during negative feed-in tariff (FIT) prices.\n\nWhen feed-in prices go negative, you PAY to export power. These settings prevent that by stopping battery export and optionally shutting down solar production.",
+        "data": {
+          "battery_curtailment_enabled": "Enable Battery Export Curtailment",
+          "ac_inverter_curtailment_enabled": "Enable AC-Coupled Inverter Shutdown",
+          "sigenergy_dc_curtailment_enabled": "Enable DC Solar Curtailment (Sigenergy)"
+        },
+        "data_description": {
+          "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. Sets Tesla to self-consumption mode or Sigenergy export limit to 0. This is the MAIN toggle - must be enabled for curtailment to work.",
+          "ac_inverter_curtailment_enabled": "Shutdown AC-coupled solar inverter (Fronius, Sungrow, GoodWe, Enphase, etc.) when feed-in price is negative. Use this if your solar bypasses the battery and exports directly to grid. Requires inverter IP configuration in next step.",
+          "sigenergy_dc_curtailment_enabled": "Limit DC solar production via Sigenergy Modbus when feed-in price is negative. Only applies to Sigenergy systems with DC-coupled solar."
         }
       },
       "globird_options": {

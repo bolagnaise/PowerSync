@@ -19,7 +19,7 @@ from .const import (
     CONF_AMBER_API_TOKEN,
     CONF_AMBER_SITE_ID,
     CONF_AMBER_FORECAST_TYPE,
-    CONF_SOLAR_CURTAILMENT_ENABLED,
+    CONF_BATTERY_CURTAILMENT_ENABLED,
     CONF_TESLEMETRY_API_TOKEN,
     CONF_TESLA_ENERGY_SITE_ID,
     CONF_AUTO_SYNC_ENABLED,
@@ -105,7 +105,7 @@ from .const import (
     # Alpha: Force tariff mode toggle
     CONF_FORCE_TARIFF_MODE_TOGGLE,
     # Inverter curtailment configuration
-    CONF_INVERTER_CURTAILMENT_ENABLED,
+    CONF_AC_INVERTER_CURTAILMENT_ENABLED,
     CONF_INVERTER_BRAND,
     CONF_INVERTER_MODEL,
     CONF_INVERTER_HOST,
@@ -477,7 +477,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ),
                 # Sync and other settings
                 vol.Optional(CONF_AUTO_SYNC_ENABLED, default=True): bool,
-                vol.Optional(CONF_SOLAR_CURTAILMENT_ENABLED, default=False): bool,
+                vol.Optional(CONF_BATTERY_CURTAILMENT_ENABLED, default=False): bool,
             }),
             errors=errors,
             description_placeholders={
@@ -1019,7 +1019,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if show_amber_options:
                 self._site_data[CONF_AUTO_SYNC_ENABLED] = user_input.get(CONF_AUTO_SYNC_ENABLED, True)
                 self._site_data[CONF_AMBER_FORECAST_TYPE] = user_input.get(CONF_AMBER_FORECAST_TYPE, "predicted")
-                self._site_data[CONF_SOLAR_CURTAILMENT_ENABLED] = user_input.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
+                self._site_data[CONF_BATTERY_CURTAILMENT_ENABLED] = user_input.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
             elif self._aemo_only_mode:
                 # AEMO-only mode doesn't use Amber sync
                 self._site_data[CONF_AUTO_SYNC_ENABLED] = False
@@ -1079,7 +1079,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "low": "Low (Aggressive)",
                 "high": "High (Conservative)"
             })
-            data_schema_dict[vol.Optional(CONF_SOLAR_CURTAILMENT_ENABLED, default=False)] = bool
+            data_schema_dict[vol.Optional(CONF_BATTERY_CURTAILMENT_ENABLED, default=False)] = bool
         elif has_amber_sites and is_flow_power:
             # Flow Power with Amber pricing - show Amber site selection only
             amber_site_options = {}
@@ -1609,15 +1609,15 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
 
         if user_input is not None:
             # Check if solar curtailment is being disabled
-            was_curtailment_enabled = self._get_option(CONF_SOLAR_CURTAILMENT_ENABLED, False)
-            new_curtailment_enabled = user_input.get(CONF_SOLAR_CURTAILMENT_ENABLED, False)
+            was_curtailment_enabled = self._get_option(CONF_BATTERY_CURTAILMENT_ENABLED, False)
+            new_curtailment_enabled = user_input.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
 
             if was_curtailment_enabled and not new_curtailment_enabled:
                 await self._restore_export_rule()
 
             # Store curtailment settings
             self._curtailment_options = {
-                CONF_SOLAR_CURTAILMENT_ENABLED: new_curtailment_enabled,
+                CONF_BATTERY_CURTAILMENT_ENABLED: new_curtailment_enabled,
             }
 
             if is_sigenergy:
@@ -1633,8 +1633,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 return self.async_create_entry(title="", data=final_data)
             else:
                 # Tesla - check if AC inverter curtailment needs configuration
-                ac_enabled = user_input.get(CONF_INVERTER_CURTAILMENT_ENABLED, False)
-                self._curtailment_options[CONF_INVERTER_CURTAILMENT_ENABLED] = ac_enabled
+                ac_enabled = user_input.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False)
+                self._curtailment_options[CONF_AC_INVERTER_CURTAILMENT_ENABLED] = ac_enabled
 
                 if ac_enabled:
                     # Route to AC inverter brand selection
@@ -1647,8 +1647,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         # Build schema based on battery system
         schema_dict: dict[vol.Marker, Any] = {
             vol.Optional(
-                CONF_SOLAR_CURTAILMENT_ENABLED,
-                default=self._get_option(CONF_SOLAR_CURTAILMENT_ENABLED, False),
+                CONF_BATTERY_CURTAILMENT_ENABLED,
+                default=self._get_option(CONF_BATTERY_CURTAILMENT_ENABLED, False),
             ): bool,
         }
 
@@ -1661,8 +1661,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         else:
             # Tesla AC inverter curtailment option
             schema_dict[vol.Optional(
-                CONF_INVERTER_CURTAILMENT_ENABLED,
-                default=self._get_option(CONF_INVERTER_CURTAILMENT_ENABLED, False),
+                CONF_AC_INVERTER_CURTAILMENT_ENABLED,
+                default=self._get_option(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False),
             )] = bool
 
         return self.async_show_form(
