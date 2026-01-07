@@ -273,7 +273,61 @@ Full support for Sigenergy DC-coupled battery systems as an alternative to Tesla
 | **Cloud API** | Tariff sync to Sigenergy | ✅ Yes |
 | **Modbus TCP** | Real-time energy data + DC curtailment | ✅ Yes |
 
-**How DC Curtailment Works:**
+#### Getting Sigenergy Cloud API Credentials
+
+To sync Amber prices to your Sigenergy system, you need to capture credentials from the Sigenergy web portal. This is a one-time setup process.
+
+**What You Need:**
+| Credential | Description | Where to Find |
+|------------|-------------|---------------|
+| **Email** | Your Sigenergy account email | Your login email |
+| **Encrypted Password** | URL-encoded password from login request | Browser dev tools (see below) |
+| **Device ID** | 13-digit numeric identifier | Browser dev tools (see below) |
+| **Station ID** | Your Sigenergy station identifier | Browser dev tools or SigenAI |
+
+**Step-by-Step Instructions:**
+
+1. **Open the Sigenergy Web Portal**
+   - Go to https://app-aus.sigencloud.com/ (Australia) in your browser
+   - Don't log in yet!
+
+2. **Open Browser Developer Tools**
+   - Press `F12` or right-click → "Inspect"
+   - Go to the **Network** tab
+   - Check "Preserve log" checkbox
+
+3. **Log In Normally**
+   - Enter your email and password
+   - Click Login
+
+4. **Find the Auth Request**
+   - In the Network tab, look for a request to `oauth/token`
+   - Click on it to see the details
+   - Go to the **Payload** tab (or "Request" in some browsers)
+
+5. **Copy the Credentials**
+   - **password**: This URL-encoded value is your `Encrypted Password`
+   - **userDeviceId**: This 13-digit number is your `Device ID`
+
+6. **Get Your Station ID**
+   - **Option A**: Ask SigenAI in the app: "Tell me my StationID"
+   - **Option B**: In dev tools, look for requests containing `stationId` in the response
+   - **Option C**: Save a tariff manually and look for `stationId` in the network request
+
+**Example Credentials:**
+```
+Email: your.email@example.com
+Encrypted Password: MyP%40ssword123  (URL-encoded, @ becomes %40)
+Device ID: 1756353655250
+Station ID: 102025092300219
+```
+
+> **Note:** The encrypted password is URL-encoded. Special characters like `@` become `%40`, spaces become `%20`, etc. Copy it exactly as shown in the browser dev tools.
+
+> **Reference:** Based on [amber2sigen](https://github.com/Talie5in/amber2sigen) by [@Talie5in](https://github.com/Talie5in)
+
+#### How DC Curtailment Works
+
 Unlike full solar shutdown, Sigenergy uses **load-following mode** (zero export):
 
 | Mode | What Happens |
@@ -290,16 +344,28 @@ This is smarter because:
 - `plant_grid_point_maximum_export_limitation` (40038) - Sets export limit to 0kW for curtailment
 - Reference: [TypQxQ/Sigenergy-Local-Modbus](https://github.com/TypQxQ/Sigenergy-Local-Modbus)
 
-**Configuration (Home Assistant):**
-1. Select **Sigenergy** as your battery system (first step in config flow)
-2. Enter Sigenergy Cloud credentials (captured from browser dev tools)
-3. Select your Sigenergy station
-4. Enter your Sigenergy inverter's **Modbus IP address** (required for energy data)
-5. Optionally enable DC solar curtailment
+#### Configuration (Home Assistant)
 
-**Configuration (Flask Web App):**
+**Initial Setup:**
+1. Install PowerSync via HACS
+2. Add the integration: Settings → Devices & Services → Add Integration → PowerSync
+3. Select **Sigenergy** as your battery system
+4. Enter your Sigenergy Cloud credentials (see above)
+5. Select your Sigenergy station from the list
+6. Enter your Sigenergy inverter's **Modbus IP address**
+7. Optionally enable DC solar curtailment
+
+**Adding Cloud Credentials Later:**
+If you set up PowerSync before entering Cloud credentials, you can add them via Options:
+1. Go to Settings → Devices & Services → PowerSync → Configure
+2. Scroll down to the Sigenergy Cloud API section
+3. Enter your credentials (Email, Encrypted Password, Device ID, Station ID)
+4. Save and restart Home Assistant
+
+#### Configuration (Flask Web App)
+
 1. Go to Settings → Battery System → Select "Sigenergy"
-2. Follow the credential capture wizard (requires browser dev tools)
+2. Enter your Cloud credentials (captured from browser dev tools)
 3. Validate credentials and select your station
 4. Go to Amber Settings → Enter Sigenergy Modbus IP address, port, and slave ID
 
