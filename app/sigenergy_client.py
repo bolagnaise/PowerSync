@@ -465,7 +465,7 @@ def convert_amber_prices_to_sigenergy(
                     )
                     result.append({
                         "timeRange": time_range,
-                        "price": round(actual_price, 4),
+                        "price": round(actual_price, 2),
                     })
                     continue
 
@@ -477,7 +477,7 @@ def convert_amber_prices_to_sigenergy(
 
             result.append({
                 "timeRange": time_range,
-                "price": round(avg_price, 4),
+                "price": round(avg_price, 2),
             })
 
     return result
