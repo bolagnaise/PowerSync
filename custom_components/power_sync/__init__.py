@@ -129,6 +129,9 @@ from .const import (
     DEFAULT_INVERTER_RESTORE_SOC,
     # Sigenergy configuration
     CONF_SIGENERGY_STATION_ID,
+    CONF_SIGENERGY_USERNAME,
+    CONF_SIGENERGY_PASS_ENC,
+    CONF_SIGENERGY_DEVICE_ID,
     CONF_SIGENERGY_MODBUS_HOST,
     CONF_SIGENERGY_MODBUS_PORT,
     CONF_SIGENERGY_MODBUS_SLAVE_ID,
@@ -2566,6 +2569,66 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """
         await handle_sync_rest_api_check(check_name="legacy fallback")
 
+    async def _sync_tariff_to_sigenergy(forecast_data: list, sync_mode: str) -> None:
+        """Sync Amber prices to Sigenergy Cloud API.
+
+        Converts Amber forecast data to Sigenergy's expected format and uploads
+        buy/sell prices via the Sigenergy Cloud API.
+        """
+        from .sigenergy_api import SigenergyAPIClient, convert_amber_prices_to_sigenergy
+
+        # Get Sigenergy credentials from config entry
+        station_id = entry.data.get(CONF_SIGENERGY_STATION_ID)
+        username = entry.data.get(CONF_SIGENERGY_USERNAME)
+        pass_enc = entry.data.get(CONF_SIGENERGY_PASS_ENC)
+        device_id = entry.data.get(CONF_SIGENERGY_DEVICE_ID)
+
+        if not all([station_id, username, pass_enc, device_id]):
+            _LOGGER.error("Missing Sigenergy credentials for tariff sync")
+            return
+
+        if not forecast_data:
+            _LOGGER.warning("No forecast data available for Sigenergy tariff sync")
+            return
+
+        # Convert Amber forecast to Sigenergy format using existing converter
+        # Filter by channel type for buy/sell prices
+        general_prices = [p for p in forecast_data if p.get("channelType") == "general"]
+        feedin_prices = [p for p in forecast_data if p.get("channelType") == "feedIn"]
+
+        buy_prices = convert_amber_prices_to_sigenergy(general_prices, price_type="buy")
+        sell_prices = convert_amber_prices_to_sigenergy(feedin_prices, price_type="sell")
+
+        if not buy_prices:
+            _LOGGER.warning("No buy prices converted for Sigenergy sync")
+            return
+
+        # Create Sigenergy client and upload tariff
+        try:
+            client = SigenergyAPIClient(
+                username=username,
+                pass_enc=pass_enc,
+                device_id=device_id,
+            )
+
+            _LOGGER.info(f"Syncing {len(buy_prices)} price periods to Sigenergy station {station_id}")
+
+            result = await client.set_tariff_rate(
+                station_id=station_id,
+                buy_prices=buy_prices,
+                sell_prices=sell_prices if sell_prices else buy_prices,
+                plan_name="PowerSync Amber",
+            )
+
+            if result.get("success"):
+                _LOGGER.info(f"✅ Sigenergy tariff synced successfully ({sync_mode})")
+            else:
+                error = result.get("error", "Unknown error")
+                _LOGGER.error(f"❌ Sigenergy tariff sync failed: {error}")
+
+        except Exception as e:
+            _LOGGER.error(f"❌ Error syncing tariff to Sigenergy: {e}")
+
     async def _handle_sync_tou_internal(websocket_data, sync_mode='initial_forecast') -> None:
         """
         Internal sync logic with smart price-aware re-sync.
@@ -2577,12 +2640,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 - 'websocket_update': Re-sync only if price differs (Stage 2)
                 - 'rest_api_check': Check REST API and re-sync if differs (Stage 3/4)
         """
-        # Skip TOU sync for Sigenergy users - Sigenergy Cloud API doesn't support TOU schedule upload
-        # Sigenergy users still get price display via Amber coordinator, but no tariff sync to battery
+        # Determine battery system type for routing
         battery_system = entry.data.get(CONF_BATTERY_SYSTEM, "tesla")
-        if battery_system == "sigenergy":
-            _LOGGER.debug("TOU sync skipped - Sigenergy Cloud API doesn't support TOU schedule upload")
-            return
 
         # Skip TOU sync if force discharge is active - don't overwrite the discharge tariff
         if force_discharge_state.get("active"):
@@ -2783,6 +2842,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         export_boost_enabled = entry.options.get(CONF_EXPORT_BOOST_ENABLED, False) if electricity_provider == "amber" else False
         export_price_offset = entry.options.get(CONF_EXPORT_PRICE_OFFSET, 0) or 0 if export_boost_enabled else 0
         export_min_price = entry.options.get(CONF_EXPORT_MIN_PRICE, 0) or 0 if export_boost_enabled else 0
+
+        # Route to appropriate battery system for tariff sync
+        if battery_system == "sigenergy":
+            # Sigenergy-specific tariff sync via Cloud API
+            await _sync_tariff_to_sigenergy(forecast_data, sync_mode)
+            return
 
         # Convert prices to Tesla tariff format
         # forecast_data comes from either AEMO sensor or Amber coordinator (set above)
