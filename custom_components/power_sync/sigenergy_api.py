@@ -405,8 +405,11 @@ def convert_amber_prices_to_sigenergy(
         slot_key = f"{dt.hour:02d}:{slot_minute:02d}"
 
         # Get the price (in cents)
+        # Amber uses perKwh for both general (buy) and feedIn (sell) channels
+        # For sell prices, we take absolute value since Sigenergy expects positive values
         if price_type == "sell":
-            price_value = price.get("spotPerKwh", price.get("feedInTariff", 0))
+            # feedIn perKwh is negative (you receive money), take absolute value
+            price_value = abs(price.get("perKwh", price.get("spotPerKwh", 0)))
         else:
             price_value = price.get("perKwh", price.get("advancedPrice", 0))
 
