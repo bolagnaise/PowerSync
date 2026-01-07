@@ -167,6 +167,7 @@ views:
             color: '#FF9800'
             yaxis_id: price
             stroke_width: 2
+            extend_to: now
             group_by:
               func: avg
               duration: 5min
@@ -176,6 +177,7 @@ views:
             color: '#4CAF50'
             yaxis_id: price
             stroke_width: 2
+            extend_to: now
             group_by:
               func: avg
               duration: 5min
@@ -542,6 +544,7 @@ views:
             type: area
             color: '#FFD700'
             stroke_width: 2
+            extend_to: now
             group_by:
               func: avg
               duration: 5min
@@ -564,6 +567,7 @@ views:
             type: area
             color: '#2196F3'
             stroke_width: 2
+            extend_to: now
             group_by:
               func: avg
               duration: 5min
@@ -584,6 +588,7 @@ views:
             type: area
             color: '#F44336'
             stroke_width: 2
+            extend_to: now
             group_by:
               func: avg
               duration: 5min
@@ -604,6 +609,7 @@ views:
             type: area
             color: '#9C27B0'
             stroke_width: 2
+            extend_to: now
             group_by:
               func: avg
               duration: 5min
