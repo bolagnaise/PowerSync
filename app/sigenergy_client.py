@@ -371,32 +371,64 @@ def convert_amber_prices_to_sigenergy(
     Returns:
         List of {timeRange: "HH:MM-HH:MM", price: float} in cents
     """
-    # Calculate current 30-min slot for ActualInterval injection
-    now = datetime.now()
+    from zoneinfo import ZoneInfo
+
+    # Detect timezone from first Amber timestamp (same as Tesla converter)
+    detected_tz = None
+    for price in amber_prices:
+        nem_time = price.get("nemTime", "")
+        if nem_time:
+            try:
+                timestamp = datetime.fromisoformat(nem_time.replace("Z", "+00:00"))
+                detected_tz = timestamp.tzinfo
+                logger.debug(f"Auto-detected timezone from Amber data: {detected_tz}")
+                break
+            except Exception:
+                continue
+
+    # Fall back to Sydney timezone if detection failed
+    if not detected_tz:
+        detected_tz = ZoneInfo("Australia/Sydney")
+        logger.warning("Timezone detection failed, falling back to Australia/Sydney")
+
+    # Calculate current 30-min slot for ActualInterval injection (using local time)
+    now = datetime.now(detected_tz)
     current_slot_minute = 0 if now.minute < 30 else 30
     current_slot_key = f"{now.hour:02d}:{current_slot_minute:02d}"
+    logger.debug(f"Current 30-min period: {current_slot_key} ({detected_tz})")
 
     # Group prices by 30-minute slots
     slots = {}
 
     for price in amber_prices:
-        # Get the timestamp
-        start_time = price.get("startTime") or price.get("nemTime")
-        if not start_time:
+        # Get the timestamp - Amber's nemTime is the END of the interval
+        nem_time = price.get("nemTime") or price.get("startTime")
+        if not nem_time:
             continue
 
         # Parse the timestamp
-        if isinstance(start_time, str):
+        if isinstance(nem_time, str):
             try:
-                dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+                timestamp = datetime.fromisoformat(nem_time.replace("Z", "+00:00"))
             except ValueError:
                 continue
         else:
-            dt = start_time
+            timestamp = nem_time
+
+        # Get interval duration (Amber provides 5 or 30 minute intervals)
+        duration = price.get("duration", 30)
+
+        # CRITICAL: Use interval START time for bucketing (same as Tesla converter)
+        # Amber's nemTime is the END of the interval, not the start
+        # Example: nemTime=18:00, duration=30 → startTime=17:30 → slot "17:30"
+        interval_start = timestamp - timedelta(minutes=duration)
+
+        # Convert to local timezone to handle DST correctly
+        interval_start_local = interval_start.astimezone(detected_tz)
 
         # Round down to 30-minute slot
-        slot_minute = 0 if dt.minute < 30 else 30
-        slot_key = f"{dt.hour:02d}:{slot_minute:02d}"
+        slot_minute = 0 if interval_start_local.minute < 30 else 30
+        slot_key = f"{interval_start_local.hour:02d}:{slot_minute:02d}"
 
         # Price extraction - matches Tesla tariff converter logic
         # - ActualInterval (past): Use perKwh (actual settled price)
@@ -506,6 +538,18 @@ def convert_amber_prices_to_sigenergy(
                 "timeRange": time_range,
                 "price": round(avg_price, 2),
             })
+
+    # Log summary of converted prices
+    if result:
+        prices = [p["price"] for p in result]
+        # Find peak period (highest price)
+        max_idx = prices.index(max(prices))
+        peak_slot = result[max_idx]
+        logger.info(
+            f"Sigenergy {price_type} prices: {len(result)} periods, "
+            f"range {min(prices):.1f}-{max(prices):.1f}c/kWh, "
+            f"peak at {peak_slot['timeRange']} ({peak_slot['price']:.1f}c)"
+        )
 
     return result
 
