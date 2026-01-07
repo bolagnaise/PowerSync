@@ -168,13 +168,19 @@ class SigenergyClient:
             return {"error": str(e)}
 
     def _ensure_token(self) -> bool:
-        """Ensure we have a valid access token, refreshing if needed.
+        """Ensure we have a valid access token, refreshing or authenticating if needed.
 
         Returns:
             True if we have a valid token, False otherwise
         """
         if not self.access_token:
-            return False
+            # No token - try to authenticate
+            logger.info("No access token, authenticating...")
+            result = self.authenticate()
+            if "error" in result:
+                logger.error(f"Authentication failed: {result['error']}")
+                return False
+            return True
 
         # Check if token is expired or about to expire (5 min buffer)
         if self.token_expires_at:
@@ -182,8 +188,12 @@ class SigenergyClient:
                 logger.info("Token expired or expiring soon, refreshing...")
                 result = self.refresh_access_token()
                 if "error" in result:
-                    logger.error(f"Token refresh failed: {result['error']}")
-                    return False
+                    # Refresh failed - try full re-authentication
+                    logger.warning("Token refresh failed, attempting full re-authentication...")
+                    result = self.authenticate()
+                    if "error" in result:
+                        logger.error(f"Re-authentication failed: {result['error']}")
+                        return False
 
         return True
 
