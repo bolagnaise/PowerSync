@@ -242,7 +242,7 @@ DEMAND_CHARGE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         name="Daily Supply Charge Cost This Month",
         native_unit_of_measurement=CURRENCY_DOLLAR,
         device_class=SensorDeviceClass.MONETARY,
-        state_class=SensorStateClass.TOTAL_INCREASING,
+        state_class=SensorStateClass.TOTAL,  # MONETARY only supports 'total', not 'total_increasing'
         suggested_display_precision=2,
         value_fn=lambda data: data.get("daily_supply_charge_cost", 0.0) if data else 0.0,
     ),
