@@ -45,7 +45,7 @@ class SigenergyController(InverterController):
     REG_ESS_MAX_CHARGE_LIMIT = 40032      # ESS max charging (U32, gain 1000, kW)
     REG_ESS_MAX_DISCHARGE_LIMIT = 40034   # ESS max discharging (U32, gain 1000, kW)
 
-    # Input registers (read-only)
+    # Input registers (read-only) - Real-time power
     REG_PV_POWER = 30035                  # PV power (S32, gain 1000, kW)
     REG_ACTIVE_POWER = 30031              # Active power (S32, gain 1000, kW)
     REG_ESS_SOC = 30014                   # Battery SOC (U16, gain 10, %)
@@ -53,6 +53,19 @@ class SigenergyController(InverterController):
     REG_RUNNING_STATE = 30051             # Plant running state (U16)
     REG_GRID_SENSOR_POWER = 30005         # Grid sensor active power (S32, gain 1000, kW)
     REG_EMS_WORK_MODE = 30003             # EMS work mode (U16)
+
+    # Input registers (read-only) - Battery health
+    REG_ESS_RATED_CAPACITY = 30083        # ESS rated energy capacity (U32, gain 100, kWh)
+    REG_ESS_SOH = 30087                   # Battery State of Health (U16, gain 10, %)
+
+    # Input registers (read-only) - Energy totals (U64 = 4 registers, gain 100)
+    REG_ACCUMULATED_PV_ENERGY = 30088     # Total PV generation (U64, gain 100, kWh)
+    REG_DAILY_CONSUMED_ENERGY = 30092     # Daily load consumption (U32, gain 100, kWh)
+    REG_ACCUMULATED_CONSUMED_ENERGY = 30094  # Total load consumption (U64, gain 100, kWh)
+    REG_ACCUMULATED_BATTERY_CHARGE = 30200   # Total battery charged (U64, gain 100, kWh)
+    REG_ACCUMULATED_BATTERY_DISCHARGE = 30204  # Total battery discharged (U64, gain 100, kWh)
+    REG_ACCUMULATED_GRID_IMPORT = 30216   # Total grid import (U64, gain 100, kWh)
+    REG_ACCUMULATED_GRID_EXPORT = 30220   # Total grid export (U64, gain 100, kWh)
 
     # === INVERTER-LEVEL REGISTERS (slave ID 1) ===
     # Fallback if plant registers don't work
@@ -66,6 +79,7 @@ class SigenergyController(InverterController):
     GAIN_POWER = 1000  # kW → scaled value (multiply to write, divide to read)
     GAIN_PERCENT = 100  # % → scaled value
     GAIN_SOC = 10      # % → scaled value
+    GAIN_ENERGY = 100  # kWh → scaled value for energy registers
 
     # Curtailment values
     # Use export limit (load-following) rather than full PV shutdown
@@ -265,6 +279,15 @@ class SigenergyController(InverterController):
         low = value & 0xFFFF
         return [high, low]
 
+    def _to_unsigned64(self, regs: list[int]) -> int:
+        """Convert four unsigned 16-bit registers to unsigned 64-bit.
+
+        Register order: [high_high, high_low, low_high, low_low]
+        """
+        if len(regs) < 4:
+            return 0
+        return (regs[0] << 48) | (regs[1] << 32) | (regs[2] << 16) | regs[3]
+
     async def _get_current_pv_limit(self) -> Optional[int]:
         """Read current PV power limit."""
         regs = await self._read_holding_registers(self.REG_PV_MAX_POWER_LIMIT, 2)
@@ -423,6 +446,17 @@ class SigenergyController(InverterController):
             attrs["battery_power_kw"] = round(ess_power_kw, 2)
             success_count += 1
 
+        # Read battery SOH (U16, gain 10)
+        soh_regs = await self._read_input_registers(self.REG_ESS_SOH, 1)
+        if soh_regs:
+            attrs["battery_soh"] = round(soh_regs[0] / self.GAIN_SOC, 1)
+
+        # Read rated capacity (U32, gain 100, kWh)
+        capacity_regs = await self._read_input_registers(self.REG_ESS_RATED_CAPACITY, 2)
+        if capacity_regs and len(capacity_regs) >= 2:
+            capacity_kwh = self._to_unsigned32(capacity_regs[0], capacity_regs[1]) / self.GAIN_ENERGY
+            attrs["battery_capacity_kwh"] = round(capacity_kwh, 2)
+
         attrs["_success_count"] = success_count
         attrs["_register_level"] = "plant"
         return attrs
@@ -469,6 +503,60 @@ class SigenergyController(InverterController):
         attrs["_register_level"] = "inverter"
         attrs["_inverter_slave_id"] = inv_slave
         return attrs
+
+    async def get_energy_summary(self) -> dict:
+        """Read accumulated energy totals from Modbus registers.
+
+        Returns a dict with lifetime and daily energy statistics in kWh.
+        All U64 values use gain factor 100.
+        """
+        energy = {}
+
+        try:
+            if not await self.connect():
+                return {"error": "Failed to connect to Sigenergy"}
+
+            # Total PV generation (U64, 4 registers, gain 100)
+            pv_regs = await self._read_input_registers(self.REG_ACCUMULATED_PV_ENERGY, 4)
+            if pv_regs and len(pv_regs) >= 4:
+                energy["total_pv_energy_kwh"] = round(self._to_unsigned64(pv_regs) / self.GAIN_ENERGY, 2)
+
+            # Daily load consumption (U32, 2 registers, gain 100)
+            daily_load_regs = await self._read_input_registers(self.REG_DAILY_CONSUMED_ENERGY, 2)
+            if daily_load_regs and len(daily_load_regs) >= 2:
+                energy["daily_load_energy_kwh"] = round(self._to_unsigned32(daily_load_regs[0], daily_load_regs[1]) / self.GAIN_ENERGY, 2)
+
+            # Total load consumption (U64, 4 registers, gain 100)
+            total_load_regs = await self._read_input_registers(self.REG_ACCUMULATED_CONSUMED_ENERGY, 4)
+            if total_load_regs and len(total_load_regs) >= 4:
+                energy["total_load_energy_kwh"] = round(self._to_unsigned64(total_load_regs) / self.GAIN_ENERGY, 2)
+
+            # Total battery charged (U64, 4 registers, gain 100)
+            charge_regs = await self._read_input_registers(self.REG_ACCUMULATED_BATTERY_CHARGE, 4)
+            if charge_regs and len(charge_regs) >= 4:
+                energy["total_battery_charged_kwh"] = round(self._to_unsigned64(charge_regs) / self.GAIN_ENERGY, 2)
+
+            # Total battery discharged (U64, 4 registers, gain 100)
+            discharge_regs = await self._read_input_registers(self.REG_ACCUMULATED_BATTERY_DISCHARGE, 4)
+            if discharge_regs and len(discharge_regs) >= 4:
+                energy["total_battery_discharged_kwh"] = round(self._to_unsigned64(discharge_regs) / self.GAIN_ENERGY, 2)
+
+            # Total grid import (U64, 4 registers, gain 100)
+            import_regs = await self._read_input_registers(self.REG_ACCUMULATED_GRID_IMPORT, 4)
+            if import_regs and len(import_regs) >= 4:
+                energy["total_grid_import_kwh"] = round(self._to_unsigned64(import_regs) / self.GAIN_ENERGY, 2)
+
+            # Total grid export (U64, 4 registers, gain 100)
+            export_regs = await self._read_input_registers(self.REG_ACCUMULATED_GRID_EXPORT, 4)
+            if export_regs and len(export_regs) >= 4:
+                energy["total_grid_export_kwh"] = round(self._to_unsigned64(export_regs) / self.GAIN_ENERGY, 2)
+
+            _LOGGER.debug(f"Sigenergy energy summary: {energy}")
+            return energy
+
+        except Exception as e:
+            _LOGGER.error(f"Error reading energy summary: {e}")
+            return {"error": str(e)}
 
     async def get_status(self) -> InverterState:
         """Get current status of the Sigenergy system.

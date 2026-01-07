@@ -1065,6 +1065,9 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
                 "export_limit_kw": attrs.get("export_limit_kw"),
                 "ems_work_mode": attrs.get("ems_work_mode"),
                 "is_curtailed": status.is_curtailed,
+                # Battery health data
+                "battery_soh": attrs.get("battery_soh"),  # % State of Health
+                "battery_capacity_kwh": attrs.get("battery_capacity_kwh"),  # kWh rated capacity
             }
 
             _LOGGER.debug(

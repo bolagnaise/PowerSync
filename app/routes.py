@@ -2383,6 +2383,76 @@ def sigenergy_live_status(api_user=None, **kwargs):
     return jsonify(status)
 
 
+@bp.route('/api/sigenergy/battery-health')
+@api_auth_required
+def sigenergy_battery_health(api_user=None, **kwargs):
+    """Get Sigenergy battery health information via Modbus TCP.
+
+    Returns battery State of Health (SOH) and rated capacity.
+    Supports both session login and Bearer token authentication.
+    """
+    from app.sigenergy_modbus import get_sigenergy_modbus_client
+
+    user = api_user or current_user
+    logger.info(f"Sigenergy battery health requested by user: {user.email}")
+
+    # Check if user has Sigenergy configured
+    if user.battery_system != 'sigenergy':
+        return jsonify({'error': 'Sigenergy not configured as battery system'}), 400
+
+    # Check if Modbus is configured
+    if not user.sigenergy_modbus_host:
+        return jsonify({'error': 'Sigenergy Modbus not configured. Please set IP address in settings.'}), 400
+
+    # Get Modbus client
+    client = get_sigenergy_modbus_client(user)
+    if not client:
+        return jsonify({'error': 'Failed to create Sigenergy Modbus client'}), 500
+
+    # Get battery health
+    health = client.get_battery_health()
+    if 'error' in health:
+        logger.error(f"Sigenergy battery health error: {health['error']}")
+        return jsonify(health), 500
+
+    return jsonify(health)
+
+
+@bp.route('/api/sigenergy/energy-summary')
+@api_auth_required
+def sigenergy_energy_summary(api_user=None, **kwargs):
+    """Get Sigenergy accumulated energy totals via Modbus TCP.
+
+    Returns lifetime and daily energy statistics directly from Modbus registers.
+    Supports both session login and Bearer token authentication.
+    """
+    from app.sigenergy_modbus import get_sigenergy_modbus_client
+
+    user = api_user or current_user
+    logger.info(f"Sigenergy energy summary requested by user: {user.email}")
+
+    # Check if user has Sigenergy configured
+    if user.battery_system != 'sigenergy':
+        return jsonify({'error': 'Sigenergy not configured as battery system'}), 400
+
+    # Check if Modbus is configured
+    if not user.sigenergy_modbus_host:
+        return jsonify({'error': 'Sigenergy Modbus not configured. Please set IP address in settings.'}), 400
+
+    # Get Modbus client
+    client = get_sigenergy_modbus_client(user)
+    if not client:
+        return jsonify({'error': 'Failed to create Sigenergy Modbus client'}), 500
+
+    # Get energy summary
+    summary = client.get_energy_summary()
+    if 'error' in summary:
+        logger.error(f"Sigenergy energy summary error: {summary['error']}")
+        return jsonify(summary), 500
+
+    return jsonify(summary)
+
+
 @bp.route('/api/sigenergy/calendar-history')
 @api_auth_required
 def sigenergy_calendar_history(api_user=None, **kwargs):
