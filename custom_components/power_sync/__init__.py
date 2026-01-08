@@ -2626,6 +2626,79 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """
         await handle_sync_rest_api_check(check_name="legacy fallback")
 
+    async def _get_nem_region_from_amber() -> Optional[str]:
+        """Auto-detect NEM region from Amber site's network field.
+
+        Fetches Amber site info and maps the electricity network to NEM region.
+        Caches the result in hass.data to avoid repeated API calls.
+        """
+        # Check cache first
+        cached_region = hass.data[DOMAIN][entry.entry_id].get("amber_nem_region")
+        if cached_region:
+            return cached_region
+
+        # Network to NEM region mapping
+        NETWORK_TO_NEM_REGION = {
+            # NSW networks
+            "Ausgrid": "NSW1",
+            "Endeavour Energy": "NSW1",
+            "Essential Energy": "NSW1",
+            # VIC networks
+            "AusNet Services": "VIC1",
+            "CitiPower": "VIC1",
+            "Jemena": "VIC1",
+            "Powercor": "VIC1",
+            "United Energy": "VIC1",
+            # QLD networks
+            "Energex": "QLD1",
+            "Ergon Energy": "QLD1",
+            # SA networks
+            "SA Power Networks": "SA1",
+            # TAS networks
+            "TasNetworks": "TAS1",
+        }
+
+        try:
+            amber_token = entry.data.get(CONF_AMBER_API_TOKEN)
+            amber_site_id = entry.data.get(CONF_AMBER_SITE_ID)
+
+            if not amber_token or not amber_site_id:
+                _LOGGER.debug("No Amber credentials for NEM region auto-detection")
+                return None
+
+            # Fetch Amber site info
+            from homeassistant.helpers.aiohttp_client import async_get_clientsession
+            session = async_get_clientsession(hass)
+            headers = {"Authorization": f"Bearer {amber_token}"}
+
+            async with session.get(
+                f"{AMBER_API_BASE_URL}/sites/{amber_site_id}",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as response:
+                if response.status == 200:
+                    site_info = await response.json()
+                    network = site_info.get("network")
+
+                    if network:
+                        nem_region = NETWORK_TO_NEM_REGION.get(network)
+                        if nem_region:
+                            _LOGGER.info(f"Auto-detected NEM region: {nem_region} (network: {network})")
+                            # Cache the result
+                            hass.data[DOMAIN][entry.entry_id]["amber_nem_region"] = nem_region
+                            return nem_region
+                        else:
+                            _LOGGER.warning(f"Unknown network '{network}' - cannot determine NEM region")
+                    else:
+                        _LOGGER.debug("Amber site info doesn't include network field")
+                else:
+                    _LOGGER.debug(f"Failed to fetch Amber site info: HTTP {response.status}")
+
+        except Exception as e:
+            _LOGGER.debug(f"Error auto-detecting NEM region: {e}")
+
+        return None
+
     async def _sync_tariff_to_sigenergy(forecast_data: list, sync_mode: str, current_actual_interval: dict = None) -> None:
         """Sync Amber prices to Sigenergy Cloud API.
 
@@ -2659,9 +2732,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
 
             # Get NEM region for timezone selection (SA1 = Adelaide, QLD1 = Brisbane, etc.)
+            # Priority: 1) Explicit AEMO region setting, 2) Auto-detect from Amber site network
             nem_region = entry.options.get(
                 CONF_AEMO_REGION, entry.data.get(CONF_AEMO_REGION)
             )
+
+            # Auto-detect NEM region from Amber site info if not explicitly configured
+            if not nem_region:
+                nem_region = await _get_nem_region_from_amber()
 
             # Convert Amber forecast to Sigenergy format
             general_prices = [p for p in forecast_data if p.get("channelType") == "general"]

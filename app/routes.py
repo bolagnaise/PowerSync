@@ -102,6 +102,79 @@ def api_auth_required(f):
     return decorated_function
 
 
+# Cache for NEM region auto-detection (keyed by site_id)
+_nem_region_cache = {}
+
+
+def _get_nem_region_from_amber_site(amber_client, site_id):
+    """Auto-detect NEM region from Amber site's network field.
+
+    Args:
+        amber_client: AmberAPIClient instance
+        site_id: Amber site ID
+
+    Returns:
+        NEM region code (NSW1, VIC1, etc.) or None
+    """
+    if not site_id:
+        return None
+
+    # Check cache first
+    if site_id in _nem_region_cache:
+        return _nem_region_cache[site_id]
+
+    # Network to NEM region mapping
+    NETWORK_TO_NEM_REGION = {
+        # NSW networks
+        "Ausgrid": "NSW1",
+        "Endeavour Energy": "NSW1",
+        "Essential Energy": "NSW1",
+        # VIC networks
+        "AusNet Services": "VIC1",
+        "CitiPower": "VIC1",
+        "Jemena": "VIC1",
+        "Powercor": "VIC1",
+        "United Energy": "VIC1",
+        # QLD networks
+        "Energex": "QLD1",
+        "Ergon Energy": "QLD1",
+        # SA networks
+        "SA Power Networks": "SA1",
+        # TAS networks
+        "TasNetworks": "TAS1",
+    }
+
+    try:
+        # Fetch site info from Amber
+        response = requests.get(
+            f"{amber_client.base_url}/sites/{site_id}",
+            headers=amber_client.headers,
+            timeout=10
+        )
+
+        if response.status_code == 200:
+            site_info = response.json()
+            network = site_info.get("network")
+
+            if network:
+                nem_region = NETWORK_TO_NEM_REGION.get(network)
+                if nem_region:
+                    logger.info(f"Auto-detected NEM region: {nem_region} (network: {network})")
+                    _nem_region_cache[site_id] = nem_region
+                    return nem_region
+                else:
+                    logger.warning(f"Unknown network '{network}' - cannot determine NEM region")
+            else:
+                logger.debug("Amber site info doesn't include network field")
+        else:
+            logger.debug(f"Failed to fetch Amber site info: HTTP {response.status_code}")
+
+    except Exception as e:
+        logger.debug(f"Error auto-detecting NEM region: {e}")
+
+    return None
+
+
 def get_powerwall_timezone(user, default='Australia/Brisbane'):
     """
     Get the Powerwall's timezone from Tesla API.
@@ -1039,7 +1112,12 @@ def api_sigenergy_tariff(api_user=None, **kwargs):
         feedin_prices = [p for p in forecast_data if p.get('channelType') == 'feedIn']
 
         # Get NEM region for timezone selection
+        # Priority: 1) Explicit aemo_region, 2) Auto-detect from Amber site network
         nem_region = user.aemo_region
+
+        if not nem_region:
+            # Auto-detect from Amber site info
+            nem_region = _get_nem_region_from_amber_site(amber_client, user.amber_site_id)
 
         # Convert to Sigenergy format
         buy_prices = convert_amber_prices_to_sigenergy(

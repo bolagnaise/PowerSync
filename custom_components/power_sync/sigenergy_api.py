@@ -405,10 +405,39 @@ def convert_amber_prices_to_sigenergy(
         "TAS1": "Australia/Hobart",
     }
 
+    # Australian electricity network to NEM region mapping
+    # Used to auto-detect NEM region from Amber site's network field
+    NETWORK_TO_NEM_REGION = {
+        # NSW networks
+        "Ausgrid": "NSW1",
+        "Endeavour Energy": "NSW1",
+        "Essential Energy": "NSW1",
+        # VIC networks
+        "AusNet Services": "VIC1",
+        "CitiPower": "VIC1",
+        "Jemena": "VIC1",
+        "Powercor": "VIC1",
+        "United Energy": "VIC1",
+        # QLD networks
+        "Energex": "QLD1",
+        "Ergon Energy": "QLD1",
+        # SA networks
+        "SA Power Networks": "SA1",
+        # TAS networks
+        "TasNetworks": "TAS1",
+    }
+
+    # Determine NEM region - priority: explicit nem_region > auto-detect from network
+    detected_region = nem_region
+    if not detected_region:
+        # Try to auto-detect from Amber price data (network field in site info)
+        # For now, default to Sydney - caller should pass nem_region if available
+        detected_region = None
+
     # Get timezone from NEM region, default to Sydney
-    tz_name = NEM_REGION_TIMEZONES.get(nem_region, "Australia/Sydney")
+    tz_name = NEM_REGION_TIMEZONES.get(detected_region, "Australia/Sydney")
     detected_tz = ZoneInfo(tz_name)
-    _LOGGER.debug(f"Using timezone: {detected_tz} (NEM region: {nem_region or 'default'})")
+    _LOGGER.debug(f"Using timezone: {detected_tz} (NEM region: {detected_region or 'default Sydney'})")
 
     # Calculate current 30-min slot for ActualInterval injection (using local time)
     now = datetime.now(detected_tz)
