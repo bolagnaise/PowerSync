@@ -392,23 +392,12 @@ def convert_amber_prices_to_sigenergy(
     """
     from zoneinfo import ZoneInfo
 
-    # Detect timezone from first Amber timestamp (same as Tesla converter)
-    detected_tz = None
-    for price in amber_prices:
-        nem_time = price.get("nemTime", "")
-        if nem_time:
-            try:
-                timestamp = datetime.fromisoformat(nem_time.replace("Z", "+00:00"))
-                detected_tz = timestamp.tzinfo
-                _LOGGER.debug(f"Auto-detected timezone from Amber data: {detected_tz}")
-                break
-            except Exception:
-                continue
-
-    # Fall back to Sydney timezone if detection failed
-    if not detected_tz:
-        detected_tz = ZoneInfo("Australia/Sydney")
-        _LOGGER.warning("Timezone detection failed, falling back to Australia/Sydney")
+    # CRITICAL: Use proper timezone that handles DST, NOT the offset from Amber data
+    # Amber provides timestamps with fixed offsets (e.g., +10:00 even during AEDT +11:00)
+    # This causes prices to be 1 hour off during daylight savings
+    # Solution: Always use Australia/Sydney which correctly handles DST transitions
+    detected_tz = ZoneInfo("Australia/Sydney")
+    _LOGGER.debug(f"Using timezone: {detected_tz}")
 
     # Calculate current 30-min slot for ActualInterval injection (using local time)
     now = datetime.now(detected_tz)
