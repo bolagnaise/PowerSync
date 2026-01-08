@@ -632,6 +632,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         self,
         period: str = "day",
         kind: str = "energy",
+        end_date: str | None = None,
     ) -> dict[str, Any] | None:
         """
         Fetch calendar history from Tesla API.
@@ -639,6 +640,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         Args:
             period: 'day', 'week', 'month', 'year', or 'lifetime'
             kind: 'energy' or 'power'
+            end_date: Optional end date in YYYY-MM-DD format (defaults to today)
 
         Returns:
             Calendar history data with time_series array, or None if fetch fails
@@ -659,17 +661,27 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
 
             # Calculate end_date in site's timezone
             from zoneinfo import ZoneInfo
+            from datetime import timedelta
             user_tz = ZoneInfo(timezone)
-            now = datetime.now(user_tz)
-            end_dt = now.replace(hour=23, minute=59, second=59)
-            end_date = end_dt.isoformat()
 
-            _LOGGER.info(f"Fetching calendar history for site {self.site_id}: period={period}, kind={kind}")
+            # Use provided end_date or default to now
+            if end_date:
+                try:
+                    reference_date = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=user_tz)
+                except ValueError:
+                    reference_date = datetime.now(user_tz)
+            else:
+                reference_date = datetime.now(user_tz)
+
+            end_dt = reference_date.replace(hour=23, minute=59, second=59)
+            end_date_iso = end_dt.isoformat()
+
+            _LOGGER.info(f"Fetching calendar history for site {self.site_id}: period={period}, kind={kind}, end_date={end_date}")
 
             params = {
                 "kind": kind,
                 "period": period,
-                "end_date": end_date,
+                "end_date": end_date_iso,
                 "time_zone": timezone,
             }
 
@@ -689,6 +701,40 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 data = await response.json()
                 result = data.get("response", {})
                 time_series = result.get("time_series", [])
+
+                _LOGGER.info(f"Fetched {len(time_series)} raw records from Tesla for period='{period}'")
+
+                # Tesla API often returns all historical data regardless of period
+                # Filter client-side based on requested period and end_date
+                if time_series and period in ["day", "week", "month", "year"]:
+                    # Calculate cutoff date based on period, relative to reference_date
+                    if period == "day":
+                        cutoff = reference_date.replace(hour=0, minute=0, second=0, microsecond=0)
+                    elif period == "week":
+                        cutoff = (reference_date - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+                    elif period == "month":
+                        cutoff = (reference_date - timedelta(days=30)).replace(hour=0, minute=0, second=0, microsecond=0)
+                    elif period == "year":
+                        cutoff = (reference_date - timedelta(days=365)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+                    # End of reference day as upper bound
+                    end_of_day = reference_date.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+                    filtered_series = []
+                    for entry in time_series:
+                        try:
+                            ts_str = entry.get("timestamp", "")
+                            if ts_str:
+                                entry_dt = datetime.fromisoformat(ts_str)
+                                if cutoff <= entry_dt <= end_of_day:
+                                    filtered_series.append(entry)
+                        except (ValueError, TypeError) as e:
+                            _LOGGER.warning(f"Failed to parse timestamp: {entry.get('timestamp')}: {e}")
+                            continue
+
+                    _LOGGER.info(f"Filtered calendar history from {len(time_series)} to {len(filtered_series)} records for period='{period}' (cutoff={cutoff.date()}, end={end_of_day.date()})")
+                    time_series = filtered_series
+
                 _LOGGER.info(f"Successfully fetched calendar history: {len(time_series)} records for period='{period}'")
 
                 return {

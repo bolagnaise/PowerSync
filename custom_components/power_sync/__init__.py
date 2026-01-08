@@ -1195,6 +1195,8 @@ class CalendarHistoryView(HomeAssistantView):
         """Handle GET request for calendar history."""
         # Get period from query params (default: day)
         period = request.query.get("period", "day")
+        # Get end_date from query params (format: YYYY-MM-DD)
+        end_date = request.query.get("end_date")
 
         # Validate period
         valid_periods = ["day", "week", "month", "year"]
@@ -1204,7 +1206,7 @@ class CalendarHistoryView(HomeAssistantView):
                 status=400
             )
 
-        _LOGGER.info(f"📊 Calendar history HTTP request for period: {period}")
+        _LOGGER.info(f"📊 Calendar history HTTP request for period: {period}, end_date: {end_date}")
 
         # Find the power_sync entry and coordinator
         tesla_coordinator = None
@@ -1237,7 +1239,7 @@ class CalendarHistoryView(HomeAssistantView):
 
         # Fetch calendar history
         try:
-            history = await tesla_coordinator.async_get_calendar_history(period=period)
+            history = await tesla_coordinator.async_get_calendar_history(period=period, end_date=end_date)
         except Exception as e:
             _LOGGER.error(f"Error fetching calendar history: {e}")
             return web.json_response(
