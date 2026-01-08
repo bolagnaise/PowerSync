@@ -3160,23 +3160,35 @@ def energy_calendar_history_unified(api_user=None, **kwargs):
         from zoneinfo import ZoneInfo
 
         user_tz = ZoneInfo(get_powerwall_timezone(user))
-        now = datetime.now(user_tz)
 
-        # Calculate cutoff date based on period
+        # Use the requested end_date for filtering, not current time
+        # This ensures historical data is correctly filtered when viewing past periods
+        if end_date_str:
+            try:
+                reference_date = datetime.strptime(end_date_str, '%Y-%m-%d').replace(tzinfo=user_tz)
+            except ValueError:
+                reference_date = datetime.now(user_tz)
+        else:
+            reference_date = datetime.now(user_tz)
+
+        # Calculate cutoff date based on period, relative to reference_date
         if period == 'day':
-            # Today only - filter to entries from today
-            cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            # Single day - filter to entries from that day only
+            cutoff = reference_date.replace(hour=0, minute=0, second=0, microsecond=0)
         elif period == 'week':
-            # Last 7 days
-            cutoff = (now - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+            # Last 7 days from reference date
+            cutoff = (reference_date - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
         elif period == 'month':
-            # Last 30 days
-            cutoff = (now - timedelta(days=30)).replace(hour=0, minute=0, second=0, microsecond=0)
+            # Last 30 days from reference date
+            cutoff = (reference_date - timedelta(days=30)).replace(hour=0, minute=0, second=0, microsecond=0)
         elif period == 'year':
-            # Last 365 days
-            cutoff = (now - timedelta(days=365)).replace(hour=0, minute=0, second=0, microsecond=0)
+            # Last 365 days from reference date
+            cutoff = (reference_date - timedelta(days=365)).replace(hour=0, minute=0, second=0, microsecond=0)
 
-        # Filter time_series to entries after cutoff
+        # Filter time_series to entries within the date range (cutoff to reference_date)
+        # End of reference day (23:59:59) as upper bound
+        end_of_day = reference_date.replace(hour=23, minute=59, second=59, microsecond=999999)
+
         filtered_series = []
         for entry in time_series:
             try:
@@ -3184,14 +3196,22 @@ def energy_calendar_history_unified(api_user=None, **kwargs):
                 ts_str = entry.get('timestamp', '')
                 if ts_str:
                     entry_dt = datetime.fromisoformat(ts_str)
-                    if entry_dt >= cutoff:
+                    # Filter to entries within the date range
+                    if cutoff <= entry_dt <= end_of_day:
                         filtered_series.append(entry)
             except (ValueError, TypeError) as e:
                 logger.warning(f"Failed to parse timestamp: {entry.get('timestamp')}: {e}")
                 continue
 
-        logger.info(f"Filtered calendar history from {len(time_series)} to {len(filtered_series)} records for period '{period}'")
+        logger.info(f"Filtered calendar history from {len(time_series)} to {len(filtered_series)} records for period '{period}' (cutoff={cutoff.date()}, end={end_of_day.date()})")
         time_series = filtered_series
+
+    # Debug: Log sample of time series data to diagnose identical values issue
+    if time_series and len(time_series) > 0:
+        sample_entries = time_series[:min(5, len(time_series))]
+        for i, entry in enumerate(sample_entries):
+            solar = entry.get('solar_energy_exported', 0)
+            logger.debug(f"Calendar entry {i}: ts={entry.get('timestamp')}, solar={solar:.1f}Wh")
 
     # Format response
     data = {
