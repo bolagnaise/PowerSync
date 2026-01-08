@@ -550,6 +550,21 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             # Route based on battery system selection
             if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
+                # Auto-select Amber site for Sigenergy (they don't go through Tesla site selection)
+                if self._amber_sites:
+                    # Prefer active site, fall back to first site
+                    active_sites = [s for s in self._amber_sites if s.get("status") == "active"]
+                    if active_sites:
+                        amber_site_id = active_sites[0]["id"]
+                    else:
+                        amber_site_id = self._amber_sites[0]["id"]
+                    # Store in _site_data for consistency with Tesla flow
+                    self._site_data = {
+                        CONF_AMBER_SITE_ID: amber_site_id,
+                        CONF_AUTO_SYNC_ENABLED: True,
+                        CONF_AMBER_FORECAST_TYPE: "predicted",
+                    }
+                    _LOGGER.info(f"Auto-selected Amber site for Sigenergy: {amber_site_id}")
                 return await self.async_step_sigenergy_credentials()
             else:
                 return await self.async_step_tesla_provider()
@@ -779,6 +794,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             CONF_BATTERY_SYSTEM: BATTERY_SYSTEM_SIGENERGY,
             CONF_AUTO_SYNC_ENABLED: True,
             **self._amber_data,
+            **self._site_data,  # Include Amber site ID for NEM region auto-detection
             **self._flow_power_data,
             **self._sigenergy_data,
         }

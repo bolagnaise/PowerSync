@@ -111,18 +111,11 @@ def _get_nem_region_from_amber_site(amber_client, site_id):
 
     Args:
         amber_client: AmberAPIClient instance
-        site_id: Amber site ID
+        site_id: Amber site ID (optional - will auto-select if not provided)
 
     Returns:
         NEM region code (NSW1, VIC1, etc.) or None
     """
-    if not site_id:
-        return None
-
-    # Check cache first
-    if site_id in _nem_region_cache:
-        return _nem_region_cache[site_id]
-
     # Network to NEM region mapping
     NETWORK_TO_NEM_REGION = {
         # NSW networks
@@ -145,6 +138,38 @@ def _get_nem_region_from_amber_site(amber_client, site_id):
         # TAS networks
         "TasNetworks": "TAS1",
     }
+
+    # If no site_id provided, fetch all sites and auto-select first active one
+    if not site_id:
+        logger.debug("No Amber site ID provided, fetching sites list...")
+        try:
+            response = requests.get(
+                f"{amber_client.base_url}/sites",
+                headers=amber_client.headers,
+                timeout=10
+            )
+            if response.status_code == 200:
+                sites = response.json()
+                # Prefer active site
+                active_sites = [s for s in sites if s.get("status") == "active"]
+                if active_sites:
+                    site_id = active_sites[0]["id"]
+                elif sites:
+                    site_id = sites[0]["id"]
+                if site_id:
+                    logger.info(f"Auto-selected Amber site: {site_id}")
+            else:
+                logger.debug(f"Failed to fetch Amber sites: HTTP {response.status_code}")
+        except Exception as e:
+            logger.debug(f"Error fetching Amber sites: {e}")
+
+    if not site_id:
+        logger.debug("Could not determine Amber site ID for NEM region auto-detection")
+        return None
+
+    # Check cache first
+    if site_id in _nem_region_cache:
+        return _nem_region_cache[site_id]
 
     try:
         # Fetch site info from Amber

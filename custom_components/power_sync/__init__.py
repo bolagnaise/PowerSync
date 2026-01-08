@@ -2665,15 +2665,43 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             amber_token = entry.data.get(CONF_AMBER_API_TOKEN)
             amber_site_id = entry.data.get(CONF_AMBER_SITE_ID)
 
-            if not amber_token or not amber_site_id:
-                _LOGGER.debug("No Amber credentials for NEM region auto-detection")
+            if not amber_token:
+                _LOGGER.debug("No Amber API token for NEM region auto-detection")
                 return None
 
-            # Fetch Amber site info
             from homeassistant.helpers.aiohttp_client import async_get_clientsession
             session = async_get_clientsession(hass)
             headers = {"Authorization": f"Bearer {amber_token}"}
 
+            # If no site ID stored, fetch all sites and use first active one
+            if not amber_site_id:
+                _LOGGER.debug("No Amber site ID in config, fetching sites list...")
+                try:
+                    async with session.get(
+                        f"{AMBER_API_BASE_URL}/sites",
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as sites_response:
+                        if sites_response.status == 200:
+                            sites = await sites_response.json()
+                            # Prefer active site
+                            active_sites = [s for s in sites if s.get("status") == "active"]
+                            if active_sites:
+                                amber_site_id = active_sites[0]["id"]
+                            elif sites:
+                                amber_site_id = sites[0]["id"]
+                            if amber_site_id:
+                                _LOGGER.info(f"Auto-selected Amber site: {amber_site_id}")
+                        else:
+                            _LOGGER.debug(f"Failed to fetch Amber sites: HTTP {sites_response.status}")
+                except Exception as e:
+                    _LOGGER.debug(f"Error fetching Amber sites: {e}")
+
+            if not amber_site_id:
+                _LOGGER.debug("Could not determine Amber site ID for NEM region auto-detection")
+                return None
+
+            # Fetch Amber site info
             async with session.get(
                 f"{AMBER_API_BASE_URL}/sites/{amber_site_id}",
                 headers=headers,
