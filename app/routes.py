@@ -129,6 +129,8 @@ def _get_nem_region_from_amber_site(amber_client, site_id):
         "Ausgrid": "NSW1",
         "Endeavour Energy": "NSW1",
         "Essential Energy": "NSW1",
+        # ACT network (part of NSW1 NEM region)
+        "Evoenergy": "NSW1",
         # VIC networks
         "AusNet Services": "VIC1",
         "CitiPower": "VIC1",

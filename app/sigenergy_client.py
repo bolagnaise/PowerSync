@@ -393,6 +393,8 @@ def convert_amber_prices_to_sigenergy(
         "Ausgrid": "NSW1",
         "Endeavour Energy": "NSW1",
         "Essential Energy": "NSW1",
+        # ACT network (part of NSW1 NEM region)
+        "Evoenergy": "NSW1",
         # VIC networks
         "AusNet Services": "VIC1",
         "CitiPower": "VIC1",

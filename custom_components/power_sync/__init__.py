@@ -2643,6 +2643,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "Ausgrid": "NSW1",
             "Endeavour Energy": "NSW1",
             "Essential Energy": "NSW1",
+            # ACT network (part of NSW1 NEM region)
+            "Evoenergy": "NSW1",
             # VIC networks
             "AusNet Services": "VIC1",
             "CitiPower": "VIC1",
