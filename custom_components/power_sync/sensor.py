@@ -740,8 +740,8 @@ class SolarCurtailmentSensor(SensorEntity):
         feedin_price = self._get_feedin_price()
 
         if feedin_price is not None:
-            # Export earnings = feedin_price (positive = you earn, negative = you pay)
-            export_earnings = feedin_price
+            # Export earnings = -feedin_price (Amber uses negative for feed-in costs)
+            export_earnings = -feedin_price
             # Curtailment active when export earnings < 1c/kWh
             return export_earnings < 1.0
 
@@ -773,7 +773,7 @@ class SolarCurtailmentSensor(SensorEntity):
             self._entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
         )
         feedin_price = self._get_feedin_price()
-        export_earnings = feedin_price  # positive = you earn, negative = you pay
+        export_earnings = -feedin_price if feedin_price is not None else None
 
         return {
             "export_rule": cached_rule,

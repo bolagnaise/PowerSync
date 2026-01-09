@@ -977,8 +977,9 @@
             }
 
             if (feedinPrice) {
-                // Amber feed-in: positive = you earn, negative = you pay to export
-                const feedinValue = feedinPrice.perKwh;
+                // Amber returns feed-in as: negative = you get paid, positive = you pay
+                // Negate for display so positive = earnings (what user expects)
+                const feedinValue = -feedinPrice.perKwh;
                 const feedinPriceEl = document.getElementById('current-feedin-price');
                 feedinPriceEl.textContent = `${feedinValue.toFixed(0)}¢`;
                 // Red text for negative prices (you pay to export)

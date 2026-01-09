@@ -2299,18 +2299,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return True
 
-        # PRIORITY CHECK 2: If actually exporting at negative price, ALWAYS curtail
-        # This takes precedence over battery charging - we don't want to lose money!
-        if is_exporting and export_earnings is not None and export_earnings < 0:
-            _LOGGER.info(
-                f"🔌 AC-COUPLED: Exporting {abs(grid_power):.0f}W at negative price ({export_earnings:.2f}c/kWh) "
-                f"- should curtail (even though battery charging at {abs(battery_power):.0f}W)"
-            )
-            return True
-
         # RESTORE CHECK: If battery SOC < restore threshold, allow inverter to run
-        # This ensures battery stays topped up before evening peak
-        # Only applies when NOT exporting at negative price (checked above)
+        # This ensures battery stays topped up before evening peak, even during negative export prices
+        # Only applies when battery can absorb solar (not full) and import price is not negative
         if battery_soc is not None and battery_soc < restore_soc:
             if battery_is_charging or battery_soc < 100:  # Battery can still absorb
                 _LOGGER.info(
@@ -2319,7 +2310,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 return False
 
-        # PRIORITY CHECK 3: If battery is charging (absorbing solar) and not exporting, don't curtail
+        # PRIORITY CHECK 2: If battery is charging (absorbing solar) and not exporting, don't curtail
         # Solar going to battery is good (when import price is not negative)
         if battery_is_charging and not is_exporting:
             _LOGGER.info(
@@ -2328,11 +2319,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             return False
 
-        # Check 4: Exporting but at OK price - don't curtail
-        if is_exporting:
-            _LOGGER.debug(f"Exporting {abs(grid_power):.0f}W but price is OK ({export_earnings:.2f}c/kWh) - not curtailing")
+        # Check 2: If actually exporting (grid_power < 0) AND export earnings are negative
+        # Only curtail when we're actually paying to export, not just when export price is negative
+        if grid_power is not None and grid_power < 0:  # Negative = exporting
+            if export_earnings is not None and export_earnings < 0:
+                _LOGGER.info(f"🔌 AC-COUPLED: Exporting {abs(grid_power):.0f}W at negative price ({export_earnings:.2f}c/kWh) - should curtail")
+                return True
+            else:
+                _LOGGER.debug(f"Exporting {abs(grid_power):.0f}W but price is OK ({export_earnings:.2f}c/kWh) - not curtailing")
         else:
-            _LOGGER.debug(f"Not exporting (grid={grid_power}W) - no need to curtail")
+            _LOGGER.debug(f"Not exporting (grid={grid_power}W) - no need to curtail for negative export")
 
         # Check 3: Battery full (100%) AND export is unprofitable (< 1c/kWh)
         if battery_soc is not None and battery_soc >= 100:
@@ -3459,11 +3455,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.warning("No feed-in price found in Amber data")
                 return
 
-            # Amber feed-in prices: positive = you earn, negative = you pay to export
-            # e.g., feedin_price = +10.44 means you get paid 10.44c/kWh (good!)
-            # e.g., feedin_price = -5.00 means you pay 5c/kWh to export (bad!)
-            # So we want to curtail when feedin_price < 1 (not worth exporting)
-            export_earnings = feedin_price  # Direct: positive = you earn, negative = you pay
+            # Amber returns feed-in prices as NEGATIVE when you're paid to export
+            # e.g., feedin_price = -10.44 means you get paid 10.44c/kWh (good!)
+            # e.g., feedin_price = +5.00 means you pay 5c/kWh to export (bad!)
+            # So we want to curtail when feedin_price > 0 (user would pay to export)
+            export_earnings = -feedin_price  # Convert to positive = earnings per kWh
             _LOGGER.info(f"Current prices from Amber: import={import_price}c/kWh, export earnings={export_earnings:.2f}c/kWh")
 
             # Get current grid export settings from Tesla
@@ -3741,11 +3737,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             general_data = websocket_data.get('general', {}) if websocket_data else None
             import_price = general_data.get('perKwh') if general_data else None
 
-            # Amber feed-in prices: positive = you earn, negative = you pay to export
-            # e.g., feedin_price = +10.44 means you get paid 10.44c/kWh (good!)
-            # e.g., feedin_price = -5.00 means you pay 5c/kWh to export (bad!)
-            # So we want to curtail when feedin_price < 1 (not worth exporting)
-            export_earnings = feedin_price  # Direct: positive = you earn, negative = you pay
+            # Amber returns feed-in prices as NEGATIVE when you're paid to export
+            # e.g., feedin_price = -10.44 means you get paid 10.44c/kWh (good!)
+            # e.g., feedin_price = +5.00 means you pay 5c/kWh to export (bad!)
+            # So we want to curtail when feedin_price > 0 (user would pay to export)
+            export_earnings = -feedin_price  # Convert to positive = earnings per kWh
             _LOGGER.info(f"Current prices (WebSocket): import={import_price}c/kWh, export earnings={export_earnings:.2f}c/kWh")
 
             # Get current grid export settings from Tesla

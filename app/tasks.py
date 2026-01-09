@@ -2610,11 +2610,11 @@ def solar_curtailment_check():
                 error_count += 1
                 continue
 
-            # Amber feed-in prices: positive = you earn, negative = you pay to export
-            # e.g., feedin_price = +10.44 means you get paid 10.44c/kWh (good!)
-            # e.g., feedin_price = -5.00 means you pay 5c/kWh to export (bad!)
-            # So we want to curtail when feedin_price < 1 (not worth exporting)
-            export_earnings = feedin_price  # Direct: positive = you earn, negative = you pay
+            # Amber returns feed-in prices as NEGATIVE when you're paid to export
+            # e.g., feedin_price = -10.44 means you get paid 10.44c/kWh (good!)
+            # e.g., feedin_price = +5.00 means you pay 5c/kWh to export (bad!)
+            # So we want to curtail when feedin_price > 0 (user would pay to export)
+            export_earnings = -feedin_price  # Convert to positive = earnings per kWh
             logger.info(f"Current feed-in price for {user.email}: {feedin_price}c/kWh (export earnings: {export_earnings}c/kWh)")
             if import_price is not None:
                 logger.debug(f"Current import price for {user.email}: {import_price}c/kWh")
@@ -2808,11 +2808,11 @@ def solar_curtailment_with_websocket_data(prices_data):
         logger.warning("No feed-in price in WebSocket data, skipping curtailment check")
         return
 
-    # Amber feed-in prices: positive = you earn, negative = you pay to export
-    # e.g., feedin_price = +10.44 means you get paid 10.44c/kWh (good!)
-    # e.g., feedin_price = -5.00 means you pay 5c/kWh to export (bad!)
-    # So we want to curtail when feedin_price < 1 (not worth exporting)
-    export_earnings = feedin_price  # Direct: positive = you earn, negative = you pay
+    # Amber returns feed-in prices as NEGATIVE when you're paid to export
+    # e.g., feedin_price = -10.44 means you get paid 10.44c/kWh (good!)
+    # e.g., feedin_price = +5.00 means you pay 5c/kWh to export (bad!)
+    # So we want to curtail when feedin_price > 0 (user would pay to export)
+    export_earnings = -feedin_price  # Convert to positive = earnings per kWh
     logger.info(f"WebSocket feed-in price: {feedin_price}c/kWh (export earnings: {export_earnings}c/kWh)")
 
     users = User.query.filter_by(solar_curtailment_enabled=True).all()
