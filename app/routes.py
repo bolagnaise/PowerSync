@@ -974,8 +974,8 @@ def api_sigenergy_validate():
     try:
         client = SigenergyClient(
             username=username,
-            pass_enc=pass_enc,
-            device_id=device_id,
+            pass_enc=final_pass_enc,
+            device_id=device_id,  # Will use default if None
         )
 
         # Authenticate
@@ -988,10 +988,10 @@ def api_sigenergy_validate():
         if 'error' in stations_result:
             return jsonify({'success': False, 'error': stations_result['error']})
 
-        # Save credentials to user
+        # Save credentials to user (use client.device_id which may be auto-generated)
         current_user.sigenergy_username = username
-        current_user.sigenergy_pass_enc_encrypted = encrypt_token(pass_enc)
-        current_user.sigenergy_device_id = device_id
+        current_user.sigenergy_pass_enc_encrypted = encrypt_token(final_pass_enc)
+        current_user.sigenergy_device_id = client.device_id
         current_user.sigenergy_access_token_encrypted = encrypt_token(client.access_token)
         if client.refresh_token:
             current_user.sigenergy_refresh_token_encrypted = encrypt_token(client.refresh_token)

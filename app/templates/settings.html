@@ -711,67 +711,20 @@
                     <details id="sigenergy-wizard" {% if not current_user.sigenergy_station_id %}open{% endif %} style="border: 2px solid {% if not current_user.sigenergy_station_id %}rgba(255, 150, 100, 0.5){% else %}rgba(100, 150, 255, 0.3){% endif %}; border-radius: 0.5em; padding: 0.5em;">
                         <summary style="font-weight: bold; cursor: pointer; padding: 0.3em; {% if not current_user.sigenergy_station_id %}color: #ff922b;{% endif %}">
                             {% if not current_user.sigenergy_station_id %}
-                            ⚙️ Setup Wizard (click to expand)
+                            ⚙️ Connect to Sigenergy
                             {% else %}
-                            ⚙️ Setup Wizard (Reconfigure)
+                            ⚙️ Sigenergy Settings (Reconfigure)
                             {% endif %}
                         </summary>
                         <div style="padding: 0.5em; margin-top: 0.5em;">
                             <p style="font-size: 0.85em; margin: 0 0 1em 0; color: var(--muted-color);">
-                                Sigenergy uses encrypted credentials that must be captured from your browser's developer tools.
+                                Enter your Sigenergy account credentials to connect.
                             </p>
-
-                            <!-- Step 1: Open Dev Tools -->
-                            <div style="padding: 0.6em; background: rgba(100, 150, 255, 0.1); border-radius: 0.5em; margin-bottom: 0.5em;">
-                                <p style="margin: 0 0 0.3em 0; font-size: 0.85em;"><strong>Step 1: Open Browser Developer Tools</strong></p>
-                                <ul style="font-size: 0.8em; margin: 0; padding-left: 1.2em;">
-                                    <li>Press <kbd>F12</kbd> (Windows/Linux) or <kbd>Cmd+Option+I</kbd> (Mac)</li>
-                                    <li>Click the <strong>Network</strong> tab</li>
-                                    <li>Keep this window open</li>
-                                </ul>
-                            </div>
-
-                            <!-- Step 2: Login to Sigenergy -->
-                            <div style="padding: 0.6em; background: rgba(255, 200, 100, 0.1); border-radius: 0.5em; margin-bottom: 0.5em;">
-                                <p style="margin: 0 0 0.3em 0; font-size: 0.85em;"><strong>Step 2: Login to Sigenergy</strong></p>
-                                <ul style="font-size: 0.8em; margin: 0; padding-left: 1.2em;">
-                                    <li>Open a <strong>new tab</strong></li>
-                                    <li>Go to <a href="https://app-aus.sigencloud.com/" target="_blank">app-aus.sigencloud.com</a></li>
-                                    <li>Enter your email and password, then click Login</li>
-                                </ul>
-                            </div>
-
-                            <!-- Step 3: Find the token request -->
-                            <div style="padding: 0.6em; background: rgba(100, 200, 150, 0.1); border-radius: 0.5em; margin-bottom: 0.5em;">
-                                <p style="margin: 0 0 0.3em 0; font-size: 0.85em;"><strong>Step 3: Find the "token" Request</strong></p>
-                                <ul style="font-size: 0.8em; margin: 0; padding-left: 1.2em;">
-                                    <li>In the Network tab, look for a request to:<br>
-                                        <code style="font-size: 0.85em;">api-aus.sigencloud.com/auth/oauth/token</code></li>
-                                    <li>Click on it to see the details</li>
-                                    <li>Click the <strong>Payload</strong> tab</li>
-                                </ul>
-                                <div style="margin-top: 0.5em; padding: 0.4em; background: rgba(0,0,0,0.2); border-radius: 0.3em; font-size: 0.75em;">
-                                    <p style="margin: 0; color: var(--muted-color);">Tip: If you don't see it, clear the Network log, then login again</p>
-                                </div>
-                            </div>
-
-                            <!-- Step 4: Copy values -->
-                            <div style="padding: 0.6em; background: rgba(150, 100, 255, 0.1); border-radius: 0.5em; margin-bottom: 0.5em;">
-                                <p style="margin: 0 0 0.3em 0; font-size: 0.85em;"><strong>Step 4: Copy the Values</strong></p>
-                                <p style="font-size: 0.8em; margin: 0 0 0.5em 0; color: var(--muted-color);">Copy these values from the Payload tab:</p>
-                                <div style="font-size: 0.8em; background: rgba(0,0,0,0.2); padding: 0.4em; border-radius: 0.3em;">
-                                    <div style="margin-bottom: 0.2em;"><strong>username</strong> → Email field below</div>
-                                    <div style="margin-bottom: 0.2em;"><strong>password</strong> → Encrypted Password field</div>
-                                    <div><strong>userDeviceId</strong> → Device ID field</div>
-                                </div>
-                            </div>
 
                             <!-- Credential Input Fields -->
                             <div style="padding: 0.6em; background: rgba(150, 150, 150, 0.1); border-radius: 0.5em; margin-bottom: 0.5em;">
-                                <p style="margin: 0 0 0.5em 0; font-size: 0.85em;"><strong>Step 5: Enter Credentials</strong></p>
-
                                 <label for="sigenergy_username_input" style="font-size: 0.85em;">
-                                    Email (username)
+                                    Email
                                 </label>
                                 <input type="email" id="sigenergy_username_input"
                                        value="{{ current_user.sigenergy_username or '' }}"
@@ -780,11 +733,10 @@
 
                                 <label for="sigenergy_password_input" style="font-size: 0.85em;">
                                     Password
-                                    <small>Your Sigenergy account password</small>
                                 </label>
                                 <div style="display: flex; align-items: center; gap: 0.5em; margin-bottom: 0.5em; width: 100%;">
                                     <input type="password" id="sigenergy_password_input"
-                                           placeholder="Enter your password"
+                                           placeholder="Enter your Sigenergy password"
                                            style="flex: 1; min-width: 0; width: 100%; font-size: 0.9em;">
                                     <button type="button" onclick="toggleVisibility('sigenergy_password_input', this)"
                                             style="background: none; border: none; cursor: pointer; padding: 0.25em;
@@ -795,37 +747,39 @@
 
                                 <details style="margin-bottom: 0.5em;">
                                     <summary style="font-size: 0.8em; cursor: pointer; color: var(--muted-color);">
-                                        Advanced: Use pre-encoded password
+                                        Advanced: Device ID &amp; Pre-encoded Password
                                     </summary>
-                                    <label for="sigenergy_pass_enc_input" style="font-size: 0.85em; margin-top: 0.5em; display: block;">
-                                        Encrypted Password (optional)
-                                        <small>Only use if you have a pre-encoded password</small>
-                                    </label>
-                                    <input type="password" id="sigenergy_pass_enc_input"
-                                           placeholder="Leave blank to use plain password above"
-                                           style="width: 100%; font-size: 0.9em;">
+                                    <div style="margin-top: 0.5em; padding: 0.5em; background: rgba(100, 150, 200, 0.1); border-radius: 0.3em;">
+                                        <p style="font-size: 0.75em; margin: 0 0 0.5em 0; color: var(--muted-color);">
+                                            Device ID is auto-generated if left blank. Only use these fields if you have specific values from browser dev tools.
+                                        </p>
+                                        <label for="sigenergy_device_id_input" style="font-size: 0.85em;">
+                                            Device ID (optional)
+                                        </label>
+                                        <input type="text" id="sigenergy_device_id_input"
+                                               value="{{ current_user.sigenergy_device_id or '' }}"
+                                               placeholder="Auto-generated if blank"
+                                               maxlength="13"
+                                               style="width: 100%; font-size: 0.9em; margin-bottom: 0.5em;">
+
+                                        <label for="sigenergy_pass_enc_input" style="font-size: 0.85em;">
+                                            Pre-encoded Password (optional)
+                                        </label>
+                                        <input type="password" id="sigenergy_pass_enc_input"
+                                               placeholder="Leave blank to use plain password"
+                                               style="width: 100%; font-size: 0.9em;">
+                                    </div>
                                 </details>
 
-                                <label for="sigenergy_device_id_input" style="font-size: 0.85em;">
-                                    Device ID
-                                    <small>13-digit number from userDeviceId</small>
-                                </label>
-                                <input type="text" id="sigenergy_device_id_input"
-                                       value="{{ current_user.sigenergy_device_id or '' }}"
-                                       placeholder="1234567890123"
-                                       maxlength="13"
-                                       pattern="[0-9]{13}"
-                                       style="width: 100%; font-size: 0.9em; margin-bottom: 0.8em;">
-
-                                <button type="button" onclick="validateSigenergyCredentials()" class="primary" style="width: 100%;">
-                                    Validate Credentials
+                                <button type="button" onclick="validateSigenergyCredentials()" class="primary" style="width: 100%; margin-top: 0.5em;">
+                                    Connect
                                 </button>
                                 <p id="sigenergy-validate-status" style="font-size: 0.8em; margin-top: 0.5em; display: none;"></p>
                             </div>
 
-                            <!-- Step 6: Station Selection -->
+                            <!-- Station Selection -->
                             <div id="sigenergy-station-section" style="padding: 0.6em; background: rgba(0, 255, 0, 0.1); border-radius: 0.5em; display: none;">
-                                <p style="margin: 0 0 0.5em 0; font-size: 0.85em;"><strong>Step 6: Select Station</strong></p>
+                                <p style="margin: 0 0 0.5em 0; font-size: 0.85em;"><strong>Select Station</strong></p>
                                 <label for="sigenergy_station_select" style="font-size: 0.85em;">
                                     Sigenergy Station
                                     <select id="sigenergy_station_select" style="width: 100%;">
