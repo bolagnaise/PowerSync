@@ -250,6 +250,22 @@
                         </p>
                     </div>
 
+                    <!-- Fronius-specific: Load Following Mode -->
+                    <div id="froniusLoadFollowingSection" style="margin-top: 1em; display: none;">
+                        <label style="display: flex; align-items: flex-start; gap: 0.5em; cursor: pointer;">
+                            <input type="checkbox" id="fronius_load_following" name="fronius_load_following"
+                                   {% if current_user.fronius_load_following %}checked{% endif %}
+                                   style="margin-top: 0.3em;">
+                            <div>
+                                <span>Enable Load Following Mode</span>
+                                <small style="display: block; margin-top: 0.2em; color: var(--muted-color);">
+                                    For Fronius users WITHOUT 0W export limit configured by installer.
+                                    Calculates power limits based on home load instead of relying on the inverter's soft export limit.
+                                </small>
+                            </div>
+                        </label>
+                    </div>
+
                     {% if current_user.inverter_last_state %}
                     <p style="font-size: 0.8em; color: var(--muted-color); margin-top: 1em;">
                         Last state: <strong>{{ current_user.inverter_last_state }}</strong>
@@ -604,6 +620,12 @@
                 const tokenLabel = document.getElementById('tokenLabel');
                 if (tokenLabel) {
                     tokenLabel.style.display = (brand === 'enphase') ? 'block' : 'none';
+                }
+
+                // Show/hide Fronius Load Following option (only for Fronius)
+                const froniusSection = document.getElementById('froniusLoadFollowingSection');
+                if (froniusSection) {
+                    froniusSection.style.display = (brand === 'fronius') ? 'block' : 'none';
                 }
             }
         }

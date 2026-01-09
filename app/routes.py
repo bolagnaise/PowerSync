@@ -1749,6 +1749,9 @@ def amber_settings():
             except (ValueError, TypeError):
                 current_user.inverter_restore_soc = 98
 
+        # Fronius-specific: load following mode (for users without 0W export profile)
+        current_user.fronius_load_following = 'fronius_load_following' in request.form
+
         # Spike Protection setting
         current_user.spike_protection_enabled = 'spike_protection_enabled' in request.form
         logger.info(f"Saving spike protection enabled: {current_user.spike_protection_enabled}")

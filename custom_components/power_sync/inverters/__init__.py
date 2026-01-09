@@ -206,6 +206,7 @@ def get_inverter_controller(
     slave_id: int = 1,
     model: Optional[str] = None,
     token: Optional[str] = None,
+    load_following: bool = False,
 ) -> Optional[InverterController]:
     """Factory function to get the appropriate inverter controller.
 
@@ -216,6 +217,8 @@ def get_inverter_controller(
         slave_id: Modbus slave ID (default: 1)
         model: Inverter model (optional, for brand-specific features)
         token: JWT token for Enphase IQ Gateway authentication (firmware 7.x+)
+        load_following: Fronius-specific - use calculated power limits instead
+                       of relying on 0W soft export limit (default: False)
 
     Returns:
         InverterController instance or None if brand not supported
@@ -251,6 +254,7 @@ def get_inverter_controller(
             port=port,
             slave_id=slave_id,
             model=model,
+            load_following=load_following,
         )
 
     if brand_lower == "goodwe":

@@ -64,6 +64,7 @@ from .const import (
     CONF_INVERTER_PORT,
     CONF_INVERTER_SLAVE_ID,
     CONF_INVERTER_TOKEN,
+    CONF_FRONIUS_LOAD_FOLLOWING,
     CONF_DEMAND_CHARGE_ENABLED,
     CONF_DEMAND_CHARGE_RATE,
     CONF_DEMAND_CHARGE_START_TIME,
@@ -880,6 +881,7 @@ class InverterStatusSensor(SensorEntity):
         inverter_slave_id = self._get_config_value(CONF_INVERTER_SLAVE_ID, 1)
         inverter_model = self._get_config_value(CONF_INVERTER_MODEL)
         inverter_token = self._get_config_value(CONF_INVERTER_TOKEN)  # For Enphase JWT
+        fronius_load_following = self._get_config_value(CONF_FRONIUS_LOAD_FOLLOWING, False)
 
         if not inverter_host:
             _LOGGER.debug("Inverter host not configured - skipping poll")
@@ -897,6 +899,7 @@ class InverterStatusSensor(SensorEntity):
                 slave_id=inverter_slave_id,
                 model=inverter_model,
                 token=inverter_token,
+                load_following=fronius_load_following,
             )
 
             if not controller:

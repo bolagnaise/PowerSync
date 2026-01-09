@@ -8,6 +8,7 @@ Reference: https://www.smartmotion.life/2023/09/12/amber-electric-curtailment-wi
 """
 import asyncio
 import logging
+import re
 from typing import Optional
 
 from pymodbus.client import AsyncModbusTcpClient
@@ -35,6 +36,10 @@ class FroniusController(InverterController):
     REG_WMAXLIMPCT_RVRT = 40234     # Reversion timeout (seconds, 0=disabled)
     REG_WMAXLIM_ENA = 40236         # Enable power limiting (1=on, 0=off)
 
+    # SunSpec Common Block (Model 1) - for reading model info
+    REG_SUNSPEC_ID = 40000          # "SunS" marker (0x5375, 0x6E53)
+    REG_MODEL = 40020               # Model string (16 registers = 32 chars)
+
     # Status registers for reading inverter state
     REG_STATUS = 40107              # Operating state
     REG_AC_POWER = 40083            # AC Power output (W)
@@ -61,6 +66,7 @@ class FroniusController(InverterController):
         port: int = 502,
         slave_id: int = 1,
         model: Optional[str] = None,
+        load_following: bool = False,
     ):
         """Initialize Fronius controller.
 
@@ -69,12 +75,19 @@ class FroniusController(InverterController):
             port: Modbus TCP port (default: 502)
             slave_id: Modbus slave ID (default: 1)
             model: Fronius model (e.g., 'primo', 'symo', 'gen24')
+            load_following: If True, use calculated power limits instead of
+                           relying on 0W soft export limit. Enable this if
+                           you don't have installer access to set 0W limit.
         """
         super().__init__(host, port, slave_id, model)
         self._client: Optional[AsyncModbusTcpClient] = None
         self._lock: Optional[asyncio.Lock] = None  # Created lazily in async context
         # Track if slave was set in client constructor (pymodbus 3.6+)
         self._slave_in_client: bool = False
+        # Load following mode (for users without 0W export profile)
+        self._load_following = load_following
+        self._rated_capacity_w: Optional[int] = None
+        self._model_string: Optional[str] = None
 
     def _get_lock(self) -> asyncio.Lock:
         """Get or create the asyncio lock (lazy initialization for Flask compatibility)."""
@@ -238,42 +251,151 @@ class FroniusController(InverterController):
             return value - 0x10000
         return value
 
-    async def curtail(self) -> bool:
+    async def get_rated_capacity(self) -> Optional[int]:
+        """Read model from SunSpec Common Block and parse rated capacity.
+
+        Fronius model names include capacity, e.g.:
+        - "Primo 5.0-1" -> 5000W
+        - "Symo 10.0-3-M" -> 10000W
+        - "Symo GEN24 6.0 Plus" -> 6000W
+
+        Returns:
+            Rated capacity in watts, or None if not detected
+        """
+        # Return cached value if available
+        if self._rated_capacity_w is not None:
+            return self._rated_capacity_w
+
+        try:
+            if not await self.connect():
+                return None
+
+            # Read Model string from SunSpec Common Block (16 registers = 32 chars)
+            regs = await self._read_register(self.REG_MODEL, 16)
+            if not regs:
+                _LOGGER.debug("Could not read model registers")
+                return None
+
+            # Convert registers to string (each register = 2 chars, big-endian)
+            model_chars = []
+            for reg in regs:
+                high_byte = (reg >> 8) & 0xFF
+                low_byte = reg & 0xFF
+                if high_byte:
+                    model_chars.append(chr(high_byte))
+                if low_byte:
+                    model_chars.append(chr(low_byte))
+            self._model_string = ''.join(model_chars).strip('\x00').strip()
+
+            if not self._model_string:
+                _LOGGER.debug("Empty model string from inverter")
+                return None
+
+            _LOGGER.info(f"Fronius model detected: {self._model_string}")
+
+            # Parse capacity from model string
+            # Look for patterns like "5.0", "10.0", "8.2" etc.
+            match = re.search(r'(\d+\.?\d*)', self._model_string)
+            if match:
+                capacity_kw = float(match.group(1))
+                self._rated_capacity_w = int(capacity_kw * 1000)
+                _LOGGER.info(f"Fronius rated capacity: {self._rated_capacity_w}W")
+                return self._rated_capacity_w
+
+            _LOGGER.warning(f"Could not parse capacity from model: {self._model_string}")
+            return None
+
+        except Exception as e:
+            _LOGGER.warning(f"Error detecting Fronius capacity: {e}")
+            return None
+
+    async def curtail(self, home_load_w: Optional[float] = None) -> bool:
         """Enable load following curtailment on the Fronius inverter.
 
-        Sets power limit to 0% which activates the pre-configured
-        0W export limit, causing the inverter to match home consumption.
+        Two modes available:
+        1. Simple mode (default, load_following=False): Disables power limiting,
+           sets 0% limit. Relies on inverter's 0W soft export limit.
+        2. Load following mode (load_following=True): Calculates power limit
+           percentage to match home consumption. Auto-detects inverter capacity.
+
+        Args:
+            home_load_w: Current home load in watts (for load following mode)
 
         Returns:
             True if curtailment successful
         """
-        _LOGGER.info(f"Curtailing Fronius inverter at {self.host} (load following mode)")
 
         try:
             if not await self.connect():
                 _LOGGER.error("Cannot curtail: failed to connect to inverter")
                 return False
 
-            # Step 1: Set power limit to 0% (triggers load following)
-            success = await self._write_register(self.REG_WMAXLIMPCT, 0)
+            # Determine which mode to use
+            # If load_following enabled, try to auto-detect capacity
+            rated_capacity_w = None
+            if self._load_following:
+                rated_capacity_w = await self.get_rated_capacity()
+                if rated_capacity_w:
+                    _LOGGER.debug(f"Using auto-detected capacity: {rated_capacity_w}W")
+
+            use_load_following = (
+                self._load_following and
+                home_load_w is not None and
+                rated_capacity_w is not None and
+                rated_capacity_w > 0
+            )
+
+            if use_load_following:
+                # Load following mode: Calculate power limit based on home load
+                target_percent = min(100, max(0, (home_load_w / rated_capacity_w) * 100))
+                target_value = int(target_percent * 100)  # SunSpec uses 0-10000 scale
+
+                _LOGGER.info(
+                    f"Curtailing Fronius at {self.host} using load following mode: "
+                    f"home_load={home_load_w:.0f}W, rated={rated_capacity_w}W, limit={target_percent:.1f}%"
+                )
+            else:
+                # Simple mode: Set 0% limit, rely on 0W soft export limit
+                target_value = 0
+                _LOGGER.info(
+                    f"Curtailing Fronius at {self.host} using simple mode "
+                    f"(requires 0W soft export limit configured)"
+                )
+
+            # Sequence: disable → write limit → enable
+            # Some inverters don't apply new limit values while enabled
+
+            # Step 1: Disable power limiting first
+            success = await self._write_register(self.REG_WMAXLIM_ENA, 0)
+            if not success:
+                _LOGGER.warning("Failed to disable power limiting before update")
+
+            await asyncio.sleep(0.1)
+
+            # Step 2: Set power limit
+            success = await self._write_register(self.REG_WMAXLIMPCT, target_value)
             if not success:
                 _LOGGER.error("Failed to set power limit")
                 return False
 
-            # Step 2: Disable reversion timeout (stay curtailed indefinitely)
+            await asyncio.sleep(0.1)
+
+            # Step 3: Disable reversion timeout (stay curtailed indefinitely)
             success = await self._write_register(self.REG_WMAXLIMPCT_RVRT, 0)
             if not success:
                 _LOGGER.warning("Failed to disable reversion timeout")
                 # Continue anyway - curtailment may still work
 
-            # Step 3: Enable power limiting
+            await asyncio.sleep(0.1)
+
+            # Step 4: Re-enable power limiting with new value
             success = await self._write_register(self.REG_WMAXLIM_ENA, 1)
             if not success:
                 _LOGGER.error("Failed to enable power limiting")
                 return False
 
             _LOGGER.info(f"Successfully curtailed Fronius inverter at {self.host}")
-            await asyncio.sleep(1)  # Brief delay for inverter to process
+            await asyncio.sleep(0.5)  # Brief delay for inverter to process
             return True
 
         except Exception as e:
@@ -295,17 +417,32 @@ class FroniusController(InverterController):
                 _LOGGER.error("Cannot restore: failed to connect to inverter")
                 return False
 
-            # Disable power limiting - returns to normal operation
+            # Sequence: disable → write limit → enable
+            # Some inverters don't apply new limit values while enabled
+
+            # Step 1: Disable power limiting first
             success = await self._write_register(self.REG_WMAXLIM_ENA, 0)
             if not success:
-                _LOGGER.error("Failed to disable power limiting")
+                _LOGGER.warning("Failed to disable power limiting before restore")
+
+            await asyncio.sleep(0.1)
+
+            # Step 2: Set power limit to 100%
+            success = await self._write_register(self.REG_WMAXLIMPCT, 10000)
+            if not success:
+                _LOGGER.error("Failed to set power limit to 100%")
                 return False
 
-            # Also set power limit back to 100% for safety
-            await self._write_register(self.REG_WMAXLIMPCT, 10000)
+            await asyncio.sleep(0.1)
+
+            # Step 3: Re-enable power limiting at 100%
+            success = await self._write_register(self.REG_WMAXLIM_ENA, 1)
+            if not success:
+                _LOGGER.error("Failed to enable power limiting")
+                return False
 
             _LOGGER.info(f"Successfully restored Fronius inverter at {self.host}")
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
             return True
 
         except Exception as e:

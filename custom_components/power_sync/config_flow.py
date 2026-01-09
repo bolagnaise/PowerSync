@@ -114,6 +114,7 @@ from .const import (
     CONF_INVERTER_SLAVE_ID,
     CONF_INVERTER_TOKEN,
     CONF_INVERTER_RESTORE_SOC,
+    CONF_FRONIUS_LOAD_FOLLOWING,
     INVERTER_BRANDS,
     DEFAULT_INVERTER_PORT,
     DEFAULT_INVERTER_SLAVE_ID,
@@ -1815,6 +1816,12 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             if self._inverter_brand == "enphase":
                 final_data[CONF_INVERTER_TOKEN] = user_input.get(CONF_INVERTER_TOKEN, "")
 
+            # Fronius-specific: load following mode (for users without 0W export profile)
+            if self._inverter_brand == "fronius":
+                final_data[CONF_FRONIUS_LOAD_FOLLOWING] = user_input.get(
+                    CONF_FRONIUS_LOAD_FOLLOWING, False
+                )
+
             # Restore SOC threshold for AC inverter curtailment
             final_data[CONF_INVERTER_RESTORE_SOC] = user_input.get(
                 CONF_INVERTER_RESTORE_SOC, DEFAULT_INVERTER_RESTORE_SOC
@@ -1867,6 +1874,15 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_INVERTER_TOKEN,
                 default=current_token,
             )] = str
+
+        # Fronius-specific: load following mode (for users without 0W export profile)
+        if brand == "fronius":
+            current_load_following = self._get_option(CONF_FRONIUS_LOAD_FOLLOWING, False)
+            schema_dict[vol.Optional(
+                CONF_FRONIUS_LOAD_FOLLOWING,
+                default=current_load_following,
+                description={"suggested_value": current_load_following},
+            )] = bool
 
         # Restore SOC threshold - restore inverter when battery drops below this %
         current_restore_soc = self._get_option(CONF_INVERTER_RESTORE_SOC, DEFAULT_INVERTER_RESTORE_SOC)

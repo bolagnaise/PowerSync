@@ -125,6 +125,7 @@ from .const import (
     CONF_INVERTER_SLAVE_ID,
     CONF_INVERTER_TOKEN,
     CONF_INVERTER_RESTORE_SOC,
+    CONF_FRONIUS_LOAD_FOLLOWING,
     DEFAULT_INVERTER_PORT,
     DEFAULT_INVERTER_SLAVE_ID,
     DEFAULT_INVERTER_RESTORE_SOC,
@@ -1594,6 +1595,10 @@ class InverterStatusView(HomeAssistantView):
             CONF_INVERTER_TOKEN,
             entry.data.get(CONF_INVERTER_TOKEN)
         )
+        fronius_load_following = entry.options.get(
+            CONF_FRONIUS_LOAD_FOLLOWING,
+            entry.data.get(CONF_FRONIUS_LOAD_FOLLOWING, False)
+        )
 
         if not inverter_host:
             return web.json_response({
@@ -1610,6 +1615,7 @@ class InverterStatusView(HomeAssistantView):
                 slave_id=inverter_slave_id,
                 model=inverter_model,
                 token=inverter_token,
+                load_following=fronius_load_following,
             )
 
             if not controller:
@@ -2475,6 +2481,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_INVERTER_TOKEN,
             entry.data.get(CONF_INVERTER_TOKEN)
         )
+        fronius_load_following = entry.options.get(
+            CONF_FRONIUS_LOAD_FOLLOWING,
+            entry.data.get(CONF_FRONIUS_LOAD_FOLLOWING, False)
+        )
 
         if not inverter_host:
             _LOGGER.warning("Inverter curtailment enabled but no host configured")
@@ -2488,6 +2498,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 slave_id=inverter_slave_id,
                 model=inverter_model,
                 token=inverter_token,
+                load_following=fronius_load_following,
             )
 
             if not controller:
@@ -4995,6 +5006,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_INVERTER_TOKEN,
             entry.data.get(CONF_INVERTER_TOKEN)
         )
+        fronius_load_following = entry.options.get(
+            CONF_FRONIUS_LOAD_FOLLOWING,
+            entry.data.get(CONF_FRONIUS_LOAD_FOLLOWING, False)
+        )
 
         if not inverter_host:
             _LOGGER.warning("No inverter host configured")
@@ -5008,6 +5023,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 slave_id=inverter_slave_id,
                 model=inverter_model,
                 token=inverter_token,
+                load_following=fronius_load_following,
             )
 
             home_load_w = None
@@ -5094,6 +5110,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_INVERTER_TOKEN,
             entry.data.get(CONF_INVERTER_TOKEN)
         )
+        fronius_load_following = entry.options.get(
+            CONF_FRONIUS_LOAD_FOLLOWING,
+            entry.data.get(CONF_FRONIUS_LOAD_FOLLOWING, False)
+        )
 
         if not inverter_host:
             _LOGGER.warning("No inverter host configured")
@@ -5107,6 +5127,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 slave_id=inverter_slave_id,
                 model=inverter_model,
                 token=inverter_token,
+                load_following=fronius_load_following,
             )
 
             _LOGGER.info(f"🟢 Restoring {inverter_brand} inverter at {inverter_host}")

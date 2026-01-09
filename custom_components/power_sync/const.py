@@ -516,6 +516,8 @@ CONF_INVERTER_SLAVE_ID = "inverter_slave_id"
 CONF_INVERTER_TOKEN = "inverter_token"  # JWT token for Enphase IQ Gateway (firmware 7.x+)
 CONF_INVERTER_RESTORE_SOC = "inverter_restore_soc"  # Battery SOC % below which to restore inverter
 DEFAULT_INVERTER_RESTORE_SOC = 98  # Restore inverter when battery drops below 98%
+# Fronius-specific: load following mode for users without 0W export profile
+CONF_FRONIUS_LOAD_FOLLOWING = "fronius_load_following"
 
 # Supported AC-coupled inverter brands (for systems with separate solar inverter)
 # Note: Sigenergy is NOT here - it's a DC-coupled battery system, not an AC inverter
