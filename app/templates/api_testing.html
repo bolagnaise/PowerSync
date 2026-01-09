@@ -814,6 +814,28 @@ async function revokeBatteryHealthToken() {
     }
 }
 
+function copyToClipboard(text) {
+    // Try modern clipboard API first (requires HTTPS)
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text);
+    }
+    // Fallback for HTTP contexts
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+        document.execCommand('copy');
+        return Promise.resolve();
+    } catch (err) {
+        return Promise.reject(err);
+    } finally {
+        document.body.removeChild(textarea);
+    }
+}
+
 async function copyBatteryHealthToken() {
     const status = document.getElementById('battery-health-token-status');
     status.style.display = 'block';
@@ -827,7 +849,7 @@ async function copyBatteryHealthToken() {
         const data = await response.json();
 
         if (data.token) {
-            await navigator.clipboard.writeText(data.token);
+            await copyToClipboard(data.token);
             status.innerHTML = '<span style="color: #51cf66;">✓ Token copied to clipboard!</span>';
         } else {
             status.innerHTML = '<span style="color: #ff6b6b;">✗ Could not fetch token</span>';

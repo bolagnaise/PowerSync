@@ -119,11 +119,32 @@
 <script>
 function copyToClipboard() {
     const jsonText = document.getElementById('tariff-json').textContent;
-    navigator.clipboard.writeText(jsonText).then(function() {
+
+    // Try modern clipboard API first (requires HTTPS)
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(jsonText).then(function() {
+            alert('Tesla API JSON copied to clipboard!');
+        }, function(err) {
+            console.error('Could not copy text: ', err);
+        });
+        return;
+    }
+
+    // Fallback for HTTP contexts
+    const textarea = document.createElement('textarea');
+    textarea.value = jsonText;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    try {
+        document.execCommand('copy');
         alert('Tesla API JSON copied to clipboard!');
-    }, function(err) {
+    } catch (err) {
         console.error('Could not copy text: ', err);
-    });
+    } finally {
+        document.body.removeChild(textarea);
+    }
 }
 </script>
 
