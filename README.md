@@ -275,17 +275,25 @@ Full support for Sigenergy DC-coupled battery systems as an alternative to Tesla
 
 #### Getting Sigenergy Cloud API Credentials
 
-To sync Amber prices to your Sigenergy system, you need to capture credentials from the Sigenergy web portal. This is a one-time setup process.
+To sync Amber prices to your Sigenergy system, you need your Sigenergy account credentials.
 
 **What You Need:**
 | Credential | Description | Where to Find |
 |------------|-------------|---------------|
 | **Email** | Your Sigenergy account email | Your login email |
-| **Encrypted Password** | URL-encoded password from login request | Browser dev tools (see below) |
+| **Password** | Your Sigenergy account password | Just use your normal password! |
 | **Device ID** | 13-digit numeric identifier | Browser dev tools (see below) |
-| **Station ID** | Your Sigenergy station identifier | Browser dev tools or SigenAI |
+| **Station ID** | Your Sigenergy station identifier | SigenAI or browser dev tools |
 
-**Step-by-Step Instructions:**
+**Password Authentication:**
+
+PowerSync automatically encrypts your password using Sigenergy's AES-128-CBC encoding before sending it to the API. Just enter your plain password - no need to capture anything from browser dev tools!
+
+> **Advanced users:** If you already have an encrypted password (from browser dev tools or a previous setup), you can still use it directly in the "Encrypted Password" field. This takes priority over the plain password field.
+
+**Getting Device ID:**
+
+The Device ID is a 13-digit identifier you need to capture once from browser dev tools:
 
 1. **Open the Sigenergy Web Portal**
    - Go to https://app-aus.sigencloud.com/ (Australia) in your browser
@@ -305,24 +313,22 @@ To sync Amber prices to your Sigenergy system, you need to capture credentials f
    - Click on it to see the details
    - Go to the **Payload** tab (or "Request" in some browsers)
 
-5. **Copy the Credentials**
-   - **password**: This URL-encoded value is your `Encrypted Password`
+5. **Copy the Device ID**
    - **userDeviceId**: This 13-digit number is your `Device ID`
 
-6. **Get Your Station ID**
-   - **Option A**: Ask SigenAI in the app: "Tell me my StationID"
-   - **Option B**: In dev tools, look for requests containing `stationId` in the response
-   - **Option C**: Save a tariff manually and look for `stationId` in the network request
+**Getting Station ID:**
+
+- **Easiest**: Ask SigenAI in the app: "Tell me my StationID"
+- **Alternative**: In dev tools, look for requests containing `stationId` in the response
+- **Alternative**: Save a tariff manually and look for `stationId` in the network request
 
 **Example Credentials:**
 ```
 Email: your.email@example.com
-Encrypted Password: MyP%40ssword123  (URL-encoded, @ becomes %40)
+Password: MySecurePassword123!
 Device ID: 1756353655250
 Station ID: 102025092300219
 ```
-
-> **Note:** The encrypted password is URL-encoded. Special characters like `@` become `%40`, spaces become `%20`, etc. Copy it exactly as shown in the browser dev tools.
 
 > **Reference:** Based on [amber2sigen](https://github.com/Talie5in/amber2sigen) by [@Talie5in](https://github.com/Talie5in)
 
