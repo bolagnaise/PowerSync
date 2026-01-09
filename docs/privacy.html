@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Privacy Policy - PowerSync</title>
+    <style>
+        :root {
+            --primary: #10b981;
+            --bg: #0f172a;
+            --card: #1e293b;
+            --text: #e2e8f0;
+            --muted: #94a3b8;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            padding: 2rem 1rem;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: var(--card);
+            padding: 2rem;
+            border-radius: 1rem;
+        }
+        h1 {
+            color: var(--primary);
+            margin-bottom: 0.5rem;
+            font-size: 2rem;
+        }
+        h2 {
+            color: var(--primary);
+            margin: 2rem 0 1rem;
+            font-size: 1.25rem;
+            border-bottom: 1px solid #334155;
+            padding-bottom: 0.5rem;
+        }
+        h3 {
+            color: var(--text);
+            margin: 1.5rem 0 0.5rem;
+            font-size: 1rem;
+        }
+        p, li {
+            margin-bottom: 0.75rem;
+            color: var(--muted);
+        }
+        ul {
+            margin-left: 1.5rem;
+            margin-bottom: 1rem;
+        }
+        .effective-date {
+            color: var(--muted);
+            font-size: 0.875rem;
+            margin-bottom: 1.5rem;
+        }
+        .summary {
+            background: rgba(16, 185, 129, 0.1);
+            border-left: 4px solid var(--primary);
+            padding: 1rem;
+            margin: 1.5rem 0;
+            border-radius: 0 0.5rem 0.5rem 0;
+        }
+        .summary p {
+            color: var(--text);
+            margin: 0;
+        }
+        a {
+            color: var(--primary);
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+        .disclaimer {
+            background: #1e293b;
+            border: 1px solid #334155;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            margin-top: 2rem;
+            font-size: 0.875rem;
+        }
+        .disclaimer p {
+            margin: 0;
+        }
+        .back-link {
+            display: inline-block;
+            margin-bottom: 1rem;
+            font-size: 0.875rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <a href="https://github.com/bolagnaise/PowerSync" class="back-link">&larr; Back to PowerSync</a>
+
+        <h1>Privacy Policy</h1>
+        <p class="effective-date">Effective Date: January 9, 2026</p>
+
+        <div class="summary">
+            <p><strong>PowerSync is designed with privacy in mind.</strong> The App operates primarily on your local network and does not collect, store, or transmit your personal energy data to our servers.</p>
+        </div>
+
+        <h2>1. Information We Don't Collect</h2>
+        <p>PowerSync does NOT:</p>
+        <ul>
+            <li>Store your energy usage data on our servers</li>
+            <li>Track your location</li>
+            <li>Collect analytics about your app usage</li>
+            <li>Share your data with third parties for advertising</li>
+            <li>Access your contacts, photos, or other personal data</li>
+        </ul>
+
+        <h2>2. Information Stored on Your Device</h2>
+        <p>The following information is stored locally on your device only:</p>
+
+        <h3>2.1 Connection Credentials</h3>
+        <ul>
+            <li>IP addresses of your local energy hardware</li>
+            <li>API tokens for Amber Electric (stored in device keychain)</li>
+            <li>Authentication tokens for energy hardware (stored in device keychain)</li>
+        </ul>
+
+        <h3>2.2 Configuration Settings</h3>
+        <ul>
+            <li>Your price thresholds and automation preferences</li>
+            <li>Notification settings</li>
+            <li>Hardware configuration options</li>
+        </ul>
+
+        <h3>2.3 Cached Data</h3>
+        <ul>
+            <li>Recent energy prices (for offline display)</li>
+            <li>Recent system status (for widgets and quick access)</li>
+        </ul>
+
+        <p><strong>This data never leaves your device</strong> except when communicating directly with your local energy hardware (over your home network) or Amber Electric's API (to fetch your prices).</p>
+
+        <h2>3. Third-Party Services</h2>
+
+        <h3>3.1 Amber Electric</h3>
+        <p>When you connect your Amber Electric account, the App communicates directly with Amber Electric's servers to retrieve your current and forecast electricity prices. This communication is between your device and Amber Electric. We do not act as an intermediary or store this data on our servers.</p>
+        <p>Amber Electric's privacy policy: <a href="https://www.amber.com.au/privacy">https://www.amber.com.au/privacy</a></p>
+
+        <h3>3.2 Local Hardware Communication</h3>
+        <p>The App communicates with your energy hardware (Tesla Powerwall, inverters, etc.) over your local network. This communication stays within your home network and does not pass through any external servers we control.</p>
+
+        <h3>3.3 Tesla (Powerwall Users)</h3>
+        <p>For Tesla Powerwall users, the App connects directly to your Powerwall Gateway on your local network. We do not use Tesla's cloud API or access your Tesla account.</p>
+
+        <h2>4. Data Security</h2>
+        <ul>
+            <li>All credentials are stored in your device's secure keychain</li>
+            <li>Communication with Amber Electric uses HTTPS encryption</li>
+            <li>Local network communication uses the security provided by your hardware</li>
+        </ul>
+
+        <h2>5. Children's Privacy</h2>
+        <p>The App is not intended for use by children under 13. We do not knowingly collect information from children.</p>
+
+        <h2>6. Your Rights</h2>
+        <p>Since your data is stored on your device:</p>
+        <ul>
+            <li><strong>Access:</strong> You can view all stored data in the App settings</li>
+            <li><strong>Deletion:</strong> Uninstalling the App removes all stored data</li>
+            <li><strong>Portability:</strong> You can export your configuration from the App</li>
+        </ul>
+
+        <h2>7. Changes to This Policy</h2>
+        <p>We may update this Privacy Policy from time to time. We will notify you of significant changes through the App.</p>
+
+        <h2>8. Contact</h2>
+        <p>For privacy questions or concerns:</p>
+        <ul>
+            <li>GitHub: <a href="https://github.com/bolagnaise/PowerSync/issues">https://github.com/bolagnaise/PowerSync/issues</a></li>
+        </ul>
+
+        <div class="disclaimer">
+            <p><strong>Third-Party Trademark Notice:</strong> Tesla, Powerwall, and other product names are trademarks of their respective owners. PowerSync is an independent third-party application and is not affiliated with Tesla, Inc. or any hardware manufacturer.</p>
+        </div>
+
+        <p style="margin-top: 2rem; font-size: 0.875rem; color: var(--muted);">Last Updated: January 9, 2026</p>
+    </div>
+</body>
+</html>
