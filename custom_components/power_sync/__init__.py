@@ -3382,7 +3382,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             # Wait briefly
                             await asyncio.sleep(5)
 
-                            # Switch back to autonomous (with retries - critical to not stay in self_consumption)
+                            # Switch back to autonomous (with retries and verification - critical to not stay in self_consumption)
                             switched_back = False
                             for attempt in range(3):
                                 try:
@@ -3392,13 +3392,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                         json={"default_real_mode": "autonomous"},
                                         timeout=aiohttp.ClientTimeout(total=30),
                                     ) as response:
-                                        if response.status == 200:
-                                            _LOGGER.info("🔄 Force mode toggle complete - switched back to autonomous")
-                                            switched_back = True
-                                            break
-                                        else:
+                                        if response.status != 200:
                                             resp_text = await response.text()
                                             _LOGGER.warning(f"Could not switch back to autonomous: {response.status} {resp_text} (attempt {attempt+1}/3)")
+                                            if attempt < 2:
+                                                await asyncio.sleep(3)
+                                            continue
+
+                                    # Verify the mode actually changed
+                                    await asyncio.sleep(2)
+                                    async with session.get(
+                                        f"{api_base}/api/1/energy_sites/{site_id}/site_info",
+                                        headers=headers,
+                                        timeout=aiohttp.ClientTimeout(total=30),
+                                    ) as verify_response:
+                                        if verify_response.status == 200:
+                                            verify_data = await verify_response.json()
+                                            current_mode = verify_data.get("response", {}).get("default_real_mode")
+                                            if current_mode == "autonomous":
+                                                _LOGGER.info("🔄 Force mode toggle complete - verified autonomous")
+                                                switched_back = True
+                                                break
+                                            else:
+                                                _LOGGER.warning(f"⚠️ Mode verification failed: expected 'autonomous', got '{current_mode}' (attempt {attempt+1}/3)")
+                                        else:
+                                            _LOGGER.warning(f"Could not verify mode (status {verify_response.status}) - assuming success")
+                                            switched_back = True
+                                            break
+
                                 except Exception as e:
                                     _LOGGER.warning(f"Switch back to autonomous failed: {e} (attempt {attempt+1}/3)")
 
