@@ -772,28 +772,33 @@ def api_inverter_curtail():
     if not user.inverter_curtailment_enabled:
         return jsonify({'success': False, 'error': 'Inverter curtailment not enabled'})
 
-    # Check for load-following parameters
+    # Check for mode and load-following parameters
+    mode = request.args.get('mode', 'load_following')  # 'shutdown' or 'load_following'
     load_following = request.args.get('load_following', 'false').lower() == 'true'
     data = request.get_json(silent=True) or {}
     power_limit_w = data.get('power_limit_w')
 
-    # Get home load for load-following mode (Zeversolar only)
+    # Determine home_load_w based on mode
     home_load_w = None
-    if user.inverter_brand == 'zeversolar':
-        if power_limit_w is not None:
-            home_load_w = int(power_limit_w)
-            logger.info(f"Manual power limit set to {home_load_w}W")
-        elif load_following:
-            # Auto-detect home load from Tesla
-            try:
-                tesla_client = get_tesla_client(user)
-                if tesla_client and user.tesla_energy_site_id:
-                    site_status = tesla_client.get_site_status(user.tesla_energy_site_id)
-                    if site_status:
-                        home_load_w = int(site_status.get('load_power', 0))
-                        logger.info(f"Load-following curtailment: home load is {home_load_w}W")
-            except Exception as e:
-                logger.warning(f"Failed to get home load for load-following: {e}")
+    if mode == 'shutdown':
+        # Explicit shutdown mode - 0% output
+        home_load_w = 0
+        logger.info(f"Manual shutdown requested for {user.inverter_brand}")
+    elif power_limit_w is not None:
+        # Explicit power limit provided
+        home_load_w = int(power_limit_w)
+        logger.info(f"Manual power limit set to {home_load_w}W")
+    elif load_following:
+        # Auto-detect home load from Tesla for load-following
+        try:
+            tesla_client = get_tesla_client(user)
+            if tesla_client and user.tesla_energy_site_id:
+                site_status = tesla_client.get_site_status(user.tesla_energy_site_id)
+                if site_status:
+                    home_load_w = int(site_status.get('load_power', 0))
+                    logger.info(f"Load-following curtailment: home load is {home_load_w}W for {user.inverter_brand}")
+        except Exception as e:
+            logger.warning(f"Failed to get home load for load-following: {e}")
 
     try:
         from app.inverters import get_inverter_controller_from_user

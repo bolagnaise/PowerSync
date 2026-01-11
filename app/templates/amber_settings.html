@@ -227,10 +227,13 @@
                         <button type="button" class="secondary" onclick="testInverterConnection()" id="testInverterBtn">
                             Test Connection
                         </button>
-                        <button type="button" class="secondary" onclick="curtailInverter()" id="curtailInverterBtn" style="margin-left: 0.5em; background: #d9534f; border-color: #d9534f;">
-                            🔴 Curtail
+                        <button type="button" class="secondary" onclick="shutdownInverter()" id="shutdownInverterBtn" style="margin-left: 0.5em; background: #d9534f; border-color: #d9534f;" title="Complete shutdown - 0% output">
+                            🔴 Shutdown
                         </button>
-                        <button type="button" class="secondary" onclick="restoreInverter()" id="restoreInverterBtn" style="margin-left: 0.5em; background: #5cb85c; border-color: #5cb85c;">
+                        <button type="button" class="secondary" onclick="loadFollowingInverter()" id="loadFollowingInverterBtn" style="margin-left: 0.5em; background: #f0ad4e; border-color: #f0ad4e;" title="Match home load - no export">
+                            ⚡ Load Follow
+                        </button>
+                        <button type="button" class="secondary" onclick="restoreInverter()" id="restoreInverterBtn" style="margin-left: 0.5em; background: #5cb85c; border-color: #5cb85c;" title="Restore full output">
                             🟢 Restore
                         </button>
                         <span id="inverterTestResult" style="margin-left: 1em; font-size: 0.9em;"></span>
@@ -687,31 +690,60 @@
             }
         }
 
-        async function curtailInverter() {
-            const btn = document.getElementById('curtailInverterBtn');
+        async function shutdownInverter() {
+            const btn = document.getElementById('shutdownInverterBtn');
             const result = document.getElementById('inverterTestResult');
 
             btn.disabled = true;
-            btn.innerHTML = 'Curtailing...';
+            btn.innerHTML = 'Shutting down...';
             result.innerHTML = '';
 
             try {
-                const response = await fetch('/api/inverter/curtail', {
+                const response = await fetch('/api/inverter/curtail?mode=shutdown', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'}
                 });
 
                 const data = await response.json();
                 if (data.success) {
-                    result.innerHTML = '<span style="color: #51cf66;">Inverter curtailed successfully</span>';
+                    result.innerHTML = '<span style="color: #51cf66;">Inverter shut down (0% output)</span>';
                 } else {
-                    result.innerHTML = '<span style="color: #ff6b6b;">' + (data.error || 'Curtail failed') + '</span>';
+                    result.innerHTML = '<span style="color: #ff6b6b;">' + (data.error || 'Shutdown failed') + '</span>';
                 }
             } catch (error) {
                 result.innerHTML = '<span style="color: #ff6b6b;">Error: ' + error.message + '</span>';
             } finally {
                 btn.disabled = false;
-                btn.innerHTML = '🔴 Curtail';
+                btn.innerHTML = '🔴 Shutdown';
+            }
+        }
+
+        async function loadFollowingInverter() {
+            const btn = document.getElementById('loadFollowingInverterBtn');
+            const result = document.getElementById('inverterTestResult');
+
+            btn.disabled = true;
+            btn.innerHTML = 'Setting...';
+            result.innerHTML = '';
+
+            try {
+                const response = await fetch('/api/inverter/curtail?load_following=true', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'}
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    const powerLimit = data.power_limit_w ? ` (${data.power_limit_w}W)` : '';
+                    result.innerHTML = '<span style="color: #51cf66;">Load following active' + powerLimit + '</span>';
+                } else {
+                    result.innerHTML = '<span style="color: #ff6b6b;">' + (data.error || 'Failed') + '</span>';
+                }
+            } catch (error) {
+                result.innerHTML = '<span style="color: #ff6b6b;">Error: ' + error.message + '</span>';
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '⚡ Load Follow';
             }
         }
 
