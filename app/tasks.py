@@ -827,14 +827,15 @@ def check_manual_discharge_expiry():
                 logger.error(f"No Tesla client available for {user.email} - cannot auto-restore")
                 continue
 
-            # Check if user has Amber configured (should sync instead of restore static tariff)
-            use_amber_sync = bool(user.amber_api_token_encrypted and user.auto_sync_enabled)
-
-            if use_amber_sync:
-                # For Amber users, we'll trigger an immediate sync after clearing the state
-                logger.info(f"Amber user {user.email} - will trigger immediate price sync")
+            # Check if user has price sync enabled (works for any electricity provider)
+            # If sync is enabled, trigger an immediate sync after clearing the state
+            # Otherwise, restore the saved tariff
+            if user.sync_enabled:
+                # For users with price sync enabled, we'll trigger an immediate sync after clearing the state
+                provider = getattr(user, 'electricity_provider', 'unknown') or 'unknown'
+                logger.info(f"{provider} user {user.email} - will trigger immediate price sync")
             else:
-                # Restore saved tariff
+                # Restore saved tariff (for users without price sync)
                 backup_profile = None
                 if user.manual_discharge_saved_tariff_id:
                     backup_profile = SavedTOUProfile.query.get(user.manual_discharge_saved_tariff_id)
@@ -904,14 +905,15 @@ def check_manual_charge_expiry():
                 logger.error(f"No Tesla client available for {user.email} - cannot auto-restore")
                 continue
 
-            # Check if user has Amber configured (should sync instead of restore static tariff)
-            use_amber_sync = bool(user.amber_api_token_encrypted and user.auto_sync_enabled)
-
-            if use_amber_sync:
-                # For Amber users, we'll trigger an immediate sync after clearing the state
-                logger.info(f"Amber user {user.email} - will trigger immediate price sync")
+            # Check if user has price sync enabled (works for any electricity provider)
+            # If sync is enabled, trigger an immediate sync after clearing the state
+            # Otherwise, restore the saved tariff
+            if user.sync_enabled:
+                # For users with price sync enabled, we'll trigger an immediate sync after clearing the state
+                provider = getattr(user, 'electricity_provider', 'unknown') or 'unknown'
+                logger.info(f"{provider} user {user.email} - will trigger immediate price sync")
             else:
-                # Restore saved tariff
+                # Restore saved tariff (for users without price sync)
                 backup_profile = None
                 if user.manual_charge_saved_tariff_id:
                     backup_profile = SavedTOUProfile.query.get(user.manual_charge_saved_tariff_id)

@@ -204,6 +204,41 @@
     </article>
     {% endif %}
 
+    <!-- AC Inverter Status & Controls -->
+    {% if current_user.inverter_curtailment_enabled %}
+    <article id="ac-inverter-section">
+        <header>
+            <strong>AC Inverter Status</strong>
+            <span id="ac-inverter-brand" style="float: right; font-size: 0.85em; opacity: 0.7;"></span>
+        </header>
+        <div id="ac-inverter-content">
+            <div class="grid" style="align-items: center;">
+                <!-- Status Display -->
+                <div>
+                    <div style="display: flex; align-items: center; gap: 1em; margin-bottom: 0.5em;">
+                        <div id="ac-inverter-status-indicator" style="width: 16px; height: 16px; border-radius: 50%; background: #888;"></div>
+                        <span id="ac-inverter-state" style="font-weight: bold; font-size: 1.1em;">Loading...</span>
+                    </div>
+                    <p style="margin: 0.3em 0;"><strong>AC Solar:</strong> <span id="ac-inverter-power">-- kW</span></p>
+                    <p style="margin: 0.3em 0; font-size: 0.9em; opacity: 0.7;"><span id="ac-inverter-power-limit"></span></p>
+                </div>
+                <!-- Control Buttons -->
+                <div style="display: flex; gap: 0.5em; flex-wrap: wrap; justify-content: flex-end;">
+                    <button id="ac-inverter-shutdown-btn" onclick="acInverterShutdown()" style="background: #d9534f; border-color: #d9534f; font-size: 0.9em;">
+                        🔴 Shutdown
+                    </button>
+                    <button id="ac-inverter-loadfollow-btn" onclick="acInverterLoadFollow()" style="background: #f0ad4e; border-color: #f0ad4e; font-size: 0.9em;">
+                        ⚡ Load Follow
+                    </button>
+                    <button id="ac-inverter-restore-btn" onclick="acInverterRestore()" style="background: #5cb85c; border-color: #5cb85c; font-size: 0.9em;">
+                        🟢 Restore
+                    </button>
+                </div>
+            </div>
+        </div>
+    </article>
+    {% endif %}
+
     <!-- Battery Health & Degradation -->
     <article id="battery-health-section">
         <header>
@@ -800,51 +835,177 @@
                 const response = await fetch('/api/inverter/status');
                 const data = await response.json();
 
+                // Update compact status box (existing)
                 const inverterDiv = document.getElementById('ac-inverter-status');
                 const inverterContent = document.getElementById('ac-inverter-status-content');
 
-                if (!inverterDiv || !inverterContent) return;
+                // Update new detailed section
+                const stateElem = document.getElementById('ac-inverter-state');
+                const indicatorElem = document.getElementById('ac-inverter-status-indicator');
+                const powerElem = document.getElementById('ac-inverter-power');
+                const powerLimitElem = document.getElementById('ac-inverter-power-limit');
+                const brandElem = document.getElementById('ac-inverter-brand');
 
                 if (data.error) {
-                    inverterDiv.style.background = 'rgba(255, 165, 0, 0.1)';
-                    inverterContent.innerHTML = `
-                        <p style="margin: 0; color: orange; font-weight: bold;">⚠ ${data.error}</p>
-                    `;
+                    if (inverterDiv && inverterContent) {
+                        inverterDiv.style.background = 'rgba(255, 165, 0, 0.1)';
+                        inverterContent.innerHTML = `
+                            <p style="margin: 0; color: orange; font-weight: bold;">⚠ ${data.error}</p>
+                        `;
+                    }
+                    if (stateElem) stateElem.textContent = 'Error';
+                    if (indicatorElem) indicatorElem.style.background = 'orange';
+                    if (powerElem) powerElem.textContent = '-- kW';
+                    if (powerLimitElem) powerLimitElem.textContent = data.error;
                     return;
                 }
 
                 const status = data.status || 'unknown';
                 const powerW = data.power_output_w;
+                const powerKW = powerW !== null ? (powerW / 1000).toFixed(2) : '--';
                 const powerStr = powerW !== null ? `${(powerW / 1000).toFixed(1)}kW` : '';
+                const brand = data.brand || 'Inverter';
 
+                // Update brand label
+                if (brandElem) brandElem.textContent = brand;
+
+                // Update based on status
                 if (status === 'sleep') {
-                    inverterDiv.style.background = 'rgba(96, 125, 139, 0.15)';
-                    inverterContent.innerHTML = `
-                        <p style="margin: 0; color: #607D8B; font-weight: bold;">🌙 Sleep</p>
-                        <p style="margin: 0.2em 0 0 0; font-size: 0.75em;">${data.brand || 'Inverter'} - Nighttime</p>
-                    `;
+                    if (inverterDiv && inverterContent) {
+                        inverterDiv.style.background = 'rgba(96, 125, 139, 0.15)';
+                        inverterContent.innerHTML = `
+                            <p style="margin: 0; color: #607D8B; font-weight: bold;">🌙 Sleep</p>
+                            <p style="margin: 0.2em 0 0 0; font-size: 0.75em;">${brand} - Nighttime</p>
+                        `;
+                    }
+                    if (stateElem) stateElem.textContent = '🌙 Sleep';
+                    if (indicatorElem) indicatorElem.style.background = '#607D8B';
+                    if (powerElem) powerElem.textContent = '0.00 kW';
+                    if (powerLimitElem) powerLimitElem.textContent = 'Nighttime mode';
                 } else if (status === 'curtailed' || data.is_curtailed) {
-                    inverterDiv.style.background = 'rgba(255, 0, 0, 0.15)';
-                    inverterContent.innerHTML = `
-                        <p style="margin: 0; color: var(--del-color); font-weight: bold;">🚫 Curtailed</p>
-                        <p style="margin: 0.2em 0 0 0; font-size: 0.75em;">${data.brand || 'Inverter'} - ${data.power_limit_percent || 0}%</p>
-                    `;
+                    const limitPercent = data.power_limit_percent || 0;
+                    const limitW = data.power_limit_w;
+                    if (inverterDiv && inverterContent) {
+                        inverterDiv.style.background = 'rgba(255, 0, 0, 0.15)';
+                        inverterContent.innerHTML = `
+                            <p style="margin: 0; color: var(--del-color); font-weight: bold;">🚫 Curtailed</p>
+                            <p style="margin: 0.2em 0 0 0; font-size: 0.75em;">${brand} - ${limitPercent}%</p>
+                        `;
+                    }
+                    if (stateElem) stateElem.textContent = limitPercent === 0 ? '🔴 Shutdown' : '⚡ Load Following';
+                    if (indicatorElem) indicatorElem.style.background = limitPercent === 0 ? '#d9534f' : '#f0ad4e';
+                    if (powerElem) powerElem.textContent = `${powerKW} kW`;
+                    if (powerLimitElem) {
+                        if (limitPercent === 0) {
+                            powerLimitElem.textContent = 'Inverter shutdown';
+                        } else if (limitW !== null && limitW !== undefined) {
+                            powerLimitElem.textContent = `Limited to ${(limitW / 1000).toFixed(1)} kW (${limitPercent}%)`;
+                        } else {
+                            powerLimitElem.textContent = `Limited to ${limitPercent}%`;
+                        }
+                    }
                 } else if (status === 'offline' || status === 'error') {
-                    inverterDiv.style.background = 'rgba(255, 165, 0, 0.1)';
-                    inverterContent.innerHTML = `
-                        <p style="margin: 0; color: orange; font-weight: bold;">⚠ Offline</p>
-                        <p style="margin: 0.2em 0 0 0; font-size: 0.75em;">${data.error_message || 'Cannot reach inverter'}</p>
-                    `;
+                    if (inverterDiv && inverterContent) {
+                        inverterDiv.style.background = 'rgba(255, 165, 0, 0.1)';
+                        inverterContent.innerHTML = `
+                            <p style="margin: 0; color: orange; font-weight: bold;">⚠ Offline</p>
+                            <p style="margin: 0.2em 0 0 0; font-size: 0.75em;">${data.error_message || 'Cannot reach inverter'}</p>
+                        `;
+                    }
+                    if (stateElem) stateElem.textContent = '⚠ Offline';
+                    if (indicatorElem) indicatorElem.style.background = 'orange';
+                    if (powerElem) powerElem.textContent = '-- kW';
+                    if (powerLimitElem) powerLimitElem.textContent = data.error_message || 'Cannot reach inverter';
                 } else {
                     // Online/running
-                    inverterDiv.style.background = 'rgba(0, 255, 0, 0.1)';
-                    inverterContent.innerHTML = `
-                        <p style="margin: 0; color: var(--ins-color); font-weight: bold;">✓ Online</p>
-                        <p style="margin: 0.2em 0 0 0; font-size: 0.75em;">${data.brand || 'Inverter'}${powerStr ? ' - ' + powerStr : ''}</p>
-                    `;
+                    if (inverterDiv && inverterContent) {
+                        inverterDiv.style.background = 'rgba(0, 255, 0, 0.1)';
+                        inverterContent.innerHTML = `
+                            <p style="margin: 0; color: var(--ins-color); font-weight: bold;">✓ Online</p>
+                            <p style="margin: 0.2em 0 0 0; font-size: 0.75em;">${brand}${powerStr ? ' - ' + powerStr : ''}</p>
+                        `;
+                    }
+                    if (stateElem) stateElem.textContent = '🟢 Running';
+                    if (indicatorElem) indicatorElem.style.background = '#5cb85c';
+                    if (powerElem) powerElem.textContent = `${powerKW} kW`;
+                    if (powerLimitElem) powerLimitElem.textContent = 'Normal operation';
                 }
             } catch (error) {
                 console.error('Error fetching AC inverter status:', error);
+            }
+        }
+
+        // AC Inverter control functions
+        async function acInverterShutdown() {
+            if (!confirm('Shutdown the AC inverter? This will stop all solar production.')) return;
+
+            const btn = document.getElementById('ac-inverter-shutdown-btn');
+            btn.disabled = true;
+            btn.setAttribute('aria-busy', 'true');
+
+            try {
+                const response = await fetch('/api/inverter/curtail?mode=shutdown', { method: 'POST' });
+                const data = await response.json();
+
+                if (data.success) {
+                    alert('Inverter shutdown successfully');
+                    fetchACInverterStatus();
+                } else {
+                    alert('Error: ' + (data.error || 'Failed to shutdown inverter'));
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            } finally {
+                btn.disabled = false;
+                btn.removeAttribute('aria-busy');
+            }
+        }
+
+        async function acInverterLoadFollow() {
+            const btn = document.getElementById('ac-inverter-loadfollow-btn');
+            btn.disabled = true;
+            btn.setAttribute('aria-busy', 'true');
+
+            try {
+                const response = await fetch('/api/inverter/curtail?load_following=true', { method: 'POST' });
+                const data = await response.json();
+
+                if (data.success) {
+                    const limitW = data.power_limit_w;
+                    const limitKW = limitW ? (limitW / 1000).toFixed(1) : '?';
+                    alert(`Load following mode activated. Power limited to ${limitKW} kW (home load).`);
+                    fetchACInverterStatus();
+                } else {
+                    alert('Error: ' + (data.error || 'Failed to set load following mode'));
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            } finally {
+                btn.disabled = false;
+                btn.removeAttribute('aria-busy');
+            }
+        }
+
+        async function acInverterRestore() {
+            const btn = document.getElementById('ac-inverter-restore-btn');
+            btn.disabled = true;
+            btn.setAttribute('aria-busy', 'true');
+
+            try {
+                const response = await fetch('/api/inverter/restore', { method: 'POST' });
+                const data = await response.json();
+
+                if (data.success) {
+                    alert('Inverter restored to normal operation');
+                    fetchACInverterStatus();
+                } else {
+                    alert('Error: ' + (data.error || 'Failed to restore inverter'));
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            } finally {
+                btn.disabled = false;
+                btn.removeAttribute('aria-busy');
             }
         }
         {% endif %}

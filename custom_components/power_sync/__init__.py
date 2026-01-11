@@ -13,7 +13,7 @@ from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.event import async_track_utc_time_change
+from homeassistant.helpers.event import async_track_utc_time_change, async_track_point_in_utc_time
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.components.http import HomeAssistantView
@@ -2169,6 +2169,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if battery_health:
         _LOGGER.info(f"Restored battery health from storage: {battery_health.get('degradation_percent')}% degradation")
 
+    # Restore force charge/discharge state from storage (survives HA restarts)
+    force_mode_state = stored_data.get("force_mode_state")
+    if force_mode_state:
+        _LOGGER.info(f"Found persisted force mode state: {force_mode_state}")
+
     # Store coordinators and WebSocket client in hass.data
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = {
@@ -2186,6 +2191,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "grid_charging_disabled_for_demand": False,  # Track if grid charging is disabled for demand period
         "cached_export_rule": cached_export_rule,  # Restored from persistent storage
         "battery_health": battery_health,  # Restored from persistent storage (from mobile app TEDAPI scans)
+        "force_mode_state": force_mode_state,  # Restored force charge/discharge state
         "store": store,  # Reference to Store for saving updates
         "token_getter": token_getter,  # Function to get fresh Tesla API token
         "is_sigenergy": is_sigenergy,  # Track battery system type
@@ -4061,6 +4067,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # FORCE DISCHARGE AND RESTORE NORMAL SERVICES
     # ======================================================================
 
+    # Get persisted force mode state (survives HA restarts)
+    persisted_force_state = hass.data[DOMAIN][entry.entry_id].get("force_mode_state") or {}
+
     # Storage for saved tariff and operation mode during force discharge
     force_discharge_state = {
         "active": False,
@@ -4079,6 +4088,133 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "expires_at": None,
         "cancel_expiry_timer": None,
     }
+
+    # Helper function to persist force mode state to storage
+    async def persist_force_mode_state() -> None:
+        """Persist current force charge/discharge state to storage."""
+        store = hass.data[DOMAIN][entry.entry_id]["store"]
+        stored_data = await store.async_load() or {}
+
+        # Only save what's needed to restore after restart
+        state_to_save = None
+        if force_charge_state["active"]:
+            state_to_save = {
+                "mode": "charge",
+                "expires_at": force_charge_state["expires_at"].isoformat() if force_charge_state["expires_at"] else None,
+                "saved_tariff": force_charge_state["saved_tariff"],
+                "saved_operation_mode": force_charge_state["saved_operation_mode"],
+                "saved_backup_reserve": force_charge_state["saved_backup_reserve"],
+            }
+        elif force_discharge_state["active"]:
+            state_to_save = {
+                "mode": "discharge",
+                "expires_at": force_discharge_state["expires_at"].isoformat() if force_discharge_state["expires_at"] else None,
+                "saved_tariff": force_discharge_state["saved_tariff"],
+                "saved_operation_mode": force_discharge_state["saved_operation_mode"],
+            }
+
+        stored_data["force_mode_state"] = state_to_save
+        await store.async_save(stored_data)
+        if state_to_save:
+            _LOGGER.debug(f"Persisted force mode state: {state_to_save['mode']} expires {state_to_save['expires_at']}")
+        else:
+            _LOGGER.debug("Cleared persisted force mode state")
+
+    # Restore force mode state from persistence (after HA restart)
+    async def restore_force_mode_from_persistence():
+        """Restore force charge/discharge state after HA restart."""
+        from homeassistant.util import dt as dt_util
+
+        if not persisted_force_state:
+            return
+
+        mode = persisted_force_state.get("mode")
+        expires_at_str = persisted_force_state.get("expires_at")
+
+        if not mode or not expires_at_str:
+            _LOGGER.info("No valid persisted force mode state to restore")
+            return
+
+        try:
+            expires_at = datetime.fromisoformat(expires_at_str)
+            # Ensure timezone-aware
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=dt_util.UTC)
+
+            now = dt_util.utcnow()
+
+            if now >= expires_at:
+                # Force mode has expired - trigger restore
+                _LOGGER.info(f"⏰ Persisted force {mode} has expired (was {expires_at_str}), auto-restoring")
+                # Clear the persisted state first
+                store = hass.data[DOMAIN][entry.entry_id]["store"]
+                stored_data = await store.async_load() or {}
+                stored_data["force_mode_state"] = None
+                await store.async_save(stored_data)
+                # Don't call restore_normal here - the Tesla should already be in that mode
+                # Just ensure we sync TOU to get the correct pricing back
+                _LOGGER.info("Triggering TOU sync to restore correct pricing after expired force mode")
+            else:
+                # Force mode is still active - restore state and re-setup timer
+                remaining_seconds = (expires_at - now).total_seconds()
+                remaining_minutes = remaining_seconds / 60
+                _LOGGER.info(f"🔄 Restoring force {mode} from persistence ({remaining_minutes:.1f} min remaining)")
+
+                if mode == "charge":
+                    force_charge_state["active"] = True
+                    force_charge_state["expires_at"] = expires_at
+                    force_charge_state["saved_tariff"] = persisted_force_state.get("saved_tariff")
+                    force_charge_state["saved_operation_mode"] = persisted_force_state.get("saved_operation_mode")
+                    force_charge_state["saved_backup_reserve"] = persisted_force_state.get("saved_backup_reserve")
+
+                    # Re-setup expiry timer
+                    async def auto_restore_charge(_now):
+                        if force_charge_state["active"]:
+                            _LOGGER.info("⏰ Force charge expired (restored timer), auto-restoring")
+                            await handle_restore_normal(ServiceCall(DOMAIN, SERVICE_RESTORE_NORMAL, {}))
+
+                    force_charge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass, auto_restore_charge, expires_at
+                    )
+
+                    # Dispatch event for UI
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
+                        "active": True,
+                        "expires_at": expires_at.isoformat(),
+                        "duration": int(remaining_minutes),
+                    })
+                    _LOGGER.info(f"✅ Force charge restored from persistence, expires in {remaining_minutes:.1f} min")
+
+                elif mode == "discharge":
+                    force_discharge_state["active"] = True
+                    force_discharge_state["expires_at"] = expires_at
+                    force_discharge_state["saved_tariff"] = persisted_force_state.get("saved_tariff")
+                    force_discharge_state["saved_operation_mode"] = persisted_force_state.get("saved_operation_mode")
+
+                    # Re-setup expiry timer
+                    async def auto_restore_discharge(_now):
+                        if force_discharge_state["active"]:
+                            _LOGGER.info("⏰ Force discharge expired (restored timer), auto-restoring")
+                            await handle_restore_normal(ServiceCall(DOMAIN, SERVICE_RESTORE_NORMAL, {}))
+
+                    force_discharge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass, auto_restore_discharge, expires_at
+                    )
+
+                    # Dispatch event for UI
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                        "active": True,
+                        "expires_at": expires_at.isoformat(),
+                        "duration": int(remaining_minutes),
+                    })
+                    _LOGGER.info(f"✅ Force discharge restored from persistence, expires in {remaining_minutes:.1f} min")
+
+        except Exception as e:
+            _LOGGER.error(f"Error restoring force mode from persistence: {e}", exc_info=True)
+
+    # Schedule the restoration to run after setup is complete
+    if persisted_force_state:
+        hass.async_create_task(restore_force_mode_from_persistence())
 
     async def handle_force_discharge(call: ServiceCall) -> None:
         """Force discharge mode - switches to autonomous with high export tariff."""
@@ -4187,13 +4323,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _LOGGER.info("⏰ Force discharge expired, auto-restoring normal operation")
                         await handle_restore_normal(ServiceCall(DOMAIN, SERVICE_RESTORE_NORMAL, {}))
 
-                force_discharge_state["cancel_expiry_timer"] = async_track_utc_time_change(
+                # Use async_track_point_in_utc_time for one-time expiry (not recurring daily)
+                force_discharge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
                     hass,
                     auto_restore,
-                    hour=force_discharge_state["expires_at"].hour,
-                    minute=force_discharge_state["expires_at"].minute,
-                    second=force_discharge_state["expires_at"].second,
+                    force_discharge_state["expires_at"],
                 )
+
+                # Persist state to survive HA restarts
+                await persist_force_mode_state()
             else:
                 _LOGGER.error("Failed to upload discharge tariff")
 
@@ -4480,13 +4618,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _LOGGER.info("⏰ Force charge expired, auto-restoring normal operation")
                         await handle_restore_normal(ServiceCall(DOMAIN, SERVICE_RESTORE_NORMAL, {}))
 
-                force_charge_state["cancel_expiry_timer"] = async_track_utc_time_change(
+                # Use async_track_point_in_utc_time for one-time expiry (not recurring daily)
+                force_charge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
                     hass,
                     auto_restore_charge,
-                    hour=force_charge_state["expires_at"].hour,
-                    minute=force_charge_state["expires_at"].minute,
-                    second=force_charge_state["expires_at"].second,
+                    force_charge_state["expires_at"],
                 )
+
+                # Persist state to survive HA restarts
+                await persist_force_mode_state()
             else:
                 _LOGGER.error("Failed to upload charge tariff")
 
@@ -4797,6 +4937,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "expires_at": None,
                 "duration": 0,
             })
+
+            # Clear persisted state (no longer needed after restore)
+            await persist_force_mode_state()
 
         except Exception as e:
             _LOGGER.error(f"Error in restore normal: {e}", exc_info=True)
