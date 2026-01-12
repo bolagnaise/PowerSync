@@ -425,6 +425,22 @@ def change_password():
     return redirect(url_for('main.security_settings'))
 
 
+def _mask_email(email: str) -> str:
+    """Mask email for display to prevent exposure. e.g., 'user@example.com' -> 'us***@e***.com'"""
+    if not email or '@' not in email:
+        return '***@***.***'
+    local, domain = email.rsplit('@', 1)
+    # Mask local part: show first 2 chars, rest as ***
+    masked_local = local[:2] + '***' if len(local) > 2 else '***'
+    # Mask domain: show first char, then ***, then TLD
+    if '.' in domain:
+        domain_name, tld = domain.rsplit('.', 1)
+        masked_domain = domain_name[0] + '***.' + tld if domain_name else '***.' + tld
+    else:
+        masked_domain = '***'
+    return f"{masked_local}@{masked_domain}"
+
+
 @bp.route('/reset-account', methods=['GET', 'POST'])
 def reset_account():
     """Reset account - deletes user and all data, allows re-registration"""
@@ -470,7 +486,9 @@ def reset_account():
 
     from flask_wtf import FlaskForm
     form = FlaskForm()  # Just for CSRF token
-    return render_template('reset_account.html', title='Reset Account', user_email=user.email, form=form)
+    # Mask email to prevent exposure - user must know their full email to reset
+    masked_email = _mask_email(user.email)
+    return render_template('reset_account.html', title='Reset Account', user_email=masked_email, form=form)
 
 
 @bp.route('/register', methods=['GET', 'POST'])
