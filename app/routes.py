@@ -453,6 +453,7 @@ def reset_account():
     if request.method == 'POST':
         email = request.form.get('email', '').strip()
         confirm = request.form.get('confirm', '').strip()
+        totp_code = request.form.get('totp_code', '').strip()
 
         if email != user.email:
             flash('Email does not match the registered account')
@@ -461,6 +462,15 @@ def reset_account():
         if confirm.lower() != 'reset':
             flash('You must type RESET to confirm')
             return redirect(url_for('main.reset_account'))
+
+        # Verify 2FA code if enabled
+        if user.two_factor_enabled:
+            if not totp_code:
+                flash('2FA code is required')
+                return redirect(url_for('main.reset_account'))
+            if not user.verify_totp(totp_code):
+                flash('Invalid 2FA code')
+                return redirect(url_for('main.reset_account'))
 
         # Log out if currently logged in
         if current_user.is_authenticated:
@@ -488,7 +498,13 @@ def reset_account():
     form = FlaskForm()  # Just for CSRF token
     # Mask email to prevent exposure - user must know their full email to reset
     masked_email = _mask_email(user.email)
-    return render_template('reset_account.html', title='Reset Account', user_email=masked_email, form=form)
+    return render_template(
+        'reset_account.html',
+        title='Reset Account',
+        user_email=masked_email,
+        two_factor_enabled=user.two_factor_enabled,
+        form=form
+    )
 
 
 @bp.route('/register', methods=['GET', 'POST'])

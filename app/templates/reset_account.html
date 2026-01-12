@@ -32,6 +32,16 @@
                 <input type="text" id="confirm" name="confirm" required placeholder="RESET" style="text-transform: uppercase;">
             </label>
 
+            {% if two_factor_enabled %}
+            <label for="totp_code">
+                Enter your 2FA code:
+                <small>Required - 2FA is enabled on this account</small>
+                <input type="text" id="totp_code" name="totp_code" required
+                       pattern="[0-9]{6}" maxlength="6" inputmode="numeric"
+                       placeholder="000000" autocomplete="one-time-code">
+            </label>
+            {% endif %}
+
             <div class="button-group">
                 <a href="{{ url_for('main.login') }}" role="button" class="outline">Cancel</a>
                 <button type="submit" class="danger">Reset Account</button>
