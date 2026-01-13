@@ -351,9 +351,19 @@ def convert_amber_to_tesla_tariff(
                         _LOGGER.error(error_msg)
                         raise ValueError(error_msg)
                 else:
-                    # No advancedPrice - use perKwh directly (AEMO data or far-future Amber forecasts)
-                    per_kwh_cents = point.get("perKwh", 0)
-                    _LOGGER.debug("%s [ForecastInterval]: perKwh=%.2fc/kWh (AEMO/wholesale)", nem_time, per_kwh_cents)
+                    # No advancedPrice available
+                    if electricity_provider == "amber":
+                        # For Amber users: Skip this interval - let forward-fill use last valid retail price
+                        # Using perKwh (AEMO wholesale) would give incorrect low/negative values
+                        _LOGGER.debug(
+                            "%s [ForecastInterval]: No advancedPrice - skipping (forward-fill will use last retail price)",
+                            nem_time
+                        )
+                        continue
+                    else:
+                        # For AEMO/other users: Use perKwh directly (wholesale is the correct price)
+                        per_kwh_cents = point.get("perKwh", 0)
+                        _LOGGER.debug("%s [ForecastInterval]: perKwh=%.2fc/kWh (AEMO/wholesale)", nem_time, per_kwh_cents)
 
             # For CurrentInterval: Prefer advancedPrice (Amber retail forecast) over perKwh (AEMO wholesale)
             # For ActualInterval: Use perKwh (actual settled retail price)
@@ -366,13 +376,24 @@ def convert_amber_to_tesla_tariff(
                     else:
                         per_kwh_cents = advanced_price
                         _LOGGER.debug("%s [CurrentInterval]: advancedPrice=%.2fc/kWh (Amber retail forecast)", nem_time, per_kwh_cents)
-                else:
-                    # ActualInterval or CurrentInterval without advancedPrice (last 5 mins of 30-min period)
+                elif interval_type == "ActualInterval":
+                    # ActualInterval: Use perKwh (actual settled retail price) - this IS the correct retail price
                     per_kwh_cents = point.get("perKwh", 0)
-                    if interval_type == "ActualInterval":
-                        _LOGGER.debug("%s [ActualInterval]: perKwh=%.2fc/kWh (actual settled retail)", nem_time, per_kwh_cents)
+                    _LOGGER.debug("%s [ActualInterval]: perKwh=%.2fc/kWh (actual settled retail)", nem_time, per_kwh_cents)
+                else:
+                    # CurrentInterval without advancedPrice (last 5 mins of 30-min period)
+                    if electricity_provider == "amber":
+                        # For Amber users: Skip this interval - let forward-fill use last valid retail price
+                        # Using perKwh (AEMO wholesale) would give incorrect low/negative values
+                        _LOGGER.debug(
+                            "%s [CurrentInterval]: No advancedPrice - skipping (forward-fill will use last retail price)",
+                            nem_time
+                        )
+                        continue
                     else:
-                        _LOGGER.debug("%s [CurrentInterval]: perKwh=%.2fc/kWh (fallback - AEMO wholesale)", nem_time, per_kwh_cents)
+                        # For AEMO/other users: Use perKwh directly (wholesale is the correct price)
+                        per_kwh_cents = point.get("perKwh", 0)
+                        _LOGGER.debug("%s [CurrentInterval]: perKwh=%.2fc/kWh (AEMO/wholesale)", nem_time, per_kwh_cents)
 
             # Amber convention: feedIn prices are negative when you get paid
             # Tesla convention: sell prices are positive when you get paid
