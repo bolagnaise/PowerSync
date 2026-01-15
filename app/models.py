@@ -106,6 +106,9 @@ class User(UserMixin, db.Model):
     inverter_port = db.Column(db.Integer, default=502)  # Modbus TCP port
     inverter_slave_id = db.Column(db.Integer, default=1)  # Modbus slave ID
     inverter_token = db.Column(db.String(2000))  # JWT token for Enphase (firmware 7.x+)
+    enphase_username = db.Column(db.String(200))  # Enlighten username/email for auto token refresh
+    enphase_password = db.Column(db.String(200))  # Enlighten password for auto token refresh
+    enphase_serial = db.Column(db.String(50))  # Envoy serial number (optional, auto-detected)
     inverter_restore_soc = db.Column(db.Integer, default=98)  # Restore inverter when battery drops below this %
     fronius_load_following = db.Column(db.Boolean, default=False)  # Fronius: use calculated limits instead of 0W profile
     inverter_last_state = db.Column(db.String(20))  # Last known state: 'online', 'curtailed', 'offline'

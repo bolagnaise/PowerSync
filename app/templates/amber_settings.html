@@ -215,12 +215,35 @@
                             <small style="font-size: 0.75em; color: var(--muted-color);">GoodWe: 247, Others: 1</small>
                         </label>
                         <label for="inverter_token" id="tokenLabel" style="display: none;">
-                            <span>JWT Token</span>
+                            <span>JWT Token (Manual)</span>
                             <input type="password" id="inverter_token" name="inverter_token"
                                    value="{{ current_user.inverter_token or '' }}"
                                    placeholder="eyJ0eXAi...">
-                            <small style="font-size: 0.75em; color: var(--muted-color);">Required for Enphase firmware 7.x+. Get from <a href="https://entrez.enphaseenergy.com/" target="_blank">entrez.enphaseenergy.com</a></small>
+                            <small style="font-size: 0.75em; color: var(--muted-color);">Optional if using Enlighten credentials below. Manual tokens expire in 12 hours for installer accounts.</small>
                         </label>
+                        <div id="enphaseCredentialsSection" style="display: none; margin-top: 1em; padding: 1em; background: rgba(128,128,128,0.1); border-radius: 8px;">
+                            <p style="margin: 0 0 0.5em 0; font-weight: 500;">Enlighten Auto-Refresh (Recommended)</p>
+                            <small style="display: block; margin-bottom: 1em; color: var(--muted-color);">Enter your Enlighten credentials for automatic JWT token refresh every 11 hours. Installer tokens expire after 12 hours.</small>
+                            <label for="enphase_username">
+                                <span>Enlighten Email</span>
+                                <input type="email" id="enphase_username" name="enphase_username"
+                                       value="{{ current_user.enphase_username or '' }}"
+                                       placeholder="your@email.com" autocomplete="username">
+                            </label>
+                            <label for="enphase_password">
+                                <span>Enlighten Password</span>
+                                <input type="password" id="enphase_password" name="enphase_password"
+                                       value="{{ current_user.enphase_password or '' }}"
+                                       placeholder="••••••••" autocomplete="current-password">
+                            </label>
+                            <label for="enphase_serial">
+                                <span>Envoy Serial (Optional)</span>
+                                <input type="text" id="enphase_serial" name="enphase_serial"
+                                       value="{{ current_user.enphase_serial or '' }}"
+                                       placeholder="Auto-detected from gateway">
+                                <small style="font-size: 0.75em; color: var(--muted-color);">Leave blank to auto-detect from IQ Gateway</small>
+                            </label>
+                        </div>
                     </div>
 
                     <div style="margin-top: 1em;">
@@ -623,6 +646,12 @@
                 const tokenLabel = document.getElementById('tokenLabel');
                 if (tokenLabel) {
                     tokenLabel.style.display = (brand === 'enphase') ? 'block' : 'none';
+                }
+
+                // Show/hide Enphase Enlighten credentials section (for auto token refresh)
+                const enphaseCredentialsSection = document.getElementById('enphaseCredentialsSection');
+                if (enphaseCredentialsSection) {
+                    enphaseCredentialsSection.style.display = (brand === 'enphase') ? 'block' : 'none';
                 }
 
                 // Show/hide Fronius Load Following option (only for Fronius)

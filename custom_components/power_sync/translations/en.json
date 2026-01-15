@@ -365,7 +365,10 @@
           "inverter_host": "IP Address / Hostname",
           "inverter_port": "Port",
           "inverter_slave_id": "Modbus Slave ID",
-          "inverter_token": "JWT Token",
+          "inverter_token": "JWT Token (Manual)",
+          "enphase_username": "Enlighten Email",
+          "enphase_password": "Enlighten Password",
+          "enphase_serial": "Envoy Serial (Optional)",
           "inverter_restore_soc": "Restore SOC Threshold (%)",
           "fronius_load_following": "Enable Load Following Mode"
         },
@@ -373,7 +376,10 @@
           "inverter_host": "Local IP address of your inverter or gateway",
           "inverter_port": "502 for Modbus (Sungrow, Fronius, GoodWe, Huawei), 443 for Enphase",
           "inverter_slave_id": "Usually 1. GoodWe uses 247 by default.",
-          "inverter_token": "Enphase JWT token for firmware 7.x+. Get from https://entrez.enphaseenergy.com/",
+          "inverter_token": "Optional if using Enlighten credentials. Manual tokens expire in 12 hours for installer accounts.",
+          "enphase_username": "Your Enlighten account email for automatic JWT token refresh (recommended)",
+          "enphase_password": "Your Enlighten account password",
+          "enphase_serial": "Leave blank to auto-detect from IQ Gateway",
           "inverter_restore_soc": "Restore inverter when battery drops below this %. Ensures battery stays topped up before evening peak. Default: 98%",
           "fronius_load_following": "Enable if you DON'T have a 0W export limit configured by your installer. Uses calculated power limits based on home load and auto-detected inverter capacity. Leave OFF if you have the 0W export profile (most users)."
         }

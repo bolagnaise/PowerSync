@@ -113,6 +113,9 @@ from .const import (
     CONF_INVERTER_PORT,
     CONF_INVERTER_SLAVE_ID,
     CONF_INVERTER_TOKEN,
+    CONF_ENPHASE_USERNAME,
+    CONF_ENPHASE_PASSWORD,
+    CONF_ENPHASE_SERIAL,
     CONF_INVERTER_RESTORE_SOC,
     CONF_FRONIUS_LOAD_FOLLOWING,
     INVERTER_BRANDS,
@@ -1814,9 +1817,12 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             else:
                 final_data[CONF_INVERTER_SLAVE_ID] = 1  # Default for HTTP-based inverters
 
-            # Include JWT token for Enphase (required for firmware 7.x+)
+            # Include JWT token and Enlighten credentials for Enphase (firmware 7.x+)
             if inverter_brand == "enphase":
                 final_data[CONF_INVERTER_TOKEN] = user_input.get(CONF_INVERTER_TOKEN, "")
+                final_data[CONF_ENPHASE_USERNAME] = user_input.get(CONF_ENPHASE_USERNAME, "")
+                final_data[CONF_ENPHASE_PASSWORD] = user_input.get(CONF_ENPHASE_PASSWORD, "")
+                final_data[CONF_ENPHASE_SERIAL] = user_input.get(CONF_ENPHASE_SERIAL, "")
 
             # Fronius-specific: load following mode (for users without 0W export profile)
             if inverter_brand == "fronius":
@@ -1870,12 +1876,31 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 default=current_slave_id,
             )] = vol.All(vol.Coerce(int), vol.Range(min=1, max=247))
 
-        # Show JWT token field for Enphase (required for firmware 7.x+)
+        # Show JWT token and Enlighten credentials for Enphase (firmware 7.x+)
         if brand == "enphase":
             current_token = self._get_option(CONF_INVERTER_TOKEN, "")
             schema_dict[vol.Optional(
                 CONF_INVERTER_TOKEN,
                 default=current_token,
+            )] = str
+
+            # Enlighten credentials for automatic JWT token refresh (recommended)
+            current_enphase_username = self._get_option(CONF_ENPHASE_USERNAME, "")
+            schema_dict[vol.Optional(
+                CONF_ENPHASE_USERNAME,
+                default=current_enphase_username,
+            )] = str
+
+            current_enphase_password = self._get_option(CONF_ENPHASE_PASSWORD, "")
+            schema_dict[vol.Optional(
+                CONF_ENPHASE_PASSWORD,
+                default=current_enphase_password,
+            )] = str
+
+            current_enphase_serial = self._get_option(CONF_ENPHASE_SERIAL, "")
+            schema_dict[vol.Optional(
+                CONF_ENPHASE_SERIAL,
+                default=current_enphase_serial,
             )] = str
 
         # Fronius-specific: load following mode (for users without 0W export profile)

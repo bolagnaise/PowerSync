@@ -514,6 +514,9 @@ CONF_INVERTER_HOST = "inverter_host"
 CONF_INVERTER_PORT = "inverter_port"
 CONF_INVERTER_SLAVE_ID = "inverter_slave_id"
 CONF_INVERTER_TOKEN = "inverter_token"  # JWT token for Enphase IQ Gateway (firmware 7.x+)
+CONF_ENPHASE_USERNAME = "enphase_username"  # Enlighten username/email for auto token refresh
+CONF_ENPHASE_PASSWORD = "enphase_password"  # Enlighten password for auto token refresh
+CONF_ENPHASE_SERIAL = "enphase_serial"  # Envoy serial number (optional, auto-detected)
 CONF_INVERTER_RESTORE_SOC = "inverter_restore_soc"  # Battery SOC % below which to restore inverter
 DEFAULT_INVERTER_RESTORE_SOC = 98  # Restore inverter when battery drops below 98%
 # Fronius-specific: load following mode for users without 0W export profile

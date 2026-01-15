@@ -207,6 +207,9 @@ def get_inverter_controller(
     model: Optional[str] = None,
     token: Optional[str] = None,
     load_following: bool = False,
+    enphase_username: Optional[str] = None,
+    enphase_password: Optional[str] = None,
+    enphase_serial: Optional[str] = None,
 ) -> Optional[InverterController]:
     """Factory function to get the appropriate inverter controller.
 
@@ -219,6 +222,9 @@ def get_inverter_controller(
         token: JWT token for Enphase IQ Gateway authentication (firmware 7.x+)
         load_following: Fronius-specific - use calculated power limits instead
                        of relying on 0W soft export limit (default: False)
+        enphase_username: Enlighten username/email for automatic JWT token refresh
+        enphase_password: Enlighten password for automatic JWT token refresh
+        enphase_serial: Envoy serial number (optional, auto-detected from gateway)
 
     Returns:
         InverterController instance or None if brand not supported
@@ -289,6 +295,9 @@ def get_inverter_controller(
             slave_id=slave_id,
             model=model,
             token=token,
+            username=enphase_username,
+            password=enphase_password,
+            serial=enphase_serial,
         )
 
     if brand_lower == "zeversolar":
@@ -339,6 +348,11 @@ def get_inverter_controller_from_user(user) -> Optional[InverterController]:
     token = getattr(user, 'inverter_token', None)  # JWT token for Enphase
     load_following = getattr(user, 'fronius_load_following', False)  # Fronius load following mode
 
+    # Enphase Enlighten credentials for automatic JWT token refresh
+    enphase_username = getattr(user, 'enphase_username', None)
+    enphase_password = getattr(user, 'enphase_password', None)
+    enphase_serial = getattr(user, 'enphase_serial', None)
+
     if not brand or not host:
         _LOGGER.warning("Inverter brand or host not configured")
         return None
@@ -352,4 +366,7 @@ def get_inverter_controller_from_user(user) -> Optional[InverterController]:
         model=model,
         token=token,
         load_following=load_following,
+        enphase_username=enphase_username,
+        enphase_password=enphase_password,
+        enphase_serial=enphase_serial,
     )

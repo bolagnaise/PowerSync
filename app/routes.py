@@ -759,6 +759,9 @@ def api_inverter_test():
     port = data.get('port', 502)
     slave_id = data.get('slave_id', 1)
     token = data.get('token')  # JWT token for Enphase
+    enphase_username = data.get('enphase_username')  # Enlighten credentials for auto-refresh
+    enphase_password = data.get('enphase_password')
+    enphase_serial = data.get('enphase_serial')
 
     if not brand or not host:
         return jsonify({'success': False, 'error': 'Brand and host are required'})
@@ -772,6 +775,9 @@ def api_inverter_test():
             port=port,
             slave_id=slave_id,
             token=token,
+            enphase_username=enphase_username,
+            enphase_password=enphase_password,
+            enphase_serial=enphase_serial,
         )
 
         if not controller:
@@ -1780,6 +1786,14 @@ def amber_settings():
 
         if 'inverter_token' in request.form:
             current_user.inverter_token = request.form.get('inverter_token', '') or None
+
+        # Enphase Enlighten credentials for automatic JWT token refresh
+        if 'enphase_username' in request.form:
+            current_user.enphase_username = request.form.get('enphase_username', '') or None
+        if 'enphase_password' in request.form:
+            current_user.enphase_password = request.form.get('enphase_password', '') or None
+        if 'enphase_serial' in request.form:
+            current_user.enphase_serial = request.form.get('enphase_serial', '') or None
 
         if 'inverter_restore_soc' in request.form:
             try:
