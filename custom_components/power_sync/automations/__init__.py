@@ -394,7 +394,8 @@ class AutomationEngine:
         )
 
     async def _async_send_notification(self, message: str) -> None:
-        """Send a persistent notification."""
+        """Send notification via persistent notification and mobile push."""
+        # Send persistent notification (shows in HA UI)
         await self._hass.services.async_call(
             "persistent_notification",
             "create",
@@ -403,3 +404,21 @@ class AutomationEngine:
                 "message": message,
             },
         )
+
+        # Try to send push notification to mobile devices
+        # Look for mobile_app notify services
+        notify_services = self._hass.services.async_services().get("notify", {})
+        for service_name in notify_services:
+            if service_name.startswith("mobile_app_"):
+                try:
+                    await self._hass.services.async_call(
+                        "notify",
+                        service_name,
+                        {
+                            "title": "PowerSync",
+                            "message": message,
+                        },
+                    )
+                    _LOGGER.debug(f"Sent push notification via {service_name}")
+                except Exception as e:
+                    _LOGGER.warning(f"Failed to send push via {service_name}: {e}")

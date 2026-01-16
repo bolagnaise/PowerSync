@@ -248,11 +248,12 @@ async def _action_send_notification(
     hass: HomeAssistant,
     params: Dict[str, Any]
 ) -> bool:
-    """Send persistent notification."""
+    """Send notification via persistent notification and mobile push."""
     message = params.get("message", "Automation triggered")
-    title = params.get("title", "PowerSync Automation")
+    title = params.get("title", "PowerSync")
 
     try:
+        # Send persistent notification (shows in HA UI)
         await hass.services.async_call(
             "persistent_notification",
             "create",
@@ -262,6 +263,25 @@ async def _action_send_notification(
             },
             blocking=True,
         )
+
+        # Send push notifications to all mobile_app devices
+        notify_services = hass.services.async_services().get("notify", {})
+        for service_name in notify_services:
+            if service_name.startswith("mobile_app_"):
+                try:
+                    await hass.services.async_call(
+                        "notify",
+                        service_name,
+                        {
+                            "title": title,
+                            "message": message,
+                        },
+                        blocking=False,  # Don't wait for push delivery
+                    )
+                    _LOGGER.debug(f"Sent push notification via {service_name}")
+                except Exception as e:
+                    _LOGGER.warning(f"Failed to send push via {service_name}: {e}")
+
         return True
     except Exception as e:
         _LOGGER.error(f"Failed to send notification: {e}")
