@@ -7953,3 +7953,492 @@ def api_sigenergy_restore_normal():
             'success': False,
             'error': str(e)
         }), 500
+
+
+# ============================================================================
+# AUTOMATIONS API ENDPOINTS
+# ============================================================================
+
+@bp.route('/api/automations', methods=['GET'])
+@api_auth_required
+def api_get_automations(api_user=None):
+    """
+    Get all automations for the authenticated user.
+
+    Returns:
+        JSON array of automations with triggers and actions
+    """
+    from app.models import Automation
+    import json
+
+    user = api_user or current_user
+
+    automations = Automation.query.filter_by(user_id=user.id).order_by(
+        Automation.group_name,
+        Automation.priority.desc(),
+        Automation.created_at.desc()
+    ).all()
+
+    result = []
+    for auto in automations:
+        auto_data = {
+            'id': auto.id,
+            'name': auto.name,
+            'group_name': auto.group_name,
+            'priority': auto.priority,
+            'enabled': auto.enabled,
+            'run_once': auto.run_once,
+            'paused': auto.paused,
+            'notification_only': auto.notification_only,
+            'created_at': auto.created_at.isoformat() if auto.created_at else None,
+            'updated_at': auto.updated_at.isoformat() if auto.updated_at else None,
+            'last_triggered_at': auto.last_triggered_at.isoformat() if auto.last_triggered_at else None,
+            'trigger': None,
+            'actions': []
+        }
+
+        # Add trigger
+        if auto.trigger:
+            t = auto.trigger
+            auto_data['trigger'] = {
+                'trigger_type': t.trigger_type,
+                'time_of_day': t.time_of_day.strftime('%H:%M') if t.time_of_day else None,
+                'repeat_days': t.repeat_days,
+                'battery_condition': t.battery_condition,
+                'battery_threshold': t.battery_threshold,
+                'flow_source': t.flow_source,
+                'flow_transition': t.flow_transition,
+                'flow_threshold_kw': t.flow_threshold_kw,
+                'price_type': t.price_type,
+                'price_transition': t.price_transition,
+                'price_threshold': t.price_threshold,
+                'grid_condition': t.grid_condition,
+                'weather_condition': t.weather_condition,
+                'time_window_start': t.time_window_start.strftime('%H:%M') if t.time_window_start else None,
+                'time_window_end': t.time_window_end.strftime('%H:%M') if t.time_window_end else None,
+            }
+
+        # Add actions
+        for action in auto.actions.order_by('execution_order').all():
+            auto_data['actions'].append({
+                'id': action.id,
+                'action_type': action.action_type,
+                'parameters': json.loads(action.parameters) if action.parameters else {},
+                'execution_order': action.execution_order
+            })
+
+        result.append(auto_data)
+
+    return jsonify(result)
+
+
+@bp.route('/api/automations', methods=['POST'])
+@api_auth_required
+def api_create_automation(api_user=None):
+    """
+    Create a new automation.
+
+    Request body:
+    {
+        "name": "My Automation",
+        "group_name": "Default Group",
+        "priority": 50,
+        "enabled": true,
+        "run_once": false,
+        "notification_only": false,
+        "trigger": {
+            "trigger_type": "price",
+            "price_type": "import",
+            "price_transition": "rises_above",
+            "price_threshold": 0.30,
+            "time_window_start": "14:00",
+            "time_window_end": "21:00"
+        },
+        "actions": [
+            {
+                "action_type": "force_discharge",
+                "parameters": {"duration_minutes": 30}
+            }
+        ]
+    }
+    """
+    from app.models import Automation, AutomationTrigger, AutomationAction
+    import json
+
+    user = api_user or current_user
+    data = request.get_json()
+
+    if not data:
+        return jsonify({'error': 'Request body required'}), 400
+
+    # Create automation
+    automation = Automation(
+        user_id=user.id,
+        name=data.get('name', 'Unnamed Automation'),
+        group_name=data.get('group_name', 'Default Group'),
+        priority=data.get('priority', 50),
+        enabled=data.get('enabled', True),
+        run_once=data.get('run_once', False),
+        notification_only=data.get('notification_only', False),
+    )
+    db.session.add(automation)
+    db.session.flush()  # Get the ID
+
+    # Create trigger
+    trigger_data = data.get('trigger', {})
+    if trigger_data:
+        trigger = AutomationTrigger(
+            automation_id=automation.id,
+            trigger_type=trigger_data.get('trigger_type', 'time'),
+        )
+
+        # Time trigger fields
+        if trigger_data.get('time_of_day'):
+            try:
+                trigger.time_of_day = datetime.strptime(trigger_data['time_of_day'], '%H:%M').time()
+            except ValueError:
+                pass
+        trigger.repeat_days = trigger_data.get('repeat_days')
+
+        # Battery trigger fields
+        trigger.battery_condition = trigger_data.get('battery_condition')
+        trigger.battery_threshold = trigger_data.get('battery_threshold')
+
+        # Flow trigger fields
+        trigger.flow_source = trigger_data.get('flow_source')
+        trigger.flow_transition = trigger_data.get('flow_transition')
+        trigger.flow_threshold_kw = trigger_data.get('flow_threshold_kw')
+
+        # Price trigger fields
+        trigger.price_type = trigger_data.get('price_type')
+        trigger.price_transition = trigger_data.get('price_transition')
+        trigger.price_threshold = trigger_data.get('price_threshold')
+
+        # Grid trigger fields
+        trigger.grid_condition = trigger_data.get('grid_condition')
+
+        # Weather trigger fields
+        trigger.weather_condition = trigger_data.get('weather_condition')
+
+        # Time window
+        if trigger_data.get('time_window_start'):
+            try:
+                trigger.time_window_start = datetime.strptime(trigger_data['time_window_start'], '%H:%M').time()
+            except ValueError:
+                pass
+        if trigger_data.get('time_window_end'):
+            try:
+                trigger.time_window_end = datetime.strptime(trigger_data['time_window_end'], '%H:%M').time()
+            except ValueError:
+                pass
+
+        db.session.add(trigger)
+
+    # Create actions
+    actions_data = data.get('actions', [])
+    for idx, action_data in enumerate(actions_data):
+        action = AutomationAction(
+            automation_id=automation.id,
+            action_type=action_data.get('action_type'),
+            parameters=json.dumps(action_data.get('parameters', {})),
+            execution_order=action_data.get('execution_order', idx)
+        )
+        db.session.add(action)
+
+    db_commit_with_retry()
+
+    logger.info(f"Created automation '{automation.name}' (id={automation.id}) for user {user.email}")
+
+    return jsonify({
+        'success': True,
+        'id': automation.id,
+        'message': f"Automation '{automation.name}' created"
+    }), 201
+
+
+@bp.route('/api/automations/<int:automation_id>', methods=['GET'])
+@api_auth_required
+def api_get_automation(automation_id, api_user=None):
+    """Get a specific automation by ID."""
+    from app.models import Automation
+    import json
+
+    user = api_user or current_user
+
+    automation = Automation.query.filter_by(id=automation_id, user_id=user.id).first()
+    if not automation:
+        return jsonify({'error': 'Automation not found'}), 404
+
+    result = {
+        'id': automation.id,
+        'name': automation.name,
+        'group_name': automation.group_name,
+        'priority': automation.priority,
+        'enabled': automation.enabled,
+        'run_once': automation.run_once,
+        'paused': automation.paused,
+        'notification_only': automation.notification_only,
+        'created_at': automation.created_at.isoformat() if automation.created_at else None,
+        'updated_at': automation.updated_at.isoformat() if automation.updated_at else None,
+        'last_triggered_at': automation.last_triggered_at.isoformat() if automation.last_triggered_at else None,
+        'trigger': None,
+        'actions': []
+    }
+
+    if automation.trigger:
+        t = automation.trigger
+        result['trigger'] = {
+            'trigger_type': t.trigger_type,
+            'time_of_day': t.time_of_day.strftime('%H:%M') if t.time_of_day else None,
+            'repeat_days': t.repeat_days,
+            'battery_condition': t.battery_condition,
+            'battery_threshold': t.battery_threshold,
+            'flow_source': t.flow_source,
+            'flow_transition': t.flow_transition,
+            'flow_threshold_kw': t.flow_threshold_kw,
+            'price_type': t.price_type,
+            'price_transition': t.price_transition,
+            'price_threshold': t.price_threshold,
+            'grid_condition': t.grid_condition,
+            'weather_condition': t.weather_condition,
+            'time_window_start': t.time_window_start.strftime('%H:%M') if t.time_window_start else None,
+            'time_window_end': t.time_window_end.strftime('%H:%M') if t.time_window_end else None,
+        }
+
+    for action in automation.actions.order_by('execution_order').all():
+        result['actions'].append({
+            'id': action.id,
+            'action_type': action.action_type,
+            'parameters': json.loads(action.parameters) if action.parameters else {},
+            'execution_order': action.execution_order
+        })
+
+    return jsonify(result)
+
+
+@bp.route('/api/automations/<int:automation_id>', methods=['PUT'])
+@api_auth_required
+def api_update_automation(automation_id, api_user=None):
+    """Update an existing automation."""
+    from app.models import Automation, AutomationTrigger, AutomationAction
+    import json
+
+    user = api_user or current_user
+    data = request.get_json()
+
+    if not data:
+        return jsonify({'error': 'Request body required'}), 400
+
+    automation = Automation.query.filter_by(id=automation_id, user_id=user.id).first()
+    if not automation:
+        return jsonify({'error': 'Automation not found'}), 404
+
+    # Update automation fields
+    if 'name' in data:
+        automation.name = data['name']
+    if 'group_name' in data:
+        automation.group_name = data['group_name']
+    if 'priority' in data:
+        automation.priority = data['priority']
+    if 'enabled' in data:
+        automation.enabled = data['enabled']
+    if 'run_once' in data:
+        automation.run_once = data['run_once']
+    if 'notification_only' in data:
+        automation.notification_only = data['notification_only']
+
+    # Update trigger
+    trigger_data = data.get('trigger')
+    if trigger_data is not None:
+        # Delete existing trigger
+        if automation.trigger:
+            db.session.delete(automation.trigger)
+
+        if trigger_data:
+            trigger = AutomationTrigger(
+                automation_id=automation.id,
+                trigger_type=trigger_data.get('trigger_type', 'time'),
+            )
+
+            if trigger_data.get('time_of_day'):
+                try:
+                    trigger.time_of_day = datetime.strptime(trigger_data['time_of_day'], '%H:%M').time()
+                except ValueError:
+                    pass
+            trigger.repeat_days = trigger_data.get('repeat_days')
+            trigger.battery_condition = trigger_data.get('battery_condition')
+            trigger.battery_threshold = trigger_data.get('battery_threshold')
+            trigger.flow_source = trigger_data.get('flow_source')
+            trigger.flow_transition = trigger_data.get('flow_transition')
+            trigger.flow_threshold_kw = trigger_data.get('flow_threshold_kw')
+            trigger.price_type = trigger_data.get('price_type')
+            trigger.price_transition = trigger_data.get('price_transition')
+            trigger.price_threshold = trigger_data.get('price_threshold')
+            trigger.grid_condition = trigger_data.get('grid_condition')
+            trigger.weather_condition = trigger_data.get('weather_condition')
+
+            if trigger_data.get('time_window_start'):
+                try:
+                    trigger.time_window_start = datetime.strptime(trigger_data['time_window_start'], '%H:%M').time()
+                except ValueError:
+                    pass
+            if trigger_data.get('time_window_end'):
+                try:
+                    trigger.time_window_end = datetime.strptime(trigger_data['time_window_end'], '%H:%M').time()
+                except ValueError:
+                    pass
+
+            db.session.add(trigger)
+
+    # Update actions
+    actions_data = data.get('actions')
+    if actions_data is not None:
+        # Delete existing actions
+        for action in automation.actions.all():
+            db.session.delete(action)
+
+        # Add new actions
+        for idx, action_data in enumerate(actions_data):
+            action = AutomationAction(
+                automation_id=automation.id,
+                action_type=action_data.get('action_type'),
+                parameters=json.dumps(action_data.get('parameters', {})),
+                execution_order=action_data.get('execution_order', idx)
+            )
+            db.session.add(action)
+
+    db_commit_with_retry()
+
+    logger.info(f"Updated automation '{automation.name}' (id={automation.id}) for user {user.email}")
+
+    return jsonify({
+        'success': True,
+        'message': f"Automation '{automation.name}' updated"
+    })
+
+
+@bp.route('/api/automations/<int:automation_id>', methods=['DELETE'])
+@api_auth_required
+def api_delete_automation(automation_id, api_user=None):
+    """Delete an automation."""
+    from app.models import Automation
+
+    user = api_user or current_user
+
+    automation = Automation.query.filter_by(id=automation_id, user_id=user.id).first()
+    if not automation:
+        return jsonify({'error': 'Automation not found'}), 404
+
+    name = automation.name
+    db.session.delete(automation)
+    db_commit_with_retry()
+
+    logger.info(f"Deleted automation '{name}' (id={automation_id}) for user {user.email}")
+
+    return jsonify({
+        'success': True,
+        'message': f"Automation '{name}' deleted"
+    })
+
+
+@bp.route('/api/automations/<int:automation_id>/toggle', methods=['POST'])
+@api_auth_required
+def api_toggle_automation(automation_id, api_user=None):
+    """Toggle automation enabled/disabled state."""
+    from app.models import Automation
+
+    user = api_user or current_user
+
+    automation = Automation.query.filter_by(id=automation_id, user_id=user.id).first()
+    if not automation:
+        return jsonify({'error': 'Automation not found'}), 404
+
+    automation.enabled = not automation.enabled
+    db_commit_with_retry()
+
+    state = 'enabled' if automation.enabled else 'disabled'
+    logger.info(f"Automation '{automation.name}' {state} for user {user.email}")
+
+    return jsonify({
+        'success': True,
+        'enabled': automation.enabled,
+        'message': f"Automation '{automation.name}' {state}"
+    })
+
+
+@bp.route('/api/automations/<int:automation_id>/pause', methods=['POST'])
+@api_auth_required
+def api_pause_automation(automation_id, api_user=None):
+    """Pause an automation (for run_once automations that have triggered)."""
+    from app.models import Automation
+
+    user = api_user or current_user
+
+    automation = Automation.query.filter_by(id=automation_id, user_id=user.id).first()
+    if not automation:
+        return jsonify({'error': 'Automation not found'}), 404
+
+    automation.paused = True
+    db_commit_with_retry()
+
+    return jsonify({
+        'success': True,
+        'message': f"Automation '{automation.name}' paused"
+    })
+
+
+@bp.route('/api/automations/<int:automation_id>/resume', methods=['POST'])
+@api_auth_required
+def api_resume_automation(automation_id, api_user=None):
+    """Resume a paused automation."""
+    from app.models import Automation
+
+    user = api_user or current_user
+
+    automation = Automation.query.filter_by(id=automation_id, user_id=user.id).first()
+    if not automation:
+        return jsonify({'error': 'Automation not found'}), 404
+
+    automation.paused = False
+    db_commit_with_retry()
+
+    return jsonify({
+        'success': True,
+        'message': f"Automation '{automation.name}' resumed"
+    })
+
+
+@bp.route('/api/automations/groups', methods=['GET'])
+@api_auth_required
+def api_get_automation_groups(api_user=None):
+    """Get list of unique automation group names for the user."""
+    from app.models import Automation
+
+    user = api_user or current_user
+
+    groups = db.session.query(Automation.group_name).filter_by(
+        user_id=user.id
+    ).distinct().order_by(Automation.group_name).all()
+
+    group_names = [g[0] for g in groups if g[0]]
+
+    # Always include "Default Group"
+    if 'Default Group' not in group_names:
+        group_names.insert(0, 'Default Group')
+
+    return jsonify(group_names)
+
+
+@bp.route('/api/weather/current', methods=['GET'])
+@api_auth_required
+def api_get_current_weather(api_user=None):
+    """Get current weather for the user's location."""
+    from app.automations.weather import get_current_weather
+
+    user = api_user or current_user
+
+    weather = get_current_weather(user)
+    if not weather:
+        return jsonify({'error': 'Weather data unavailable'}), 503
+
+    return jsonify(weather)

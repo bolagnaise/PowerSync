@@ -28,6 +28,9 @@ CONF_TIMEZONE = "timezone"
 CONF_AMBER_FORECAST_TYPE = "amber_forecast_type"
 CONF_BATTERY_CURTAILMENT_ENABLED = "battery_curtailment_enabled"
 
+# Automations - OpenWeatherMap API for weather triggers
+CONF_OPENWEATHERMAP_API_KEY = "openweathermap_api_key"
+
 # Battery System Selection
 CONF_BATTERY_SYSTEM = "battery_system"
 BATTERY_SYSTEM_TESLA = "tesla"

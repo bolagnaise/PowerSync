@@ -444,7 +444,7 @@ def create_app(config_class=Config):
         scheduler = BackgroundScheduler()
 
         # Add jobs for smart TOU sync (3-stage approach)
-        from app.tasks import sync_initial_forecast, sync_rest_api_check, save_price_history, save_energy_usage, monitor_aemo_prices, solar_curtailment_check, demand_period_grid_charging_check, check_manual_discharge_expiry, check_manual_charge_expiry
+        from app.tasks import sync_initial_forecast, sync_rest_api_check, save_price_history, save_energy_usage, monitor_aemo_prices, solar_curtailment_check, demand_period_grid_charging_check, check_manual_discharge_expiry, check_manual_charge_expiry, evaluate_automations_task
 
         # Wrapper functions to run tasks within app context
         def run_sync_initial_forecast():
@@ -493,6 +493,10 @@ def create_app(config_class=Config):
         def run_check_manual_charge_expiry():
             with app.app_context():
                 check_manual_charge_expiry()
+
+        def run_evaluate_automations():
+            with app.app_context():
+                evaluate_automations_task()
 
         # STAGE 1: Initial forecast sync at start of each 5-min period (0s)
         # Gets predicted price to Tesla ASAP
@@ -590,6 +594,16 @@ def create_app(config_class=Config):
             replace_existing=True
         )
 
+        # Add job to evaluate user automations every 30 seconds
+        # Checks triggers and executes actions for user-defined automations
+        scheduler.add_job(
+            func=run_evaluate_automations,
+            trigger=CronTrigger(second='0,30'),  # Run every 30 seconds (at :00 and :30)
+            id='evaluate_automations',
+            name='Evaluate user automations',
+            replace_existing=True
+        )
+
         # Start the scheduler
         scheduler.start()
         logger.info("✅ Background scheduler started with SMART SYNC:")
@@ -602,6 +616,7 @@ def create_app(config_class=Config):
         logger.info("  - Energy usage: every minute (Teslemetry allows 1/min)")
         logger.info("  - AEMO monitoring: every minute at :35 seconds")
         logger.info("  - Demand period grid charging: every 1 minute at :45 seconds")
+        logger.info("  - User automations: every 30 seconds")
 
         # Shut down the scheduler and release lock when exiting the app
         def cleanup():

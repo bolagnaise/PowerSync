@@ -142,6 +142,8 @@ from .const import (
     CONF_SIGENERGY_TOKEN_EXPIRES_AT,
     # Battery system selection
     CONF_BATTERY_SYSTEM,
+    # OpenWeatherMap for automations weather triggers
+    CONF_OPENWEATHERMAP_API_KEY,
 )
 from .inverters import get_inverter_controller
 from .coordinator import (
@@ -5916,6 +5918,154 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         from homeassistant.util import dt as dt_util
         await auto_demand_charging_check(dt_util.now())
 
+    # ========================================
+    # AUTOMATIONS ENGINE SETUP
+    # ========================================
+    # Initialize the automation store and engine for user-defined automations
+    from .automations import AutomationStore, AutomationEngine
+
+    automation_store = AutomationStore(hass)
+    await automation_store.async_load()
+
+    automation_engine = AutomationEngine(hass, automation_store, entry)
+
+    # Store automation components in hass.data
+    hass.data[DOMAIN][entry.entry_id]["automation_store"] = automation_store
+    hass.data[DOMAIN][entry.entry_id]["automation_engine"] = automation_engine
+
+    # Set up automation evaluation timer (every 30 seconds)
+    async def auto_evaluate_automations(now):
+        """Evaluate all user automations."""
+        try:
+            triggered_count = await automation_engine.async_evaluate_all()
+            if triggered_count > 0:
+                _LOGGER.info(f"🤖 Automation evaluation: {triggered_count} automation(s) triggered")
+        except Exception as e:
+            _LOGGER.error(f"Error evaluating automations: {e}")
+
+    automation_cancel_timer = async_track_utc_time_change(
+        hass,
+        auto_evaluate_automations,
+        second=[0, 30],  # Every 30 seconds
+    )
+    hass.data[DOMAIN][entry.entry_id]["automation_cancel"] = automation_cancel_timer
+    _LOGGER.info("🤖 Automation evaluation scheduled every 30 seconds")
+
+    # Register automation CRUD services
+    async def handle_list_automations(call: ServiceCall) -> dict:
+        """List all automations."""
+        automations = automation_store.get_all()
+        return {"automations": automations}
+
+    async def handle_create_automation(call: ServiceCall) -> dict:
+        """Create a new automation."""
+        automation_data = dict(call.data)
+        automation = automation_store.create(automation_data)
+        await automation_store.async_save()
+        return {"automation": automation}
+
+    async def handle_update_automation(call: ServiceCall) -> dict:
+        """Update an existing automation."""
+        automation_id = call.data.get("automation_id")
+        automation_data = {k: v for k, v in call.data.items() if k != "automation_id"}
+        automation = automation_store.update(automation_id, automation_data)
+        if automation:
+            await automation_store.async_save()
+            return {"automation": automation}
+        return {"error": "Automation not found"}
+
+    async def handle_delete_automation(call: ServiceCall) -> dict:
+        """Delete an automation."""
+        automation_id = call.data.get("automation_id")
+        success = automation_store.delete(automation_id)
+        if success:
+            await automation_store.async_save()
+            return {"success": True}
+        return {"error": "Automation not found"}
+
+    async def handle_toggle_automation(call: ServiceCall) -> dict:
+        """Toggle an automation's enabled state."""
+        automation_id = call.data.get("automation_id")
+        new_state = automation_store.toggle(automation_id)
+        if new_state is not None:
+            await automation_store.async_save()
+            return {"enabled": new_state}
+        return {"error": "Automation not found"}
+
+    async def handle_pause_automation(call: ServiceCall) -> dict:
+        """Pause an automation."""
+        automation_id = call.data.get("automation_id")
+        success = automation_store.pause(automation_id)
+        if success:
+            await automation_store.async_save()
+            return {"success": True}
+        return {"error": "Automation not found"}
+
+    async def handle_resume_automation(call: ServiceCall) -> dict:
+        """Resume a paused automation."""
+        automation_id = call.data.get("automation_id")
+        success = automation_store.resume(automation_id)
+        if success:
+            await automation_store.async_save()
+            return {"success": True}
+        return {"error": "Automation not found"}
+
+    async def handle_list_groups(call: ServiceCall) -> dict:
+        """List all automation groups."""
+        groups = automation_store.get_groups()
+        return {"groups": groups}
+
+    # Register automation services with response support
+    hass.services.async_register(
+        DOMAIN,
+        "list_automations",
+        handle_list_automations,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        "create_automation",
+        handle_create_automation,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        "update_automation",
+        handle_update_automation,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        "delete_automation",
+        handle_delete_automation,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        "toggle_automation",
+        handle_toggle_automation,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        "pause_automation",
+        handle_pause_automation,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        "resume_automation",
+        handle_resume_automation,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        "list_automation_groups",
+        handle_list_groups,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    _LOGGER.info("🤖 Automation services registered")
+
     _LOGGER.info("=" * 60)
     _LOGGER.info("PowerSync integration setup complete!")
     _LOGGER.info("Domain '%s' registered successfully", DOMAIN)
@@ -5959,6 +6109,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if demand_charging_cancel := entry_data.get("demand_charging_cancel"):
         demand_charging_cancel()
         _LOGGER.debug("Cancelled demand period grid charging timer")
+
+    # Cancel the automation evaluation timer if it exists
+    if automation_cancel := entry_data.get("automation_cancel"):
+        automation_cancel()
+        _LOGGER.debug("Cancelled automation evaluation timer")
 
     # Stop WebSocket client if it exists
     if ws_client := entry_data.get("ws_client"):

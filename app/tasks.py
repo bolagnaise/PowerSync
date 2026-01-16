@@ -3124,3 +3124,34 @@ def demand_period_grid_charging_check():
 
         logger.info(f"=== ✅ Demand period grid charging check complete: {success_count} OK, {error_count} errors ===")
 
+
+def evaluate_automations_task():
+    """
+    Evaluate all user automations and execute triggered actions.
+    Runs every 30 seconds via scheduler.
+
+    This task:
+    1. Loads all enabled, non-paused automations
+    2. Gets current state for each user (battery %, prices, power flows, etc.)
+    3. Evaluates each automation's trigger against current state
+    4. Executes actions for triggered automations (respecting priority for conflicts)
+    5. Handles run_once pausing and notifications
+    """
+    from app import create_app
+
+    logger.info("=== 🤖 Starting automation evaluation ===")
+
+    app = create_app()
+    with app.app_context():
+        try:
+            from app.automations import evaluate_automations
+            triggered_count = evaluate_automations()
+
+            if triggered_count > 0:
+                logger.info(f"=== ✅ Automation evaluation complete: {triggered_count} automations triggered ===")
+            else:
+                logger.debug("=== ✅ Automation evaluation complete: no automations triggered ===")
+
+        except Exception as e:
+            logger.error(f"Error in automation evaluation: {e}", exc_info=True)
+

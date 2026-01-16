@@ -142,6 +142,8 @@ from .const import (
     NETWORK_TARIFF_TYPES,
     NETWORK_DISTRIBUTORS,
     ALL_NETWORK_TARIFFS,
+    # Automations - OpenWeatherMap API for weather triggers
+    CONF_OPENWEATHERMAP_API_KEY,
 )
 
 # Combined network tariff key for config flow
@@ -1715,9 +1717,10 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             if was_curtailment_enabled and not new_curtailment_enabled:
                 await self._restore_export_rule()
 
-            # Store curtailment settings
+            # Store curtailment and automation settings
             self._curtailment_options = {
                 CONF_BATTERY_CURTAILMENT_ENABLED: new_curtailment_enabled,
+                CONF_OPENWEATHERMAP_API_KEY: user_input.get(CONF_OPENWEATHERMAP_API_KEY, ""),
             }
 
             if is_sigenergy:
@@ -1764,6 +1767,12 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_AC_INVERTER_CURTAILMENT_ENABLED,
                 default=self._get_option(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False),
             )] = bool
+
+        # OpenWeatherMap API key for weather-based automations (optional)
+        schema_dict[vol.Optional(
+            CONF_OPENWEATHERMAP_API_KEY,
+            default=self._get_option(CONF_OPENWEATHERMAP_API_KEY, ""),
+        )] = str
 
         return self.async_show_form(
             step_id="curtailment_options",

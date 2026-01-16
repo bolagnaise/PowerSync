@@ -453,3 +453,112 @@ class BatteryHealthHistory(db.Model):
 
     def __repr__(self):
         return f'<BatteryHealthHistory {self.scanned_at} - {self.health_percent}%>'
+
+
+class Automation(db.Model):
+    """User-defined automations for battery/energy management"""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+
+    # Automation metadata
+    name = db.Column(db.String(100))  # User-provided name
+    group_name = db.Column(db.String(100), default='Default Group')  # Grouping for UI
+    priority = db.Column(db.Integer, default=50)  # 1-100, higher wins conflicts
+
+    # State
+    enabled = db.Column(db.Boolean, default=True)  # Enable/disable automation
+    run_once = db.Column(db.Boolean, default=False)  # Pause after first trigger
+    paused = db.Column(db.Boolean, default=False)  # Paused (set true after run_once executes)
+    notification_only = db.Column(db.Boolean, default=False)  # Only send notification, no actions
+
+    # Timestamps
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_triggered_at = db.Column(db.DateTime, nullable=True)
+
+    # Relationships
+    trigger = db.relationship('AutomationTrigger', backref='automation', uselist=False, cascade='all, delete-orphan')
+    actions = db.relationship('AutomationAction', backref='automation', lazy='dynamic', cascade='all, delete-orphan')
+    user = db.relationship('User', backref=db.backref('automations', lazy='dynamic'))
+
+    def __repr__(self):
+        return f'<Automation {self.name} (priority={self.priority}, enabled={self.enabled})>'
+
+
+class AutomationTrigger(db.Model):
+    """Trigger conditions for an automation (one per automation)"""
+    id = db.Column(db.Integer, primary_key=True)
+    automation_id = db.Column(db.Integer, db.ForeignKey('automation.id'), nullable=False)
+
+    # Trigger type: time, battery, flow, price, grid, weather
+    trigger_type = db.Column(db.String(50), nullable=False)
+
+    # ========== Time Trigger Fields ==========
+    time_of_day = db.Column(db.Time, nullable=True)  # When to trigger (HH:MM)
+    repeat_days = db.Column(db.String(20), nullable=True)  # "0,1,2,3,4,5,6" for Sun-Sat
+
+    # ========== Battery Trigger Fields ==========
+    # battery_condition: charged_up_to, discharged_down_to, discharged_to_reserve
+    battery_condition = db.Column(db.String(50), nullable=True)
+    battery_threshold = db.Column(db.Integer, nullable=True)  # 0-100%
+
+    # ========== Flow Trigger Fields ==========
+    # flow_source: home_usage, solar, grid_import, grid_export, battery_charge, battery_discharge
+    flow_source = db.Column(db.String(50), nullable=True)
+    # flow_transition: rises_above, drops_below
+    flow_transition = db.Column(db.String(20), nullable=True)
+    flow_threshold_kw = db.Column(db.Float, nullable=True)  # Threshold in kW
+
+    # ========== Price Trigger Fields ==========
+    # price_type: import, export
+    price_type = db.Column(db.String(20), nullable=True)
+    # price_transition: rises_above, drops_below
+    price_transition = db.Column(db.String(20), nullable=True)
+    price_threshold = db.Column(db.Float, nullable=True)  # Threshold in $/kWh
+
+    # ========== Grid Trigger Fields ==========
+    # grid_condition: off_grid, on_grid
+    grid_condition = db.Column(db.String(20), nullable=True)
+
+    # ========== Weather Trigger Fields ==========
+    # weather_condition: sunny, partly_sunny, cloudy
+    weather_condition = db.Column(db.String(20), nullable=True)
+
+    # ========== Time Window (optional constraint for all triggers) ==========
+    time_window_start = db.Column(db.Time, nullable=True)  # Only trigger after this time
+    time_window_end = db.Column(db.Time, nullable=True)  # Only trigger before this time
+
+    # ========== State Tracking (for edge detection) ==========
+    # Tracks last known state to detect transitions (rises_above, drops_below)
+    last_evaluated_value = db.Column(db.Float, nullable=True)
+    last_evaluated_at = db.Column(db.DateTime, nullable=True)
+
+    def __repr__(self):
+        return f'<AutomationTrigger type={self.trigger_type}>'
+
+
+class AutomationAction(db.Model):
+    """Actions to execute when automation triggers (one or more per automation)"""
+    id = db.Column(db.Integer, primary_key=True)
+    automation_id = db.Column(db.Integer, db.ForeignKey('automation.id'), nullable=False)
+
+    # Action type: set_backup_reserve, preserve_charge, set_operation_mode,
+    #              force_discharge, force_charge, curtail_inverter, send_notification
+    action_type = db.Column(db.String(50), nullable=False)
+
+    # Action parameters as JSON
+    # Examples:
+    #   set_backup_reserve: {"reserve_percent": 50}
+    #   preserve_charge: {} (no params, sets export to "never")
+    #   set_operation_mode: {"mode": "self_consumption"} or {"mode": "autonomous"} or {"mode": "backup"}
+    #   force_discharge: {"duration_minutes": 30}
+    #   force_charge: {"duration_minutes": 60, "target_percent": 100}
+    #   curtail_inverter: {} or {"power_limit_w": 2000}
+    #   send_notification: {"message": "Price spike detected!"}
+    parameters = db.Column(db.Text, nullable=True)  # JSON string
+
+    # Execution order within the automation
+    execution_order = db.Column(db.Integer, default=0)
+
+    def __repr__(self):
+        return f'<AutomationAction type={self.action_type}>'
