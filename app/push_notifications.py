@@ -54,7 +54,83 @@ def get_apns_auth_token():
 
 def send_push_notification(device_token: str, title: str, body: str, data: dict = None) -> bool:
     """
-    Send a push notification to an iOS device.
+    Send a push notification to a device.
+    Supports both Expo Push tokens and native APNs tokens.
+
+    Args:
+        device_token: The push token (Expo or APNs)
+        title: Notification title
+        body: Notification body text
+        data: Optional custom data payload
+
+    Returns:
+        True if notification was sent successfully, False otherwise
+    """
+    if not device_token:
+        logger.warning("Cannot send push notification - no device token")
+        return False
+
+    # Check if it's an Expo push token
+    if device_token.startswith('ExponentPushToken'):
+        return send_expo_push_notification(device_token, title, body, data)
+
+    # Otherwise use APNs
+    return send_apns_notification(device_token, title, body, data)
+
+
+def send_expo_push_notification(expo_token: str, title: str, body: str, data: dict = None) -> bool:
+    """
+    Send a push notification via Expo Push API.
+    Works for both iOS and Android without certificates.
+
+    Args:
+        expo_token: Expo push token (ExponentPushToken[...])
+        title: Notification title
+        body: Notification body text
+        data: Optional custom data payload
+
+    Returns:
+        True if notification was sent successfully
+    """
+    if not expo_token or not expo_token.startswith('ExponentPushToken'):
+        logger.warning(f"Invalid Expo push token: {expo_token}")
+        return False
+
+    message = {
+        "to": expo_token,
+        "title": title,
+        "body": body,
+        "sound": "default",
+        "priority": "high",
+    }
+
+    if data:
+        message["data"] = data
+
+    try:
+        response = httpx.post(
+            "https://exp.host/--/api/v2/push/send",
+            json=message,
+            headers={"Content-Type": "application/json"},
+            timeout=30.0
+        )
+
+        if response.status_code == 200:
+            result = response.json()
+            logger.info(f"Expo push notification sent successfully to {expo_token[:30]}...")
+            return True
+        else:
+            logger.error(f"Expo Push API error {response.status_code}: {response.text}")
+            return False
+
+    except Exception as e:
+        logger.error(f"Failed to send Expo push notification: {e}")
+        return False
+
+
+def send_apns_notification(device_token: str, title: str, body: str, data: dict = None) -> bool:
+    """
+    Send a push notification via APNs (native iOS).
 
     Args:
         device_token: The APNs device token
@@ -67,11 +143,7 @@ def send_push_notification(device_token: str, title: str, body: str, data: dict 
     """
     auth_token = get_apns_auth_token()
     if not auth_token:
-        logger.warning("Cannot send push notification - APNs not configured")
-        return False
-
-    if not device_token:
-        logger.warning("Cannot send push notification - no device token")
+        logger.warning("Cannot send APNs notification - APNs not configured")
         return False
 
     # Build APNs payload
@@ -110,14 +182,14 @@ def send_push_notification(device_token: str, title: str, body: str, data: dict 
             )
 
             if response.status_code == 200:
-                logger.info(f"Push notification sent successfully to {device_token[:20]}...")
+                logger.info(f"APNs notification sent successfully to {device_token[:20]}...")
                 return True
             else:
                 logger.error(f"APNs error {response.status_code}: {response.text}")
                 return False
 
     except Exception as e:
-        logger.error(f"Failed to send push notification: {e}")
+        logger.error(f"Failed to send APNs notification: {e}")
         return False
 
 

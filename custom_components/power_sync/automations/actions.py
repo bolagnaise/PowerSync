@@ -248,7 +248,7 @@ async def _action_send_notification(
     hass: HomeAssistant,
     params: Dict[str, Any]
 ) -> bool:
-    """Send notification via persistent notification and mobile push."""
+    """Send notification via persistent notification and Expo Push."""
     message = params.get("message", "Automation triggered")
     title = params.get("title", "PowerSync")
 
@@ -264,25 +264,56 @@ async def _action_send_notification(
             blocking=True,
         )
 
-        # Send push notifications to all mobile_app devices
-        notify_services = hass.services.async_services().get("notify", {})
-        for service_name in notify_services:
-            if service_name.startswith("mobile_app_"):
-                try:
-                    await hass.services.async_call(
-                        "notify",
-                        service_name,
-                        {
-                            "title": title,
-                            "message": message,
-                        },
-                        blocking=False,  # Don't wait for push delivery
-                    )
-                    _LOGGER.debug(f"Sent push notification via {service_name}")
-                except Exception as e:
-                    _LOGGER.warning(f"Failed to send push via {service_name}: {e}")
+        # Send push notification to PowerSync app via Expo Push API
+        await _send_expo_push(hass, title, message)
 
         return True
     except Exception as e:
         _LOGGER.error(f"Failed to send notification: {e}")
         return False
+
+
+async def _send_expo_push(hass: HomeAssistant, title: str, message: str) -> None:
+    """Send push notification via Expo Push API."""
+    from ..const import DOMAIN
+    import aiohttp
+
+    # Get registered push tokens
+    push_tokens = hass.data.get(DOMAIN, {}).get("push_tokens", {})
+    if not push_tokens:
+        _LOGGER.debug("No push tokens registered, skipping push notification")
+        return
+
+    # Prepare messages for Expo Push API
+    messages = []
+    for token_data in push_tokens.values():
+        token = token_data.get("token")
+        if token and token.startswith("ExponentPushToken"):
+            messages.append({
+                "to": token,
+                "title": title,
+                "body": message,
+                "sound": "default",
+                "priority": "high",
+            })
+
+    if not messages:
+        _LOGGER.debug("No valid Expo push tokens found")
+        return
+
+    # Send to Expo Push API
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://exp.host/--/api/v2/push/send",
+                json=messages,
+                headers={"Content-Type": "application/json"},
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    _LOGGER.info(f"📱 Push notification sent to {len(messages)} device(s)")
+                else:
+                    text = await response.text()
+                    _LOGGER.error(f"Expo Push API error: {response.status} - {text}")
+    except Exception as e:
+        _LOGGER.error(f"Failed to send Expo push notification: {e}")

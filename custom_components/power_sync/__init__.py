@@ -2168,6 +2168,59 @@ class AutomationGroupsView(HomeAssistantView):
             })
 
 
+class PushTokenRegisterView(HomeAssistantView):
+    """HTTP view to register push notification tokens."""
+
+    url = "/api/power_sync/push/register"
+    name = "api:power_sync:push_register"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Handle POST request - register push token."""
+        _LOGGER.info("📱 Push token registration request")
+
+        try:
+            data = await request.json()
+            push_token = data.get("push_token")
+            platform = data.get("platform", "unknown")
+            device_name = data.get("device_name", "Unknown device")
+
+            if not push_token:
+                return web.json_response(
+                    {"success": False, "error": "push_token is required"},
+                    status=400
+                )
+
+            # Store push token in hass.data
+            if DOMAIN not in self._hass.data:
+                self._hass.data[DOMAIN] = {}
+
+            if "push_tokens" not in self._hass.data[DOMAIN]:
+                self._hass.data[DOMAIN]["push_tokens"] = {}
+
+            # Store by token (to avoid duplicates)
+            self._hass.data[DOMAIN]["push_tokens"][push_token] = {
+                "token": push_token,
+                "platform": platform,
+                "device_name": device_name,
+                "registered_at": datetime.now().isoformat(),
+            }
+
+            _LOGGER.info(f"✅ Push token registered for {device_name} ({platform})")
+            return web.json_response({"success": True})
+
+        except Exception as e:
+            _LOGGER.error(f"Error registering push token: {e}", exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500
+            )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PowerSync from a config entry."""
     _LOGGER.info("=" * 60)
@@ -5750,6 +5803,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.http.register_view(AutomationToggleView(hass))
     hass.http.register_view(AutomationGroupsView(hass))
     _LOGGER.info("⚡ Automations HTTP endpoints registered at /api/power_sync/automations")
+
+    # Register HTTP endpoint for push token registration
+    hass.http.register_view(PushTokenRegisterView(hass))
+    _LOGGER.info("📱 Push token registration endpoint registered at /api/power_sync/push/register")
 
     # ======================================================================
     # SYNC BATTERY HEALTH SERVICE (from mobile app TEDAPI scans)

@@ -1067,8 +1067,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._site_data[CONF_AUTO_SYNC_ENABLED] = False
             # For Flow Power, these settings are already in _flow_power_data
 
-            # Go to optional demand charge configuration
-            return await self.async_step_demand_charges()
+            # Go to curtailment setup (for AC inverter configuration)
+            return await self.async_step_curtailment_setup()
 
         data_schema_dict: dict[vol.Marker, Any] = {}
 
@@ -1153,6 +1153,158 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    async def async_step_curtailment_setup(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle curtailment configuration during initial setup."""
+        # Only show for Tesla battery system (Sigenergy has its own DC curtailment step)
+        if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
+            return await self.async_step_demand_charges()
+
+        if user_input is not None:
+            # Store curtailment settings
+            self._curtailment_data = {
+                CONF_BATTERY_CURTAILMENT_ENABLED: user_input.get(CONF_BATTERY_CURTAILMENT_ENABLED, False),
+                CONF_AC_INVERTER_CURTAILMENT_ENABLED: user_input.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False),
+            }
+
+            # If AC inverter curtailment enabled, go to inverter brand selection
+            if user_input.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False):
+                return await self.async_step_inverter_brand_setup()
+
+            # Otherwise, go to demand charges
+            return await self.async_step_demand_charges()
+
+        # Get default from site_data if already set
+        default_curtailment = self._site_data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
+
+        return self.async_show_form(
+            step_id="curtailment_setup",
+            data_schema=vol.Schema({
+                vol.Optional(
+                    CONF_BATTERY_CURTAILMENT_ENABLED,
+                    default=default_curtailment,
+                ): bool,
+                vol.Optional(
+                    CONF_AC_INVERTER_CURTAILMENT_ENABLED,
+                    default=False,
+                ): bool,
+            }),
+        )
+
+    async def async_step_inverter_brand_setup(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle inverter brand selection during initial setup."""
+        if user_input is not None:
+            self._inverter_brand = user_input.get(CONF_INVERTER_BRAND, "sungrow")
+            return await self.async_step_inverter_config_setup()
+
+        return self.async_show_form(
+            step_id="inverter_brand_setup",
+            data_schema=vol.Schema({
+                vol.Required(
+                    CONF_INVERTER_BRAND,
+                    default="sungrow",
+                ): vol.In(INVERTER_BRANDS),
+            }),
+        )
+
+    async def async_step_inverter_config_setup(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle inverter configuration during initial setup."""
+        if user_input is not None:
+            # Store inverter configuration
+            inverter_brand = getattr(self, '_inverter_brand', "sungrow")
+            self._inverter_data = {
+                CONF_INVERTER_BRAND: inverter_brand,
+                CONF_INVERTER_MODEL: user_input.get(CONF_INVERTER_MODEL),
+                CONF_INVERTER_HOST: user_input.get(CONF_INVERTER_HOST, ""),
+                CONF_INVERTER_PORT: user_input.get(CONF_INVERTER_PORT, DEFAULT_INVERTER_PORT),
+            }
+
+            # Only include slave ID for Modbus brands (not Enphase/Zeversolar which use HTTP)
+            if inverter_brand not in ("enphase", "zeversolar"):
+                self._inverter_data[CONF_INVERTER_SLAVE_ID] = user_input.get(
+                    CONF_INVERTER_SLAVE_ID, DEFAULT_INVERTER_SLAVE_ID
+                )
+            else:
+                self._inverter_data[CONF_INVERTER_SLAVE_ID] = 1
+
+            # Include JWT token and Enlighten credentials for Enphase
+            if inverter_brand == "enphase":
+                self._inverter_data[CONF_INVERTER_TOKEN] = user_input.get(CONF_INVERTER_TOKEN, "")
+                self._inverter_data[CONF_ENPHASE_USERNAME] = user_input.get(CONF_ENPHASE_USERNAME, "")
+                self._inverter_data[CONF_ENPHASE_PASSWORD] = user_input.get(CONF_ENPHASE_PASSWORD, "")
+                self._inverter_data[CONF_ENPHASE_SERIAL] = user_input.get(CONF_ENPHASE_SERIAL, "")
+
+            # Fronius-specific: load following mode
+            if inverter_brand == "fronius":
+                self._inverter_data[CONF_FRONIUS_LOAD_FOLLOWING] = user_input.get(
+                    CONF_FRONIUS_LOAD_FOLLOWING, False
+                )
+
+            # Restore SOC threshold
+            self._inverter_data[CONF_INVERTER_RESTORE_SOC] = user_input.get(
+                CONF_INVERTER_RESTORE_SOC, DEFAULT_INVERTER_RESTORE_SOC
+            )
+
+            return await self.async_step_demand_charges()
+
+        # Get brand-specific models and defaults
+        brand = getattr(self, '_inverter_brand', "sungrow")
+        models = get_models_for_brand(brand)
+        defaults = get_brand_defaults(brand)
+
+        # Build brand-specific schema
+        schema_dict: dict[vol.Marker, Any] = {
+            vol.Required(
+                CONF_INVERTER_MODEL,
+                default=next(iter(models.keys())) if models else "",
+            ): vol.In(models),
+            vol.Required(
+                CONF_INVERTER_HOST,
+                default="",
+            ): str,
+            vol.Required(
+                CONF_INVERTER_PORT,
+                default=defaults["port"],
+            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
+        }
+
+        # Only show Slave ID for Modbus brands
+        if brand not in ("enphase", "zeversolar"):
+            schema_dict[vol.Required(
+                CONF_INVERTER_SLAVE_ID,
+                default=defaults["slave_id"],
+            )] = vol.All(vol.Coerce(int), vol.Range(min=1, max=247))
+
+        # Show JWT token and Enlighten credentials for Enphase
+        if brand == "enphase":
+            schema_dict[vol.Optional(CONF_INVERTER_TOKEN, default="")] = str
+            schema_dict[vol.Optional(CONF_ENPHASE_USERNAME, default="")] = str
+            schema_dict[vol.Optional(CONF_ENPHASE_PASSWORD, default="")] = str
+            schema_dict[vol.Optional(CONF_ENPHASE_SERIAL, default="")] = str
+
+        # Fronius load following mode
+        if brand == "fronius":
+            schema_dict[vol.Optional(CONF_FRONIUS_LOAD_FOLLOWING, default=False)] = bool
+
+        # Restore SOC threshold for all brands
+        schema_dict[vol.Optional(
+            CONF_INVERTER_RESTORE_SOC,
+            default=DEFAULT_INVERTER_RESTORE_SOC,
+        )] = vol.All(vol.Coerce(int), vol.Range(min=0, max=100))
+
+        return self.async_show_form(
+            step_id="inverter_config_setup",
+            data_schema=vol.Schema(schema_dict),
+            description_placeholders={
+                "brand": brand.title(),
+            },
+        )
+
     async def async_step_demand_charges(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -1165,6 +1317,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 **self._site_data,
                 **self._aemo_data,  # Include AEMO configuration
                 **self._flow_power_data,  # Include Flow Power configuration
+                **getattr(self, '_curtailment_data', {}),  # Include curtailment configuration
+                **getattr(self, '_inverter_data', {}),  # Include inverter configuration
                 CONF_ELECTRICITY_PROVIDER: self._selected_electricity_provider,
             }
 

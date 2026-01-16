@@ -6963,13 +6963,15 @@ def api_battery_health_from_cloud():
 def api_push_register():
     """
     Register device for push notifications.
+    Supports both Expo Push tokens and native APNs tokens.
 
     Authentication: Bearer token in Authorization header
 
     Request body:
     {
-        "deviceToken": "apns-device-token-string",
-        "platform": "ios"  # Currently only iOS supported
+        "push_token": "ExponentPushToken[...] or native-device-token",
+        "platform": "ios" or "android",
+        "device_name": "optional device name"
     }
 
     Response:
@@ -6988,21 +6990,21 @@ def api_push_register():
     if not data:
         return jsonify({'success': False, 'error': 'No data provided'}), 400
 
-    device_token = data.get('deviceToken')
+    # Accept both 'push_token' (new) and 'deviceToken' (old) for backwards compatibility
+    device_token = data.get('push_token') or data.get('deviceToken')
     platform = data.get('platform', 'ios')
+    device_name = data.get('device_name', 'Unknown device')
 
     if not device_token:
-        return jsonify({'success': False, 'error': 'deviceToken is required'}), 400
-
-    if platform != 'ios':
-        return jsonify({'success': False, 'error': 'Only iOS platform is currently supported'}), 400
+        return jsonify({'success': False, 'error': 'push_token is required'}), 400
 
     try:
         user.apns_device_token = device_token
         user.push_notifications_enabled = True
         db.session.commit()
 
-        logger.info(f"Registered push token for user {user.email}: {device_token[:20]}...")
+        token_type = "Expo" if device_token.startswith("ExponentPushToken") else "native"
+        logger.info(f"Registered {token_type} push token for user {user.email} ({platform}/{device_name}): {device_token[:30]}...")
 
         return jsonify({
             'success': True,
