@@ -105,6 +105,20 @@ def api_auth_required(f):
 # Cache for NEM region auto-detection (keyed by site_id)
 _nem_region_cache = {}
 
+# NEM region to timezone mapping (for automation time triggers)
+NEM_REGION_TIMEZONES = {
+    "NSW1": "Australia/Sydney",
+    "VIC1": "Australia/Melbourne",
+    "QLD1": "Australia/Brisbane",
+    "SA1": "Australia/Adelaide",
+    "TAS1": "Australia/Hobart",
+}
+
+
+def _get_timezone_from_nem_region(nem_region: str) -> str:
+    """Get IANA timezone from NEM region code."""
+    return NEM_REGION_TIMEZONES.get(nem_region, "Australia/Sydney")
+
 
 def _get_nem_region_from_amber_site(amber_client, site_id):
     """Auto-detect NEM region from Amber site's network field.
@@ -1328,6 +1342,17 @@ def settings():
                             site_id = str(energy_sites[0].get('energy_site_id'))
                             current_user.tesla_energy_site_id = site_id
                             logger.info(f"Auto-detected Tesla energy site ID via Teslemetry: {site_id}")
+
+                            # Fetch and store timezone for automation time triggers
+                            try:
+                                site_info = teslemetry_client.get_site_info(site_id)
+                                if site_info:
+                                    site_timezone = site_info.get('installation_time_zone')
+                                    if site_timezone:
+                                        current_user.timezone = site_timezone
+                                        logger.info(f"Updated user timezone from Teslemetry site info: {site_timezone}")
+                            except Exception as tz_err:
+                                logger.warning(f"Could not fetch site timezone via Teslemetry: {tz_err}")
                         else:
                             # Multiple sites - user needs to choose
                             logger.info(f"Found {len(energy_sites)} energy sites via Teslemetry - user needs to select one")
@@ -1708,12 +1733,26 @@ def amber_settings():
                     logger.error(f"Failed to restore export rule when disabling curtailment")
 
         # Save selected site ID (auto-select if only 1 site)
+        selected_amber_site_id = None
         if len(amber_sites) == 1:
             current_user.amber_site_id = amber_sites[0]['id']
+            selected_amber_site_id = amber_sites[0]['id']
             logger.info(f"Auto-selected single Amber site: {current_user.amber_site_id}")
         elif form.amber_site_id.data:
             current_user.amber_site_id = form.amber_site_id.data
+            selected_amber_site_id = form.amber_site_id.data
             logger.info(f"User selected Amber site: {current_user.amber_site_id}")
+
+        # Set timezone from Amber NEM region for Sigenergy users (who don't have Tesla to get timezone from)
+        if selected_amber_site_id and current_user.battery_system == 'sigenergy':
+            try:
+                nem_region = _get_nem_region_from_amber_site(amber_client, selected_amber_site_id)
+                if nem_region:
+                    tz = _get_timezone_from_nem_region(nem_region)
+                    current_user.timezone = tz
+                    logger.info(f"Updated user timezone from Amber NEM region ({nem_region}): {tz}")
+            except Exception as e:
+                logger.warning(f"Could not set timezone from Amber NEM region: {e}")
 
         # Export Price Boost settings
         current_user.export_boost_enabled = 'export_boost_enabled' in request.form
@@ -2003,6 +2042,19 @@ def select_tesla_energy_site():
             logger.error(f"Error verifying site ID: {e}")
 
     current_user.tesla_energy_site_id = site_id
+
+    # Fetch and store the site's timezone for automation time triggers
+    if tesla_client:
+        try:
+            site_info = tesla_client.get_site_info(site_id)
+            if site_info:
+                site_timezone = site_info.get('installation_time_zone')
+                if site_timezone:
+                    current_user.timezone = site_timezone
+                    logger.info(f"Updated user timezone from Tesla site info: {site_timezone}")
+        except Exception as e:
+            logger.warning(f"Could not fetch site timezone: {e}")
+
     db.session.commit()
     logger.info(f"User {current_user.email} selected energy site: {site_id}")
 
@@ -5650,6 +5702,18 @@ def fleet_api_oauth_callback():
                     # Single site - auto-select it
                     site_id = str(energy_sites[0].get('energy_site_id'))
                     current_user.tesla_energy_site_id = site_id
+
+                    # Fetch and store timezone for automation time triggers
+                    try:
+                        site_info = fleet_client.get_site_info(site_id)
+                        if site_info:
+                            site_timezone = site_info.get('installation_time_zone')
+                            if site_timezone:
+                                current_user.timezone = site_timezone
+                                logger.info(f"Updated user timezone from Fleet API site info: {site_timezone}")
+                    except Exception as tz_err:
+                        logger.warning(f"Could not fetch site timezone via Fleet API: {tz_err}")
+
                     db.session.commit()
                     logger.info(f"Auto-detected Tesla energy site ID: {site_id}")
                     flash('✓ Successfully connected to Tesla Fleet API!')

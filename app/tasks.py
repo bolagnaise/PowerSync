@@ -613,6 +613,11 @@ def _sync_all_users_internal(websocket_data, sync_mode='initial_forecast'):
                 powerwall_tz = site_info.get('installation_time_zone')
                 if powerwall_tz:
                     logger.info(f"Using Powerwall timezone: {powerwall_tz}")
+                    # Update user's timezone if it changed or wasn't set
+                    if user.timezone != powerwall_tz:
+                        user.timezone = powerwall_tz
+                        db.session.commit()
+                        logger.info(f"Updated user timezone for {user.email}: {powerwall_tz}")
                 else:
                     logger.warning(f"No installation_time_zone in site_info for {user.email}")
 

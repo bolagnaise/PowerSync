@@ -67,11 +67,13 @@ def evaluate_trigger(
 
 
 def _is_within_time_window(trigger: AutomationTrigger, current_state: Dict[str, Any]) -> bool:
-    """Check if current time is within the optional time window."""
+    """Check if current time is within the optional time window (uses user's local timezone)."""
     if not trigger.time_window_start and not trigger.time_window_end:
         return True  # No window constraint
 
-    current_time = current_state.get('current_time', datetime.now()).time()
+    current_datetime = current_state.get('current_time', datetime.now())
+    current_time = current_datetime.time()
+    user_timezone = current_state.get('user_timezone', 'UTC')
 
     start = trigger.time_window_start
     end = trigger.time_window_end
@@ -82,10 +84,17 @@ def _is_within_time_window(trigger: AutomationTrigger, current_state: Dict[str, 
     # Handle overnight windows (e.g., 22:00 to 06:00)
     if start <= end:
         # Normal window (e.g., 09:00 to 17:00)
-        return start <= current_time <= end
+        is_within = start <= current_time <= end
     else:
         # Overnight window (e.g., 22:00 to 06:00)
-        return current_time >= start or current_time <= end
+        is_within = current_time >= start or current_time <= end
+
+    _LOGGER.debug(
+        f"Time window check: {current_time.strftime('%H:%M')} ({user_timezone}) "
+        f"window={start.strftime('%H:%M')}-{end.strftime('%H:%M')}, within={is_within}"
+    )
+
+    return is_within
 
 
 def _evaluate_time_trigger(
@@ -98,13 +107,22 @@ def _evaluate_time_trigger(
 
     Triggers once per day at the specified time (with 1-minute tolerance).
     Respects repeat_days (0=Sun, 1=Mon, ..., 6=Sat).
+    Uses user's local timezone from their site configuration.
     """
     if not trigger.time_of_day:
         return TriggerResult(triggered=False, reason="No time_of_day set")
 
     now = current_state.get('current_time', datetime.now())
+    user_timezone = current_state.get('user_timezone', 'UTC')
     current_time = now.time()
     current_day = now.weekday()  # Monday=0, Sunday=6
+
+    # Log timezone for debugging
+    _LOGGER.debug(
+        f"Time trigger evaluation for user {user.id}: "
+        f"timezone={user_timezone}, local_time={now.strftime('%Y-%m-%d %H:%M:%S')}, "
+        f"trigger_time={trigger.time_of_day.strftime('%H:%M')}"
+    )
 
     # Convert to our format (Sunday=0)
     day_of_week = (current_day + 1) % 7
@@ -117,23 +135,44 @@ def _evaluate_time_trigger(
 
     # Check if current time matches trigger time (within 1 minute tolerance)
     trigger_time = trigger.time_of_day
-    trigger_datetime = datetime.combine(now.date(), trigger_time)
+
+    # Create trigger datetime in user's timezone
+    if hasattr(now, 'tzinfo') and now.tzinfo is not None:
+        # now is timezone-aware, combine with same timezone
+        trigger_datetime = datetime.combine(now.date(), trigger_time, tzinfo=now.tzinfo)
+    else:
+        trigger_datetime = datetime.combine(now.date(), trigger_time)
+
     time_diff = abs((now - trigger_datetime).total_seconds())
 
     if time_diff <= 60:  # Within 1 minute
         # Check if we already triggered recently (prevent duplicate triggers)
         if trigger.last_evaluated_at:
-            since_last = (now - trigger.last_evaluated_at).total_seconds()
+            # last_evaluated_at is stored as naive UTC, so compare in a consistent way
+            last_eval_utc = trigger.last_evaluated_at
+            if hasattr(now, 'tzinfo') and now.tzinfo is not None:
+                # Convert now to UTC for comparison
+                from zoneinfo import ZoneInfo
+                now_utc = now.astimezone(ZoneInfo('UTC')).replace(tzinfo=None)
+                since_last = (now_utc - last_eval_utc).total_seconds()
+            else:
+                since_last = (now - last_eval_utc).total_seconds()
+
             if since_last < 300:  # 5 minutes
                 return TriggerResult(triggered=False, reason="Already triggered recently")
 
-        # Update last evaluated time
-        trigger.last_evaluated_at = now
+        # Update last evaluated time (store as UTC)
+        trigger.last_evaluated_at = datetime.utcnow()
         db.session.commit()
+
+        _LOGGER.info(
+            f"Time trigger fired for user {user.id} at {now.strftime('%H:%M')} {user_timezone} "
+            f"(target: {trigger_time.strftime('%H:%M')})"
+        )
 
         return TriggerResult(
             triggered=True,
-            reason=f"Time trigger at {trigger_time.strftime('%H:%M')}"
+            reason=f"Time trigger at {trigger_time.strftime('%H:%M')} ({user_timezone})"
         )
 
     return TriggerResult(triggered=False, reason="Not yet time")

@@ -123,9 +123,15 @@ class AutomationEngine:
         Get current state for a user (battery, power flows, prices, etc.).
 
         This fetches live data from the user's configured battery system.
+        Uses the user's timezone for time-based triggers.
         """
         from app.api_clients import get_tesla_client, AmberAPIClient
         from app.sigenergy_client import SigenergyAPIClient
+        from zoneinfo import ZoneInfo
+
+        # Get current time in user's timezone (for time-based automation triggers)
+        user_tz = ZoneInfo(user.timezone) if user.timezone else ZoneInfo('Australia/Sydney')
+        current_time_local = datetime.now(user_tz)
 
         state: Dict[str, Any] = {
             'battery_percent': None,
@@ -139,7 +145,8 @@ class AutomationEngine:
             'export_price': None,
             'grid_status': 'on_grid',  # 'on_grid' or 'off_grid'
             'weather': None,  # 'sunny', 'partly_sunny', 'cloudy'
-            'current_time': datetime.now(),
+            'current_time': current_time_local,  # User's local time for automation triggers
+            'user_timezone': str(user_tz),  # Pass timezone info for logging
             'backup_reserve': None,
         }
 
