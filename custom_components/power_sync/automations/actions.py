@@ -2,13 +2,13 @@
 Action execution logic for HA automations.
 
 Supported actions:
-- set_backup_reserve: Set battery backup reserve percentage
-- preserve_charge: Prevent battery discharge (set export to "never")
-- set_operation_mode: Set Powerwall operation mode
-- force_discharge: Force battery discharge for a duration
-- force_charge: Force battery charge for a duration
-- curtail_inverter: Curtail AC-coupled solar inverter
-- send_notification: Send push notification to user
+- set_backup_reserve: Set battery backup reserve percentage (Tesla only)
+- preserve_charge: Prevent battery discharge (Tesla: set export to "never", Sigenergy: not supported)
+- set_operation_mode: Set Powerwall operation mode (Tesla only)
+- force_discharge: Force battery discharge for a duration (Tesla only)
+- force_charge: Force battery charge for a duration (Tesla only)
+- curtail_inverter: Curtail AC-coupled solar inverter (both Tesla and Sigenergy)
+- send_notification: Send push notification to user (both)
 """
 
 import logging
@@ -18,6 +18,12 @@ from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _is_sigenergy(config_entry: ConfigEntry) -> bool:
+    """Check if this is a Sigenergy system."""
+    from ..const import CONF_SIGENERGY_STATION_ID
+    return bool(config_entry.data.get(CONF_SIGENERGY_STATION_ID))
 
 
 async def execute_actions(
@@ -100,7 +106,11 @@ async def _action_set_backup_reserve(
     config_entry: ConfigEntry,
     params: Dict[str, Any]
 ) -> bool:
-    """Set battery backup reserve percentage."""
+    """Set battery backup reserve percentage (Tesla only)."""
+    if _is_sigenergy(config_entry):
+        _LOGGER.warning("set_backup_reserve not supported for Sigenergy")
+        return False
+
     from ..const import DOMAIN, SERVICE_SET_BACKUP_RESERVE
 
     # Accept both "percent" and "reserve_percent" for flexibility
@@ -116,7 +126,7 @@ async def _action_set_backup_reserve(
         await hass.services.async_call(
             DOMAIN,
             SERVICE_SET_BACKUP_RESERVE,
-            {"percent": reserve_percent},  # Service expects "percent"
+            {"percent": reserve_percent},
             blocking=True,
         )
         return True
@@ -129,14 +139,19 @@ async def _action_preserve_charge(
     hass: HomeAssistant,
     config_entry: ConfigEntry
 ) -> bool:
-    """Prevent battery discharge by setting export rule to 'never'."""
+    """Prevent battery discharge."""
+    if _is_sigenergy(config_entry):
+        # Sigenergy: Could potentially set export limit to 0, but that's different behavior
+        _LOGGER.warning("preserve_charge not fully supported for Sigenergy - use curtail_inverter instead")
+        return False
+
     from ..const import DOMAIN, SERVICE_SET_GRID_EXPORT
 
     try:
         await hass.services.async_call(
             DOMAIN,
             SERVICE_SET_GRID_EXPORT,
-            {"rule": "never"},  # Service expects "rule"
+            {"rule": "never"},
             blocking=True,
         )
         return True
@@ -150,7 +165,11 @@ async def _action_set_operation_mode(
     config_entry: ConfigEntry,
     params: Dict[str, Any]
 ) -> bool:
-    """Set battery operation mode."""
+    """Set battery operation mode (Tesla only)."""
+    if _is_sigenergy(config_entry):
+        _LOGGER.warning("set_operation_mode not supported for Sigenergy")
+        return False
+
     from ..const import DOMAIN, SERVICE_SET_OPERATION_MODE
 
     mode = params.get("mode")
@@ -182,6 +201,10 @@ async def _action_force_discharge(
     params: Dict[str, Any]
 ) -> bool:
     """Force battery discharge for a specified duration."""
+    if _is_sigenergy(config_entry):
+        _LOGGER.warning("force_discharge not supported for Sigenergy in HA")
+        return False
+
     from ..const import DOMAIN, SERVICE_FORCE_DISCHARGE
 
     # Accept both "duration" and "duration_minutes" for flexibility
@@ -191,7 +214,7 @@ async def _action_force_discharge(
         await hass.services.async_call(
             DOMAIN,
             SERVICE_FORCE_DISCHARGE,
-            {"duration": duration},  # Service expects "duration"
+            {"duration": duration},
             blocking=True,
         )
         return True
@@ -206,6 +229,10 @@ async def _action_force_charge(
     params: Dict[str, Any]
 ) -> bool:
     """Force battery charge for a specified duration."""
+    if _is_sigenergy(config_entry):
+        _LOGGER.warning("force_charge not supported for Sigenergy in HA")
+        return False
+
     from ..const import DOMAIN, SERVICE_FORCE_CHARGE
 
     # Accept both "duration" and "duration_minutes" for flexibility
@@ -215,7 +242,7 @@ async def _action_force_charge(
         await hass.services.async_call(
             DOMAIN,
             SERVICE_FORCE_CHARGE,
-            {"duration": duration},  # Service expects "duration"
+            {"duration": duration},
             blocking=True,
         )
         return True
@@ -229,7 +256,7 @@ async def _action_curtail_inverter(
     config_entry: ConfigEntry,
     params: Dict[str, Any]
 ) -> bool:
-    """Curtail AC-coupled solar inverter."""
+    """Curtail AC-coupled solar inverter (works for both Tesla and Sigenergy)."""
     from ..const import DOMAIN, SERVICE_CURTAIL_INVERTER
 
     # Service expects "mode": "load_following" or "shutdown"

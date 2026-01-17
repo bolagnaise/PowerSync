@@ -130,11 +130,14 @@ def _action_preserve_charge(user: User) -> bool:
                 _LOGGER.error(f"Failed to preserve charge: {e}")
                 return False
     elif user.battery_system == 'sigenergy':
-        from app.sigenergy_client import SigenergyAPIClient
+        from app.sigenergy_modbus import get_sigenergy_modbus_client
         try:
-            client = SigenergyAPIClient(user)
-            # Set discharge rate to 0 to prevent discharge
-            result = client.set_discharge_rate(0)
+            client = get_sigenergy_modbus_client(user)
+            if not client:
+                _LOGGER.error("Sigenergy Modbus not configured")
+                return False
+            # Set discharge rate limit to 0 to prevent discharge
+            result = client.set_discharge_rate_limit(0)
             return result
         except Exception as e:
             _LOGGER.error(f"Failed to preserve charge (Sigenergy): {e}")
@@ -223,16 +226,20 @@ def _action_force_discharge(params: Dict[str, Any], user: User) -> bool:
             return False
 
     elif user.battery_system == 'sigenergy':
-        from app.sigenergy_client import SigenergyAPIClient
+        from app.sigenergy_modbus import get_sigenergy_modbus_client
         try:
-            client = SigenergyAPIClient(user)
-            # Enable discharge at maximum rate
-            result = client.force_discharge(duration_minutes)
-            if result:
-                user.manual_discharge_active = True
-                user.manual_discharge_expires_at = datetime.utcnow() + timedelta(minutes=duration_minutes)
-                db.session.commit()
-            return result
+            client = get_sigenergy_modbus_client(user)
+            if not client:
+                _LOGGER.error("Sigenergy Modbus not configured")
+                return False
+            # Set high discharge rate limit and remove export limit to allow discharge
+            client.set_discharge_rate_limit(10.0)  # 10kW max discharge
+            client.restore_export_limit()  # Remove export limit
+            user.manual_discharge_active = True
+            user.manual_discharge_expires_at = datetime.utcnow() + timedelta(minutes=duration_minutes)
+            db.session.commit()
+            _LOGGER.info(f"Force discharge activated for Sigenergy ({duration_minutes} minutes)")
+            return True
         except Exception as e:
             _LOGGER.error(f"Failed to force discharge (Sigenergy): {e}")
             return False
@@ -295,15 +302,20 @@ def _action_force_charge(params: Dict[str, Any], user: User) -> bool:
             return False
 
     elif user.battery_system == 'sigenergy':
-        from app.sigenergy_client import SigenergyAPIClient
+        from app.sigenergy_modbus import get_sigenergy_modbus_client
         try:
-            client = SigenergyAPIClient(user)
-            result = client.force_charge(duration_minutes)
-            if result:
-                user.manual_charge_active = True
-                user.manual_charge_expires_at = datetime.utcnow() + timedelta(minutes=duration_minutes)
-                db.session.commit()
-            return result
+            client = get_sigenergy_modbus_client(user)
+            if not client:
+                _LOGGER.error("Sigenergy Modbus not configured")
+                return False
+            # Set high charge rate limit and zero discharge to force charging
+            client.set_charge_rate_limit(10.0)  # 10kW max charge
+            client.set_discharge_rate_limit(0)  # Prevent discharge
+            user.manual_charge_active = True
+            user.manual_charge_expires_at = datetime.utcnow() + timedelta(minutes=duration_minutes)
+            db.session.commit()
+            _LOGGER.info(f"Force charge activated for Sigenergy ({duration_minutes} minutes)")
+            return True
         except Exception as e:
             _LOGGER.error(f"Failed to force charge (Sigenergy): {e}")
             return False
