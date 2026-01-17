@@ -86,10 +86,6 @@ class AutomationEngine:
                         _LOGGER.info(
                             f"Automation '{automation.name}' (id={automation.id}) triggered: {result.reason}"
                         )
-                    else:
-                        _LOGGER.debug(
-                            f"Automation '{automation.name}' (id={automation.id}) not triggered: {result.reason}"
-                        )
 
                         # Execute actions (skip if higher priority automation already did same action)
                         actions_executed = self._execute_automation(
@@ -110,6 +106,10 @@ class AutomationEngine:
                                 )
 
                             db.session.commit()
+                    else:
+                        _LOGGER.debug(
+                            f"Automation '{automation.name}' (id={automation.id}) not triggered: {result.reason}"
+                        )
 
                 except Exception as e:
                     _LOGGER.error(
@@ -284,29 +284,37 @@ class AutomationEngine:
         """
         Execute an automation's actions.
 
+        Always sends a notification when automation triggers.
+        If notification_only is False, also executes the configured actions.
+
         Args:
             automation: The automation to execute
             user: The user who owns the automation
             executed_actions: Set of action types already executed by higher-priority automations
 
         Returns:
-            True if any actions were executed
+            True if automation was processed successfully
         """
+        from app.push_notifications import send_push_notification
+
+        # Always send notification when automation triggers
+        message = f"Automation '{automation.name}' triggered"
+        try:
+            if user.apns_device_token:
+                send_push_notification(user.apns_device_token, "PowerSync Automation", message, {
+                    "type": "automation",
+                    "automation_id": automation.id,
+                    "automation_name": automation.name
+                })
+                _LOGGER.info(f"📱 Sent notification for automation '{automation.name}'")
+            else:
+                _LOGGER.warning(f"Cannot send notification - user {user.id} has no device token")
+        except Exception as e:
+            _LOGGER.warning(f"Failed to send notification: {e}")
+
+        # If notification_only, we're done - don't execute actions
         if automation.notification_only:
-            # Only send notification, no actual actions
-            from app.push_notifications import send_push_notification
-            message = f"Automation '{automation.name}' triggered"
-            try:
-                if user.apns_device_token:
-                    send_push_notification(user.apns_device_token, "Automation Triggered", message, {
-                        "type": "automation",
-                        "automation_id": automation.id,
-                        "automation_name": automation.name
-                    })
-                else:
-                    _LOGGER.warning(f"Cannot send notification - user {user.id} has no device token")
-            except Exception as e:
-                _LOGGER.warning(f"Failed to send notification: {e}")
+            _LOGGER.info(f"Automation '{automation.name}' is notification-only, skipping actions")
             return True
 
         # Get actions sorted by execution order
@@ -325,7 +333,8 @@ class AutomationEngine:
             executed_actions.add(action.action_type)
 
         if not actions_to_execute:
-            return False
+            _LOGGER.debug(f"Automation '{automation.name}' has no actions to execute")
+            return True  # Still successful since notification was sent
 
         # Execute actions
         return execute_actions(actions_to_execute, user)

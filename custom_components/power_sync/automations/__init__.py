@@ -420,16 +420,25 @@ class AutomationEngine:
         automation: Dict[str, Any],
         executed_actions: set
     ) -> bool:
-        """Execute an automation's actions."""
+        """Execute an automation's actions.
+
+        Always sends a notification when automation triggers.
+        If notification_only is False, also executes the configured actions.
+        """
+        automation_name = automation.get('name', 'Unnamed')
+
+        # Always send notification when automation triggers
+        await self._async_send_notification(
+            f"Automation '{automation_name}' triggered"
+        )
+
+        # If notification_only, we're done - don't execute actions
         if automation.get("notification_only"):
-            # Only send notification
-            await self._async_send_notification(
-                f"Automation '{automation.get('name')}' triggered"
-            )
+            _LOGGER.info(f"Automation '{automation_name}' is notification-only, skipping actions")
             return True
 
         actions = automation.get("actions", [])
-        _LOGGER.debug(f"Automation '{automation.get('name')}' has {len(actions)} action(s): {[a.get('action_type') for a in actions]}")
+        _LOGGER.debug(f"Automation '{automation_name}' has {len(actions)} action(s): {[a.get('action_type') for a in actions]}")
 
         # Filter out conflicting actions
         actions_to_execute = []
@@ -444,13 +453,15 @@ class AutomationEngine:
             executed_actions.add(action_type)
 
         if not actions_to_execute:
-            return False
+            _LOGGER.debug(f"Automation '{automation_name}' has no actions to execute")
+            return True  # Still successful since notification was sent
 
-        return await execute_actions(
+        result = await execute_actions(
             self._hass,
             self._config_entry,
             actions_to_execute
         )
+        return result
 
     async def _async_send_notification(self, message: str) -> None:
         """Send notification via persistent notification and Expo Push."""
