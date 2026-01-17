@@ -718,6 +718,87 @@ class SigenergyController(InverterController):
             _LOGGER.error(f"Error setting export limit: {e}")
             return False
 
+    async def restore_export_limit(self) -> bool:
+        """Restore the export limit to unlimited (normal operation).
+
+        Returns:
+            True if successful
+        """
+        try:
+            if not await self.connect():
+                return False
+
+            _LOGGER.info("Restoring Sigenergy export limit to unlimited")
+            values = self._from_unsigned32(self.EXPORT_LIMIT_UNLIMITED)
+            success = await self._write_holding_registers(self.REG_GRID_EXPORT_LIMIT, values)
+
+            if success:
+                _LOGGER.info("Successfully restored Sigenergy export limit to unlimited")
+                # Clear stored original limit
+                self._original_pv_limit = None
+            else:
+                _LOGGER.error("Failed to restore Sigenergy export limit")
+
+            return success
+
+        except Exception as e:
+            _LOGGER.error(f"Error restoring export limit: {e}")
+            return False
+
+    async def set_charge_rate_limit(self, limit_kw: float) -> bool:
+        """Set the maximum battery charge rate.
+
+        Args:
+            limit_kw: Charge rate limit in kW (0 to disable charging)
+
+        Returns:
+            True if successful
+        """
+        try:
+            if not await self.connect():
+                return False
+
+            scaled_value = int(limit_kw * self.GAIN_POWER)
+            if scaled_value < 0:
+                scaled_value = 0
+            if scaled_value > 0xFFFFFFFE:
+                scaled_value = 0xFFFFFFFE
+
+            _LOGGER.info(f"Setting Sigenergy charge rate limit to {limit_kw} kW")
+            values = self._from_unsigned32(scaled_value)
+            return await self._write_holding_registers(self.REG_ESS_MAX_CHARGE_LIMIT, values)
+
+        except Exception as e:
+            _LOGGER.error(f"Error setting charge rate limit: {e}")
+            return False
+
+    async def set_discharge_rate_limit(self, limit_kw: float) -> bool:
+        """Set the maximum battery discharge rate.
+
+        Args:
+            limit_kw: Discharge rate limit in kW (0 to disable discharging)
+
+        Returns:
+            True if successful
+        """
+        try:
+            if not await self.connect():
+                return False
+
+            scaled_value = int(limit_kw * self.GAIN_POWER)
+            if scaled_value < 0:
+                scaled_value = 0
+            if scaled_value > 0xFFFFFFFE:
+                scaled_value = 0xFFFFFFFE
+
+            _LOGGER.info(f"Setting Sigenergy discharge rate limit to {limit_kw} kW")
+            values = self._from_unsigned32(scaled_value)
+            return await self._write_holding_registers(self.REG_ESS_MAX_DISCHARGE_LIMIT, values)
+
+        except Exception as e:
+            _LOGGER.error(f"Error setting discharge rate limit: {e}")
+            return False
+
     async def __aenter__(self):
         """Async context manager entry."""
         await self.connect()

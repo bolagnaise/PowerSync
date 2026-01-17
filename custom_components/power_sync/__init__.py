@@ -4590,6 +4590,73 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         _LOGGER.info(f"🔋 FORCE DISCHARGE: Activating for {duration} minutes")
 
+        # Check if this is a Sigenergy system
+        is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
+        if is_sigenergy:
+            try:
+                from .inverters.sigenergy import SigenergyController
+                modbus_host = entry.options.get(
+                    CONF_SIGENERGY_MODBUS_HOST,
+                    entry.data.get(CONF_SIGENERGY_MODBUS_HOST)
+                )
+                if not modbus_host:
+                    _LOGGER.error("Force discharge: Sigenergy Modbus host not configured")
+                    return
+
+                modbus_port = entry.options.get(
+                    CONF_SIGENERGY_MODBUS_PORT,
+                    entry.data.get(CONF_SIGENERGY_MODBUS_PORT, 502)
+                )
+                modbus_slave_id = entry.options.get(
+                    CONF_SIGENERGY_MODBUS_SLAVE_ID,
+                    entry.data.get(CONF_SIGENERGY_MODBUS_SLAVE_ID, 1)
+                )
+
+                controller = SigenergyController(
+                    host=modbus_host,
+                    port=modbus_port,
+                    slave_id=modbus_slave_id,
+                )
+
+                # Set high discharge rate and restore export limit
+                discharge_result = await controller.set_discharge_rate_limit(10.0)
+                export_result = await controller.restore_export_limit()
+                await controller.disconnect()
+
+                if discharge_result and export_result:
+                    force_discharge_state["active"] = True
+                    force_discharge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
+                    _LOGGER.info(f"✅ Sigenergy FORCE DISCHARGE ACTIVE for {duration} minutes")
+
+                    # Dispatch event for switch entity
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                        "active": True,
+                        "expires_at": force_discharge_state["expires_at"].isoformat(),
+                        "duration": duration,
+                    })
+
+                    # Schedule auto-restore
+                    if force_discharge_state.get("cancel_expiry_timer"):
+                        force_discharge_state["cancel_expiry_timer"]()
+
+                    async def auto_restore_sigenergy(_now):
+                        if force_discharge_state["active"]:
+                            _LOGGER.info("⏰ Sigenergy force discharge expired, auto-restoring")
+                            await handle_restore_normal(ServiceCall(DOMAIN, SERVICE_RESTORE_NORMAL, {}))
+
+                    force_discharge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass,
+                        auto_restore_sigenergy,
+                        force_discharge_state["expires_at"],
+                    )
+                    await persist_force_mode_state()
+                else:
+                    _LOGGER.error(f"Sigenergy force discharge failed: discharge={discharge_result}, export={export_result}")
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error in Sigenergy force discharge: {e}", exc_info=True)
+                return
+
         try:
             # Get current token and provider using helper function
             current_token, provider = get_tesla_api_token(hass, entry)
@@ -4853,6 +4920,82 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             duration = DEFAULT_DISCHARGE_DURATION
 
         _LOGGER.info(f"🔌 FORCE CHARGE: Activating for {duration} minutes")
+
+        # Check if this is a Sigenergy system
+        is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
+        if is_sigenergy:
+            try:
+                from .inverters.sigenergy import SigenergyController
+                modbus_host = entry.options.get(
+                    CONF_SIGENERGY_MODBUS_HOST,
+                    entry.data.get(CONF_SIGENERGY_MODBUS_HOST)
+                )
+                if not modbus_host:
+                    _LOGGER.error("Force charge: Sigenergy Modbus host not configured")
+                    return
+
+                modbus_port = entry.options.get(
+                    CONF_SIGENERGY_MODBUS_PORT,
+                    entry.data.get(CONF_SIGENERGY_MODBUS_PORT, 502)
+                )
+                modbus_slave_id = entry.options.get(
+                    CONF_SIGENERGY_MODBUS_SLAVE_ID,
+                    entry.data.get(CONF_SIGENERGY_MODBUS_SLAVE_ID, 1)
+                )
+
+                controller = SigenergyController(
+                    host=modbus_host,
+                    port=modbus_port,
+                    slave_id=modbus_slave_id,
+                )
+
+                # Cancel active discharge mode if switching to charge
+                if force_discharge_state["active"]:
+                    _LOGGER.info("Canceling active discharge mode to enable charge mode")
+                    if force_discharge_state.get("cancel_expiry_timer"):
+                        force_discharge_state["cancel_expiry_timer"]()
+                        force_discharge_state["cancel_expiry_timer"] = None
+                    force_discharge_state["active"] = False
+                    force_discharge_state["expires_at"] = None
+
+                # Set high charge rate and prevent discharge
+                charge_result = await controller.set_charge_rate_limit(10.0)
+                discharge_result = await controller.set_discharge_rate_limit(0)
+                await controller.disconnect()
+
+                if charge_result and discharge_result:
+                    force_charge_state["active"] = True
+                    force_charge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
+                    _LOGGER.info(f"✅ Sigenergy FORCE CHARGE ACTIVE for {duration} minutes")
+
+                    # Dispatch event for UI
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
+                        "active": True,
+                        "expires_at": force_charge_state["expires_at"].isoformat(),
+                        "duration": duration,
+                    })
+
+                    # Schedule auto-restore
+                    if force_charge_state.get("cancel_expiry_timer"):
+                        force_charge_state["cancel_expiry_timer"]()
+
+                    async def auto_restore_charge_sigenergy(_now):
+                        if force_charge_state["active"]:
+                            _LOGGER.info("⏰ Sigenergy force charge expired, auto-restoring")
+                            await handle_restore_normal(ServiceCall(DOMAIN, SERVICE_RESTORE_NORMAL, {}))
+
+                    force_charge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass,
+                        auto_restore_charge_sigenergy,
+                        force_charge_state["expires_at"],
+                    )
+                    await persist_force_mode_state()
+                else:
+                    _LOGGER.error(f"Sigenergy force charge failed: charge={charge_result}, discharge={discharge_result}")
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error in Sigenergy force charge: {e}", exc_info=True)
+                return
 
         try:
             # Get current token and provider using helper function
@@ -5145,6 +5288,74 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if force_charge_state.get("cancel_expiry_timer"):
             force_charge_state["cancel_expiry_timer"]()
             force_charge_state["cancel_expiry_timer"] = None
+
+        # Check if this is a Sigenergy system
+        is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
+        if is_sigenergy:
+            try:
+                from .inverters.sigenergy import SigenergyController
+                modbus_host = entry.options.get(
+                    CONF_SIGENERGY_MODBUS_HOST,
+                    entry.data.get(CONF_SIGENERGY_MODBUS_HOST)
+                )
+                if not modbus_host:
+                    _LOGGER.warning("Restore normal: Sigenergy Modbus host not configured")
+                else:
+                    modbus_port = entry.options.get(
+                        CONF_SIGENERGY_MODBUS_PORT,
+                        entry.data.get(CONF_SIGENERGY_MODBUS_PORT, 502)
+                    )
+                    modbus_slave_id = entry.options.get(
+                        CONF_SIGENERGY_MODBUS_SLAVE_ID,
+                        entry.data.get(CONF_SIGENERGY_MODBUS_SLAVE_ID, 1)
+                    )
+
+                    controller = SigenergyController(
+                        host=modbus_host,
+                        port=modbus_port,
+                        slave_id=modbus_slave_id,
+                    )
+
+                    # Restore normal operation: allow both charge and discharge
+                    charge_result = await controller.set_charge_rate_limit(10.0)
+                    discharge_result = await controller.set_discharge_rate_limit(10.0)
+                    await controller.disconnect()
+
+                    if charge_result and discharge_result:
+                        _LOGGER.info("✅ Sigenergy normal operation restored (charge/discharge enabled)")
+                    else:
+                        _LOGGER.warning(f"Sigenergy restore partial: charge={charge_result}, discharge={discharge_result}")
+
+                # Clear state
+                force_discharge_state["active"] = False
+                force_discharge_state["saved_tariff"] = None
+                force_discharge_state["saved_operation_mode"] = None
+                force_discharge_state["expires_at"] = None
+                force_charge_state["active"] = False
+                force_charge_state["saved_tariff"] = None
+                force_charge_state["saved_operation_mode"] = None
+                force_charge_state["saved_backup_reserve"] = None
+                force_charge_state["expires_at"] = None
+
+                _LOGGER.info("✅ SIGENERGY NORMAL OPERATION RESTORED")
+
+                # Dispatch events for UI
+                async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                    "active": False,
+                    "expires_at": None,
+                    "duration": 0,
+                })
+                async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
+                    "active": False,
+                    "expires_at": None,
+                    "duration": 0,
+                })
+
+                await persist_force_mode_state()
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error in Sigenergy restore normal: {e}", exc_info=True)
+                return
 
         try:
             # Get current token and provider using helper function

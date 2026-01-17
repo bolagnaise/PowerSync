@@ -3,16 +3,16 @@ Action execution logic for HA automations.
 
 Supported actions:
 - set_backup_reserve: Set battery backup reserve percentage (Tesla only)
-- preserve_charge: Prevent battery discharge (Tesla: set export to "never", Sigenergy: not supported)
+- preserve_charge: Prevent battery discharge (Tesla: set export to "never", Sigenergy: set discharge to 0)
 - set_operation_mode: Set Powerwall operation mode (Tesla only)
-- force_discharge: Force battery discharge for a duration (Tesla only)
-- force_charge: Force battery charge for a duration (Tesla only)
+- force_discharge: Force battery discharge for a duration (Tesla/Sigenergy)
+- force_charge: Force battery charge for a duration (Tesla/Sigenergy)
 - curtail_inverter: Curtail AC-coupled solar inverter (both Tesla and Sigenergy)
 - send_notification: Send push notification to user (both)
 """
 
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
@@ -24,6 +24,44 @@ def _is_sigenergy(config_entry: ConfigEntry) -> bool:
     """Check if this is a Sigenergy system."""
     from ..const import CONF_SIGENERGY_STATION_ID
     return bool(config_entry.data.get(CONF_SIGENERGY_STATION_ID))
+
+
+async def _get_sigenergy_controller(config_entry: ConfigEntry) -> Optional["SigenergyController"]:
+    """Get a Sigenergy controller for Modbus operations.
+
+    Returns:
+        SigenergyController instance or None if not configured
+    """
+    from ..const import (
+        CONF_SIGENERGY_MODBUS_HOST,
+        CONF_SIGENERGY_MODBUS_PORT,
+        CONF_SIGENERGY_MODBUS_SLAVE_ID,
+    )
+    from ..inverters.sigenergy import SigenergyController
+
+    # Check both data and options for Modbus settings
+    modbus_host = config_entry.options.get(
+        CONF_SIGENERGY_MODBUS_HOST,
+        config_entry.data.get(CONF_SIGENERGY_MODBUS_HOST)
+    )
+    if not modbus_host:
+        _LOGGER.warning("Sigenergy Modbus host not configured")
+        return None
+
+    modbus_port = config_entry.options.get(
+        CONF_SIGENERGY_MODBUS_PORT,
+        config_entry.data.get(CONF_SIGENERGY_MODBUS_PORT, 502)
+    )
+    modbus_slave_id = config_entry.options.get(
+        CONF_SIGENERGY_MODBUS_SLAVE_ID,
+        config_entry.data.get(CONF_SIGENERGY_MODBUS_SLAVE_ID, 1)
+    )
+
+    return SigenergyController(
+        host=modbus_host,
+        port=modbus_port,
+        slave_id=modbus_slave_id,
+    )
 
 
 async def execute_actions(
@@ -141,9 +179,21 @@ async def _action_preserve_charge(
 ) -> bool:
     """Prevent battery discharge."""
     if _is_sigenergy(config_entry):
-        # Sigenergy: Could potentially set export limit to 0, but that's different behavior
-        _LOGGER.warning("preserve_charge not fully supported for Sigenergy - use curtail_inverter instead")
-        return False
+        # Sigenergy: Set discharge rate limit to 0 to prevent discharge
+        controller = await _get_sigenergy_controller(config_entry)
+        if not controller:
+            _LOGGER.error("preserve_charge: Sigenergy Modbus not configured")
+            return False
+        try:
+            result = await controller.set_discharge_rate_limit(0)
+            if result:
+                _LOGGER.info("Sigenergy: Set discharge rate to 0 (preserve charge)")
+            return result
+        except Exception as e:
+            _LOGGER.error(f"Failed to preserve charge (Sigenergy): {e}")
+            return False
+        finally:
+            await controller.disconnect()
 
     from ..const import DOMAIN, SERVICE_SET_GRID_EXPORT
 
@@ -201,14 +251,33 @@ async def _action_force_discharge(
     params: Dict[str, Any]
 ) -> bool:
     """Force battery discharge for a specified duration."""
-    if _is_sigenergy(config_entry):
-        _LOGGER.warning("force_discharge not supported for Sigenergy in HA")
-        return False
-
-    from ..const import DOMAIN, SERVICE_FORCE_DISCHARGE
-
     # Accept both "duration" and "duration_minutes" for flexibility
     duration = params.get("duration") or params.get("duration_minutes", 30)
+
+    if _is_sigenergy(config_entry):
+        # Sigenergy: Set high discharge rate and restore export limit
+        controller = await _get_sigenergy_controller(config_entry)
+        if not controller:
+            _LOGGER.error("force_discharge: Sigenergy Modbus not configured")
+            return False
+        try:
+            # Set high discharge rate (10kW max)
+            discharge_result = await controller.set_discharge_rate_limit(10.0)
+            # Restore export limit to allow discharge to grid
+            export_result = await controller.restore_export_limit()
+            if discharge_result and export_result:
+                _LOGGER.info(f"Sigenergy: Force discharge activated for {duration} minutes")
+                return True
+            else:
+                _LOGGER.warning(f"Sigenergy force discharge partial: discharge={discharge_result}, export={export_result}")
+                return discharge_result or export_result
+        except Exception as e:
+            _LOGGER.error(f"Failed to force discharge (Sigenergy): {e}")
+            return False
+        finally:
+            await controller.disconnect()
+
+    from ..const import DOMAIN, SERVICE_FORCE_DISCHARGE
 
     try:
         await hass.services.async_call(
@@ -229,14 +298,33 @@ async def _action_force_charge(
     params: Dict[str, Any]
 ) -> bool:
     """Force battery charge for a specified duration."""
-    if _is_sigenergy(config_entry):
-        _LOGGER.warning("force_charge not supported for Sigenergy in HA")
-        return False
-
-    from ..const import DOMAIN, SERVICE_FORCE_CHARGE
-
     # Accept both "duration" and "duration_minutes" for flexibility
     duration = params.get("duration") or params.get("duration_minutes", 60)
+
+    if _is_sigenergy(config_entry):
+        # Sigenergy: Set high charge rate and prevent discharge
+        controller = await _get_sigenergy_controller(config_entry)
+        if not controller:
+            _LOGGER.error("force_charge: Sigenergy Modbus not configured")
+            return False
+        try:
+            # Set high charge rate (10kW max)
+            charge_result = await controller.set_charge_rate_limit(10.0)
+            # Prevent discharge while charging
+            discharge_result = await controller.set_discharge_rate_limit(0)
+            if charge_result and discharge_result:
+                _LOGGER.info(f"Sigenergy: Force charge activated for {duration} minutes")
+                return True
+            else:
+                _LOGGER.warning(f"Sigenergy force charge partial: charge={charge_result}, discharge={discharge_result}")
+                return charge_result or discharge_result
+        except Exception as e:
+            _LOGGER.error(f"Failed to force charge (Sigenergy): {e}")
+            return False
+        finally:
+            await controller.disconnect()
+
+    from ..const import DOMAIN, SERVICE_FORCE_CHARGE
 
     try:
         await hass.services.async_call(
