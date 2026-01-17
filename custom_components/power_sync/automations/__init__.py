@@ -249,7 +249,59 @@ class AutomationEngine:
 
     async def _async_get_current_state(self) -> Dict[str, Any]:
         """Get current state for automation evaluation."""
-        from ..const import DOMAIN
+        from ..const import DOMAIN, CONF_AEMO_REGION
+        from zoneinfo import ZoneInfo
+
+        # NEM region to timezone mapping (for Sigenergy/AEMO users)
+        NEM_REGION_TIMEZONES = {
+            "NSW1": "Australia/Sydney",
+            "VIC1": "Australia/Melbourne",
+            "QLD1": "Australia/Brisbane",
+            "SA1": "Australia/Adelaide",
+            "TAS1": "Australia/Hobart",
+        }
+
+        # Default timezone - will be overridden by site info or NEM region
+        user_timezone = self._config_entry.options.get(
+            "timezone",
+            self._config_entry.data.get("timezone", "Australia/Sydney")
+        )
+
+        # Try to get timezone from coordinator's site info (most accurate for Tesla)
+        entry_id = self._config_entry.entry_id
+        got_timezone_from_site_info = False
+        if DOMAIN in self._hass.data and entry_id in self._hass.data[DOMAIN]:
+            data = self._hass.data[DOMAIN][entry_id]
+            coordinator = data.get("coordinator")
+            if coordinator and hasattr(coordinator, 'async_get_site_info'):
+                try:
+                    site_info = await coordinator.async_get_site_info()
+                    if site_info:
+                        site_tz = site_info.get("installation_time_zone")
+                        if site_tz:
+                            user_timezone = site_tz
+                            got_timezone_from_site_info = True
+                            _LOGGER.debug(f"Using timezone from Tesla site info: {user_timezone}")
+                except Exception as e:
+                    _LOGGER.debug(f"Could not get timezone from site info: {e}")
+
+        # Fallback: Try to get timezone from NEM region (for Sigenergy/AEMO users)
+        if not got_timezone_from_site_info:
+            nem_region = self._config_entry.options.get(
+                CONF_AEMO_REGION,
+                self._config_entry.data.get(CONF_AEMO_REGION)
+            )
+            if nem_region and nem_region in NEM_REGION_TIMEZONES:
+                user_timezone = NEM_REGION_TIMEZONES[nem_region]
+                _LOGGER.debug(f"Using timezone from NEM region ({nem_region}): {user_timezone}")
+
+        # Get current time in user's timezone for time-based triggers
+        try:
+            user_tz = ZoneInfo(user_timezone)
+            current_time_local = datetime.now(user_tz)
+        except Exception:
+            current_time_local = datetime.now()
+            user_timezone = "UTC"
 
         state: Dict[str, Any] = {
             "battery_percent": None,
@@ -263,7 +315,8 @@ class AutomationEngine:
             "export_price": None,
             "grid_status": "on_grid",
             "weather": None,
-            "current_time": datetime.now(),
+            "current_time": current_time_local,
+            "user_timezone": user_timezone,
             "backup_reserve": None,
         }
 
