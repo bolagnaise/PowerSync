@@ -175,7 +175,8 @@ def _action_set_operation_mode(params: Dict[str, Any], user: User) -> bool:
 
 def _action_force_discharge(params: Dict[str, Any], user: User) -> bool:
     """Force battery discharge for a specified duration."""
-    duration_minutes = params.get('duration_minutes', 30)
+    # Accept both "duration" and "duration_minutes" for flexibility
+    duration_minutes = params.get('duration') or params.get('duration_minutes', 30)
 
     if user.battery_system == 'tesla':
         from app.api_clients import get_tesla_client
@@ -241,8 +242,9 @@ def _action_force_discharge(params: Dict[str, Any], user: User) -> bool:
 
 def _action_force_charge(params: Dict[str, Any], user: User) -> bool:
     """Force battery charge for a specified duration."""
-    duration_minutes = params.get('duration_minutes', 60)
-    target_percent = params.get('target_percent', 100)
+    # Accept both "duration" and "duration_minutes" for flexibility
+    duration_minutes = params.get('duration') or params.get('duration_minutes', 60)
+    target_percent = params.get('target_percent') or params.get('percent', 100)
 
     if user.battery_system == 'tesla':
         from app.api_clients import get_tesla_client
@@ -315,7 +317,15 @@ def _action_curtail_inverter(params: Dict[str, Any], user: User) -> bool:
         _LOGGER.warning("Inverter curtailment not enabled for user")
         return False
 
-    power_limit_w = params.get('power_limit_w', 0)  # 0 = full curtailment
+    # Support both "mode" (load_following/shutdown) and "power_limit_w"
+    mode = params.get('mode', 'load_following')
+    power_limit_w = params.get('power_limit_w')
+
+    # If mode is shutdown, set power_limit_w to 0
+    if mode == 'shutdown' and power_limit_w is None:
+        power_limit_w = 0
+    elif power_limit_w is None:
+        power_limit_w = 0  # Default to full curtailment
 
     from app.inverters import get_inverter_controller
 

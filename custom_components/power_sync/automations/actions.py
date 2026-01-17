@@ -136,7 +136,7 @@ async def _action_preserve_charge(
         await hass.services.async_call(
             DOMAIN,
             SERVICE_SET_GRID_EXPORT,
-            {"export_rule": "never"},
+            {"rule": "never"},  # Service expects "rule"
             blocking=True,
         )
         return True
@@ -184,13 +184,14 @@ async def _action_force_discharge(
     """Force battery discharge for a specified duration."""
     from ..const import DOMAIN, SERVICE_FORCE_DISCHARGE
 
-    duration_minutes = params.get("duration_minutes", 30)
+    # Accept both "duration" and "duration_minutes" for flexibility
+    duration = params.get("duration") or params.get("duration_minutes", 30)
 
     try:
         await hass.services.async_call(
             DOMAIN,
             SERVICE_FORCE_DISCHARGE,
-            {"duration_minutes": duration_minutes},
+            {"duration": duration},  # Service expects "duration"
             blocking=True,
         )
         return True
@@ -207,13 +208,14 @@ async def _action_force_charge(
     """Force battery charge for a specified duration."""
     from ..const import DOMAIN, SERVICE_FORCE_CHARGE
 
-    duration_minutes = params.get("duration_minutes", 60)
+    # Accept both "duration" and "duration_minutes" for flexibility
+    duration = params.get("duration") or params.get("duration_minutes", 60)
 
     try:
         await hass.services.async_call(
             DOMAIN,
             SERVICE_FORCE_CHARGE,
-            {"duration_minutes": duration_minutes},
+            {"duration": duration},  # Service expects "duration"
             blocking=True,
         )
         return True
@@ -230,13 +232,15 @@ async def _action_curtail_inverter(
     """Curtail AC-coupled solar inverter."""
     from ..const import DOMAIN, SERVICE_CURTAIL_INVERTER
 
-    power_limit_w = params.get("power_limit_w", 0)  # 0 = full curtailment
+    # Service expects "mode": "load_following" or "shutdown"
+    # Default to "load_following" (limit to home load / zero-export)
+    mode = params.get("mode", "load_following")
 
     try:
         await hass.services.async_call(
             DOMAIN,
             SERVICE_CURTAIL_INVERTER,
-            {"power_limit_w": power_limit_w},
+            {"mode": mode},
             blocking=True,
         )
         return True
