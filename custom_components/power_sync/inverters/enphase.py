@@ -195,9 +195,12 @@ class EnphaseController(InverterController):
                 age = datetime.now() - self._token_obtained_at
                 if age < timedelta(hours=self.TOKEN_REFRESH_HOURS):
                     return True
-                _LOGGER.info("JWT token expired, refreshing from Enlighten cloud")
+                _LOGGER.info(f"JWT token is {age.total_seconds()/3600:.1f} hours old, refreshing from Enlighten cloud")
             else:
-                # Token was provided externally, assume it's valid
+                # Token was provided externally - if we have credentials, we can refresh if needed
+                # For now, assume it's valid but mark that we should check on 401
+                if self._username and self._password:
+                    _LOGGER.debug("External token provided, will refresh on 401 if needed")
                 return True
 
         # Need to get token from cloud
@@ -211,6 +214,7 @@ class EnphaseController(InverterController):
             _LOGGER.warning("Cannot fetch token: Envoy serial number not known")
             return False
 
+        _LOGGER.info(f"Fetching new JWT token from Enlighten cloud for Envoy {serial}")
         token = await self._get_token_from_cloud(serial)
         return token is not None
 
@@ -286,11 +290,14 @@ class EnphaseController(InverterController):
             headers["Authorization"] = f"Bearer {self._token}"
         return headers
 
-    async def _get(self, endpoint: str) -> Optional[dict]:
+    async def _get(self, endpoint: str, retry_auth: bool = True) -> Optional[dict]:
         """Make a GET request to the IQ Gateway."""
         if not self._session:
             if not await self.connect():
                 return None
+
+        # Ensure we have a valid token before making authenticated requests
+        await self._ensure_token()
 
         url = f"https://{self.host}:{self.port}{endpoint}"
         try:
@@ -301,6 +308,12 @@ class EnphaseController(InverterController):
                     return await response.json(content_type=None)
                 elif response.status == 401:
                     _LOGGER.debug(f"Authentication required for {endpoint}")
+                    # If we got 401 and haven't retried, try refreshing token
+                    if retry_auth and self._username and self._password:
+                        _LOGGER.info("Got 401, attempting token refresh...")
+                        self._token_obtained_at = None  # Force refresh
+                        if await self._ensure_token():
+                            return await self._get(endpoint, retry_auth=False)
                     return None
                 else:
                     _LOGGER.debug(f"GET {endpoint} returned status {response.status}")
@@ -313,11 +326,14 @@ class EnphaseController(InverterController):
             _LOGGER.debug(f"Error getting {endpoint}: {e}")
             return None
 
-    async def _put(self, endpoint: str, data: dict) -> bool:
+    async def _put(self, endpoint: str, data: dict, retry_auth: bool = True) -> bool:
         """Make a PUT request to the IQ Gateway."""
         if not self._session:
             if not await self.connect():
                 return False
+
+        # Ensure we have a valid token before making authenticated requests
+        await self._ensure_token()
 
         url = f"https://{self.host}:{self.port}{endpoint}"
         try:
@@ -329,6 +345,12 @@ class EnphaseController(InverterController):
                     return True
                 elif response.status == 401:
                     _LOGGER.error(f"Authentication required for {endpoint}")
+                    # If we got 401 and haven't retried, try refreshing token
+                    if retry_auth and self._username and self._password:
+                        _LOGGER.info("Got 401, attempting token refresh...")
+                        self._token_obtained_at = None  # Force refresh
+                        if await self._ensure_token():
+                            return await self._put(endpoint, data, retry_auth=False)
                     return False
                 else:
                     _LOGGER.debug(f"PUT {endpoint} returned status {response.status}")
@@ -341,11 +363,14 @@ class EnphaseController(InverterController):
             _LOGGER.error(f"Error putting {endpoint}: {e}")
             return False
 
-    async def _post(self, endpoint: str, data: dict) -> bool:
+    async def _post(self, endpoint: str, data: dict, retry_auth: bool = True) -> bool:
         """Make a POST request to the IQ Gateway."""
         if not self._session:
             if not await self.connect():
                 return False
+
+        # Ensure we have a valid token before making authenticated requests
+        await self._ensure_token()
 
         url = f"https://{self.host}:{self.port}{endpoint}"
         try:
@@ -357,6 +382,12 @@ class EnphaseController(InverterController):
                     return True
                 elif response.status == 401:
                     _LOGGER.error(f"Authentication required for {endpoint}")
+                    # If we got 401 and haven't retried, try refreshing token
+                    if retry_auth and self._username and self._password:
+                        _LOGGER.info("Got 401, attempting token refresh...")
+                        self._token_obtained_at = None  # Force refresh
+                        if await self._ensure_token():
+                            return await self._post(endpoint, data, retry_auth=False)
                     return False
                 else:
                     # Log response body for debugging 400 errors
