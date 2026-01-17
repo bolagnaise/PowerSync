@@ -272,23 +272,19 @@ class AutomationEngine:
         got_timezone_from_site_info = False
         if DOMAIN in self._hass.data and entry_id in self._hass.data[DOMAIN]:
             data = self._hass.data[DOMAIN][entry_id]
-            coordinator = data.get("coordinator")
-            _LOGGER.debug(f"Coordinator type: {type(coordinator).__name__ if coordinator else 'None'}")
+            # Coordinator is stored as "tesla_coordinator" for Tesla users
+            coordinator = data.get("tesla_coordinator")
             if coordinator and hasattr(coordinator, 'async_get_site_info'):
                 try:
                     site_info = await coordinator.async_get_site_info()
-                    _LOGGER.debug(f"Site info response: {site_info.keys() if site_info else 'None'}")
                     if site_info:
                         site_tz = site_info.get("installation_time_zone")
-                        _LOGGER.debug(f"installation_time_zone from site info: {site_tz}")
                         if site_tz:
                             user_timezone = site_tz
                             got_timezone_from_site_info = True
-                            _LOGGER.info(f"Using timezone from Tesla site info: {user_timezone}")
+                            _LOGGER.debug(f"Using timezone from Tesla site info: {user_timezone}")
                 except Exception as e:
                     _LOGGER.warning(f"Could not get timezone from site info: {e}")
-            else:
-                _LOGGER.debug(f"Coordinator has no async_get_site_info: hasattr={hasattr(coordinator, 'async_get_site_info') if coordinator else 'N/A'}")
 
         # Fallback: Try to get timezone from NEM region (for Sigenergy/AEMO users)
         if not got_timezone_from_site_info:
