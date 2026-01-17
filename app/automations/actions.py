@@ -363,9 +363,17 @@ def _action_send_notification(params: Dict[str, Any], user: User) -> bool:
 
     from app.push_notifications import send_push_notification
 
+    if not user.apns_device_token:
+        _LOGGER.warning(f"Cannot send notification - user {user.id} has no device token registered")
+        return False
+
     try:
-        send_push_notification(user, title, message)
-        return True
+        success = send_push_notification(user.apns_device_token, title, message, {
+            "type": "automation_action",
+            "title": title,
+            "message": message
+        })
+        return success
     except Exception as e:
         _LOGGER.error(f"Failed to send notification: {e}")
         return False

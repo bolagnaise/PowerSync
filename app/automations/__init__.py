@@ -44,6 +44,12 @@ class AutomationEngine:
             Automation.paused == False
         ).order_by(Automation.priority.desc()).all()
 
+        _LOGGER.debug(f"Found {len(automations)} enabled automations to evaluate")
+
+        if not automations:
+            _LOGGER.debug("No enabled automations found")
+            return 0
+
         # Group by user for efficient state fetching
         user_automations: Dict[int, List[Automation]] = {}
         for automation in automations:
@@ -70,6 +76,7 @@ class AutomationEngine:
             # Evaluate each automation (already sorted by priority desc)
             for automation in user_autos:
                 if not automation.trigger:
+                    _LOGGER.warning(f"Automation '{automation.name}' (id={automation.id}) has no trigger configured - skipping")
                     continue
 
                 try:
@@ -78,6 +85,10 @@ class AutomationEngine:
                     if result.triggered:
                         _LOGGER.info(
                             f"Automation '{automation.name}' (id={automation.id}) triggered: {result.reason}"
+                        )
+                    else:
+                        _LOGGER.debug(
+                            f"Automation '{automation.name}' (id={automation.id}) not triggered: {result.reason}"
                         )
 
                         # Execute actions (skip if higher priority automation already did same action)
@@ -279,7 +290,14 @@ class AutomationEngine:
             from app.push_notifications import send_push_notification
             message = f"Automation '{automation.name}' triggered"
             try:
-                send_push_notification(user, "Automation Triggered", message)
+                if user.apns_device_token:
+                    send_push_notification(user.apns_device_token, "Automation Triggered", message, {
+                        "type": "automation",
+                        "automation_id": automation.id,
+                        "automation_name": automation.name
+                    })
+                else:
+                    _LOGGER.warning(f"Cannot send notification - user {user.id} has no device token")
             except Exception as e:
                 _LOGGER.warning(f"Failed to send notification: {e}")
             return True
