@@ -1962,6 +1962,7 @@ class AutomationsView(HomeAssistantView):
 
         try:
             data = await request.json()
+            _LOGGER.debug(f"📱 Creating automation with data: name={data.get('name')}, actions={data.get('actions')}")
             automation = store.create(data)
             await store.async_save()
             return web.json_response({
@@ -2022,6 +2023,8 @@ class AutomationDetailView(HomeAssistantView):
 
     async def put(self, request: web.Request, automation_id: str) -> web.Response:
         """Handle PUT request - update automation."""
+        _LOGGER.info(f"📱 Automations HTTP PUT request for id={automation_id}")
+
         store = self._get_store()
         if not store:
             return web.json_response(
@@ -2031,6 +2034,7 @@ class AutomationDetailView(HomeAssistantView):
 
         try:
             data = await request.json()
+            _LOGGER.debug(f"📱 Updating automation {automation_id} with data: name={data.get('name')}, actions={data.get('actions')}")
             automation = store.update(int(automation_id), data)
             if not automation:
                 return web.json_response(

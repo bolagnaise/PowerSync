@@ -57,6 +57,9 @@ class AutomationStore:
         automation_id = self._data.get("next_id", 1)
         self._data["next_id"] = automation_id + 1
 
+        actions = automation_data.get("actions", [])
+        _LOGGER.debug(f"Creating automation with {len(actions)} action(s): {actions}")
+
         automation = {
             "id": automation_id,
             "name": automation_data.get("name", "Unnamed Automation"),
@@ -67,7 +70,7 @@ class AutomationStore:
             "paused": automation_data.get("paused", False),
             "notification_only": automation_data.get("notification_only", False),
             "trigger": automation_data.get("trigger", {}),
-            "actions": automation_data.get("actions", []),
+            "actions": actions,
             "created_at": datetime.utcnow().isoformat(),
             "updated_at": datetime.utcnow().isoformat(),
             "last_triggered_at": None,
@@ -100,6 +103,7 @@ class AutomationStore:
                 if "trigger" in automation_data:
                     auto["trigger"] = automation_data["trigger"]
                 if "actions" in automation_data:
+                    _LOGGER.debug(f"Updating automation {automation_id} with {len(automation_data['actions'])} action(s): {automation_data['actions']}")
                     auto["actions"] = automation_data["actions"]
 
                 auto["updated_at"] = datetime.utcnow().isoformat()
@@ -425,6 +429,7 @@ class AutomationEngine:
             return True
 
         actions = automation.get("actions", [])
+        _LOGGER.debug(f"Automation '{automation.get('name')}' has {len(actions)} action(s): {[a.get('action_type') for a in actions]}")
 
         # Filter out conflicting actions
         actions_to_execute = []
