@@ -103,9 +103,10 @@ async def _action_set_backup_reserve(
     """Set battery backup reserve percentage."""
     from ..const import DOMAIN, SERVICE_SET_BACKUP_RESERVE
 
-    reserve_percent = params.get("reserve_percent")
+    # Accept both "percent" and "reserve_percent" for flexibility
+    reserve_percent = params.get("percent") or params.get("reserve_percent")
     if reserve_percent is None:
-        _LOGGER.error("set_backup_reserve: missing reserve_percent parameter")
+        _LOGGER.error("set_backup_reserve: missing percent parameter")
         return False
 
     # Clamp to valid range
@@ -115,7 +116,7 @@ async def _action_set_backup_reserve(
         await hass.services.async_call(
             DOMAIN,
             SERVICE_SET_BACKUP_RESERVE,
-            {"reserve_percent": reserve_percent},
+            {"percent": reserve_percent},  # Service expects "percent"
             blocking=True,
         )
         return True

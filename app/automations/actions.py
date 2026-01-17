@@ -85,9 +85,10 @@ def _execute_single_action(action_type: str, params: Dict[str, Any], user: User)
 
 def _action_set_backup_reserve(params: Dict[str, Any], user: User) -> bool:
     """Set battery backup reserve percentage."""
-    reserve_percent = params.get('reserve_percent')
+    # Accept both "percent" and "reserve_percent" for flexibility
+    reserve_percent = params.get('percent') or params.get('reserve_percent')
     if reserve_percent is None:
-        _LOGGER.error("set_backup_reserve: missing reserve_percent parameter")
+        _LOGGER.error("set_backup_reserve: missing percent parameter")
         return False
 
     # Clamp to valid range
