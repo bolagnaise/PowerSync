@@ -1106,6 +1106,21 @@ def api_sigenergy_save():
     try:
         current_user.sigenergy_station_id = str(station_id)
         current_user.battery_system = 'sigenergy'  # Also set battery system
+
+        # Set timezone from Amber NEM region if Amber is already configured
+        if current_user.amber_api_token_encrypted and current_user.amber_site_id:
+            try:
+                from app.encryption import decrypt_token
+                amber_token = decrypt_token(current_user.amber_api_token_encrypted)
+                amber_client = AmberAPIClient(amber_token)
+                nem_region = _get_nem_region_from_amber_site(amber_client, current_user.amber_site_id)
+                if nem_region:
+                    tz = _get_timezone_from_nem_region(nem_region)
+                    current_user.timezone = tz
+                    logger.info(f"Set timezone from Amber NEM region ({nem_region}): {tz}")
+            except Exception as tz_err:
+                logger.warning(f"Could not set timezone from Amber: {tz_err}")
+
         db.session.commit()
 
         logger.info(f"Sigenergy station {station_id} saved for user {current_user.email}")
