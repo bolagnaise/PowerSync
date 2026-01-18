@@ -8523,3 +8523,121 @@ def api_get_current_weather(api_user=None):
         return jsonify({'error': 'Weather data unavailable'}), 503
 
     return jsonify(weather)
+
+
+@bp.route('/api/weather/settings', methods=['GET'])
+@api_auth_required
+def api_get_weather_settings(api_user=None):
+    """Get weather settings for the user."""
+    user = api_user or current_user
+
+    return jsonify({
+        'weather_location': user.weather_location,
+        'weather_latitude': user.weather_latitude,
+        'weather_longitude': user.weather_longitude,
+        'has_api_key': bool(user.openweathermap_api_key),
+    })
+
+
+@bp.route('/api/weather/settings', methods=['POST'])
+@api_auth_required
+def api_save_weather_settings(api_user=None):
+    """Save weather settings for the user."""
+    from app.automations.weather import geocode_location
+
+    user = api_user or current_user
+    data = request.get_json()
+
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    # Update location if provided
+    if 'weather_location' in data:
+        new_location = data['weather_location']
+        if new_location != user.weather_location:
+            user.weather_location = new_location
+            # Clear cached coordinates so they'll be re-geocoded
+            user.weather_latitude = None
+            user.weather_longitude = None
+
+            # Try to geocode immediately
+            if new_location:
+                coords = geocode_location(new_location)
+                if coords:
+                    user.weather_latitude = coords[0]
+                    user.weather_longitude = coords[1]
+
+    # Update API key if provided
+    if 'openweathermap_api_key' in data:
+        api_key = data['openweathermap_api_key']
+        if api_key:
+            user.openweathermap_api_key = api_key
+        elif api_key == '':
+            user.openweathermap_api_key = None
+
+    try:
+        db.session.commit()
+        return jsonify({
+            'success': True,
+            'weather_location': user.weather_location,
+            'weather_latitude': user.weather_latitude,
+            'weather_longitude': user.weather_longitude,
+        })
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Failed to save weather settings: {e}")
+        return jsonify({'error': 'Failed to save settings'}), 500
+
+
+@bp.route('/api/weather/test', methods=['POST'])
+@api_auth_required
+def api_test_weather(api_user=None):
+    """Test weather API with a location."""
+    from app.automations.weather import geocode_location, OPENWEATHERMAP_API_KEY
+    import os
+
+    user = api_user or current_user
+    data = request.get_json()
+
+    location = data.get('location') if data else None
+    if not location:
+        return jsonify({'error': 'Location required'}), 400
+
+    # Use user's API key or server's
+    api_key = user.openweathermap_api_key or OPENWEATHERMAP_API_KEY or os.environ.get('OPENWEATHERMAP_API_KEY')
+    if not api_key:
+        return jsonify({'error': 'OpenWeatherMap API key not configured'}), 400
+
+    # Test geocoding
+    coords = geocode_location(location)
+    if not coords:
+        return jsonify({'error': f'Could not find location: {location}'}), 404
+
+    # Test weather fetch
+    try:
+        response = requests.get(
+            'https://api.openweathermap.org/data/2.5/weather',
+            params={
+                'lat': coords[0],
+                'lon': coords[1],
+                'appid': api_key,
+                'units': 'metric',
+            },
+            timeout=10
+        )
+        response.raise_for_status()
+        weather_data = response.json()
+
+        return jsonify({
+            'success': True,
+            'location': location,
+            'coordinates': {'lat': coords[0], 'lon': coords[1]},
+            'weather': {
+                'temperature': weather_data.get('main', {}).get('temp'),
+                'description': weather_data.get('weather', [{}])[0].get('description'),
+                'humidity': weather_data.get('main', {}).get('humidity'),
+                'city': weather_data.get('name'),
+            }
+        })
+    except requests.RequestException as e:
+        return jsonify({'error': f'Weather API error: {str(e)}'}), 500

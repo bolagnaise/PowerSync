@@ -115,11 +115,32 @@ def get_current_weather(user: User) -> Optional[Dict[str, Any]]:
 
 def _get_coordinates_for_user(user: User) -> tuple:
     """
-    Get approximate coordinates based on user's timezone.
+    Get coordinates for user's location.
 
-    This is a rough approximation - for better accuracy, users could
-    configure their location explicitly.
+    Priority:
+    1. User-configured coordinates (weather_latitude, weather_longitude)
+    2. Geocoded from user's weather_location (city name or postcode)
+    3. Fallback to timezone-based approximation
     """
+    # First check if user has explicitly configured coordinates
+    if user.weather_latitude is not None and user.weather_longitude is not None:
+        return (user.weather_latitude, user.weather_longitude)
+
+    # If user has a location but no cached coordinates, geocode it
+    if user.weather_location:
+        coords = geocode_location(user.weather_location)
+        if coords:
+            # Cache the coordinates for future use
+            try:
+                from app import db
+                user.weather_latitude = coords[0]
+                user.weather_longitude = coords[1]
+                db.session.commit()
+            except Exception as e:
+                _LOGGER.warning(f"Failed to cache geocoded coordinates: {e}")
+            return coords
+
+    # Fallback to timezone-based approximation
     timezone = user.timezone or 'Australia/Brisbane'
 
     # Map Australian timezones to approximate coordinates
@@ -135,6 +156,53 @@ def _get_coordinates_for_user(user: User) -> tuple:
     }
 
     return timezone_coords.get(timezone, (DEFAULT_LAT, DEFAULT_LON))
+
+
+def geocode_location(location: str) -> Optional[tuple]:
+    """
+    Geocode a location string (city name or postcode) to coordinates.
+
+    Args:
+        location: City name (e.g., "Brisbane") or postcode (e.g., "4000")
+
+    Returns:
+        (latitude, longitude) tuple or None if geocoding fails
+    """
+    if not OPENWEATHERMAP_API_KEY:
+        _LOGGER.warning("Cannot geocode: OpenWeatherMap API key not configured")
+        return None
+
+    try:
+        # Try geocoding with country code for Australia
+        query = location
+        if not ',' in location:
+            query = f"{location},AU"
+
+        response = requests.get(
+            'https://api.openweathermap.org/geo/1.0/direct',
+            params={
+                'q': query,
+                'limit': 1,
+                'appid': OPENWEATHERMAP_API_KEY,
+            },
+            timeout=10
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        if data and len(data) > 0:
+            lat = data[0].get('lat')
+            lon = data[0].get('lon')
+            if lat is not None and lon is not None:
+                _LOGGER.info(f"Geocoded '{location}' to ({lat}, {lon})")
+                return (lat, lon)
+
+        _LOGGER.warning(f"No geocoding results for '{location}'")
+        return None
+
+    except requests.RequestException as e:
+        _LOGGER.error(f"Failed to geocode location: {e}")
+        return None
 
 
 def _classify_weather_condition(weather_id: int) -> str:

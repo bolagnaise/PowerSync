@@ -67,6 +67,12 @@ class User(UserMixin, db.Model):
     timezone = db.Column(db.String(50), default='Australia/Brisbane')  # IANA timezone string
     sync_enabled = db.Column(db.Boolean, default=True)  # Enable/disable automatic Tesla syncing
 
+    # Weather/Location settings (for weather-based automations and dashboard display)
+    weather_location = db.Column(db.String(100), nullable=True)  # City name or postcode (e.g., "Brisbane" or "4000")
+    weather_latitude = db.Column(db.Float, nullable=True)  # Cached geocoded latitude
+    weather_longitude = db.Column(db.Float, nullable=True)  # Cached geocoded longitude
+    openweathermap_api_key = db.Column(db.String(64), nullable=True)  # Optional user-specific API key
+
     # Amber Electric Preferences
     amber_forecast_type = db.Column(db.String(20), default='predicted')  # 'low', 'predicted', 'high'
     solar_curtailment_enabled = db.Column(db.Boolean, default=False)  # Enable solar curtailment when export price <= 0
