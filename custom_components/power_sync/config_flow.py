@@ -144,6 +144,7 @@ from .const import (
     ALL_NETWORK_TARIFFS,
     # Automations - OpenWeatherMap API for weather triggers
     CONF_OPENWEATHERMAP_API_KEY,
+    CONF_WEATHER_LOCATION,
 )
 
 # Combined network tariff key for config flow
@@ -1874,6 +1875,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             # Store curtailment and automation settings
             self._curtailment_options = {
                 CONF_BATTERY_CURTAILMENT_ENABLED: new_curtailment_enabled,
+                CONF_WEATHER_LOCATION: user_input.get(CONF_WEATHER_LOCATION, ""),
                 CONF_OPENWEATHERMAP_API_KEY: user_input.get(CONF_OPENWEATHERMAP_API_KEY, ""),
             }
 
@@ -1921,6 +1923,13 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_AC_INVERTER_CURTAILMENT_ENABLED,
                 default=self._get_option(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False),
             )] = bool
+
+        # Weather location for weather-based automations (optional)
+        schema_dict[vol.Optional(
+            CONF_WEATHER_LOCATION,
+            default=self._get_option(CONF_WEATHER_LOCATION, ""),
+            description={"suggested_value": "City name or postcode (e.g., Brisbane or 4000)"},
+        )] = str
 
         # OpenWeatherMap API key for weather-based automations (optional)
         schema_dict[vol.Optional(

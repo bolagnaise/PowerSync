@@ -382,7 +382,7 @@ class AutomationEngine:
     async def _async_get_weather(self) -> Optional[str]:
         """Get current weather condition with caching."""
         from .weather import async_get_current_weather
-        from ..const import CONF_OPENWEATHERMAP_API_KEY
+        from ..const import CONF_OPENWEATHERMAP_API_KEY, CONF_WEATHER_LOCATION
 
         cache_duration_seconds = 900  # 15 minutes
 
@@ -401,13 +401,19 @@ class AutomationEngine:
         if not api_key:
             return None
 
-        # Get timezone from config for location estimation
+        # Get weather location from config (city name or postcode)
+        weather_location = self._config_entry.options.get(
+            CONF_WEATHER_LOCATION,
+            self._config_entry.data.get(CONF_WEATHER_LOCATION)
+        )
+
+        # Get timezone from config for location fallback
         timezone = self._config_entry.options.get(
             "timezone",
             self._config_entry.data.get("timezone", "Australia/Brisbane")
         )
 
-        weather_data = await async_get_current_weather(self._hass, api_key, timezone)
+        weather_data = await async_get_current_weather(self._hass, api_key, timezone, weather_location)
         if weather_data:
             self._weather_cache = weather_data
             self._weather_cache_time = datetime.utcnow()

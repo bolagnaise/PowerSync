@@ -8,7 +8,7 @@ Provides weather condition classification:
 """
 
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 
 import aiohttp
 
@@ -18,10 +18,15 @@ _LOGGER = logging.getLogger(__name__)
 
 # OpenWeatherMap API configuration
 OPENWEATHERMAP_BASE_URL = "https://api.openweathermap.org/data/2.5/weather"
+OPENWEATHERMAP_GEO_URL = "https://api.openweathermap.org/geo/1.0/direct"
+OPENWEATHERMAP_ZIP_URL = "https://api.openweathermap.org/geo/1.0/zip"
 
 # Default coordinates (Brisbane, Australia) - used if user location unknown
 DEFAULT_LAT = -27.4698
 DEFAULT_LON = 153.0251
+
+# Cache for geocoded locations to avoid repeated API calls
+_location_cache: Dict[str, Tuple[float, float]] = {}
 
 # Weather condition ID ranges from OpenWeatherMap
 # https://openweathermap.org/weather-conditions
@@ -59,15 +64,17 @@ TIMEZONE_COORDS = {
 async def async_get_current_weather(
     hass: HomeAssistant,
     api_key: str,
-    timezone: str = "Australia/Brisbane"
+    timezone: str = "Australia/Brisbane",
+    weather_location: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     """
-    Get current weather conditions based on timezone.
+    Get current weather conditions based on configured location or timezone.
 
     Args:
         hass: Home Assistant instance
         api_key: OpenWeatherMap API key
-        timezone: User's timezone (used to estimate location)
+        timezone: User's timezone (fallback for location)
+        weather_location: City name or postcode (e.g., "Brisbane" or "4000")
 
     Returns:
         Dict with weather data:
@@ -85,8 +92,8 @@ async def async_get_current_weather(
         _LOGGER.warning("OpenWeatherMap API key not configured")
         return None
 
-    # Get coordinates based on timezone
-    lat, lon = _get_coordinates_for_timezone(timezone)
+    # Get coordinates - prefer explicit location, fallback to timezone
+    lat, lon = await _get_coordinates(api_key, weather_location, timezone)
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -131,11 +138,98 @@ async def async_get_current_weather(
         return None
 
 
-def _get_coordinates_for_timezone(timezone: str) -> tuple:
+async def _get_coordinates(
+    api_key: str,
+    weather_location: Optional[str],
+    timezone: str
+) -> Tuple[float, float]:
+    """
+    Get coordinates from configured location or timezone fallback.
+
+    Args:
+        api_key: OpenWeatherMap API key (needed for geocoding)
+        weather_location: City name or postcode
+        timezone: Fallback timezone for location
+
+    Returns:
+        Tuple of (latitude, longitude)
+    """
+    # If location is configured, try to geocode it
+    if weather_location and weather_location.strip():
+        location = weather_location.strip()
+
+        # Check cache first
+        if location in _location_cache:
+            return _location_cache[location]
+
+        # Try geocoding
+        coords = await _geocode_location(api_key, location)
+        if coords:
+            _location_cache[location] = coords
+            return coords
+
+        _LOGGER.warning(f"Could not geocode location '{location}', falling back to timezone")
+
+    # Fallback to timezone-based coordinates
+    return _get_coordinates_for_timezone(timezone)
+
+
+async def _geocode_location(api_key: str, location: str) -> Optional[Tuple[float, float]]:
+    """
+    Geocode a city name or postcode to coordinates using OpenWeatherMap.
+
+    Args:
+        api_key: OpenWeatherMap API key
+        location: City name or postcode (e.g., "Brisbane" or "4000")
+
+    Returns:
+        Tuple of (latitude, longitude) or None if not found
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Check if location looks like a postcode (all digits)
+            if location.isdigit():
+                # Use zip code API for Australian postcodes
+                async with session.get(
+                    OPENWEATHERMAP_ZIP_URL,
+                    params={
+                        "zip": f"{location},AU",
+                        "appid": api_key,
+                    },
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return (data.get("lat"), data.get("lon"))
+            else:
+                # Use direct geocoding API for city names
+                async with session.get(
+                    OPENWEATHERMAP_GEO_URL,
+                    params={
+                        "q": f"{location},AU",
+                        "limit": 1,
+                        "appid": api_key,
+                    },
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        if data and len(data) > 0:
+                            return (data[0].get("lat"), data[0].get("lon"))
+
+    except aiohttp.ClientError as e:
+        _LOGGER.error(f"Failed to geocode location: {e}")
+    except (KeyError, ValueError, IndexError) as e:
+        _LOGGER.error(f"Failed to parse geocoding response: {e}")
+
+    return None
+
+
+def _get_coordinates_for_timezone(timezone: str) -> Tuple[float, float]:
     """
     Get approximate coordinates based on timezone.
 
-    This is a rough approximation - for better accuracy, users could
+    This is a rough approximation - for better accuracy, users should
     configure their location explicitly.
     """
     return TIMEZONE_COORDS.get(timezone, (DEFAULT_LAT, DEFAULT_LON))

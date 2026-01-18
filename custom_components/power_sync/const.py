@@ -30,6 +30,7 @@ CONF_BATTERY_CURTAILMENT_ENABLED = "battery_curtailment_enabled"
 
 # Automations - OpenWeatherMap API for weather triggers
 CONF_OPENWEATHERMAP_API_KEY = "openweathermap_api_key"
+CONF_WEATHER_LOCATION = "weather_location"
 
 # Battery System Selection
 CONF_BATTERY_SYSTEM = "battery_system"

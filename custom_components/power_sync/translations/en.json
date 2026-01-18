@@ -384,12 +384,14 @@
           "battery_curtailment_enabled": "Enable Battery Export Curtailment",
           "ac_inverter_curtailment_enabled": "Enable AC-Coupled Inverter Shutdown",
           "sigenergy_dc_curtailment_enabled": "Enable DC Solar Curtailment (Sigenergy)",
+          "weather_location": "Weather Location (Optional)",
           "openweathermap_api_key": "OpenWeatherMap API Key (Optional)"
         },
         "data_description": {
           "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. Sets Tesla to self-consumption mode or Sigenergy export limit to 0. This is the MAIN toggle - must be enabled for curtailment to work.",
           "ac_inverter_curtailment_enabled": "Shutdown AC-coupled solar inverter (Fronius, Sungrow, GoodWe, Enphase, etc.) when feed-in price is negative. Use this if your solar bypasses the battery and exports directly to grid. Requires inverter IP configuration in next step.",
           "sigenergy_dc_curtailment_enabled": "Limit DC solar production via Sigenergy Modbus when feed-in price is negative. Only applies to Sigenergy systems with DC-coupled solar.",
+          "weather_location": "City name or postcode for weather-based automations (e.g., Brisbane or 4000). Used with OpenWeatherMap API.",
           "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny/cloudy triggers). Leave blank to disable weather triggers."
         }
       },
