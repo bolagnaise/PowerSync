@@ -1288,9 +1288,9 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch forecast data from Solcast API.
 
-        Fetches both forecasts (future) and estimated_actuals (past) to calculate
-        the full day's expected production. This gives an accurate "today" total
-        even when fetched mid-day.
+        Fetches forecasts (future) and optionally estimated_actuals (past) to calculate
+        the full day's expected production. If estimated_actuals fails (rate limit, etc.),
+        we fall back to using the cached full-day forecast.
 
         Supports multiple resource IDs - values are combined by summing.
         """
@@ -1302,8 +1302,13 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                     _LOGGER.warning("No forecasts from Solcast API")
                     return self.data or {"available": False}
 
-                # Fetch estimated actuals (past production based on satellite data)
-                estimated_actuals = await self._fetch_estimated_actuals_for_resource(self._resource_ids[0])
+                # Try to fetch estimated actuals (past production based on satellite data)
+                # This is optional - if it fails, we'll use cached full-day forecast
+                estimated_actuals = None
+                try:
+                    estimated_actuals = await self._fetch_estimated_actuals_for_resource(self._resource_ids[0])
+                except Exception as e:
+                    _LOGGER.debug(f"Could not fetch estimated_actuals: {e}")
 
                 # If multiple resources, fetch and combine
                 if len(self._resource_ids) > 1:
@@ -1314,9 +1319,13 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                         else:
                             _LOGGER.warning(f"Failed to fetch forecast from resource {resource_id[:8]}...")
 
-                        additional_actuals = await self._fetch_estimated_actuals_for_resource(resource_id)
-                        if additional_actuals and estimated_actuals:
-                            estimated_actuals = self._combine_forecasts(estimated_actuals, additional_actuals)
+                        if estimated_actuals:
+                            try:
+                                additional_actuals = await self._fetch_estimated_actuals_for_resource(resource_id)
+                                if additional_actuals:
+                                    estimated_actuals = self._combine_forecasts(estimated_actuals, additional_actuals)
+                            except Exception:
+                                pass
 
                     _LOGGER.info(f"Combined data from {len(self._resource_ids)} Solcast sites")
 
@@ -1377,14 +1386,40 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                 except (ValueError, TypeError) as e:
                     _LOGGER.debug(f"Error parsing forecast period: {e}")
 
-            # Full day = past actuals + future forecast
-            today_forecast = today_past + today_remaining
+            # Full day calculation
+            today_str = now.strftime("%Y-%m-%d")
 
-            _LOGGER.info(
-                f"Solcast forecast updated: Today total={today_forecast:.1f}kWh "
-                f"(past={today_past:.1f}kWh + remaining={today_remaining:.1f}kWh), "
-                f"peak={today_peak:.2f}kW, Tomorrow={tomorrow_total:.1f}kWh"
-            )
+            if today_past > 0:
+                # We have estimated actuals - use actual + remaining
+                today_forecast = today_past + today_remaining
+                # Update cache with this more accurate value
+                self._daily_forecast_date = today_str
+                self._daily_forecast_kwh = today_forecast
+                self._daily_forecast_peak_kw = today_peak
+                _LOGGER.info(
+                    f"Solcast forecast updated: Today total={today_forecast:.1f}kWh "
+                    f"(past={today_past:.1f}kWh + remaining={today_remaining:.1f}kWh), "
+                    f"peak={today_peak:.2f}kW, Tomorrow={tomorrow_total:.1f}kWh"
+                )
+            else:
+                # No estimated actuals - use cached full-day or remaining as fallback
+                if self._daily_forecast_date != today_str:
+                    # New day - cache the current remaining as the full-day estimate
+                    self._daily_forecast_date = today_str
+                    self._daily_forecast_kwh = today_remaining
+                    self._daily_forecast_peak_kw = today_peak
+                    today_forecast = today_remaining
+                    _LOGGER.info(
+                        f"Solcast: New day, cached forecast for {today_str}: {today_remaining:.1f}kWh"
+                    )
+                else:
+                    # Use cached value (from earlier fetch today)
+                    today_forecast = self._daily_forecast_kwh or today_remaining
+                    today_peak = self._daily_forecast_peak_kw or today_peak
+                    _LOGGER.info(
+                        f"Solcast forecast updated: Today={today_forecast:.1f}kWh (cached), "
+                        f"remaining={today_remaining:.1f}kWh, Tomorrow={tomorrow_total:.1f}kWh"
+                    )
 
             return {
                 "available": True,
