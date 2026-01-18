@@ -62,6 +62,10 @@ from .const import (
     CONF_AEMO_SPIKE_ENABLED,
     CONF_AEMO_REGION,
     CONF_AEMO_SPIKE_THRESHOLD,
+    # Solcast solar forecasting
+    CONF_SOLCAST_ENABLED,
+    CONF_SOLCAST_API_KEY,
+    CONF_SOLCAST_RESOURCE_ID,
     AMBER_API_BASE_URL,
     # Flow Power configuration
     CONF_ELECTRICITY_PROVIDER,
@@ -2594,6 +2598,39 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     elif use_aemo_pricing and not flow_power_state:
         _LOGGER.warning("AEMO price source selected but no region configured")
 
+    # Initialize Solcast Solar Forecast Coordinator if enabled
+    solcast_coordinator = None
+    solcast_enabled = entry.options.get(
+        CONF_SOLCAST_ENABLED,
+        entry.data.get(CONF_SOLCAST_ENABLED, False)
+    )
+    solcast_api_key = entry.options.get(
+        CONF_SOLCAST_API_KEY,
+        entry.data.get(CONF_SOLCAST_API_KEY, "")
+    )
+    solcast_resource_id = entry.options.get(
+        CONF_SOLCAST_RESOURCE_ID,
+        entry.data.get(CONF_SOLCAST_RESOURCE_ID, "")
+    )
+
+    if solcast_enabled and solcast_api_key and solcast_resource_id:
+        from .coordinator import SolcastForecastCoordinator
+
+        solcast_coordinator = SolcastForecastCoordinator(
+            hass,
+            api_key=solcast_api_key,
+            resource_id=solcast_resource_id,
+        )
+        try:
+            await solcast_coordinator.async_config_entry_first_refresh()
+            _LOGGER.info(
+                "Solcast Forecast Coordinator initialized for site %s",
+                solcast_resource_id[:8] + "..." if len(solcast_resource_id) > 8 else solcast_resource_id,
+            )
+        except Exception as e:
+            _LOGGER.error("Failed to initialize Solcast coordinator: %s", e)
+            solcast_coordinator = None
+
     # Initialize persistent storage for data that survives HA restarts
     # (like Teslemetry's RestoreEntity pattern for export rule state)
     store = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}.{entry.entry_id}")
@@ -2621,6 +2658,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "demand_charge_coordinator": demand_charge_coordinator,
         "aemo_spike_manager": aemo_spike_manager,
         "aemo_sensor_coordinator": aemo_sensor_coordinator,  # For Flow Power AEMO-only mode
+        "solcast_coordinator": solcast_coordinator,  # For Solcast solar forecasting
         "ws_client": ws_client,  # Store for cleanup on unload
         "entry": entry,
         "auto_sync_cancel": None,  # Will store the timer cancel function

@@ -1140,3 +1140,130 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
     async def async_shutdown(self) -> None:
         """Disconnect from Sigenergy system on shutdown."""
         await self._controller.disconnect()
+
+
+class SolcastForecastCoordinator(DataUpdateCoordinator):
+    """Coordinator to fetch Solcast solar production forecasts.
+
+    Fetches PV power forecasts from Solcast API and caches them locally.
+    Updates every 3 hours to stay within API limits (10 calls/day for hobbyist tier).
+    """
+
+    # Solcast API base URL
+    SOLCAST_API_URL = "https://api.solcast.com.au"
+
+    # Update interval - 3 hours to stay within 10 calls/day limit
+    UPDATE_INTERVAL = timedelta(hours=3)
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        api_key: str,
+        resource_id: str,
+        capacity_kw: float | None = None,
+    ) -> None:
+        """Initialize the coordinator.
+
+        Args:
+            hass: HomeAssistant instance
+            api_key: Solcast API key
+            resource_id: Rooftop site resource ID
+            capacity_kw: System capacity in kW (optional, for validation)
+        """
+        self._api_key = api_key
+        self._resource_id = resource_id
+        self._capacity_kw = capacity_kw
+        self._session = async_get_clientsession(hass)
+
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_solcast_forecast",
+            update_interval=self.UPDATE_INTERVAL,
+        )
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Fetch forecast data from Solcast API."""
+        try:
+            url = f"{self.SOLCAST_API_URL}/rooftop_sites/{self._resource_id}/forecasts"
+            headers = {
+                "Authorization": f"Bearer {self._api_key}",
+                "Accept": "application/json",
+            }
+            params = {"hours": 48, "format": "json"}
+
+            async with asyncio.timeout(30):
+                async with self._session.get(url, headers=headers, params=params) as response:
+                    if response.status == 401:
+                        raise UpdateFailed("Solcast API authentication failed - check API key")
+                    if response.status == 429:
+                        _LOGGER.warning("Solcast API rate limit exceeded, using cached data")
+                        return self.data or {}
+                    if response.status != 200:
+                        text = await response.text()
+                        raise UpdateFailed(f"Solcast API error {response.status}: {text[:100]}")
+
+                    data = await response.json()
+
+            forecasts = data.get("forecasts", [])
+            if not forecasts:
+                _LOGGER.warning("No forecasts returned from Solcast API")
+                return {"available": False}
+
+            # Calculate today and tomorrow totals
+            now = dt_util.now()
+            today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+            tomorrow_end = today_end + timedelta(days=1)
+
+            today_total = 0.0
+            tomorrow_total = 0.0
+            today_peak = 0.0
+            tomorrow_peak = 0.0
+            current_estimate = None
+            period_hours = 0.5  # 30-minute periods
+
+            for forecast in forecasts:
+                period_end_str = forecast.get("period_end", "")
+                pv_estimate = forecast.get("pv_estimate", 0) or 0
+
+                try:
+                    # Parse ISO 8601 datetime
+                    period_end = datetime.fromisoformat(period_end_str.replace("Z", "+00:00"))
+                    period_end_local = dt_util.as_local(period_end)
+
+                    # Set current estimate to first forecast period
+                    if current_estimate is None:
+                        current_estimate = pv_estimate
+
+                    if period_end_local <= today_end:
+                        today_total += pv_estimate * period_hours
+                        today_peak = max(today_peak, pv_estimate)
+                    elif period_end_local <= tomorrow_end:
+                        tomorrow_total += pv_estimate * period_hours
+                        tomorrow_peak = max(tomorrow_peak, pv_estimate)
+
+                except (ValueError, TypeError) as e:
+                    _LOGGER.debug(f"Error parsing forecast period: {e}")
+
+            _LOGGER.info(
+                f"Solcast forecast updated: Today={today_total:.1f}kWh (peak {today_peak:.2f}kW), "
+                f"Tomorrow={tomorrow_total:.1f}kWh (peak {tomorrow_peak:.2f}kW)"
+            )
+
+            return {
+                "available": True,
+                "today_total_kwh": round(today_total, 2),
+                "tomorrow_total_kwh": round(tomorrow_total, 2),
+                "today_peak_kw": round(today_peak, 2),
+                "tomorrow_peak_kw": round(tomorrow_peak, 2),
+                "current_estimate_kw": round(current_estimate, 2) if current_estimate else None,
+                "forecast_periods": len(forecasts),
+                "last_update": dt_util.utcnow(),
+            }
+
+        except asyncio.TimeoutError as err:
+            raise UpdateFailed("Timeout fetching Solcast forecast") from err
+        except aiohttp.ClientError as err:
+            raise UpdateFailed(f"Error fetching Solcast forecast: {err}") from err
+        except Exception as err:
+            raise UpdateFailed(f"Unexpected error fetching Solcast forecast: {err}") from err

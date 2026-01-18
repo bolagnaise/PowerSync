@@ -448,6 +448,16 @@ DEFAULT_DISCHARGE_DURATION = 30
 SENSOR_TYPE_AEMO_PRICE = "aemo_price"
 SENSOR_TYPE_AEMO_SPIKE_STATUS = "aemo_spike_status"
 
+# Solcast Solar Forecast sensors
+SENSOR_TYPE_SOLCAST_TODAY = "solcast_today_forecast"
+SENSOR_TYPE_SOLCAST_TOMORROW = "solcast_tomorrow_forecast"
+SENSOR_TYPE_SOLCAST_CURRENT = "solcast_current_estimate"
+
+# Solcast Configuration
+CONF_SOLCAST_API_KEY = "solcast_api_key"
+CONF_SOLCAST_RESOURCE_ID = "solcast_resource_id"
+CONF_SOLCAST_ENABLED = "solcast_enabled"
+
 # Tariff schedule sensor
 SENSOR_TYPE_TARIFF_SCHEDULE = "tariff_schedule"
 

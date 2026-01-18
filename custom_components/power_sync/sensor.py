@@ -51,6 +51,10 @@ from .const import (
     SENSOR_TYPE_TOTAL_MONTHLY_COST,
     SENSOR_TYPE_AEMO_PRICE,
     SENSOR_TYPE_AEMO_SPIKE_STATUS,
+    SENSOR_TYPE_SOLCAST_TODAY,
+    SENSOR_TYPE_SOLCAST_TOMORROW,
+    SENSOR_TYPE_SOLCAST_CURRENT,
+    CONF_SOLCAST_ENABLED,
     SENSOR_TYPE_TARIFF_SCHEDULE,
     SENSOR_TYPE_SOLAR_CURTAILMENT,
     SENSOR_TYPE_FLOW_POWER_PRICE,
@@ -92,7 +96,7 @@ from .const import (
     ATTR_AEMO_THRESHOLD,
     ATTR_SPIKE_START_TIME,
 )
-from .coordinator import AmberPriceCoordinator, TeslaEnergyCoordinator, DemandChargeCoordinator
+from .coordinator import AmberPriceCoordinator, TeslaEnergyCoordinator, DemandChargeCoordinator, SolcastForecastCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -300,6 +304,49 @@ AEMO_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
 )
 
 
+# Solcast Solar Forecast Sensors
+SOLCAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_SOLCAST_TODAY,
+        name="Solar Forecast Today",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        icon="mdi:solar-power",
+        suggested_display_precision=1,
+        value_fn=lambda data: data.get("today_total_kwh") if data and data.get("available") else None,
+        attr_fn=lambda data: {
+            "peak_kw": data.get("today_peak_kw") if data else None,
+            "last_update": data.get("last_update").isoformat() if data and data.get("last_update") else None,
+        } if data else {},
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_SOLCAST_TOMORROW,
+        name="Solar Forecast Tomorrow",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        icon="mdi:solar-power-variant",
+        suggested_display_precision=1,
+        value_fn=lambda data: data.get("tomorrow_total_kwh") if data and data.get("available") else None,
+        attr_fn=lambda data: {
+            "peak_kw": data.get("tomorrow_peak_kw") if data else None,
+        } if data else {},
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_SOLCAST_CURRENT,
+        name="Solar Forecast Current",
+        native_unit_of_measurement=UnitOfPower.KILO_WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:white-balance-sunny",
+        suggested_display_precision=2,
+        value_fn=lambda data: data.get("current_estimate_kw") if data and data.get("available") else None,
+        attr_fn=lambda data: {
+            "forecast_periods": data.get("forecast_periods") if data else None,
+        } if data else {},
+    ),
+)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -361,6 +408,19 @@ async def async_setup_entry(
             entities.append(
                 AEMOSpikeSensor(
                     spike_manager=aemo_spike_manager,
+                    description=description,
+                    entry=entry,
+                )
+            )
+
+    # Add Solcast solar forecast sensors if enabled and coordinator exists
+    solcast_coordinator: SolcastForecastCoordinator | None = domain_data.get("solcast_coordinator")
+    if solcast_coordinator:
+        _LOGGER.info("Solcast solar forecasting enabled - adding sensors")
+        for description in SOLCAST_SENSORS:
+            entities.append(
+                SolcastForecastSensor(
+                    coordinator=solcast_coordinator,
                     description=description,
                     entry=entry,
                 )
@@ -575,6 +635,38 @@ class AEMOSpikeSensor(SensorEntity):
         """Return additional attributes."""
         if self.entity_description.attr_fn:
             return self.entity_description.attr_fn(self._spike_manager.get_status())
+        return {}
+
+
+class SolcastForecastSensor(CoordinatorEntity, SensorEntity):
+    """Sensor for Solcast solar production forecasts."""
+
+    entity_description: PowerSyncSensorEntityDescription
+
+    def __init__(
+        self,
+        coordinator: SolcastForecastCoordinator,
+        description: PowerSyncSensorEntityDescription,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator)
+        self.entity_description = description
+        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        self._attr_has_entity_name = True
+
+    @property
+    def native_value(self) -> Any:
+        """Return the state of the sensor."""
+        if self.entity_description.value_fn:
+            return self.entity_description.value_fn(self.coordinator.data)
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return additional attributes."""
+        if self.entity_description.attr_fn:
+            return self.entity_description.attr_fn(self.coordinator.data)
         return {}
 
 
