@@ -8644,6 +8644,141 @@ def api_test_weather(api_user=None):
 
 
 # =============================================================================
+# SOLCAST SOLAR FORECASTING API ENDPOINTS
+# =============================================================================
+
+@bp.route('/api/solcast/settings', methods=['GET'])
+@api_auth_required
+def api_get_solcast_settings(api_user=None):
+    """Get Solcast configuration settings."""
+    user = api_user or current_user
+
+    return jsonify({
+        'enabled': user.solcast_enabled or False,
+        'resource_id': user.solcast_resource_id or '',
+        'capacity_kw': user.solcast_capacity_kw,
+        'has_api_key': bool(user.solcast_api_key_encrypted),
+    })
+
+
+@bp.route('/api/solcast/settings', methods=['POST'])
+@api_auth_required
+def api_save_solcast_settings(api_user=None):
+    """Save Solcast configuration settings."""
+    from app.utils import encrypt_token
+
+    user = api_user or current_user
+    data = request.get_json()
+
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    try:
+        # Update settings
+        user.solcast_enabled = data.get('enabled', False)
+        user.solcast_resource_id = data.get('resource_id', '').strip() or None
+
+        # Only update API key if provided (not the masked placeholder)
+        api_key = data.get('api_key')
+        if api_key and api_key != '••••••••':
+            user.solcast_api_key_encrypted = encrypt_token(api_key.strip())
+
+        capacity = data.get('capacity_kw')
+        user.solcast_capacity_kw = float(capacity) if capacity else None
+
+        db.session.commit()
+        return jsonify({'success': True})
+
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.error(f"Error saving Solcast settings: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/api/solcast/test', methods=['GET'])
+@api_auth_required
+def api_test_solcast(api_user=None):
+    """Test Solcast API connection."""
+    from app.solcast import SolcastService
+
+    user = api_user or current_user
+
+    if not user.solcast_enabled:
+        return jsonify({'error': 'Solcast not enabled'}), 400
+
+    service = SolcastService(user)
+    if not service.is_configured:
+        return jsonify({'error': 'Solcast not properly configured. Check API key and Resource ID.'}), 400
+
+    # Try to fetch a short forecast to test connection
+    forecasts = service.fetch_forecast(hours=1)
+    if forecasts is not None:
+        return jsonify({
+            'success': True,
+            'message': f'Connection successful! Received {len(forecasts)} forecast periods.',
+        })
+    else:
+        return jsonify({'error': 'Failed to connect to Solcast API. Check your API key.'}), 400
+
+
+@bp.route('/api/solcast/forecast', methods=['GET'])
+@api_auth_required
+def api_get_solcast_forecast(api_user=None):
+    """Get current solar production forecast summary."""
+    from app.solcast import get_user_production_forecast
+
+    user = api_user or current_user
+    hours = request.args.get('hours', 24, type=int)
+
+    summary = get_user_production_forecast(user, hours_ahead=hours)
+    return jsonify(summary)
+
+
+@bp.route('/api/solcast/forecast/hourly', methods=['GET'])
+@api_auth_required
+def api_get_solcast_hourly(api_user=None):
+    """Get hourly solar production forecast data."""
+    from app.solcast import get_solcast_service
+
+    user = api_user or current_user
+    hours = request.args.get('hours', 24, type=int)
+
+    service = get_solcast_service(user)
+    if not service:
+        return jsonify({'error': 'Solcast not configured', 'forecasts': []}), 200
+
+    forecasts = service.get_cached_forecast(hours_ahead=hours)
+    return jsonify({
+        'forecasts': [f.to_dict() for f in forecasts],
+        'count': len(forecasts),
+    })
+
+
+@bp.route('/api/solcast/refresh', methods=['POST'])
+@api_auth_required
+def api_refresh_solcast(api_user=None):
+    """Force refresh Solcast forecast from API."""
+    from app.solcast import SolcastService
+
+    user = api_user or current_user
+
+    if not user.solcast_enabled:
+        return jsonify({'error': 'Solcast not enabled'}), 400
+
+    service = SolcastService(user)
+    if not service.is_configured:
+        return jsonify({'error': 'Solcast not properly configured'}), 400
+
+    if service.update_forecast_cache():
+        return jsonify({
+            'success': True,
+            'message': 'Forecast updated successfully',
+        })
+    else:
+        return jsonify({'error': 'Failed to refresh forecast. Check API limits (10 calls/day for hobbyist).'}), 400
+
+
+# =============================================================================
 # EV CHARGING API ENDPOINTS (Tesla Fleet API)
 # =============================================================================
 

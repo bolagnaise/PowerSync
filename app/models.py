@@ -73,6 +73,12 @@ class User(UserMixin, db.Model):
     weather_longitude = db.Column(db.Float, nullable=True)  # Cached geocoded longitude
     openweathermap_api_key = db.Column(db.String(64), nullable=True)  # Optional user-specific API key
 
+    # Solcast Solar Forecasting
+    solcast_api_key_encrypted = db.Column(db.LargeBinary, nullable=True)  # Encrypted Solcast API key
+    solcast_resource_id = db.Column(db.String(50), nullable=True)  # Rooftop site resource ID from Solcast
+    solcast_enabled = db.Column(db.Boolean, default=False)  # Enable Solcast solar forecasting
+    solcast_capacity_kw = db.Column(db.Float, nullable=True)  # System capacity in kW (for validation)
+
     # Amber Electric Preferences
     amber_forecast_type = db.Column(db.String(20), default='predicted')  # 'low', 'predicted', 'high'
     solar_curtailment_enabled = db.Column(db.Boolean, default=False)  # Enable solar curtailment when export price <= 0
@@ -798,4 +804,43 @@ class OCPPTransaction(db.Model):
             'max_power_kw': self.max_power_kw,
             'cost': self.cost,
             'cost_currency': self.cost_currency,
+        }
+
+
+class SolcastForecast(db.Model):
+    """Cached Solcast solar production forecasts.
+
+    Stores forecast data from Solcast API to minimize API calls.
+    Forecasts are updated periodically (hobbyist tier: 10 calls/day).
+    """
+    __tablename__ = 'solcast_forecast'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+
+    # Forecast period end time (UTC)
+    period_end = db.Column(db.DateTime, nullable=False, index=True)
+
+    # PV power estimates in kW
+    pv_estimate = db.Column(db.Float)  # 50th percentile (most likely)
+    pv_estimate10 = db.Column(db.Float)  # 10th percentile (conservative/cloudy)
+    pv_estimate90 = db.Column(db.Float)  # 90th percentile (optimistic/clear)
+
+    # Metadata
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    user = db.relationship('User', backref=db.backref('solcast_forecasts', lazy='dynamic'))
+
+    def __repr__(self):
+        return f'<SolcastForecast {self.period_end} - {self.pv_estimate}kW>'
+
+    def to_dict(self):
+        """Convert to dictionary for API responses."""
+        return {
+            'period_end': self.period_end.isoformat() if self.period_end else None,
+            'pv_estimate': self.pv_estimate,
+            'pv_estimate10': self.pv_estimate10,
+            'pv_estimate90': self.pv_estimate90,
         }

@@ -847,6 +847,85 @@
         </form>
     </article>
 
+    <!-- Solcast Solar Forecasting -->
+    <article>
+        <header><strong>Solar Forecasting (Solcast)</strong></header>
+        <p style="font-size: 0.85em;">
+            Get accurate solar production forecasts to improve curtailment decisions.
+            <a href="https://solcast.com" target="_blank">Solcast</a> offers a free hobbyist tier (10 API calls/day).
+        </p>
+
+        <form id="solcastForm">
+            <label for="solcast_enabled" style="display: flex; align-items: center; gap: 0.5em; cursor: pointer;">
+                <input type="checkbox" id="solcast_enabled" name="solcast_enabled"
+                       {{ 'checked' if current_user.solcast_enabled else '' }}
+                       role="switch">
+                Enable Solcast Solar Forecasting
+            </label>
+
+            <div id="solcastConfig" style="{{ '' if current_user.solcast_enabled else 'display: none;' }}">
+                <label for="solcast_api_key" style="margin-top: 1em;">
+                    Solcast API Key
+                    <small>Get your API key from <a href="https://toolkit.solcast.com.au/account" target="_blank">Solcast Toolkit</a></small>
+                </label>
+                <div style="display: flex; align-items: center; gap: 0.5em;">
+                    <input type="password" id="solcast_api_key" name="solcast_api_key"
+                           value="{{ '••••••••' if current_user.solcast_api_key_encrypted else '' }}"
+                           placeholder="Enter Solcast API key"
+                           class="secure-field"
+                           style="flex: 1;">
+                    <button type="button" onclick="toggleVisibility('solcast_api_key', this)"
+                            style="background: none; border: none; cursor: pointer; padding: 0.5em;
+                                   font-size: 1.2em; color: var(--muted-color); flex-shrink: 0; width: 40px;"
+                            aria-label="Toggle visibility" title="Show/Hide API Key">
+                        👁️
+                    </button>
+                </div>
+
+                <label for="solcast_resource_id" style="margin-top: 1em;">
+                    Rooftop Site Resource ID
+                    <small>Find in <a href="https://toolkit.solcast.com.au/rooftop-sites" target="_blank">Solcast Toolkit → Rooftop Sites</a></small>
+                </label>
+                <input type="text" id="solcast_resource_id" name="solcast_resource_id"
+                       value="{{ current_user.solcast_resource_id or '' }}"
+                       placeholder="e.g., 1234-5678-abcd-efgh">
+
+                <label for="solcast_capacity_kw" style="margin-top: 1em;">
+                    System Capacity (kW) - Optional
+                    <small>Your solar system's peak capacity for validation</small>
+                </label>
+                <input type="number" id="solcast_capacity_kw" name="solcast_capacity_kw"
+                       value="{{ current_user.solcast_capacity_kw or '' }}"
+                       placeholder="e.g., 6.6"
+                       step="0.1"
+                       min="0">
+            </div>
+
+            <div style="display: flex; gap: 0.5em; margin-top: 1em; flex-wrap: wrap;">
+                <button type="button" onclick="saveSolcastSettings()" class="primary" style="width: auto;">
+                    Save Solcast Settings
+                </button>
+                <button type="button" onclick="testSolcastConnection()" class="outline" style="width: auto;"
+                        id="solcast-test-btn" {{ '' if current_user.solcast_enabled else 'disabled' }}>
+                    Test Connection
+                </button>
+                <button type="button" onclick="refreshSolcastForecast()" class="outline" style="width: auto;"
+                        id="solcast-refresh-btn" {{ '' if current_user.solcast_enabled else 'disabled' }}>
+                    Refresh Forecast
+                </button>
+            </div>
+            <p id="solcast-status" style="font-size: 0.8em; margin-top: 0.5em; display: none;"></p>
+        </form>
+
+        <!-- Forecast Preview -->
+        <div id="solcastForecastPreview" style="margin-top: 1em; {{ '' if current_user.solcast_enabled else 'display: none;' }}">
+            <h4 style="font-size: 0.9em; margin-bottom: 0.5em;">Current Forecast</h4>
+            <div id="solcastForecastData" style="font-size: 0.85em; color: var(--muted-color);">
+                Loading forecast...
+            </div>
+        </div>
+    </article>
+
     <!-- EV Charging Configuration (Tesla Fleet API) -->
     <article>
         <header><strong>EV Charging</strong></header>
@@ -1287,6 +1366,157 @@
                 }
             } catch (error) {
                 status.innerHTML = '<span style="color: #ff6b6b;">✗ Failed to save settings</span>';
+            }
+        }
+
+        // Solcast Settings Toggle
+        document.addEventListener('DOMContentLoaded', function() {
+            const solcastEnabled = document.getElementById('solcast_enabled');
+            if (solcastEnabled) {
+                solcastEnabled.addEventListener('change', function() {
+                    const config = document.getElementById('solcastConfig');
+                    const preview = document.getElementById('solcastForecastPreview');
+                    const testBtn = document.getElementById('solcast-test-btn');
+                    const refreshBtn = document.getElementById('solcast-refresh-btn');
+
+                    if (this.checked) {
+                        config.style.display = 'block';
+                        preview.style.display = 'block';
+                        testBtn.disabled = false;
+                        refreshBtn.disabled = false;
+                        loadSolcastForecast();
+                    } else {
+                        config.style.display = 'none';
+                        preview.style.display = 'none';
+                        testBtn.disabled = true;
+                        refreshBtn.disabled = true;
+                    }
+                });
+            }
+
+            // Load forecast on page load if Solcast is enabled
+            if (solcastEnabled && solcastEnabled.checked) {
+                loadSolcastForecast();
+            }
+        });
+
+        async function saveSolcastSettings() {
+            const status = document.getElementById('solcast-status');
+            const enabled = document.getElementById('solcast_enabled').checked;
+            const apiKeyInput = document.getElementById('solcast_api_key').value;
+            const resourceId = document.getElementById('solcast_resource_id').value;
+            const capacityKw = document.getElementById('solcast_capacity_kw').value;
+
+            // Don't send masked placeholder
+            const apiKey = apiKeyInput === '••••••••' ? null : apiKeyInput;
+
+            status.style.display = 'block';
+            status.innerHTML = '<span style="color: #fcc419;">Saving...</span>';
+
+            try {
+                const response = await fetch('/api/solcast/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        enabled: enabled,
+                        api_key: apiKey,
+                        resource_id: resourceId,
+                        capacity_kw: capacityKw ? parseFloat(capacityKw) : null
+                    })
+                });
+                const data = await response.json();
+
+                if (data.success) {
+                    status.innerHTML = '<span style="color: #51cf66;">✓ Solcast settings saved!</span>';
+                    if (enabled) {
+                        loadSolcastForecast();
+                    }
+                } else {
+                    status.innerHTML = `<span style="color: #ff6b6b;">✗ ${data.error || 'Failed to save'}</span>`;
+                }
+            } catch (error) {
+                status.innerHTML = '<span style="color: #ff6b6b;">✗ Failed to save settings</span>';
+            }
+        }
+
+        async function testSolcastConnection() {
+            const status = document.getElementById('solcast-status');
+            status.style.display = 'block';
+            status.innerHTML = '<span style="color: #fcc419;">Testing connection...</span>';
+
+            try {
+                const response = await fetch('/api/solcast/test');
+                const data = await response.json();
+
+                if (data.success) {
+                    status.innerHTML = '<span style="color: #51cf66;">✓ Connection successful!</span>';
+                    loadSolcastForecast();
+                } else {
+                    status.innerHTML = `<span style="color: #ff6b6b;">✗ ${data.error || 'Connection failed'}</span>`;
+                }
+            } catch (error) {
+                status.innerHTML = '<span style="color: #ff6b6b;">✗ Failed to test connection</span>';
+            }
+        }
+
+        async function refreshSolcastForecast() {
+            const status = document.getElementById('solcast-status');
+            status.style.display = 'block';
+            status.innerHTML = '<span style="color: #fcc419;">Refreshing forecast...</span>';
+
+            try {
+                const response = await fetch('/api/solcast/refresh', { method: 'POST' });
+                const data = await response.json();
+
+                if (data.success) {
+                    status.innerHTML = '<span style="color: #51cf66;">✓ Forecast updated!</span>';
+                    loadSolcastForecast();
+                } else {
+                    status.innerHTML = `<span style="color: #ff6b6b;">✗ ${data.error || 'Refresh failed'}</span>`;
+                }
+            } catch (error) {
+                status.innerHTML = '<span style="color: #ff6b6b;">✗ Failed to refresh forecast</span>';
+            }
+        }
+
+        async function loadSolcastForecast() {
+            const container = document.getElementById('solcastForecastData');
+
+            try {
+                const response = await fetch('/api/solcast/forecast');
+                const data = await response.json();
+
+                if (data.available) {
+                    container.innerHTML = `
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1em;">
+                            <div style="padding: 0.75em; background: var(--card-sectionning-background-color); border-radius: 0.5em;">
+                                <small style="color: var(--muted-color);">Current</small>
+                                <div style="font-size: 1.2em; font-weight: bold; color: #fcc419;">
+                                    ${data.current_estimate_kw !== null ? data.current_estimate_kw.toFixed(2) + ' kW' : 'N/A'}
+                                </div>
+                            </div>
+                            <div style="padding: 0.75em; background: var(--card-sectionning-background-color); border-radius: 0.5em;">
+                                <small style="color: var(--muted-color);">Peak (24h)</small>
+                                <div style="font-size: 1.2em; font-weight: bold; color: #51cf66;">
+                                    ${data.peak_estimate_kw !== null ? data.peak_estimate_kw.toFixed(2) + ' kW' : 'N/A'}
+                                </div>
+                            </div>
+                            <div style="padding: 0.75em; background: var(--card-sectionning-background-color); border-radius: 0.5em;">
+                                <small style="color: var(--muted-color);">Total (24h)</small>
+                                <div style="font-size: 1.2em; font-weight: bold;">
+                                    ${data.total_energy_kwh !== null ? data.total_energy_kwh.toFixed(1) + ' kWh' : 'N/A'}
+                                </div>
+                            </div>
+                        </div>
+                        <p style="font-size: 0.75em; color: var(--muted-color); margin-top: 0.5em;">
+                            Last updated: ${data.last_updated ? new Date(data.last_updated).toLocaleString() : 'Never'}
+                        </p>
+                    `;
+                } else {
+                    container.innerHTML = `<p style="color: var(--muted-color);">${data.message || 'No forecast available'}</p>`;
+                }
+            } catch (error) {
+                container.innerHTML = '<p style="color: #ff6b6b;">Failed to load forecast</p>';
             }
         }
     </script>

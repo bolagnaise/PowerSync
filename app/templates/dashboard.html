@@ -366,6 +366,30 @@
                     </div>
                 </div>
                 <canvas id="solarChart" style="max-height: 200px;"></canvas>
+
+                <!-- Solcast Solar Forecast -->
+                <div id="solcast-forecast-section" style="margin-top: 1em; padding-top: 0.75em; border-top: 1px solid #eee; display: none;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5em;">
+                        <h5 style="margin: 0; font-size: 0.85em; color: #666;">
+                            <span style="color: #fcc419;">☀️</span> Solcast Forecast
+                        </h5>
+                        <span id="solcast-forecast-time" style="font-size: 0.7em; color: #999;"></span>
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75em;">
+                        <div style="background: linear-gradient(135deg, #fff5cc 0%, #fff 100%); padding: 0.5em 0.75em; border-radius: 0.5em; border: 1px solid #ffeaa7;">
+                            <div style="font-size: 0.7em; color: #d4a800; font-weight: 500;">Today</div>
+                            <div style="font-size: 1.1em; font-weight: bold; color: #f39c12;">
+                                <span id="solcast-today">-- kWh</span>
+                            </div>
+                        </div>
+                        <div style="background: linear-gradient(135deg, #e8f6ff 0%, #fff 100%); padding: 0.5em 0.75em; border-radius: 0.5em; border: 1px solid #bee5ff;">
+                            <div style="font-size: 0.7em; color: #0984e3; font-weight: 500;">Tomorrow</div>
+                            <div style="font-size: 1.1em; font-weight: bold; color: #0984e3;">
+                                <span id="solcast-tomorrow">-- kWh</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <!-- Grid Chart -->
@@ -676,6 +700,85 @@
 
         // Check discharge status on page load
         document.addEventListener('DOMContentLoaded', checkDischargeStatus);
+
+        // Load Solcast forecast on page load
+        document.addEventListener('DOMContentLoaded', loadSolcastDashboardForecast);
+
+        // ========================================
+        // SOLCAST FORECAST FUNCTIONS
+        // ========================================
+
+        async function loadSolcastDashboardForecast() {
+            const section = document.getElementById('solcast-forecast-section');
+            if (!section) return;
+
+            try {
+                // First check if Solcast is enabled
+                const settingsResponse = await fetch('/api/solcast/settings');
+                const settings = await settingsResponse.json();
+
+                if (!settings.enabled) {
+                    section.style.display = 'none';
+                    return;
+                }
+
+                // Fetch forecast for today and tomorrow (48 hours)
+                const response = await fetch('/api/solcast/forecast?hours=48');
+                const data = await response.json();
+
+                if (!data.available) {
+                    section.style.display = 'none';
+                    return;
+                }
+
+                // Show the section
+                section.style.display = 'block';
+
+                // Fetch hourly data to calculate today vs tomorrow
+                const hourlyResponse = await fetch('/api/solcast/forecast/hourly?hours=48');
+                const hourlyData = await hourlyResponse.json();
+
+                if (hourlyData.forecasts && hourlyData.forecasts.length > 0) {
+                    const now = new Date();
+                    const todayEnd = new Date(now);
+                    todayEnd.setHours(23, 59, 59, 999);
+
+                    let todayTotal = 0;
+                    let tomorrowTotal = 0;
+                    const periodHours = 0.5; // 30-minute periods
+
+                    hourlyData.forecasts.forEach(f => {
+                        const periodEnd = new Date(f.period_end);
+                        const estimate = f.pv_estimate || 0;
+
+                        if (periodEnd <= todayEnd) {
+                            todayTotal += estimate * periodHours;
+                        } else {
+                            tomorrowTotal += estimate * periodHours;
+                        }
+                    });
+
+                    document.getElementById('solcast-today').textContent = todayTotal.toFixed(1) + ' kWh';
+                    document.getElementById('solcast-tomorrow').textContent = tomorrowTotal.toFixed(1) + ' kWh';
+
+                    // Show last updated time
+                    if (data.last_updated) {
+                        const updated = new Date(data.last_updated);
+                        document.getElementById('solcast-forecast-time').textContent =
+                            'Updated ' + updated.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                    }
+                } else {
+                    // Use summary data if hourly not available
+                    document.getElementById('solcast-today').textContent =
+                        data.total_energy_kwh ? data.total_energy_kwh.toFixed(1) + ' kWh' : '-- kWh';
+                    document.getElementById('solcast-tomorrow').textContent = '-- kWh';
+                }
+
+            } catch (error) {
+                console.error('Error loading Solcast forecast:', error);
+                section.style.display = 'none';
+            }
+        }
 
         // ========================================
         // PRICE CHANNEL FUNCTIONS
