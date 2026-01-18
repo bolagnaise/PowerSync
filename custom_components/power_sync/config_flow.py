@@ -1936,10 +1936,10 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             )] = bool
 
         # Weather location for weather-based automations (optional)
+        current_weather_location = self._get_option(CONF_WEATHER_LOCATION) or ""
         schema_dict[vol.Optional(
             CONF_WEATHER_LOCATION,
-            default=self._get_option(CONF_WEATHER_LOCATION, ""),
-            description={"suggested_value": "City name or postcode (e.g., Brisbane or 4000)"},
+            default=current_weather_location,
         )] = str
 
         # OpenWeatherMap API key for weather-based automations (optional)
