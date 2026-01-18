@@ -7,8 +7,15 @@ Supported actions:
 - set_operation_mode: Set Powerwall operation mode (Tesla only)
 - force_discharge: Force battery discharge for a duration (Tesla/Sigenergy)
 - force_charge: Force battery charge for a duration (Tesla/Sigenergy)
-- curtail_inverter: Curtail AC-coupled solar inverter (both Tesla and Sigenergy)
-- send_notification: Send push notification to user (both)
+- curtail_inverter: Curtail AC-coupled solar inverter
+- restore_inverter: Restore inverter to normal operation
+- send_notification: Send push notification to user
+- set_grid_export: Set grid export rule (Tesla only)
+- set_grid_charging: Enable/disable grid charging (Tesla only)
+- restore_normal: Restore normal battery operation
+- set_charge_rate: Set charge rate limit (Sigenergy only)
+- set_discharge_rate: Set discharge rate limit (Sigenergy only)
+- set_export_limit: Set export power limit (Sigenergy only)
 """
 
 import logging
@@ -132,8 +139,22 @@ async def _execute_single_action(
         return await _action_force_charge(hass, config_entry, params)
     elif action_type == "curtail_inverter":
         return await _action_curtail_inverter(hass, config_entry, params)
+    elif action_type == "restore_inverter":
+        return await _action_restore_inverter(hass, config_entry)
     elif action_type == "send_notification":
         return await _action_send_notification(hass, params)
+    elif action_type == "set_grid_export":
+        return await _action_set_grid_export(hass, config_entry, params)
+    elif action_type == "set_grid_charging":
+        return await _action_set_grid_charging(hass, config_entry, params)
+    elif action_type == "restore_normal":
+        return await _action_restore_normal(hass, config_entry)
+    elif action_type == "set_charge_rate":
+        return await _action_set_charge_rate(hass, config_entry, params)
+    elif action_type == "set_discharge_rate":
+        return await _action_set_discharge_rate(hass, config_entry, params)
+    elif action_type == "set_export_limit":
+        return await _action_set_export_limit(hass, config_entry, params)
     else:
         _LOGGER.warning(f"Unknown action type: {action_type}")
         return False
@@ -348,8 +369,9 @@ async def _action_curtail_inverter(
     from ..const import DOMAIN, SERVICE_CURTAIL_INVERTER
 
     # Service expects "mode": "load_following" or "shutdown"
+    # Accept both "mode" and "curtailment_mode" for flexibility
     # Default to "load_following" (limit to home load / zero-export)
-    mode = params.get("mode", "load_following")
+    mode = params.get("mode") or params.get("curtailment_mode", "load_following")
 
     try:
         await hass.services.async_call(
@@ -437,3 +459,234 @@ async def _send_expo_push(hass: HomeAssistant, title: str, message: str) -> None
                     _LOGGER.error(f"Expo Push API error: {response.status} - {text}")
     except Exception as e:
         _LOGGER.error(f"Failed to send Expo push notification: {e}")
+
+
+async def _action_set_grid_export(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    params: Dict[str, Any]
+) -> bool:
+    """Set grid export rule (Tesla only)."""
+    if _is_sigenergy(config_entry):
+        _LOGGER.warning("set_grid_export not supported for Sigenergy")
+        return False
+
+    from ..const import DOMAIN, SERVICE_SET_GRID_EXPORT
+
+    # Accept both "rule" and "grid_export_rule" for flexibility
+    rule = params.get("rule") or params.get("grid_export_rule")
+    if not rule:
+        _LOGGER.error("set_grid_export: missing rule parameter")
+        return False
+
+    valid_rules = ["never", "pv_only", "battery_ok"]
+    if rule not in valid_rules:
+        _LOGGER.error(f"set_grid_export: invalid rule '{rule}'")
+        return False
+
+    try:
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_SET_GRID_EXPORT,
+            {"rule": rule},
+            blocking=True,
+        )
+        return True
+    except Exception as e:
+        _LOGGER.error(f"Failed to set grid export: {e}")
+        return False
+
+
+async def _action_set_grid_charging(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    params: Dict[str, Any]
+) -> bool:
+    """Enable or disable grid charging (Tesla only)."""
+    if _is_sigenergy(config_entry):
+        _LOGGER.warning("set_grid_charging not supported for Sigenergy")
+        return False
+
+    from ..const import DOMAIN, SERVICE_SET_GRID_CHARGING
+
+    enabled = params.get("enabled", True)
+
+    try:
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_SET_GRID_CHARGING,
+            {"enabled": enabled},
+            blocking=True,
+        )
+        return True
+    except Exception as e:
+        _LOGGER.error(f"Failed to set grid charging: {e}")
+        return False
+
+
+async def _action_restore_normal(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry
+) -> bool:
+    """Restore normal battery operation (cancel force charge/discharge)."""
+    if _is_sigenergy(config_entry):
+        # Sigenergy: Restore default rate limits
+        controller = await _get_sigenergy_controller(config_entry)
+        if not controller:
+            _LOGGER.error("restore_normal: Sigenergy Modbus not configured")
+            return False
+        try:
+            # Restore default rates (max rates)
+            charge_result = await controller.set_charge_rate_limit(10.0)
+            discharge_result = await controller.set_discharge_rate_limit(10.0)
+            export_result = await controller.restore_export_limit()
+            if charge_result and discharge_result and export_result:
+                _LOGGER.info("Sigenergy: Restored normal operation")
+                return True
+            return charge_result or discharge_result or export_result
+        except Exception as e:
+            _LOGGER.error(f"Failed to restore normal (Sigenergy): {e}")
+            return False
+        finally:
+            await controller.disconnect()
+
+    from ..const import DOMAIN, SERVICE_RESTORE_NORMAL
+
+    try:
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_RESTORE_NORMAL,
+            {},
+            blocking=True,
+        )
+        return True
+    except Exception as e:
+        _LOGGER.error(f"Failed to restore normal: {e}")
+        return False
+
+
+async def _action_set_charge_rate(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    params: Dict[str, Any]
+) -> bool:
+    """Set charge rate limit (Sigenergy only)."""
+    if not _is_sigenergy(config_entry):
+        _LOGGER.warning("set_charge_rate only supported for Sigenergy")
+        return False
+
+    # Accept both "rate" and "rate_limit_kw" for flexibility
+    rate_kw = params.get("rate") or params.get("rate_limit_kw")
+    if rate_kw is None:
+        _LOGGER.error("set_charge_rate: missing rate parameter")
+        return False
+
+    controller = await _get_sigenergy_controller(config_entry)
+    if not controller:
+        _LOGGER.error("set_charge_rate: Sigenergy Modbus not configured")
+        return False
+
+    try:
+        # Clamp to valid range (0-10 kW typical)
+        rate_kw = max(0, min(10, float(rate_kw)))
+        result = await controller.set_charge_rate_limit(rate_kw)
+        if result:
+            _LOGGER.info(f"Set charge rate limit to {rate_kw} kW")
+        return result
+    except Exception as e:
+        _LOGGER.error(f"Failed to set charge rate: {e}")
+        return False
+    finally:
+        await controller.disconnect()
+
+
+async def _action_set_discharge_rate(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    params: Dict[str, Any]
+) -> bool:
+    """Set discharge rate limit (Sigenergy only)."""
+    if not _is_sigenergy(config_entry):
+        _LOGGER.warning("set_discharge_rate only supported for Sigenergy")
+        return False
+
+    # Accept both "rate" and "rate_limit_kw" for flexibility
+    rate_kw = params.get("rate") or params.get("rate_limit_kw")
+    if rate_kw is None:
+        _LOGGER.error("set_discharge_rate: missing rate parameter")
+        return False
+
+    controller = await _get_sigenergy_controller(config_entry)
+    if not controller:
+        _LOGGER.error("set_discharge_rate: Sigenergy Modbus not configured")
+        return False
+
+    try:
+        # Clamp to valid range (0-10 kW typical)
+        rate_kw = max(0, min(10, float(rate_kw)))
+        result = await controller.set_discharge_rate_limit(rate_kw)
+        if result:
+            _LOGGER.info(f"Set discharge rate limit to {rate_kw} kW")
+        return result
+    except Exception as e:
+        _LOGGER.error(f"Failed to set discharge rate: {e}")
+        return False
+    finally:
+        await controller.disconnect()
+
+
+async def _action_set_export_limit(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    params: Dict[str, Any]
+) -> bool:
+    """Set export power limit (Sigenergy only)."""
+    if not _is_sigenergy(config_entry):
+        _LOGGER.warning("set_export_limit only supported for Sigenergy")
+        return False
+
+    # Accept both "limit" and "export_limit_kw" for flexibility
+    # None means unlimited
+    limit_kw = params.get("limit") or params.get("export_limit_kw")
+
+    controller = await _get_sigenergy_controller(config_entry)
+    if not controller:
+        _LOGGER.error("set_export_limit: Sigenergy Modbus not configured")
+        return False
+
+    try:
+        if limit_kw is None:
+            # Unlimited export
+            result = await controller.restore_export_limit()
+            _LOGGER.info("Restored unlimited export")
+        else:
+            # Clamp to valid range (0-10 kW typical)
+            limit_kw = max(0, min(10, float(limit_kw)))
+            result = await controller.set_export_limit(limit_kw)
+            _LOGGER.info(f"Set export limit to {limit_kw} kW")
+        return result
+    except Exception as e:
+        _LOGGER.error(f"Failed to set export limit: {e}")
+        return False
+    finally:
+        await controller.disconnect()
+
+
+async def _action_restore_inverter(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry
+) -> bool:
+    """Restore inverter to normal operation."""
+    from ..const import DOMAIN, SERVICE_RESTORE_INVERTER
+
+    try:
+        await hass.services.async_call(
+            DOMAIN,
+            SERVICE_RESTORE_INVERTER,
+            {},
+            blocking=True,
+        )
+        return True
+    except Exception as e:
+        _LOGGER.error(f"Failed to restore inverter: {e}")
+        return False

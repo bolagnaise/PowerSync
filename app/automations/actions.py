@@ -2,13 +2,20 @@
 Action execution logic for automations.
 
 Supported actions:
-- set_backup_reserve: Set battery backup reserve percentage
-- preserve_charge: Prevent battery discharge (set export to "never")
-- set_operation_mode: Set Powerwall operation mode
+- set_backup_reserve: Set battery backup reserve percentage (Tesla)
+- preserve_charge: Prevent battery discharge
+- set_operation_mode: Set Powerwall operation mode (Tesla)
 - force_discharge: Force battery discharge for a duration
 - force_charge: Force battery charge for a duration
 - curtail_inverter: Curtail AC-coupled solar inverter
+- restore_inverter: Restore inverter to normal operation
 - send_notification: Send push notification to user
+- set_grid_export: Set grid export rule (Tesla)
+- set_grid_charging: Enable/disable grid charging (Tesla)
+- restore_normal: Restore normal battery operation
+- set_charge_rate: Set charge rate limit (Sigenergy)
+- set_discharge_rate: Set discharge rate limit (Sigenergy)
+- set_export_limit: Set export power limit (Sigenergy)
 """
 
 import logging
@@ -76,8 +83,22 @@ def _execute_single_action(action_type: str, params: Dict[str, Any], user: User)
         return _action_force_charge(params, user)
     elif action_type == 'curtail_inverter':
         return _action_curtail_inverter(params, user)
+    elif action_type == 'restore_inverter':
+        return _action_restore_inverter(user)
     elif action_type == 'send_notification':
         return _action_send_notification(params, user)
+    elif action_type == 'set_grid_export':
+        return _action_set_grid_export(params, user)
+    elif action_type == 'set_grid_charging':
+        return _action_set_grid_charging(params, user)
+    elif action_type == 'restore_normal':
+        return _action_restore_normal(user)
+    elif action_type == 'set_charge_rate':
+        return _action_set_charge_rate(params, user)
+    elif action_type == 'set_discharge_rate':
+        return _action_set_discharge_rate(params, user)
+    elif action_type == 'set_export_limit':
+        return _action_set_export_limit(params, user)
     else:
         _LOGGER.warning(f"Unknown action type: {action_type}")
         return False
@@ -329,8 +350,8 @@ def _action_curtail_inverter(params: Dict[str, Any], user: User) -> bool:
         _LOGGER.warning("Inverter curtailment not enabled for user")
         return False
 
-    # Support both "mode" (load_following/shutdown) and "power_limit_w"
-    mode = params.get('mode', 'load_following')
+    # Support both "mode"/"curtailment_mode" (load_following/shutdown) and "power_limit_w"
+    mode = params.get('mode') or params.get('curtailment_mode', 'load_following')
     power_limit_w = params.get('power_limit_w')
 
     # If mode is shutdown, set power_limit_w to 0
@@ -399,4 +420,252 @@ def _action_send_notification(params: Dict[str, Any], user: User) -> bool:
         return success
     except Exception as e:
         _LOGGER.error(f"Failed to send notification: {e}")
+        return False
+
+
+def _action_set_grid_export(params: Dict[str, Any], user: User) -> bool:
+    """Set grid export rule (Tesla only)."""
+    # Accept both "rule" and "grid_export_rule" for flexibility
+    rule = params.get('rule') or params.get('grid_export_rule')
+    if not rule:
+        _LOGGER.error("set_grid_export: missing rule parameter")
+        return False
+
+    valid_rules = ['never', 'pv_only', 'battery_ok']
+    if rule not in valid_rules:
+        _LOGGER.error(f"set_grid_export: invalid rule '{rule}'")
+        return False
+
+    if user.battery_system != 'tesla':
+        _LOGGER.warning("set_grid_export only supported for Tesla")
+        return False
+
+    from app.api_clients import get_tesla_client
+    client = get_tesla_client(user)
+    if not client:
+        return False
+
+    try:
+        result = client.set_grid_export(user.tesla_energy_site_id, rule)
+        if result:
+            user.current_export_rule = rule
+            user.current_export_rule_updated = datetime.utcnow()
+            db.session.commit()
+        return result is not None
+    except Exception as e:
+        _LOGGER.error(f"Failed to set grid export: {e}")
+        return False
+
+
+def _action_set_grid_charging(params: Dict[str, Any], user: User) -> bool:
+    """Enable or disable grid charging (Tesla only)."""
+    enabled = params.get('enabled', True)
+
+    if user.battery_system != 'tesla':
+        _LOGGER.warning("set_grid_charging only supported for Tesla")
+        return False
+
+    from app.api_clients import get_tesla_client
+    client = get_tesla_client(user)
+    if not client:
+        return False
+
+    try:
+        result = client.set_grid_charging(user.tesla_energy_site_id, enabled)
+        return result is not None
+    except Exception as e:
+        _LOGGER.error(f"Failed to set grid charging: {e}")
+        return False
+
+
+def _action_restore_normal(user: User) -> bool:
+    """Restore normal battery operation (cancel force charge/discharge)."""
+    try:
+        # Clear force charge/discharge states
+        user.manual_charge_active = False
+        user.manual_charge_expires_at = None
+        user.manual_discharge_active = False
+        user.manual_discharge_expires_at = None
+
+        if user.battery_system == 'tesla':
+            from app.api_clients import get_tesla_client
+            from app.models import SavedTOUProfile
+
+            client = get_tesla_client(user)
+            if not client:
+                return False
+
+            # Restore saved tariff if available
+            if user.manual_charge_saved_tariff_id:
+                saved = SavedTOUProfile.query.get(user.manual_charge_saved_tariff_id)
+                if saved:
+                    import json as json_module
+                    tariff = json_module.loads(saved.tariff_json)
+                    client.set_tariff(user.tesla_energy_site_id, tariff)
+                user.manual_charge_saved_tariff_id = None
+
+            if user.manual_discharge_saved_tariff_id:
+                saved = SavedTOUProfile.query.get(user.manual_discharge_saved_tariff_id)
+                if saved:
+                    import json as json_module
+                    tariff = json_module.loads(saved.tariff_json)
+                    client.set_tariff(user.tesla_energy_site_id, tariff)
+                user.manual_discharge_saved_tariff_id = None
+
+            # Restore backup reserve if saved
+            if user.manual_charge_saved_backup_reserve is not None:
+                client.set_backup_reserve(user.tesla_energy_site_id, user.manual_charge_saved_backup_reserve)
+                user.manual_charge_saved_backup_reserve = None
+
+        elif user.battery_system == 'sigenergy':
+            from app.sigenergy_modbus import get_sigenergy_modbus_client
+            client = get_sigenergy_modbus_client(user)
+            if client:
+                # Restore default rate limits (max rates)
+                client.set_charge_rate_limit(10.0)
+                client.set_discharge_rate_limit(10.0)
+                client.restore_export_limit()
+
+        db.session.commit()
+        _LOGGER.info(f"Restored normal operation for user {user.id}")
+        return True
+
+    except Exception as e:
+        _LOGGER.error(f"Failed to restore normal operation: {e}")
+        db.session.rollback()
+        return False
+
+
+def _action_set_charge_rate(params: Dict[str, Any], user: User) -> bool:
+    """Set charge rate limit (Sigenergy only)."""
+    # Accept both "rate" and "rate_limit_kw" for flexibility
+    rate_kw = params.get('rate') or params.get('rate_limit_kw')
+    if rate_kw is None:
+        _LOGGER.error("set_charge_rate: missing rate parameter")
+        return False
+
+    if user.battery_system != 'sigenergy':
+        _LOGGER.warning("set_charge_rate only supported for Sigenergy")
+        return False
+
+    from app.sigenergy_modbus import get_sigenergy_modbus_client
+
+    try:
+        client = get_sigenergy_modbus_client(user)
+        if not client:
+            _LOGGER.error("Sigenergy Modbus not configured")
+            return False
+
+        # Clamp to valid range (0-10 kW typical)
+        rate_kw = max(0, min(10, float(rate_kw)))
+        result = client.set_charge_rate_limit(rate_kw)
+        _LOGGER.info(f"Set charge rate limit to {rate_kw} kW")
+        return result
+    except Exception as e:
+        _LOGGER.error(f"Failed to set charge rate: {e}")
+        return False
+
+
+def _action_set_discharge_rate(params: Dict[str, Any], user: User) -> bool:
+    """Set discharge rate limit (Sigenergy only)."""
+    # Accept both "rate" and "rate_limit_kw" for flexibility
+    rate_kw = params.get('rate') or params.get('rate_limit_kw')
+    if rate_kw is None:
+        _LOGGER.error("set_discharge_rate: missing rate parameter")
+        return False
+
+    if user.battery_system != 'sigenergy':
+        _LOGGER.warning("set_discharge_rate only supported for Sigenergy")
+        return False
+
+    from app.sigenergy_modbus import get_sigenergy_modbus_client
+
+    try:
+        client = get_sigenergy_modbus_client(user)
+        if not client:
+            _LOGGER.error("Sigenergy Modbus not configured")
+            return False
+
+        # Clamp to valid range (0-10 kW typical)
+        rate_kw = max(0, min(10, float(rate_kw)))
+        result = client.set_discharge_rate_limit(rate_kw)
+        _LOGGER.info(f"Set discharge rate limit to {rate_kw} kW")
+        return result
+    except Exception as e:
+        _LOGGER.error(f"Failed to set discharge rate: {e}")
+        return False
+
+
+def _action_set_export_limit(params: Dict[str, Any], user: User) -> bool:
+    """Set export power limit (Sigenergy only)."""
+    # Accept both "limit" and "export_limit_kw" for flexibility
+    # None means unlimited
+    limit_kw = params.get('limit') or params.get('export_limit_kw')
+
+    if user.battery_system != 'sigenergy':
+        _LOGGER.warning("set_export_limit only supported for Sigenergy")
+        return False
+
+    from app.sigenergy_modbus import get_sigenergy_modbus_client
+
+    try:
+        client = get_sigenergy_modbus_client(user)
+        if not client:
+            _LOGGER.error("Sigenergy Modbus not configured")
+            return False
+
+        if limit_kw is None:
+            # Unlimited export
+            result = client.restore_export_limit()
+            _LOGGER.info("Restored unlimited export")
+        else:
+            # Clamp to valid range (0-10 kW typical)
+            limit_kw = max(0, min(10, float(limit_kw)))
+            result = client.set_export_limit(limit_kw)
+            _LOGGER.info(f"Set export limit to {limit_kw} kW")
+        return result
+    except Exception as e:
+        _LOGGER.error(f"Failed to set export limit: {e}")
+        return False
+
+
+def _action_restore_inverter(user: User) -> bool:
+    """Restore inverter to normal operation."""
+    if not user.inverter_curtailment_enabled:
+        _LOGGER.warning("Inverter curtailment not enabled for user")
+        return False
+
+    from app.inverters import get_inverter_controller
+
+    try:
+        controller = get_inverter_controller(
+            brand=user.inverter_brand,
+            host=user.inverter_host,
+            port=user.inverter_port or 502,
+            slave_id=user.inverter_slave_id or 1,
+            model=user.inverter_model,
+            token=user.inverter_token,
+            load_following=user.fronius_load_following,
+            enphase_username=user.enphase_username,
+            enphase_password=user.enphase_password,
+            enphase_serial=user.enphase_serial,
+        )
+
+        if not controller:
+            _LOGGER.error("Failed to create inverter controller")
+            return False
+
+        result = controller.restore()
+
+        if result:
+            user.inverter_last_state = 'normal'
+            user.inverter_last_state_updated = datetime.utcnow()
+            user.inverter_power_limit_w = None
+            db.session.commit()
+
+        _LOGGER.info("Restored inverter to normal operation")
+        return result
+
+    except Exception as e:
+        _LOGGER.error(f"Failed to restore inverter: {e}")
         return False
