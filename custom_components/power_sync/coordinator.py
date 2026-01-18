@@ -1220,6 +1220,41 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             data = await response.json()
             return data.get("forecasts", [])
 
+    async def _fetch_estimated_actuals_for_resource(self, resource_id: str) -> list[dict] | None:
+        """Fetch estimated actuals (past production) for a single resource ID.
+
+        Args:
+            resource_id: Solcast rooftop site resource ID
+
+        Returns:
+            List of estimated actual periods or None on error
+        """
+        url = f"{self.SOLCAST_API_URL}/rooftop_sites/{resource_id}/estimated_actuals"
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Accept": "application/json",
+        }
+        # Get last 24 hours of estimated actuals (covers today's past production)
+        params = {"hours": 24, "format": "json"}
+
+        try:
+            async with self._session.get(url, headers=headers, params=params) as response:
+                if response.status == 401:
+                    _LOGGER.warning("Solcast estimated_actuals auth failed")
+                    return None
+                if response.status == 429:
+                    _LOGGER.warning(f"Solcast API rate limit for estimated_actuals {resource_id[:8]}...")
+                    return None
+                if response.status != 200:
+                    _LOGGER.debug(f"Solcast estimated_actuals error for {resource_id[:8]}: {response.status}")
+                    return None
+
+                data = await response.json()
+                return data.get("estimated_actuals", [])
+        except Exception as e:
+            _LOGGER.debug(f"Error fetching estimated_actuals: {e}")
+            return None
+
     def _combine_forecasts(self, base: list[dict], additional: list[dict]) -> list[dict]:
         """Combine forecasts from multiple resources by summing pv_estimate values.
 
@@ -1253,49 +1288,78 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch forecast data from Solcast API.
 
-        Supports multiple resource IDs - forecasts are combined by summing values.
+        Fetches both forecasts (future) and estimated_actuals (past) to calculate
+        the full day's expected production. This gives an accurate "today" total
+        even when fetched mid-day.
+
+        Supports multiple resource IDs - values are combined by summing.
         """
         try:
-            async with asyncio.timeout(30):
-                # Fetch from first resource
+            async with asyncio.timeout(60):  # Longer timeout for multiple API calls
+                # Fetch forecasts from first resource
                 forecasts = await self._fetch_forecast_for_resource(self._resource_ids[0])
                 if not forecasts:
                     _LOGGER.warning("No forecasts from Solcast API")
                     return self.data or {"available": False}
 
+                # Fetch estimated actuals (past production based on satellite data)
+                estimated_actuals = await self._fetch_estimated_actuals_for_resource(self._resource_ids[0])
+
                 # If multiple resources, fetch and combine
                 if len(self._resource_ids) > 1:
                     for resource_id in self._resource_ids[1:]:
-                        additional = await self._fetch_forecast_for_resource(resource_id)
-                        if additional:
-                            forecasts = self._combine_forecasts(forecasts, additional)
+                        additional_forecasts = await self._fetch_forecast_for_resource(resource_id)
+                        if additional_forecasts:
+                            forecasts = self._combine_forecasts(forecasts, additional_forecasts)
                         else:
-                            _LOGGER.warning(f"Failed to fetch from resource {resource_id[:8]}...")
+                            _LOGGER.warning(f"Failed to fetch forecast from resource {resource_id[:8]}...")
 
-                    _LOGGER.info(f"Combined forecasts from {len(self._resource_ids)} Solcast sites")
+                        additional_actuals = await self._fetch_estimated_actuals_for_resource(resource_id)
+                        if additional_actuals and estimated_actuals:
+                            estimated_actuals = self._combine_forecasts(estimated_actuals, additional_actuals)
+
+                    _LOGGER.info(f"Combined data from {len(self._resource_ids)} Solcast sites")
 
             if not forecasts:
                 return {"available": False}
 
-            # Calculate today and tomorrow totals (remaining from now)
+            # Calculate totals
             now = dt_util.now()
-            today_str = now.strftime("%Y-%m-%d")
+            today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
             today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
             tomorrow_end = today_end + timedelta(days=1)
 
-            today_remaining = 0.0
+            today_past = 0.0  # Production that already happened today (from estimated_actuals)
+            today_remaining = 0.0  # Future production today (from forecasts)
             tomorrow_total = 0.0
             today_peak = 0.0
             tomorrow_peak = 0.0
             current_estimate = None
             period_hours = 0.5  # 30-minute periods
 
+            # Sum up past production from estimated_actuals (today only)
+            if estimated_actuals:
+                for actual in estimated_actuals:
+                    period_end_str = actual.get("period_end", "")
+                    pv_estimate = actual.get("pv_estimate", 0) or 0
+
+                    try:
+                        period_end = datetime.fromisoformat(period_end_str.replace("Z", "+00:00"))
+                        period_end_local = dt_util.as_local(period_end)
+
+                        # Only count today's past production
+                        if today_start <= period_end_local <= now:
+                            today_past += pv_estimate * period_hours
+                            today_peak = max(today_peak, pv_estimate)
+                    except (ValueError, TypeError):
+                        pass
+
+            # Sum up future production from forecasts
             for forecast in forecasts:
                 period_end_str = forecast.get("period_end", "")
                 pv_estimate = forecast.get("pv_estimate", 0) or 0
 
                 try:
-                    # Parse ISO 8601 datetime
                     period_end = datetime.fromisoformat(period_end_str.replace("Z", "+00:00"))
                     period_end_local = dt_util.as_local(period_end)
 
@@ -1313,40 +1377,22 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                 except (ValueError, TypeError) as e:
                     _LOGGER.debug(f"Error parsing forecast period: {e}")
 
-            # Cache full-day forecast on first fetch of the day
-            # This captures the full day's forecast before production starts depleting it
-            if self._daily_forecast_date != today_str:
-                # New day or first fetch - store the current remaining as full-day forecast
-                # If it's early morning (before much production), this will be close to full day
-                # If it's later in the day, we use the remaining as best estimate
-                self._daily_forecast_date = today_str
-                self._daily_forecast_kwh = today_remaining
-                self._daily_forecast_peak_kw = today_peak
-                _LOGGER.info(
-                    f"Solcast: Cached full-day forecast for {today_str}: {today_remaining:.1f}kWh"
-                )
-
-            # Use cached full-day value, but update if current remaining is higher
-            # (this handles the case where first fetch was mid-day and we get a fuller picture later)
-            today_forecast = self._daily_forecast_kwh or today_remaining
-            if today_remaining > today_forecast:
-                # Current remaining is higher (shouldn't happen normally, but handle gracefully)
-                today_forecast = today_remaining
-                self._daily_forecast_kwh = today_remaining
+            # Full day = past actuals + future forecast
+            today_forecast = today_past + today_remaining
 
             _LOGGER.info(
-                f"Solcast forecast updated: Today forecast={today_forecast:.1f}kWh, "
-                f"remaining={today_remaining:.1f}kWh (peak {today_peak:.2f}kW), "
-                f"Tomorrow={tomorrow_total:.1f}kWh (peak {tomorrow_peak:.2f}kW)"
+                f"Solcast forecast updated: Today total={today_forecast:.1f}kWh "
+                f"(past={today_past:.1f}kWh + remaining={today_remaining:.1f}kWh), "
+                f"peak={today_peak:.2f}kW, Tomorrow={tomorrow_total:.1f}kWh"
             )
 
             return {
                 "available": True,
-                "today_forecast_kwh": round(today_forecast, 2),  # Full day forecast (cached)
+                "today_forecast_kwh": round(today_forecast, 2),  # Full day (actuals + forecast)
                 "today_remaining_kwh": round(today_remaining, 2),  # Remaining from now
                 "today_total_kwh": round(today_forecast, 2),  # Alias for backward compat
                 "tomorrow_total_kwh": round(tomorrow_total, 2),
-                "today_peak_kw": round(self._daily_forecast_peak_kw or today_peak, 2),
+                "today_peak_kw": round(today_peak, 2),
                 "tomorrow_peak_kw": round(tomorrow_peak, 2),
                 "current_estimate_kw": round(current_estimate, 2) if current_estimate else None,
                 "forecast_periods": len(forecasts),

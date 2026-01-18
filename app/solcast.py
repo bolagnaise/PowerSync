@@ -394,7 +394,8 @@ class SolcastService:
 
         Returns:
             Dictionary with today and tomorrow production forecasts.
-            Includes both full-day forecast (cached from first fetch) and remaining forecast.
+            Combines estimated_actuals (past production) with forecasts (future)
+            to get accurate full-day totals.
         """
         from datetime import date
 
@@ -404,7 +405,7 @@ class SolcastService:
         if not forecasts:
             return {
                 "enabled": True,
-                "today_forecast_kwh": None,  # Full day forecast
+                "today_forecast_kwh": None,  # Full day (actuals + forecast)
                 "today_remaining_kwh": None,  # Remaining from now
                 "today_kwh": None,  # Alias for backward compat
                 "tomorrow_kwh": None,
@@ -414,61 +415,70 @@ class SolcastService:
                 "last_updated": None,
             }
 
-        # Group forecasts by date
-        today = date.today()
-        today_str = today.strftime("%Y-%m-%d")
-        tomorrow = today + timedelta(days=1)
+        # Fetch estimated actuals for today's past production
+        estimated_actuals = self.fetch_estimated_actuals(hours=24)
 
-        today_estimates = []
-        tomorrow_estimates = []
+        # Calculate past production from estimated actuals
+        today = date.today()
+        now = datetime.utcnow()
+        today_start = datetime.combine(today, datetime.min.time())
+        tomorrow = today + timedelta(days=1)
+        period_hours = 0.5
+
+        today_past = 0.0
+        today_peak_kw = 0.0
+
+        if estimated_actuals:
+            for actual in estimated_actuals:
+                period_end_str = actual.get("period_end", "")
+                pv_estimate = actual.get("pv_estimate", 0) or 0
+                try:
+                    period_end = datetime.fromisoformat(period_end_str.replace("Z", "+00:00"))
+                    period_end_naive = period_end.replace(tzinfo=None)
+                    # Only count today's past production
+                    if today_start <= period_end_naive <= now:
+                        today_past += pv_estimate * period_hours
+                        today_peak_kw = max(today_peak_kw, pv_estimate)
+                except (ValueError, TypeError):
+                    pass
+
+        # Calculate remaining from cached forecasts
+        today_remaining = 0.0
+        tomorrow_total = 0.0
+        tomorrow_peak_kw = 0.0
 
         for f in forecasts:
             if f.pv_estimate is not None:
                 forecast_date = f.period_end.date()
                 if forecast_date == today:
-                    today_estimates.append(f.pv_estimate)
+                    today_remaining += f.pv_estimate * period_hours
+                    today_peak_kw = max(today_peak_kw, f.pv_estimate)
                 elif forecast_date == tomorrow:
-                    tomorrow_estimates.append(f.pv_estimate)
+                    tomorrow_total += f.pv_estimate * period_hours
+                    tomorrow_peak_kw = max(tomorrow_peak_kw, f.pv_estimate)
 
-        # Calculate totals (30-minute periods, so multiply by 0.5 to get kWh)
-        period_hours = 0.5
-        today_remaining_kwh = sum(today_estimates) * period_hours if today_estimates else None
-        tomorrow_kwh = sum(tomorrow_estimates) * period_hours if tomorrow_estimates else None
-        today_peak_kw = max(today_estimates) if today_estimates else None
-        tomorrow_peak_kw = max(tomorrow_estimates) if tomorrow_estimates else None
-
-        # Cache full-day forecast on first fetch of the day
-        # This captures the full day's forecast before production starts depleting it
-        today_forecast_kwh = today_remaining_kwh
-        if self.user.solcast_daily_forecast_date != today_str:
-            # New day or first fetch - store the current remaining as full-day forecast
-            self.user.solcast_daily_forecast_date = today_str
-            self.user.solcast_daily_forecast_kwh = today_remaining_kwh
-            self.user.solcast_daily_forecast_peak_kw = today_peak_kw
-            try:
-                db.session.commit()
-                _LOGGER.info(f"Solcast: Cached full-day forecast for {today_str}: {today_remaining_kwh:.1f}kWh")
-            except Exception as e:
-                _LOGGER.error(f"Failed to cache daily forecast: {e}")
-                db.session.rollback()
-        else:
-            # Use cached full-day value
-            today_forecast_kwh = self.user.solcast_daily_forecast_kwh or today_remaining_kwh
-            today_peak_kw = self.user.solcast_daily_forecast_peak_kw or today_peak_kw
+        # Full day = past actuals + future forecast
+        today_forecast_kwh = today_past + today_remaining
 
         # Current estimate is the first forecast
         current_estimate = forecasts[0].pv_estimate if forecasts and forecasts[0].pv_estimate else None
         last_updated = forecasts[0].updated_at.isoformat() if forecasts else None
 
+        _LOGGER.info(
+            f"Solcast daily summary: Today={today_forecast_kwh:.1f}kWh "
+            f"(past={today_past:.1f} + remaining={today_remaining:.1f}), "
+            f"Tomorrow={tomorrow_total:.1f}kWh"
+        )
+
         return {
             "enabled": True,
-            "today_forecast_kwh": round(today_forecast_kwh, 2) if today_forecast_kwh is not None else None,
-            "today_remaining_kwh": round(today_remaining_kwh, 2) if today_remaining_kwh is not None else None,
-            "today_kwh": round(today_forecast_kwh, 2) if today_forecast_kwh is not None else None,  # Backward compat
-            "tomorrow_kwh": round(tomorrow_kwh, 2) if tomorrow_kwh is not None else None,
+            "today_forecast_kwh": round(today_forecast_kwh, 2) if today_forecast_kwh else None,
+            "today_remaining_kwh": round(today_remaining, 2) if today_remaining else None,
+            "today_kwh": round(today_forecast_kwh, 2) if today_forecast_kwh else None,  # Backward compat
+            "tomorrow_kwh": round(tomorrow_total, 2) if tomorrow_total else None,
             "current_estimate_kw": round(current_estimate, 2) if current_estimate is not None else None,
-            "today_peak_kw": round(today_peak_kw, 2) if today_peak_kw is not None else None,
-            "tomorrow_peak_kw": round(tomorrow_peak_kw, 2) if tomorrow_peak_kw is not None else None,
+            "today_peak_kw": round(today_peak_kw, 2) if today_peak_kw else None,
+            "tomorrow_peak_kw": round(tomorrow_peak_kw, 2) if tomorrow_peak_kw else None,
             "last_updated": last_updated,
         }
 
