@@ -618,8 +618,34 @@ def create_app(config_class=Config):
         logger.info("  - Demand period grid charging: every 1 minute at :45 seconds")
         logger.info("  - User automations: every 30 seconds")
 
+        # Start OCPP WebSocket server for EV charger control
+        # Runs in background thread alongside Flask
+        ocpp_server = None
+        try:
+            from app.ocpp import OCPPServer
+
+            ocpp_port = int(os.environ.get('OCPP_PORT', 9000))
+            ocpp_host = os.environ.get('OCPP_HOST', '0.0.0.0')
+
+            ocpp_server = OCPPServer(host=ocpp_host, port=ocpp_port, app=app)
+            if ocpp_server.start():
+                app.config['OCPP_SERVER'] = ocpp_server
+                logger.info(f"🔌 OCPP 1.6J server started on ws://{ocpp_host}:{ocpp_port}")
+            else:
+                logger.warning("⚠️  OCPP server failed to start (websockets/ocpp library may not be installed)")
+                ocpp_server = None
+        except ImportError as e:
+            logger.warning(f"⚠️  OCPP module not available: {e}")
+            logger.info("   Install with: pip install websockets ocpp")
+        except Exception as e:
+            logger.error(f"❌ Error starting OCPP server: {e}")
+
         # Shut down the scheduler and release lock when exiting the app
         def cleanup():
+            # Stop OCPP server first
+            if ocpp_server:
+                logger.info("Stopping OCPP server...")
+                ocpp_server.stop()
             scheduler.shutdown()
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
             lock_file.close()

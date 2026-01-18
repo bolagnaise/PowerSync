@@ -20,6 +20,11 @@ Supported actions:
 - stop_ev_charging: Stop EV charging (Tesla Fleet API)
 - set_ev_charge_limit: Set EV charge limit percentage (Tesla Fleet API)
 - set_ev_charging_amps: Set EV charging amperage (Tesla Fleet API)
+- start_ocpp_charging: Start OCPP charger charging session
+- stop_ocpp_charging: Stop OCPP charger charging session
+- set_ocpp_power_limit: Set OCPP charger power limit (watts)
+- clear_ocpp_power_limit: Clear OCPP charger power limit
+- reset_ocpp_charger: Reset OCPP charger (soft/hard)
 """
 
 import logging
@@ -111,6 +116,16 @@ def _execute_single_action(action_type: str, params: Dict[str, Any], user: User)
         return _action_set_ev_charge_limit(params, user)
     elif action_type == 'set_ev_charging_amps':
         return _action_set_ev_charging_amps(params, user)
+    elif action_type == 'start_ocpp_charging':
+        return _action_start_ocpp_charging(params, user)
+    elif action_type == 'stop_ocpp_charging':
+        return _action_stop_ocpp_charging(params, user)
+    elif action_type == 'set_ocpp_power_limit':
+        return _action_set_ocpp_power_limit(params, user)
+    elif action_type == 'clear_ocpp_power_limit':
+        return _action_clear_ocpp_power_limit(params, user)
+    elif action_type == 'reset_ocpp_charger':
+        return _action_reset_ocpp_charger(params, user)
     else:
         _LOGGER.warning(f"Unknown action type: {action_type}")
         return False
@@ -862,4 +877,233 @@ def _action_set_ev_charging_amps(params: Dict[str, Any], user: User) -> bool:
 
     except Exception as e:
         _LOGGER.error(f"Failed to set EV charging amps: {e}")
+        return False
+
+
+# =============================================================================
+# OCPP Charger Actions
+# =============================================================================
+
+def _get_ocpp_charger_and_server(params: Dict[str, Any], user: User):
+    """
+    Get the target OCPP charger and server instance.
+
+    Args:
+        params: Action parameters (may contain charger_id)
+        user: The user
+
+    Returns:
+        Tuple of (OCPPCharger, OCPPServer) or (None, None) if not available
+    """
+    from app.models import OCPPCharger
+    from app.ocpp import get_ocpp_server
+
+    # Get OCPP server
+    server = get_ocpp_server()
+    if not server:
+        _LOGGER.error("OCPP server not running")
+        return None, None
+
+    # Get target charger
+    charger_id = params.get('charger_id')
+    if charger_id:
+        charger = OCPPCharger.query.filter_by(user_id=user.id, id=charger_id).first()
+    else:
+        # Use first charger with automations enabled
+        charger = OCPPCharger.query.filter_by(
+            user_id=user.id,
+            enable_automations=True
+        ).first()
+
+    if not charger:
+        _LOGGER.error("No OCPP charger found for action")
+        return None, None
+
+    return charger, server
+
+
+def _action_start_ocpp_charging(params: Dict[str, Any], user: User) -> bool:
+    """Start OCPP charger charging session via RemoteStartTransaction."""
+    charger, server = _get_ocpp_charger_and_server(params, user)
+    if not charger or not server:
+        return False
+
+    try:
+        # Check if charger is connected
+        if not charger.is_connected:
+            _LOGGER.warning(f"Cannot start charging - {charger.display_name or charger.charger_id} is not connected")
+            return False
+
+        # Check if already charging
+        if charger.current_transaction_id:
+            _LOGGER.warning(f"Charger {charger.charger_id} already has active transaction")
+            return False
+
+        # Get optional parameters
+        id_tag = params.get('id_tag', 'PowerSync')
+        connector_id = params.get('connector_id', 1)
+
+        # Start charging
+        result = server.remote_start_transaction(
+            charger_id=charger.charger_id,
+            id_tag=id_tag,
+            connector_id=connector_id
+        )
+
+        if result:
+            _LOGGER.info(f"Started OCPP charging on {charger.charger_id}")
+            return True
+
+        _LOGGER.warning(f"RemoteStartTransaction rejected for {charger.charger_id}")
+        return False
+
+    except Exception as e:
+        _LOGGER.error(f"Failed to start OCPP charging: {e}")
+        return False
+
+
+def _action_stop_ocpp_charging(params: Dict[str, Any], user: User) -> bool:
+    """Stop OCPP charger charging session via RemoteStopTransaction."""
+    charger, server = _get_ocpp_charger_and_server(params, user)
+    if not charger or not server:
+        return False
+
+    try:
+        # Check if charger is connected
+        if not charger.is_connected:
+            _LOGGER.warning(f"Cannot stop charging - {charger.display_name or charger.charger_id} is not connected")
+            return False
+
+        # Check if there's an active transaction
+        if not charger.current_transaction_id:
+            _LOGGER.warning(f"Charger {charger.charger_id} has no active transaction to stop")
+            return False
+
+        # Stop charging
+        result = server.remote_stop_transaction(
+            charger_id=charger.charger_id,
+            transaction_id=charger.current_transaction_id
+        )
+
+        if result:
+            _LOGGER.info(f"Stopped OCPP charging on {charger.charger_id}")
+            return True
+
+        _LOGGER.warning(f"RemoteStopTransaction rejected for {charger.charger_id}")
+        return False
+
+    except Exception as e:
+        _LOGGER.error(f"Failed to stop OCPP charging: {e}")
+        return False
+
+
+def _action_set_ocpp_power_limit(params: Dict[str, Any], user: User) -> bool:
+    """Set OCPP charger power limit via SetChargingProfile."""
+    charger, server = _get_ocpp_charger_and_server(params, user)
+    if not charger or not server:
+        return False
+
+    # Accept both "watts" and "power_limit_w" for flexibility
+    limit_watts = params.get('watts') or params.get('power_limit_w')
+    if limit_watts is None:
+        _LOGGER.error("set_ocpp_power_limit: missing watts parameter")
+        return False
+
+    limit_watts = int(limit_watts)
+    if limit_watts < 0:
+        limit_watts = 0
+
+    # Optional duration in seconds
+    duration_seconds = params.get('duration_seconds')
+    connector_id = params.get('connector_id', 1)
+
+    try:
+        # Check if charger is connected
+        if not charger.is_connected:
+            _LOGGER.warning(f"Cannot set power limit - {charger.charger_id} is not connected")
+            return False
+
+        # Set charging profile
+        result = server.set_charging_profile(
+            charger_id=charger.charger_id,
+            connector_id=connector_id,
+            limit_watts=limit_watts,
+            duration_seconds=duration_seconds
+        )
+
+        if result:
+            _LOGGER.info(f"Set power limit to {limit_watts}W on {charger.charger_id}")
+            return True
+
+        _LOGGER.warning(f"SetChargingProfile rejected for {charger.charger_id}")
+        return False
+
+    except Exception as e:
+        _LOGGER.error(f"Failed to set OCPP power limit: {e}")
+        return False
+
+
+def _action_clear_ocpp_power_limit(params: Dict[str, Any], user: User) -> bool:
+    """Clear OCPP charger power limit via ClearChargingProfile."""
+    charger, server = _get_ocpp_charger_and_server(params, user)
+    if not charger or not server:
+        return False
+
+    connector_id = params.get('connector_id', 1)
+
+    try:
+        # Check if charger is connected
+        if not charger.is_connected:
+            _LOGGER.warning(f"Cannot clear power limit - {charger.charger_id} is not connected")
+            return False
+
+        # Clear charging profile
+        result = server.clear_charging_profile(
+            charger_id=charger.charger_id,
+            connector_id=connector_id
+        )
+
+        if result:
+            _LOGGER.info(f"Cleared power limit on {charger.charger_id}")
+            return True
+
+        _LOGGER.warning(f"ClearChargingProfile rejected for {charger.charger_id}")
+        return False
+
+    except Exception as e:
+        _LOGGER.error(f"Failed to clear OCPP power limit: {e}")
+        return False
+
+
+def _action_reset_ocpp_charger(params: Dict[str, Any], user: User) -> bool:
+    """Reset OCPP charger via Reset command."""
+    charger, server = _get_ocpp_charger_and_server(params, user)
+    if not charger or not server:
+        return False
+
+    # Hard reset (True) vs soft reset (False)
+    hard_reset = params.get('hard', False)
+
+    try:
+        # Check if charger is connected
+        if not charger.is_connected:
+            _LOGGER.warning(f"Cannot reset - {charger.charger_id} is not connected")
+            return False
+
+        # Reset charger
+        result = server.reset_charger(
+            charger_id=charger.charger_id,
+            hard=hard_reset
+        )
+
+        reset_type = "hard" if hard_reset else "soft"
+        if result:
+            _LOGGER.info(f"Sent {reset_type} reset to {charger.charger_id}")
+            return True
+
+        _LOGGER.warning(f"Reset rejected for {charger.charger_id}")
+        return False
+
+    except Exception as e:
+        _LOGGER.error(f"Failed to reset OCPP charger: {e}")
         return False

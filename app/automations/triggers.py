@@ -9,6 +9,7 @@ Supports the following trigger types:
 - grid: Trigger when grid status changes (off-grid/on-grid)
 - weather: Trigger based on weather conditions
 - ev: Trigger based on EV charging state (connected, charging, SoC)
+- ocpp: Trigger based on OCPP charger state (connected, charging, energy)
 """
 
 import logging
@@ -64,6 +65,8 @@ def evaluate_trigger(
         return _evaluate_weather_trigger(trigger, current_state)
     elif trigger.trigger_type == 'ev':
         return _evaluate_ev_trigger(trigger, current_state, user)
+    elif trigger.trigger_type == 'ocpp':
+        return _evaluate_ocpp_trigger(trigger, current_state, user)
     else:
         _LOGGER.warning(f"Unknown trigger type: {trigger.trigger_type}")
         return TriggerResult(triggered=False, reason=f"Unknown trigger type: {trigger.trigger_type}")
@@ -594,3 +597,168 @@ def _evaluate_ev_trigger(
             _update_last_value(trigger, current_value)
 
     return TriggerResult(triggered=False, reason=f"No EV matched condition: {condition}")
+
+
+def _evaluate_ocpp_trigger(
+    trigger: AutomationTrigger,
+    current_state: Dict[str, Any],
+    user: User
+) -> TriggerResult:
+    """
+    Evaluate OCPP charger trigger.
+
+    Conditions:
+    - connected: Charger connects to central system
+    - disconnected: Charger disconnects from central system
+    - charging_starts: Charging session starts
+    - charging_stops: Charging session stops
+    - energy_reaches: Energy delivered reaches threshold (kWh)
+    - available: Charger becomes available
+    - faulted: Charger reports a fault
+    """
+    from app.models import OCPPCharger
+
+    condition = trigger.ocpp_condition
+    if not condition:
+        return TriggerResult(triggered=False, reason="No OCPP condition set")
+
+    # Get OCPP charger state from current_state
+    ocpp_chargers = current_state.get('ocpp_chargers', [])
+    if not ocpp_chargers:
+        # Try to get from database if not in current_state
+        chargers = OCPPCharger.query.filter_by(user_id=user.id).all()
+        ocpp_chargers = [{
+            'id': c.id,
+            'charger_id': c.charger_id,
+            'display_name': c.display_name or c.charger_id,
+            'is_connected': c.is_connected,
+            'status': c.status,
+            'current_transaction_id': c.current_transaction_id,
+            'current_energy_kwh': c.current_energy_kwh,
+        } for c in chargers]
+
+    if not ocpp_chargers:
+        return TriggerResult(triggered=False, reason="No OCPP chargers found")
+
+    # Filter to specific charger if set
+    target_charger_id = trigger.ocpp_charger_id
+    if target_charger_id:
+        ocpp_chargers = [c for c in ocpp_chargers if c.get('id') == target_charger_id]
+        if not ocpp_chargers:
+            return TriggerResult(triggered=False, reason=f"Charger {target_charger_id} not found")
+
+    # Check each charger for the trigger condition
+    for charger in ocpp_chargers:
+        charger_name = charger.get('display_name', charger.get('charger_id', 'Charger'))
+        charger_id = charger.get('id')
+        is_connected = charger.get('is_connected', False)
+        status = charger.get('status', 'Unavailable')
+        current_transaction_id = charger.get('current_transaction_id')
+        current_energy_kwh = charger.get('current_energy_kwh', 0.0)
+
+        # State tracking:
+        # For connected/disconnected: 1.0 = connected, 0.0 = not connected
+        # For charging_starts/stops: 1.0 = has active transaction, 0.0 = no transaction
+        # For available/faulted: use status string hash
+        # For energy_reaches: actual energy value
+        last_value = trigger.last_evaluated_value
+
+        if condition == 'connected':
+            # Trigger when charger connects to central system
+            current_value = 1.0 if is_connected else 0.0
+            if is_connected:
+                if last_value is not None and last_value == 0.0:
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(triggered=True, reason=f"{charger_name} connected")
+                elif last_value is None:
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(triggered=False, reason="Initial state connected")
+            _update_last_value(trigger, current_value)
+
+        elif condition == 'disconnected':
+            # Trigger when charger disconnects from central system
+            current_value = 1.0 if is_connected else 0.0
+            if not is_connected:
+                if last_value is not None and last_value == 1.0:
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(triggered=True, reason=f"{charger_name} disconnected")
+                elif last_value is None:
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(triggered=False, reason="Initial state disconnected")
+            _update_last_value(trigger, current_value)
+
+        elif condition == 'charging_starts':
+            # Trigger when a charging session starts (transaction begins)
+            has_transaction = current_transaction_id is not None
+            current_value = 1.0 if has_transaction else 0.0
+            if has_transaction:
+                if last_value is not None and last_value == 0.0:
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(triggered=True, reason=f"{charger_name} started charging")
+                elif last_value is None:
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(triggered=False, reason="Initial state charging")
+            _update_last_value(trigger, current_value)
+
+        elif condition == 'charging_stops':
+            # Trigger when a charging session stops (transaction ends)
+            has_transaction = current_transaction_id is not None
+            current_value = 1.0 if has_transaction else 0.0
+            if not has_transaction:
+                if last_value is not None and last_value == 1.0:
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(triggered=True, reason=f"{charger_name} stopped charging")
+                elif last_value is None:
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(triggered=False, reason="Initial state not charging")
+            _update_last_value(trigger, current_value)
+
+        elif condition == 'energy_reaches':
+            # Trigger when energy delivered reaches threshold
+            threshold = trigger.ocpp_energy_threshold
+            if threshold is None:
+                return TriggerResult(triggered=False, reason="No energy threshold set")
+
+            if current_energy_kwh is None:
+                continue  # Skip this charger, try next
+
+            current_value = float(current_energy_kwh)
+            if current_energy_kwh >= threshold:
+                if last_value is not None and last_value < threshold:
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(
+                        triggered=True,
+                        reason=f"{charger_name} delivered {current_energy_kwh:.1f}kWh (threshold: {threshold}kWh)"
+                    )
+                elif last_value is None:
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(triggered=False, reason="Initial state above threshold")
+            _update_last_value(trigger, current_value)
+
+        elif condition == 'available':
+            # Trigger when charger becomes available
+            is_available = status == 'Available'
+            current_value = 1.0 if is_available else 0.0
+            if is_available:
+                if last_value is not None and last_value == 0.0:
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(triggered=True, reason=f"{charger_name} is now available")
+                elif last_value is None:
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(triggered=False, reason="Initial state available")
+            _update_last_value(trigger, current_value)
+
+        elif condition == 'faulted':
+            # Trigger when charger reports a fault
+            is_faulted = status == 'Faulted'
+            current_value = 1.0 if is_faulted else 0.0
+            if is_faulted:
+                if last_value is not None and last_value == 0.0:
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(triggered=True, reason=f"{charger_name} reported a fault")
+                elif last_value is None:
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(triggered=False, reason="Initial state faulted")
+            _update_last_value(trigger, current_value)
+
+    return TriggerResult(triggered=False, reason=f"No OCPP charger matched condition: {condition}")

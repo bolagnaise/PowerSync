@@ -538,6 +538,14 @@ class AutomationTrigger(db.Model):
     # ev_soc_threshold: For soc_reaches trigger (0-100%)
     ev_soc_threshold = db.Column(db.Integer, nullable=True)
 
+    # ========== OCPP Charger Trigger Fields ==========
+    # ocpp_charger_id: Specific charger ID (null = any charger)
+    ocpp_charger_id = db.Column(db.Integer, db.ForeignKey('ocpp_charger.id'), nullable=True)
+    # ocpp_condition: connected, disconnected, charging_starts, charging_stops, energy_reaches, available, faulted
+    ocpp_condition = db.Column(db.String(30), nullable=True)
+    # ocpp_energy_threshold: For energy_reaches trigger (kWh)
+    ocpp_energy_threshold = db.Column(db.Float, nullable=True)
+
     # ========== Time Window (optional constraint for all triggers) ==========
     time_window_start = db.Column(db.Time, nullable=True)  # Only trigger after this time
     time_window_end = db.Column(db.Time, nullable=True)  # Only trigger before this time
@@ -657,4 +665,137 @@ class TeslaVehicle(db.Model):
             'enable_automations': self.enable_automations,
             'prioritize_powerwall': self.prioritize_powerwall,
             'powerwall_min_soc': self.powerwall_min_soc,
+        }
+
+
+class OCPPCharger(db.Model):
+    """OCPP-compliant EV charger registered with the central system."""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+
+    # Charger identification (from BootNotification)
+    charger_id = db.Column(db.String(50), nullable=False, unique=True)  # Unique ID used in OCPP connection
+    vendor = db.Column(db.String(50))  # Charge point vendor (e.g., "Grizzl-E", "Wallbox")
+    model = db.Column(db.String(50))  # Charge point model
+    serial_number = db.Column(db.String(50))  # Serial number
+    firmware_version = db.Column(db.String(50))  # Firmware version
+
+    # Connection state
+    is_connected = db.Column(db.Boolean, default=False)  # WebSocket connected
+    last_seen = db.Column(db.DateTime)  # Last heartbeat/message
+    last_boot = db.Column(db.DateTime)  # Last BootNotification
+
+    # Connector status (for single-connector chargers; multi-connector uses OCPPConnector)
+    # Status: Available, Preparing, Charging, SuspendedEVSE, SuspendedEV, Finishing, Reserved, Unavailable, Faulted
+    status = db.Column(db.String(20), default='Unavailable')
+    error_code = db.Column(db.String(50))  # NoError, ConnectorLockFailure, EVCommunicationError, etc.
+
+    # Current charging session info
+    current_transaction_id = db.Column(db.Integer)  # Active transaction ID
+    current_power_kw = db.Column(db.Float)  # Current charging power in kW
+    current_energy_kwh = db.Column(db.Float)  # Energy delivered in current session
+    current_soc = db.Column(db.Integer)  # Vehicle SoC if reported
+
+    # Meter values
+    meter_value_kwh = db.Column(db.Float)  # Total energy meter reading
+
+    # Configuration
+    max_power_kw = db.Column(db.Float)  # Maximum power capability
+    num_connectors = db.Column(db.Integer, default=1)  # Number of connectors
+
+    # User settings
+    display_name = db.Column(db.String(100))  # User-friendly name
+    enable_automations = db.Column(db.Boolean, default=True)  # Enable in automations
+
+    # Timestamps
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    user = db.relationship('User', backref=db.backref('ocpp_chargers', lazy='dynamic'))
+
+    def __repr__(self):
+        return f'<OCPPCharger {self.display_name or self.charger_id}>'
+
+    def to_dict(self):
+        """Convert to dictionary for API responses."""
+        return {
+            'id': self.id,
+            'charger_id': self.charger_id,
+            'display_name': self.display_name,
+            'vendor': self.vendor,
+            'model': self.model,
+            'serial_number': self.serial_number,
+            'firmware_version': self.firmware_version,
+            'is_connected': self.is_connected,
+            'status': self.status,
+            'error_code': self.error_code,
+            'current_transaction_id': self.current_transaction_id,
+            'current_power_kw': self.current_power_kw,
+            'current_energy_kwh': self.current_energy_kwh,
+            'current_soc': self.current_soc,
+            'meter_value_kwh': self.meter_value_kwh,
+            'max_power_kw': self.max_power_kw,
+            'num_connectors': self.num_connectors,
+            'last_seen': self.last_seen.isoformat() if self.last_seen else None,
+            'last_boot': self.last_boot.isoformat() if self.last_boot else None,
+            'enable_automations': self.enable_automations,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class OCPPTransaction(db.Model):
+    """OCPP charging transaction/session."""
+    id = db.Column(db.Integer, primary_key=True)
+    charger_id = db.Column(db.Integer, db.ForeignKey('ocpp_charger.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+
+    # Transaction identification
+    transaction_id = db.Column(db.Integer, nullable=False)  # OCPP transaction ID
+    id_tag = db.Column(db.String(50))  # RFID tag or identifier used to authorize
+
+    # Connector (for multi-connector chargers)
+    connector_id = db.Column(db.Integer, default=1)
+
+    # Session timing
+    start_time = db.Column(db.DateTime, nullable=False)
+    stop_time = db.Column(db.DateTime)
+    stop_reason = db.Column(db.String(50))  # Local, Remote, EVDisconnected, PowerLoss, etc.
+
+    # Energy
+    meter_start = db.Column(db.Float)  # Meter reading at start (Wh)
+    meter_stop = db.Column(db.Float)  # Meter reading at stop (Wh)
+    energy_kwh = db.Column(db.Float)  # Energy delivered (kWh)
+
+    # Peak values during session
+    max_power_kw = db.Column(db.Float)  # Maximum power during session
+
+    # Cost (if calculated)
+    cost = db.Column(db.Float)  # Calculated cost
+    cost_currency = db.Column(db.String(3))  # Currency code (e.g., "AUD")
+
+    # Relationships
+    charger = db.relationship('OCPPCharger', backref=db.backref('transactions', lazy='dynamic'))
+    user = db.relationship('User', backref=db.backref('ocpp_transactions', lazy='dynamic'))
+
+    def __repr__(self):
+        return f'<OCPPTransaction {self.transaction_id} on {self.charger_id}>'
+
+    def to_dict(self):
+        """Convert to dictionary for API responses."""
+        return {
+            'id': self.id,
+            'transaction_id': self.transaction_id,
+            'charger_id': self.charger_id,
+            'connector_id': self.connector_id,
+            'id_tag': self.id_tag,
+            'start_time': self.start_time.isoformat() if self.start_time else None,
+            'stop_time': self.stop_time.isoformat() if self.stop_time else None,
+            'stop_reason': self.stop_reason,
+            'meter_start': self.meter_start,
+            'meter_stop': self.meter_stop,
+            'energy_kwh': self.energy_kwh,
+            'max_power_kw': self.max_power_kw,
+            'cost': self.cost,
+            'cost_currency': self.cost_currency,
         }

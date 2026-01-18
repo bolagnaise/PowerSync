@@ -8902,3 +8902,286 @@ def api_ev_status(api_user=None):
         'linked': has_tokens,
         'vehicle_count': vehicle_count,
     })
+
+
+# =============================================================================
+# OCPP CHARGER API ENDPOINTS
+# =============================================================================
+
+@bp.route('/api/ocpp/status', methods=['GET'])
+@api_auth_required
+def api_ocpp_status(api_user=None):
+    """Get OCPP server status and connected chargers."""
+    from app.models import OCPPCharger
+    from app.ocpp import get_ocpp_server
+
+    user = api_user or current_user
+    server = get_ocpp_server()
+
+    charger_count = OCPPCharger.query.filter_by(user_id=user.id).count()
+    connected_chargers = server.get_connected_chargers() if server else []
+
+    return jsonify({
+        'success': True,
+        'server_running': server is not None and server._running,
+        'server_port': server.port if server else 9000,
+        'charger_count': charger_count,
+        'connected_chargers': connected_chargers,
+    })
+
+
+@bp.route('/api/ocpp/chargers', methods=['GET'])
+@api_auth_required
+def api_ocpp_list_chargers(api_user=None):
+    """List registered OCPP chargers."""
+    from app.models import OCPPCharger
+
+    user = api_user or current_user
+    chargers = OCPPCharger.query.filter_by(user_id=user.id).all()
+
+    return jsonify({
+        'success': True,
+        'chargers': [c.to_dict() for c in chargers]
+    })
+
+
+@bp.route('/api/ocpp/chargers/<int:charger_id>', methods=['GET'])
+@api_auth_required
+def api_ocpp_get_charger(charger_id, api_user=None):
+    """Get details for a specific OCPP charger."""
+    from app.models import OCPPCharger
+
+    user = api_user or current_user
+    charger = OCPPCharger.query.filter_by(id=charger_id, user_id=user.id).first()
+
+    if not charger:
+        return jsonify({'error': 'Charger not found'}), 404
+
+    return jsonify({
+        'success': True,
+        'charger': charger.to_dict()
+    })
+
+
+@bp.route('/api/ocpp/chargers/<int:charger_id>', methods=['PUT'])
+@api_auth_required
+def api_ocpp_update_charger(charger_id, api_user=None):
+    """Update charger settings (display_name, enable_automations)."""
+    from app.models import OCPPCharger
+
+    user = api_user or current_user
+    data = request.get_json()
+
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    charger = OCPPCharger.query.filter_by(id=charger_id, user_id=user.id).first()
+    if not charger:
+        return jsonify({'error': 'Charger not found'}), 404
+
+    # Update allowed fields
+    if 'display_name' in data:
+        charger.display_name = data['display_name']
+    if 'enable_automations' in data:
+        charger.enable_automations = data['enable_automations']
+    if 'max_power_kw' in data:
+        charger.max_power_kw = data['max_power_kw']
+
+    try:
+        db.session.commit()
+        return jsonify({'success': True, 'charger': charger.to_dict()})
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Failed to update charger: {e}")
+        return jsonify({'error': 'Failed to save settings'}), 500
+
+
+@bp.route('/api/ocpp/chargers/<int:charger_id>', methods=['DELETE'])
+@api_auth_required
+def api_ocpp_delete_charger(charger_id, api_user=None):
+    """Delete an OCPP charger registration."""
+    from app.models import OCPPCharger, OCPPTransaction
+
+    user = api_user or current_user
+    charger = OCPPCharger.query.filter_by(id=charger_id, user_id=user.id).first()
+
+    if not charger:
+        return jsonify({'error': 'Charger not found'}), 404
+
+    try:
+        # Delete associated transactions first
+        OCPPTransaction.query.filter_by(charger_id=charger.id).delete()
+        db.session.delete(charger)
+        db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Failed to delete charger: {e}")
+        return jsonify({'error': 'Failed to delete charger'}), 500
+
+
+@bp.route('/api/ocpp/chargers/<int:charger_id>/command/<command>', methods=['POST'])
+@api_auth_required
+def api_ocpp_charger_command(charger_id, command, api_user=None):
+    """
+    Send command to an OCPP charger.
+
+    Supported commands:
+    - start: Start charging (RemoteStartTransaction)
+    - stop: Stop charging (RemoteStopTransaction)
+    - reset: Reset charger (soft reset)
+    - hard_reset: Hard reset charger
+    """
+    from app.models import OCPPCharger
+    from app.ocpp import get_ocpp_server
+
+    user = api_user or current_user
+    data = request.get_json() or {}
+
+    charger = OCPPCharger.query.filter_by(id=charger_id, user_id=user.id).first()
+    if not charger:
+        return jsonify({'error': 'Charger not found'}), 404
+
+    server = get_ocpp_server()
+    if not server or not server._running:
+        return jsonify({'error': 'OCPP server not running'}), 503
+
+    if not charger.is_connected:
+        return jsonify({'error': 'Charger is not connected'}), 400
+
+    result = False
+
+    try:
+        if command == 'start':
+            id_tag = data.get('id_tag', 'PowerSync')
+            connector_id = data.get('connector_id', 1)
+            result = server.remote_start_transaction(charger.charger_id, id_tag, connector_id)
+
+        elif command == 'stop':
+            if not charger.current_transaction_id:
+                return jsonify({'error': 'No active transaction to stop'}), 400
+            result = server.remote_stop_transaction(charger.charger_id, charger.current_transaction_id)
+
+        elif command == 'reset':
+            result = server.reset_charger(charger.charger_id, hard=False)
+
+        elif command == 'hard_reset':
+            result = server.reset_charger(charger.charger_id, hard=True)
+
+        elif command == 'set_power_limit':
+            limit_kw = data.get('limit_kw')
+            if limit_kw is None:
+                return jsonify({'error': 'limit_kw parameter required'}), 400
+            limit_watts = int(float(limit_kw) * 1000)
+            duration = data.get('duration_seconds')
+            result = server.set_charging_profile(charger.charger_id, 1, limit_watts, duration)
+
+        elif command == 'clear_power_limit':
+            result = server.clear_charging_profile(charger.charger_id)
+
+        else:
+            return jsonify({'error': f'Unknown command: {command}'}), 400
+
+        if result:
+            return jsonify({'success': True, 'command': command, 'accepted': True})
+        else:
+            return jsonify({'success': False, 'command': command, 'accepted': False, 'error': 'Command rejected'}), 400
+
+    except Exception as e:
+        logger.error(f"OCPP command error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/api/ocpp/chargers/<int:charger_id>/transactions', methods=['GET'])
+@api_auth_required
+def api_ocpp_charger_transactions(charger_id, api_user=None):
+    """Get charging transactions for a charger."""
+    from app.models import OCPPCharger, OCPPTransaction
+
+    user = api_user or current_user
+    charger = OCPPCharger.query.filter_by(id=charger_id, user_id=user.id).first()
+
+    if not charger:
+        return jsonify({'error': 'Charger not found'}), 404
+
+    # Get query parameters for pagination
+    limit = request.args.get('limit', 50, type=int)
+    offset = request.args.get('offset', 0, type=int)
+
+    transactions = OCPPTransaction.query.filter_by(charger_id=charger.id)\
+        .order_by(OCPPTransaction.start_time.desc())\
+        .limit(limit).offset(offset).all()
+
+    return jsonify({
+        'success': True,
+        'transactions': [t.to_dict() for t in transactions]
+    })
+
+
+@bp.route('/api/ocpp/transactions', methods=['GET'])
+@api_auth_required
+def api_ocpp_all_transactions(api_user=None):
+    """Get all charging transactions for the user."""
+    from app.models import OCPPTransaction
+
+    user = api_user or current_user
+
+    # Get query parameters for pagination
+    limit = request.args.get('limit', 50, type=int)
+    offset = request.args.get('offset', 0, type=int)
+
+    transactions = OCPPTransaction.query.filter_by(user_id=user.id)\
+        .order_by(OCPPTransaction.start_time.desc())\
+        .limit(limit).offset(offset).all()
+
+    return jsonify({
+        'success': True,
+        'transactions': [t.to_dict() for t in transactions]
+    })
+
+
+@bp.route('/api/ocpp/register', methods=['POST'])
+@api_auth_required
+def api_ocpp_register_charger(api_user=None):
+    """
+    Pre-register a charger before it connects.
+
+    This allows users to set up a charger ID and display name before
+    the physical charger connects to the OCPP server.
+    """
+    from app.models import OCPPCharger
+
+    user = api_user or current_user
+    data = request.get_json()
+
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    charger_id = data.get('charger_id')
+    if not charger_id:
+        return jsonify({'error': 'charger_id is required'}), 400
+
+    # Check if charger already exists
+    existing = OCPPCharger.query.filter_by(charger_id=charger_id).first()
+    if existing:
+        if existing.user_id != user.id:
+            return jsonify({'error': 'Charger ID already registered by another user'}), 409
+        return jsonify({'success': True, 'charger': existing.to_dict(), 'message': 'Charger already registered'})
+
+    # Create new charger registration
+    charger = OCPPCharger(
+        user_id=user.id,
+        charger_id=charger_id,
+        display_name=data.get('display_name', charger_id),
+        max_power_kw=data.get('max_power_kw'),
+        enable_automations=data.get('enable_automations', True),
+    )
+
+    try:
+        db.session.add(charger)
+        db.session.commit()
+        return jsonify({'success': True, 'charger': charger.to_dict()})
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Failed to register charger: {e}")
+        return jsonify({'error': 'Failed to register charger'}), 500
