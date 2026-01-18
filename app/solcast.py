@@ -393,7 +393,8 @@ class SolcastService:
         """Get today and tomorrow production forecast summary.
 
         Returns:
-            Dictionary with today and tomorrow production forecasts
+            Dictionary with today and tomorrow production forecasts.
+            Includes both full-day forecast (cached from first fetch) and remaining forecast.
         """
         from datetime import date
 
@@ -403,7 +404,9 @@ class SolcastService:
         if not forecasts:
             return {
                 "enabled": True,
-                "today_kwh": None,
+                "today_forecast_kwh": None,  # Full day forecast
+                "today_remaining_kwh": None,  # Remaining from now
+                "today_kwh": None,  # Alias for backward compat
                 "tomorrow_kwh": None,
                 "current_estimate_kw": None,
                 "today_peak_kw": None,
@@ -413,6 +416,7 @@ class SolcastService:
 
         # Group forecasts by date
         today = date.today()
+        today_str = today.strftime("%Y-%m-%d")
         tomorrow = today + timedelta(days=1)
 
         today_estimates = []
@@ -428,10 +432,29 @@ class SolcastService:
 
         # Calculate totals (30-minute periods, so multiply by 0.5 to get kWh)
         period_hours = 0.5
-        today_kwh = sum(today_estimates) * period_hours if today_estimates else None
+        today_remaining_kwh = sum(today_estimates) * period_hours if today_estimates else None
         tomorrow_kwh = sum(tomorrow_estimates) * period_hours if tomorrow_estimates else None
         today_peak_kw = max(today_estimates) if today_estimates else None
         tomorrow_peak_kw = max(tomorrow_estimates) if tomorrow_estimates else None
+
+        # Cache full-day forecast on first fetch of the day
+        # This captures the full day's forecast before production starts depleting it
+        today_forecast_kwh = today_remaining_kwh
+        if self.user.solcast_daily_forecast_date != today_str:
+            # New day or first fetch - store the current remaining as full-day forecast
+            self.user.solcast_daily_forecast_date = today_str
+            self.user.solcast_daily_forecast_kwh = today_remaining_kwh
+            self.user.solcast_daily_forecast_peak_kw = today_peak_kw
+            try:
+                db.session.commit()
+                _LOGGER.info(f"Solcast: Cached full-day forecast for {today_str}: {today_remaining_kwh:.1f}kWh")
+            except Exception as e:
+                _LOGGER.error(f"Failed to cache daily forecast: {e}")
+                db.session.rollback()
+        else:
+            # Use cached full-day value
+            today_forecast_kwh = self.user.solcast_daily_forecast_kwh or today_remaining_kwh
+            today_peak_kw = self.user.solcast_daily_forecast_peak_kw or today_peak_kw
 
         # Current estimate is the first forecast
         current_estimate = forecasts[0].pv_estimate if forecasts and forecasts[0].pv_estimate else None
@@ -439,7 +462,9 @@ class SolcastService:
 
         return {
             "enabled": True,
-            "today_kwh": round(today_kwh, 2) if today_kwh is not None else None,
+            "today_forecast_kwh": round(today_forecast_kwh, 2) if today_forecast_kwh is not None else None,
+            "today_remaining_kwh": round(today_remaining_kwh, 2) if today_remaining_kwh is not None else None,
+            "today_kwh": round(today_forecast_kwh, 2) if today_forecast_kwh is not None else None,  # Backward compat
             "tomorrow_kwh": round(tomorrow_kwh, 2) if tomorrow_kwh is not None else None,
             "current_estimate_kw": round(current_estimate, 2) if current_estimate is not None else None,
             "today_peak_kw": round(today_peak_kw, 2) if today_peak_kw is not None else None,
@@ -554,12 +579,14 @@ def get_user_daily_forecast(user: User) -> Dict[str, Any]:
         user: User to get forecast for
 
     Returns:
-        Daily forecast summary dictionary with today_kwh, tomorrow_kwh, etc.
+        Daily forecast summary dictionary with today_forecast_kwh, today_remaining_kwh, etc.
     """
     service = get_solcast_service(user)
     if not service:
         return {
             "enabled": False,
+            "today_forecast_kwh": None,
+            "today_remaining_kwh": None,
             "today_kwh": None,
             "tomorrow_kwh": None,
             "current_estimate_kw": None,

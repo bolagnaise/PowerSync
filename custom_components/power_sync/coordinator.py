@@ -1179,6 +1179,11 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
         self._capacity_kw = capacity_kw
         self._session = async_get_clientsession(hass)
 
+        # Cache for full-day forecast (stored on first fetch of the day)
+        self._daily_forecast_date: str | None = None  # Date string (YYYY-MM-DD)
+        self._daily_forecast_kwh: float | None = None  # Full day's forecast
+        self._daily_forecast_peak_kw: float | None = None  # Peak for the day
+
         super().__init__(
             hass,
             _LOGGER,
@@ -1272,12 +1277,13 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             if not forecasts:
                 return {"available": False}
 
-            # Calculate today and tomorrow totals
+            # Calculate today and tomorrow totals (remaining from now)
             now = dt_util.now()
+            today_str = now.strftime("%Y-%m-%d")
             today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
             tomorrow_end = today_end + timedelta(days=1)
 
-            today_total = 0.0
+            today_remaining = 0.0
             tomorrow_total = 0.0
             today_peak = 0.0
             tomorrow_peak = 0.0
@@ -1298,7 +1304,7 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                         current_estimate = pv_estimate
 
                     if period_end_local <= today_end:
-                        today_total += pv_estimate * period_hours
+                        today_remaining += pv_estimate * period_hours
                         today_peak = max(today_peak, pv_estimate)
                     elif period_end_local <= tomorrow_end:
                         tomorrow_total += pv_estimate * period_hours
@@ -1307,16 +1313,40 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                 except (ValueError, TypeError) as e:
                     _LOGGER.debug(f"Error parsing forecast period: {e}")
 
+            # Cache full-day forecast on first fetch of the day
+            # This captures the full day's forecast before production starts depleting it
+            if self._daily_forecast_date != today_str:
+                # New day or first fetch - store the current remaining as full-day forecast
+                # If it's early morning (before much production), this will be close to full day
+                # If it's later in the day, we use the remaining as best estimate
+                self._daily_forecast_date = today_str
+                self._daily_forecast_kwh = today_remaining
+                self._daily_forecast_peak_kw = today_peak
+                _LOGGER.info(
+                    f"Solcast: Cached full-day forecast for {today_str}: {today_remaining:.1f}kWh"
+                )
+
+            # Use cached full-day value, but update if current remaining is higher
+            # (this handles the case where first fetch was mid-day and we get a fuller picture later)
+            today_forecast = self._daily_forecast_kwh or today_remaining
+            if today_remaining > today_forecast:
+                # Current remaining is higher (shouldn't happen normally, but handle gracefully)
+                today_forecast = today_remaining
+                self._daily_forecast_kwh = today_remaining
+
             _LOGGER.info(
-                f"Solcast forecast updated: Today={today_total:.1f}kWh (peak {today_peak:.2f}kW), "
+                f"Solcast forecast updated: Today forecast={today_forecast:.1f}kWh, "
+                f"remaining={today_remaining:.1f}kWh (peak {today_peak:.2f}kW), "
                 f"Tomorrow={tomorrow_total:.1f}kWh (peak {tomorrow_peak:.2f}kW)"
             )
 
             return {
                 "available": True,
-                "today_total_kwh": round(today_total, 2),
+                "today_forecast_kwh": round(today_forecast, 2),  # Full day forecast (cached)
+                "today_remaining_kwh": round(today_remaining, 2),  # Remaining from now
+                "today_total_kwh": round(today_forecast, 2),  # Alias for backward compat
                 "tomorrow_total_kwh": round(tomorrow_total, 2),
-                "today_peak_kw": round(today_peak, 2),
+                "today_peak_kw": round(self._daily_forecast_peak_kw or today_peak, 2),
                 "tomorrow_peak_kw": round(tomorrow_peak, 2),
                 "current_estimate_kw": round(current_estimate, 2) if current_estimate else None,
                 "forecast_periods": len(forecasts),

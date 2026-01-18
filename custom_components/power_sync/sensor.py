@@ -313,9 +313,10 @@ SOLCAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.ENERGY,
         icon="mdi:solar-power",
         suggested_display_precision=1,
-        value_fn=lambda data: data.get("today_total_kwh") if data and data.get("available") else None,
+        value_fn=lambda data: data.get("today_forecast_kwh") if data and data.get("available") else None,
         attr_fn=lambda data: {
             "peak_kw": data.get("today_peak_kw") if data else None,
+            "remaining_kwh": data.get("today_remaining_kwh") if data else None,
             "last_update": data.get("last_update").isoformat() if data and data.get("last_update") else None,
         } if data else {},
     ),

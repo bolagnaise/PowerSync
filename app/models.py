@@ -78,6 +78,10 @@ class User(UserMixin, db.Model):
     solcast_resource_id = db.Column(db.String(50), nullable=True)  # Rooftop site resource ID from Solcast
     solcast_enabled = db.Column(db.Boolean, default=False)  # Enable Solcast solar forecasting
     solcast_capacity_kw = db.Column(db.Float, nullable=True)  # System capacity in kW (for validation)
+    # Daily forecast cache (stores full day's forecast from first fetch of the day)
+    solcast_daily_forecast_date = db.Column(db.String(10), nullable=True)  # Date string (YYYY-MM-DD)
+    solcast_daily_forecast_kwh = db.Column(db.Float, nullable=True)  # Full day's forecast in kWh
+    solcast_daily_forecast_peak_kw = db.Column(db.Float, nullable=True)  # Peak power for the day
 
     # Amber Electric Preferences
     amber_forecast_type = db.Column(db.String(20), default='predicted')  # 'low', 'predicted', 'high'
