@@ -801,6 +801,116 @@
         </form>
     </article>
 
+    <!-- Weather Configuration -->
+    <article>
+        <header><strong>Weather Configuration</strong></header>
+        <p style="font-size: 0.85em;">Configure weather location for weather-based automations and dashboard display.</p>
+
+        <form id="weatherForm">
+            <label for="weather_location">
+                City or Postcode
+                <small>Enter your city name or postcode for accurate weather data (e.g., Brisbane or 4000)</small>
+            </label>
+            <div style="display: flex; gap: 0.5em; align-items: flex-start;">
+                <input type="text" id="weather_location" name="weather_location"
+                       value="{{ current_user.weather_location or '' }}"
+                       placeholder="e.g., Brisbane or 4000"
+                       style="flex: 1;">
+                <button type="button" onclick="testWeatherLocation()" class="outline" style="flex-shrink: 0;">
+                    Test Location
+                </button>
+            </div>
+            <p id="weather-test-status" style="font-size: 0.8em; margin-top: 0.5em; display: none;"></p>
+
+            <label for="openweathermap_api_key" style="margin-top: 1em;">
+                OpenWeatherMap API Key (Optional)
+                <small>Get a free API key from <a href="https://openweathermap.org/api" target="_blank">openweathermap.org</a>. Leave blank to use server default.</small>
+            </label>
+            <div style="display: flex; align-items: center; gap: 0.5em;">
+                <input type="password" id="openweathermap_api_key" name="openweathermap_api_key"
+                       value="{{ current_user.openweathermap_api_key or '' }}"
+                       placeholder="Enter API key (optional)"
+                       class="secure-field"
+                       style="flex: 1;">
+                <button type="button" onclick="toggleVisibility('openweathermap_api_key', this)"
+                        style="background: none; border: none; cursor: pointer; padding: 0.5em;
+                               font-size: 1.2em; color: var(--muted-color); flex-shrink: 0; width: 40px;"
+                        aria-label="Toggle visibility" title="Show/Hide API Key">
+                    👁️
+                </button>
+            </div>
+
+            <button type="button" onclick="saveWeatherSettings()" class="primary" style="margin-top: 1em;">
+                Save Weather Settings
+            </button>
+            <p id="weather-save-status" style="font-size: 0.8em; margin-top: 0.5em; display: none;"></p>
+        </form>
+    </article>
+
+    <script>
+        // Weather Settings Functions
+        async function testWeatherLocation() {
+            const location = document.getElementById('weather_location').value;
+            const status = document.getElementById('weather-test-status');
+
+            if (!location.trim()) {
+                status.style.display = 'block';
+                status.innerHTML = '<span style="color: #ff6b6b;">Please enter a city or postcode</span>';
+                return;
+            }
+
+            status.style.display = 'block';
+            status.innerHTML = '<span style="color: #fcc419;">Testing location...</span>';
+
+            try {
+                const response = await fetch('/api/weather/test', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ location: location })
+                });
+                const data = await response.json();
+
+                if (data.success && data.weather) {
+                    const w = data.weather;
+                    status.innerHTML = `<span style="color: #51cf66;">✓ ${w.city}: ${w.temperature}°C, ${w.description}</span>`;
+                } else {
+                    status.innerHTML = `<span style="color: #ff6b6b;">✗ ${data.error || 'Location not found'}</span>`;
+                }
+            } catch (error) {
+                status.innerHTML = '<span style="color: #ff6b6b;">✗ Failed to test location</span>';
+            }
+        }
+
+        async function saveWeatherSettings() {
+            const location = document.getElementById('weather_location').value;
+            const apiKey = document.getElementById('openweathermap_api_key').value;
+            const status = document.getElementById('weather-save-status');
+
+            status.style.display = 'block';
+            status.innerHTML = '<span style="color: #fcc419;">Saving...</span>';
+
+            try {
+                const response = await fetch('/api/weather/settings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        weather_location: location,
+                        openweathermap_api_key: apiKey
+                    })
+                });
+                const data = await response.json();
+
+                if (data.success) {
+                    status.innerHTML = '<span style="color: #51cf66;">✓ Weather settings saved!</span>';
+                } else {
+                    status.innerHTML = `<span style="color: #ff6b6b;">✗ ${data.error || 'Failed to save'}</span>`;
+                }
+            } catch (error) {
+                status.innerHTML = '<span style="color: #ff6b6b;">✗ Failed to save settings</span>';
+            }
+        }
+    </script>
+
     <script>
         // Battery System Toggle
         function toggleBatterySystemSettings() {
