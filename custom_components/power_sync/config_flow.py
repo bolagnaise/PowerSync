@@ -2113,8 +2113,12 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
     ) -> FlowResult:
         """Step for EV Charging and OCPP Central System configuration."""
         if user_input is not None:
-            # Get previous options from earlier steps
-            final_data = getattr(self, '_final_options', {})
+            # Start with existing options to preserve any settings not in this flow
+            final_data = dict(self.config_entry.options)
+
+            # Update with options collected from earlier steps in this flow
+            flow_options = getattr(self, '_final_options', {})
+            final_data.update(flow_options)
 
             # Add EV and OCPP settings
             final_data[CONF_EV_CHARGING_ENABLED] = user_input.get(
@@ -2322,9 +2326,9 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             user_input[CONF_ELECTRICITY_PROVIDER] = "globird"
             # Enable AEMO spike detection for Globird
             user_input[CONF_AEMO_SPIKE_ENABLED] = True
-            # Route to EV/OCPP options
-            self._final_options = user_input
-            return await self.async_step_ev_ocpp_options()
+            # Store options and route to curtailment options (weather, inverter config)
+            self._amber_options = user_input
+            return await self.async_step_curtailment_options()
 
         # Build region choices for AEMO
         region_choices = {"": "Select Region..."}
