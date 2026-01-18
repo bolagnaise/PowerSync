@@ -281,6 +281,64 @@ class SolcastService:
 
         return sum(estimates) / len(estimates)
 
+    def get_daily_production_summary(self) -> Dict[str, Any]:
+        """Get today and tomorrow production forecast summary.
+
+        Returns:
+            Dictionary with today and tomorrow production forecasts
+        """
+        from datetime import date
+
+        # Get forecasts for 48 hours (covers today and tomorrow)
+        forecasts = self.get_cached_forecast(hours_ahead=48)
+
+        if not forecasts:
+            return {
+                "enabled": True,
+                "today_kwh": None,
+                "tomorrow_kwh": None,
+                "current_estimate_kw": None,
+                "today_peak_kw": None,
+                "tomorrow_peak_kw": None,
+                "last_updated": None,
+            }
+
+        # Group forecasts by date
+        today = date.today()
+        tomorrow = today + timedelta(days=1)
+
+        today_estimates = []
+        tomorrow_estimates = []
+
+        for f in forecasts:
+            if f.pv_estimate is not None:
+                forecast_date = f.period_end.date()
+                if forecast_date == today:
+                    today_estimates.append(f.pv_estimate)
+                elif forecast_date == tomorrow:
+                    tomorrow_estimates.append(f.pv_estimate)
+
+        # Calculate totals (30-minute periods, so multiply by 0.5 to get kWh)
+        period_hours = 0.5
+        today_kwh = sum(today_estimates) * period_hours if today_estimates else None
+        tomorrow_kwh = sum(tomorrow_estimates) * period_hours if tomorrow_estimates else None
+        today_peak_kw = max(today_estimates) if today_estimates else None
+        tomorrow_peak_kw = max(tomorrow_estimates) if tomorrow_estimates else None
+
+        # Current estimate is the first forecast
+        current_estimate = forecasts[0].pv_estimate if forecasts and forecasts[0].pv_estimate else None
+        last_updated = forecasts[0].updated_at.isoformat() if forecasts else None
+
+        return {
+            "enabled": True,
+            "today_kwh": round(today_kwh, 2) if today_kwh is not None else None,
+            "tomorrow_kwh": round(tomorrow_kwh, 2) if tomorrow_kwh is not None else None,
+            "current_estimate_kw": round(current_estimate, 2) if current_estimate is not None else None,
+            "today_peak_kw": round(today_peak_kw, 2) if today_peak_kw is not None else None,
+            "tomorrow_peak_kw": round(tomorrow_peak_kw, 2) if tomorrow_peak_kw is not None else None,
+            "last_updated": last_updated,
+        }
+
     def get_production_summary(self, hours_ahead: int = 24) -> Dict[str, Any]:
         """Get summary of expected solar production.
 
@@ -379,3 +437,31 @@ def get_user_production_forecast(user: User, hours_ahead: int = 24) -> Dict[str,
         service.update_forecast_cache()
 
     return service.get_production_summary(hours_ahead)
+
+
+def get_user_daily_forecast(user: User) -> Dict[str, Any]:
+    """Get today and tomorrow production forecast for a user.
+
+    Args:
+        user: User to get forecast for
+
+    Returns:
+        Daily forecast summary dictionary with today_kwh, tomorrow_kwh, etc.
+    """
+    service = get_solcast_service(user)
+    if not service:
+        return {
+            "enabled": False,
+            "today_kwh": None,
+            "tomorrow_kwh": None,
+            "current_estimate_kw": None,
+            "today_peak_kw": None,
+            "tomorrow_peak_kw": None,
+            "last_updated": None,
+        }
+
+    # Refresh cache if needed
+    if service.should_refresh_cache():
+        service.update_forecast_cache()
+
+    return service.get_daily_production_summary()

@@ -453,14 +453,20 @@
         }
       },
       "ev_ocpp_options": {
-        "title": "EV Charging & OCPP Configuration",
-        "description": "Configure EV charging control via Tesla Fleet API and OCPP charger management.\n\n**EV Charging:** Control Tesla vehicles connected via Fleet API (start/stop charging, set limits).\n\n**OCPP:** Connect OCPP 1.6-compliant chargers (Grizzl-E Smart, Wallbox, EVBox, etc.) for automation control.",
+        "title": "EV Charging, OCPP & Solar Forecast",
+        "description": "Configure EV charging, OCPP charger management, and solar production forecasting.\n\n**Solcast:** Get solar production forecasts from Solcast (free hobbyist tier: 10 API calls/day).\n\n**EV Charging:** Control Tesla vehicles via Fleet API.\n\n**OCPP:** Connect OCPP 1.6-compliant chargers.",
         "data": {
+          "solcast_enabled": "Enable Solcast Solar Forecast",
+          "solcast_api_key": "Solcast API Key",
+          "solcast_resource_id": "Solcast Resource ID",
           "ev_charging_enabled": "Enable EV Charging Control (Tesla Fleet API)",
           "ocpp_enabled": "Enable OCPP Central System",
           "ocpp_port": "OCPP WebSocket Port"
         },
         "data_description": {
+          "solcast_enabled": "Enable solar production forecasting using Solcast API. Shows expected daily solar production.",
+          "solcast_api_key": "Your Solcast API key from solcast.com. Free hobbyist accounts get 10 API calls/day.",
+          "solcast_resource_id": "Your rooftop site resource ID from Solcast (found in your site settings).",
           "ev_charging_enabled": "Allow automations to control Tesla vehicle charging via Fleet API (start/stop, set charge limits, set amps). Requires Fleet API credentials to be configured.",
           "ocpp_enabled": "Run an OCPP 1.6J WebSocket server for connecting OCPP-compliant EV chargers. Chargers connect to ws://server:port/{charger_id}",
           "ocpp_port": "Port for OCPP WebSocket server (default: 9000). Chargers will connect to this port."
@@ -520,6 +526,15 @@
       },
       "inverter_status": {
         "name": "Inverter Status"
+      },
+      "solcast_today_forecast": {
+        "name": "Solar Forecast Today"
+      },
+      "solcast_tomorrow_forecast": {
+        "name": "Solar Forecast Tomorrow"
+      },
+      "solcast_current_estimate": {
+        "name": "Solar Current Estimate"
       }
     },
     "switch": {

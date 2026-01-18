@@ -8724,13 +8724,12 @@ def api_test_solcast(api_user=None):
 @bp.route('/api/solcast/forecast', methods=['GET'])
 @api_auth_required
 def api_get_solcast_forecast(api_user=None):
-    """Get current solar production forecast summary."""
-    from app.solcast import get_user_production_forecast
+    """Get current solar production forecast summary (today and tomorrow)."""
+    from app.solcast import get_user_daily_forecast
 
     user = api_user or current_user
-    hours = request.args.get('hours', 24, type=int)
 
-    summary = get_user_production_forecast(user, hours_ahead=hours)
+    summary = get_user_daily_forecast(user)
     return jsonify(summary)
 
 

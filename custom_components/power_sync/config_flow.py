@@ -150,6 +150,10 @@ from .const import (
     CONF_OCPP_ENABLED,
     CONF_OCPP_PORT,
     DEFAULT_OCPP_PORT,
+    # Solcast Solar Forecast configuration
+    CONF_SOLCAST_ENABLED,
+    CONF_SOLCAST_API_KEY,
+    CONF_SOLCAST_RESOURCE_ID,
 )
 
 # Combined network tariff key for config flow
@@ -2111,7 +2115,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
     async def async_step_ev_ocpp_options(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step for EV Charging and OCPP Central System configuration."""
+        """Step for EV Charging, OCPP, and Solcast configuration."""
         if user_input is not None:
             # Start with existing options to preserve any settings not in this flow
             final_data = dict(self.config_entry.options)
@@ -2129,9 +2133,20 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_OCPP_PORT, DEFAULT_OCPP_PORT
             )
 
+            # Add Solcast settings
+            final_data[CONF_SOLCAST_ENABLED] = user_input.get(
+                CONF_SOLCAST_ENABLED, False
+            )
+            final_data[CONF_SOLCAST_API_KEY] = user_input.get(
+                CONF_SOLCAST_API_KEY, ""
+            )
+            final_data[CONF_SOLCAST_RESOURCE_ID] = user_input.get(
+                CONF_SOLCAST_RESOURCE_ID, ""
+            )
+
             return self.async_create_entry(title="", data=final_data)
 
-        # Build schema for EV and OCPP options
+        # Build schema for EV, OCPP, and Solcast options
         schema_dict: dict[vol.Marker, Any] = {
             vol.Optional(
                 CONF_EV_CHARGING_ENABLED,
@@ -2145,6 +2160,19 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_OCPP_PORT,
                 default=self._get_option(CONF_OCPP_PORT, DEFAULT_OCPP_PORT),
             ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
+            # Solcast Solar Forecasting
+            vol.Optional(
+                CONF_SOLCAST_ENABLED,
+                default=self._get_option(CONF_SOLCAST_ENABLED, False),
+            ): bool,
+            vol.Optional(
+                CONF_SOLCAST_API_KEY,
+                default=self._get_option(CONF_SOLCAST_API_KEY, ""),
+            ): str,
+            vol.Optional(
+                CONF_SOLCAST_RESOURCE_ID,
+                default=self._get_option(CONF_SOLCAST_RESOURCE_ID, ""),
+            ): str,
         }
 
         return self.async_show_form(
