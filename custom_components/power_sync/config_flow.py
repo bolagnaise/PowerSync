@@ -145,6 +145,11 @@ from .const import (
     # Automations - OpenWeatherMap API for weather triggers
     CONF_OPENWEATHERMAP_API_KEY,
     CONF_WEATHER_LOCATION,
+    # EV Charging and OCPP configuration
+    CONF_EV_CHARGING_ENABLED,
+    CONF_OCPP_ENABLED,
+    CONF_OCPP_PORT,
+    DEFAULT_OCPP_PORT,
 )
 
 # Combined network tariff key for config flow
@@ -1887,9 +1892,10 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 self.hass.config_entries.async_update_entry(
                     self.config_entry, data=new_data
                 )
-                # Combine with previous options and save
+                # Combine with previous options and route to EV/OCPP options
                 final_data = {**getattr(self, '_amber_options', {}), **self._curtailment_options}
-                return self.async_create_entry(title="", data=final_data)
+                self._final_options = final_data
+                return await self.async_step_ev_ocpp_options()
             else:
                 # Tesla - check if AC inverter curtailment needs configuration
                 ac_enabled = user_input.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False)
@@ -1899,9 +1905,10 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     # Route to AC inverter brand selection
                     return await self.async_step_inverter_brand()
 
-                # No AC inverter - combine options and save
+                # No AC inverter - combine options and route to EV/OCPP options
                 final_data = {**getattr(self, '_amber_options', {}), **self._curtailment_options}
-                return self.async_create_entry(title="", data=final_data)
+                self._final_options = final_data
+                return await self.async_step_ev_ocpp_options()
 
         # Build schema based on battery system
         schema_dict: dict[vol.Marker, Any] = {
@@ -2007,7 +2014,9 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_INVERTER_RESTORE_SOC, DEFAULT_INVERTER_RESTORE_SOC
             )
 
-            return self.async_create_entry(title="", data=final_data)
+            # Route to EV/OCPP options instead of finishing
+            self._final_options = final_data
+            return await self.async_step_ev_ocpp_options()
 
         # Get brand-specific models and defaults
         # Fall back to existing config if _inverter_brand not set (options flow)
@@ -2097,6 +2106,46 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             description_placeholders={
                 "brand": INVERTER_BRANDS.get(brand, brand),
             },
+        )
+
+    async def async_step_ev_ocpp_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step for EV Charging and OCPP Central System configuration."""
+        if user_input is not None:
+            # Get previous options from earlier steps
+            final_data = getattr(self, '_final_options', {})
+
+            # Add EV and OCPP settings
+            final_data[CONF_EV_CHARGING_ENABLED] = user_input.get(
+                CONF_EV_CHARGING_ENABLED, False
+            )
+            final_data[CONF_OCPP_ENABLED] = user_input.get(CONF_OCPP_ENABLED, False)
+            final_data[CONF_OCPP_PORT] = user_input.get(
+                CONF_OCPP_PORT, DEFAULT_OCPP_PORT
+            )
+
+            return self.async_create_entry(title="", data=final_data)
+
+        # Build schema for EV and OCPP options
+        schema_dict: dict[vol.Marker, Any] = {
+            vol.Optional(
+                CONF_EV_CHARGING_ENABLED,
+                default=self._get_option(CONF_EV_CHARGING_ENABLED, False),
+            ): bool,
+            vol.Optional(
+                CONF_OCPP_ENABLED,
+                default=self._get_option(CONF_OCPP_ENABLED, False),
+            ): bool,
+            vol.Optional(
+                CONF_OCPP_PORT,
+                default=self._get_option(CONF_OCPP_PORT, DEFAULT_OCPP_PORT),
+            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
+        }
+
+        return self.async_show_form(
+            step_id="ev_ocpp_options",
+            data_schema=vol.Schema(schema_dict),
         )
 
     async def async_step_flow_power_options(
@@ -2273,7 +2322,9 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             user_input[CONF_ELECTRICITY_PROVIDER] = "globird"
             # Enable AEMO spike detection for Globird
             user_input[CONF_AEMO_SPIKE_ENABLED] = True
-            return self.async_create_entry(title="", data=user_input)
+            # Route to EV/OCPP options
+            self._final_options = user_input
+            return await self.async_step_ev_ocpp_options()
 
         # Build region choices for AEMO
         region_choices = {"": "Select Region..."}

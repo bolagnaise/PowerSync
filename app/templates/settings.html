@@ -847,6 +847,386 @@
         </form>
     </article>
 
+    <!-- EV Charging Configuration (Tesla Fleet API) -->
+    <article>
+        <header><strong>EV Charging</strong></header>
+        <p style="font-size: 0.85em;">Control your Tesla vehicles via the Fleet API. Requires Fleet API credentials configured in Battery System settings.</p>
+
+        <div id="evVehiclesList">
+            <p style="font-size: 0.85em; color: var(--muted-color);">Loading vehicles...</p>
+        </div>
+
+        <div style="margin-top: 1em; display: flex; gap: 0.5em; flex-wrap: wrap;">
+            <button type="button" onclick="syncEVVehicles()" class="outline" style="width: auto;">
+                Sync Vehicles from Tesla
+            </button>
+        </div>
+        <p id="ev-sync-status" style="font-size: 0.8em; margin-top: 0.5em; display: none;"></p>
+    </article>
+
+    <!-- OCPP Charger Configuration -->
+    <article>
+        <header><strong>OCPP Chargers</strong></header>
+        <p style="font-size: 0.85em;">Connect OCPP 1.6-compliant EV chargers (Grizzl-E Smart, Wallbox, EVBox, etc.) to control charging via automations.</p>
+
+        <div id="ocppServerStatus" style="margin-bottom: 1em;">
+            <p style="font-size: 0.85em; color: var(--muted-color);">Loading server status...</p>
+        </div>
+
+        <div id="ocppChargersList">
+            <p style="font-size: 0.85em; color: var(--muted-color);">Loading chargers...</p>
+        </div>
+
+        <!-- Pre-register Charger Form -->
+        <details style="margin-top: 1em;">
+            <summary style="font-size: 0.9em; cursor: pointer;">Pre-register a New Charger</summary>
+            <div style="padding: 1em; background: var(--card-sectionning-background-color); border-radius: 0.5em; margin-top: 0.5em;">
+                <p style="font-size: 0.8em; margin: 0 0 1em 0; color: var(--muted-color);">
+                    Pre-register your charger before it connects. The Charger ID must match what your charger uses to connect.
+                </p>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1em;">
+                    <label for="ocpp_charger_id_input" style="font-size: 0.85em;">
+                        Charger ID (required)
+                        <input type="text" id="ocpp_charger_id_input" placeholder="e.g., GrizzlE-001" style="margin-top: 0.25em;">
+                    </label>
+                    <label for="ocpp_display_name_input" style="font-size: 0.85em;">
+                        Display Name (optional)
+                        <input type="text" id="ocpp_display_name_input" placeholder="e.g., Garage Charger" style="margin-top: 0.25em;">
+                    </label>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1em; margin-top: 1em;">
+                    <label for="ocpp_max_power_input" style="font-size: 0.85em;">
+                        Max Power (kW)
+                        <input type="number" id="ocpp_max_power_input" value="7.4" step="0.1" min="0" style="margin-top: 0.25em;">
+                    </label>
+                    <label style="font-size: 0.85em; display: flex; align-items: center; gap: 0.5em; margin-top: 1.5em;">
+                        <input type="checkbox" id="ocpp_enable_automations_input" checked style="width: auto;">
+                        Enable Automations
+                    </label>
+                </div>
+                <button type="button" onclick="registerOCPPCharger()" class="outline" style="margin-top: 1em; width: auto;">
+                    Register Charger
+                </button>
+                <p id="ocpp-register-status" style="font-size: 0.8em; margin-top: 0.5em; display: none;"></p>
+            </div>
+        </details>
+
+        <details style="margin-top: 1em;">
+            <summary style="font-size: 0.9em; cursor: pointer;">How to Connect Your Charger</summary>
+            <div style="padding: 1em; background: var(--card-sectionning-background-color); border-radius: 0.5em; margin-top: 0.5em; font-size: 0.85em;">
+                <ol style="margin: 0; padding-left: 1.5em;">
+                    <li>Pre-register your charger above with its Charger ID</li>
+                    <li>Configure your charger's OCPP settings:
+                        <ul style="margin: 0.5em 0;">
+                            <li><strong>Central System URL:</strong> <code>ws://YOUR_SERVER_IP:9000/{charger_id}</code></li>
+                            <li><strong>Protocol:</strong> OCPP 1.6J (JSON over WebSocket)</li>
+                        </ul>
+                    </li>
+                    <li>Restart your charger - it should connect automatically</li>
+                    <li>Create automations to control charging based on electricity prices, solar production, etc.</li>
+                </ol>
+            </div>
+        </details>
+    </article>
+
+    <script>
+        // EV Charging Functions
+        async function loadEVVehicles() {
+            const container = document.getElementById('evVehiclesList');
+            try {
+                const response = await fetch('/api/ev/vehicles');
+                const data = await response.json();
+
+                if (!data.vehicles || data.vehicles.length === 0) {
+                    container.innerHTML = `
+                        <div style="padding: 1em; background: rgba(255, 193, 7, 0.1); border-radius: 0.5em; border-left: 4px solid #fcc419;">
+                            <p style="margin: 0; font-size: 0.85em;">No vehicles found. Click "Sync Vehicles from Tesla" to discover your Tesla vehicles.</p>
+                        </div>`;
+                    return;
+                }
+
+                let html = '<div style="display: grid; gap: 1em;">';
+                for (const vehicle of data.vehicles) {
+                    const isCharging = vehicle.charging_state === 'Charging';
+                    const statusColor = isCharging ? '#51cf66' : (vehicle.charging_state === 'Complete' ? '#339af0' : 'var(--muted-color)');
+                    html += `
+                        <div style="padding: 1em; background: var(--card-sectionning-background-color); border-radius: 0.5em; border-left: 4px solid ${statusColor};">
+                            <div style="display: flex; justify-content: space-between; align-items: start;">
+                                <div>
+                                    <strong>${vehicle.display_name || vehicle.name || 'Tesla Vehicle'}</strong>
+                                    <p style="margin: 0.5em 0 0 0; font-size: 0.85em; color: var(--muted-color);">
+                                        VIN: ${vehicle.vin || 'Unknown'}<br>
+                                        Battery: ${vehicle.battery_level || '--'}% | Charge Limit: ${vehicle.charge_limit_soc || '--'}%<br>
+                                        State: ${vehicle.charging_state || 'Unknown'}
+                                    </p>
+                                </div>
+                                <label style="display: flex; align-items: center; gap: 0.5em; font-size: 0.85em;">
+                                    <input type="checkbox" ${vehicle.enable_automations ? 'checked' : ''}
+                                           onchange="updateEVVehicleSettings(${vehicle.id}, this.checked)"
+                                           style="width: auto;">
+                                    Automations
+                                </label>
+                            </div>
+                            <div style="margin-top: 0.75em; display: flex; gap: 0.5em; flex-wrap: wrap;">
+                                <button type="button" onclick="sendEVCommand(${vehicle.id}, 'start_charging')" class="outline secondary" style="width: auto; padding: 0.4em 0.8em; font-size: 0.8em;">Start Charging</button>
+                                <button type="button" onclick="sendEVCommand(${vehicle.id}, 'stop_charging')" class="outline secondary" style="width: auto; padding: 0.4em 0.8em; font-size: 0.8em;">Stop Charging</button>
+                                <button type="button" onclick="sendEVCommand(${vehicle.id}, 'wake_up')" class="outline secondary" style="width: auto; padding: 0.4em 0.8em; font-size: 0.8em;">Wake Up</button>
+                            </div>
+                            <p id="ev-cmd-status-${vehicle.id}" style="font-size: 0.75em; margin-top: 0.5em; display: none;"></p>
+                        </div>`;
+                }
+                html += '</div>';
+                container.innerHTML = html;
+            } catch (error) {
+                container.innerHTML = `<p style="color: #ff6b6b; font-size: 0.85em;">Failed to load vehicles: ${error.message}</p>`;
+            }
+        }
+
+        async function syncEVVehicles() {
+            const status = document.getElementById('ev-sync-status');
+            status.style.display = 'block';
+            status.innerHTML = '<span style="color: #fcc419;">Syncing vehicles from Tesla...</span>';
+
+            try {
+                const response = await fetch('/api/ev/vehicles/sync', { method: 'POST' });
+                const data = await response.json();
+
+                if (data.success) {
+                    status.innerHTML = `<span style="color: #51cf66;">Synced ${data.vehicles_count || 0} vehicle(s)</span>`;
+                    loadEVVehicles();
+                } else {
+                    status.innerHTML = `<span style="color: #ff6b6b;">${data.error || 'Sync failed'}</span>`;
+                }
+            } catch (error) {
+                status.innerHTML = `<span style="color: #ff6b6b;">Sync failed: ${error.message}</span>`;
+            }
+        }
+
+        async function updateEVVehicleSettings(vehicleId, enableAutomations) {
+            try {
+                await fetch(`/api/ev/vehicles/${vehicleId}/settings`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enable_automations: enableAutomations })
+                });
+            } catch (error) {
+                console.error('Failed to update vehicle settings:', error);
+            }
+        }
+
+        async function sendEVCommand(vehicleId, command) {
+            const status = document.getElementById(`ev-cmd-status-${vehicleId}`);
+            status.style.display = 'block';
+            status.innerHTML = '<span style="color: #fcc419;">Sending command...</span>';
+
+            try {
+                const response = await fetch(`/api/ev/vehicles/${vehicleId}/command/${command}`, { method: 'POST' });
+                const data = await response.json();
+
+                if (data.success) {
+                    status.innerHTML = `<span style="color: #51cf66;">${data.message || 'Command sent'}</span>`;
+                    setTimeout(() => { status.style.display = 'none'; }, 3000);
+                    setTimeout(loadEVVehicles, 2000);
+                } else {
+                    status.innerHTML = `<span style="color: #ff6b6b;">${data.error || 'Command failed'}</span>`;
+                }
+            } catch (error) {
+                status.innerHTML = `<span style="color: #ff6b6b;">Failed: ${error.message}</span>`;
+            }
+        }
+
+        // OCPP Functions
+        async function loadOCPPStatus() {
+            const container = document.getElementById('ocppServerStatus');
+            try {
+                const response = await fetch('/api/ocpp/status');
+                const data = await response.json();
+
+                if (data.running) {
+                    container.innerHTML = `
+                        <div style="padding: 0.75em; background: rgba(81, 207, 102, 0.15); border-radius: 0.5em; border-left: 4px solid #51cf66;">
+                            <p style="margin: 0; font-size: 0.85em;">
+                                <strong>OCPP Server Running</strong><br>
+                                <span style="color: var(--muted-color);">Port: ${data.port} | Connected: ${data.connected_chargers?.length || 0} charger(s)</span>
+                            </p>
+                        </div>`;
+                } else {
+                    container.innerHTML = `
+                        <div style="padding: 0.75em; background: rgba(255, 107, 107, 0.15); border-radius: 0.5em; border-left: 4px solid #ff6b6b;">
+                            <p style="margin: 0; font-size: 0.85em;">
+                                <strong>OCPP Server Not Running</strong><br>
+                                <span style="color: var(--muted-color);">Install websockets and ocpp packages: pip install websockets ocpp</span>
+                            </p>
+                        </div>`;
+                }
+            } catch (error) {
+                container.innerHTML = `<p style="color: #ff6b6b; font-size: 0.85em;">Failed to get server status</p>`;
+            }
+        }
+
+        async function loadOCPPChargers() {
+            const container = document.getElementById('ocppChargersList');
+            try {
+                const response = await fetch('/api/ocpp/chargers');
+                const data = await response.json();
+
+                if (!data.chargers || data.chargers.length === 0) {
+                    container.innerHTML = `
+                        <div style="padding: 1em; background: rgba(255, 193, 7, 0.1); border-radius: 0.5em; border-left: 4px solid #fcc419;">
+                            <p style="margin: 0; font-size: 0.85em;">No chargers registered. Pre-register a charger below or let it auto-register on first connection.</p>
+                        </div>`;
+                    return;
+                }
+
+                let html = '<div style="display: grid; gap: 1em;">';
+                for (const charger of data.chargers) {
+                    const isConnected = charger.is_connected;
+                    const isCharging = charger.status === 'Charging';
+                    const statusColor = isCharging ? '#339af0' : (isConnected ? '#51cf66' : 'var(--muted-color)');
+                    html += `
+                        <div style="padding: 1em; background: var(--card-sectionning-background-color); border-radius: 0.5em; border-left: 4px solid ${statusColor};">
+                            <div style="display: flex; justify-content: space-between; align-items: start;">
+                                <div>
+                                    <strong>${charger.display_name || charger.charger_id}</strong>
+                                    <span style="font-size: 0.75em; padding: 0.2em 0.5em; border-radius: 3px; margin-left: 0.5em;
+                                                background: ${isConnected ? 'rgba(81, 207, 102, 0.2)' : 'rgba(128, 128, 128, 0.2)'};">
+                                        ${isConnected ? 'Connected' : 'Offline'}
+                                    </span>
+                                    <p style="margin: 0.5em 0 0 0; font-size: 0.85em; color: var(--muted-color);">
+                                        ID: ${charger.charger_id}<br>
+                                        Status: ${charger.status || 'Unknown'}
+                                        ${charger.current_power_kw ? ` | Power: ${charger.current_power_kw.toFixed(1)} kW` : ''}
+                                        ${charger.current_energy_kwh ? ` | Session: ${charger.current_energy_kwh.toFixed(1)} kWh` : ''}
+                                    </p>
+                                </div>
+                                <div style="display: flex; flex-direction: column; align-items: end; gap: 0.5em;">
+                                    <label style="display: flex; align-items: center; gap: 0.5em; font-size: 0.85em;">
+                                        <input type="checkbox" ${charger.enable_automations ? 'checked' : ''}
+                                               onchange="updateOCPPChargerSettings(${charger.id}, this.checked)"
+                                               style="width: auto;">
+                                        Automations
+                                    </label>
+                                    <button type="button" onclick="deleteOCPPCharger(${charger.id}, '${charger.display_name || charger.charger_id}')"
+                                            class="outline secondary" style="width: auto; padding: 0.2em 0.5em; font-size: 0.75em;">Delete</button>
+                                </div>
+                            </div>
+                            ${isConnected ? `
+                            <div style="margin-top: 0.75em; display: flex; gap: 0.5em; flex-wrap: wrap;">
+                                <button type="button" onclick="sendOCPPCommand(${charger.id}, 'start')" class="outline secondary" style="width: auto; padding: 0.4em 0.8em; font-size: 0.8em;">Start Charging</button>
+                                <button type="button" onclick="sendOCPPCommand(${charger.id}, 'stop')" class="outline secondary" style="width: auto; padding: 0.4em 0.8em; font-size: 0.8em;">Stop Charging</button>
+                                <button type="button" onclick="sendOCPPCommand(${charger.id}, 'reset')" class="outline secondary" style="width: auto; padding: 0.4em 0.8em; font-size: 0.8em;">Reset</button>
+                            </div>
+                            ` : ''}
+                            <p id="ocpp-cmd-status-${charger.id}" style="font-size: 0.75em; margin-top: 0.5em; display: none;"></p>
+                        </div>`;
+                }
+                html += '</div>';
+                container.innerHTML = html;
+            } catch (error) {
+                container.innerHTML = `<p style="color: #ff6b6b; font-size: 0.85em;">Failed to load chargers: ${error.message}</p>`;
+            }
+        }
+
+        async function registerOCPPCharger() {
+            const status = document.getElementById('ocpp-register-status');
+            const chargerId = document.getElementById('ocpp_charger_id_input').value.trim();
+            const displayName = document.getElementById('ocpp_display_name_input').value.trim();
+            const maxPower = parseFloat(document.getElementById('ocpp_max_power_input').value) || 7.4;
+            const enableAutomations = document.getElementById('ocpp_enable_automations_input').checked;
+
+            if (!chargerId) {
+                status.style.display = 'block';
+                status.innerHTML = '<span style="color: #ff6b6b;">Please enter a Charger ID</span>';
+                return;
+            }
+
+            status.style.display = 'block';
+            status.innerHTML = '<span style="color: #fcc419;">Registering charger...</span>';
+
+            try {
+                const response = await fetch('/api/ocpp/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        charger_id: chargerId,
+                        display_name: displayName || null,
+                        max_power_kw: maxPower,
+                        enable_automations: enableAutomations
+                    })
+                });
+                const data = await response.json();
+
+                if (data.charger) {
+                    status.innerHTML = `<span style="color: #51cf66;">Charger "${data.charger.display_name || data.charger.charger_id}" registered!</span>`;
+                    document.getElementById('ocpp_charger_id_input').value = '';
+                    document.getElementById('ocpp_display_name_input').value = '';
+                    loadOCPPChargers();
+                } else {
+                    status.innerHTML = `<span style="color: #ff6b6b;">${data.error || 'Registration failed'}</span>`;
+                }
+            } catch (error) {
+                status.innerHTML = `<span style="color: #ff6b6b;">Registration failed: ${error.message}</span>`;
+            }
+        }
+
+        async function updateOCPPChargerSettings(chargerId, enableAutomations) {
+            try {
+                await fetch(`/api/ocpp/chargers/${chargerId}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enable_automations: enableAutomations })
+                });
+            } catch (error) {
+                console.error('Failed to update charger settings:', error);
+            }
+        }
+
+        async function sendOCPPCommand(chargerId, command) {
+            const status = document.getElementById(`ocpp-cmd-status-${chargerId}`);
+            status.style.display = 'block';
+            status.innerHTML = '<span style="color: #fcc419;">Sending command...</span>';
+
+            try {
+                const response = await fetch(`/api/ocpp/chargers/${chargerId}/command/${command}`, { method: 'POST' });
+                const data = await response.json();
+
+                if (data.success) {
+                    status.innerHTML = `<span style="color: #51cf66;">${data.message || 'Command sent'}</span>`;
+                    setTimeout(() => { status.style.display = 'none'; }, 3000);
+                    setTimeout(loadOCPPChargers, 2000);
+                } else {
+                    status.innerHTML = `<span style="color: #ff6b6b;">${data.error || 'Command failed'}</span>`;
+                }
+            } catch (error) {
+                status.innerHTML = `<span style="color: #ff6b6b;">Failed: ${error.message}</span>`;
+            }
+        }
+
+        async function deleteOCPPCharger(chargerId, name) {
+            if (!confirm(`Delete charger "${name}"? This cannot be undone.`)) return;
+
+            try {
+                const response = await fetch(`/api/ocpp/chargers/${chargerId}`, { method: 'DELETE' });
+                const data = await response.json();
+
+                if (data.success) {
+                    loadOCPPChargers();
+                } else {
+                    alert(data.error || 'Failed to delete charger');
+                }
+            } catch (error) {
+                alert('Failed to delete charger: ' + error.message);
+            }
+        }
+
+        // Load EV and OCPP data on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            loadEVVehicles();
+            loadOCPPStatus();
+            loadOCPPChargers();
+        });
+    </script>
+
     <script>
         // Weather Settings Functions
         async function testWeatherLocation() {

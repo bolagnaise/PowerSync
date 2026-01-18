@@ -451,6 +451,20 @@
           "sigenergy_dc_curtailment_enabled": "Limit DC solar production via Sigenergy Modbus when feed-in price is negative. Only applies to Sigenergy systems with DC-coupled solar.",
           "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny/cloudy triggers). Leave blank to disable weather triggers."
         }
+      },
+      "ev_ocpp_options": {
+        "title": "EV Charging & OCPP Configuration",
+        "description": "Configure EV charging control via Tesla Fleet API and OCPP charger management.\n\n**EV Charging:** Control Tesla vehicles connected via Fleet API (start/stop charging, set limits).\n\n**OCPP:** Connect OCPP 1.6-compliant chargers (Grizzl-E Smart, Wallbox, EVBox, etc.) for automation control.",
+        "data": {
+          "ev_charging_enabled": "Enable EV Charging Control (Tesla Fleet API)",
+          "ocpp_enabled": "Enable OCPP Central System",
+          "ocpp_port": "OCPP WebSocket Port"
+        },
+        "data_description": {
+          "ev_charging_enabled": "Allow automations to control Tesla vehicle charging via Fleet API (start/stop, set charge limits, set amps). Requires Fleet API credentials to be configured.",
+          "ocpp_enabled": "Run an OCPP 1.6J WebSocket server for connecting OCPP-compliant EV chargers. Chargers connect to ws://server:port/{charger_id}",
+          "ocpp_port": "Port for OCPP WebSocket server (default: 9000). Chargers will connect to this port."
+        }
       }
     }
   },

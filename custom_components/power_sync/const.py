@@ -32,6 +32,14 @@ CONF_BATTERY_CURTAILMENT_ENABLED = "battery_curtailment_enabled"
 CONF_OPENWEATHERMAP_API_KEY = "openweathermap_api_key"
 CONF_WEATHER_LOCATION = "weather_location"
 
+# EV Charging configuration (Tesla Fleet API for vehicles)
+CONF_EV_CHARGING_ENABLED = "ev_charging_enabled"
+
+# OCPP Central System configuration
+CONF_OCPP_ENABLED = "ocpp_enabled"
+CONF_OCPP_PORT = "ocpp_port"
+DEFAULT_OCPP_PORT = 9000
+
 # Battery System Selection
 CONF_BATTERY_SYSTEM = "battery_system"
 BATTERY_SYSTEM_TESLA = "tesla"
