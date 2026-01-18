@@ -454,19 +454,19 @@
       },
       "ev_ocpp_options": {
         "title": "EV Charging, OCPP & Solar Forecast",
-        "description": "Configure EV charging, OCPP charger management, and solar production forecasting.\n\n**Solcast:** Get solar production forecasts from Solcast (free hobbyist tier: 10 API calls/day).\n\n**EV Charging:** Control Tesla vehicles via Fleet API.\n\n**OCPP:** Connect OCPP 1.6-compliant chargers.",
+        "description": "Configure EV charging, OCPP charger management, and solar production forecasting.\n\n**Solcast:** Get solar production forecasts from Solcast (free hobbyist tier: 10 API calls/day). Supports split arrays with multiple resource IDs.\n\n**EV Charging:** Control Tesla vehicles via Fleet API.\n\n**OCPP:** Connect OCPP 1.6-compliant chargers.",
         "data": {
           "solcast_enabled": "Enable Solcast Solar Forecast",
           "solcast_api_key": "Solcast API Key",
-          "solcast_resource_id": "Solcast Resource ID",
+          "solcast_resource_id": "Solcast Resource ID(s)",
           "ev_charging_enabled": "Enable EV Charging Control (Tesla Fleet API)",
           "ocpp_enabled": "Enable OCPP Central System",
           "ocpp_port": "OCPP WebSocket Port"
         },
         "data_description": {
-          "solcast_enabled": "Enable solar production forecasting using Solcast API. Shows expected daily solar production.",
-          "solcast_api_key": "Your Solcast API key from solcast.com. Free hobbyist accounts get 10 API calls/day.",
-          "solcast_resource_id": "Your rooftop site resource ID from Solcast (found in your site settings).",
+          "solcast_enabled": "Enable solar production forecasting using Solcast API. Shows expected daily solar production for today and tomorrow.",
+          "solcast_api_key": "Your Solcast API key from toolkit.solcast.com.au. Free hobbyist accounts get 10 API calls/day (plenty with 3-hour caching).",
+          "solcast_resource_id": "Your rooftop site Resource ID(s) from Solcast. For split arrays (e.g., east/west facing panels), create separate sites in Solcast and enter multiple IDs separated by commas. Example: abc123,def456. Forecasts will be combined automatically.",
           "ev_charging_enabled": "Allow automations to control Tesla vehicle charging via Fleet API (start/stop, set charge limits, set amps). Requires Fleet API credentials to be configured.",
           "ocpp_enabled": "Run an OCPP 1.6J WebSocket server for connecting OCPP-compliant EV chargers. Chargers connect to ws://server:port/{charger_id}",
           "ocpp_port": "Port for OCPP WebSocket server (default: 9000). Chargers will connect to this port."

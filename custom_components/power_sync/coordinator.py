@@ -1147,6 +1147,9 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
 
     Fetches PV power forecasts from Solcast API and caches them locally.
     Updates every 3 hours to stay within API limits (10 calls/day for hobbyist tier).
+
+    Supports multiple resource IDs for split arrays (e.g., east/west facing panels).
+    Provide comma-separated resource IDs and forecasts will be combined by summing values.
     """
 
     # Solcast API base URL
@@ -1167,11 +1170,12 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
         Args:
             hass: HomeAssistant instance
             api_key: Solcast API key
-            resource_id: Rooftop site resource ID
+            resource_id: Rooftop site resource ID(s) - comma-separated for split arrays
             capacity_kw: System capacity in kW (optional, for validation)
         """
         self._api_key = api_key
-        self._resource_id = resource_id
+        # Support comma-separated resource IDs for split arrays
+        self._resource_ids = [rid.strip() for rid in resource_id.split(",") if rid.strip()]
         self._capacity_kw = capacity_kw
         self._session = async_get_clientsession(hass)
 
@@ -1182,32 +1186,90 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             update_interval=self.UPDATE_INTERVAL,
         )
 
+    async def _fetch_forecast_for_resource(self, resource_id: str) -> list[dict] | None:
+        """Fetch forecast for a single resource ID.
+
+        Args:
+            resource_id: Solcast rooftop site resource ID
+
+        Returns:
+            List of forecast periods or None on error
+        """
+        url = f"{self.SOLCAST_API_URL}/rooftop_sites/{resource_id}/forecasts"
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Accept": "application/json",
+        }
+        params = {"hours": 48, "format": "json"}
+
+        async with self._session.get(url, headers=headers, params=params) as response:
+            if response.status == 401:
+                raise UpdateFailed("Solcast API authentication failed - check API key")
+            if response.status == 429:
+                _LOGGER.warning(f"Solcast API rate limit for resource {resource_id[:8]}...")
+                return None
+            if response.status != 200:
+                _LOGGER.error(f"Solcast API error for resource {resource_id[:8]}: {response.status}")
+                return None
+
+            data = await response.json()
+            return data.get("forecasts", [])
+
+    def _combine_forecasts(self, base: list[dict], additional: list[dict]) -> list[dict]:
+        """Combine forecasts from multiple resources by summing pv_estimate values.
+
+        Args:
+            base: Base forecast list
+            additional: Additional forecast list to add
+
+        Returns:
+            Combined forecast list with summed values
+        """
+        additional_lookup = {f.get("period_end"): f for f in additional}
+
+        combined = []
+        for forecast in base:
+            period_end = forecast.get("period_end")
+            result = dict(forecast)
+
+            if period_end in additional_lookup:
+                add_f = additional_lookup[period_end]
+                if result.get("pv_estimate") is not None and add_f.get("pv_estimate") is not None:
+                    result["pv_estimate"] = result["pv_estimate"] + add_f["pv_estimate"]
+                if result.get("pv_estimate10") is not None and add_f.get("pv_estimate10") is not None:
+                    result["pv_estimate10"] = result["pv_estimate10"] + add_f["pv_estimate10"]
+                if result.get("pv_estimate90") is not None and add_f.get("pv_estimate90") is not None:
+                    result["pv_estimate90"] = result["pv_estimate90"] + add_f["pv_estimate90"]
+
+            combined.append(result)
+
+        return combined
+
     async def _async_update_data(self) -> dict[str, Any]:
-        """Fetch forecast data from Solcast API."""
+        """Fetch forecast data from Solcast API.
+
+        Supports multiple resource IDs - forecasts are combined by summing values.
+        """
         try:
-            url = f"{self.SOLCAST_API_URL}/rooftop_sites/{self._resource_id}/forecasts"
-            headers = {
-                "Authorization": f"Bearer {self._api_key}",
-                "Accept": "application/json",
-            }
-            params = {"hours": 48, "format": "json"}
-
             async with asyncio.timeout(30):
-                async with self._session.get(url, headers=headers, params=params) as response:
-                    if response.status == 401:
-                        raise UpdateFailed("Solcast API authentication failed - check API key")
-                    if response.status == 429:
-                        _LOGGER.warning("Solcast API rate limit exceeded, using cached data")
-                        return self.data or {}
-                    if response.status != 200:
-                        text = await response.text()
-                        raise UpdateFailed(f"Solcast API error {response.status}: {text[:100]}")
+                # Fetch from first resource
+                forecasts = await self._fetch_forecast_for_resource(self._resource_ids[0])
+                if not forecasts:
+                    _LOGGER.warning("No forecasts from Solcast API")
+                    return self.data or {"available": False}
 
-                    data = await response.json()
+                # If multiple resources, fetch and combine
+                if len(self._resource_ids) > 1:
+                    for resource_id in self._resource_ids[1:]:
+                        additional = await self._fetch_forecast_for_resource(resource_id)
+                        if additional:
+                            forecasts = self._combine_forecasts(forecasts, additional)
+                        else:
+                            _LOGGER.warning(f"Failed to fetch from resource {resource_id[:8]}...")
 
-            forecasts = data.get("forecasts", [])
+                    _LOGGER.info(f"Combined forecasts from {len(self._resource_ids)} Solcast sites")
+
             if not forecasts:
-                _LOGGER.warning("No forecasts returned from Solcast API")
                 return {"available": False}
 
             # Calculate today and tomorrow totals

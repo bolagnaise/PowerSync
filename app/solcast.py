@@ -50,9 +50,21 @@ class SolcastService:
         return self._api_key
 
     @property
+    def resource_ids(self) -> List[str]:
+        """Get list of Solcast rooftop site resource IDs.
+
+        Supports comma-separated IDs for split arrays (e.g., east/west facing).
+        """
+        if not self.user.solcast_resource_id:
+            return []
+        # Split by comma and strip whitespace
+        return [rid.strip() for rid in self.user.solcast_resource_id.split(",") if rid.strip()]
+
+    @property
     def resource_id(self) -> Optional[str]:
-        """Get Solcast rooftop site resource ID."""
-        return self.user.solcast_resource_id
+        """Get first Solcast rooftop site resource ID (for backwards compatibility)."""
+        ids = self.resource_ids
+        return ids[0] if ids else None
 
     @property
     def is_configured(self) -> bool:
@@ -60,7 +72,7 @@ class SolcastService:
         return bool(
             self.user.solcast_enabled
             and self.api_key
-            and self.resource_id
+            and self.resource_ids
         )
 
     def _get_headers(self) -> Dict[str, str]:
@@ -108,20 +120,17 @@ class SolcastService:
 
         return None
 
-    def fetch_forecast(self, hours: int = 48) -> Optional[List[Dict]]:
-        """Fetch solar production forecast from Solcast API.
+    def _fetch_forecast_for_resource(self, resource_id: str, hours: int = 48) -> Optional[List[Dict]]:
+        """Fetch solar production forecast for a single resource ID.
 
         Args:
+            resource_id: Solcast rooftop site resource ID
             hours: Number of hours to forecast (default 48, max 168)
 
         Returns:
             List of forecast periods with pv_estimate values, or None on error
         """
-        if not self.is_configured:
-            _LOGGER.debug("Solcast not configured, skipping forecast fetch")
-            return None
-
-        endpoint = f"/rooftop_sites/{self.resource_id}/forecasts"
+        endpoint = f"/rooftop_sites/{resource_id}/forecasts"
         params = {
             "hours": min(hours, 168),
             "format": "json",
@@ -131,13 +140,86 @@ class SolcastService:
         if not data:
             return None
 
-        forecasts = data.get("forecasts", [])
-        _LOGGER.info(f"Fetched {len(forecasts)} Solcast forecast periods for next {hours} hours")
+        return data.get("forecasts", [])
 
-        return forecasts
+    def fetch_forecast(self, hours: int = 48) -> Optional[List[Dict]]:
+        """Fetch solar production forecast from Solcast API.
+
+        Supports multiple resource IDs for split arrays - forecasts are combined
+        by summing pv_estimate values for matching time periods.
+
+        Args:
+            hours: Number of hours to forecast (default 48, max 168)
+
+        Returns:
+            List of forecast periods with combined pv_estimate values, or None on error
+        """
+        if not self.is_configured:
+            _LOGGER.debug("Solcast not configured, skipping forecast fetch")
+            return None
+
+        resource_ids = self.resource_ids
+        if not resource_ids:
+            return None
+
+        # Fetch from first resource
+        combined_forecasts = self._fetch_forecast_for_resource(resource_ids[0], hours)
+        if not combined_forecasts:
+            return None
+
+        _LOGGER.info(f"Fetched {len(combined_forecasts)} forecast periods from resource {resource_ids[0][:8]}...")
+
+        # If multiple resources, fetch and combine
+        if len(resource_ids) > 1:
+            for resource_id in resource_ids[1:]:
+                additional_forecasts = self._fetch_forecast_for_resource(resource_id, hours)
+                if additional_forecasts:
+                    _LOGGER.info(f"Fetched {len(additional_forecasts)} forecast periods from resource {resource_id[:8]}...")
+                    # Combine by summing values for matching period_end times
+                    combined_forecasts = self._combine_forecasts(combined_forecasts, additional_forecasts)
+                else:
+                    _LOGGER.warning(f"Failed to fetch forecast from resource {resource_id[:8]}...")
+
+        _LOGGER.info(f"Combined forecast: {len(combined_forecasts)} periods for {len(resource_ids)} resource(s)")
+        return combined_forecasts
+
+    def _combine_forecasts(self, base: List[Dict], additional: List[Dict]) -> List[Dict]:
+        """Combine forecasts from multiple resources by summing values.
+
+        Args:
+            base: Base forecast list
+            additional: Additional forecast list to add
+
+        Returns:
+            Combined forecast list with summed pv_estimate values
+        """
+        # Create lookup by period_end
+        additional_lookup = {f.get("period_end"): f for f in additional}
+
+        combined = []
+        for forecast in base:
+            period_end = forecast.get("period_end")
+            result = dict(forecast)  # Copy base forecast
+
+            if period_end in additional_lookup:
+                add_forecast = additional_lookup[period_end]
+                # Sum the pv_estimate values
+                if result.get("pv_estimate") is not None and add_forecast.get("pv_estimate") is not None:
+                    result["pv_estimate"] = result["pv_estimate"] + add_forecast["pv_estimate"]
+                if result.get("pv_estimate10") is not None and add_forecast.get("pv_estimate10") is not None:
+                    result["pv_estimate10"] = result["pv_estimate10"] + add_forecast["pv_estimate10"]
+                if result.get("pv_estimate90") is not None and add_forecast.get("pv_estimate90") is not None:
+                    result["pv_estimate90"] = result["pv_estimate90"] + add_forecast["pv_estimate90"]
+
+            combined.append(result)
+
+        return combined
 
     def fetch_estimated_actuals(self, hours: int = 24) -> Optional[List[Dict]]:
         """Fetch estimated actuals (recent history) from Solcast API.
+
+        Supports multiple resource IDs for split arrays - actuals are combined
+        by summing pv_estimate values for matching time periods.
 
         Args:
             hours: Number of hours of history (default 24, max 168)
@@ -148,7 +230,36 @@ class SolcastService:
         if not self.is_configured:
             return None
 
-        endpoint = f"/rooftop_sites/{self.resource_id}/estimated_actuals"
+        resource_ids = self.resource_ids
+        if not resource_ids:
+            return None
+
+        # Fetch from first resource
+        combined_actuals = self._fetch_actuals_for_resource(resource_ids[0], hours)
+        if not combined_actuals:
+            return None
+
+        # If multiple resources, fetch and combine
+        if len(resource_ids) > 1:
+            for resource_id in resource_ids[1:]:
+                additional_actuals = self._fetch_actuals_for_resource(resource_id, hours)
+                if additional_actuals:
+                    combined_actuals = self._combine_forecasts(combined_actuals, additional_actuals)
+
+        _LOGGER.info(f"Combined {len(combined_actuals)} estimated actuals from {len(resource_ids)} resource(s)")
+        return combined_actuals
+
+    def _fetch_actuals_for_resource(self, resource_id: str, hours: int = 24) -> Optional[List[Dict]]:
+        """Fetch estimated actuals for a single resource ID.
+
+        Args:
+            resource_id: Solcast rooftop site resource ID
+            hours: Number of hours of history (default 24, max 168)
+
+        Returns:
+            List of estimated actual periods, or None on error
+        """
+        endpoint = f"/rooftop_sites/{resource_id}/estimated_actuals"
         params = {
             "hours": min(hours, 168),
             "format": "json",
@@ -158,10 +269,7 @@ class SolcastService:
         if not data:
             return None
 
-        actuals = data.get("estimated_actuals", [])
-        _LOGGER.info(f"Fetched {len(actuals)} Solcast estimated actuals for past {hours} hours")
-
-        return actuals
+        return data.get("estimated_actuals", [])
 
     def update_forecast_cache(self) -> bool:
         """Update cached forecasts from Solcast API.

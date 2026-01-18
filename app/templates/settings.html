@@ -883,12 +883,16 @@
                 </div>
 
                 <label for="solcast_resource_id" style="margin-top: 1em;">
-                    Rooftop Site Resource ID
+                    Rooftop Site Resource ID(s)
                     <small>Find in <a href="https://toolkit.solcast.com.au/rooftop-sites" target="_blank">Solcast Toolkit → Rooftop Sites</a></small>
                 </label>
                 <input type="text" id="solcast_resource_id" name="solcast_resource_id"
                        value="{{ current_user.solcast_resource_id or '' }}"
-                       placeholder="e.g., 1234-5678-abcd-efgh">
+                       placeholder="e.g., abc123 or abc123,def456 for split arrays">
+                <small style="color: var(--text-muted); display: block; margin-top: 0.25em;">
+                    <strong>Split arrays?</strong> If you have panels on multiple roof faces (e.g., east & west),
+                    create separate sites in Solcast and enter IDs separated by commas. Forecasts will be combined automatically.
+                </small>
 
                 <label for="solcast_capacity_kw" style="margin-top: 1em;">
                     System Capacity (kW) - Optional
