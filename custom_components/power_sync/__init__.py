@@ -2225,6 +2225,85 @@ class PushTokenRegisterView(HomeAssistantView):
             )
 
 
+class CurrentWeatherView(HomeAssistantView):
+    """HTTP view to get current weather for mobile app dashboard."""
+
+    url = "/api/power_sync/weather"
+    name = "api:power_sync:weather"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request - fetch current weather."""
+        from .automations.weather import async_get_current_weather
+        from .const import CONF_OPENWEATHERMAP_API_KEY, CONF_WEATHER_LOCATION
+
+        try:
+            # Get config entry
+            entries = self._hass.config_entries.async_entries(DOMAIN)
+            if not entries:
+                return web.json_response({
+                    "success": False,
+                    "error": "PowerSync not configured"
+                }, status=400)
+
+            entry = entries[0]
+
+            # Get API key from config
+            api_key = entry.options.get(
+                CONF_OPENWEATHERMAP_API_KEY,
+                entry.data.get(CONF_OPENWEATHERMAP_API_KEY)
+            )
+
+            if not api_key:
+                return web.json_response({
+                    "success": False,
+                    "error": "OpenWeatherMap API key not configured"
+                }, status=400)
+
+            # Get weather location from config
+            weather_location = entry.options.get(
+                CONF_WEATHER_LOCATION,
+                entry.data.get(CONF_WEATHER_LOCATION)
+            )
+
+            # Get timezone from config
+            timezone = entry.options.get(
+                "timezone",
+                entry.data.get("timezone", "Australia/Brisbane")
+            )
+
+            # Fetch weather
+            weather_data = await async_get_current_weather(
+                self._hass, api_key, timezone, weather_location
+            )
+
+            if not weather_data:
+                return web.json_response({
+                    "success": False,
+                    "error": "Failed to fetch weather data"
+                }, status=500)
+
+            return web.json_response({
+                "success": True,
+                "condition": weather_data.get("condition"),
+                "description": weather_data.get("description"),
+                "temperature_c": weather_data.get("temperature_c"),
+                "humidity": weather_data.get("humidity"),
+                "cloud_cover": weather_data.get("cloud_cover"),
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error fetching weather: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PowerSync from a config entry."""
     _LOGGER.info("=" * 60)
@@ -6022,6 +6101,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register HTTP endpoint for push token registration
     hass.http.register_view(PushTokenRegisterView(hass))
     _LOGGER.info("📱 Push token registration endpoint registered at /api/power_sync/push/register")
+
+    # Register HTTP endpoint for current weather (for mobile app dashboard)
+    hass.http.register_view(CurrentWeatherView(hass))
+    _LOGGER.info("🌤️ Current weather HTTP endpoint registered at /api/power_sync/weather")
 
     # ======================================================================
     # SYNC BATTERY HEALTH SERVICE (from mobile app TEDAPI scans)
