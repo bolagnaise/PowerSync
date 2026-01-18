@@ -811,12 +811,12 @@
                 City or Postcode
                 <small>Enter your city name or postcode for accurate weather data (e.g., Brisbane or 4000)</small>
             </label>
-            <div style="display: flex; gap: 0.5em; align-items: flex-start;">
+            <div style="display: grid; grid-template-columns: 1fr auto; gap: 0.5em; align-items: start;">
                 <input type="text" id="weather_location" name="weather_location"
                        value="{{ current_user.weather_location or '' }}"
                        placeholder="e.g., Brisbane or 4000"
-                       style="flex: 1;">
-                <button type="button" onclick="testWeatherLocation()" class="outline" style="flex-shrink: 0;">
+                       style="margin-bottom: 0;">
+                <button type="button" onclick="testWeatherLocation()" class="outline" style="width: auto; margin-bottom: 0;">
                     Test Location
                 </button>
             </div>
