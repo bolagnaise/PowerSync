@@ -8,6 +8,7 @@ Supports the following trigger types:
 - price: Trigger based on electricity price thresholds
 - grid: Trigger when grid status changes (off-grid/on-grid)
 - weather: Trigger based on weather conditions
+- ev: Trigger based on EV charging state (connected, charging, SoC)
 """
 
 import logging
@@ -61,6 +62,8 @@ def evaluate_trigger(
         return _evaluate_grid_trigger(trigger, current_state)
     elif trigger.trigger_type == 'weather':
         return _evaluate_weather_trigger(trigger, current_state)
+    elif trigger.trigger_type == 'ev':
+        return _evaluate_ev_trigger(trigger, current_state, user)
     else:
         _LOGGER.warning(f"Unknown trigger type: {trigger.trigger_type}")
         return TriggerResult(triggered=False, reason=f"Unknown trigger type: {trigger.trigger_type}")
@@ -466,3 +469,128 @@ def _update_last_value(trigger: AutomationTrigger, value: float) -> None:
     trigger.last_evaluated_value = value
     trigger.last_evaluated_at = datetime.utcnow()
     db.session.commit()
+
+
+def _evaluate_ev_trigger(
+    trigger: AutomationTrigger,
+    current_state: Dict[str, Any],
+    user: User
+) -> TriggerResult:
+    """
+    Evaluate EV charging trigger.
+
+    Conditions:
+    - connected: EV is plugged in
+    - disconnected: EV is unplugged
+    - charging_starts: EV starts charging
+    - charging_stops: EV stops charging
+    - soc_reaches: EV battery reaches threshold
+    """
+    from app.models import TeslaVehicle
+
+    condition = trigger.ev_condition
+    if not condition:
+        return TriggerResult(triggered=False, reason="No EV condition set")
+
+    # Get EV state from current_state
+    ev_state = current_state.get('ev_vehicles', [])
+    if not ev_state:
+        return TriggerResult(triggered=False, reason="No EV data available")
+
+    # Filter to specific vehicle if set
+    target_vehicle_id = trigger.ev_vehicle_id
+    if target_vehicle_id:
+        ev_state = [v for v in ev_state if v.get('id') == target_vehicle_id]
+        if not ev_state:
+            return TriggerResult(triggered=False, reason=f"Vehicle {target_vehicle_id} not found")
+
+    # Check each vehicle for the trigger condition
+    for vehicle in ev_state:
+        vehicle_name = vehicle.get('display_name', 'EV')
+        vehicle_id = vehicle.get('id')
+        is_plugged_in = vehicle.get('is_plugged_in', False)
+        charging_state = vehicle.get('charging_state', '')
+        battery_level = vehicle.get('battery_level')
+
+        # Create a unique key for this trigger + vehicle combination
+        state_key = f"ev_{vehicle_id}_{condition}"
+
+        # Use last_evaluated_value to track state:
+        # For connected/disconnected: 1.0 = plugged in, 0.0 = not plugged in
+        # For charging_starts/stops: 1.0 = charging, 0.0 = not charging
+        # For soc_reaches: actual battery level
+        last_value = trigger.last_evaluated_value
+
+        if condition == 'connected':
+            # Trigger when EV gets plugged in
+            current_value = 1.0 if is_plugged_in else 0.0
+            if is_plugged_in:
+                if last_value is not None and last_value == 0.0:  # Was disconnected
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(triggered=True, reason=f"{vehicle_name} connected")
+                elif last_value is None:
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(triggered=False, reason="Initial state connected")
+            _update_last_value(trigger, current_value)
+
+        elif condition == 'disconnected':
+            # Trigger when EV gets unplugged
+            current_value = 1.0 if is_plugged_in else 0.0
+            if not is_plugged_in:
+                if last_value is not None and last_value == 1.0:  # Was connected
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(triggered=True, reason=f"{vehicle_name} disconnected")
+                elif last_value is None:
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(triggered=False, reason="Initial state disconnected")
+            _update_last_value(trigger, current_value)
+
+        elif condition == 'charging_starts':
+            # Trigger when EV starts charging
+            is_charging = charging_state == 'Charging'
+            current_value = 1.0 if is_charging else 0.0
+            if is_charging:
+                if last_value is not None and last_value == 0.0:  # Was not charging
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(triggered=True, reason=f"{vehicle_name} started charging")
+                elif last_value is None:
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(triggered=False, reason="Initial state charging")
+            _update_last_value(trigger, current_value)
+
+        elif condition == 'charging_stops':
+            # Trigger when EV stops charging
+            is_charging = charging_state == 'Charging'
+            current_value = 1.0 if is_charging else 0.0
+            if not is_charging and is_plugged_in:  # Stopped but still plugged in
+                if last_value is not None and last_value == 1.0:  # Was charging
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(triggered=True, reason=f"{vehicle_name} stopped charging")
+                elif last_value is None:
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(triggered=False, reason="Initial state not charging")
+            _update_last_value(trigger, current_value)
+
+        elif condition == 'soc_reaches':
+            # Trigger when EV battery reaches threshold
+            threshold = trigger.ev_soc_threshold
+            if threshold is None:
+                return TriggerResult(triggered=False, reason="No SoC threshold set")
+
+            if battery_level is None:
+                continue  # Skip this vehicle, try next
+
+            current_value = float(battery_level)
+            if battery_level >= threshold:
+                if last_value is not None and last_value < threshold:
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(
+                        triggered=True,
+                        reason=f"{vehicle_name} reached {battery_level}% (threshold: {threshold}%)"
+                    )
+                elif last_value is None:
+                    _update_last_value(trigger, current_value)
+                    return TriggerResult(triggered=False, reason="Initial state above threshold")
+            _update_last_value(trigger, current_value)
+
+    return TriggerResult(triggered=False, reason=f"No EV matched condition: {condition}")

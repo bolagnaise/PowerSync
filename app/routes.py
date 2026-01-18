@@ -8641,3 +8641,264 @@ def api_test_weather(api_user=None):
         })
     except requests.RequestException as e:
         return jsonify({'error': f'Weather API error: {str(e)}'}), 500
+
+
+# =============================================================================
+# EV CHARGING API ENDPOINTS (Tesla Fleet API)
+# =============================================================================
+
+@bp.route('/api/ev/auth/url', methods=['GET'])
+@api_auth_required
+def api_ev_auth_url(api_user=None):
+    """Get Tesla OAuth authorization URL for linking account."""
+    from app.ev.tesla_fleet import TeslaFleetClient
+    from app.utils.encryption import decrypt_data
+    import secrets
+
+    user = api_user or current_user
+
+    # Check if Fleet API credentials are configured
+    if not user.fleet_api_client_id_encrypted:
+        return jsonify({'error': 'Fleet API client ID not configured. Please set up your Tesla Developer credentials.'}), 400
+
+    try:
+        client_id = decrypt_data(user.fleet_api_client_id_encrypted)
+        client_secret = decrypt_data(user.fleet_api_client_secret_encrypted) if user.fleet_api_client_secret_encrypted else ""
+        redirect_uri = user.fleet_api_redirect_uri or ""
+
+        if not redirect_uri:
+            return jsonify({'error': 'Fleet API redirect URI not configured'}), 400
+
+        client = TeslaFleetClient(
+            client_id=client_id,
+            client_secret=client_secret,
+            redirect_uri=redirect_uri,
+        )
+
+        # Generate state for CSRF protection
+        state = secrets.token_urlsafe(32)
+
+        # Store state in session for verification
+        from flask import session
+        session['tesla_oauth_state'] = state
+
+        auth_url = client.get_authorization_url(state)
+        return jsonify({'success': True, 'auth_url': auth_url, 'state': state})
+
+    except Exception as e:
+        logger.error(f"Error generating auth URL: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/api/ev/auth/callback', methods=['POST'])
+@api_auth_required
+def api_ev_auth_callback(api_user=None):
+    """Handle OAuth callback and exchange code for tokens."""
+    from app.ev.tesla_fleet import TeslaFleetClient, TeslaAuthError
+    from app.utils.encryption import decrypt_data, encrypt_data
+
+    user = api_user or current_user
+    data = request.get_json()
+
+    code = data.get('code') if data else None
+    state = data.get('state') if data else None
+
+    if not code:
+        return jsonify({'error': 'Authorization code required'}), 400
+
+    try:
+        client_id = decrypt_data(user.fleet_api_client_id_encrypted)
+        client_secret = decrypt_data(user.fleet_api_client_secret_encrypted) if user.fleet_api_client_secret_encrypted else ""
+        redirect_uri = user.fleet_api_redirect_uri or ""
+
+        client = TeslaFleetClient(
+            client_id=client_id,
+            client_secret=client_secret,
+            redirect_uri=redirect_uri,
+        )
+
+        # Exchange code for tokens
+        token_data = client.exchange_code_for_token(code)
+
+        # Save tokens to user
+        user.fleet_api_access_token_encrypted = encrypt_data(token_data['access_token'])
+        user.fleet_api_refresh_token_encrypted = encrypt_data(token_data['refresh_token'])
+        user.fleet_api_token_expires_at = client.token_expires_at
+
+        db.session.commit()
+
+        return jsonify({'success': True, 'message': 'Tesla account linked successfully'})
+
+    except TeslaAuthError as e:
+        logger.error(f"Tesla auth error: {e}")
+        return jsonify({'error': f'Authentication failed: {e}'}), 400
+    except Exception as e:
+        logger.error(f"Error in OAuth callback: {e}")
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/api/ev/vehicles', methods=['GET'])
+@api_auth_required
+def api_ev_list_vehicles(api_user=None):
+    """List Tesla vehicles linked to the account."""
+    from app.models import TeslaVehicle
+
+    user = api_user or current_user
+
+    vehicles = TeslaVehicle.query.filter_by(user_id=user.id).all()
+    return jsonify({
+        'success': True,
+        'vehicles': [v.to_dict() for v in vehicles]
+    })
+
+
+@bp.route('/api/ev/vehicles/sync', methods=['POST'])
+@api_auth_required
+def api_ev_sync_vehicles(api_user=None):
+    """Sync vehicles from Tesla Fleet API."""
+    from app.ev.tesla_fleet import sync_vehicles_for_user
+
+    user = api_user or current_user
+
+    synced, errors = sync_vehicles_for_user(user)
+
+    if errors:
+        return jsonify({
+            'success': False,
+            'synced': synced,
+            'errors': errors
+        }), 400 if synced == 0 else 200
+
+    return jsonify({
+        'success': True,
+        'synced': synced,
+        'message': f'Synced {synced} vehicle(s)'
+    })
+
+
+@bp.route('/api/ev/vehicles/<int:vehicle_id>', methods=['GET'])
+@api_auth_required
+def api_ev_get_vehicle(vehicle_id, api_user=None):
+    """Get detailed vehicle data."""
+    from app.models import TeslaVehicle
+    from app.ev.tesla_fleet import get_fleet_client_for_user, _update_vehicle_from_data
+
+    user = api_user or current_user
+
+    vehicle = TeslaVehicle.query.filter_by(id=vehicle_id, user_id=user.id).first()
+    if not vehicle:
+        return jsonify({'error': 'Vehicle not found'}), 404
+
+    # Try to get fresh data from API
+    client = get_fleet_client_for_user(user)
+    if client:
+        try:
+            data = client.get_vehicle_data(vehicle.vehicle_id)
+            _update_vehicle_from_data(vehicle, data)
+            db.session.commit()
+        except Exception as e:
+            logger.warning(f"Could not refresh vehicle data: {e}")
+
+    return jsonify({'success': True, 'vehicle': vehicle.to_dict()})
+
+
+@bp.route('/api/ev/vehicles/<int:vehicle_id>/command/<command>', methods=['POST'])
+@api_auth_required
+def api_ev_vehicle_command(vehicle_id, command, api_user=None):
+    """Execute a vehicle command."""
+    from app.models import TeslaVehicle
+    from app.ev.tesla_fleet import get_fleet_client_for_user, TeslaFleetError
+
+    user = api_user or current_user
+    data = request.get_json() or {}
+
+    vehicle = TeslaVehicle.query.filter_by(id=vehicle_id, user_id=user.id).first()
+    if not vehicle:
+        return jsonify({'error': 'Vehicle not found'}), 404
+
+    client = get_fleet_client_for_user(user)
+    if not client:
+        return jsonify({'error': 'Fleet API not configured'}), 400
+
+    try:
+        if command == 'charge_start':
+            result = client.charge_start(vehicle.vehicle_id)
+        elif command == 'charge_stop':
+            result = client.charge_stop(vehicle.vehicle_id)
+        elif command == 'set_charge_limit':
+            percent = data.get('percent', 80)
+            result = client.set_charge_limit(vehicle.vehicle_id, percent)
+        elif command == 'set_charging_amps':
+            amps = data.get('amps', 32)
+            result = client.set_charging_amps(vehicle.vehicle_id, amps)
+        elif command == 'wake_up':
+            result = client.wake_up_vehicle(vehicle.vehicle_id)
+        elif command == 'charge_port_open':
+            result = client.charge_port_door_open(vehicle.vehicle_id)
+        elif command == 'charge_port_close':
+            result = client.charge_port_door_close(vehicle.vehicle_id)
+        else:
+            return jsonify({'error': f'Unknown command: {command}'}), 400
+
+        return jsonify({'success': True, 'result': result})
+
+    except TeslaFleetError as e:
+        logger.error(f"Vehicle command error: {e}")
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Unexpected error in vehicle command: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@bp.route('/api/ev/vehicles/<int:vehicle_id>/settings', methods=['POST'])
+@api_auth_required
+def api_ev_vehicle_settings(vehicle_id, api_user=None):
+    """Update vehicle automation settings."""
+    from app.models import TeslaVehicle
+
+    user = api_user or current_user
+    data = request.get_json()
+
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    vehicle = TeslaVehicle.query.filter_by(id=vehicle_id, user_id=user.id).first()
+    if not vehicle:
+        return jsonify({'error': 'Vehicle not found'}), 404
+
+    # Update settings
+    if 'enable_automations' in data:
+        vehicle.enable_automations = data['enable_automations']
+    if 'prioritize_powerwall' in data:
+        vehicle.prioritize_powerwall = data['prioritize_powerwall']
+    if 'powerwall_min_soc' in data:
+        vehicle.powerwall_min_soc = max(0, min(100, data['powerwall_min_soc']))
+
+    try:
+        db.session.commit()
+        return jsonify({'success': True, 'vehicle': vehicle.to_dict()})
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Failed to update vehicle settings: {e}")
+        return jsonify({'error': 'Failed to save settings'}), 500
+
+
+@bp.route('/api/ev/status', methods=['GET'])
+@api_auth_required
+def api_ev_status(api_user=None):
+    """Get EV integration status - whether Fleet API is configured and linked."""
+    from app.models import TeslaVehicle
+
+    user = api_user or current_user
+
+    has_credentials = bool(user.fleet_api_client_id_encrypted)
+    has_tokens = bool(user.fleet_api_access_token_encrypted)
+    vehicle_count = TeslaVehicle.query.filter_by(user_id=user.id).count()
+
+    return jsonify({
+        'success': True,
+        'configured': has_credentials,
+        'linked': has_tokens,
+        'vehicle_count': vehicle_count,
+    })

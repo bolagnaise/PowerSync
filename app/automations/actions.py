@@ -16,6 +16,10 @@ Supported actions:
 - set_charge_rate: Set charge rate limit (Sigenergy)
 - set_discharge_rate: Set discharge rate limit (Sigenergy)
 - set_export_limit: Set export power limit (Sigenergy)
+- start_ev_charging: Start EV charging (Tesla Fleet API)
+- stop_ev_charging: Stop EV charging (Tesla Fleet API)
+- set_ev_charge_limit: Set EV charge limit percentage (Tesla Fleet API)
+- set_ev_charging_amps: Set EV charging amperage (Tesla Fleet API)
 """
 
 import logging
@@ -99,6 +103,14 @@ def _execute_single_action(action_type: str, params: Dict[str, Any], user: User)
         return _action_set_discharge_rate(params, user)
     elif action_type == 'set_export_limit':
         return _action_set_export_limit(params, user)
+    elif action_type == 'start_ev_charging':
+        return _action_start_ev_charging(params, user)
+    elif action_type == 'stop_ev_charging':
+        return _action_stop_ev_charging(params, user)
+    elif action_type == 'set_ev_charge_limit':
+        return _action_set_ev_charge_limit(params, user)
+    elif action_type == 'set_ev_charging_amps':
+        return _action_set_ev_charging_amps(params, user)
     else:
         _LOGGER.warning(f"Unknown action type: {action_type}")
         return False
@@ -668,4 +680,186 @@ def _action_restore_inverter(user: User) -> bool:
 
     except Exception as e:
         _LOGGER.error(f"Failed to restore inverter: {e}")
+        return False
+
+
+# =============================================================================
+# EV Charging Actions (Tesla Fleet API)
+# =============================================================================
+
+def _get_ev_vehicle_and_client(params: Dict[str, Any], user: User):
+    """
+    Get the target vehicle and Fleet API client.
+
+    Args:
+        params: Action parameters (may contain vehicle_id)
+        user: The user
+
+    Returns:
+        Tuple of (TeslaVehicle, TeslaFleetClient) or (None, None) if not available
+    """
+    from app.models import TeslaVehicle
+    from app.ev.tesla_fleet import get_fleet_client_for_user
+
+    # Get Fleet API client
+    client = get_fleet_client_for_user(user)
+    if not client:
+        _LOGGER.error("Fleet API not configured for user")
+        return None, None
+
+    # Get target vehicle
+    vehicle_id = params.get('vehicle_id')
+    if vehicle_id:
+        vehicle = TeslaVehicle.query.filter_by(user_id=user.id, id=vehicle_id).first()
+    else:
+        # Use first vehicle with automations enabled
+        vehicle = TeslaVehicle.query.filter_by(
+            user_id=user.id,
+            enable_automations=True
+        ).first()
+
+    if not vehicle:
+        _LOGGER.error("No EV vehicle found for action")
+        return None, None
+
+    return vehicle, client
+
+
+def _action_start_ev_charging(params: Dict[str, Any], user: User) -> bool:
+    """Start EV charging via Tesla Fleet API."""
+    vehicle, client = _get_ev_vehicle_and_client(params, user)
+    if not vehicle or not client:
+        return False
+
+    try:
+        # Check if vehicle is plugged in
+        if not vehicle.is_plugged_in:
+            _LOGGER.warning(f"Cannot start charging - {vehicle.display_name} is not plugged in")
+            return False
+
+        # Wake up vehicle if needed
+        if not vehicle.is_online:
+            _LOGGER.info(f"Waking up {vehicle.display_name}...")
+            client.wake_up_vehicle(vehicle.vehicle_id)
+            # Give it a moment to wake
+            import time
+            time.sleep(5)
+
+        # Start charging
+        result = client.charge_start(vehicle.vehicle_id)
+        if result:
+            vehicle.charging_state = 'Charging'
+            vehicle.data_updated_at = datetime.utcnow()
+            db.session.commit()
+            _LOGGER.info(f"Started charging {vehicle.display_name}")
+            return True
+        return False
+
+    except Exception as e:
+        _LOGGER.error(f"Failed to start EV charging: {e}")
+        return False
+
+
+def _action_stop_ev_charging(params: Dict[str, Any], user: User) -> bool:
+    """Stop EV charging via Tesla Fleet API."""
+    vehicle, client = _get_ev_vehicle_and_client(params, user)
+    if not vehicle or not client:
+        return False
+
+    try:
+        # Wake up vehicle if needed
+        if not vehicle.is_online:
+            _LOGGER.info(f"Waking up {vehicle.display_name}...")
+            client.wake_up_vehicle(vehicle.vehicle_id)
+            import time
+            time.sleep(5)
+
+        # Stop charging
+        result = client.charge_stop(vehicle.vehicle_id)
+        if result:
+            vehicle.charging_state = 'Stopped'
+            vehicle.data_updated_at = datetime.utcnow()
+            db.session.commit()
+            _LOGGER.info(f"Stopped charging {vehicle.display_name}")
+            return True
+        return False
+
+    except Exception as e:
+        _LOGGER.error(f"Failed to stop EV charging: {e}")
+        return False
+
+
+def _action_set_ev_charge_limit(params: Dict[str, Any], user: User) -> bool:
+    """Set EV charge limit percentage via Tesla Fleet API."""
+    vehicle, client = _get_ev_vehicle_and_client(params, user)
+    if not vehicle or not client:
+        return False
+
+    # Accept both "percent" and "limit" for flexibility
+    percent = params.get('percent') or params.get('limit')
+    if percent is None:
+        _LOGGER.error("set_ev_charge_limit: missing percent parameter")
+        return False
+
+    # Clamp to valid range (50-100%)
+    percent = max(50, min(100, int(percent)))
+
+    try:
+        # Wake up vehicle if needed
+        if not vehicle.is_online:
+            _LOGGER.info(f"Waking up {vehicle.display_name}...")
+            client.wake_up_vehicle(vehicle.vehicle_id)
+            import time
+            time.sleep(5)
+
+        # Set charge limit
+        result = client.set_charge_limit(vehicle.vehicle_id, percent)
+        if result:
+            vehicle.charge_limit_soc = percent
+            vehicle.data_updated_at = datetime.utcnow()
+            db.session.commit()
+            _LOGGER.info(f"Set charge limit to {percent}% for {vehicle.display_name}")
+            return True
+        return False
+
+    except Exception as e:
+        _LOGGER.error(f"Failed to set EV charge limit: {e}")
+        return False
+
+
+def _action_set_ev_charging_amps(params: Dict[str, Any], user: User) -> bool:
+    """Set EV charging amperage via Tesla Fleet API."""
+    vehicle, client = _get_ev_vehicle_and_client(params, user)
+    if not vehicle or not client:
+        return False
+
+    # Accept both "amps" and "charging_amps" for flexibility
+    amps = params.get('amps') or params.get('charging_amps')
+    if amps is None:
+        _LOGGER.error("set_ev_charging_amps: missing amps parameter")
+        return False
+
+    # Clamp to valid range (typically 1-48A)
+    amps = max(1, min(48, int(amps)))
+
+    try:
+        # Wake up vehicle if needed
+        if not vehicle.is_online:
+            _LOGGER.info(f"Waking up {vehicle.display_name}...")
+            client.wake_up_vehicle(vehicle.vehicle_id)
+            import time
+            time.sleep(5)
+
+        # Set charging amps
+        result = client.set_charging_amps(vehicle.vehicle_id, amps)
+        if result:
+            vehicle.charge_current_request = amps
+            vehicle.data_updated_at = datetime.utcnow()
+            db.session.commit()
+            _LOGGER.info(f"Set charging amps to {amps}A for {vehicle.display_name}")
+            return True
+        return False
+
+    except Exception as e:
+        _LOGGER.error(f"Failed to set EV charging amps: {e}")
         return False

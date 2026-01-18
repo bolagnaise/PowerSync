@@ -148,6 +148,7 @@ class AutomationEngine:
             'current_time': current_time_local,  # User's local time for automation triggers
             'user_timezone': str(user_tz),  # Pass timezone info for logging
             'backup_reserve': None,
+            'ev_vehicles': [],  # List of EV vehicle states
         }
 
         # Get battery/energy data based on user's battery system
@@ -248,6 +249,12 @@ class AutomationEngine:
         except Exception as e:
             _LOGGER.warning(f"Failed to get weather for user {user.id}: {e}")
 
+        # Get EV vehicle states
+        try:
+            state['ev_vehicles'] = self._get_ev_vehicles_for_user(user)
+        except Exception as e:
+            _LOGGER.warning(f"Failed to get EV vehicles for user {user.id}: {e}")
+
         return state
 
     def _get_weather_for_user(self, user: User) -> Optional[str]:
@@ -274,6 +281,66 @@ class AutomationEngine:
             return weather_data.get('condition')
 
         return None
+
+    def _get_ev_vehicles_for_user(self, user: User) -> List[Dict[str, Any]]:
+        """
+        Get EV vehicle states for a user.
+
+        Returns a list of vehicle state dictionaries containing:
+        - id, vehicle_id, display_name
+        - is_plugged_in, charging_state, battery_level
+        - charge_limit_soc, charge_current_request
+        """
+        from app.models import TeslaVehicle
+        from app.ev.tesla_fleet import get_fleet_client_for_user, sync_vehicles_for_user
+
+        vehicles = TeslaVehicle.query.filter_by(
+            user_id=user.id,
+            enable_automations=True
+        ).all()
+
+        if not vehicles:
+            return []
+
+        # Check if we need to refresh vehicle data (refresh every 5 minutes)
+        needs_refresh = False
+        for v in vehicles:
+            if v.data_updated_at is None:
+                needs_refresh = True
+                break
+            age = (datetime.utcnow() - v.data_updated_at).total_seconds()
+            if age > 300:  # 5 minutes
+                needs_refresh = True
+                break
+
+        if needs_refresh:
+            try:
+                sync_vehicles_for_user(user)
+                # Refresh the query after sync
+                vehicles = TeslaVehicle.query.filter_by(
+                    user_id=user.id,
+                    enable_automations=True
+                ).all()
+            except Exception as e:
+                _LOGGER.warning(f"Failed to sync EV vehicles: {e}")
+
+        # Convert to state dictionaries
+        ev_states = []
+        for v in vehicles:
+            ev_states.append({
+                'id': v.id,
+                'vehicle_id': v.vehicle_id,
+                'display_name': v.display_name or v.vin or f'Vehicle {v.id}',
+                'is_online': v.is_online,
+                'is_plugged_in': v.is_plugged_in,
+                'charging_state': v.charging_state,
+                'battery_level': v.battery_level,
+                'charge_limit_soc': v.charge_limit_soc,
+                'charge_current_request': v.charge_current_request,
+                'charger_power': v.charger_power,
+            })
+
+        return ev_states
 
     def _execute_automation(
         self,

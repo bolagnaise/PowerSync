@@ -530,6 +530,14 @@ class AutomationTrigger(db.Model):
     # weather_condition: sunny, partly_sunny, cloudy
     weather_condition = db.Column(db.String(20), nullable=True)
 
+    # ========== EV Trigger Fields ==========
+    # ev_vehicle_id: Specific vehicle ID (null = any vehicle)
+    ev_vehicle_id = db.Column(db.Integer, db.ForeignKey('tesla_vehicle.id'), nullable=True)
+    # ev_condition: connected, disconnected, charging_starts, charging_stops, soc_reaches
+    ev_condition = db.Column(db.String(30), nullable=True)
+    # ev_soc_threshold: For soc_reaches trigger (0-100%)
+    ev_soc_threshold = db.Column(db.Integer, nullable=True)
+
     # ========== Time Window (optional constraint for all triggers) ==========
     time_window_start = db.Column(db.Time, nullable=True)  # Only trigger after this time
     time_window_end = db.Column(db.Time, nullable=True)  # Only trigger before this time
@@ -568,3 +576,85 @@ class AutomationAction(db.Model):
 
     def __repr__(self):
         return f'<AutomationAction type={self.action_type}>'
+
+
+class TeslaVehicle(db.Model):
+    """Tesla vehicle linked via Fleet API for EV charging control."""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+
+    # Vehicle identification
+    vehicle_id = db.Column(db.String(50), nullable=False)  # Tesla vehicle ID
+    vin = db.Column(db.String(20))  # Vehicle Identification Number
+
+    # Vehicle info
+    display_name = db.Column(db.String(100))  # User-assigned name (e.g., "TESSY")
+    model = db.Column(db.String(50))  # Model name (e.g., "Model Y", "Model 3")
+    year = db.Column(db.Integer)  # Model year
+    color = db.Column(db.String(50))  # Exterior color
+
+    # Charging state (cached from last update)
+    charging_state = db.Column(db.String(30))  # Charging, Complete, Disconnected, Stopped, etc.
+    battery_level = db.Column(db.Integer)  # Current battery percentage (0-100)
+    battery_range = db.Column(db.Float)  # Estimated range in miles/km
+    charge_limit_soc = db.Column(db.Integer)  # Charge limit percentage
+    charge_current_request = db.Column(db.Integer)  # Requested charge amps
+    charge_current_actual = db.Column(db.Float)  # Actual charge amps
+    charger_voltage = db.Column(db.Integer)  # Charger voltage
+    charger_power = db.Column(db.Float)  # Charging power in kW
+    time_to_full_charge = db.Column(db.Float)  # Hours until full charge
+    charge_port_door_open = db.Column(db.Boolean)  # Is charge port open
+    charge_port_latch = db.Column(db.String(20))  # Engaged, Disengaged, etc.
+
+    # Vehicle state
+    is_online = db.Column(db.Boolean, default=False)  # Vehicle is online/awake
+    is_plugged_in = db.Column(db.Boolean, default=False)  # Vehicle is plugged in
+
+    # Location (optional, if user grants permission)
+    latitude = db.Column(db.Float)
+    longitude = db.Column(db.Float)
+    location_name = db.Column(db.String(200))  # Reverse geocoded location
+
+    # Timestamps
+    last_seen = db.Column(db.DateTime)  # Last time vehicle was online
+    data_updated_at = db.Column(db.DateTime)  # Last data refresh
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    # User settings for this vehicle
+    enable_automations = db.Column(db.Boolean, default=True)  # Enable EV automations for this vehicle
+    prioritize_powerwall = db.Column(db.Boolean, default=False)  # Charge Powerwall before vehicle
+    powerwall_min_soc = db.Column(db.Integer, default=80)  # Min Powerwall SoC before vehicle charging
+
+    # Relationships
+    user = db.relationship('User', backref=db.backref('tesla_vehicles', lazy='dynamic'))
+
+    def __repr__(self):
+        return f'<TeslaVehicle {self.display_name or self.vin}>'
+
+    def to_dict(self):
+        """Convert to dictionary for API responses."""
+        return {
+            'id': self.id,
+            'vehicle_id': self.vehicle_id,
+            'vin': self.vin,
+            'display_name': self.display_name,
+            'model': self.model,
+            'year': self.year,
+            'color': self.color,
+            'charging_state': self.charging_state,
+            'battery_level': self.battery_level,
+            'battery_range': self.battery_range,
+            'charge_limit_soc': self.charge_limit_soc,
+            'charge_current_request': self.charge_current_request,
+            'charge_current_actual': self.charge_current_actual,
+            'charger_voltage': self.charger_voltage,
+            'charger_power': self.charger_power,
+            'time_to_full_charge': self.time_to_full_charge,
+            'is_online': self.is_online,
+            'is_plugged_in': self.is_plugged_in,
+            'last_seen': self.last_seen.isoformat() if self.last_seen else None,
+            'data_updated_at': self.data_updated_at.isoformat() if self.data_updated_at else None,
+            'enable_automations': self.enable_automations,
+            'prioritize_powerwall': self.prioritize_powerwall,
+            'powerwall_min_soc': self.powerwall_min_soc,
+        }
