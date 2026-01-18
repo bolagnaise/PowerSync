@@ -183,24 +183,32 @@ class EnphaseController(InverterController):
 
         return None
 
-    async def _ensure_token(self) -> bool:
+    async def _ensure_token(self, force_refresh: bool = False) -> bool:
         """Ensure we have a valid JWT token, fetching from cloud if needed.
+
+        Args:
+            force_refresh: If True, force fetching a new token even if current one seems valid
 
         Returns:
             True if we have a valid token
         """
-        # If we have a token and it's not too old, use it
-        if self._token:
+        # If we have a token and it's not too old, use it (unless force refresh)
+        if self._token and not force_refresh:
             if self._token_obtained_at:
                 age = datetime.now() - self._token_obtained_at
                 if age < timedelta(hours=self.TOKEN_REFRESH_HOURS):
                     return True
                 _LOGGER.info(f"JWT token is {age.total_seconds()/3600:.1f} hours old, refreshing from Enlighten cloud")
             else:
-                # Token was provided externally - if we have credentials, we can refresh if needed
-                # For now, assume it's valid but mark that we should check on 401
-                if self._username and self._password:
-                    _LOGGER.debug("External token provided, will refresh on 401 if needed")
+                # Token was provided externally - assume it's valid for the first request
+                # If we get a 401, the caller should set force_refresh=True
+                if not self._username or not self._password:
+                    _LOGGER.debug("External token provided, no credentials for refresh")
+                    return True
+                # We have credentials but no timestamp - this is the first use of external token
+                # Mark when we started using it so we can track age
+                self._token_obtained_at = datetime.now()
+                _LOGGER.debug("External token provided, marked timestamp for age tracking")
                 return True
 
         # Need to get token from cloud
@@ -311,8 +319,7 @@ class EnphaseController(InverterController):
                     # If we got 401 and haven't retried, try refreshing token
                     if retry_auth and self._username and self._password:
                         _LOGGER.info("Got 401, attempting token refresh...")
-                        self._token_obtained_at = None  # Force refresh
-                        if await self._ensure_token():
+                        if await self._ensure_token(force_refresh=True):
                             return await self._get(endpoint, retry_auth=False)
                     return None
                 else:
@@ -348,8 +355,7 @@ class EnphaseController(InverterController):
                     # If we got 401 and haven't retried, try refreshing token
                     if retry_auth and self._username and self._password:
                         _LOGGER.info("Got 401, attempting token refresh...")
-                        self._token_obtained_at = None  # Force refresh
-                        if await self._ensure_token():
+                        if await self._ensure_token(force_refresh=True):
                             return await self._put(endpoint, data, retry_auth=False)
                     return False
                 else:
@@ -385,8 +391,7 @@ class EnphaseController(InverterController):
                     # If we got 401 and haven't retried, try refreshing token
                     if retry_auth and self._username and self._password:
                         _LOGGER.info("Got 401, attempting token refresh...")
-                        self._token_obtained_at = None  # Force refresh
-                        if await self._ensure_token():
+                        if await self._ensure_token(force_refresh=True):
                             return await self._post(endpoint, data, retry_auth=False)
                     return False
                 else:
