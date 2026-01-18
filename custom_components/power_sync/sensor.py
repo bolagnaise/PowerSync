@@ -903,6 +903,7 @@ class InverterStatusSensor(SensorEntity):
         self._unsub_interval = None
         self._cached_state = None
         self._cached_attrs = {}
+        self._controller = None  # Cached controller to preserve state (e.g., JWT token timestamp)
 
     async def async_added_to_hass(self) -> None:
         """Run when entity is added to hass."""
@@ -958,6 +959,13 @@ class InverterStatusSensor(SensorEntity):
             self._unsub_dispatcher()
         if self._unsub_interval:
             self._unsub_interval()
+        # Disconnect cached controller
+        if self._controller:
+            try:
+                await self._controller.disconnect()
+            except Exception:
+                pass
+            self._controller = None
 
     async def _async_poll_inverter(self) -> None:
         """Poll the inverter to get current status."""
@@ -992,18 +1000,34 @@ class InverterStatusSensor(SensorEntity):
         _LOGGER.debug(f"Polling inverter: {inverter_brand} at {inverter_host}:{inverter_port}")
 
         try:
-            controller = get_inverter_controller(
-                brand=inverter_brand,
-                host=inverter_host,
-                port=inverter_port,
-                slave_id=inverter_slave_id,
-                model=inverter_model,
-                token=inverter_token,
-                load_following=fronius_load_following,
-                enphase_username=enphase_username,
-                enphase_password=enphase_password,
-                enphase_serial=enphase_serial,
-            )
+            # Reuse cached controller if config matches (preserves JWT token state for Enphase)
+            controller_key = f"{inverter_brand}:{inverter_host}:{inverter_port}"
+            if self._controller and getattr(self._controller, '_cache_key', None) == controller_key:
+                controller = self._controller
+                _LOGGER.debug("Reusing cached inverter controller")
+            else:
+                # Config changed or no cached controller - create new one
+                if self._controller:
+                    try:
+                        await self._controller.disconnect()
+                    except Exception:
+                        pass
+                controller = get_inverter_controller(
+                    brand=inverter_brand,
+                    host=inverter_host,
+                    port=inverter_port,
+                    slave_id=inverter_slave_id,
+                    model=inverter_model,
+                    token=inverter_token,
+                    load_following=fronius_load_following,
+                    enphase_username=enphase_username,
+                    enphase_password=enphase_password,
+                    enphase_serial=enphase_serial,
+                )
+                if controller:
+                    controller._cache_key = controller_key
+                    self._controller = controller
+                    _LOGGER.debug("Created new inverter controller")
 
             if not controller:
                 _LOGGER.warning(f"Failed to create controller for {inverter_brand}")
@@ -1012,9 +1036,8 @@ class InverterStatusSensor(SensorEntity):
                 self.async_write_ha_state()
                 return
 
-            # Get status from inverter
+            # Get status from inverter (don't disconnect - keep state for next poll)
             state = await controller.get_status()
-            await controller.disconnect()
 
             # Update cached state based on inverter response
             if state.status.value == "offline":
