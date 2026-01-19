@@ -18,7 +18,7 @@
   <a href="https://testflight.apple.com/join/FhnUtSFy"><img src="https://img.shields.io/badge/iOS-TestFlight-blue?logo=apple&logoColor=white" alt="iOS TestFlight"></a>
   <a href="https://play.google.com/apps/internaltest/4701190520579978532-"><img src="https://img.shields.io/badge/Android-Beta-3DDC84?logo=android&logoColor=white" alt="Android Beta"></a>
 
-  Monitor your battery, view live pricing, and fetch battery health data from your phone.
+  Monitor your battery, view live pricing, control EV charging, and create powerful automations from your phone.
 
 </div>
 
@@ -41,6 +41,8 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 | AEMO Spike Detection | ✅ | ⏳ Coming soon |
 | Force Mode Toggle | ✅ | ➖ N/A |
 | Custom TOU Schedules | ✅ | ➖ N/A |
+| **Automations** | ✅ | ✅ |
+| **EV Charging Controls** | ✅ Tesla Fleet | ➖ N/A |
 
 **Connection Methods:**
 - 🔋 **Tesla Powerwall** - Fleet API or Teslemetry proxy
@@ -500,6 +502,60 @@ Not using Amber Electric? No problem! Create custom time-of-use schedules for an
 - Configure weekday/weekend variations
 - Upload directly to Tesla Powerwall via Teslemetry
 
+### Automations
+
+Create powerful automations that respond to your energy system, EV charging, weather, and electricity prices. Automations can send notifications or execute actions on your battery system.
+
+**Trigger Types:**
+| Trigger | Description | Example Use Case |
+|---------|-------------|------------------|
+| **Time** | Fire at specific times | Start battery charging at 2am |
+| **Battery** | Battery SOC thresholds | Notify when battery reaches 100% |
+| **Power Flow** | Solar/grid/load thresholds | Alert when solar exceeds 5kW |
+| **Price** | Import/export price thresholds | Export when price rises above 30c |
+| **Grid** | Grid status changes | Alert when going off-grid |
+| **Weather** | Weather condition changes | Notify when it becomes sunny |
+| **Solar Forecast** | Solcast forecast thresholds | Charge battery if tomorrow < 10kWh |
+| **EV** | EV charging state (Tesla Fleet) | Notify when EV starts charging |
+| **OCPP** | OCPP charger state | Alert when charger becomes available |
+
+**Available Actions:**
+| Action | Description |
+|--------|-------------|
+| **Set Operation Mode** | Switch to self-consumption, autonomous, or backup mode |
+| **Set Backup Reserve** | Adjust backup reserve percentage |
+| **Force Charge** | Force battery to charge from grid |
+| **Force Discharge** | Force battery to discharge to grid |
+
+**Features:**
+- **Time Windows**: Restrict triggers to specific hours (e.g., only during peak 5pm-9pm)
+- **Repeat Days**: Limit to specific days of the week
+- **Priority System**: Higher priority automations take precedence
+- **Notification Only Mode**: Get alerts without executing actions
+- **Edge Detection**: Triggers fire on state changes, not continuously
+
+**Configuration:**
+- Create automations via the PowerSync mobile app
+- Automations sync to your Home Assistant instance
+- Manage via Settings → Devices & Services → PowerSync → Automations
+
+### EV Charging Controls 🚗 *Tesla Fleet only*
+
+Control your Tesla vehicle's charging directly from the PowerSync mobile app.
+
+**Available Commands:**
+| Command | Description |
+|---------|-------------|
+| **Wake Up** | Wake the vehicle from sleep |
+| **Start Charging** | Begin charging session |
+| **Stop Charging** | End charging session |
+| **Set Charge Limit** | Adjust charge limit percentage |
+| **Set Charging Amps** | Adjust charging amperage |
+
+**Requirements:**
+- Tesla Fleet integration configured in Home Assistant
+- Vehicle entities available (sensor.*_charging_state, binary_sensor.*_charger, etc.)
+
 ### Saved TOU Profiles
 Backup and restore your tariff configurations:
 - Save current Tesla tariff as named profile
@@ -639,6 +695,9 @@ The easiest way to use PowerSync if you're already running Home Assistant.
 - ✅ **Real-time Sensors** - Amber pricing and Tesla energy data as HA sensors
 - ✅ **Automatic TOU Sync** - Background syncing every 5 minutes
 - ✅ **Manual Services** - On-demand sync services for advanced automation
+- ✅ **Automations Engine** - Create automations triggered by battery, price, weather, EV, and more
+- ✅ **EV Charging Controls** - Control Tesla vehicle charging via Tesla Fleet integration
+- ✅ **Push Notifications** - Receive alerts on your phone when automations trigger
 
 ### Prerequisites
 
