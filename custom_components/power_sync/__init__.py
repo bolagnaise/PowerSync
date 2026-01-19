@@ -2087,7 +2087,8 @@ class AutomationDetailView(HomeAssistantView):
 
         try:
             data = await request.json()
-            _LOGGER.debug(f"📱 Updating automation {automation_id} with data: name={data.get('name')}, actions={data.get('actions')}, conditions={data.get('conditions')}")
+            trigger = data.get('trigger', {})
+            _LOGGER.debug(f"📱 Updating automation {automation_id} with data: name={data.get('name')}, trigger={trigger}, actions={data.get('actions')}, conditions={data.get('conditions')}")
             automation = store.update(int(automation_id), data)
             if not automation:
                 return web.json_response(
