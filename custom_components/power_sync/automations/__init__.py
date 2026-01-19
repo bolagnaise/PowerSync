@@ -13,7 +13,7 @@ import json
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
-from .triggers import evaluate_trigger, TriggerResult
+from .triggers import evaluate_trigger, evaluate_conditions, TriggerResult
 from .actions import execute_actions
 
 _LOGGER = logging.getLogger(__name__)
@@ -233,6 +233,18 @@ class AutomationEngine:
                     _LOGGER.info(
                         f"Automation '{automation.get('name')}' (id={automation.get('id')}) triggered: {result.reason}"
                     )
+
+                    # Check conditions (if any)
+                    conditions = automation.get("conditions", [])
+                    if conditions:
+                        conditions_result = evaluate_conditions(conditions, current_state)
+                        if not conditions_result.triggered:
+                            _LOGGER.info(
+                                f"Automation '{automation.get('name')}' conditions not met: {conditions_result.reason}"
+                            )
+                            continue  # Skip execution, conditions not met
+
+                        _LOGGER.debug(f"Automation '{automation.get('name')}' conditions passed")
 
                     # Execute actions
                     actions_executed = await self._async_execute_automation(
@@ -560,6 +572,7 @@ class AutomationEngine:
             "is_charging": False,
             "battery_level": None,
             "charging_state": "",
+            "location": "unknown",  # home, work, or zone name
         }
 
         # Look for Tesla Fleet entities
@@ -614,6 +627,12 @@ class AutomationEngine:
                         _LOGGER.debug(f"EV battery level from {entity_id}: {level}%")
                 except (ValueError, TypeError):
                     pass
+
+            # Device tracker for location
+            # Tesla Fleet: device_tracker.tessy_location
+            elif entity_id == f"device_tracker.{vehicle_prefix}_location":
+                ev_state["location"] = state_value.lower()
+                _LOGGER.debug(f"EV location from {entity_id}: {state_value}")
 
         _LOGGER.debug(f"EV state collected: {ev_state}")
         return ev_state

@@ -16,7 +16,7 @@ Supports the following trigger types:
 import logging
 from dataclasses import dataclass
 from datetime import datetime, time as dt_time, timedelta
-from typing import Dict, Any, Optional, TYPE_CHECKING
+from typing import Dict, Any, Optional, List, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from . import AutomationStore
@@ -542,6 +542,17 @@ def _evaluate_ev_trigger(
     is_charging = ev_state.get("is_charging", False)
     battery_level = ev_state.get("battery_level")
     charging_state = ev_state.get("charging_state", "").lower()
+    location = ev_state.get("location", "unknown")
+
+    # Check location requirement
+    ev_location = trigger.get("ev_location", "any")
+    if ev_location and ev_location != "any":
+        if ev_location == "home" and location != "home":
+            return TriggerResult(triggered=False, reason=f"EV not at home (location: {location})")
+        elif ev_location == "work" and location != "work":
+            return TriggerResult(triggered=False, reason=f"EV not at work (location: {location})")
+        elif ev_location == "other" and location in ("home", "work", "unknown", "not_home"):
+            return TriggerResult(triggered=False, reason=f"EV not at other location (location: {location})")
 
     # Encode state for edge detection
     # Bits: 0=plugged_in, 1=charging
@@ -706,3 +717,228 @@ def _evaluate_ocpp_trigger(
 
     store.update_trigger_state(automation_id, current_value)
     return TriggerResult(triggered=False, reason=f"OCPP condition '{condition}' not met")
+
+
+def evaluate_conditions(
+    conditions: List[Dict[str, Any]],
+    current_state: Dict[str, Any]
+) -> TriggerResult:
+    """
+    Evaluate all conditions. All must be true for the result to be True.
+
+    Args:
+        conditions: List of condition configurations
+        current_state: Current system state
+
+    Returns:
+        TriggerResult indicating if all conditions are met
+    """
+    if not conditions:
+        return TriggerResult(triggered=True, reason="No conditions")
+
+    for i, condition in enumerate(conditions):
+        result = _evaluate_single_condition(condition, current_state)
+        if not result.triggered:
+            _LOGGER.debug(f"Condition {i+1} failed: {result.reason}")
+            return TriggerResult(triggered=False, reason=f"Condition {i+1} not met: {result.reason}")
+
+    return TriggerResult(triggered=True, reason="All conditions met")
+
+
+def _evaluate_single_condition(
+    condition: Dict[str, Any],
+    current_state: Dict[str, Any]
+) -> TriggerResult:
+    """
+    Evaluate a single condition (different from trigger - no edge detection).
+
+    Conditions check current state without caring about transitions.
+    """
+    condition_type = condition.get("condition_type")
+
+    if condition_type == "battery":
+        return _evaluate_battery_condition(condition, current_state)
+    elif condition_type == "flow":
+        return _evaluate_flow_condition(condition, current_state)
+    elif condition_type == "price":
+        return _evaluate_price_condition(condition, current_state)
+    elif condition_type == "grid":
+        return _evaluate_grid_condition(condition, current_state)
+    elif condition_type == "weather":
+        return _evaluate_weather_condition(condition, current_state)
+    elif condition_type == "ev":
+        return _evaluate_ev_condition(condition, current_state)
+    elif condition_type == "solar_forecast":
+        return _evaluate_solar_forecast_condition(condition, current_state)
+    else:
+        return TriggerResult(triggered=False, reason=f"Unknown condition type: {condition_type}")
+
+
+def _evaluate_battery_condition(condition: Dict[str, Any], current_state: Dict[str, Any]) -> TriggerResult:
+    """Evaluate battery level condition (current state, no edge detection)."""
+    battery_percent = current_state.get("battery_percent")
+    if battery_percent is None:
+        return TriggerResult(triggered=False, reason="Battery level unavailable")
+
+    threshold = condition.get("battery_threshold", 50)
+    battery_condition = condition.get("battery_condition", "charged_up_to")
+
+    if battery_condition == "charged_up_to":  # Above
+        if battery_percent >= threshold:
+            return TriggerResult(triggered=True, reason=f"Battery at {battery_percent}% (>= {threshold}%)")
+        return TriggerResult(triggered=False, reason=f"Battery at {battery_percent}% (< {threshold}%)")
+    else:  # Below (discharged_down_to)
+        if battery_percent <= threshold:
+            return TriggerResult(triggered=True, reason=f"Battery at {battery_percent}% (<= {threshold}%)")
+        return TriggerResult(triggered=False, reason=f"Battery at {battery_percent}% (> {threshold}%)")
+
+
+def _evaluate_flow_condition(condition: Dict[str, Any], current_state: Dict[str, Any]) -> TriggerResult:
+    """Evaluate power flow condition."""
+    source = condition.get("flow_source", "solar")
+    comparison = condition.get("flow_comparison", "above")
+    threshold = condition.get("flow_threshold_kw", 0)
+
+    # Map source to state key
+    source_map = {
+        "home_usage": "home_usage_kw",
+        "solar": "solar_power_kw",
+        "grid_import": "grid_import_kw",
+        "grid_export": "grid_export_kw",
+        "battery_charge": "battery_charge_kw",
+        "battery_discharge": "battery_discharge_kw",
+    }
+
+    state_key = source_map.get(source)
+    if not state_key:
+        return TriggerResult(triggered=False, reason=f"Unknown flow source: {source}")
+
+    value = current_state.get(state_key)
+    if value is None:
+        return TriggerResult(triggered=False, reason=f"{source} data unavailable")
+
+    if comparison == "above":
+        if value >= threshold:
+            return TriggerResult(triggered=True, reason=f"{source} at {value:.1f} kW (>= {threshold} kW)")
+        return TriggerResult(triggered=False, reason=f"{source} at {value:.1f} kW (< {threshold} kW)")
+    else:  # below
+        if value <= threshold:
+            return TriggerResult(triggered=True, reason=f"{source} at {value:.1f} kW (<= {threshold} kW)")
+        return TriggerResult(triggered=False, reason=f"{source} at {value:.1f} kW (> {threshold} kW)")
+
+
+def _evaluate_price_condition(condition: Dict[str, Any], current_state: Dict[str, Any]) -> TriggerResult:
+    """Evaluate price condition."""
+    price_type = condition.get("price_type", "import")
+    comparison = condition.get("price_comparison", "below")
+    threshold = condition.get("price_threshold", 0)
+
+    price = current_state.get("import_price" if price_type == "import" else "export_price")
+    if price is None:
+        return TriggerResult(triggered=False, reason=f"{price_type} price unavailable")
+
+    if comparison == "above":
+        if price >= threshold:
+            return TriggerResult(triggered=True, reason=f"{price_type} price ${price:.2f} (>= ${threshold:.2f})")
+        return TriggerResult(triggered=False, reason=f"{price_type} price ${price:.2f} (< ${threshold:.2f})")
+    else:  # below
+        if price <= threshold:
+            return TriggerResult(triggered=True, reason=f"{price_type} price ${price:.2f} (<= ${threshold:.2f})")
+        return TriggerResult(triggered=False, reason=f"{price_type} price ${price:.2f} (> ${threshold:.2f})")
+
+
+def _evaluate_grid_condition(condition: Dict[str, Any], current_state: Dict[str, Any]) -> TriggerResult:
+    """Evaluate grid status condition."""
+    required_status = condition.get("grid_condition", "on_grid")
+    current_status = current_state.get("grid_status", "on_grid")
+
+    if current_status == required_status:
+        return TriggerResult(triggered=True, reason=f"Grid is {current_status}")
+    return TriggerResult(triggered=False, reason=f"Grid is {current_status}, need {required_status}")
+
+
+def _evaluate_weather_condition(condition: Dict[str, Any], current_state: Dict[str, Any]) -> TriggerResult:
+    """Evaluate weather condition."""
+    required_weather = condition.get("weather_condition", "sunny")
+    current_weather = current_state.get("weather")
+
+    if current_weather is None:
+        return TriggerResult(triggered=False, reason="Weather data unavailable")
+
+    # Normalize weather strings
+    current_weather_normalized = current_weather.lower().replace(" ", "_")
+    if current_weather_normalized == required_weather:
+        return TriggerResult(triggered=True, reason=f"Weather is {current_weather}")
+    return TriggerResult(triggered=False, reason=f"Weather is {current_weather}, need {required_weather}")
+
+
+def _evaluate_ev_condition(condition: Dict[str, Any], current_state: Dict[str, Any]) -> TriggerResult:
+    """Evaluate EV condition."""
+    ev_state = current_state.get("ev_state", {})
+
+    # Check location first if specified
+    ev_location = condition.get("ev_location", "any")
+    location = ev_state.get("location", "unknown")
+    if ev_location and ev_location != "any":
+        if ev_location == "home" and location != "home":
+            return TriggerResult(triggered=False, reason=f"EV not at home (location: {location})")
+        elif ev_location == "work" and location != "work":
+            return TriggerResult(triggered=False, reason=f"EV not at work (location: {location})")
+        elif ev_location == "other" and location in ("home", "work", "unknown", "not_home"):
+            return TriggerResult(triggered=False, reason=f"EV not at other location (location: {location})")
+
+    # Check plugged in status
+    ev_plugged_in = condition.get("ev_is_plugged_in")
+    if ev_plugged_in is not None:
+        is_plugged = ev_state.get("is_plugged_in", False)
+        if ev_plugged_in and not is_plugged:
+            return TriggerResult(triggered=False, reason="EV is not plugged in")
+        if not ev_plugged_in and is_plugged:
+            return TriggerResult(triggered=False, reason="EV is plugged in (expected unplugged)")
+
+    # Check charging status
+    ev_charging = condition.get("ev_is_charging")
+    if ev_charging is not None:
+        is_charging = ev_state.get("is_charging", False)
+        if ev_charging and not is_charging:
+            return TriggerResult(triggered=False, reason="EV is not charging")
+        if not ev_charging and is_charging:
+            return TriggerResult(triggered=False, reason="EV is charging (expected not charging)")
+
+    # Check SOC
+    soc_comparison = condition.get("ev_soc_comparison")
+    if soc_comparison:
+        threshold = condition.get("ev_soc_threshold", 50)
+        battery_level = ev_state.get("battery_level")
+        if battery_level is None:
+            return TriggerResult(triggered=False, reason="EV battery level unavailable")
+
+        if soc_comparison == "above":
+            if battery_level < threshold:
+                return TriggerResult(triggered=False, reason=f"EV battery at {battery_level}% (< {threshold}%)")
+        else:  # below
+            if battery_level > threshold:
+                return TriggerResult(triggered=False, reason=f"EV battery at {battery_level}% (> {threshold}%)")
+
+    return TriggerResult(triggered=True, reason="EV condition met")
+
+
+def _evaluate_solar_forecast_condition(condition: Dict[str, Any], current_state: Dict[str, Any]) -> TriggerResult:
+    """Evaluate solar forecast condition."""
+    forecast = current_state.get("solcast_forecast", {})
+    period = condition.get("solar_forecast_period", "today")
+    comparison = condition.get("solar_forecast_comparison", "above")
+    threshold = condition.get("solar_forecast_threshold_kwh", 0)
+
+    forecast_value = forecast.get(f"{period}_kwh")
+    if forecast_value is None:
+        return TriggerResult(triggered=False, reason=f"Solar forecast for {period} unavailable")
+
+    if comparison == "above":
+        if forecast_value >= threshold:
+            return TriggerResult(triggered=True, reason=f"{period} forecast {forecast_value:.0f} kWh (>= {threshold} kWh)")
+        return TriggerResult(triggered=False, reason=f"{period} forecast {forecast_value:.0f} kWh (< {threshold} kWh)")
+    else:  # below
+        if forecast_value <= threshold:
+            return TriggerResult(triggered=True, reason=f"{period} forecast {forecast_value:.0f} kWh (<= {threshold} kWh)")
+        return TriggerResult(triggered=False, reason=f"{period} forecast {forecast_value:.0f} kWh (> {threshold} kWh)")
