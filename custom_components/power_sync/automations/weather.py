@@ -117,9 +117,13 @@ async def async_get_current_weather(
 
         weather = weather_list[0]
         weather_id = weather.get("id", 0)
+        icon = weather.get("icon", "01d")  # e.g., "01d" (day) or "01n" (night)
 
         # Classify condition
         condition = _classify_weather_condition(weather_id)
+
+        # Determine if it's night (icon ends with 'n')
+        is_night = icon.endswith("n")
 
         return {
             "condition": condition,
@@ -128,6 +132,7 @@ async def async_get_current_weather(
             "humidity": data.get("main", {}).get("humidity"),
             "cloud_cover": data.get("clouds", {}).get("all", 0),
             "weather_id": weather_id,
+            "is_night": is_night,
         }
 
     except aiohttp.ClientError as e:

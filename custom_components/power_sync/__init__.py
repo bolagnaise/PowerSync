@@ -2356,6 +2356,7 @@ class CurrentWeatherView(HomeAssistantView):
                 "temperature_c": weather_data.get("temperature_c"),
                 "humidity": weather_data.get("humidity"),
                 "cloud_cover": weather_data.get("cloud_cover"),
+                "is_night": weather_data.get("is_night", False),
             })
 
         except Exception as e:
