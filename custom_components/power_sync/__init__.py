@@ -12,6 +12,7 @@ from homeassistant.const import Platform, CONF_ACCESS_TOKEN, CONF_TOKEN
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_utc_time_change, async_track_point_in_utc_time
 from homeassistant.helpers.storage import Store
@@ -2375,7 +2376,7 @@ class EVStatusView(HomeAssistantView):
             vehicle_count = 0
 
             if active_integration and tesla_entries:
-                device_registry = self._hass.helpers.device_registry.async_get(self._hass)
+                device_registry = dr.async_get(self._hass)
 
                 for device in device_registry.devices.values():
                     # Check if device belongs to a Tesla integration
@@ -2451,8 +2452,8 @@ class EVVehiclesView(HomeAssistantView):
                 })
 
             # Get device and entity registries
-            device_registry = self._hass.helpers.device_registry.async_get(self._hass)
-            entity_registry = self._hass.helpers.entity_registry.async_get(self._hass)
+            device_registry = dr.async_get(self._hass)
+            entity_registry = er.async_get(self._hass)
 
             vehicle_id = 0
             for entry in tesla_entries:
