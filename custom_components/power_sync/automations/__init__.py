@@ -581,10 +581,13 @@ class AutomationEngine:
         all_states = self._hass.states.async_all()
         vehicle_prefix = None
 
-        # First pass: find Tesla EV charging_state sensor to identify the vehicle prefix
+        # First pass: find Tesla EV charging sensor to identify the vehicle prefix
+        # Tesla Fleet uses: sensor.tessy_charging (no _state suffix)
+        # Some versions use: sensor.tessy_charging_state
         for state in all_states:
             entity_id = state.entity_id
-            match = re.match(r"sensor\.(\w+)_charging_state$", entity_id)
+            # Try both patterns: _charging$ and _charging_state$
+            match = re.match(r"sensor\.(\w+)_charging(?:_state)?$", entity_id)
             if match:
                 vehicle_prefix = match.group(1)
                 state_value = state.state
@@ -595,11 +598,18 @@ class AutomationEngine:
                 break
 
         if not vehicle_prefix:
-            _LOGGER.debug("No Tesla EV charging_state sensor found")
+            _LOGGER.debug("No Tesla EV charging sensor found (sensor.*_charging or sensor.*_charging_state)")
             return ev_state
 
+        # Check if this is a BLE integration (prefix contains "ble")
+        is_ble = "ble" in vehicle_prefix.lower()
+        if is_ble:
+            # BLE only works when car is nearby, so assume "home" location
+            ev_state["location"] = "home"
+            _LOGGER.debug(f"Tesla BLE detected (prefix={vehicle_prefix}), assuming location=home")
+
         # Second pass: find related sensors using the vehicle prefix
-        # Support both Tesla Fleet and Teslemetry naming conventions
+        # Support Tesla Fleet, Teslemetry, and Tesla BLE naming conventions
         for state in all_states:
             entity_id = state.entity_id
             state_value = state.state
@@ -609,17 +619,21 @@ class AutomationEngine:
 
             # Charger binary sensor (plugged in)
             # Tesla Fleet: binary_sensor.tessy_charger
-            # Teslemetry: binary_sensor.tessy_charger or binary_sensor.tessy_charge_cable
+            # Teslemetry: binary_sensor.tessy_charge_cable
+            # Tesla BLE: binary_sensor.tesla_ble_charge_flap
             if entity_id in (f"binary_sensor.{vehicle_prefix}_charger",
-                            f"binary_sensor.{vehicle_prefix}_charge_cable"):
+                            f"binary_sensor.{vehicle_prefix}_charge_cable",
+                            f"binary_sensor.{vehicle_prefix}_charge_flap"):
                 ev_state["is_plugged_in"] = state_value.lower() == "on"
                 _LOGGER.debug(f"EV plugged in from {entity_id}: {state_value}")
 
             # Battery level sensor
             # Tesla Fleet: sensor.tessy_battery
             # Teslemetry: sensor.tessy_battery_level
+            # Tesla BLE: sensor.tesla_ble_charge_level
             elif entity_id in (f"sensor.{vehicle_prefix}_battery",
-                              f"sensor.{vehicle_prefix}_battery_level"):
+                              f"sensor.{vehicle_prefix}_battery_level",
+                              f"sensor.{vehicle_prefix}_charge_level"):
                 try:
                     level = float(state_value)
                     if 0 <= level <= 100:
@@ -629,10 +643,31 @@ class AutomationEngine:
                     pass
 
             # Device tracker for location
-            # Tesla Fleet: device_tracker.tessy_location
+            # Tesla Fleet/Teslemetry: device_tracker.tessy_location
+            # Tesla BLE: no location tracking (BLE is local only)
             elif entity_id == f"device_tracker.{vehicle_prefix}_location":
                 ev_state["location"] = state_value.lower()
                 _LOGGER.debug(f"EV location from {entity_id}: {state_value}")
+
+            # Teslemetry: binary_sensor.*_located_at_home
+            elif entity_id == f"binary_sensor.{vehicle_prefix}_located_at_home":
+                if state_value.lower() == "on":
+                    ev_state["location"] = "home"
+                    _LOGGER.debug(f"EV at home from {entity_id}: {state_value}")
+
+            # Teslemetry: binary_sensor.*_located_at_work
+            elif entity_id == f"binary_sensor.{vehicle_prefix}_located_at_work":
+                if state_value.lower() == "on" and ev_state["location"] != "home":
+                    ev_state["location"] = "work"
+                    _LOGGER.debug(f"EV at work from {entity_id}: {state_value}")
+
+        # Infer plugged in from charging state if not already determined
+        # If car is charging/stopped/complete, it must be plugged in
+        if not ev_state["is_plugged_in"] and ev_state["charging_state"]:
+            charging_implies_plugged = ev_state["charging_state"] in ("charging", "stopped", "complete", "starting")
+            if charging_implies_plugged:
+                ev_state["is_plugged_in"] = True
+                _LOGGER.debug(f"Inferred is_plugged_in=True from charging_state={ev_state['charging_state']}")
 
         _LOGGER.debug(f"EV state collected: {ev_state}")
         return ev_state

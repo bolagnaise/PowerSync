@@ -2924,26 +2924,27 @@ class EVVehicleCommandView(HomeAssistantView):
         return await self._wait_for_vehicle_awake(vehicle_vin, timeout=30)
 
     async def _is_vehicle_at_home(self, vehicle_vin: str | None = None) -> bool:
-        """Check if vehicle is at home using device_tracker."""
-        # Check device_tracker.*_location
+        """Check if vehicle is at home using binary_sensor or device_tracker."""
+        # First try: binary_sensor.*_located_at_home (Teslemetry)
+        # This is the most reliable method
+        home_entity = await self._get_tesla_ev_entity(r"binary_sensor\..*_located_at_home$", vehicle_vin)
+        if home_entity:
+            state = self._hass.states.get(home_entity)
+            if state and state.state not in ("unavailable", "unknown"):
+                is_home = state.state.lower() == "on"
+                _LOGGER.debug(f"Vehicle at home from {home_entity}: {state.state} (at_home={is_home})")
+                return is_home
+
+        # Second try: device_tracker.*_location
         location_entity = await self._get_tesla_ev_entity(r"device_tracker\..*_location$", vehicle_vin)
         if location_entity:
             state = self._hass.states.get(location_entity)
-            if state:
+            if state and state.state not in ("unavailable", "unknown"):
                 is_home = state.state.lower() == "home"
                 _LOGGER.debug(f"Vehicle location from {location_entity}: {state.state} (at_home={is_home})")
                 return is_home
 
-        # Fallback: check device_tracker without _location suffix
-        location_entity = await self._get_tesla_ev_entity(r"device_tracker\.[^_]+$", vehicle_vin)
-        if location_entity:
-            state = self._hass.states.get(location_entity)
-            if state:
-                is_home = state.state.lower() == "home"
-                _LOGGER.debug(f"Vehicle location from {location_entity}: {state.state} (at_home={is_home})")
-                return is_home
-
-        _LOGGER.warning("Could not determine vehicle location - no device_tracker found")
+        _LOGGER.warning("Could not determine vehicle location - no location entity found")
         return True  # Default to True to not block commands if we can't check
 
     async def _is_vehicle_plugged_in(self, vehicle_vin: str | None = None) -> bool:
@@ -2971,7 +2972,8 @@ class EVVehicleCommandView(HomeAssistantView):
 
     async def _get_vehicle_charging_state(self, vehicle_vin: str | None = None) -> str:
         """Get current charging state."""
-        charging_entity = await self._get_tesla_ev_entity(r"sensor\..*_charging_state$", vehicle_vin)
+        # Tesla Fleet uses sensor.*_charging (no _state suffix)
+        charging_entity = await self._get_tesla_ev_entity(r"sensor\..*_charging$", vehicle_vin)
         if charging_entity:
             state = self._hass.states.get(charging_entity)
             if state and state.state not in ("unavailable", "unknown"):

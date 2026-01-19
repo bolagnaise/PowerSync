@@ -43,6 +43,8 @@ from ..const import (
     TESLA_BLE_NUMBER_CHARGING_AMPS,
     TESLA_BLE_NUMBER_CHARGING_LIMIT,
     TESLA_BLE_BUTTON_WAKE_UP,
+    TESLA_BLE_BINARY_ASLEEP,
+    TESLA_BLE_BINARY_STATUS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -95,20 +97,26 @@ async def _get_tesla_ev_entity(
                         break
 
     if not tesla_devices:
-        _LOGGER.warning("No Tesla EV devices found")
+        _LOGGER.warning("No Tesla EV devices found in device registry (looking for tesla_fleet/teslemetry integrations)")
         return None
 
     # Use first vehicle if no specific VIN provided
     target_device = tesla_devices[0]
+    _LOGGER.debug(f"Found Tesla EV device: {target_device.name} (id: {target_device.id})")
 
     # Find matching entity for this device
     pattern = re.compile(entity_pattern, re.IGNORECASE)
+    device_entities = []
     for entity in entity_registry.entities.values():
         if entity.device_id == target_device.id:
+            device_entities.append(entity.entity_id)
             if pattern.match(entity.entity_id):
+                _LOGGER.debug(f"Found matching entity: {entity.entity_id}")
                 return entity.entity_id
 
     _LOGGER.warning(f"No entity matching pattern '{entity_pattern}' found for Tesla EV")
+    if device_entities:
+        _LOGGER.debug(f"Available entities for device: {device_entities[:20]}")  # Log first 20
     return None
 
 
@@ -168,14 +176,29 @@ def _is_ble_available(hass: HomeAssistant, ble_prefix: str) -> bool:
     return state is not None
 
 
-async def _wake_tesla_ble(hass: HomeAssistant, ble_prefix: str) -> bool:
-    """Wake up Tesla via BLE."""
-    wake_entity = TESLA_BLE_BUTTON_WAKE_UP.format(prefix=ble_prefix)
-    state = hass.states.get(wake_entity)
+async def _wake_tesla_ble(hass: HomeAssistant, ble_prefix: str, wait_timeout: int = 30) -> bool:
+    """Wake up Tesla via BLE and wait for it to be awake.
 
+    Args:
+        hass: Home Assistant instance
+        ble_prefix: The BLE entity prefix (e.g., "tesla_ble")
+        wait_timeout: Maximum seconds to wait for car to wake up (default 30)
+    """
+    import asyncio
+
+    wake_entity = TESLA_BLE_BUTTON_WAKE_UP.format(prefix=ble_prefix)
+    asleep_entity = TESLA_BLE_BINARY_ASLEEP.format(prefix=ble_prefix)
+
+    state = hass.states.get(wake_entity)
     if state is None:
         _LOGGER.warning(f"Tesla BLE wake entity not found: {wake_entity}")
         return False
+
+    # Check if already awake
+    asleep_state = hass.states.get(asleep_entity)
+    if asleep_state and asleep_state.state == "off":
+        _LOGGER.debug("Tesla BLE: Car is already awake")
+        return True
 
     try:
         await hass.services.async_call(
@@ -185,8 +208,29 @@ async def _wake_tesla_ble(hass: HomeAssistant, ble_prefix: str) -> bool:
             blocking=True,
         )
         _LOGGER.info(f"Sent wake command via Tesla BLE: {wake_entity}")
-        import asyncio
-        await asyncio.sleep(2)
+
+        # Wait for car to wake up (poll every 2 seconds)
+        start_time = asyncio.get_event_loop().time()
+        while (asyncio.get_event_loop().time() - start_time) < wait_timeout:
+            await asyncio.sleep(2)
+
+            asleep_state = hass.states.get(asleep_entity)
+            if asleep_state and asleep_state.state == "off":
+                _LOGGER.info(f"Tesla BLE: Car is now awake after {int(asyncio.get_event_loop().time() - start_time)}s")
+                # Give it a bit more time to be fully ready
+                await asyncio.sleep(2)
+                return True
+
+            # Also check status entity as fallback
+            status_entity = TESLA_BLE_BINARY_STATUS.format(prefix=ble_prefix)
+            status_state = hass.states.get(status_entity)
+            if status_state and status_state.state == "on":
+                _LOGGER.info(f"Tesla BLE: Car is online after {int(asyncio.get_event_loop().time() - start_time)}s")
+                await asyncio.sleep(2)
+                return True
+
+        _LOGGER.warning(f"Tesla BLE: Timed out waiting for car to wake after {wait_timeout}s")
+        # Still return True to attempt the command anyway
         return True
     except Exception as e:
         _LOGGER.error(f"Failed to wake Tesla via BLE: {e}")
@@ -987,25 +1031,26 @@ async def _action_start_ev_charging(
 
     # Use Fleet API
     if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
-        charge_start_entity = await _get_tesla_ev_entity(
+        # Tesla Fleet uses switch.X_charge, not button.X_charge_start
+        charge_switch_entity = await _get_tesla_ev_entity(
             hass,
-            r"button\..*charge_start$",
+            r"switch\..*_charge$",
             vehicle_vin
         )
 
-        if not charge_start_entity:
-            _LOGGER.error("Could not find Tesla charge_start button entity")
+        if not charge_switch_entity:
+            _LOGGER.error("Could not find Tesla charge switch entity (switch.*_charge)")
             return False
 
         try:
             await _wake_tesla_ev(hass, vehicle_vin)
             await hass.services.async_call(
-                "button",
-                "press",
-                {"entity_id": charge_start_entity},
+                "switch",
+                "turn_on",
+                {"entity_id": charge_switch_entity},
                 blocking=True,
             )
-            _LOGGER.info(f"Started EV charging via {charge_start_entity}")
+            _LOGGER.info(f"Started EV charging via {charge_switch_entity}")
             return True
         except Exception as e:
             _LOGGER.error(f"Failed to start EV charging: {e}")
@@ -1038,25 +1083,26 @@ async def _action_stop_ev_charging(
 
     # Use Fleet API
     if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
-        charge_stop_entity = await _get_tesla_ev_entity(
+        # Tesla Fleet uses switch.X_charge, not button.X_charge_stop
+        charge_switch_entity = await _get_tesla_ev_entity(
             hass,
-            r"button\..*charge_stop$",
+            r"switch\..*_charge$",
             vehicle_vin
         )
 
-        if not charge_stop_entity:
-            _LOGGER.error("Could not find Tesla charge_stop button entity")
+        if not charge_switch_entity:
+            _LOGGER.error("Could not find Tesla charge switch entity (switch.*_charge)")
             return False
 
         try:
             await _wake_tesla_ev(hass, vehicle_vin)
             await hass.services.async_call(
-                "button",
-                "press",
-                {"entity_id": charge_stop_entity},
+                "switch",
+                "turn_off",
+                {"entity_id": charge_switch_entity},
                 blocking=True,
             )
-            _LOGGER.info(f"Stopped EV charging via {charge_stop_entity}")
+            _LOGGER.info(f"Stopped EV charging via {charge_switch_entity}")
             return True
         except Exception as e:
             _LOGGER.error(f"Failed to stop EV charging: {e}")
@@ -1156,14 +1202,15 @@ async def _action_set_ev_charging_amps(
 
     # Use Fleet API
     if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+        # Tesla Fleet uses charge_current, some versions use charging_amps
         charging_amps_entity = await _get_tesla_ev_entity(
             hass,
-            r"number\..*charging_amps$",
+            r"number\..*(charging_amps|charge_current)$",
             vehicle_vin
         )
 
         if not charging_amps_entity:
-            _LOGGER.error("Could not find Tesla charging_amps number entity")
+            _LOGGER.error("Could not find Tesla charge_current/charging_amps number entity")
             return False
 
         try:
