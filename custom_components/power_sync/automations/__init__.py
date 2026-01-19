@@ -586,6 +586,7 @@ class AutomationEngine:
             return ev_state
 
         # Second pass: find related sensors using the vehicle prefix
+        # Support both Tesla Fleet and Teslemetry naming conventions
         for state in all_states:
             entity_id = state.entity_id
             state_value = state.state
@@ -593,13 +594,19 @@ class AutomationEngine:
             if state_value in ("unavailable", "unknown"):
                 continue
 
-            # Charger binary sensor (plugged in) - e.g., binary_sensor.tessy_charger
-            if entity_id == f"binary_sensor.{vehicle_prefix}_charger":
+            # Charger binary sensor (plugged in)
+            # Tesla Fleet: binary_sensor.tessy_charger
+            # Teslemetry: binary_sensor.tessy_charger or binary_sensor.tessy_charge_cable
+            if entity_id in (f"binary_sensor.{vehicle_prefix}_charger",
+                            f"binary_sensor.{vehicle_prefix}_charge_cable"):
                 ev_state["is_plugged_in"] = state_value.lower() == "on"
                 _LOGGER.debug(f"EV plugged in from {entity_id}: {state_value}")
 
-            # Battery level sensor - e.g., sensor.tessy_battery
-            elif entity_id == f"sensor.{vehicle_prefix}_battery":
+            # Battery level sensor
+            # Tesla Fleet: sensor.tessy_battery
+            # Teslemetry: sensor.tessy_battery_level
+            elif entity_id in (f"sensor.{vehicle_prefix}_battery",
+                              f"sensor.{vehicle_prefix}_battery_level"):
                 try:
                     level = float(state_value)
                     if 0 <= level <= 100:
