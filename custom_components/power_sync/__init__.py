@@ -2811,7 +2811,11 @@ class EVVehicleCommandView(HomeAssistantView):
         tesla_devices = []
         for device in device_registry.devices.values():
             for identifier in device.identifiers:
-                domain, identifier_value = identifier
+                # Handle identifiers with varying tuple lengths
+                if len(identifier) < 2:
+                    continue
+                domain = identifier[0]
+                identifier_value = identifier[1]
                 if domain in self.TESLA_INTEGRATIONS:
                     if len(str(identifier_value)) == 17 and not str(identifier_value).isdigit():
                         if vehicle_vin is None or identifier_value == vehicle_vin:
