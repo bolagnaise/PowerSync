@@ -130,6 +130,12 @@ from .const import (
     CONF_INVERTER_TOKEN,
     CONF_INVERTER_RESTORE_SOC,
     CONF_FRONIUS_LOAD_FOLLOWING,
+    # Enphase credentials for JWT token refresh
+    CONF_ENPHASE_USERNAME,
+    CONF_ENPHASE_PASSWORD,
+    CONF_ENPHASE_SERIAL,
+    CONF_ENPHASE_NORMAL_PROFILE,
+    CONF_ENPHASE_ZERO_EXPORT_PROFILE,
     DEFAULT_INVERTER_PORT,
     DEFAULT_INVERTER_SLAVE_ID,
     DEFAULT_INVERTER_RESTORE_SOC,
@@ -1645,6 +1651,27 @@ class InverterStatusView(HomeAssistantView):
             CONF_FRONIUS_LOAD_FOLLOWING,
             entry.data.get(CONF_FRONIUS_LOAD_FOLLOWING, False)
         )
+        # Enphase Enlighten credentials for automatic JWT token refresh
+        enphase_username = entry.options.get(
+            CONF_ENPHASE_USERNAME,
+            entry.data.get(CONF_ENPHASE_USERNAME)
+        )
+        enphase_password = entry.options.get(
+            CONF_ENPHASE_PASSWORD,
+            entry.data.get(CONF_ENPHASE_PASSWORD)
+        )
+        enphase_serial = entry.options.get(
+            CONF_ENPHASE_SERIAL,
+            entry.data.get(CONF_ENPHASE_SERIAL)
+        )
+        enphase_normal_profile = entry.options.get(
+            CONF_ENPHASE_NORMAL_PROFILE,
+            entry.data.get(CONF_ENPHASE_NORMAL_PROFILE)
+        )
+        enphase_zero_export_profile = entry.options.get(
+            CONF_ENPHASE_ZERO_EXPORT_PROFILE,
+            entry.data.get(CONF_ENPHASE_ZERO_EXPORT_PROFILE)
+        )
 
         if not inverter_host:
             return web.json_response({
@@ -1662,6 +1689,11 @@ class InverterStatusView(HomeAssistantView):
                 model=inverter_model,
                 token=inverter_token,
                 load_following=fronius_load_following,
+                enphase_username=enphase_username,
+                enphase_password=enphase_password,
+                enphase_serial=enphase_serial,
+                enphase_normal_profile=enphase_normal_profile,
+                enphase_zero_export_profile=enphase_zero_export_profile,
             )
 
             if not controller:
@@ -2982,6 +3014,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_FRONIUS_LOAD_FOLLOWING, False)
         )
 
+        # Enphase Enlighten credentials for automatic JWT token refresh
+        enphase_username = entry.options.get(
+            CONF_ENPHASE_USERNAME,
+            entry.data.get(CONF_ENPHASE_USERNAME)
+        )
+        enphase_password = entry.options.get(
+            CONF_ENPHASE_PASSWORD,
+            entry.data.get(CONF_ENPHASE_PASSWORD)
+        )
+        enphase_serial = entry.options.get(
+            CONF_ENPHASE_SERIAL,
+            entry.data.get(CONF_ENPHASE_SERIAL)
+        )
+        enphase_normal_profile = entry.options.get(
+            CONF_ENPHASE_NORMAL_PROFILE,
+            entry.data.get(CONF_ENPHASE_NORMAL_PROFILE)
+        )
+        enphase_zero_export_profile = entry.options.get(
+            CONF_ENPHASE_ZERO_EXPORT_PROFILE,
+            entry.data.get(CONF_ENPHASE_ZERO_EXPORT_PROFILE)
+        )
+
         if not inverter_host:
             _LOGGER.warning("Inverter curtailment enabled but no host configured")
             return False
@@ -2995,6 +3049,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 model=inverter_model,
                 token=inverter_token,
                 load_following=fronius_load_following,
+                enphase_username=enphase_username,
+                enphase_password=enphase_password,
+                enphase_serial=enphase_serial,
+                enphase_normal_profile=enphase_normal_profile,
+                enphase_zero_export_profile=enphase_zero_export_profile,
             )
 
             if not controller:
@@ -5889,6 +5948,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_FRONIUS_LOAD_FOLLOWING,
             entry.data.get(CONF_FRONIUS_LOAD_FOLLOWING, False)
         )
+        # Enphase Enlighten credentials for automatic JWT token refresh
+        enphase_username = entry.options.get(
+            CONF_ENPHASE_USERNAME,
+            entry.data.get(CONF_ENPHASE_USERNAME)
+        )
+        enphase_password = entry.options.get(
+            CONF_ENPHASE_PASSWORD,
+            entry.data.get(CONF_ENPHASE_PASSWORD)
+        )
+        enphase_serial = entry.options.get(
+            CONF_ENPHASE_SERIAL,
+            entry.data.get(CONF_ENPHASE_SERIAL)
+        )
+        enphase_normal_profile = entry.options.get(
+            CONF_ENPHASE_NORMAL_PROFILE,
+            entry.data.get(CONF_ENPHASE_NORMAL_PROFILE)
+        )
+        enphase_zero_export_profile = entry.options.get(
+            CONF_ENPHASE_ZERO_EXPORT_PROFILE,
+            entry.data.get(CONF_ENPHASE_ZERO_EXPORT_PROFILE)
+        )
 
         if not inverter_host:
             _LOGGER.warning("No inverter host configured")
@@ -5903,6 +5983,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 model=inverter_model,
                 token=inverter_token,
                 load_following=fronius_load_following,
+                enphase_username=enphase_username,
+                enphase_password=enphase_password,
+                enphase_serial=enphase_serial,
+                enphase_normal_profile=enphase_normal_profile,
+                enphase_zero_export_profile=enphase_zero_export_profile,
             )
 
             home_load_w = None
@@ -5993,6 +6078,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_FRONIUS_LOAD_FOLLOWING,
             entry.data.get(CONF_FRONIUS_LOAD_FOLLOWING, False)
         )
+        # Enphase Enlighten credentials for automatic JWT token refresh
+        enphase_username = entry.options.get(
+            CONF_ENPHASE_USERNAME,
+            entry.data.get(CONF_ENPHASE_USERNAME)
+        )
+        enphase_password = entry.options.get(
+            CONF_ENPHASE_PASSWORD,
+            entry.data.get(CONF_ENPHASE_PASSWORD)
+        )
+        enphase_serial = entry.options.get(
+            CONF_ENPHASE_SERIAL,
+            entry.data.get(CONF_ENPHASE_SERIAL)
+        )
+        enphase_normal_profile = entry.options.get(
+            CONF_ENPHASE_NORMAL_PROFILE,
+            entry.data.get(CONF_ENPHASE_NORMAL_PROFILE)
+        )
+        enphase_zero_export_profile = entry.options.get(
+            CONF_ENPHASE_ZERO_EXPORT_PROFILE,
+            entry.data.get(CONF_ENPHASE_ZERO_EXPORT_PROFILE)
+        )
 
         if not inverter_host:
             _LOGGER.warning("No inverter host configured")
@@ -6007,6 +6113,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 model=inverter_model,
                 token=inverter_token,
                 load_following=fronius_load_following,
+                enphase_username=enphase_username,
+                enphase_password=enphase_password,
+                enphase_serial=enphase_serial,
+                enphase_normal_profile=enphase_normal_profile,
+                enphase_zero_export_profile=enphase_zero_export_profile,
             )
 
             _LOGGER.info(f"🟢 Restoring {inverter_brand} inverter at {inverter_host}")

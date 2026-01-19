@@ -125,6 +125,8 @@ class User(UserMixin, db.Model):
     enphase_username = db.Column(db.String(200))  # Enlighten username/email for auto token refresh
     enphase_password = db.Column(db.String(200))  # Enlighten password for auto token refresh
     enphase_serial = db.Column(db.String(50))  # Envoy serial number (optional, auto-detected)
+    enphase_normal_profile = db.Column(db.String(200))  # Grid profile name for normal operation (fallback)
+    enphase_zero_export_profile = db.Column(db.String(200))  # Grid profile name for zero export (fallback)
     inverter_restore_soc = db.Column(db.Integer, default=98)  # Restore inverter when battery drops below this %
     fronius_load_following = db.Column(db.Boolean, default=False)  # Fronius: use calculated limits instead of 0W profile
     inverter_last_state = db.Column(db.String(20))  # Last known state: 'online', 'curtailed', 'offline'

@@ -41,6 +41,11 @@ class EnphaseController(InverterController):
     ENDPOINT_PCS_SETTINGS = "/ivp/ss/pcs_settings"
     ENDPOINT_HOME = "/home.json"
 
+    # AGF (Advanced Grid Functions) endpoints for grid profile switching
+    ENDPOINT_AGF_INDEX = "/installer/agf/index.json"
+    ENDPOINT_AGF_DETAILS = "/installer/agf/details.json"
+    ENDPOINT_AGF_SET_PROFILE = "/installer/agf/set_profile.json"
+
     # Enlighten cloud endpoints for token retrieval
     ENLIGHTEN_LOGIN_URL = "https://enlighten.enphaseenergy.com/login/login.json"
     ENLIGHTEN_TOKEN_URL = "https://entrez.enphaseenergy.com/tokens"
@@ -61,6 +66,8 @@ class EnphaseController(InverterController):
         username: Optional[str] = None,
         password: Optional[str] = None,
         serial: Optional[str] = None,
+        normal_profile: Optional[str] = None,
+        zero_export_profile: Optional[str] = None,
     ):
         """Initialize Enphase controller.
 
@@ -73,18 +80,24 @@ class EnphaseController(InverterController):
             username: Enlighten username/email (for cloud token retrieval)
             password: Enlighten password (for cloud token retrieval)
             serial: Envoy serial number (for token retrieval, auto-detected if not provided)
+            normal_profile: Grid profile name for normal operation (for profile switching fallback)
+            zero_export_profile: Grid profile name for zero export (for profile switching fallback)
         """
         super().__init__(host, port, slave_id, model)
         self._token = token
         self._username = username
         self._password = password
         self._serial = serial
+        self._normal_profile = normal_profile
+        self._zero_export_profile = zero_export_profile
         self._session: Optional[aiohttp.ClientSession] = None
         self._cloud_session: Optional[aiohttp.ClientSession] = None
         self._lock = asyncio.Lock()
         self._firmware_version: Optional[str] = None
         self._envoy_serial: Optional[str] = None
         self._dpel_supported: Optional[bool] = None
+        self._profile_switching_supported: Optional[bool] = None
+        self._current_profile: Optional[str] = None
         self._token_obtained_at: Optional[datetime] = None
         self._enlighten_session_id: Optional[str] = None
 
@@ -537,6 +550,105 @@ class EnphaseController(InverterController):
             return True
         return await self._put(self.ENDPOINT_DER_SETTINGS, current)
 
+    # =========================================================================
+    # Grid Profile Switching (AGF - Advanced Grid Functions)
+    # Fallback method when DPEL/DER endpoints don't work
+    # =========================================================================
+
+    async def _get_available_profiles(self) -> Optional[list]:
+        """Get list of available grid profiles from the IQ Gateway.
+
+        Returns:
+            List of profile names, or None if unavailable
+        """
+        data = await self._get(self.ENDPOINT_AGF_INDEX)
+        if data and isinstance(data, list):
+            _LOGGER.debug(f"Available grid profiles: {data}")
+            return data
+        return None
+
+    async def _get_current_profile(self) -> Optional[str]:
+        """Get the currently active grid profile.
+
+        Returns:
+            Current profile name, or None if unavailable
+        """
+        data = await self._get(self.ENDPOINT_AGF_DETAILS)
+        if data:
+            profile_name = data.get("selected_profile") or data.get("profile_name") or data.get("name")
+            if profile_name:
+                self._current_profile = profile_name
+                _LOGGER.debug(f"Current grid profile: {profile_name}")
+                return profile_name
+        return None
+
+    async def _set_grid_profile(self, profile_name: str) -> bool:
+        """Set the active grid profile.
+
+        Args:
+            profile_name: Full name of the grid profile to activate
+
+        Returns:
+            True if successful
+        """
+        if not profile_name:
+            _LOGGER.error("Cannot set grid profile: no profile name provided")
+            return False
+
+        _LOGGER.info(f"Setting grid profile to: {profile_name}")
+
+        data = {"selected_profile": profile_name}
+
+        # Try PUT first (as per API documentation)
+        if await self._put(self.ENDPOINT_AGF_SET_PROFILE, data):
+            self._current_profile = profile_name
+            self._profile_switching_supported = True
+            _LOGGER.info(f"Successfully set grid profile to: {profile_name}")
+            return True
+
+        # Fall back to POST
+        if await self._post(self.ENDPOINT_AGF_SET_PROFILE, data):
+            self._current_profile = profile_name
+            self._profile_switching_supported = True
+            _LOGGER.info(f"Successfully set grid profile to: {profile_name}")
+            return True
+
+        _LOGGER.error(f"Failed to set grid profile to: {profile_name}")
+        return False
+
+    async def _switch_to_zero_export_profile(self) -> bool:
+        """Switch to zero export grid profile.
+
+        Returns:
+            True if successful
+        """
+        if not self._zero_export_profile:
+            _LOGGER.debug("No zero export profile configured for profile switching")
+            return False
+
+        # Store current profile so we can restore it later
+        if not self._current_profile:
+            current = await self._get_current_profile()
+            if current and current != self._zero_export_profile:
+                # Auto-detect normal profile if not set
+                if not self._normal_profile:
+                    self._normal_profile = current
+                    _LOGGER.info(f"Auto-detected normal profile: {current}")
+
+        return await self._set_grid_profile(self._zero_export_profile)
+
+    async def _switch_to_normal_profile(self) -> bool:
+        """Switch to normal (non-zero-export) grid profile.
+
+        Returns:
+            True if successful
+        """
+        if not self._normal_profile:
+            _LOGGER.debug("No normal profile configured for profile switching")
+            return False
+
+        return await self._set_grid_profile(self._normal_profile)
+
     async def curtail(
         self,
         home_load_w: Optional[float] = None,
@@ -544,7 +656,10 @@ class EnphaseController(InverterController):
     ) -> bool:
         """Enable load following curtailment on the Enphase system.
 
-        Sets export limit to 0W via DPEL or DER settings.
+        Tries methods in order of preference:
+        1. DPEL endpoint (fastest, dynamic)
+        2. DER settings endpoint
+        3. Grid profile switching (slowest, takes time to propagate to micros)
 
         Returns:
             True if curtailment successful
@@ -556,7 +671,7 @@ class EnphaseController(InverterController):
                 _LOGGER.error("Cannot curtail: failed to connect to IQ Gateway")
                 return False
 
-            # Try DPEL endpoint first
+            # Method 1: Try DPEL endpoint first (fastest, most dynamic)
             success = await self._set_dpel(enabled=True, limit_watts=0)
             if success:
                 _LOGGER.info(f"Successfully curtailed Enphase system at {self.host} via DPEL")
@@ -566,16 +681,32 @@ class EnphaseController(InverterController):
 
             _LOGGER.debug("DPEL not available, trying DER settings")
 
-            # Try DER settings as fallback
+            # Method 2: Try DER settings as second option
             success = await self._set_der_export_limit(0)
             if success:
                 _LOGGER.info(f"Successfully curtailed Enphase system at {self.host} via DER")
                 await asyncio.sleep(1)
                 return True
 
+            _LOGGER.debug("DER settings not available, trying grid profile switching")
+
+            # Method 3: Grid profile switching as last resort
+            # Note: This is slower as it takes time to propagate to microinverters
+            if self._zero_export_profile:
+                success = await self._switch_to_zero_export_profile()
+                if success:
+                    _LOGGER.info(
+                        f"Successfully curtailed Enphase system at {self.host} via grid profile switching. "
+                        f"Note: May take 30-60 seconds to propagate to microinverters."
+                    )
+                    # Wait longer for profile to propagate
+                    await asyncio.sleep(5)
+                    return True
+
             _LOGGER.warning(
                 "Export limiting not available on this Enphase system. "
-                "This may require installer-level access or a specific grid profile."
+                "This may require installer-level access, a specific grid profile, "
+                "or configuring zero_export_profile for profile switching fallback."
             )
             return False
 
@@ -586,7 +717,10 @@ class EnphaseController(InverterController):
     async def restore(self) -> bool:
         """Restore normal operation of the Enphase system.
 
-        Disables export limiting to return to normal export behavior.
+        Tries methods in order of preference:
+        1. DPEL endpoint (fastest, dynamic)
+        2. DER settings endpoint
+        3. Grid profile switching (slowest, takes time to propagate to micros)
 
         Returns:
             True if restore successful
@@ -598,21 +732,39 @@ class EnphaseController(InverterController):
                 _LOGGER.error("Cannot restore: failed to connect to IQ Gateway")
                 return False
 
-            # Try DPEL endpoint first
+            # Method 1: Try DPEL endpoint first (fastest)
             success = await self._set_dpel(enabled=False, limit_watts=0)
             if success:
                 _LOGGER.info(f"Successfully restored Enphase system at {self.host} via DPEL")
                 await asyncio.sleep(1)
                 return True
 
-            # Try DER settings as fallback (set high limit to effectively disable)
+            # Method 2: Try DER settings (set high limit to effectively disable)
             success = await self._set_der_export_limit(100000)  # 100kW effectively unlimited
             if success:
                 _LOGGER.info(f"Successfully restored Enphase system at {self.host} via DER")
                 await asyncio.sleep(1)
                 return True
 
-            _LOGGER.warning("Failed to restore normal operation")
+            _LOGGER.debug("DER settings not available, trying grid profile switching")
+
+            # Method 3: Grid profile switching as last resort
+            # Note: This is slower as it takes time to propagate to microinverters
+            if self._normal_profile:
+                success = await self._switch_to_normal_profile()
+                if success:
+                    _LOGGER.info(
+                        f"Successfully restored Enphase system at {self.host} via grid profile switching. "
+                        f"Note: May take 30-60 seconds to propagate to microinverters."
+                    )
+                    # Wait longer for profile to propagate
+                    await asyncio.sleep(5)
+                    return True
+
+            _LOGGER.warning(
+                "Failed to restore normal operation. "
+                "Configure normal_profile for profile switching fallback."
+            )
             return False
 
         except Exception as e:

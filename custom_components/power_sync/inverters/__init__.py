@@ -210,6 +210,8 @@ def get_inverter_controller(
     enphase_username: Optional[str] = None,
     enphase_password: Optional[str] = None,
     enphase_serial: Optional[str] = None,
+    enphase_normal_profile: Optional[str] = None,
+    enphase_zero_export_profile: Optional[str] = None,
 ) -> Optional[InverterController]:
     """Factory function to get the appropriate inverter controller.
 
@@ -225,6 +227,8 @@ def get_inverter_controller(
         enphase_username: Enlighten username/email for automatic JWT token refresh
         enphase_password: Enlighten password for automatic JWT token refresh
         enphase_serial: Envoy serial number (optional, auto-detected from gateway)
+        enphase_normal_profile: Grid profile name for normal operation (fallback)
+        enphase_zero_export_profile: Grid profile name for zero export (fallback)
 
     Returns:
         InverterController instance or None if brand not supported
@@ -298,6 +302,8 @@ def get_inverter_controller(
             username=enphase_username,
             password=enphase_password,
             serial=enphase_serial,
+            normal_profile=enphase_normal_profile,
+            zero_export_profile=enphase_zero_export_profile,
         )
 
     if brand_lower == "zeversolar":

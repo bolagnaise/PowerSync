@@ -8906,21 +8906,27 @@ def api_ev_list_vehicles(api_user=None):
 def api_ev_sync_vehicles(api_user=None):
     """Sync vehicles from Tesla Fleet API."""
     from app.ev.tesla_fleet import sync_vehicles_for_user
+    from app.models import TeslaVehicle
 
     user = api_user or current_user
 
     synced, errors = sync_vehicles_for_user(user)
 
+    # Get updated vehicles list
+    vehicles = TeslaVehicle.query.filter_by(user_id=user.id).all()
+
     if errors:
         return jsonify({
             'success': False,
             'synced': synced,
+            'vehicles': [v.to_dict() for v in vehicles],
             'errors': errors
         }), 400 if synced == 0 else 200
 
     return jsonify({
         'success': True,
         'synced': synced,
+        'vehicles': [v.to_dict() for v in vehicles],
         'message': f'Synced {synced} vehicle(s)'
     })
 
@@ -8970,9 +8976,9 @@ def api_ev_vehicle_command(vehicle_id, command, api_user=None):
         return jsonify({'error': 'Fleet API not configured'}), 400
 
     try:
-        if command == 'charge_start':
+        if command in ('charge_start', 'start_charging'):
             result = client.charge_start(vehicle.vehicle_id)
-        elif command == 'charge_stop':
+        elif command in ('charge_stop', 'stop_charging'):
             result = client.charge_stop(vehicle.vehicle_id)
         elif command == 'set_charge_limit':
             percent = data.get('percent', 80)
@@ -9044,10 +9050,17 @@ def api_ev_status(api_user=None):
     has_tokens = bool(user.fleet_api_access_token_encrypted)
     vehicle_count = TeslaVehicle.query.filter_by(user_id=user.id).count()
 
+    # Include token expiration if available
+    token_expires_at = None
+    if user.fleet_api_token_expires_at:
+        token_expires_at = user.fleet_api_token_expires_at.isoformat()
+
     return jsonify({
         'success': True,
         'configured': has_credentials,
         'linked': has_tokens,
+        'has_access_token': has_tokens,  # Alias for mobile app compatibility
+        'token_expires_at': token_expires_at,
         'vehicle_count': vehicle_count,
     })
 
