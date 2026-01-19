@@ -28,14 +28,18 @@ class AutomationStore:
     def __init__(self, hass: HomeAssistant):
         self._hass = hass
         self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
-        self._data: Dict[str, Any] = {"automations": [], "next_id": 1}
+        self._data: Dict[str, Any] = {"automations": [], "next_id": 1, "push_tokens": {}}
 
     async def async_load(self) -> None:
         """Load automations from storage."""
         data = await self._store.async_load()
         if data:
             self._data = data
+            # Ensure push_tokens exists (for upgrades from older versions)
+            if "push_tokens" not in self._data:
+                self._data["push_tokens"] = {}
         _LOGGER.debug(f"Loaded {len(self._data.get('automations', []))} automations from storage")
+        _LOGGER.debug(f"Loaded {len(self._data.get('push_tokens', {}))} push tokens from storage")
 
     async def async_save(self) -> None:
         """Save automations to storage."""
@@ -186,6 +190,31 @@ class AutomationStore:
         if "Default Group" not in groups:
             groups.add("Default Group")
         return sorted(list(groups))
+
+    # Push token management (persisted to disk)
+    def register_push_token(self, push_token: str, platform: str, device_name: str) -> None:
+        """Register a push notification token."""
+        if "push_tokens" not in self._data:
+            self._data["push_tokens"] = {}
+
+        self._data["push_tokens"][push_token] = {
+            "token": push_token,
+            "platform": platform,
+            "device_name": device_name,
+            "registered_at": datetime.utcnow().isoformat(),
+        }
+        _LOGGER.info(f"📱 Push token registered for {device_name} ({platform})")
+
+    def get_push_tokens(self) -> Dict[str, Any]:
+        """Get all registered push tokens."""
+        return self._data.get("push_tokens", {})
+
+    def remove_push_token(self, push_token: str) -> bool:
+        """Remove a push token."""
+        if "push_tokens" in self._data and push_token in self._data["push_tokens"]:
+            del self._data["push_tokens"][push_token]
+            return True
+        return False
 
 
 class AutomationEngine:

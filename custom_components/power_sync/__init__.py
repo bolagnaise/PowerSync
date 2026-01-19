@@ -2238,7 +2238,7 @@ class PushTokenRegisterView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         """Handle POST request - register push token."""
-        _LOGGER.info("📱 Push token registration request")
+        _LOGGER.info("📱 Push token registration request received")
 
         try:
             data = await request.json()
@@ -2252,20 +2252,29 @@ class PushTokenRegisterView(HomeAssistantView):
                     status=400
                 )
 
-            # Store push token in hass.data
+            # Store push token in hass.data for quick access
             if DOMAIN not in self._hass.data:
                 self._hass.data[DOMAIN] = {}
 
             if "push_tokens" not in self._hass.data[DOMAIN]:
                 self._hass.data[DOMAIN]["push_tokens"] = {}
 
-            # Store by token (to avoid duplicates)
             self._hass.data[DOMAIN]["push_tokens"][push_token] = {
                 "token": push_token,
                 "platform": platform,
                 "device_name": device_name,
                 "registered_at": datetime.now().isoformat(),
             }
+
+            # Also persist to AutomationStore for survival across restarts
+            # Find any config entry to get the automation store
+            for entry_id, entry_data in self._hass.data.get(DOMAIN, {}).items():
+                if isinstance(entry_data, dict) and "automation_store" in entry_data:
+                    store = entry_data["automation_store"]
+                    store.register_push_token(push_token, platform, device_name)
+                    await store.async_save()
+                    _LOGGER.info(f"✅ Push token persisted to storage for {device_name} ({platform})")
+                    break
 
             _LOGGER.info(f"✅ Push token registered for {device_name} ({platform})")
             return web.json_response({"success": True})
@@ -7626,6 +7635,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN][entry.entry_id]["automation_engine"] = automation_engine
     # Also store at domain level for HTTP API access
     hass.data[DOMAIN]["automation_store"] = automation_store
+
+    # Restore persisted push tokens to hass.data for notification sending
+    persisted_tokens = automation_store.get_push_tokens()
+    if persisted_tokens:
+        if "push_tokens" not in hass.data[DOMAIN]:
+            hass.data[DOMAIN]["push_tokens"] = {}
+        hass.data[DOMAIN]["push_tokens"].update(persisted_tokens)
+        _LOGGER.info(f"📱 Restored {len(persisted_tokens)} push token(s) from storage")
 
     # Set up automation evaluation timer (every 30 seconds)
     async def auto_evaluate_automations(now):
