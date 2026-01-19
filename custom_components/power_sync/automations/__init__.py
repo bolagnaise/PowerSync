@@ -469,18 +469,16 @@ class AutomationEngine:
     ) -> bool:
         """Execute an automation's actions.
 
-        Always sends a notification when automation triggers.
-        If notification_only is False, also executes the configured actions.
+        If notification_only is True, sends a notification and skips actions.
+        Otherwise, executes the configured actions (which may include send_notification).
         """
         automation_name = automation.get('name', 'Unnamed')
 
-        # Always send notification when automation triggers
-        await self._async_send_notification(
-            f"Automation '{automation_name}' triggered"
-        )
-
-        # If notification_only, we're done - don't execute actions
+        # If notification_only, send notification and skip actions
         if automation.get("notification_only"):
+            await self._async_send_notification(
+                f"Automation '{automation_name}' triggered"
+            )
             _LOGGER.info(f"Automation '{automation_name}' is notification-only, skipping actions")
             return True
 
