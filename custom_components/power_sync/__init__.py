@@ -2900,21 +2900,22 @@ class EVVehicleCommandView(HomeAssistantView):
         # Try Fleet API
         if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
             await self._wake_vehicle(vehicle_vin)
-            charge_start_entity = await self._get_tesla_ev_entity(r"button\..*charge_start$", vehicle_vin)
-            if charge_start_entity:
+            # Tesla Fleet uses switch.X_charge, not button.X_charge_start
+            charge_switch_entity = await self._get_tesla_ev_entity(r"switch\..*_charge$", vehicle_vin)
+            if charge_switch_entity:
                 try:
                     await self._hass.services.async_call(
-                        "button", "press",
-                        {"entity_id": charge_start_entity},
+                        "switch", "turn_on",
+                        {"entity_id": charge_switch_entity},
                         blocking=True,
                     )
-                    _LOGGER.info(f"Started charging via Fleet API: {charge_start_entity}")
+                    _LOGGER.info(f"Started charging via Fleet API: {charge_switch_entity}")
                     return True
                 except Exception as e:
                     _LOGGER.error(f"Fleet API start charging failed: {e}")
                     return False
             else:
-                _LOGGER.error("Could not find charge_start button entity for Tesla vehicle")
+                _LOGGER.error("Could not find charge switch entity for Tesla vehicle")
 
         _LOGGER.warning(f"Start charging failed - no suitable entity found (provider: {ev_provider})")
         return False
@@ -2943,15 +2944,16 @@ class EVVehicleCommandView(HomeAssistantView):
         # Try Fleet API
         if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
             await self._wake_vehicle(vehicle_vin)
-            charge_stop_entity = await self._get_tesla_ev_entity(r"button\..*charge_stop$", vehicle_vin)
-            if charge_stop_entity:
+            # Tesla Fleet uses switch.X_charge, not button.X_charge_stop
+            charge_switch_entity = await self._get_tesla_ev_entity(r"switch\..*_charge$", vehicle_vin)
+            if charge_switch_entity:
                 try:
                     await self._hass.services.async_call(
-                        "button", "press",
-                        {"entity_id": charge_stop_entity},
+                        "switch", "turn_off",
+                        {"entity_id": charge_switch_entity},
                         blocking=True,
                     )
-                    _LOGGER.info(f"Stopped charging via Fleet API: {charge_stop_entity}")
+                    _LOGGER.info(f"Stopped charging via Fleet API: {charge_switch_entity}")
                     return True
                 except Exception as e:
                     _LOGGER.error(f"Fleet API stop charging failed: {e}")
@@ -3030,7 +3032,8 @@ class EVVehicleCommandView(HomeAssistantView):
         # Try Fleet API
         if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
             await self._wake_vehicle(vehicle_vin)
-            amps_entity = await self._get_tesla_ev_entity(r"number\..*charging_amps$", vehicle_vin)
+            # Tesla Fleet uses charge_current, Teslemetry uses charging_amps
+            amps_entity = await self._get_tesla_ev_entity(r"number\..*(charging_amps|charge_current)$", vehicle_vin)
             if amps_entity:
                 try:
                     await self._hass.services.async_call(
