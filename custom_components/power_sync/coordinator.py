@@ -1191,6 +1191,119 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             update_interval=self.UPDATE_INTERVAL,
         )
 
+    async def _try_read_from_solcast_integration(self) -> dict[str, Any] | None:
+        """Try to read forecast data from the Solcast HA integration.
+
+        If the Solcast integration is installed, we read from its sensors instead
+        of making our own API calls. This avoids doubling API usage (10 calls/day limit).
+
+        Sensor entity IDs used:
+        - sensor.solcast_pv_forecast_forecast_today (kWh)
+        - sensor.solcast_pv_forecast_forecast_tomorrow (kWh)
+        - sensor.solcast_pv_forecast_forecast_remaining_today (kWh)
+        - sensor.solcast_pv_forecast_peak_forecast_today (W)
+        - sensor.solcast_pv_forecast_peak_forecast_tomorrow (W)
+        - sensor.solcast_pv_forecast_power_now (W)
+
+        Returns:
+            Forecast data dict if Solcast integration is available, None otherwise
+        """
+        try:
+            # Check for Solcast integration sensors - forecast_today is the key sensor
+            today_state = self.hass.states.get("sensor.solcast_pv_forecast_forecast_today")
+            if not today_state or today_state.state in ("unavailable", "unknown", None, ""):
+                return None
+
+            # Get all the sensor values
+            tomorrow_state = self.hass.states.get("sensor.solcast_pv_forecast_forecast_tomorrow")
+            remaining_state = self.hass.states.get("sensor.solcast_pv_forecast_forecast_remaining_today")
+            peak_today_state = self.hass.states.get("sensor.solcast_pv_forecast_peak_forecast_today")
+            peak_tomorrow_state = self.hass.states.get("sensor.solcast_pv_forecast_peak_forecast_tomorrow")
+            power_now_state = self.hass.states.get("sensor.solcast_pv_forecast_power_now")
+
+            # Parse values - these are already in kWh
+            today_forecast = float(today_state.state) if today_state.state else 0
+            tomorrow_forecast = float(tomorrow_state.state) if tomorrow_state and tomorrow_state.state not in ("unavailable", "unknown", None, "") else 0
+            remaining = float(remaining_state.state) if remaining_state and remaining_state.state not in ("unavailable", "unknown", None, "") else today_forecast
+
+            # Peak values are in W - convert to kW
+            today_peak = None
+            if peak_today_state and peak_today_state.state not in ("unavailable", "unknown", None, ""):
+                today_peak = float(peak_today_state.state) / 1000.0  # W to kW
+
+            tomorrow_peak = None
+            if peak_tomorrow_state and peak_tomorrow_state.state not in ("unavailable", "unknown", None, ""):
+                tomorrow_peak = float(peak_tomorrow_state.state) / 1000.0  # W to kW
+
+            # Current power estimate is in W - convert to kW
+            current_estimate = None
+            if power_now_state and power_now_state.state not in ("unavailable", "unknown", None, ""):
+                current_estimate = float(power_now_state.state) / 1000.0  # W to kW
+
+            # Try to get detailed hourly forecast from sensor attributes
+            # The Solcast HA integration stores this in various attribute names
+            detailed_forecast = None
+            if today_state.attributes:
+                # Try common attribute names used by Solcast HA integration
+                detailed_forecast = (
+                    today_state.attributes.get("detailedForecast") or
+                    today_state.attributes.get("forecast_today") or
+                    today_state.attributes.get("detailedHourly") or
+                    today_state.attributes.get("forecasts")
+                )
+
+            # Build hourly forecast data for chart overlay
+            hourly_forecast = []
+            if detailed_forecast and isinstance(detailed_forecast, list):
+                now = dt_util.now()
+                today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+                for period in detailed_forecast:
+                    try:
+                        # Parse period end time and pv_estimate
+                        period_end_str = period.get("period_end", "")
+                        pv_estimate = period.get("pv_estimate", 0) or 0
+
+                        if period_end_str:
+                            period_end = datetime.fromisoformat(period_end_str.replace("Z", "+00:00"))
+                            period_local = dt_util.as_local(period_end)
+
+                            # Only include today's data for the chart
+                            if today_start <= period_local <= today_end:
+                                hourly_forecast.append({
+                                    "time": period_local.strftime("%H:%M"),
+                                    "hour": period_local.hour,
+                                    "pv_estimate_kw": round(pv_estimate, 2),
+                                })
+                    except (ValueError, TypeError, KeyError):
+                        continue
+
+            _LOGGER.info(
+                f"Solcast (from HA integration): Today={today_forecast:.1f}kWh, "
+                f"remaining={remaining:.1f}kWh, Tomorrow={tomorrow_forecast:.1f}kWh, "
+                f"hourly_points={len(hourly_forecast)}"
+            )
+
+            return {
+                "available": True,
+                "today_forecast_kwh": round(today_forecast, 2),
+                "today_remaining_kwh": round(remaining, 2),
+                "today_total_kwh": round(today_forecast, 2),
+                "tomorrow_total_kwh": round(tomorrow_forecast, 2),
+                "today_peak_kw": round(today_peak, 2) if today_peak else None,
+                "tomorrow_peak_kw": round(tomorrow_peak, 2) if tomorrow_peak else None,
+                "current_estimate_kw": round(current_estimate, 2) if current_estimate else None,
+                "hourly_forecast": hourly_forecast,  # For chart overlay
+                "forecast_periods": len(hourly_forecast),
+                "last_update": dt_util.utcnow(),
+                "source": "solcast_integration",
+            }
+
+        except (ValueError, TypeError, AttributeError) as e:
+            _LOGGER.debug(f"Could not read from Solcast integration: {e}")
+            return None
+
     async def _fetch_forecast_for_resource(self, resource_id: str) -> list[dict] | None:
         """Fetch forecast for a single resource ID.
 
@@ -1286,14 +1399,22 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
         return combined
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Fetch forecast data from Solcast API.
+        """Fetch forecast data from Solcast.
 
-        Fetches forecasts (future) and optionally estimated_actuals (past) to calculate
-        the full day's expected production. If estimated_actuals fails (rate limit, etc.),
-        we fall back to using the cached full-day forecast.
+        First checks if the Solcast HA integration is installed - if so, reads from
+        its sensors to avoid doubling API calls. Only makes direct API calls if the
+        Solcast integration is not available.
 
         Supports multiple resource IDs - values are combined by summing.
         """
+        # First, check if Solcast HA integration is installed and has data
+        # This avoids doubling API calls if user has both integrations
+        solcast_data = await self._try_read_from_solcast_integration()
+        if solcast_data:
+            _LOGGER.debug("Using data from Solcast HA integration (no API calls needed)")
+            return solcast_data
+
+        # Solcast integration not available - make our own API calls
         try:
             async with asyncio.timeout(60):  # Longer timeout for multiple API calls
                 # Fetch forecasts from first resource

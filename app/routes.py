@@ -9046,22 +9046,150 @@ def api_ev_status(api_user=None):
 @api_auth_required
 def api_ocpp_status(api_user=None):
     """Get OCPP server status and connected chargers."""
+    import socket
+    import subprocess
     from app.models import OCPPCharger
     from app.ocpp import get_ocpp_server
 
     user = api_user or current_user
+
+    # Check embedded server first
     server = get_ocpp_server()
+    embedded_running = server is not None and server._running
+
+    # Check standalone service by trying to connect to the port
+    standalone_running = False
+    ocpp_port = int(os.environ.get('OCPP_PORT', 9000))
+
+    if not embedded_running:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1)
+            result = sock.connect_ex(('127.0.0.1', ocpp_port))
+            standalone_running = (result == 0)
+            sock.close()
+        except Exception:
+            pass
+
+    server_running = embedded_running or standalone_running
+
+    # Check if service is enabled (auto-start on boot)
+    service_enabled = False
+    service_installed = False
+    try:
+        # Check if service file exists
+        result = subprocess.run(
+            ['systemctl', 'list-unit-files', 'powersync-ocpp.service'],
+            capture_output=True, text=True, timeout=5
+        )
+        service_installed = 'powersync-ocpp.service' in result.stdout
+
+        if service_installed:
+            result = subprocess.run(
+                ['systemctl', 'is-enabled', 'powersync-ocpp'],
+                capture_output=True, text=True, timeout=5
+            )
+            service_enabled = result.returncode == 0
+    except Exception:
+        pass
 
     charger_count = OCPPCharger.query.filter_by(user_id=user.id).count()
-    connected_chargers = server.get_connected_chargers() if server else []
+
+    # Get connected chargers from embedded server, or from database for standalone
+    if embedded_running and server:
+        connected_chargers = server.get_connected_chargers()
+    else:
+        # For standalone service, check database for connected chargers
+        connected_chargers = [c.charger_id for c in OCPPCharger.query.filter_by(
+            user_id=user.id, is_connected=True).all()]
 
     return jsonify({
         'success': True,
-        'server_running': server is not None and server._running,
-        'server_port': server.port if server else 9000,
+        'server_running': server_running,
+        'standalone_service': standalone_running and not embedded_running,
+        'service_installed': service_installed,
+        'service_enabled': service_enabled,
+        'server_port': server.port if server else ocpp_port,
         'charger_count': charger_count,
         'connected_chargers': connected_chargers,
     })
+
+
+@bp.route('/api/ocpp/service/<action>', methods=['POST'])
+@login_required
+def api_ocpp_service_control(action):
+    """
+    Control the OCPP systemd service.
+
+    Actions:
+    - start: Start the service
+    - stop: Stop the service
+    - restart: Restart the service
+    - enable: Enable auto-start on boot
+    - disable: Disable auto-start on boot
+    - install: Install the service file
+
+    Requires sudoers configuration:
+    pi ALL=(ALL) NOPASSWD: /bin/systemctl start powersync-ocpp
+    pi ALL=(ALL) NOPASSWD: /bin/systemctl stop powersync-ocpp
+    pi ALL=(ALL) NOPASSWD: /bin/systemctl restart powersync-ocpp
+    pi ALL=(ALL) NOPASSWD: /bin/systemctl enable powersync-ocpp
+    pi ALL=(ALL) NOPASSWD: /bin/systemctl disable powersync-ocpp
+    pi ALL=(ALL) NOPASSWD: /bin/systemctl daemon-reload
+    pi ALL=(ALL) NOPASSWD: /bin/cp /home/pi/power-sync/powersync-ocpp.service /etc/systemd/system/
+    """
+    import subprocess
+
+    valid_actions = ['start', 'stop', 'restart', 'enable', 'disable', 'install']
+    if action not in valid_actions:
+        return jsonify({'error': f'Invalid action. Must be one of: {valid_actions}'}), 400
+
+    try:
+        if action == 'install':
+            # Copy service file and reload daemon
+            result = subprocess.run(
+                ['sudo', 'cp', '/home/pi/power-sync/powersync-ocpp.service', '/etc/systemd/system/'],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode != 0:
+                return jsonify({'error': f'Failed to copy service file: {result.stderr}'}), 500
+
+            result = subprocess.run(
+                ['sudo', 'systemctl', 'daemon-reload'],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode != 0:
+                return jsonify({'error': f'Failed to reload daemon: {result.stderr}'}), 500
+
+            return jsonify({'success': True, 'message': 'Service installed successfully'})
+
+        else:
+            # Run systemctl command
+            result = subprocess.run(
+                ['sudo', 'systemctl', action, 'powersync-ocpp'],
+                capture_output=True, text=True, timeout=30
+            )
+
+            if result.returncode != 0:
+                error_msg = result.stderr.strip() or 'Command failed'
+                # Check if it's a permission issue
+                if 'password' in error_msg.lower() or 'sudo' in error_msg.lower():
+                    return jsonify({
+                        'error': 'Permission denied. Please configure sudoers (see setup instructions).',
+                        'setup_required': True
+                    }), 403
+                return jsonify({'error': error_msg}), 500
+
+            return jsonify({
+                'success': True,
+                'message': f'Service {action} successful'
+            })
+
+    except subprocess.TimeoutExpired:
+        return jsonify({'error': 'Command timed out'}), 504
+    except Exception as e:
+        logger.error(f"OCPP service control error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 
 @bp.route('/api/ocpp/chargers', methods=['GET'])

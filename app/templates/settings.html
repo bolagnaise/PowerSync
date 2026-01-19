@@ -956,6 +956,38 @@
             <p style="font-size: 0.85em; color: var(--muted-color);">Loading server status...</p>
         </div>
 
+        <div id="ocppServiceControls" style="margin-bottom: 1em; display: none;">
+            <div style="display: flex; gap: 0.5em; flex-wrap: wrap; align-items: center;">
+                <button type="button" id="ocppStartBtn" onclick="controlOCPPService('start')" class="outline" style="width: auto; padding: 0.4em 0.8em; font-size: 0.85em;">
+                    Start Server
+                </button>
+                <button type="button" id="ocppStopBtn" onclick="controlOCPPService('stop')" class="outline secondary" style="width: auto; padding: 0.4em 0.8em; font-size: 0.85em;">
+                    Stop Server
+                </button>
+                <button type="button" id="ocppRestartBtn" onclick="controlOCPPService('restart')" class="outline secondary" style="width: auto; padding: 0.4em 0.8em; font-size: 0.85em;">
+                    Restart
+                </button>
+                <label style="display: flex; align-items: center; gap: 0.5em; font-size: 0.85em; margin-left: 1em;">
+                    <input type="checkbox" id="ocppAutoStartToggle" onchange="toggleOCPPAutoStart(this.checked)" style="width: auto;">
+                    Start on Boot
+                </label>
+            </div>
+            <p id="ocpp-service-status" style="font-size: 0.8em; margin-top: 0.5em; display: none;"></p>
+        </div>
+
+        <div id="ocppInstallPrompt" style="margin-bottom: 1em; display: none;">
+            <div style="padding: 0.75em; background: rgba(255, 193, 7, 0.15); border-radius: 0.5em; border-left: 4px solid #fcc419;">
+                <p style="margin: 0 0 0.75em 0; font-size: 0.85em;">
+                    <strong>OCPP Service Not Installed</strong><br>
+                    <span style="color: var(--muted-color);">Install the service to control EV chargers.</span>
+                </p>
+                <button type="button" onclick="installOCPPService()" class="outline" style="width: auto; padding: 0.4em 0.8em; font-size: 0.85em;">
+                    Install OCPP Service
+                </button>
+                <p id="ocpp-install-status" style="font-size: 0.8em; margin-top: 0.5em; display: none;"></p>
+            </div>
+        </div>
+
         <div id="ocppChargersList">
             <p style="font-size: 0.85em; color: var(--muted-color);">Loading chargers...</p>
         </div>
@@ -1008,6 +1040,34 @@
                     <li>Restart your charger - it should connect automatically</li>
                     <li>Create automations to control charging based on electricity prices, solar production, etc.</li>
                 </ol>
+            </div>
+        </details>
+
+        <details style="margin-top: 1em;">
+            <summary style="font-size: 0.9em; cursor: pointer;">Manual Setup (if buttons don't work)</summary>
+            <div style="padding: 1em; background: var(--card-sectionning-background-color); border-radius: 0.5em; margin-top: 0.5em; font-size: 0.85em;">
+                <p style="margin: 0 0 1em 0;">If the buttons above show permission errors, run these commands once to enable GUI control:</p>
+
+                <p style="margin: 0.5em 0;"><strong>1. Install dependencies:</strong></p>
+                <pre style="background: rgba(0,0,0,0.2); padding: 0.5em; border-radius: 4px; overflow-x: auto; margin: 0.5em 0;"><code>pip install websockets ocpp</code></pre>
+
+                <p style="margin: 0.5em 0;"><strong>2. Enable GUI control (run once):</strong></p>
+                <pre style="background: rgba(0,0,0,0.2); padding: 0.5em; border-radius: 4px; overflow-x: auto; margin: 0.5em 0;"><code>sudo cp /home/pi/power-sync/powersync.sudoers /etc/sudoers.d/powersync
+sudo chmod 440 /etc/sudoers.d/powersync</code></pre>
+
+                <p style="margin: 0.5em 0;"><strong>3. Install and start the service:</strong></p>
+                <pre style="background: rgba(0,0,0,0.2); padding: 0.5em; border-radius: 4px; overflow-x: auto; margin: 0.5em 0;"><code>sudo cp /home/pi/power-sync/powersync-ocpp.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable powersync-ocpp
+sudo systemctl start powersync-ocpp</code></pre>
+
+                <p style="margin: 0.5em 0;"><strong>Check logs:</strong></p>
+                <pre style="background: rgba(0,0,0,0.2); padding: 0.5em; border-radius: 4px; overflow-x: auto; margin: 0.5em 0;"><code>journalctl -u powersync-ocpp -f</code></pre>
+
+                <p style="margin: 1em 0 0.5em 0;"><strong>Or run manually for testing:</strong></p>
+                <pre style="background: rgba(0,0,0,0.2); padding: 0.5em; border-radius: 4px; overflow-x: auto; margin: 0.5em 0;"><code>cd /home/pi/power-sync
+source venv/bin/activate
+python ocpp_server.py --port 9000</code></pre>
             </div>
         </details>
     </article>
@@ -1121,29 +1181,124 @@
         // OCPP Functions
         async function loadOCPPStatus() {
             const container = document.getElementById('ocppServerStatus');
+            const controlsDiv = document.getElementById('ocppServiceControls');
+            const installPrompt = document.getElementById('ocppInstallPrompt');
+
             try {
                 const response = await fetch('/api/ocpp/status');
                 const data = await response.json();
 
-                if (data.running) {
+                // Show/hide install prompt and controls based on service installation
+                if (data.service_installed) {
+                    installPrompt.style.display = 'none';
+                    controlsDiv.style.display = 'block';
+
+                    // Update auto-start toggle
+                    document.getElementById('ocppAutoStartToggle').checked = data.service_enabled;
+
+                    // Update button states based on running status
+                    document.getElementById('ocppStartBtn').disabled = data.server_running;
+                    document.getElementById('ocppStopBtn').disabled = !data.server_running;
+                    document.getElementById('ocppRestartBtn').disabled = !data.server_running;
+                } else {
+                    installPrompt.style.display = 'block';
+                    controlsDiv.style.display = 'none';
+                }
+
+                if (data.server_running) {
+                    const connectedCount = data.connected_chargers?.length || 0;
+                    const serviceType = data.standalone_service ? 'Standalone Service' : 'Embedded';
                     container.innerHTML = `
                         <div style="padding: 0.75em; background: rgba(81, 207, 102, 0.15); border-radius: 0.5em; border-left: 4px solid #51cf66;">
                             <p style="margin: 0; font-size: 0.85em;">
-                                <strong>OCPP Server Running</strong><br>
-                                <span style="color: var(--muted-color);">Port: ${data.port} | Connected: ${data.connected_chargers?.length || 0} charger(s)</span>
+                                <strong>OCPP Server Running</strong> <span style="font-size: 0.75em; opacity: 0.7;">(${serviceType})</span><br>
+                                <span style="color: var(--muted-color);">Port: ${data.server_port} | Connected: ${connectedCount} charger(s) | Registered: ${data.charger_count || 0}</span>
                             </p>
                         </div>`;
                 } else {
                     container.innerHTML = `
-                        <div style="padding: 0.75em; background: rgba(255, 107, 107, 0.15); border-radius: 0.5em; border-left: 4px solid #ff6b6b;">
+                        <div style="padding: 0.75em; background: rgba(128, 128, 128, 0.15); border-radius: 0.5em; border-left: 4px solid #888;">
                             <p style="margin: 0; font-size: 0.85em;">
-                                <strong>OCPP Server Not Running</strong><br>
-                                <span style="color: var(--muted-color);">Install websockets and ocpp packages: pip install websockets ocpp</span>
+                                <strong>OCPP Server Stopped</strong><br>
+                                <span style="color: var(--muted-color);">Click "Start Server" to begin accepting charger connections on port ${data.server_port}</span>
                             </p>
                         </div>`;
                 }
             } catch (error) {
                 container.innerHTML = `<p style="color: #ff6b6b; font-size: 0.85em;">Failed to get server status</p>`;
+            }
+        }
+
+        async function controlOCPPService(action) {
+            const status = document.getElementById('ocpp-service-status');
+            status.style.display = 'block';
+            status.innerHTML = `<span style="color: #fcc419;">${action === 'start' ? 'Starting' : action === 'stop' ? 'Stopping' : 'Restarting'} server...</span>`;
+
+            try {
+                const response = await fetch(`/api/ocpp/service/${action}`, { method: 'POST' });
+                const data = await response.json();
+
+                if (data.success) {
+                    status.innerHTML = `<span style="color: #51cf66;">${data.message}</span>`;
+                    setTimeout(() => { status.style.display = 'none'; }, 3000);
+                    setTimeout(loadOCPPStatus, 1500);
+                } else if (data.setup_required) {
+                    status.innerHTML = `<span style="color: #ff6b6b;">${data.error}</span><br><small>Run: <code>sudo visudo -f /etc/sudoers.d/powersync-ocpp</code></small>`;
+                } else {
+                    status.innerHTML = `<span style="color: #ff6b6b;">${data.error}</span>`;
+                }
+            } catch (error) {
+                status.innerHTML = `<span style="color: #ff6b6b;">Failed: ${error.message}</span>`;
+            }
+        }
+
+        async function toggleOCPPAutoStart(enable) {
+            const status = document.getElementById('ocpp-service-status');
+            const action = enable ? 'enable' : 'disable';
+            status.style.display = 'block';
+            status.innerHTML = `<span style="color: #fcc419;">${enable ? 'Enabling' : 'Disabling'} auto-start...</span>`;
+
+            try {
+                const response = await fetch(`/api/ocpp/service/${action}`, { method: 'POST' });
+                const data = await response.json();
+
+                if (data.success) {
+                    status.innerHTML = `<span style="color: #51cf66;">Auto-start ${enable ? 'enabled' : 'disabled'}</span>`;
+                    setTimeout(() => { status.style.display = 'none'; }, 3000);
+                } else if (data.setup_required) {
+                    status.innerHTML = `<span style="color: #ff6b6b;">${data.error}</span>`;
+                    document.getElementById('ocppAutoStartToggle').checked = !enable; // Revert toggle
+                } else {
+                    status.innerHTML = `<span style="color: #ff6b6b;">${data.error}</span>`;
+                    document.getElementById('ocppAutoStartToggle').checked = !enable; // Revert toggle
+                }
+            } catch (error) {
+                status.innerHTML = `<span style="color: #ff6b6b;">Failed: ${error.message}</span>`;
+                document.getElementById('ocppAutoStartToggle').checked = !enable; // Revert toggle
+            }
+        }
+
+        async function installOCPPService() {
+            const status = document.getElementById('ocpp-install-status');
+            status.style.display = 'block';
+            status.innerHTML = '<span style="color: #fcc419;">Installing service...</span>';
+
+            try {
+                const response = await fetch('/api/ocpp/service/install', { method: 'POST' });
+                const data = await response.json();
+
+                if (data.success) {
+                    status.innerHTML = `<span style="color: #51cf66;">${data.message}</span>`;
+                    setTimeout(() => {
+                        loadOCPPStatus();
+                    }, 1000);
+                } else if (data.setup_required) {
+                    status.innerHTML = `<span style="color: #ff6b6b;">${data.error}</span><br><small style="color: var(--muted-color);">See "Manual Setup" below for sudoers configuration.</small>`;
+                } else {
+                    status.innerHTML = `<span style="color: #ff6b6b;">${data.error}</span>`;
+                }
+            } catch (error) {
+                status.innerHTML = `<span style="color: #ff6b6b;">Failed: ${error.message}</span>`;
             }
         }
 

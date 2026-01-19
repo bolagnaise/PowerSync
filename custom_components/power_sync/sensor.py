@@ -317,7 +317,9 @@ SOLCAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         attr_fn=lambda data: {
             "peak_kw": data.get("today_peak_kw") if data else None,
             "remaining_kwh": data.get("today_remaining_kwh") if data else None,
+            "hourly_forecast": data.get("hourly_forecast") if data else None,  # For chart overlay
             "last_update": data.get("last_update").isoformat() if data and data.get("last_update") else None,
+            "source": data.get("source", "api") if data else None,  # "solcast_integration" or "api"
         } if data else {},
     ),
     PowerSyncSensorEntityDescription(

@@ -1,0 +1,41 @@
+[Unit]
+Description=Power Sync OCPP 1.6J Central System Server
+Documentation=https://github.com/your-repo/power-sync
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/power-sync
+
+# Environment variables
+Environment=OCPP_HOST=0.0.0.0
+Environment=OCPP_PORT=9000
+Environment=DATABASE_PATH=/home/pi/power-sync/instance/app.db
+Environment=FLASK_APP=run.py
+
+# Run database migrations before starting OCPP server
+ExecStartPre=/home/pi/power-sync/venv/bin/flask db upgrade
+
+# Use the same Python environment as Flask
+# --skip-migrate since ExecStartPre already ran migrations
+ExecStart=/home/pi/power-sync/venv/bin/python /home/pi/power-sync/ocpp_server.py --skip-migrate
+
+# Restart configuration
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=powersync-ocpp
+
+# Security hardening (optional but recommended)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/pi/power-sync/instance
+
+[Install]
+WantedBy=multi-user.target
