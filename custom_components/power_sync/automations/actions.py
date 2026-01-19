@@ -82,7 +82,11 @@ async def _get_tesla_ev_entity(
     tesla_devices = []
     for device in device_registry.devices.values():
         for identifier in device.identifiers:
-            domain, identifier_value = identifier
+            # Use index access instead of tuple unpacking (identifiers can have >2 values)
+            if len(identifier) < 2:
+                continue
+            domain = identifier[0]
+            identifier_value = identifier[1]
             if domain in TESLA_EV_INTEGRATIONS:
                 # Check if it's a vehicle (VIN is 17 chars, non-numeric)
                 if len(str(identifier_value)) == 17 and not str(identifier_value).isdigit():
