@@ -2913,7 +2913,10 @@ class EVVehicleCommandView(HomeAssistantView):
                 except Exception as e:
                     _LOGGER.error(f"Fleet API start charging failed: {e}")
                     return False
+            else:
+                _LOGGER.error("Could not find charge_start button entity for Tesla vehicle")
 
+        _LOGGER.warning(f"Start charging failed - no suitable entity found (provider: {ev_provider})")
         return False
 
     async def _stop_charging(self, vehicle_vin: str | None = None) -> bool:
