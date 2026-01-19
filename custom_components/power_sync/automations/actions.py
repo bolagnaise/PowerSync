@@ -699,25 +699,13 @@ async def _action_send_notification(
     hass: HomeAssistant,
     params: Dict[str, Any]
 ) -> bool:
-    """Send notification via persistent notification and Expo Push."""
+    """Send push notification via Expo Push API to the PowerSync mobile app."""
     message = params.get("message", "Automation triggered")
     title = params.get("title", "PowerSync")
 
     try:
-        # Send persistent notification (shows in HA UI)
-        await hass.services.async_call(
-            "persistent_notification",
-            "create",
-            {
-                "title": title,
-                "message": message,
-            },
-            blocking=True,
-        )
-
         # Send push notification to PowerSync app via Expo Push API
         await _send_expo_push(hass, title, message)
-
         return True
     except Exception as e:
         _LOGGER.error(f"Failed to send notification: {e}")

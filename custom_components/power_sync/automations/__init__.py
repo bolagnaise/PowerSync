@@ -107,6 +107,10 @@ class AutomationStore:
                     auto["notification_only"] = automation_data["notification_only"]
                 if "trigger" in automation_data:
                     auto["trigger"] = automation_data["trigger"]
+                    # Reset trigger state when trigger config changes
+                    # This allows re-evaluation with fresh state (e.g., after changing time window)
+                    auto["last_evaluated_value"] = None
+                    _LOGGER.debug(f"Reset trigger state for automation {automation_id} due to trigger config change")
                 if "actions" in automation_data:
                     _LOGGER.debug(f"Updating automation {automation_id} with {len(automation_data['actions'])} action(s): {automation_data['actions']}")
                     auto["actions"] = automation_data["actions"]
