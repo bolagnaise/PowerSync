@@ -2923,8 +2923,80 @@ class EVVehicleCommandView(HomeAssistantView):
         # Wait for vehicle to wake up (up to 30 seconds)
         return await self._wait_for_vehicle_awake(vehicle_vin, timeout=30)
 
-    async def _start_charging(self, vehicle_vin: str | None = None) -> bool:
-        """Start charging."""
+    async def _is_vehicle_at_home(self, vehicle_vin: str | None = None) -> bool:
+        """Check if vehicle is at home using device_tracker."""
+        # Check device_tracker.*_location
+        location_entity = await self._get_tesla_ev_entity(r"device_tracker\..*_location$", vehicle_vin)
+        if location_entity:
+            state = self._hass.states.get(location_entity)
+            if state:
+                is_home = state.state.lower() == "home"
+                _LOGGER.debug(f"Vehicle location from {location_entity}: {state.state} (at_home={is_home})")
+                return is_home
+
+        # Fallback: check device_tracker without _location suffix
+        location_entity = await self._get_tesla_ev_entity(r"device_tracker\.[^_]+$", vehicle_vin)
+        if location_entity:
+            state = self._hass.states.get(location_entity)
+            if state:
+                is_home = state.state.lower() == "home"
+                _LOGGER.debug(f"Vehicle location from {location_entity}: {state.state} (at_home={is_home})")
+                return is_home
+
+        _LOGGER.warning("Could not determine vehicle location - no device_tracker found")
+        return True  # Default to True to not block commands if we can't check
+
+    async def _is_vehicle_plugged_in(self, vehicle_vin: str | None = None) -> bool:
+        """Check if vehicle is plugged in."""
+        # Check binary_sensor.*_charger (Tesla Fleet)
+        charger_entity = await self._get_tesla_ev_entity(r"binary_sensor\..*_charger$", vehicle_vin)
+        if charger_entity:
+            state = self._hass.states.get(charger_entity)
+            if state:
+                is_plugged = state.state.lower() == "on"
+                _LOGGER.debug(f"Vehicle plugged in from {charger_entity}: {state.state} (plugged={is_plugged})")
+                return is_plugged
+
+        # Check binary_sensor.*_charge_cable (Teslemetry)
+        cable_entity = await self._get_tesla_ev_entity(r"binary_sensor\..*_charge_cable$", vehicle_vin)
+        if cable_entity:
+            state = self._hass.states.get(cable_entity)
+            if state:
+                is_plugged = state.state.lower() == "on"
+                _LOGGER.debug(f"Vehicle plugged in from {cable_entity}: {state.state} (plugged={is_plugged})")
+                return is_plugged
+
+        _LOGGER.warning("Could not determine if vehicle is plugged in")
+        return False
+
+    async def _get_vehicle_charging_state(self, vehicle_vin: str | None = None) -> str:
+        """Get current charging state."""
+        charging_entity = await self._get_tesla_ev_entity(r"sensor\..*_charging_state$", vehicle_vin)
+        if charging_entity:
+            state = self._hass.states.get(charging_entity)
+            if state and state.state not in ("unavailable", "unknown"):
+                return state.state.lower()
+        return ""
+
+    async def _start_charging(self, vehicle_vin: str | None = None) -> tuple[bool, str]:
+        """Start charging. Returns (success, message)."""
+        # Check preconditions
+        if not await self._is_vehicle_at_home(vehicle_vin):
+            msg = "Vehicle is not at home"
+            _LOGGER.warning(msg)
+            return False, msg
+
+        if not await self._is_vehicle_plugged_in(vehicle_vin):
+            msg = "Vehicle is not plugged in"
+            _LOGGER.warning(msg)
+            return False, msg
+
+        charging_state = await self._get_vehicle_charging_state(vehicle_vin)
+        if charging_state == "charging":
+            msg = "Vehicle is already charging"
+            _LOGGER.info(msg)
+            return True, msg  # Return success since desired state is achieved
+
         config = self._get_powersync_config()
         ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
         ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
@@ -2940,7 +3012,7 @@ class EVVehicleCommandView(HomeAssistantView):
                         blocking=True,
                     )
                     _LOGGER.info(f"Started charging via BLE: {charger_entity}")
-                    return True
+                    return True, "Charging started"
                 except Exception as e:
                     _LOGGER.warning(f"BLE start charging failed: {e}")
 
@@ -2957,18 +3029,26 @@ class EVVehicleCommandView(HomeAssistantView):
                         blocking=True,
                     )
                     _LOGGER.info(f"Started charging via Fleet API: {charge_switch_entity}")
-                    return True
+                    return True, "Charging started"
                 except Exception as e:
                     _LOGGER.error(f"Fleet API start charging failed: {e}")
-                    return False
+                    return False, f"Failed to start charging: {e}"
             else:
                 _LOGGER.error("Could not find charge switch entity for Tesla vehicle")
 
-        _LOGGER.warning(f"Start charging failed - no suitable entity found (provider: {ev_provider})")
-        return False
+        msg = f"Start charging failed - no suitable entity found (provider: {ev_provider})"
+        _LOGGER.warning(msg)
+        return False, msg
 
-    async def _stop_charging(self, vehicle_vin: str | None = None) -> bool:
-        """Stop charging."""
+    async def _stop_charging(self, vehicle_vin: str | None = None) -> tuple[bool, str]:
+        """Stop charging. Returns (success, message)."""
+        # Check if actually charging
+        charging_state = await self._get_vehicle_charging_state(vehicle_vin)
+        if charging_state and charging_state != "charging":
+            msg = f"Vehicle is not charging (state: {charging_state})"
+            _LOGGER.info(msg)
+            return True, msg  # Return success since desired state is achieved
+
         config = self._get_powersync_config()
         ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
         ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
@@ -2984,7 +3064,7 @@ class EVVehicleCommandView(HomeAssistantView):
                         blocking=True,
                     )
                     _LOGGER.info(f"Stopped charging via BLE: {charger_entity}")
-                    return True
+                    return True, "Charging stopped"
                 except Exception as e:
                     _LOGGER.warning(f"BLE stop charging failed: {e}")
 
@@ -3001,15 +3081,15 @@ class EVVehicleCommandView(HomeAssistantView):
                         blocking=True,
                     )
                     _LOGGER.info(f"Stopped charging via Fleet API: {charge_switch_entity}")
-                    return True
+                    return True, "Charging stopped"
                 except Exception as e:
                     _LOGGER.error(f"Fleet API stop charging failed: {e}")
-                    return False
+                    return False, f"Failed to stop charging: {e}"
 
-        return False
+        return False, "No suitable entity found to stop charging"
 
-    async def _set_charge_limit(self, percent: int, vehicle_vin: str | None = None) -> bool:
-        """Set charge limit percentage."""
+    async def _set_charge_limit(self, percent: int, vehicle_vin: str | None = None) -> tuple[bool, str]:
+        """Set charge limit percentage. Returns (success, message)."""
         # Clamp to valid range (50-100%)
         percent = max(50, min(100, int(percent)))
 
@@ -3028,7 +3108,7 @@ class EVVehicleCommandView(HomeAssistantView):
                         blocking=True,
                     )
                     _LOGGER.info(f"Set charge limit to {percent}% via BLE: {limit_entity}")
-                    return True
+                    return True, f"Charge limit set to {percent}%"
                 except Exception as e:
                     _LOGGER.warning(f"BLE set charge limit failed: {e}")
 
@@ -3044,17 +3124,23 @@ class EVVehicleCommandView(HomeAssistantView):
                         blocking=True,
                     )
                     _LOGGER.info(f"Set charge limit to {percent}% via Fleet API: {limit_entity}")
-                    return True
+                    return True, f"Charge limit set to {percent}%"
                 except Exception as e:
                     _LOGGER.error(f"Fleet API set charge limit failed: {e}")
-                    return False
+                    return False, f"Failed to set charge limit: {e}"
 
-        return False
+        return False, "No suitable entity found to set charge limit"
 
-    async def _set_charging_amps(self, amps: int, vehicle_vin: str | None = None) -> bool:
-        """Set charging amperage."""
+    async def _set_charging_amps(self, amps: int, vehicle_vin: str | None = None) -> tuple[bool, str]:
+        """Set charging amperage. Returns (success, message)."""
         # Clamp to valid range (1-48A for most, up to 80A for some)
         amps = max(1, min(80, int(amps)))
+
+        # Check if plugged in - can only set amps when connected
+        if not await self._is_vehicle_plugged_in(vehicle_vin):
+            msg = "Vehicle is not plugged in - cannot set charging amps"
+            _LOGGER.warning(msg)
+            return False, msg
 
         config = self._get_powersync_config()
         ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
@@ -3072,7 +3158,7 @@ class EVVehicleCommandView(HomeAssistantView):
                         blocking=True,
                     )
                     _LOGGER.info(f"Set charging amps to {ble_amps}A via BLE: {amps_entity}")
-                    return True
+                    return True, f"Charging amps set to {ble_amps}A"
                 except Exception as e:
                     _LOGGER.warning(f"BLE set charging amps failed: {e}")
 
@@ -3089,12 +3175,12 @@ class EVVehicleCommandView(HomeAssistantView):
                         blocking=True,
                     )
                     _LOGGER.info(f"Set charging amps to {amps}A via Fleet API: {amps_entity}")
-                    return True
+                    return True, f"Charging amps set to {amps}A"
                 except Exception as e:
                     _LOGGER.error(f"Fleet API set charging amps failed: {e}")
-                    return False
+                    return False, f"Failed to set charging amps: {e}"
 
-        return False
+        return False, "No suitable entity found to set charging amps"
 
     async def post(self, request: web.Request, vehicle_id: str) -> web.Response:
         """Handle POST request to send vehicle command."""
@@ -3121,15 +3207,13 @@ class EVVehicleCommandView(HomeAssistantView):
 
             if command == "wake_up":
                 success = await self._wake_vehicle(vehicle_vin)
-                message = "Wake command sent" if success else "Failed to wake vehicle"
+                message = "Vehicle is awake" if success else "Failed to wake vehicle"
 
             elif command == "start_charging":
-                success = await self._start_charging(vehicle_vin)
-                message = "Charging started" if success else "Failed to start charging"
+                success, message = await self._start_charging(vehicle_vin)
 
             elif command == "stop_charging":
-                success = await self._stop_charging(vehicle_vin)
-                message = "Charging stopped" if success else "Failed to stop charging"
+                success, message = await self._stop_charging(vehicle_vin)
 
             elif command == "set_charge_limit":
                 percent = data.get("value") or data.get("percent") or data.get("limit")
@@ -3138,8 +3222,7 @@ class EVVehicleCommandView(HomeAssistantView):
                         "success": False,
                         "error": "Missing 'value' parameter for set_charge_limit (50-100)"
                     }, status=400)
-                success = await self._set_charge_limit(int(percent), vehicle_vin)
-                message = f"Charge limit set to {percent}%" if success else "Failed to set charge limit"
+                success, message = await self._set_charge_limit(int(percent), vehicle_vin)
 
             elif command == "set_charging_amps":
                 amps = data.get("value") or data.get("amps")
@@ -3148,8 +3231,7 @@ class EVVehicleCommandView(HomeAssistantView):
                         "success": False,
                         "error": "Missing 'value' parameter for set_charging_amps (1-48)"
                     }, status=400)
-                success = await self._set_charging_amps(int(amps), vehicle_vin)
-                message = f"Charging amps set to {amps}A" if success else "Failed to set charging amps"
+                success, message = await self._set_charging_amps(int(amps), vehicle_vin)
 
             if success:
                 return web.json_response({
