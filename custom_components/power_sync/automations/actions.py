@@ -1074,8 +1074,8 @@ async def _action_set_ev_charge_limit(
     ble_prefix = ev_config["ble_prefix"]
     vehicle_vin = params.get("vehicle_vin")
 
-    # Accept both "percent" and "limit" for flexibility
-    percent = params.get("percent") or params.get("limit")
+    # Accept multiple parameter names for flexibility
+    percent = params.get("percent") or params.get("limit") or params.get("charge_limit_percent")
     if percent is None:
         _LOGGER.error("set_ev_charge_limit: missing percent parameter")
         return False
