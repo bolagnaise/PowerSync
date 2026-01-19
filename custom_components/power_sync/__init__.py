@@ -2486,46 +2486,73 @@ class EVVehiclesView(HomeAssistantView):
                     charger_power = None
 
                     # Find entities for this device
+                    device_entities = []
                     for entity in entity_registry.entities.values():
                         if entity.device_id != device.id:
                             continue
+                        device_entities.append(entity.entity_id)
 
                         state = self._hass.states.get(entity.entity_id)
                         if not state:
                             continue
 
-                        # Battery level sensor
-                        if "battery_level" in entity.entity_id or "battery" in entity.entity_id:
+                        entity_id_lower = entity.entity_id.lower()
+
+                        # Battery level sensor - check multiple patterns
+                        # Tesla Fleet: sensor.xxx_battery, Teslemetry: sensor.xxx_battery_level
+                        if ("battery" in entity_id_lower and
+                            "sensor." in entity_id_lower and
+                            "range" not in entity_id_lower):
                             if state.state not in ("unknown", "unavailable"):
                                 try:
-                                    battery_level = int(float(state.state))
+                                    val = float(state.state)
+                                    # Only accept if it looks like a percentage (0-100)
+                                    if 0 <= val <= 100 and battery_level is None:
+                                        battery_level = int(val)
+                                        _LOGGER.debug(f"EV: Found battery level {battery_level}% from {entity.entity_id}")
                                 except (ValueError, TypeError):
                                     pass
 
-                        # Charging state sensor
-                        if "charging" in entity.entity_id and "sensor" in entity.entity_id:
-                            charging_state = state.state
+                        # Charging state sensor - multiple patterns
+                        # Tesla Fleet: sensor.xxx_charging, Teslemetry: sensor.xxx_charging_state
+                        if (("charging" in entity_id_lower or "charge_state" in entity_id_lower) and
+                            "sensor." in entity_id_lower and
+                            "limit" not in entity_id_lower and
+                            "rate" not in entity_id_lower and
+                            "power" not in entity_id_lower):
+                            if state.state not in ("unknown", "unavailable") and charging_state is None:
+                                charging_state = state.state
+                                _LOGGER.debug(f"EV: Found charging state '{charging_state}' from {entity.entity_id}")
 
                         # Charge limit
-                        if "charge_limit" in entity.entity_id:
+                        if "charge_limit" in entity_id_lower or "charge_limit_soc" in entity_id_lower:
                             if state.state not in ("unknown", "unavailable"):
                                 try:
                                     charge_limit = int(float(state.state))
+                                    _LOGGER.debug(f"EV: Found charge limit {charge_limit}% from {entity.entity_id}")
                                 except (ValueError, TypeError):
                                     pass
 
-                        # Plugged in binary sensor
-                        if "plugged_in" in entity.entity_id or "charger" in entity.entity_id:
-                            if state.state == "on":
+                        # Plugged in - binary sensor or cable connected
+                        if ("plugged" in entity_id_lower or
+                            "cable" in entity_id_lower or
+                            "charger_connected" in entity_id_lower):
+                            if state.state in ("on", "true", "connected"):
                                 is_plugged_in = True
+                                _LOGGER.debug(f"EV: Found plugged in from {entity.entity_id}")
 
                         # Charger power
-                        if "charger_power" in entity.entity_id or "charge_rate" in entity.entity_id:
+                        if ("charger_power" in entity_id_lower or
+                            "charge_rate" in entity_id_lower or
+                            "charging_power" in entity_id_lower):
                             if state.state not in ("unknown", "unavailable"):
                                 try:
                                     charger_power = float(state.state)
+                                    _LOGGER.debug(f"EV: Found charger power {charger_power} from {entity.entity_id}")
                                 except (ValueError, TypeError):
                                     pass
+
+                    _LOGGER.debug(f"EV: Device {device.name} has {len(device_entities)} entities: {device_entities[:10]}...")
 
                     vehicles.append({
                         "id": vehicle_id,
