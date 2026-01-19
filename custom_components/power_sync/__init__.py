@@ -2530,7 +2530,11 @@ class EVVehiclesView(HomeAssistantView):
                             "rate" not in entity_id_lower and
                             "power" not in entity_id_lower):
                             _LOGGER.debug(f"EV: Checking charging entity {entity.entity_id} state={state.state}")
-                            if state.state not in ("unknown", "unavailable") and charging_state is None:
+                            if state.state in ("unknown", "unavailable") and charging_state is None:
+                                # Car is asleep - show as Disconnected/Asleep
+                                charging_state = "Asleep"
+                                _LOGGER.debug(f"EV: Car appears asleep (state={state.state})")
+                            elif state.state not in ("unknown", "unavailable") and charging_state is None:
                                 charging_state = state.state
                                 _LOGGER.debug(f"EV: Found charging state '{charging_state}' from {entity.entity_id}")
 
