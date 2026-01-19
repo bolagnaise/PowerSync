@@ -1961,6 +1961,171 @@ class ConfigView(HomeAssistantView):
             )
 
 
+class TariffPriceView(HomeAssistantView):
+    """HTTP view to get current electricity prices from Tesla tariff schedule.
+
+    This endpoint is designed for Globird users who don't have an API like Amber.
+    It calculates the current import/export prices based on the Tesla tariff
+    that was manually configured in the Tesla app.
+    """
+
+    url = "/api/power_sync/tariff_price"
+    name = "api:power_sync:tariff_price"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request for current tariff-based prices."""
+        _LOGGER.info("💰 Tariff price HTTP request")
+
+        # Find the power_sync entry
+        entry = None
+        entry_id = None
+        for config_entry in self._hass.config_entries.async_entries(DOMAIN):
+            entry = config_entry
+            entry_id = config_entry.entry_id
+            break
+
+        if not entry:
+            return web.json_response(
+                {"success": False, "error": "PowerSync not configured"},
+                status=503
+            )
+
+        try:
+            # Get stored tariff schedule
+            tariff_schedule = self._hass.data.get(DOMAIN, {}).get(entry_id, {}).get("tariff_schedule")
+
+            # If no stored tariff, try to fetch from Tesla API
+            if not tariff_schedule:
+                _LOGGER.info("No stored tariff schedule, fetching from Tesla API")
+                tariff_schedule = await self._fetch_tesla_tariff(entry)
+
+            if not tariff_schedule:
+                return web.json_response({
+                    "success": False,
+                    "error": "No tariff schedule available. Configure your rate plan in the Tesla app."
+                }, status=404)
+
+            # Get current time period
+            from datetime import datetime
+            now = datetime.now()
+            current_minute = 0 if now.minute < 30 else 30
+            current_period = f"PERIOD_{now.hour:02d}_{current_minute:02d}"
+
+            # Get prices for current period
+            buy_prices = tariff_schedule.get("buy_prices", {})
+            sell_prices = tariff_schedule.get("sell_prices", {})
+
+            buy_price_dollars = buy_prices.get(current_period, 0)
+            sell_price_dollars = sell_prices.get(current_period, 0)
+
+            # Convert to cents/kWh for mobile app (consistent with Amber format)
+            buy_price_cents = buy_price_dollars * 100
+            sell_price_cents = sell_price_dollars * 100
+
+            result = {
+                "success": True,
+                "import": {
+                    "perKwh": buy_price_cents,
+                    "channelType": "general",
+                    "type": "TariffInterval",
+                    "duration": 30,
+                    "spikeStatus": None,
+                    "source": "tesla_tariff",
+                },
+                "feedIn": {
+                    # Amber format: feedIn is negative when you get paid
+                    # We negate to match Amber convention
+                    "perKwh": -sell_price_cents,
+                    "channelType": "feedIn",
+                    "type": "TariffInterval",
+                    "duration": 30,
+                    "spikeStatus": None,
+                    "source": "tesla_tariff",
+                },
+                "current_period": current_period,
+                "last_sync": tariff_schedule.get("last_sync"),
+            }
+
+            _LOGGER.info(
+                f"✅ Tariff price response: period={current_period}, buy={buy_price_cents:.1f}c, sell={sell_price_cents:.1f}c"
+            )
+            return web.json_response(result)
+
+        except Exception as e:
+            _LOGGER.error(f"Error fetching tariff price: {e}", exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500
+            )
+
+    async def _fetch_tesla_tariff(self, entry: ConfigEntry) -> dict | None:
+        """Fetch tariff from Tesla API and extract prices."""
+        try:
+            current_token, provider = get_tesla_api_token(self._hass, entry)
+            site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+
+            if not site_id or not current_token:
+                _LOGGER.warning("Missing Tesla site ID or token")
+                return None
+
+            session = async_get_clientsession(self._hass)
+            headers = {
+                "Authorization": f"Bearer {current_token}",
+                "Content-Type": "application/json",
+            }
+            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+            # Fetch tariff from Tesla
+            async with session.get(
+                f"{api_base}/api/1/energy_sites/{site_id}/tariff_rate",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status != 200:
+                    text = await response.text()
+                    _LOGGER.error(f"Failed to get tariff: {response.status} - {text}")
+                    return None
+
+                data = await response.json()
+                tariff = data.get("response", {})
+
+            if not tariff:
+                _LOGGER.warning("No tariff data in Tesla response")
+                return None
+
+            # Extract buy and sell prices from tariff structure
+            # Tesla tariff structure: energy_charges.Summer.rates.PERIOD_XX_XX
+            buy_prices = tariff.get("energy_charges", {}).get("Summer", {}).get("rates", {})
+            sell_prices = tariff.get("sell_tariff", {}).get("energy_charges", {}).get("Summer", {}).get("rates", {})
+
+            if not buy_prices:
+                _LOGGER.warning("No buy prices in Tesla tariff")
+                return None
+
+            from datetime import datetime as dt
+            tariff_schedule = {
+                "buy_prices": buy_prices,
+                "sell_prices": sell_prices or {},
+                "last_sync": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+
+            # Store for future use
+            if DOMAIN in self._hass.data and entry.entry_id in self._hass.data[DOMAIN]:
+                self._hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = tariff_schedule
+
+            _LOGGER.info(f"Fetched Tesla tariff: {len(buy_prices)} periods")
+            return tariff_schedule
+
+        except Exception as e:
+            _LOGGER.error(f"Error fetching Tesla tariff: {e}", exc_info=True)
+            return None
+
+
 class AutomationsView(HomeAssistantView):
     """HTTP view to manage automations for mobile app."""
 
@@ -7173,6 +7338,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register HTTP endpoint for Config (for mobile app auto-detection)
     hass.http.register_view(ConfigView(hass))
     _LOGGER.info("📱 Config HTTP endpoint registered at /api/power_sync/config")
+
+    # Register HTTP endpoint for Tariff Price (for Globird users without API)
+    hass.http.register_view(TariffPriceView(hass))
+    _LOGGER.info("💰 Tariff price HTTP endpoint registered at /api/power_sync/tariff_price")
 
     # Register HTTP endpoints for Automations (for mobile app)
     hass.http.register_view(AutomationsView(hass))
