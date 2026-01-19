@@ -55,23 +55,35 @@ def evaluate_trigger(
     in_time_window = _is_within_time_window(trigger, current_state)
     trigger_type = trigger.get("trigger_type")
 
+    # Sentinel value to mark "was outside time window"
+    OUTSIDE_WINDOW_SENTINEL = -999999.0
+
     if not in_time_window:
-        # For EV triggers, update state to track that we're outside the window
-        # This allows detecting when we enter the window while condition is met
+        # Mark that we're outside the time window
+        # For EV triggers, preserve state bits but clear window flag
         if trigger_type == "ev" and last_evaluated_value is not None:
-            # Clear bit 2 (was_in_window) while preserving EV state bits
             new_value = float(int(last_evaluated_value) & 3)  # Keep bits 0-1, clear bit 2
             store.update_trigger_state(automation_id, new_value)
+        else:
+            # For other triggers, use sentinel value
+            store.update_trigger_state(automation_id, OUTSIDE_WINDOW_SENTINEL)
         return TriggerResult(triggered=False, reason="Outside time window")
+
+    # Check if we just entered the time window (for non-EV triggers)
+    # EV triggers handle this internally with bit 2
+    just_entered_window = (
+        last_evaluated_value == OUTSIDE_WINDOW_SENTINEL
+        if trigger_type != "ev" else False
+    )
 
     if trigger_type == "time":
         return _evaluate_time_trigger(trigger, current_state, store, automation_id)
     elif trigger_type == "battery":
-        return _evaluate_battery_trigger(trigger, current_state, last_evaluated_value, store, automation_id)
+        return _evaluate_battery_trigger(trigger, current_state, last_evaluated_value, store, automation_id, just_entered_window)
     elif trigger_type == "flow":
-        return _evaluate_flow_trigger(trigger, current_state, last_evaluated_value, store, automation_id)
+        return _evaluate_flow_trigger(trigger, current_state, last_evaluated_value, store, automation_id, just_entered_window)
     elif trigger_type == "price":
-        return _evaluate_price_trigger(trigger, current_state, last_evaluated_value, store, automation_id)
+        return _evaluate_price_trigger(trigger, current_state, last_evaluated_value, store, automation_id, just_entered_window)
     elif trigger_type == "grid":
         return _evaluate_grid_trigger(trigger, current_state, last_evaluated_value, store, automation_id)
     elif trigger_type == "weather":
@@ -205,7 +217,8 @@ def _evaluate_battery_trigger(
     current_state: Dict[str, Any],
     last_value: Optional[float],
     store: "AutomationStore",
-    automation_id: int
+    automation_id: int,
+    just_entered_window: bool = False
 ) -> TriggerResult:
     """Evaluate battery state trigger."""
     battery_percent = current_state.get("battery_percent")
@@ -221,12 +234,13 @@ def _evaluate_battery_trigger(
             return TriggerResult(triggered=False, reason="No threshold set")
 
         if battery_percent >= threshold:
-            if last_value is not None and last_value < threshold:
+            # Trigger if: crossed threshold OR just entered time window while above
+            if (last_value is not None and last_value < threshold) or just_entered_window:
                 store.update_trigger_state(automation_id, battery_percent)
-                return TriggerResult(
-                    triggered=True,
-                    reason=f"Battery charged to {battery_percent}% (threshold: {threshold}%)"
-                )
+                reason = f"Battery charged to {battery_percent}% (threshold: {threshold}%)"
+                if just_entered_window:
+                    reason = f"Battery already at {battery_percent}% (entered time window)"
+                return TriggerResult(triggered=True, reason=reason)
             elif last_value is None:
                 store.update_trigger_state(automation_id, battery_percent)
 
@@ -238,12 +252,13 @@ def _evaluate_battery_trigger(
             return TriggerResult(triggered=False, reason="No threshold set")
 
         if battery_percent <= threshold:
-            if last_value is not None and last_value > threshold:
+            # Trigger if: crossed threshold OR just entered time window while below
+            if (last_value is not None and last_value > threshold) or just_entered_window:
                 store.update_trigger_state(automation_id, battery_percent)
-                return TriggerResult(
-                    triggered=True,
-                    reason=f"Battery discharged to {battery_percent}% (threshold: {threshold}%)"
-                )
+                reason = f"Battery discharged to {battery_percent}% (threshold: {threshold}%)"
+                if just_entered_window:
+                    reason = f"Battery already at {battery_percent}% (entered time window)"
+                return TriggerResult(triggered=True, reason=reason)
             elif last_value is None:
                 store.update_trigger_state(automation_id, battery_percent)
 
@@ -255,12 +270,13 @@ def _evaluate_battery_trigger(
             return TriggerResult(triggered=False, reason="Backup reserve unavailable")
 
         if battery_percent <= backup_reserve + 1:
-            if last_value is not None and last_value > backup_reserve + 1:
+            # Trigger if: crossed threshold OR just entered time window while at reserve
+            if (last_value is not None and last_value > backup_reserve + 1) or just_entered_window:
                 store.update_trigger_state(automation_id, battery_percent)
-                return TriggerResult(
-                    triggered=True,
-                    reason=f"Battery at reserve ({battery_percent}%, reserve: {backup_reserve}%)"
-                )
+                reason = f"Battery at reserve ({battery_percent}%, reserve: {backup_reserve}%)"
+                if just_entered_window:
+                    reason = f"Battery already at reserve {battery_percent}% (entered time window)"
+                return TriggerResult(triggered=True, reason=reason)
             elif last_value is None:
                 store.update_trigger_state(automation_id, battery_percent)
 
@@ -275,7 +291,8 @@ def _evaluate_flow_trigger(
     current_state: Dict[str, Any],
     last_value: Optional[float],
     store: "AutomationStore",
-    automation_id: int
+    automation_id: int,
+    just_entered_window: bool = False
 ) -> TriggerResult:
     """Evaluate power flow trigger."""
     source = trigger.get("flow_source")
@@ -304,23 +321,25 @@ def _evaluate_flow_trigger(
 
     if transition == "rises_above":
         if current_value >= threshold_kw:
-            if last_value is not None and last_value < threshold_kw:
+            # Trigger if: crossed threshold OR just entered time window while above
+            if (last_value is not None and last_value < threshold_kw) or just_entered_window:
                 store.update_trigger_state(automation_id, current_value)
-                return TriggerResult(
-                    triggered=True,
-                    reason=f"{source} rose to {current_value:.2f}kW (threshold: {threshold_kw}kW)"
-                )
+                reason = f"{source} rose to {current_value:.2f}kW (threshold: {threshold_kw}kW)"
+                if just_entered_window:
+                    reason = f"{source} already at {current_value:.2f}kW (entered time window)"
+                return TriggerResult(triggered=True, reason=reason)
             elif last_value is None:
                 store.update_trigger_state(automation_id, current_value)
 
     elif transition == "drops_below":
         if current_value <= threshold_kw:
-            if last_value is not None and last_value > threshold_kw:
+            # Trigger if: crossed threshold OR just entered time window while below
+            if (last_value is not None and last_value > threshold_kw) or just_entered_window:
                 store.update_trigger_state(automation_id, current_value)
-                return TriggerResult(
-                    triggered=True,
-                    reason=f"{source} dropped to {current_value:.2f}kW (threshold: {threshold_kw}kW)"
-                )
+                reason = f"{source} dropped to {current_value:.2f}kW (threshold: {threshold_kw}kW)"
+                if just_entered_window:
+                    reason = f"{source} already at {current_value:.2f}kW (entered time window)"
+                return TriggerResult(triggered=True, reason=reason)
             elif last_value is None:
                 store.update_trigger_state(automation_id, current_value)
 
@@ -333,7 +352,8 @@ def _evaluate_price_trigger(
     current_state: Dict[str, Any],
     last_value: Optional[float],
     store: "AutomationStore",
-    automation_id: int
+    automation_id: int,
+    just_entered_window: bool = False
 ) -> TriggerResult:
     """Evaluate price trigger."""
     price_type = trigger.get("price_type")
@@ -351,23 +371,25 @@ def _evaluate_price_trigger(
 
     if transition == "rises_above":
         if current_price >= threshold:
-            if last_value is not None and last_value < threshold:
+            # Trigger if: price crossed threshold OR just entered time window while above
+            if (last_value is not None and last_value < threshold) or just_entered_window:
                 store.update_trigger_state(automation_id, current_price)
-                return TriggerResult(
-                    triggered=True,
-                    reason=f"{price_type} price rose to ${current_price:.4f}/kWh"
-                )
+                reason = f"{price_type} price rose to ${current_price:.4f}/kWh"
+                if just_entered_window:
+                    reason = f"{price_type} price already above ${threshold:.4f}/kWh (entered time window)"
+                return TriggerResult(triggered=True, reason=reason)
             elif last_value is None:
                 store.update_trigger_state(automation_id, current_price)
 
     elif transition == "drops_below":
         if current_price <= threshold:
-            if last_value is not None and last_value > threshold:
+            # Trigger if: price crossed threshold OR just entered time window while below
+            if (last_value is not None and last_value > threshold) or just_entered_window:
                 store.update_trigger_state(automation_id, current_price)
-                return TriggerResult(
-                    triggered=True,
-                    reason=f"{price_type} price dropped to ${current_price:.4f}/kWh"
-                )
+                reason = f"{price_type} price dropped to ${current_price:.4f}/kWh"
+                if just_entered_window:
+                    reason = f"{price_type} price already below ${threshold:.4f}/kWh (entered time window)"
+                return TriggerResult(triggered=True, reason=reason)
             elif last_value is None:
                 store.update_trigger_state(automation_id, current_price)
 
