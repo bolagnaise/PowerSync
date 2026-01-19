@@ -2779,6 +2779,233 @@ class EVVehiclesSyncView(HomeAssistantView):
             }, status=500)
 
 
+class EVVehicleCommandView(HomeAssistantView):
+    """HTTP view to send commands to Tesla vehicles."""
+
+    url = "/api/power_sync/ev/vehicles/{vehicle_id}/command"
+    name = "api:power_sync:ev:vehicles:command"
+    requires_auth = True
+
+    # Supported Tesla integrations
+    TESLA_INTEGRATIONS = ["tesla_fleet", "teslemetry"]
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    def _get_powersync_config(self) -> dict:
+        """Get PowerSync config entry options."""
+        entries = self._hass.config_entries.async_entries(DOMAIN)
+        if entries:
+            return dict(entries[0].options)
+        return {}
+
+    async def _get_tesla_ev_entity(self, entity_pattern: str, vehicle_vin: str | None = None) -> str | None:
+        """Find a Tesla EV entity by pattern."""
+        import re
+
+        entity_registry = er.async_get(self._hass)
+        device_registry = dr.async_get(self._hass)
+
+        # Find devices from Tesla integrations
+        tesla_devices = []
+        for device in device_registry.devices.values():
+            for identifier in device.identifiers:
+                domain, identifier_value = identifier
+                if domain in self.TESLA_INTEGRATIONS:
+                    if len(str(identifier_value)) == 17 and not str(identifier_value).isdigit():
+                        if vehicle_vin is None or identifier_value == vehicle_vin:
+                            tesla_devices.append(device)
+                            break
+
+        if not tesla_devices:
+            return None
+
+        target_device = tesla_devices[0]
+
+        pattern = re.compile(entity_pattern, re.IGNORECASE)
+        for entity in entity_registry.entities.values():
+            if entity.device_id == target_device.id:
+                if pattern.match(entity.entity_id):
+                    return entity.entity_id
+
+        return None
+
+    async def _wake_vehicle(self, vehicle_vin: str | None = None) -> bool:
+        """Wake up a Tesla vehicle."""
+        # Try BLE first
+        config = self._get_powersync_config()
+        ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
+        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+
+        if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+            wake_entity = TESLA_BLE_BUTTON_WAKE_UP.format(prefix=ble_prefix)
+            if self._hass.states.get(wake_entity):
+                try:
+                    await self._hass.services.async_call(
+                        "button", "press",
+                        {"entity_id": wake_entity},
+                        blocking=True,
+                    )
+                    _LOGGER.info(f"Sent wake command via BLE: {wake_entity}")
+                    await asyncio.sleep(2)
+                    return True
+                except Exception as e:
+                    _LOGGER.warning(f"BLE wake failed: {e}")
+
+        # Try Fleet API
+        if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+            wake_entity = await self._get_tesla_ev_entity(r"button\..*wake(_up)?$", vehicle_vin)
+            if wake_entity:
+                try:
+                    await self._hass.services.async_call(
+                        "button", "press",
+                        {"entity_id": wake_entity},
+                        blocking=True,
+                    )
+                    _LOGGER.info(f"Sent wake command via Fleet API: {wake_entity}")
+                    await asyncio.sleep(2)
+                    return True
+                except Exception as e:
+                    _LOGGER.error(f"Fleet API wake failed: {e}")
+                    return False
+
+        return False
+
+    async def _start_charging(self, vehicle_vin: str | None = None) -> bool:
+        """Start charging."""
+        config = self._get_powersync_config()
+        ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
+        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+
+        # Try BLE first
+        if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+            charger_entity = TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)
+            if self._hass.states.get(charger_entity):
+                try:
+                    await self._hass.services.async_call(
+                        "switch", "turn_on",
+                        {"entity_id": charger_entity},
+                        blocking=True,
+                    )
+                    _LOGGER.info(f"Started charging via BLE: {charger_entity}")
+                    return True
+                except Exception as e:
+                    _LOGGER.warning(f"BLE start charging failed: {e}")
+
+        # Try Fleet API
+        if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+            await self._wake_vehicle(vehicle_vin)
+            charge_start_entity = await self._get_tesla_ev_entity(r"button\..*charge_start$", vehicle_vin)
+            if charge_start_entity:
+                try:
+                    await self._hass.services.async_call(
+                        "button", "press",
+                        {"entity_id": charge_start_entity},
+                        blocking=True,
+                    )
+                    _LOGGER.info(f"Started charging via Fleet API: {charge_start_entity}")
+                    return True
+                except Exception as e:
+                    _LOGGER.error(f"Fleet API start charging failed: {e}")
+                    return False
+
+        return False
+
+    async def _stop_charging(self, vehicle_vin: str | None = None) -> bool:
+        """Stop charging."""
+        config = self._get_powersync_config()
+        ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
+        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+
+        # Try BLE first
+        if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+            charger_entity = TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)
+            if self._hass.states.get(charger_entity):
+                try:
+                    await self._hass.services.async_call(
+                        "switch", "turn_off",
+                        {"entity_id": charger_entity},
+                        blocking=True,
+                    )
+                    _LOGGER.info(f"Stopped charging via BLE: {charger_entity}")
+                    return True
+                except Exception as e:
+                    _LOGGER.warning(f"BLE stop charging failed: {e}")
+
+        # Try Fleet API
+        if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+            await self._wake_vehicle(vehicle_vin)
+            charge_stop_entity = await self._get_tesla_ev_entity(r"button\..*charge_stop$", vehicle_vin)
+            if charge_stop_entity:
+                try:
+                    await self._hass.services.async_call(
+                        "button", "press",
+                        {"entity_id": charge_stop_entity},
+                        blocking=True,
+                    )
+                    _LOGGER.info(f"Stopped charging via Fleet API: {charge_stop_entity}")
+                    return True
+                except Exception as e:
+                    _LOGGER.error(f"Fleet API stop charging failed: {e}")
+                    return False
+
+        return False
+
+    async def post(self, request: web.Request, vehicle_id: str) -> web.Response:
+        """Handle POST request to send vehicle command."""
+        try:
+            data = await request.json()
+            command = data.get("command")
+
+            if not command:
+                return web.json_response({
+                    "success": False,
+                    "error": "Missing 'command' parameter"
+                }, status=400)
+
+            valid_commands = ["wake_up", "start_charging", "stop_charging"]
+            if command not in valid_commands:
+                return web.json_response({
+                    "success": False,
+                    "error": f"Invalid command. Must be one of: {', '.join(valid_commands)}"
+                }, status=400)
+
+            vehicle_vin = data.get("vin")
+            success = False
+            message = ""
+
+            if command == "wake_up":
+                success = await self._wake_vehicle(vehicle_vin)
+                message = "Wake command sent" if success else "Failed to wake vehicle"
+
+            elif command == "start_charging":
+                success = await self._start_charging(vehicle_vin)
+                message = "Charging started" if success else "Failed to start charging"
+
+            elif command == "stop_charging":
+                success = await self._stop_charging(vehicle_vin)
+                message = "Charging stopped" if success else "Failed to stop charging"
+
+            if success:
+                return web.json_response({
+                    "success": True,
+                    "data": {"message": message}
+                })
+            else:
+                return web.json_response({
+                    "success": False,
+                    "error": message
+                }, status=500)
+
+        except Exception as e:
+            _LOGGER.error(f"Error executing vehicle command: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PowerSync from a config entry."""
     _LOGGER.info("=" * 60)
@@ -6698,6 +6925,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.http.register_view(EVStatusView(hass))
     hass.http.register_view(EVVehiclesView(hass))
     hass.http.register_view(EVVehiclesSyncView(hass))
+    hass.http.register_view(EVVehicleCommandView(hass))
     _LOGGER.info("🚗 EV HTTP endpoints registered at /api/power_sync/ev/*")
 
     # ======================================================================
