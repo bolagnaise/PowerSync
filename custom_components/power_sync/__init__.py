@@ -2838,12 +2838,53 @@ class EVVehicleCommandView(HomeAssistantView):
 
         return None
 
+    async def _is_vehicle_asleep(self, vehicle_vin: str | None = None) -> bool:
+        """Check if vehicle is asleep."""
+        # Check binary_sensor.*_asleep (custom integration)
+        asleep_entity = await self._get_tesla_ev_entity(r"binary_sensor\..*_asleep$", vehicle_vin)
+        if asleep_entity:
+            state = self._hass.states.get(asleep_entity)
+            if state and state.state == "on":
+                _LOGGER.debug(f"Vehicle is asleep (from {asleep_entity})")
+                return True
+
+        # Check binary_sensor.*_online (if asleep not available)
+        online_entity = await self._get_tesla_ev_entity(r"binary_sensor\..*_online$", vehicle_vin)
+        if online_entity:
+            state = self._hass.states.get(online_entity)
+            if state and state.state == "off":
+                _LOGGER.debug(f"Vehicle is offline/asleep (from {online_entity})")
+                return True
+
+        return False
+
+    async def _wait_for_vehicle_awake(self, vehicle_vin: str | None = None, timeout: int = 30) -> bool:
+        """Wait for vehicle to wake up, polling every 2 seconds."""
+        for i in range(timeout // 2):
+            if not await self._is_vehicle_asleep(vehicle_vin):
+                _LOGGER.info(f"Vehicle is awake after {i * 2} seconds")
+                return True
+            _LOGGER.debug(f"Waiting for vehicle to wake... ({i * 2}s)")
+            await asyncio.sleep(2)
+
+        _LOGGER.warning(f"Vehicle did not wake within {timeout} seconds")
+        return False
+
     async def _wake_vehicle(self, vehicle_vin: str | None = None) -> bool:
-        """Wake up a Tesla vehicle."""
+        """Wake up a Tesla vehicle and wait for it to be awake."""
+        # Check if already awake
+        if not await self._is_vehicle_asleep(vehicle_vin):
+            _LOGGER.debug("Vehicle is already awake")
+            return True
+
+        _LOGGER.info("Vehicle is asleep, sending wake command...")
+
         # Try BLE first
         config = self._get_powersync_config()
         ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
         ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+
+        wake_sent = False
 
         if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
             wake_entity = TESLA_BLE_BUTTON_WAKE_UP.format(prefix=ble_prefix)
@@ -2855,13 +2896,12 @@ class EVVehicleCommandView(HomeAssistantView):
                         blocking=True,
                     )
                     _LOGGER.info(f"Sent wake command via BLE: {wake_entity}")
-                    await asyncio.sleep(2)
-                    return True
+                    wake_sent = True
                 except Exception as e:
                     _LOGGER.warning(f"BLE wake failed: {e}")
 
         # Try Fleet API
-        if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+        if not wake_sent and ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
             wake_entity = await self._get_tesla_ev_entity(r"button\..*wake(_up)?$", vehicle_vin)
             if wake_entity:
                 try:
@@ -2871,13 +2911,17 @@ class EVVehicleCommandView(HomeAssistantView):
                         blocking=True,
                     )
                     _LOGGER.info(f"Sent wake command via Fleet API: {wake_entity}")
-                    await asyncio.sleep(2)
-                    return True
+                    wake_sent = True
                 except Exception as e:
                     _LOGGER.error(f"Fleet API wake failed: {e}")
                     return False
 
-        return False
+        if not wake_sent:
+            _LOGGER.warning("No wake entity found")
+            return False
+
+        # Wait for vehicle to wake up (up to 30 seconds)
+        return await self._wait_for_vehicle_awake(vehicle_vin, timeout=30)
 
     async def _start_charging(self, vehicle_vin: str | None = None) -> bool:
         """Start charging."""
