@@ -9,6 +9,8 @@ Supports the following trigger types:
 - grid: Trigger when grid status changes
 - weather: Trigger based on weather conditions
 - solar_forecast: Trigger based on solar forecast (today/tomorrow above/below kWh threshold)
+- ev: Trigger based on EV charging state (connected, disconnected, charging, SOC)
+- ocpp: Trigger based on OCPP charger state
 """
 
 import logging
@@ -69,6 +71,10 @@ def evaluate_trigger(
         return _evaluate_weather_trigger(trigger, current_state, last_evaluated_value, store, automation_id)
     elif trigger_type == "solar_forecast":
         return _evaluate_solar_forecast_trigger(trigger, current_state, last_evaluated_value, store, automation_id)
+    elif trigger_type == "ev":
+        return _evaluate_ev_trigger(trigger, current_state, last_evaluated_value, store, automation_id)
+    elif trigger_type == "ocpp":
+        return _evaluate_ocpp_trigger(trigger, current_state, last_evaluated_value, store, automation_id)
     else:
         _LOGGER.warning(f"Unknown trigger type: {trigger_type}")
         return TriggerResult(triggered=False, reason=f"Unknown trigger type: {trigger_type}")
@@ -502,3 +508,196 @@ def _evaluate_solar_forecast_trigger(
         triggered=False,
         reason=f"{period.capitalize()} forecast {forecast_kwh:.1f} kWh (threshold: {condition} {threshold_kwh:.1f} kWh)"
     )
+
+
+def _evaluate_ev_trigger(
+    trigger: Dict[str, Any],
+    current_state: Dict[str, Any],
+    last_value: Optional[float],
+    store: "AutomationStore",
+    automation_id: int
+) -> TriggerResult:
+    """
+    Evaluate EV charging trigger.
+
+    Conditions:
+    - connected: EV plugged in
+    - disconnected: EV unplugged
+    - charging_starts: Charging begins
+    - charging_stops: Charging ends
+    - soc_reaches: EV battery reaches threshold
+    """
+    condition = trigger.get("ev_condition")
+    if not condition:
+        return TriggerResult(triggered=False, reason="No EV condition set")
+
+    # Get EV state from current_state
+    ev_state = current_state.get("ev_state", {})
+    is_plugged_in = ev_state.get("is_plugged_in", False)
+    is_charging = ev_state.get("is_charging", False)
+    battery_level = ev_state.get("battery_level")
+    charging_state = ev_state.get("charging_state", "").lower()
+
+    # Encode state for edge detection
+    # Bits: 0=plugged_in, 1=charging
+    current_value = float((1 if is_plugged_in else 0) + (2 if is_charging else 0))
+
+    if condition == "connected":
+        if is_plugged_in:
+            if last_value is not None and int(last_value) & 1 == 0:
+                store.update_trigger_state(automation_id, current_value)
+                return TriggerResult(triggered=True, reason="EV plugged in")
+            elif last_value is None:
+                store.update_trigger_state(automation_id, current_value)
+
+    elif condition == "disconnected":
+        if not is_plugged_in:
+            if last_value is not None and int(last_value) & 1 == 1:
+                store.update_trigger_state(automation_id, current_value)
+                return TriggerResult(triggered=True, reason="EV unplugged")
+            elif last_value is None:
+                store.update_trigger_state(automation_id, current_value)
+
+    elif condition == "charging_starts":
+        if is_charging or charging_state == "charging":
+            if last_value is not None and int(last_value) & 2 == 0:
+                store.update_trigger_state(automation_id, current_value)
+                return TriggerResult(triggered=True, reason="EV charging started")
+            elif last_value is None:
+                store.update_trigger_state(automation_id, current_value)
+
+    elif condition == "charging_stops":
+        if not is_charging and charging_state != "charging":
+            if last_value is not None and int(last_value) & 2 == 2:
+                store.update_trigger_state(automation_id, current_value)
+                return TriggerResult(triggered=True, reason="EV charging stopped")
+            elif last_value is None:
+                store.update_trigger_state(automation_id, current_value)
+
+    elif condition == "soc_reaches":
+        threshold = trigger.get("ev_soc_threshold")
+        if threshold is None:
+            return TriggerResult(triggered=False, reason="No SOC threshold set")
+        if battery_level is None:
+            return TriggerResult(triggered=False, reason="EV battery level unavailable")
+
+        # Use battery_level as last_value for edge detection
+        if battery_level >= threshold:
+            if last_value is not None and last_value < threshold:
+                store.update_trigger_state(automation_id, float(battery_level))
+                return TriggerResult(
+                    triggered=True,
+                    reason=f"EV battery reached {battery_level}% (threshold: {threshold}%)"
+                )
+            elif last_value is None:
+                store.update_trigger_state(automation_id, float(battery_level))
+
+        store.update_trigger_state(automation_id, float(battery_level))
+        return TriggerResult(triggered=False, reason=f"EV battery at {battery_level}%")
+
+    store.update_trigger_state(automation_id, current_value)
+    return TriggerResult(triggered=False, reason=f"EV condition '{condition}' not met")
+
+
+def _evaluate_ocpp_trigger(
+    trigger: Dict[str, Any],
+    current_state: Dict[str, Any],
+    last_value: Optional[float],
+    store: "AutomationStore",
+    automation_id: int
+) -> TriggerResult:
+    """
+    Evaluate OCPP charger trigger.
+
+    Conditions:
+    - connected: Charger connected
+    - disconnected: Charger disconnected
+    - charging_starts: Charging session starts
+    - charging_stops: Charging session stops
+    - energy_reaches: Energy delivered reaches threshold
+    - available: Charger becomes available
+    - faulted: Charger reports fault
+    """
+    condition = trigger.get("ocpp_condition")
+    if not condition:
+        return TriggerResult(triggered=False, reason="No OCPP condition set")
+
+    # Get OCPP state from current_state
+    ocpp_state = current_state.get("ocpp_state", {})
+    status = ocpp_state.get("status", "").lower()
+    is_connected = ocpp_state.get("is_connected", False)
+    is_charging = status == "charging"
+    energy_kwh = ocpp_state.get("energy_kwh", 0)
+
+    # Encode state for edge detection
+    status_values = {"available": 1, "preparing": 2, "charging": 3, "finishing": 4, "faulted": 5}
+    current_value = float(status_values.get(status, 0))
+
+    if condition == "connected":
+        if is_connected:
+            if last_value == 0:
+                store.update_trigger_state(automation_id, current_value)
+                return TriggerResult(triggered=True, reason="OCPP charger connected")
+            elif last_value is None:
+                store.update_trigger_state(automation_id, current_value)
+
+    elif condition == "disconnected":
+        if not is_connected:
+            if last_value is not None and last_value > 0:
+                store.update_trigger_state(automation_id, current_value)
+                return TriggerResult(triggered=True, reason="OCPP charger disconnected")
+            elif last_value is None:
+                store.update_trigger_state(automation_id, current_value)
+
+    elif condition == "charging_starts":
+        if is_charging:
+            if last_value is not None and last_value != 3:
+                store.update_trigger_state(automation_id, current_value)
+                return TriggerResult(triggered=True, reason="OCPP charging started")
+            elif last_value is None:
+                store.update_trigger_state(automation_id, current_value)
+
+    elif condition == "charging_stops":
+        if not is_charging and status in ("available", "finishing"):
+            if last_value == 3:
+                store.update_trigger_state(automation_id, current_value)
+                return TriggerResult(triggered=True, reason="OCPP charging stopped")
+            elif last_value is None:
+                store.update_trigger_state(automation_id, current_value)
+
+    elif condition == "available":
+        if status == "available":
+            if last_value is not None and last_value != 1:
+                store.update_trigger_state(automation_id, current_value)
+                return TriggerResult(triggered=True, reason="OCPP charger available")
+            elif last_value is None:
+                store.update_trigger_state(automation_id, current_value)
+
+    elif condition == "faulted":
+        if status == "faulted":
+            if last_value is not None and last_value != 5:
+                store.update_trigger_state(automation_id, current_value)
+                return TriggerResult(triggered=True, reason="OCPP charger faulted")
+            elif last_value is None:
+                store.update_trigger_state(automation_id, current_value)
+
+    elif condition == "energy_reaches":
+        threshold = trigger.get("ocpp_energy_threshold")
+        if threshold is None:
+            return TriggerResult(triggered=False, reason="No energy threshold set")
+
+        if energy_kwh >= threshold:
+            if last_value is not None and last_value < threshold:
+                store.update_trigger_state(automation_id, float(energy_kwh))
+                return TriggerResult(
+                    triggered=True,
+                    reason=f"OCPP energy reached {energy_kwh:.1f} kWh (threshold: {threshold} kWh)"
+                )
+            elif last_value is None:
+                store.update_trigger_state(automation_id, float(energy_kwh))
+
+        store.update_trigger_state(automation_id, float(energy_kwh))
+        return TriggerResult(triggered=False, reason=f"OCPP energy at {energy_kwh:.1f} kWh")
+
+    store.update_trigger_state(automation_id, current_value)
+    return TriggerResult(triggered=False, reason=f"OCPP condition '{condition}' not met")
