@@ -60,6 +60,10 @@ class AutomationStore:
         actions = automation_data.get("actions", [])
         _LOGGER.debug(f"Creating automation with {len(actions)} action(s): {actions}")
 
+        conditions = automation_data.get("conditions", [])
+        if conditions:
+            _LOGGER.debug(f"Creating automation with {len(conditions)} condition(s)")
+
         automation = {
             "id": automation_id,
             "name": automation_data.get("name", "Unnamed Automation"),
@@ -70,6 +74,7 @@ class AutomationStore:
             "paused": automation_data.get("paused", False),
             "notification_only": automation_data.get("notification_only", False),
             "trigger": automation_data.get("trigger", {}),
+            "conditions": conditions,
             "actions": actions,
             "created_at": datetime.utcnow().isoformat(),
             "updated_at": datetime.utcnow().isoformat(),
@@ -105,6 +110,9 @@ class AutomationStore:
                 if "actions" in automation_data:
                     _LOGGER.debug(f"Updating automation {automation_id} with {len(automation_data['actions'])} action(s): {automation_data['actions']}")
                     auto["actions"] = automation_data["actions"]
+                if "conditions" in automation_data:
+                    _LOGGER.debug(f"Updating automation {automation_id} with {len(automation_data.get('conditions', []))} condition(s)")
+                    auto["conditions"] = automation_data["conditions"]
 
                 auto["updated_at"] = datetime.utcnow().isoformat()
                 self._data["automations"][i] = auto
