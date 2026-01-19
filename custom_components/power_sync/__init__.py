@@ -4390,6 +4390,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Determine battery system type for routing
         battery_system = entry.data.get(CONF_BATTERY_SYSTEM, "tesla")
 
+        # Skip TOU sync for Globird - they use AEMO spike detection only, not rate plan sync
+        electricity_provider_check = entry.options.get(
+            CONF_ELECTRICITY_PROVIDER,
+            entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
+        )
+        if electricity_provider_check == "globird":
+            _LOGGER.debug("⏭️  TOU sync skipped - Globird uses AEMO spike detection only")
+            return
+
         # Skip TOU sync if force discharge is active - don't overwrite the discharge tariff
         if force_discharge_state.get("active"):
             expires_at = force_discharge_state.get("expires_at")
