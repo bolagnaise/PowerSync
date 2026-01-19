@@ -52,10 +52,17 @@ def evaluate_trigger(
         TriggerResult indicating if trigger condition is met
     """
     # Check time window constraint first
-    if not _is_within_time_window(trigger, current_state):
-        return TriggerResult(triggered=False, reason="Outside time window")
-
+    in_time_window = _is_within_time_window(trigger, current_state)
     trigger_type = trigger.get("trigger_type")
+
+    if not in_time_window:
+        # For EV triggers, update state to track that we're outside the window
+        # This allows detecting when we enter the window while condition is met
+        if trigger_type == "ev" and last_evaluated_value is not None:
+            # Clear bit 2 (was_in_window) while preserving EV state bits
+            new_value = float(int(last_evaluated_value) & 3)  # Keep bits 0-1, clear bit 2
+            store.update_trigger_state(automation_id, new_value)
+        return TriggerResult(triggered=False, reason="Outside time window")
 
     if trigger_type == "time":
         return _evaluate_time_trigger(trigger, current_state, store, automation_id)
@@ -526,6 +533,10 @@ def _evaluate_ev_trigger(
     - charging_starts: Charging begins
     - charging_stops: Charging ends
     - soc_reaches: EV battery reaches threshold
+
+    Edge detection triggers on:
+    1. State change (e.g., unplugged -> plugged in)
+    2. Time window entry while condition is already met
     """
     condition = trigger.get("ev_condition")
     if not condition:
@@ -555,38 +566,60 @@ def _evaluate_ev_trigger(
             return TriggerResult(triggered=False, reason=f"EV not at other location (location: {location})")
 
     # Encode state for edge detection
-    # Bits: 0=plugged_in, 1=charging
-    current_value = float((1 if is_plugged_in else 0) + (2 if is_charging else 0))
+    # Bits: 0=plugged_in, 1=charging, 2=was_in_time_window
+    # Bit 2 tracks whether we were in the time window on last evaluation
+    # This allows triggering when entering time window while condition is already met
+    was_in_window = (int(last_value) & 4) != 0 if last_value is not None else False
+    current_value = float(
+        (1 if is_plugged_in else 0) +
+        (2 if is_charging else 0) +
+        4  # Always set bit 2 since we're now in time window (check happens before this)
+    )
+
+    # Check if we just entered the time window
+    just_entered_window = not was_in_window and last_value is not None
 
     if condition == "connected":
         if is_plugged_in:
-            if last_value is not None and int(last_value) & 1 == 0:
+            # Trigger if: state changed OR just entered time window while plugged in
+            was_plugged_in = (int(last_value) & 1) != 0 if last_value is not None else False
+            if (last_value is not None and not was_plugged_in) or just_entered_window:
                 store.update_trigger_state(automation_id, current_value)
-                return TriggerResult(triggered=True, reason="EV plugged in")
+                reason = "EV plugged in" if not just_entered_window else "EV already plugged in (entered time window)"
+                return TriggerResult(triggered=True, reason=reason)
             elif last_value is None:
                 store.update_trigger_state(automation_id, current_value)
 
     elif condition == "disconnected":
         if not is_plugged_in:
-            if last_value is not None and int(last_value) & 1 == 1:
+            # Trigger if: state changed OR just entered time window while unplugged
+            was_plugged_in = (int(last_value) & 1) != 0 if last_value is not None else False
+            if (last_value is not None and was_plugged_in) or just_entered_window:
                 store.update_trigger_state(automation_id, current_value)
-                return TriggerResult(triggered=True, reason="EV unplugged")
+                reason = "EV unplugged" if not just_entered_window else "EV already unplugged (entered time window)"
+                return TriggerResult(triggered=True, reason=reason)
             elif last_value is None:
                 store.update_trigger_state(automation_id, current_value)
 
     elif condition == "charging_starts":
         if is_charging or charging_state == "charging":
-            if last_value is not None and int(last_value) & 2 == 0:
+            # Trigger if: state changed OR just entered time window while charging
+            was_charging = (int(last_value) & 2) != 0 if last_value is not None else False
+            if (last_value is not None and not was_charging) or just_entered_window:
                 store.update_trigger_state(automation_id, current_value)
-                return TriggerResult(triggered=True, reason="EV charging started")
+                reason = "EV charging started" if not just_entered_window else "EV already charging (entered time window)"
+                return TriggerResult(triggered=True, reason=reason)
             elif last_value is None:
                 store.update_trigger_state(automation_id, current_value)
 
     elif condition == "charging_stops":
         if not is_charging and charging_state != "charging":
-            if last_value is not None and int(last_value) & 2 == 2:
+            # Trigger if: state changed OR just entered time window while not charging
+            was_charging = (int(last_value) & 2) != 0 if last_value is not None else False
+            if (last_value is not None and was_charging) or just_entered_window:
                 store.update_trigger_state(automation_id, current_value)
-                return TriggerResult(triggered=True, reason="EV charging stopped")
+                reason = "EV charging stopped" if not just_entered_window else "EV already stopped (entered time window)"
+                return TriggerResult(triggered=True, reason=reason)
             elif last_value is None:
                 store.update_trigger_state(automation_id, current_value)
 
