@@ -2487,10 +2487,17 @@ class EVVehiclesView(HomeAssistantView):
 
                     # Find entities for this device
                     device_entities = []
+                    sensor_entities = []  # Track sensor entities specifically
                     for entity in entity_registry.entities.values():
                         if entity.device_id != device.id:
                             continue
                         device_entities.append(entity.entity_id)
+
+                        # Track sensor entities for debugging
+                        if entity.entity_id.startswith("sensor."):
+                            state = self._hass.states.get(entity.entity_id)
+                            state_val = state.state if state else "no_state"
+                            sensor_entities.append(f"{entity.entity_id}={state_val}")
 
                         state = self._hass.states.get(entity.entity_id)
                         if not state:
@@ -2502,7 +2509,9 @@ class EVVehiclesView(HomeAssistantView):
                         # Tesla Fleet: sensor.xxx_battery, Teslemetry: sensor.xxx_battery_level
                         if ("battery" in entity_id_lower and
                             "sensor." in entity_id_lower and
-                            "range" not in entity_id_lower):
+                            "range" not in entity_id_lower and
+                            "heater" not in entity_id_lower):
+                            _LOGGER.debug(f"EV: Checking battery entity {entity.entity_id} state={state.state}")
                             if state.state not in ("unknown", "unavailable"):
                                 try:
                                     val = float(state.state)
@@ -2520,6 +2529,7 @@ class EVVehiclesView(HomeAssistantView):
                             "limit" not in entity_id_lower and
                             "rate" not in entity_id_lower and
                             "power" not in entity_id_lower):
+                            _LOGGER.debug(f"EV: Checking charging entity {entity.entity_id} state={state.state}")
                             if state.state not in ("unknown", "unavailable") and charging_state is None:
                                 charging_state = state.state
                                 _LOGGER.debug(f"EV: Found charging state '{charging_state}' from {entity.entity_id}")
@@ -2552,7 +2562,8 @@ class EVVehiclesView(HomeAssistantView):
                                 except (ValueError, TypeError):
                                     pass
 
-                    _LOGGER.debug(f"EV: Device {device.name} has {len(device_entities)} entities: {device_entities[:10]}...")
+                    _LOGGER.debug(f"EV: Device {device.name} has {len(device_entities)} entities, {len(sensor_entities)} sensors")
+                    _LOGGER.debug(f"EV: Sensors for {device.name}: {sensor_entities[:15]}")
 
                     vehicles.append({
                         "id": vehicle_id,
