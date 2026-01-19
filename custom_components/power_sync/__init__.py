@@ -2340,6 +2340,251 @@ class CurrentWeatherView(HomeAssistantView):
             }, status=500)
 
 
+class EVStatusView(HomeAssistantView):
+    """HTTP view to get EV integration status for mobile app."""
+
+    url = "/api/power_sync/ev/status"
+    name = "api:power_sync:ev:status"
+    requires_auth = True
+
+    # Supported Tesla integrations in HA
+    TESLA_INTEGRATIONS = ["tesla_fleet", "teslemetry"]
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request for EV status."""
+        try:
+            # Check for any Tesla integration (tesla_fleet or teslemetry)
+            active_integration = None
+            tesla_entries = []
+
+            for integration in self.TESLA_INTEGRATIONS:
+                if integration in self._hass.config_entries.async_domains():
+                    entries = self._hass.config_entries.async_entries(integration)
+                    if entries:
+                        active_integration = integration
+                        tesla_entries = entries
+                        break
+
+            has_credentials = len(tesla_entries) > 0
+
+            # Count vehicles by looking for device entries
+            vehicle_count = 0
+
+            if active_integration and tesla_entries:
+                device_registry = self._hass.helpers.device_registry.async_get(self._hass)
+
+                for device in device_registry.devices.values():
+                    # Check if device belongs to a Tesla integration
+                    for identifier in device.identifiers:
+                        if identifier[0] in self.TESLA_INTEGRATIONS:
+                            # Check if it's a vehicle (VIN is 17 chars, energy site is numeric)
+                            potential_vin = identifier[1]
+                            if len(str(potential_vin)) == 17 and not str(potential_vin).isdigit():
+                                vehicle_count += 1
+                            break
+
+            return web.json_response({
+                "success": True,
+                "configured": has_credentials,
+                "linked": has_credentials,
+                "has_access_token": has_credentials,
+                "token_expires_at": None,  # HA manages tokens internally
+                "vehicle_count": vehicle_count,
+                "integration": active_integration,
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting EV status: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
+class EVVehiclesView(HomeAssistantView):
+    """HTTP view to get Tesla vehicles for mobile app."""
+
+    url = "/api/power_sync/ev/vehicles"
+    name = "api:power_sync:ev:vehicles"
+    requires_auth = True
+
+    # Supported Tesla integrations in HA
+    TESLA_INTEGRATIONS = ["tesla_fleet", "teslemetry"]
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request for vehicle list."""
+        try:
+            vehicles = []
+
+            # Check for any Tesla integration (tesla_fleet or teslemetry)
+            active_integration = None
+            tesla_entries = []
+
+            for integration in self.TESLA_INTEGRATIONS:
+                if integration in self._hass.config_entries.async_domains():
+                    entries = self._hass.config_entries.async_entries(integration)
+                    if entries:
+                        active_integration = integration
+                        tesla_entries = entries
+                        break
+
+            if not active_integration:
+                return web.json_response({
+                    "success": True,
+                    "vehicles": [],
+                    "message": "No Tesla integration installed (tesla_fleet or teslemetry)"
+                })
+
+            if not tesla_entries:
+                return web.json_response({
+                    "success": True,
+                    "vehicles": [],
+                    "message": "Tesla integration not configured"
+                })
+
+            # Get device and entity registries
+            device_registry = self._hass.helpers.device_registry.async_get(self._hass)
+            entity_registry = self._hass.helpers.entity_registry.async_get(self._hass)
+
+            vehicle_id = 0
+            for entry in tesla_entries:
+                # Find devices belonging to this integration
+                for device in device_registry.devices.values():
+                    # Check if device belongs to a Tesla integration and is a vehicle (not energy site)
+                    is_tesla_vehicle = False
+                    vin = None
+
+                    for identifier in device.identifiers:
+                        if identifier[0] in self.TESLA_INTEGRATIONS:
+                            # The second part is typically the VIN for vehicles
+                            potential_vin = str(identifier[1])
+                            # VINs are 17 characters, energy sites are numeric
+                            if len(potential_vin) == 17 and not potential_vin.isdigit():
+                                is_tesla_vehicle = True
+                                vin = potential_vin
+                            break
+
+                    if not is_tesla_vehicle:
+                        continue
+
+                    vehicle_id += 1
+
+                    # Get entity states for this device
+                    battery_level = None
+                    charging_state = None
+                    charge_limit = None
+                    is_plugged_in = False
+                    charger_power = None
+
+                    # Find entities for this device
+                    for entity in entity_registry.entities.values():
+                        if entity.device_id != device.id:
+                            continue
+
+                        state = self._hass.states.get(entity.entity_id)
+                        if not state:
+                            continue
+
+                        # Battery level sensor
+                        if "battery_level" in entity.entity_id or "battery" in entity.entity_id:
+                            if state.state not in ("unknown", "unavailable"):
+                                try:
+                                    battery_level = int(float(state.state))
+                                except (ValueError, TypeError):
+                                    pass
+
+                        # Charging state sensor
+                        if "charging" in entity.entity_id and "sensor" in entity.entity_id:
+                            charging_state = state.state
+
+                        # Charge limit
+                        if "charge_limit" in entity.entity_id:
+                            if state.state not in ("unknown", "unavailable"):
+                                try:
+                                    charge_limit = int(float(state.state))
+                                except (ValueError, TypeError):
+                                    pass
+
+                        # Plugged in binary sensor
+                        if "plugged_in" in entity.entity_id or "charger" in entity.entity_id:
+                            if state.state == "on":
+                                is_plugged_in = True
+
+                        # Charger power
+                        if "charger_power" in entity.entity_id or "charge_rate" in entity.entity_id:
+                            if state.state not in ("unknown", "unavailable"):
+                                try:
+                                    charger_power = float(state.state)
+                                except (ValueError, TypeError):
+                                    pass
+
+                    vehicles.append({
+                        "id": vehicle_id,
+                        "vehicle_id": vin or str(device.id),
+                        "vin": vin,
+                        "display_name": device.name or f"Tesla {vehicle_id}",
+                        "model": device.model,
+                        "battery_level": battery_level,
+                        "charging_state": charging_state,
+                        "charge_limit_soc": charge_limit,
+                        "is_plugged_in": is_plugged_in,
+                        "charger_power": charger_power,
+                        "is_online": True,  # If we have data, it's online
+                        "data_updated_at": datetime.now().isoformat(),
+                    })
+
+            return web.json_response({
+                "success": True,
+                "vehicles": vehicles,
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting vehicles: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
+class EVVehiclesSyncView(HomeAssistantView):
+    """HTTP view to sync/refresh Tesla vehicles."""
+
+    url = "/api/power_sync/ev/vehicles/sync"
+    name = "api:power_sync:ev:vehicles:sync"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Handle POST request to sync vehicles."""
+        try:
+            # Trigger a refresh of tesla_fleet integration
+            tesla_entries = self._hass.config_entries.async_entries("tesla_fleet")
+            for entry in tesla_entries:
+                await self._hass.config_entries.async_reload(entry.entry_id)
+
+            # Return updated vehicle list
+            vehicles_view = EVVehiclesView(self._hass)
+            return await vehicles_view.get(request)
+
+        except Exception as e:
+            _LOGGER.error(f"Error syncing vehicles: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PowerSync from a config entry."""
     _LOGGER.info("=" * 60)
@@ -6254,6 +6499,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register HTTP endpoint for current weather (for mobile app dashboard)
     hass.http.register_view(CurrentWeatherView(hass))
     _LOGGER.info("🌤️ Current weather HTTP endpoint registered at /api/power_sync/weather")
+
+    # Register HTTP endpoints for EV/Tesla vehicles (for mobile app EV section)
+    hass.http.register_view(EVStatusView(hass))
+    hass.http.register_view(EVVehiclesView(hass))
+    hass.http.register_view(EVVehiclesSyncView(hass))
+    _LOGGER.info("🚗 EV HTTP endpoints registered at /api/power_sync/ev/*")
 
     # ======================================================================
     # SYNC BATTERY HEALTH SERVICE (from mobile app TEDAPI scans)
