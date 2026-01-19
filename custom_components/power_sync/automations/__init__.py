@@ -563,43 +563,50 @@ class AutomationEngine:
         }
 
         # Look for Tesla Fleet entities
-        # Patterns: sensor.*_charging_state, binary_sensor.*_charger, sensor.*_battery
+        # First, find Tesla EV by looking for _charging_state sensor (unique to Tesla Fleet)
+        # Then use the same prefix to find related sensors
         all_states = self._hass.states.async_all()
+        vehicle_prefix = None
 
+        # First pass: find Tesla EV charging_state sensor to identify the vehicle prefix
+        for state in all_states:
+            entity_id = state.entity_id
+            match = re.match(r"sensor\.(\w+)_charging_state$", entity_id)
+            if match:
+                vehicle_prefix = match.group(1)
+                state_value = state.state
+                if state_value not in ("unavailable", "unknown"):
+                    ev_state["charging_state"] = state_value.lower()
+                    ev_state["is_charging"] = state_value.lower() == "charging"
+                    _LOGGER.debug(f"EV charging state from {entity_id}: {state_value}")
+                break
+
+        if not vehicle_prefix:
+            _LOGGER.debug("No Tesla EV charging_state sensor found")
+            return ev_state
+
+        # Second pass: find related sensors using the vehicle prefix
         for state in all_states:
             entity_id = state.entity_id
             state_value = state.state
 
-            # Skip unavailable states
             if state_value in ("unavailable", "unknown"):
                 continue
 
-            # Charging state sensor (e.g., sensor.tessy_charging_state)
-            if re.match(r"sensor\.\w+_charging_state$", entity_id):
-                ev_state["charging_state"] = state_value.lower()
-                ev_state["is_charging"] = state_value.lower() == "charging"
-                _LOGGER.debug(f"EV charging state from {entity_id}: {state_value}")
-
-            # Charger binary sensor (plugged in) (e.g., binary_sensor.tessy_charger)
-            elif re.match(r"binary_sensor\.\w+_charger$", entity_id):
+            # Charger binary sensor (plugged in) - e.g., binary_sensor.tessy_charger
+            if entity_id == f"binary_sensor.{vehicle_prefix}_charger":
                 ev_state["is_plugged_in"] = state_value.lower() == "on"
                 _LOGGER.debug(f"EV plugged in from {entity_id}: {state_value}")
 
-            # Battery level sensor (e.g., sensor.tessy_battery)
-            elif re.match(r"sensor\.\w+_battery$", entity_id):
-                # Make sure this is an EV battery, not home battery
-                # Check for device class or unit
-                device_class = state.attributes.get("device_class", "")
-                unit = state.attributes.get("unit_of_measurement", "")
-                if device_class == "battery" or unit == "%":
-                    try:
-                        level = float(state_value)
-                        # Only use if it looks like a battery percentage (0-100)
-                        if 0 <= level <= 100:
-                            ev_state["battery_level"] = level
-                            _LOGGER.debug(f"EV battery level from {entity_id}: {level}%")
-                    except (ValueError, TypeError):
-                        pass
+            # Battery level sensor - e.g., sensor.tessy_battery
+            elif entity_id == f"sensor.{vehicle_prefix}_battery":
+                try:
+                    level = float(state_value)
+                    if 0 <= level <= 100:
+                        ev_state["battery_level"] = level
+                        _LOGGER.debug(f"EV battery level from {entity_id}: {level}%")
+                except (ValueError, TypeError):
+                    pass
 
         _LOGGER.debug(f"EV state collected: {ev_state}")
         return ev_state
