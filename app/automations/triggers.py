@@ -10,6 +10,7 @@ Supports the following trigger types:
 - weather: Trigger based on weather conditions
 - ev: Trigger based on EV charging state (connected, charging, SoC)
 - ocpp: Trigger based on OCPP charger state (connected, charging, energy)
+- solar_forecast: Trigger based on solar forecast (today/tomorrow above/below kWh threshold)
 """
 
 import logging
@@ -67,6 +68,8 @@ def evaluate_trigger(
         return _evaluate_ev_trigger(trigger, current_state, user)
     elif trigger.trigger_type == 'ocpp':
         return _evaluate_ocpp_trigger(trigger, current_state, user)
+    elif trigger.trigger_type == 'solar_forecast':
+        return _evaluate_solar_forecast_trigger(trigger, current_state)
     else:
         _LOGGER.warning(f"Unknown trigger type: {trigger.trigger_type}")
         return TriggerResult(triggered=False, reason=f"Unknown trigger type: {trigger.trigger_type}")
@@ -762,3 +765,82 @@ def _evaluate_ocpp_trigger(
             _update_last_value(trigger, current_value)
 
     return TriggerResult(triggered=False, reason=f"No OCPP charger matched condition: {condition}")
+
+
+def _evaluate_solar_forecast_trigger(
+    trigger: AutomationTrigger,
+    current_state: Dict[str, Any]
+) -> TriggerResult:
+    """
+    Evaluate solar forecast trigger.
+
+    Periods: today, tomorrow
+    Conditions: above, below (threshold in kWh)
+
+    This trigger fires once per day when the forecast meets the condition.
+    Uses edge detection to avoid repeated triggering.
+    """
+    period = trigger.solar_forecast_period
+    condition = trigger.solar_forecast_condition
+    threshold_kwh = trigger.solar_forecast_threshold_kwh
+
+    if not period or not condition or threshold_kwh is None:
+        return TriggerResult(triggered=False, reason="Incomplete solar forecast trigger config")
+
+    # Get solar forecast from current state
+    solcast = current_state.get('solcast_forecast', {})
+    if not solcast:
+        return TriggerResult(triggered=False, reason="Solar forecast data unavailable")
+
+    # Get the forecast value based on period
+    if period == 'today':
+        forecast_kwh = solcast.get('today_forecast_kwh') or solcast.get('today_kwh')
+    elif period == 'tomorrow':
+        forecast_kwh = solcast.get('tomorrow_kwh')
+    else:
+        return TriggerResult(triggered=False, reason=f"Unknown forecast period: {period}")
+
+    if forecast_kwh is None:
+        return TriggerResult(triggered=False, reason=f"No {period} forecast available")
+
+    # Check if we already triggered today (use date as part of state tracking)
+    now = current_state.get('current_time', datetime.now())
+    today_str = now.strftime('%Y-%m-%d')
+
+    # We encode the date into the last_evaluated_value to prevent re-triggering same day
+    # Format: YYYYMMDD.forecast_kwh (e.g., 20260119.25.5)
+    last_value = trigger.last_evaluated_value
+    last_date_encoded = int(last_value) if last_value is not None else 0
+    last_date_str = str(last_date_encoded) if last_date_encoded > 20000000 else None
+
+    current_date_encoded = int(now.strftime('%Y%m%d'))
+
+    # Check if already triggered today
+    if last_date_str and last_date_str == now.strftime('%Y%m%d'):
+        return TriggerResult(
+            triggered=False,
+            reason=f"Already evaluated {period} forecast today ({forecast_kwh:.1f} kWh)"
+        )
+
+    # Evaluate the condition
+    triggered = False
+    if condition == 'above':
+        triggered = forecast_kwh >= threshold_kwh
+    elif condition == 'below':
+        triggered = forecast_kwh <= threshold_kwh
+    else:
+        return TriggerResult(triggered=False, reason=f"Unknown condition: {condition}")
+
+    # Update last evaluated (encode date to prevent re-triggering)
+    _update_last_value(trigger, float(current_date_encoded))
+
+    if triggered:
+        return TriggerResult(
+            triggered=True,
+            reason=f"{period.capitalize()} solar forecast {forecast_kwh:.1f} kWh is {condition} {threshold_kwh:.1f} kWh"
+        )
+
+    return TriggerResult(
+        triggered=False,
+        reason=f"{period.capitalize()} forecast {forecast_kwh:.1f} kWh (threshold: {condition} {threshold_kwh:.1f} kWh)"
+    )

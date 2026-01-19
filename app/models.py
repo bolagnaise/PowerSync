@@ -556,6 +556,14 @@ class AutomationTrigger(db.Model):
     # ocpp_energy_threshold: For energy_reaches trigger (kWh)
     ocpp_energy_threshold = db.Column(db.Float, nullable=True)
 
+    # ========== Solar Forecast Trigger Fields ==========
+    # solar_forecast_period: today, tomorrow
+    solar_forecast_period = db.Column(db.String(20), nullable=True)
+    # solar_forecast_condition: above, below
+    solar_forecast_condition = db.Column(db.String(20), nullable=True)
+    # solar_forecast_threshold_kwh: Threshold in kWh
+    solar_forecast_threshold_kwh = db.Column(db.Float, nullable=True)
+
     # ========== Time Window (optional constraint for all triggers) ==========
     time_window_start = db.Column(db.Time, nullable=True)  # Only trigger after this time
     time_window_end = db.Column(db.Time, nullable=True)  # Only trigger before this time

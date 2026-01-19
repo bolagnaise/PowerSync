@@ -8,6 +8,7 @@ Supports the following trigger types:
 - price: Trigger based on electricity price thresholds
 - grid: Trigger when grid status changes
 - weather: Trigger based on weather conditions
+- solar_forecast: Trigger based on solar forecast (today/tomorrow above/below kWh threshold)
 """
 
 import logging
@@ -66,6 +67,8 @@ def evaluate_trigger(
         return _evaluate_grid_trigger(trigger, current_state, last_evaluated_value, store, automation_id)
     elif trigger_type == "weather":
         return _evaluate_weather_trigger(trigger, current_state, last_evaluated_value, store, automation_id)
+    elif trigger_type == "solar_forecast":
+        return _evaluate_solar_forecast_trigger(trigger, current_state, last_evaluated_value, store, automation_id)
     else:
         _LOGGER.warning(f"Unknown trigger type: {trigger_type}")
         return TriggerResult(triggered=False, reason=f"Unknown trigger type: {trigger_type}")
@@ -423,3 +426,79 @@ def _evaluate_weather_trigger(
 
     store.update_trigger_state(automation_id, current_value)
     return TriggerResult(triggered=False, reason=f"Current weather: {current_weather}")
+
+
+def _evaluate_solar_forecast_trigger(
+    trigger: Dict[str, Any],
+    current_state: Dict[str, Any],
+    last_value: Optional[float],
+    store: "AutomationStore",
+    automation_id: int
+) -> TriggerResult:
+    """
+    Evaluate solar forecast trigger.
+
+    Periods: today, tomorrow
+    Conditions: above, below (threshold in kWh)
+
+    This trigger fires once per day when the forecast meets the condition.
+    Uses date encoding in last_value to prevent re-triggering same day.
+    """
+    period = trigger.get("solar_forecast_period")
+    condition = trigger.get("solar_forecast_condition")
+    threshold_kwh = trigger.get("solar_forecast_threshold_kwh")
+
+    if not period or not condition or threshold_kwh is None:
+        return TriggerResult(triggered=False, reason="Incomplete solar forecast trigger config")
+
+    # Get solar forecast from current state
+    solcast = current_state.get("solcast_forecast", {})
+    if not solcast:
+        return TriggerResult(triggered=False, reason="Solar forecast data unavailable")
+
+    # Get the forecast value based on period
+    if period == "today":
+        forecast_kwh = solcast.get("today_forecast_kwh") or solcast.get("today_kwh")
+    elif period == "tomorrow":
+        forecast_kwh = solcast.get("tomorrow_kwh")
+    else:
+        return TriggerResult(triggered=False, reason=f"Unknown forecast period: {period}")
+
+    if forecast_kwh is None:
+        return TriggerResult(triggered=False, reason=f"No {period} forecast available")
+
+    # Check if we already triggered today
+    now = current_state.get("current_time", datetime.now())
+    current_date_encoded = int(now.strftime("%Y%m%d"))
+
+    # We encode the date into last_value to prevent re-triggering same day
+    last_date_encoded = int(last_value) if last_value is not None else 0
+
+    if last_date_encoded == current_date_encoded:
+        return TriggerResult(
+            triggered=False,
+            reason=f"Already evaluated {period} forecast today ({forecast_kwh:.1f} kWh)"
+        )
+
+    # Evaluate the condition
+    triggered = False
+    if condition == "above":
+        triggered = forecast_kwh >= threshold_kwh
+    elif condition == "below":
+        triggered = forecast_kwh <= threshold_kwh
+    else:
+        return TriggerResult(triggered=False, reason=f"Unknown condition: {condition}")
+
+    # Update state with date encoding
+    store.update_trigger_state(automation_id, float(current_date_encoded))
+
+    if triggered:
+        return TriggerResult(
+            triggered=True,
+            reason=f"{period.capitalize()} solar forecast {forecast_kwh:.1f} kWh is {condition} {threshold_kwh:.1f} kWh"
+        )
+
+    return TriggerResult(
+        triggered=False,
+        reason=f"{period.capitalize()} forecast {forecast_kwh:.1f} kWh (threshold: {condition} {threshold_kwh:.1f} kWh)"
+    )

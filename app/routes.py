@@ -8095,6 +8095,9 @@ def api_get_automations(api_user=None):
                 'price_threshold': t.price_threshold,
                 'grid_condition': t.grid_condition,
                 'weather_condition': t.weather_condition,
+                'solar_forecast_period': t.solar_forecast_period,
+                'solar_forecast_condition': t.solar_forecast_condition,
+                'solar_forecast_threshold_kwh': t.solar_forecast_threshold_kwh,
                 'time_window_start': t.time_window_start.strftime('%H:%M') if t.time_window_start else None,
                 'time_window_end': t.time_window_end.strftime('%H:%M') if t.time_window_end else None,
             }
@@ -8201,6 +8204,11 @@ def api_create_automation(api_user=None):
         # Weather trigger fields
         trigger.weather_condition = trigger_data.get('weather_condition')
 
+        # Solar forecast trigger fields
+        trigger.solar_forecast_period = trigger_data.get('solar_forecast_period')
+        trigger.solar_forecast_condition = trigger_data.get('solar_forecast_condition')
+        trigger.solar_forecast_threshold_kwh = trigger_data.get('solar_forecast_threshold_kwh')
+
         # Time window
         if trigger_data.get('time_window_start'):
             try:
@@ -8282,6 +8290,9 @@ def api_get_automation(automation_id, api_user=None):
             'price_threshold': t.price_threshold,
             'grid_condition': t.grid_condition,
             'weather_condition': t.weather_condition,
+            'solar_forecast_period': t.solar_forecast_period,
+            'solar_forecast_condition': t.solar_forecast_condition,
+            'solar_forecast_threshold_kwh': t.solar_forecast_threshold_kwh,
             'time_window_start': t.time_window_start.strftime('%H:%M') if t.time_window_start else None,
             'time_window_end': t.time_window_end.strftime('%H:%M') if t.time_window_end else None,
         }
@@ -8357,6 +8368,9 @@ def api_update_automation(automation_id, api_user=None):
             trigger.price_threshold = trigger_data.get('price_threshold')
             trigger.grid_condition = trigger_data.get('grid_condition')
             trigger.weather_condition = trigger_data.get('weather_condition')
+            trigger.solar_forecast_period = trigger_data.get('solar_forecast_period')
+            trigger.solar_forecast_condition = trigger_data.get('solar_forecast_condition')
+            trigger.solar_forecast_threshold_kwh = trigger_data.get('solar_forecast_threshold_kwh')
 
             if trigger_data.get('time_window_start'):
                 try:
