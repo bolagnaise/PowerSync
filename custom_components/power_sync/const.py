@@ -32,8 +32,44 @@ CONF_BATTERY_CURTAILMENT_ENABLED = "battery_curtailment_enabled"
 CONF_OPENWEATHERMAP_API_KEY = "openweathermap_api_key"
 CONF_WEATHER_LOCATION = "weather_location"
 
-# EV Charging configuration (Tesla Fleet API for vehicles)
+# EV Charging configuration
 CONF_EV_CHARGING_ENABLED = "ev_charging_enabled"
+
+# EV Control Provider selection
+CONF_EV_PROVIDER = "ev_provider"
+EV_PROVIDER_FLEET_API = "fleet_api"  # Tesla Fleet API / Teslemetry
+EV_PROVIDER_TESLA_BLE = "tesla_ble"  # ESPHome Tesla BLE
+EV_PROVIDER_BOTH = "both"  # Use both providers
+
+EV_PROVIDERS = {
+    EV_PROVIDER_FLEET_API: "Tesla Fleet API / Teslemetry",
+    EV_PROVIDER_TESLA_BLE: "Tesla BLE (ESPHome)",
+    EV_PROVIDER_BOTH: "Both (Fleet API + BLE)",
+}
+
+# Tesla BLE configuration (ESPHome Tesla BLE integration)
+CONF_TESLA_BLE_ENABLED = "tesla_ble_enabled"
+CONF_TESLA_BLE_ENTITY_PREFIX = "tesla_ble_entity_prefix"
+DEFAULT_TESLA_BLE_ENTITY_PREFIX = "tesla_ble"
+
+# Tesla BLE entity patterns (based on esphome-tesla-ble)
+# Sensors
+TESLA_BLE_SENSOR_CHARGE_LEVEL = "sensor.{prefix}_charge_level"
+TESLA_BLE_SENSOR_CHARGING_STATE = "sensor.{prefix}_charging_state"
+TESLA_BLE_SENSOR_CHARGE_LIMIT = "sensor.{prefix}_charge_limit"
+TESLA_BLE_SENSOR_CHARGE_CURRENT = "sensor.{prefix}_charge_current"
+TESLA_BLE_SENSOR_CHARGE_POWER = "sensor.{prefix}_charge_power"
+TESLA_BLE_SENSOR_RANGE = "sensor.{prefix}_range"
+# Binary sensors
+TESLA_BLE_BINARY_ASLEEP = "binary_sensor.{prefix}_asleep"
+TESLA_BLE_BINARY_STATUS = "binary_sensor.{prefix}_status"
+TESLA_BLE_BINARY_CHARGE_FLAP = "binary_sensor.{prefix}_charge_flap"
+# Controls
+TESLA_BLE_SWITCH_CHARGER = "switch.{prefix}_charger"
+TESLA_BLE_NUMBER_CHARGING_AMPS = "number.{prefix}_charging_amps"
+TESLA_BLE_NUMBER_CHARGING_LIMIT = "number.{prefix}_charging_limit"
+TESLA_BLE_BUTTON_WAKE_UP = "button.{prefix}_wake_up"
+TESLA_BLE_BUTTON_UNLOCK_CHARGE_PORT = "button.{prefix}_unlock_charge_port"
 
 # OCPP Central System configuration
 CONF_OCPP_ENABLED = "ocpp_enabled"

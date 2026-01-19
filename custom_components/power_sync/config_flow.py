@@ -147,6 +147,13 @@ from .const import (
     CONF_WEATHER_LOCATION,
     # EV Charging and OCPP configuration
     CONF_EV_CHARGING_ENABLED,
+    CONF_EV_PROVIDER,
+    EV_PROVIDER_FLEET_API,
+    EV_PROVIDER_TESLA_BLE,
+    EV_PROVIDER_BOTH,
+    EV_PROVIDERS,
+    CONF_TESLA_BLE_ENTITY_PREFIX,
+    DEFAULT_TESLA_BLE_ENTITY_PREFIX,
     CONF_OCPP_ENABLED,
     CONF_OCPP_PORT,
     DEFAULT_OCPP_PORT,
@@ -2124,10 +2131,18 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             flow_options = getattr(self, '_final_options', {})
             final_data.update(flow_options)
 
-            # Add EV and OCPP settings
+            # Add EV settings
             final_data[CONF_EV_CHARGING_ENABLED] = user_input.get(
                 CONF_EV_CHARGING_ENABLED, False
             )
+            final_data[CONF_EV_PROVIDER] = user_input.get(
+                CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API
+            )
+            final_data[CONF_TESLA_BLE_ENTITY_PREFIX] = user_input.get(
+                CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX
+            )
+
+            # Add OCPP settings
             final_data[CONF_OCPP_ENABLED] = user_input.get(CONF_OCPP_ENABLED, False)
             final_data[CONF_OCPP_PORT] = user_input.get(
                 CONF_OCPP_PORT, DEFAULT_OCPP_PORT
@@ -2147,11 +2162,27 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data=final_data)
 
         # Build schema for EV, OCPP, and Solcast options
+        # Get current EV provider to determine if BLE prefix should be shown
+        current_ev_enabled = self._get_option(CONF_EV_CHARGING_ENABLED, False)
+        current_ev_provider = self._get_option(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
+
         schema_dict: dict[vol.Marker, Any] = {
+            # EV Charging settings
             vol.Optional(
                 CONF_EV_CHARGING_ENABLED,
-                default=self._get_option(CONF_EV_CHARGING_ENABLED, False),
+                default=current_ev_enabled,
             ): bool,
+            vol.Optional(
+                CONF_EV_PROVIDER,
+                default=current_ev_provider,
+            ): vol.In(EV_PROVIDERS),
+            vol.Optional(
+                CONF_TESLA_BLE_ENTITY_PREFIX,
+                default=self._get_option(
+                    CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX
+                ),
+            ): str,
+            # OCPP settings
             vol.Optional(
                 CONF_OCPP_ENABLED,
                 default=self._get_option(CONF_OCPP_ENABLED, False),

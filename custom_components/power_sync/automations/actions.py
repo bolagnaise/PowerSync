@@ -16,6 +16,12 @@ Supported actions:
 - set_charge_rate: Set charge rate limit (Sigenergy only)
 - set_discharge_rate: Set discharge rate limit (Sigenergy only)
 - set_export_limit: Set export power limit (Sigenergy only)
+
+EV Actions (Tesla Fleet/Teslemetry or Tesla BLE):
+- start_ev_charging: Start charging an EV
+- stop_ev_charging: Stop charging an EV
+- set_ev_charge_limit: Set EV charge limit percentage
+- set_ev_charging_amps: Set EV charging amperage
 """
 
 import logging
@@ -23,14 +29,260 @@ from typing import List, Dict, Any, Optional
 
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.helpers import entity_registry as er, device_registry as dr
+
+from ..const import (
+    DOMAIN,
+    CONF_EV_PROVIDER,
+    EV_PROVIDER_FLEET_API,
+    EV_PROVIDER_TESLA_BLE,
+    EV_PROVIDER_BOTH,
+    CONF_TESLA_BLE_ENTITY_PREFIX,
+    DEFAULT_TESLA_BLE_ENTITY_PREFIX,
+    TESLA_BLE_SWITCH_CHARGER,
+    TESLA_BLE_NUMBER_CHARGING_AMPS,
+    TESLA_BLE_NUMBER_CHARGING_LIMIT,
+    TESLA_BLE_BUTTON_WAKE_UP,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+# Tesla integrations supported for EV control via Fleet API
+TESLA_EV_INTEGRATIONS = ["tesla_fleet", "teslemetry"]
 
 
 def _is_sigenergy(config_entry: ConfigEntry) -> bool:
     """Check if this is a Sigenergy system."""
     from ..const import CONF_SIGENERGY_STATION_ID
     return bool(config_entry.data.get(CONF_SIGENERGY_STATION_ID))
+
+
+async def _get_tesla_ev_entity(
+    hass: HomeAssistant,
+    entity_pattern: str,
+    vehicle_vin: Optional[str] = None
+) -> Optional[str]:
+    """
+    Find a Tesla EV entity by pattern.
+
+    Args:
+        hass: Home Assistant instance
+        entity_pattern: Pattern to match (e.g., "button.*charge_start", "number.*charge_limit")
+        vehicle_vin: Optional VIN to filter by specific vehicle
+
+    Returns:
+        Entity ID if found, None otherwise
+    """
+    import re
+
+    entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
+
+    # Find devices from Tesla integrations
+    tesla_devices = []
+    for device in device_registry.devices.values():
+        for identifier in device.identifiers:
+            domain, identifier_value = identifier
+            if domain in TESLA_EV_INTEGRATIONS:
+                # Check if it's a vehicle (VIN is 17 chars, non-numeric)
+                if len(str(identifier_value)) == 17 and not str(identifier_value).isdigit():
+                    if vehicle_vin is None or identifier_value == vehicle_vin:
+                        tesla_devices.append(device)
+                        break
+
+    if not tesla_devices:
+        _LOGGER.warning("No Tesla EV devices found")
+        return None
+
+    # Use first vehicle if no specific VIN provided
+    target_device = tesla_devices[0]
+
+    # Find matching entity for this device
+    pattern = re.compile(entity_pattern, re.IGNORECASE)
+    for entity in entity_registry.entities.values():
+        if entity.device_id == target_device.id:
+            if pattern.match(entity.entity_id):
+                return entity.entity_id
+
+    _LOGGER.warning(f"No entity matching pattern '{entity_pattern}' found for Tesla EV")
+    return None
+
+
+async def _wake_tesla_ev(hass: HomeAssistant, vehicle_vin: Optional[str] = None) -> bool:
+    """
+    Wake up a Tesla vehicle before sending commands.
+
+    Args:
+        hass: Home Assistant instance
+        vehicle_vin: Optional VIN to filter by specific vehicle
+
+    Returns:
+        True if wake command sent successfully
+    """
+    # Find the wake up button entity
+    wake_entity = await _get_tesla_ev_entity(
+        hass,
+        r"button\..*wake(_up)?$",
+        vehicle_vin
+    )
+
+    if not wake_entity:
+        _LOGGER.warning("Could not find Tesla wake button entity")
+        return False
+
+    try:
+        await hass.services.async_call(
+            "button",
+            "press",
+            {"entity_id": wake_entity},
+            blocking=True,
+        )
+        _LOGGER.info(f"Sent wake command to Tesla EV: {wake_entity}")
+        # Wait a moment for vehicle to wake
+        import asyncio
+        await asyncio.sleep(3)
+        return True
+    except Exception as e:
+        _LOGGER.error(f"Failed to wake Tesla EV: {e}")
+        return False
+
+
+def _get_ev_config(config_entry: ConfigEntry) -> dict:
+    """Get EV configuration from config entry."""
+    return {
+        "ev_provider": config_entry.options.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API),
+        "ble_prefix": config_entry.options.get(
+            CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX
+        ),
+    }
+
+
+def _is_ble_available(hass: HomeAssistant, ble_prefix: str) -> bool:
+    """Check if Tesla BLE entities are available."""
+    charger_entity = TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)
+    state = hass.states.get(charger_entity)
+    return state is not None
+
+
+async def _wake_tesla_ble(hass: HomeAssistant, ble_prefix: str) -> bool:
+    """Wake up Tesla via BLE."""
+    wake_entity = TESLA_BLE_BUTTON_WAKE_UP.format(prefix=ble_prefix)
+    state = hass.states.get(wake_entity)
+
+    if state is None:
+        _LOGGER.warning(f"Tesla BLE wake entity not found: {wake_entity}")
+        return False
+
+    try:
+        await hass.services.async_call(
+            "button",
+            "press",
+            {"entity_id": wake_entity},
+            blocking=True,
+        )
+        _LOGGER.info(f"Sent wake command via Tesla BLE: {wake_entity}")
+        import asyncio
+        await asyncio.sleep(2)
+        return True
+    except Exception as e:
+        _LOGGER.error(f"Failed to wake Tesla via BLE: {e}")
+        return False
+
+
+async def _start_ev_charging_ble(hass: HomeAssistant, ble_prefix: str) -> bool:
+    """Start EV charging via Tesla BLE."""
+    charger_entity = TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)
+
+    if hass.states.get(charger_entity) is None:
+        _LOGGER.error(f"Tesla BLE charger entity not found: {charger_entity}")
+        return False
+
+    try:
+        await _wake_tesla_ble(hass, ble_prefix)
+        await hass.services.async_call(
+            "switch",
+            "turn_on",
+            {"entity_id": charger_entity},
+            blocking=True,
+        )
+        _LOGGER.info(f"Started EV charging via Tesla BLE: {charger_entity}")
+        return True
+    except Exception as e:
+        _LOGGER.error(f"Failed to start EV charging via BLE: {e}")
+        return False
+
+
+async def _stop_ev_charging_ble(hass: HomeAssistant, ble_prefix: str) -> bool:
+    """Stop EV charging via Tesla BLE."""
+    charger_entity = TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)
+
+    if hass.states.get(charger_entity) is None:
+        _LOGGER.error(f"Tesla BLE charger entity not found: {charger_entity}")
+        return False
+
+    try:
+        await _wake_tesla_ble(hass, ble_prefix)
+        await hass.services.async_call(
+            "switch",
+            "turn_off",
+            {"entity_id": charger_entity},
+            blocking=True,
+        )
+        _LOGGER.info(f"Stopped EV charging via Tesla BLE: {charger_entity}")
+        return True
+    except Exception as e:
+        _LOGGER.error(f"Failed to stop EV charging via BLE: {e}")
+        return False
+
+
+async def _set_ev_charge_limit_ble(
+    hass: HomeAssistant, ble_prefix: str, percent: int
+) -> bool:
+    """Set EV charge limit via Tesla BLE."""
+    limit_entity = TESLA_BLE_NUMBER_CHARGING_LIMIT.format(prefix=ble_prefix)
+
+    if hass.states.get(limit_entity) is None:
+        _LOGGER.error(f"Tesla BLE charge limit entity not found: {limit_entity}")
+        return False
+
+    try:
+        await _wake_tesla_ble(hass, ble_prefix)
+        await hass.services.async_call(
+            "number",
+            "set_value",
+            {"entity_id": limit_entity, "value": percent},
+            blocking=True,
+        )
+        _LOGGER.info(f"Set EV charge limit to {percent}% via Tesla BLE: {limit_entity}")
+        return True
+    except Exception as e:
+        _LOGGER.error(f"Failed to set EV charge limit via BLE: {e}")
+        return False
+
+
+async def _set_ev_charging_amps_ble(
+    hass: HomeAssistant, ble_prefix: str, amps: int
+) -> bool:
+    """Set EV charging amps via Tesla BLE."""
+    amps_entity = TESLA_BLE_NUMBER_CHARGING_AMPS.format(prefix=ble_prefix)
+
+    if hass.states.get(amps_entity) is None:
+        _LOGGER.error(f"Tesla BLE charging amps entity not found: {amps_entity}")
+        return False
+
+    try:
+        await _wake_tesla_ble(hass, ble_prefix)
+        await hass.services.async_call(
+            "number",
+            "set_value",
+            {"entity_id": amps_entity, "value": amps},
+            blocking=True,
+        )
+        _LOGGER.info(f"Set EV charging amps to {amps}A via Tesla BLE: {amps_entity}")
+        return True
+    except Exception as e:
+        _LOGGER.error(f"Failed to set EV charging amps via BLE: {e}")
+        return False
 
 
 async def _get_sigenergy_controller(config_entry: ConfigEntry) -> Optional["SigenergyController"]:
@@ -155,6 +407,15 @@ async def _execute_single_action(
         return await _action_set_discharge_rate(hass, config_entry, params)
     elif action_type == "set_export_limit":
         return await _action_set_export_limit(hass, config_entry, params)
+    # EV Charging Actions
+    elif action_type == "start_ev_charging":
+        return await _action_start_ev_charging(hass, config_entry, params)
+    elif action_type == "stop_ev_charging":
+        return await _action_stop_ev_charging(hass, config_entry, params)
+    elif action_type == "set_ev_charge_limit":
+        return await _action_set_ev_charge_limit(hass, config_entry, params)
+    elif action_type == "set_ev_charging_amps":
+        return await _action_set_ev_charging_amps(hass, config_entry, params)
     else:
         _LOGGER.warning(f"Unknown action type: {action_type}")
         return False
@@ -690,3 +951,229 @@ async def _action_restore_inverter(
     except Exception as e:
         _LOGGER.error(f"Failed to restore inverter: {e}")
         return False
+
+
+# =============================================================================
+# EV Charging Actions (Tesla Fleet/Teslemetry or Tesla BLE via Home Assistant)
+# =============================================================================
+
+
+async def _action_start_ev_charging(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    params: Dict[str, Any]
+) -> bool:
+    """
+    Start EV charging via Tesla Fleet/Teslemetry or Tesla BLE.
+
+    Uses BLE if configured as primary or both, falls back to Fleet API.
+    """
+    ev_config = _get_ev_config(config_entry)
+    ev_provider = ev_config["ev_provider"]
+    ble_prefix = ev_config["ble_prefix"]
+    vehicle_vin = params.get("vehicle_vin")
+
+    # Try BLE first if configured
+    if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+        if _is_ble_available(hass, ble_prefix):
+            result = await _start_ev_charging_ble(hass, ble_prefix)
+            if result or ev_provider == EV_PROVIDER_TESLA_BLE:
+                return result
+            # Fall through to Fleet API if BLE failed and both are configured
+
+    # Use Fleet API
+    if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+        charge_start_entity = await _get_tesla_ev_entity(
+            hass,
+            r"button\..*charge_start$",
+            vehicle_vin
+        )
+
+        if not charge_start_entity:
+            _LOGGER.error("Could not find Tesla charge_start button entity")
+            return False
+
+        try:
+            await _wake_tesla_ev(hass, vehicle_vin)
+            await hass.services.async_call(
+                "button",
+                "press",
+                {"entity_id": charge_start_entity},
+                blocking=True,
+            )
+            _LOGGER.info(f"Started EV charging via {charge_start_entity}")
+            return True
+        except Exception as e:
+            _LOGGER.error(f"Failed to start EV charging: {e}")
+            return False
+
+    return False
+
+
+async def _action_stop_ev_charging(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    params: Dict[str, Any]
+) -> bool:
+    """
+    Stop EV charging via Tesla Fleet/Teslemetry or Tesla BLE.
+
+    Uses BLE if configured as primary or both, falls back to Fleet API.
+    """
+    ev_config = _get_ev_config(config_entry)
+    ev_provider = ev_config["ev_provider"]
+    ble_prefix = ev_config["ble_prefix"]
+    vehicle_vin = params.get("vehicle_vin")
+
+    # Try BLE first if configured
+    if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+        if _is_ble_available(hass, ble_prefix):
+            result = await _stop_ev_charging_ble(hass, ble_prefix)
+            if result or ev_provider == EV_PROVIDER_TESLA_BLE:
+                return result
+
+    # Use Fleet API
+    if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+        charge_stop_entity = await _get_tesla_ev_entity(
+            hass,
+            r"button\..*charge_stop$",
+            vehicle_vin
+        )
+
+        if not charge_stop_entity:
+            _LOGGER.error("Could not find Tesla charge_stop button entity")
+            return False
+
+        try:
+            await _wake_tesla_ev(hass, vehicle_vin)
+            await hass.services.async_call(
+                "button",
+                "press",
+                {"entity_id": charge_stop_entity},
+                blocking=True,
+            )
+            _LOGGER.info(f"Stopped EV charging via {charge_stop_entity}")
+            return True
+        except Exception as e:
+            _LOGGER.error(f"Failed to stop EV charging: {e}")
+            return False
+
+    return False
+
+
+async def _action_set_ev_charge_limit(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    params: Dict[str, Any]
+) -> bool:
+    """
+    Set EV charge limit percentage via Tesla Fleet/Teslemetry or Tesla BLE.
+    """
+    ev_config = _get_ev_config(config_entry)
+    ev_provider = ev_config["ev_provider"]
+    ble_prefix = ev_config["ble_prefix"]
+    vehicle_vin = params.get("vehicle_vin")
+
+    # Accept both "percent" and "limit" for flexibility
+    percent = params.get("percent") or params.get("limit")
+    if percent is None:
+        _LOGGER.error("set_ev_charge_limit: missing percent parameter")
+        return False
+
+    # Clamp to valid range (50-100%)
+    percent = max(50, min(100, int(percent)))
+
+    # Try BLE first if configured
+    if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+        if _is_ble_available(hass, ble_prefix):
+            result = await _set_ev_charge_limit_ble(hass, ble_prefix, percent)
+            if result or ev_provider == EV_PROVIDER_TESLA_BLE:
+                return result
+
+    # Use Fleet API
+    if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+        charge_limit_entity = await _get_tesla_ev_entity(
+            hass,
+            r"number\..*charge_limit$",
+            vehicle_vin
+        )
+
+        if not charge_limit_entity:
+            _LOGGER.error("Could not find Tesla charge_limit number entity")
+            return False
+
+        try:
+            await _wake_tesla_ev(hass, vehicle_vin)
+            await hass.services.async_call(
+                "number",
+                "set_value",
+                {"entity_id": charge_limit_entity, "value": percent},
+                blocking=True,
+            )
+            _LOGGER.info(f"Set EV charge limit to {percent}% via {charge_limit_entity}")
+            return True
+        except Exception as e:
+            _LOGGER.error(f"Failed to set EV charge limit: {e}")
+            return False
+
+    return False
+
+
+async def _action_set_ev_charging_amps(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    params: Dict[str, Any]
+) -> bool:
+    """
+    Set EV charging amperage via Tesla Fleet/Teslemetry or Tesla BLE.
+    """
+    ev_config = _get_ev_config(config_entry)
+    ev_provider = ev_config["ev_provider"]
+    ble_prefix = ev_config["ble_prefix"]
+    vehicle_vin = params.get("vehicle_vin")
+
+    # Accept both "amps" and "charging_amps" for flexibility
+    amps = params.get("amps") or params.get("charging_amps")
+    if amps is None:
+        _LOGGER.error("set_ev_charging_amps: missing amps parameter")
+        return False
+
+    # Clamp to valid range (1-48A typical, but allow up to 80A for some chargers)
+    # Note: Tesla BLE max is typically 15A
+    amps = max(1, min(80, int(amps)))
+
+    # Try BLE first if configured (BLE max is typically 15A)
+    ble_amps = min(amps, 15)  # BLE charger has lower max
+    if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+        if _is_ble_available(hass, ble_prefix):
+            result = await _set_ev_charging_amps_ble(hass, ble_prefix, ble_amps)
+            if result or ev_provider == EV_PROVIDER_TESLA_BLE:
+                return result
+
+    # Use Fleet API
+    if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+        charging_amps_entity = await _get_tesla_ev_entity(
+            hass,
+            r"number\..*charging_amps$",
+            vehicle_vin
+        )
+
+        if not charging_amps_entity:
+            _LOGGER.error("Could not find Tesla charging_amps number entity")
+            return False
+
+        try:
+            await _wake_tesla_ev(hass, vehicle_vin)
+            await hass.services.async_call(
+                "number",
+                "set_value",
+                {"entity_id": charging_amps_entity, "value": amps},
+                blocking=True,
+            )
+            _LOGGER.info(f"Set EV charging amps to {amps}A via {charging_amps_entity}")
+            return True
+        except Exception as e:
+            _LOGGER.error(f"Failed to set EV charging amps: {e}")
+            return False
+
+    return False
