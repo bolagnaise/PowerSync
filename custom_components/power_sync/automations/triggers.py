@@ -533,6 +533,11 @@ def _evaluate_ev_trigger(
 
     # Get EV state from current_state
     ev_state = current_state.get("ev_state", {})
+
+    _LOGGER.debug(
+        f"EV trigger evaluation: condition={condition}, last_value={last_value}, "
+        f"ev_state={ev_state}"
+    )
     is_plugged_in = ev_state.get("is_plugged_in", False)
     is_charging = ev_state.get("is_charging", False)
     battery_level = ev_state.get("battery_level")

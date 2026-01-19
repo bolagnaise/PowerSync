@@ -323,6 +323,9 @@ class AutomationEngine:
             "current_time": current_time_local,
             "user_timezone": user_timezone,
             "backup_reserve": None,
+            "ev_state": {},
+            "ocpp_state": {},
+            "solcast_forecast": {},
         }
 
         # Get data from coordinator
@@ -370,6 +373,24 @@ class AutomationEngine:
                 # Prices
                 state["import_price"] = coord_data.get("current_import_price")
                 state["export_price"] = coord_data.get("current_export_price")
+
+        # Get EV state from Tesla Fleet entities
+        try:
+            state["ev_state"] = await self._async_get_ev_state()
+        except Exception as e:
+            _LOGGER.warning(f"Failed to get EV state: {e}")
+
+        # Get OCPP state
+        try:
+            state["ocpp_state"] = await self._async_get_ocpp_state()
+        except Exception as e:
+            _LOGGER.warning(f"Failed to get OCPP state: {e}")
+
+        # Get Solcast forecast
+        try:
+            state["solcast_forecast"] = await self._async_get_solcast_forecast()
+        except Exception as e:
+            _LOGGER.warning(f"Failed to get Solcast forecast: {e}")
 
         # Get weather
         try:
@@ -529,3 +550,128 @@ class AutomationEngine:
                         _LOGGER.error(f"Expo Push API error: {response.status} - {text}")
         except Exception as e:
             _LOGGER.error(f"Failed to send Expo push notification: {e}")
+
+    async def _async_get_ev_state(self) -> Dict[str, Any]:
+        """Get EV state from Tesla Fleet or other EV integrations."""
+        import re
+
+        ev_state = {
+            "is_plugged_in": False,
+            "is_charging": False,
+            "battery_level": None,
+            "charging_state": "",
+        }
+
+        # Look for Tesla Fleet entities
+        # Patterns: sensor.*_charging_state, binary_sensor.*_charger, sensor.*_battery
+        all_states = self._hass.states.async_all()
+
+        for state in all_states:
+            entity_id = state.entity_id
+            state_value = state.state
+
+            # Skip unavailable states
+            if state_value in ("unavailable", "unknown"):
+                continue
+
+            # Charging state sensor (e.g., sensor.tessy_charging_state)
+            if re.match(r"sensor\.\w+_charging_state$", entity_id):
+                ev_state["charging_state"] = state_value.lower()
+                ev_state["is_charging"] = state_value.lower() == "charging"
+                _LOGGER.debug(f"EV charging state from {entity_id}: {state_value}")
+
+            # Charger binary sensor (plugged in) (e.g., binary_sensor.tessy_charger)
+            elif re.match(r"binary_sensor\.\w+_charger$", entity_id):
+                ev_state["is_plugged_in"] = state_value.lower() == "on"
+                _LOGGER.debug(f"EV plugged in from {entity_id}: {state_value}")
+
+            # Battery level sensor (e.g., sensor.tessy_battery)
+            elif re.match(r"sensor\.\w+_battery$", entity_id):
+                # Make sure this is an EV battery, not home battery
+                # Check for device class or unit
+                device_class = state.attributes.get("device_class", "")
+                unit = state.attributes.get("unit_of_measurement", "")
+                if device_class == "battery" or unit == "%":
+                    try:
+                        level = float(state_value)
+                        # Only use if it looks like a battery percentage (0-100)
+                        if 0 <= level <= 100:
+                            ev_state["battery_level"] = level
+                            _LOGGER.debug(f"EV battery level from {entity_id}: {level}%")
+                    except (ValueError, TypeError):
+                        pass
+
+        _LOGGER.debug(f"EV state collected: {ev_state}")
+        return ev_state
+
+    async def _async_get_ocpp_state(self) -> Dict[str, Any]:
+        """Get OCPP charger state from OCPP integration entities."""
+        import re
+
+        ocpp_state = {
+            "status": "",
+            "is_connected": False,
+            "energy_kwh": 0,
+        }
+
+        all_states = self._hass.states.async_all()
+
+        for state in all_states:
+            entity_id = state.entity_id
+            state_value = state.state
+
+            if state_value in ("unavailable", "unknown"):
+                continue
+
+            # OCPP status sensor (e.g., sensor.evse_status, sensor.*_charger_status)
+            if re.match(r"sensor\.\w*(ocpp|evse|charger).*_status$", entity_id, re.IGNORECASE):
+                ocpp_state["status"] = state_value.lower()
+                ocpp_state["is_connected"] = state_value.lower() not in ("unavailable", "disconnected", "")
+                _LOGGER.debug(f"OCPP status from {entity_id}: {state_value}")
+
+            # OCPP energy sensor
+            elif re.match(r"sensor\.\w*(ocpp|evse).*energy", entity_id, re.IGNORECASE):
+                try:
+                    ocpp_state["energy_kwh"] = float(state_value)
+                except (ValueError, TypeError):
+                    pass
+
+        return ocpp_state
+
+    async def _async_get_solcast_forecast(self) -> Dict[str, Any]:
+        """Get Solcast solar forecast data from Solcast integration entities."""
+        import re
+
+        forecast = {
+            "today_kwh": None,
+            "tomorrow_kwh": None,
+            "today_forecast_kwh": None,  # Alias for compatibility
+        }
+
+        all_states = self._hass.states.async_all()
+
+        for state in all_states:
+            entity_id = state.entity_id
+            state_value = state.state
+
+            if state_value in ("unavailable", "unknown"):
+                continue
+
+            # Solcast forecast today (e.g., sensor.solcast_pv_forecast_forecast_today)
+            if re.match(r"sensor\.solcast.*forecast.*today", entity_id, re.IGNORECASE):
+                try:
+                    forecast["today_kwh"] = float(state_value)
+                    forecast["today_forecast_kwh"] = float(state_value)
+                    _LOGGER.debug(f"Solcast today forecast from {entity_id}: {state_value} kWh")
+                except (ValueError, TypeError):
+                    pass
+
+            # Solcast forecast tomorrow
+            elif re.match(r"sensor\.solcast.*forecast.*tomorrow", entity_id, re.IGNORECASE):
+                try:
+                    forecast["tomorrow_kwh"] = float(state_value)
+                    _LOGGER.debug(f"Solcast tomorrow forecast from {entity_id}: {state_value} kWh")
+                except (ValueError, TypeError):
+                    pass
+
+        return forecast
