@@ -2661,7 +2661,10 @@ class EVVehiclesView(HomeAssistantView):
                                 if state.state in ("unknown", "unavailable") and charging_state is None:
                                     charging_state = "Asleep"
                                 elif state.state not in ("unknown", "unavailable") and charging_state is None:
-                                    charging_state = state.state
+                                    # Capitalize first letter to match app's expected format
+                                    # Tesla Fleet: charging, complete, stopped, etc.
+                                    # App expects: Charging, Complete, Stopped, etc.
+                                    charging_state = state.state.capitalize()
 
                             if "charge_limit" in entity_id_lower or "charge_limit_soc" in entity_id_lower:
                                 if state.state not in ("unknown", "unavailable"):
