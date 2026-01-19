@@ -2952,6 +2952,93 @@ class EVVehicleCommandView(HomeAssistantView):
 
         return False
 
+    async def _set_charge_limit(self, percent: int, vehicle_vin: str | None = None) -> bool:
+        """Set charge limit percentage."""
+        # Clamp to valid range (50-100%)
+        percent = max(50, min(100, int(percent)))
+
+        config = self._get_powersync_config()
+        ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
+        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+
+        # Try BLE first
+        if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+            limit_entity = TESLA_BLE_NUMBER_CHARGING_LIMIT.format(prefix=ble_prefix)
+            if self._hass.states.get(limit_entity):
+                try:
+                    await self._hass.services.async_call(
+                        "number", "set_value",
+                        {"entity_id": limit_entity, "value": percent},
+                        blocking=True,
+                    )
+                    _LOGGER.info(f"Set charge limit to {percent}% via BLE: {limit_entity}")
+                    return True
+                except Exception as e:
+                    _LOGGER.warning(f"BLE set charge limit failed: {e}")
+
+        # Try Fleet API
+        if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+            await self._wake_vehicle(vehicle_vin)
+            limit_entity = await self._get_tesla_ev_entity(r"number\..*charge_limit$", vehicle_vin)
+            if limit_entity:
+                try:
+                    await self._hass.services.async_call(
+                        "number", "set_value",
+                        {"entity_id": limit_entity, "value": percent},
+                        blocking=True,
+                    )
+                    _LOGGER.info(f"Set charge limit to {percent}% via Fleet API: {limit_entity}")
+                    return True
+                except Exception as e:
+                    _LOGGER.error(f"Fleet API set charge limit failed: {e}")
+                    return False
+
+        return False
+
+    async def _set_charging_amps(self, amps: int, vehicle_vin: str | None = None) -> bool:
+        """Set charging amperage."""
+        # Clamp to valid range (1-48A for most, up to 80A for some)
+        amps = max(1, min(80, int(amps)))
+
+        config = self._get_powersync_config()
+        ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
+        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+
+        # Try BLE first (BLE max is typically 15A)
+        if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+            amps_entity = TESLA_BLE_NUMBER_CHARGING_AMPS.format(prefix=ble_prefix)
+            if self._hass.states.get(amps_entity):
+                ble_amps = min(amps, 15)  # BLE charger has lower max
+                try:
+                    await self._hass.services.async_call(
+                        "number", "set_value",
+                        {"entity_id": amps_entity, "value": ble_amps},
+                        blocking=True,
+                    )
+                    _LOGGER.info(f"Set charging amps to {ble_amps}A via BLE: {amps_entity}")
+                    return True
+                except Exception as e:
+                    _LOGGER.warning(f"BLE set charging amps failed: {e}")
+
+        # Try Fleet API
+        if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+            await self._wake_vehicle(vehicle_vin)
+            amps_entity = await self._get_tesla_ev_entity(r"number\..*charging_amps$", vehicle_vin)
+            if amps_entity:
+                try:
+                    await self._hass.services.async_call(
+                        "number", "set_value",
+                        {"entity_id": amps_entity, "value": amps},
+                        blocking=True,
+                    )
+                    _LOGGER.info(f"Set charging amps to {amps}A via Fleet API: {amps_entity}")
+                    return True
+                except Exception as e:
+                    _LOGGER.error(f"Fleet API set charging amps failed: {e}")
+                    return False
+
+        return False
+
     async def post(self, request: web.Request, vehicle_id: str) -> web.Response:
         """Handle POST request to send vehicle command."""
         try:
@@ -2964,7 +3051,7 @@ class EVVehicleCommandView(HomeAssistantView):
                     "error": "Missing 'command' parameter"
                 }, status=400)
 
-            valid_commands = ["wake_up", "start_charging", "stop_charging"]
+            valid_commands = ["wake_up", "start_charging", "stop_charging", "set_charge_limit", "set_charging_amps"]
             if command not in valid_commands:
                 return web.json_response({
                     "success": False,
@@ -2986,6 +3073,26 @@ class EVVehicleCommandView(HomeAssistantView):
             elif command == "stop_charging":
                 success = await self._stop_charging(vehicle_vin)
                 message = "Charging stopped" if success else "Failed to stop charging"
+
+            elif command == "set_charge_limit":
+                percent = data.get("value") or data.get("percent") or data.get("limit")
+                if percent is None:
+                    return web.json_response({
+                        "success": False,
+                        "error": "Missing 'value' parameter for set_charge_limit (50-100)"
+                    }, status=400)
+                success = await self._set_charge_limit(int(percent), vehicle_vin)
+                message = f"Charge limit set to {percent}%" if success else "Failed to set charge limit"
+
+            elif command == "set_charging_amps":
+                amps = data.get("value") or data.get("amps")
+                if amps is None:
+                    return web.json_response({
+                        "success": False,
+                        "error": "Missing 'value' parameter for set_charging_amps (1-48)"
+                    }, status=400)
+                success = await self._set_charging_amps(int(amps), vehicle_vin)
+                message = f"Charging amps set to {amps}A" if success else "Failed to set charging amps"
 
             if success:
                 return web.json_response({
