@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import aiohttp
 import asyncio
+import json
 import logging
 from datetime import datetime, timedelta
 from typing import Any
@@ -2121,13 +2122,47 @@ class TariffPriceView(HomeAssistantView):
                 _LOGGER.warning("No tariff data in Tesla response")
                 return None
 
+            # Log the full tariff structure for debugging
+            _LOGGER.info(f"Tesla tariff structure: {json.dumps(tariff, indent=2)[:2000]}")
+
             # Extract buy and sell prices from tariff structure
-            # Tesla tariff structure: energy_charges.Summer.rates.PERIOD_XX_XX
-            buy_prices = tariff.get("energy_charges", {}).get("Summer", {}).get("rates", {})
-            sell_prices = tariff.get("sell_tariff", {}).get("energy_charges", {}).get("Summer", {}).get("rates", {})
+            # Tesla tariff structure varies by region/config:
+            # - US/Australia: energy_charges.Summer.rates.PERIOD_XX_XX or energy_charges.ALL.rates
+            # - Some configs: energy_charges.rates directly
+            energy_charges = tariff.get("energy_charges", {})
+
+            # Try different tariff structures
+            buy_prices = None
+            if "Summer" in energy_charges:
+                buy_prices = energy_charges.get("Summer", {}).get("rates", {})
+            elif "ALL" in energy_charges:
+                buy_prices = energy_charges.get("ALL", {}).get("rates", {})
+            elif "rates" in energy_charges:
+                buy_prices = energy_charges.get("rates", {})
+            elif energy_charges:
+                # Try first season key
+                first_season = next(iter(energy_charges.keys()), None)
+                if first_season:
+                    buy_prices = energy_charges.get(first_season, {}).get("rates", {})
+                    _LOGGER.info(f"Using tariff season: {first_season}")
+
+            # Also check for sell tariff
+            sell_tariff = tariff.get("sell_tariff", {})
+            sell_charges = sell_tariff.get("energy_charges", {})
+            sell_prices = None
+            if "Summer" in sell_charges:
+                sell_prices = sell_charges.get("Summer", {}).get("rates", {})
+            elif "ALL" in sell_charges:
+                sell_prices = sell_charges.get("ALL", {}).get("rates", {})
+            elif "rates" in sell_charges:
+                sell_prices = sell_charges.get("rates", {})
+            elif sell_charges:
+                first_season = next(iter(sell_charges.keys()), None)
+                if first_season:
+                    sell_prices = sell_charges.get(first_season, {}).get("rates", {})
 
             if not buy_prices:
-                _LOGGER.warning("No buy prices in Tesla tariff")
+                _LOGGER.warning(f"No buy prices in Tesla tariff. energy_charges keys: {list(energy_charges.keys()) if energy_charges else 'empty'}")
                 return None
 
             from datetime import datetime as dt
