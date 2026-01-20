@@ -195,6 +195,8 @@ class EnphaseController(InverterController):
                         self._token_obtained_at = datetime.now()
                         # Update session cookie for /installer/ endpoints
                         self._update_session_cookie()
+                        # Validate token locally to establish session for installer endpoints
+                        await self._validate_token_locally()
                         return token
                     else:
                         _LOGGER.error(f"Invalid token response from Enlighten: {token[:100]}")
@@ -283,6 +285,32 @@ class EnphaseController(InverterController):
                 URL(f"https://{self.host}:{self.port}/")
             )
             _LOGGER.debug(f"Updated session cookie with JWT token for {self.host}")
+
+    async def _validate_token_locally(self) -> bool:
+        """Validate the JWT token locally with the Enphase gateway.
+
+        The gateway needs to validate the token via /auth/check_jwt before
+        installer-level endpoints will work. This establishes the local session.
+
+        Returns:
+            True if validation succeeded
+        """
+        if not self._token or not self._session:
+            return False
+
+        url = f"https://{self.host}:{self.port}/auth/check_jwt"
+        try:
+            async with self._session.get(url, headers=self._get_headers()) as response:
+                if response.status == 200:
+                    _LOGGER.debug(f"JWT token validated locally with gateway")
+                    return True
+                else:
+                    body = await response.text()
+                    _LOGGER.debug(f"JWT local validation returned {response.status}: {body[:100]}")
+                    return False
+        except Exception as e:
+            _LOGGER.debug(f"JWT local validation error: {e}")
+            return False
 
     async def connect(self) -> bool:
         """Connect to the Enphase IQ Gateway."""
