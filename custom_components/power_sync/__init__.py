@@ -1445,10 +1445,11 @@ class PowerwallSettingsView(HomeAssistantView):
 
             # Get grid settings from components
             components = site_info.get("components", {})
-            api_export_rule = components.get("customer_preferred_export_rule") or site_info.get("customer_preferred_export_rule", "pv_only")
+            # Try components first, then site_info, default to battery_ok (most common setting)
+            api_export_rule = components.get("customer_preferred_export_rule") or site_info.get("customer_preferred_export_rule")
             disallow_charge = components.get("disallow_charge_from_grid_with_solar_installed", False)
 
-            # Handle VPP users where export rule might not be set
+            # Handle cases where export rule is not set (VPP users, new accounts, etc.)
             if api_export_rule is None:
                 non_export = components.get("non_export_configured", False)
                 api_export_rule = "never" if non_export else "battery_ok"

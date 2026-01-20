@@ -1186,6 +1186,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._curtailment_data = {
                 CONF_BATTERY_CURTAILMENT_ENABLED: user_input.get(CONF_BATTERY_CURTAILMENT_ENABLED, False),
                 CONF_AC_INVERTER_CURTAILMENT_ENABLED: user_input.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False),
+                CONF_WEATHER_LOCATION: user_input.get(CONF_WEATHER_LOCATION, ""),
+                CONF_OPENWEATHERMAP_API_KEY: user_input.get(CONF_OPENWEATHERMAP_API_KEY, ""),
             }
 
             # If AC inverter curtailment enabled, go to inverter brand selection
@@ -1209,6 +1211,14 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_AC_INVERTER_CURTAILMENT_ENABLED,
                     default=False,
                 ): bool,
+                vol.Optional(
+                    CONF_WEATHER_LOCATION,
+                    default="",
+                ): str,
+                vol.Optional(
+                    CONF_OPENWEATHERMAP_API_KEY,
+                    default="",
+                ): str,
             }),
         )
 
