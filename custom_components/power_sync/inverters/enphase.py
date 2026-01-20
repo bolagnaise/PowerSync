@@ -300,13 +300,24 @@ class EnphaseController(InverterController):
 
         url = f"https://{self.host}:{self.port}/auth/check_jwt"
         try:
-            async with self._session.get(url, headers=self._get_headers()) as response:
+            # Try POST first (some firmware versions require this)
+            async with self._session.post(url, headers=self._get_headers()) as response:
+                body = await response.text()
                 if response.status == 200:
-                    _LOGGER.debug(f"JWT token validated locally with gateway")
+                    # Log the response to see token type (installer vs homeowner)
+                    _LOGGER.info(f"JWT token validated locally (POST): {body[:200]}")
                     return True
                 else:
-                    body = await response.text()
-                    _LOGGER.debug(f"JWT local validation returned {response.status}: {body[:100]}")
+                    _LOGGER.debug(f"JWT local validation POST returned {response.status}: {body[:100]}")
+
+            # Fall back to GET
+            async with self._session.get(url, headers=self._get_headers()) as response:
+                body = await response.text()
+                if response.status == 200:
+                    _LOGGER.info(f"JWT token validated locally (GET): {body[:200]}")
+                    return True
+                else:
+                    _LOGGER.debug(f"JWT local validation GET returned {response.status}: {body[:100]}")
                     return False
         except Exception as e:
             _LOGGER.debug(f"JWT local validation error: {e}")
