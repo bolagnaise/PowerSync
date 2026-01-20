@@ -22,14 +22,19 @@ EV Actions (Tesla Fleet/Teslemetry or Tesla BLE):
 - stop_ev_charging: Stop charging an EV
 - set_ev_charge_limit: Set EV charge limit percentage
 - set_ev_charging_amps: Set EV charging amperage
+- start_ev_charging_dynamic: Start dynamic EV charging that adjusts amps based on battery/grid
+- stop_ev_charging_dynamic: Stop dynamic EV charging and cancel the adjustment timer
 """
 
 import logging
-from typing import List, Dict, Any, Optional
+import asyncio
+from typing import List, Dict, Any, Optional, Callable
 
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers import entity_registry as er, device_registry as dr
+from homeassistant.helpers.event import async_track_time_interval
+from datetime import timedelta
 
 from ..const import (
     DOMAIN,
@@ -464,6 +469,10 @@ async def _execute_single_action(
         return await _action_set_ev_charge_limit(hass, config_entry, params)
     elif action_type == "set_ev_charging_amps":
         return await _action_set_ev_charging_amps(hass, config_entry, params)
+    elif action_type == "start_ev_charging_dynamic":
+        return await _action_start_ev_charging_dynamic(hass, config_entry, params)
+    elif action_type == "stop_ev_charging_dynamic":
+        return await _action_stop_ev_charging_dynamic(hass, config_entry, params)
     else:
         _LOGGER.warning(f"Unknown action type: {action_type}")
         return False
@@ -1216,3 +1225,279 @@ async def _action_set_ev_charging_amps(
             return False
 
     return False
+
+
+# =============================================================================
+# Dynamic EV Charging (adjusts amps based on battery discharge and grid import)
+# =============================================================================
+
+# Global storage for dynamic EV charging state per config entry
+_dynamic_ev_state: Dict[str, Dict[str, Any]] = {}
+
+
+async def _get_tesla_live_status(hass: HomeAssistant, config_entry: ConfigEntry) -> Optional[Dict[str, Any]]:
+    """Get live status from Tesla API for battery and grid power.
+
+    Returns:
+        Dict with battery_power, grid_power, solar_power, load_power, battery_soc
+        - battery_power: Positive = discharging, Negative = charging
+        - grid_power: Positive = importing, Negative = exporting
+    """
+    from ..const import DOMAIN
+
+    entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
+    token_getter = entry_data.get("token_getter")
+    site_id = entry_data.get("site_id")
+
+    if not token_getter or not site_id:
+        _LOGGER.debug("No Tesla token getter or site_id available")
+        return None
+
+    try:
+        current_token, current_provider = token_getter()
+        if not current_token:
+            return None
+
+        import aiohttp
+
+        if current_provider == "teslemetry":
+            url = f"https://api.teslemetry.com/api/energy_sites/{site_id}/live_status"
+        else:
+            url = f"https://fleet-api.prd.na.vn.cloud.tesla.com/api/1/energy_sites/{site_id}/live_status"
+
+        headers = {"Authorization": f"Bearer {current_token}"}
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    site_status = data.get("response", {})
+                    return {
+                        "battery_soc": site_status.get("percentage_charged"),
+                        "grid_power": site_status.get("grid_power"),  # Positive = importing
+                        "solar_power": site_status.get("solar_power"),
+                        "battery_power": site_status.get("battery_power"),  # Positive = discharging
+                        "load_power": site_status.get("load_power"),
+                    }
+                else:
+                    _LOGGER.debug(f"Failed to get live_status: {response.status}")
+                    return None
+    except Exception as e:
+        _LOGGER.debug(f"Error getting Tesla live status: {e}")
+        return None
+
+
+async def _dynamic_ev_update(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    entry_id: str,
+) -> None:
+    """Periodic update function for dynamic EV charging.
+
+    Adjusts EV charge amps based on:
+    - Battery discharge rate (keep under max_battery_discharge_kw)
+    - Grid import rate (keep under max_grid_import_kw, ideally zero)
+    """
+    state = _dynamic_ev_state.get(entry_id)
+    if not state or not state.get("active"):
+        return
+
+    params = state.get("params", {})
+    max_battery_discharge_w = params.get("max_battery_discharge_kw", 10.0) * 1000
+    max_grid_import_w = params.get("max_grid_import_kw", 0.0) * 1000
+    min_amps = params.get("min_charge_amps", 5)
+    max_amps = params.get("max_charge_amps", 32)
+    voltage = params.get("voltage", 240)  # Assumed voltage for power calculations
+
+    current_amps = state.get("current_amps", max_amps)
+
+    # Get live status
+    live_status = await _get_tesla_live_status(hass, config_entry)
+    if not live_status:
+        _LOGGER.debug("Dynamic EV: Could not get live status, keeping current amps")
+        return
+
+    battery_power = live_status.get("battery_power", 0) or 0  # Positive = discharging
+    grid_power = live_status.get("grid_power", 0) or 0  # Positive = importing
+    load_power = live_status.get("load_power", 0) or 0
+    solar_power = live_status.get("solar_power", 0) or 0
+
+    _LOGGER.debug(
+        f"Dynamic EV: battery={battery_power:.0f}W, grid={grid_power:.0f}W, "
+        f"load={load_power:.0f}W, solar={solar_power:.0f}W, current={current_amps}A"
+    )
+
+    # Calculate how much we need to reduce (positive = need to reduce, negative = can increase)
+    battery_excess_w = max(0, battery_power - max_battery_discharge_w)
+    grid_excess_w = max(0, grid_power - max_grid_import_w)
+
+    # The total excess power we need to reduce
+    excess_w = max(battery_excess_w, grid_excess_w)
+
+    # Calculate target amps adjustment
+    # Each amp change = voltage watts change in EV charging
+    if excess_w > 0:
+        # Need to reduce amps
+        amps_to_reduce = int(excess_w / voltage) + 1  # Round up
+        new_amps = max(min_amps, current_amps - amps_to_reduce)
+        _LOGGER.info(
+            f"⚡ Dynamic EV: Reducing amps from {current_amps}A to {new_amps}A "
+            f"(battery excess={battery_excess_w:.0f}W, grid excess={grid_excess_w:.0f}W)"
+        )
+    else:
+        # Check if we have headroom to increase
+        # Headroom = how much more we could discharge/import before hitting limits
+        battery_headroom_w = max_battery_discharge_w - max(0, battery_power)
+        grid_headroom_w = max_grid_import_w - max(0, grid_power)
+
+        # Also consider if we're exporting (grid_power < 0) - that's free power we could use
+        if grid_power < 0:
+            grid_headroom_w = max_grid_import_w + abs(grid_power)
+
+        # Use the smaller headroom (most constrained)
+        headroom_w = min(battery_headroom_w, grid_headroom_w)
+
+        if headroom_w > voltage:  # At least 1 amp worth of headroom
+            amps_to_increase = min(2, int(headroom_w / voltage))  # Max 2A increase at a time
+            new_amps = min(max_amps, current_amps + amps_to_increase)
+            if new_amps > current_amps:
+                _LOGGER.info(
+                    f"⚡ Dynamic EV: Increasing amps from {current_amps}A to {new_amps}A "
+                    f"(headroom={headroom_w:.0f}W)"
+                )
+            else:
+                new_amps = current_amps
+        else:
+            new_amps = current_amps
+
+    # Apply the new amps if changed
+    if new_amps != current_amps:
+        success = await _action_set_ev_charging_amps(
+            hass, config_entry, {"amps": new_amps}
+        )
+        if success:
+            state["current_amps"] = new_amps
+        else:
+            _LOGGER.warning(f"Dynamic EV: Failed to set amps to {new_amps}A")
+
+
+async def _action_start_ev_charging_dynamic(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    params: Dict[str, Any]
+) -> bool:
+    """
+    Start dynamic EV charging that adjusts charge rate based on battery/grid.
+
+    Parameters:
+        max_battery_discharge_kw: Max battery discharge rate before reducing EV amps (default 10.0)
+        max_grid_import_kw: Max grid import before reducing EV amps (default 0.0 = no import)
+        min_charge_amps: Minimum charge amps (default 5)
+        max_charge_amps: Maximum charge amps (default 32)
+        voltage: Assumed charging voltage for calculations (default 240)
+        vehicle_vin: Optional VIN to filter by specific vehicle
+    """
+    from ..const import DOMAIN
+
+    entry_id = config_entry.entry_id
+
+    # Get parameters with defaults
+    max_battery_discharge_kw = params.get("max_battery_discharge_kw", 10.0)
+    max_grid_import_kw = params.get("max_grid_import_kw", 0.0)
+    min_charge_amps = params.get("min_charge_amps", 5)
+    max_charge_amps = params.get("max_charge_amps", 32)
+    voltage = params.get("voltage", 240)
+    start_amps = params.get("start_amps", max_charge_amps)
+
+    _LOGGER.info(
+        f"⚡ Starting dynamic EV charging: max_discharge={max_battery_discharge_kw}kW, "
+        f"max_import={max_grid_import_kw}kW, amps={min_charge_amps}-{max_charge_amps}A"
+    )
+
+    # Stop any existing dynamic charging for this entry
+    await _action_stop_ev_charging_dynamic(hass, config_entry, {})
+
+    # Start EV charging first
+    start_success = await _action_start_ev_charging(hass, config_entry, params)
+    if not start_success:
+        _LOGGER.error("Dynamic EV: Failed to start EV charging")
+        return False
+
+    # Set initial amps
+    amps_success = await _action_set_ev_charging_amps(
+        hass, config_entry, {"amps": start_amps}
+    )
+    if not amps_success:
+        _LOGGER.warning(f"Dynamic EV: Failed to set initial amps to {start_amps}A")
+
+    # Create the periodic update callback
+    async def periodic_update(now) -> None:
+        await _dynamic_ev_update(hass, config_entry, entry_id)
+
+    # Schedule the periodic update (every 30 seconds)
+    cancel_timer = async_track_time_interval(
+        hass,
+        periodic_update,
+        timedelta(seconds=30),
+    )
+
+    # Store state
+    _dynamic_ev_state[entry_id] = {
+        "active": True,
+        "params": {
+            "max_battery_discharge_kw": max_battery_discharge_kw,
+            "max_grid_import_kw": max_grid_import_kw,
+            "min_charge_amps": min_charge_amps,
+            "max_charge_amps": max_charge_amps,
+            "voltage": voltage,
+        },
+        "current_amps": start_amps,
+        "cancel_timer": cancel_timer,
+    }
+
+    # Also store in hass.data for access from other places
+    if DOMAIN in hass.data and entry_id in hass.data[DOMAIN]:
+        hass.data[DOMAIN][entry_id]["dynamic_ev_state"] = _dynamic_ev_state[entry_id]
+
+    _LOGGER.info(f"⚡ Dynamic EV charging started (update every 30s)")
+    return True
+
+
+async def _action_stop_ev_charging_dynamic(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    params: Dict[str, Any]
+) -> bool:
+    """
+    Stop dynamic EV charging and cancel the adjustment timer.
+
+    Parameters:
+        stop_charging: If True (default), also stop the EV charging. If False, just stop adjustments.
+    """
+    from ..const import DOMAIN
+
+    entry_id = config_entry.entry_id
+    stop_charging = params.get("stop_charging", True)
+
+    state = _dynamic_ev_state.get(entry_id)
+    if state:
+        # Cancel the timer
+        cancel_timer = state.get("cancel_timer")
+        if cancel_timer:
+            cancel_timer()
+            _LOGGER.debug("Dynamic EV: Cancelled periodic timer")
+
+        state["active"] = False
+        del _dynamic_ev_state[entry_id]
+
+        # Remove from hass.data
+        if DOMAIN in hass.data and entry_id in hass.data[DOMAIN]:
+            hass.data[DOMAIN][entry_id].pop("dynamic_ev_state", None)
+
+        _LOGGER.info("⚡ Dynamic EV charging stopped")
+
+    # Stop EV charging if requested
+    if stop_charging:
+        return await _action_stop_ev_charging(hass, config_entry, params)
+
+    return True
