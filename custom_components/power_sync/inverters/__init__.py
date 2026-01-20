@@ -212,6 +212,7 @@ def get_inverter_controller(
     enphase_serial: Optional[str] = None,
     enphase_normal_profile: Optional[str] = None,
     enphase_zero_export_profile: Optional[str] = None,
+    enphase_is_installer: bool = False,
 ) -> Optional[InverterController]:
     """Factory function to get the appropriate inverter controller.
 
@@ -229,6 +230,7 @@ def get_inverter_controller(
         enphase_serial: Envoy serial number (optional, auto-detected from gateway)
         enphase_normal_profile: Grid profile name for normal operation (fallback)
         enphase_zero_export_profile: Grid profile name for zero export (fallback)
+        enphase_is_installer: Whether user has installer-level Enlighten access
 
     Returns:
         InverterController instance or None if brand not supported
@@ -304,6 +306,7 @@ def get_inverter_controller(
             serial=enphase_serial,
             normal_profile=enphase_normal_profile,
             zero_export_profile=enphase_zero_export_profile,
+            is_installer=enphase_is_installer,
         )
 
     if brand_lower == "zeversolar":

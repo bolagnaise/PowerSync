@@ -82,6 +82,7 @@ class EnphaseController(InverterController):
             serial: Envoy serial number (for token retrieval, auto-detected if not provided)
             normal_profile: Grid profile name for normal operation (for profile switching fallback)
             zero_export_profile: Grid profile name for zero export (for profile switching fallback)
+            is_installer: Whether to request installer-level token (for grid profile access)
         """
         super().__init__(host, port, slave_id, model)
         self._token = token
@@ -90,6 +91,7 @@ class EnphaseController(InverterController):
         self._serial = serial
         self._normal_profile = normal_profile
         self._zero_export_profile = zero_export_profile
+        self._is_installer = kwargs.get('is_installer', False)
         self._session: Optional[aiohttp.ClientSession] = None
         self._cloud_session: Optional[aiohttp.ClientSession] = None
         self._lock = asyncio.Lock()
@@ -167,11 +169,17 @@ class EnphaseController(InverterController):
                 )
 
             # Request token for this Envoy
+            # Include is_installer flag if set - this requests installer-scope token
             token_data = {
                 "session_id": session_id,
                 "serial_num": serial,
                 "username": self._username,
             }
+
+            # Add installer flag for installer accounts
+            if self._is_installer:
+                token_data["is_installer"] = True
+                _LOGGER.info("Requesting installer-level token from Enlighten")
 
             async with self._cloud_session.post(
                 self.ENLIGHTEN_TOKEN_URL,

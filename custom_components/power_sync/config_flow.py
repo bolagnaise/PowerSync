@@ -118,6 +118,7 @@ from .const import (
     CONF_ENPHASE_SERIAL,
     CONF_ENPHASE_NORMAL_PROFILE,
     CONF_ENPHASE_ZERO_EXPORT_PROFILE,
+    CONF_ENPHASE_IS_INSTALLER,
     CONF_INVERTER_RESTORE_SOC,
     CONF_FRONIUS_LOAD_FOLLOWING,
     INVERTER_BRANDS,
@@ -1260,6 +1261,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # Grid profile names for profile switching fallback
                 self._inverter_data[CONF_ENPHASE_NORMAL_PROFILE] = user_input.get(CONF_ENPHASE_NORMAL_PROFILE, "")
                 self._inverter_data[CONF_ENPHASE_ZERO_EXPORT_PROFILE] = user_input.get(CONF_ENPHASE_ZERO_EXPORT_PROFILE, "")
+                # Installer mode for grid profile access
+                self._inverter_data[CONF_ENPHASE_IS_INSTALLER] = user_input.get(CONF_ENPHASE_IS_INSTALLER, False)
 
             # Fronius-specific: load following mode
             if inverter_brand == "fronius":
@@ -1311,6 +1314,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # Grid profile names for profile switching fallback (when DPEL/DER unavailable)
             schema_dict[vol.Optional(CONF_ENPHASE_NORMAL_PROFILE, default="")] = str
             schema_dict[vol.Optional(CONF_ENPHASE_ZERO_EXPORT_PROFILE, default="")] = str
+            # Installer mode for accessing grid profile switching
+            schema_dict[vol.Optional(CONF_ENPHASE_IS_INSTALLER, default=False)] = bool
 
         # Fronius load following mode
         if brand == "fronius":
@@ -2024,6 +2029,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 # Grid profile names for profile switching fallback
                 final_data[CONF_ENPHASE_NORMAL_PROFILE] = user_input.get(CONF_ENPHASE_NORMAL_PROFILE, "")
                 final_data[CONF_ENPHASE_ZERO_EXPORT_PROFILE] = user_input.get(CONF_ENPHASE_ZERO_EXPORT_PROFILE, "")
+                # Installer mode for grid profile access
+                final_data[CONF_ENPHASE_IS_INSTALLER] = user_input.get(CONF_ENPHASE_IS_INSTALLER, False)
 
             # Fronius-specific: load following mode (for users without 0W export profile)
             if inverter_brand == "fronius":
@@ -2118,6 +2125,13 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_ENPHASE_ZERO_EXPORT_PROFILE,
                 default=current_zero_export_profile,
             )] = str
+
+            # Installer mode for grid profile access
+            current_is_installer = self._get_option(CONF_ENPHASE_IS_INSTALLER, False)
+            schema_dict[vol.Optional(
+                CONF_ENPHASE_IS_INSTALLER,
+                default=current_is_installer,
+            )] = bool
 
         # Fronius-specific: load following mode (for users without 0W export profile)
         if brand == "fronius":

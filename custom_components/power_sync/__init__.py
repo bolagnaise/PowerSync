@@ -137,6 +137,7 @@ from .const import (
     CONF_ENPHASE_SERIAL,
     CONF_ENPHASE_NORMAL_PROFILE,
     CONF_ENPHASE_ZERO_EXPORT_PROFILE,
+    CONF_ENPHASE_IS_INSTALLER,
     DEFAULT_INVERTER_PORT,
     DEFAULT_INVERTER_SLAVE_ID,
     DEFAULT_INVERTER_RESTORE_SOC,
@@ -1689,6 +1690,10 @@ class InverterStatusView(HomeAssistantView):
             CONF_ENPHASE_ZERO_EXPORT_PROFILE,
             entry.data.get(CONF_ENPHASE_ZERO_EXPORT_PROFILE)
         )
+        enphase_is_installer = entry.options.get(
+            CONF_ENPHASE_IS_INSTALLER,
+            entry.data.get(CONF_ENPHASE_IS_INSTALLER, False)
+        )
 
         if not inverter_host:
             return web.json_response({
@@ -1711,6 +1716,7 @@ class InverterStatusView(HomeAssistantView):
                 enphase_serial=enphase_serial,
                 enphase_normal_profile=enphase_normal_profile,
                 enphase_zero_export_profile=enphase_zero_export_profile,
+                enphase_is_installer=enphase_is_installer,
             )
 
             if not controller:
@@ -4125,6 +4131,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_ENPHASE_ZERO_EXPORT_PROFILE,
             entry.data.get(CONF_ENPHASE_ZERO_EXPORT_PROFILE)
         )
+        enphase_is_installer = entry.options.get(
+            CONF_ENPHASE_IS_INSTALLER,
+            entry.data.get(CONF_ENPHASE_IS_INSTALLER, False)
+        )
 
         if not inverter_host:
             _LOGGER.warning("Inverter curtailment enabled but no host configured")
@@ -4144,6 +4154,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 enphase_serial=enphase_serial,
                 enphase_normal_profile=enphase_normal_profile,
                 enphase_zero_export_profile=enphase_zero_export_profile,
+                enphase_is_installer=enphase_is_installer,
             )
 
             if not controller:
@@ -7068,6 +7079,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_ENPHASE_ZERO_EXPORT_PROFILE,
             entry.data.get(CONF_ENPHASE_ZERO_EXPORT_PROFILE)
         )
+        enphase_is_installer = entry.options.get(
+            CONF_ENPHASE_IS_INSTALLER,
+            entry.data.get(CONF_ENPHASE_IS_INSTALLER, False)
+        )
 
         if not inverter_host:
             _LOGGER.warning("No inverter host configured")
@@ -7087,6 +7102,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 enphase_serial=enphase_serial,
                 enphase_normal_profile=enphase_normal_profile,
                 enphase_zero_export_profile=enphase_zero_export_profile,
+                enphase_is_installer=enphase_is_installer,
             )
 
             home_load_w = None
@@ -7198,6 +7214,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_ENPHASE_ZERO_EXPORT_PROFILE,
             entry.data.get(CONF_ENPHASE_ZERO_EXPORT_PROFILE)
         )
+        enphase_is_installer = entry.options.get(
+            CONF_ENPHASE_IS_INSTALLER,
+            entry.data.get(CONF_ENPHASE_IS_INSTALLER, False)
+        )
 
         if not inverter_host:
             _LOGGER.warning("No inverter host configured")
@@ -7217,6 +7237,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 enphase_serial=enphase_serial,
                 enphase_normal_profile=enphase_normal_profile,
                 enphase_zero_export_profile=enphase_zero_export_profile,
+                enphase_is_installer=enphase_is_installer,
             )
 
             _LOGGER.info(f"🟢 Restoring {inverter_brand} inverter at {inverter_host}")
