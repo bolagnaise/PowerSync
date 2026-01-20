@@ -7,6 +7,7 @@ Reference: https://github.com/pyenphase/pyenphase
            https://github.com/Matthew1471/Enphase-API
 """
 import asyncio
+import base64
 import json
 import logging
 import ssl
@@ -190,9 +191,19 @@ class EnphaseController(InverterController):
                     token = await response.text()
                     token = token.strip()
                     if token and len(token) > 100:  # JWT tokens are long
-                        _LOGGER.info(f"Successfully obtained JWT token from Enlighten for Envoy {serial}")
                         self._token = token
                         self._token_obtained_at = datetime.now()
+                        # Log the token type (owner vs installer) for debugging
+                        token_type = self._get_token_type()
+                        _LOGGER.info(
+                            f"Successfully obtained JWT token from Enlighten for Envoy {serial} "
+                            f"(token_type={token_type}, is_installer_config={self._is_installer})"
+                        )
+                        if token_type == 'owner':
+                            _LOGGER.warning(
+                                "Token is 'owner' type - /installer/ endpoints will NOT work. "
+                                "The Enlighten account must be a DIY/self-installer account, not a homeowner account."
+                            )
                         # Update session cookie for /installer/ endpoints
                         self._update_session_cookie()
                         # Validate token locally to establish session for installer endpoints
@@ -262,6 +273,33 @@ class EnphaseController(InverterController):
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
         return ssl_context
+
+    def _get_token_type(self) -> Optional[str]:
+        """Get the token type (owner or installer) from the JWT payload.
+
+        Returns:
+            'owner' or 'installer', or None if unable to decode
+        """
+        if not self._token:
+            return None
+        try:
+            # JWT format: header.payload.signature
+            # We only need to decode the payload (second part)
+            parts = self._token.split('.')
+            if len(parts) != 3:
+                return None
+            # Add padding if needed for base64 decode
+            payload_b64 = parts[1]
+            padding = 4 - len(payload_b64) % 4
+            if padding != 4:
+                payload_b64 += '=' * padding
+            payload_json = base64.urlsafe_b64decode(payload_b64)
+            payload = json.loads(payload_json)
+            # The 'enphaseUser' field contains 'owner' or 'installer'
+            return payload.get('enphaseUser')
+        except Exception as e:
+            _LOGGER.debug(f"Failed to decode JWT token type: {e}")
+            return None
 
     def _update_session_cookie(self) -> None:
         """Update the session cookie with the current JWT token.
@@ -587,45 +625,49 @@ class EnphaseController(InverterController):
         """
         # Different firmware versions require different formats
         # Try multiple formats until one works
+        # Note: Error "missing/incorrect enable" means field should be 'enable' not 'enabled'
 
-        # Format 1: Firmware D8.x with wrapper and integer enabled (1/0)
+        # Format 1: D8.x firmware - 'enable' (singular) with integer (1/0)
         data_v1 = {
+            "enable": 1 if enabled else 0,
+            "limit": limit_watts,
+        }
+        if await self._post(self.ENDPOINT_DPEL, data_v1):
+            _LOGGER.debug("DPEL succeeded with format v1 (enable integer)")
+            return True
+
+        # Format 2: 'enable' (singular) with boolean
+        data_v2 = {
+            "enable": enabled,
+            "limit": limit_watts,
+        }
+        if await self._post(self.ENDPOINT_DPEL, data_v2):
+            _LOGGER.debug("DPEL succeeded with format v2 (enable boolean)")
+            return True
+
+        # Format 3: Wrapped format with 'enabled' (some older firmware)
+        data_wrapped = {
             "dynamic_pel_settings": {
                 "enabled": 1 if enabled else 0,
                 "limit": limit_watts,
             }
         }
-        if await self._post(self.ENDPOINT_DPEL, data_v1):
-            _LOGGER.debug("DPEL succeeded with format v1 (integer enabled)")
+        if await self._post(self.ENDPOINT_DPEL, data_wrapped):
+            _LOGGER.debug("DPEL succeeded with wrapped format")
             return True
 
-        # Format 2: Firmware D8.x with wrapper and boolean enabled
-        data_v2 = {
-            "dynamic_pel_settings": {
-                "enabled": enabled,
-                "limit": limit_watts,
-            }
-        }
-        if await self._post(self.ENDPOINT_DPEL, data_v2):
-            _LOGGER.debug("DPEL succeeded with format v2 (boolean enabled)")
+        # Format 4: PUT method with 'enable'
+        if await self._put(self.ENDPOINT_DPEL, data_v1):
+            _LOGGER.debug("DPEL succeeded with PUT enable format")
             return True
 
-        # Format 3: Simple format without wrapper (older firmware)
-        data_simple = {
+        # Format 5: PUT with 'enabled' (older firmware)
+        data_old = {
             "enabled": 1 if enabled else 0,
             "limit": limit_watts,
         }
-        if await self._put(self.ENDPOINT_DPEL, data_simple):
-            _LOGGER.debug("DPEL succeeded with simple PUT format")
-            return True
-
-        # Format 4: Simple format with boolean
-        data_simple_bool = {
-            "enabled": enabled,
-            "limit": limit_watts,
-        }
-        if await self._put(self.ENDPOINT_DPEL, data_simple_bool):
-            _LOGGER.debug("DPEL succeeded with simple PUT boolean format")
+        if await self._put(self.ENDPOINT_DPEL, data_old):
+            _LOGGER.debug("DPEL succeeded with PUT enabled format")
             return True
 
         return False
