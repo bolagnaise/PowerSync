@@ -1445,17 +1445,15 @@ class PowerwallSettingsView(HomeAssistantView):
 
             # Get grid settings from components
             components = site_info.get("components", {})
-            # Try components first, then site_info - don't default, let it be None for VPP users
+            # Try components first, then site_info
             api_export_rule = components.get("customer_preferred_export_rule") or site_info.get("customer_preferred_export_rule")
             disallow_charge = components.get("disallow_charge_from_grid_with_solar_installed", False)
 
             # For VPP users, the API doesn't return customer_preferred_export_rule
-            # We can check non_export_configured but that's a derived/forced value, not the actual setting
-            # Show "unknown" to indicate we don't have visibility into the actual export rule
+            # Use non_export_configured to derive the value, or default to battery_ok
             if api_export_rule is None:
                 non_export = components.get("non_export_configured", False)
-                # Only use non_export to derive "never" - otherwise show "unknown"
-                api_export_rule = "never" if non_export else "unknown"
+                api_export_rule = "never" if non_export else "battery_ok"
 
             # Check if solar curtailment is enabled - if so, use server's target rule
             # (more accurate than stale Tesla API values)
