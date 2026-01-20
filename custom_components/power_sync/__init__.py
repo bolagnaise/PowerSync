@@ -2020,36 +2020,20 @@ class TariffPriceView(HomeAssistantView):
             )
 
         try:
-            # Get stored tariff schedule
-            tariff_schedule = self._hass.data.get(DOMAIN, {}).get(entry_id, {}).get("tariff_schedule")
+            # Always fetch fresh tariff data to get current TOU period
+            _LOGGER.info("Fetching tariff from Tesla API")
+            tariff_data = await self._fetch_tesla_tariff(entry)
 
-            # If no stored tariff, try to fetch from Tesla API
-            if not tariff_schedule:
-                _LOGGER.info("No stored tariff schedule, fetching from Tesla API")
-                tariff_schedule = await self._fetch_tesla_tariff(entry)
-
-            if not tariff_schedule:
+            if not tariff_data:
                 return web.json_response({
                     "success": False,
                     "error": "No tariff schedule available. Configure your rate plan in the Tesla app."
                 }, status=404)
 
-            # Get current time period
-            from datetime import datetime
-            now = datetime.now()
-            current_minute = 0 if now.minute < 30 else 30
-            current_period = f"PERIOD_{now.hour:02d}_{current_minute:02d}"
-
-            # Get prices for current period
-            buy_prices = tariff_schedule.get("buy_prices", {})
-            sell_prices = tariff_schedule.get("sell_prices", {})
-
-            buy_price_dollars = buy_prices.get(current_period, 0)
-            sell_price_dollars = sell_prices.get(current_period, 0)
-
-            # Convert to cents/kWh for mobile app (consistent with Amber format)
-            buy_price_cents = buy_price_dollars * 100
-            sell_price_cents = sell_price_dollars * 100
+            # Get current prices (already in cents from _fetch_tesla_tariff)
+            buy_price_cents = tariff_data.get("buy_price", 0)
+            sell_price_cents = tariff_data.get("sell_price", 0)
+            current_period = tariff_data.get("current_period", "UNKNOWN")
 
             result = {
                 "success": True,
@@ -2072,7 +2056,9 @@ class TariffPriceView(HomeAssistantView):
                     "source": "tesla_tariff",
                 },
                 "current_period": current_period,
-                "last_sync": tariff_schedule.get("last_sync"),
+                "utility": tariff_data.get("utility"),
+                "plan_name": tariff_data.get("plan_name"),
+                "last_sync": tariff_data.get("last_sync"),
             }
 
             _LOGGER.info(
@@ -2088,7 +2074,7 @@ class TariffPriceView(HomeAssistantView):
             )
 
     async def _fetch_tesla_tariff(self, entry: ConfigEntry) -> dict | None:
-        """Fetch tariff from Tesla API and extract prices."""
+        """Fetch tariff from Tesla site_info API and extract current prices."""
         try:
             current_token, provider = get_tesla_api_token(self._hass, entry)
             site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
@@ -2104,80 +2090,137 @@ class TariffPriceView(HomeAssistantView):
             }
             api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
 
-            # Fetch tariff from Tesla
+            # Fetch site_info which contains tariff_content
             async with session.get(
-                f"{api_base}/api/1/energy_sites/{site_id}/tariff_rate",
+                f"{api_base}/api/1/energy_sites/{site_id}/site_info",
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as response:
                 if response.status != 200:
                     text = await response.text()
-                    _LOGGER.error(f"Failed to get tariff: {response.status} - {text}")
+                    _LOGGER.error(f"Failed to get site_info: {response.status} - {text}")
                     return None
 
                 data = await response.json()
-                tariff = data.get("response", {})
+                site_info = data.get("response", {})
 
+            # Get tariff_content from site_info
+            tariff = site_info.get("tariff_content", {})
             if not tariff:
-                _LOGGER.warning("No tariff data in Tesla response")
+                _LOGGER.warning("No tariff_content in Tesla site_info response")
                 return None
 
-            # Log the full tariff structure for debugging
-            _LOGGER.info(f"Tesla tariff structure: {json.dumps(tariff, indent=2)[:2000]}")
+            _LOGGER.debug(f"Tesla tariff_content utility: {tariff.get('utility')}, name: {tariff.get('name')}")
 
-            # Extract buy and sell prices from tariff structure
-            # Tesla tariff structure varies by region/config:
-            # - US/Australia: energy_charges.Summer.rates.PERIOD_XX_XX or energy_charges.ALL.rates
-            # - Some configs: energy_charges.rates directly
-            energy_charges = tariff.get("energy_charges", {})
-
-            # Try different tariff structures
-            buy_prices = None
-            if "Summer" in energy_charges:
-                buy_prices = energy_charges.get("Summer", {}).get("rates", {})
-            elif "ALL" in energy_charges:
-                buy_prices = energy_charges.get("ALL", {}).get("rates", {})
-            elif "rates" in energy_charges:
-                buy_prices = energy_charges.get("rates", {})
-            elif energy_charges:
-                # Try first season key
-                first_season = next(iter(energy_charges.keys()), None)
-                if first_season:
-                    buy_prices = energy_charges.get(first_season, {}).get("rates", {})
-                    _LOGGER.info(f"Using tariff season: {first_season}")
-
-            # Also check for sell tariff
-            sell_tariff = tariff.get("sell_tariff", {})
-            sell_charges = sell_tariff.get("energy_charges", {})
-            sell_prices = None
-            if "Summer" in sell_charges:
-                sell_prices = sell_charges.get("Summer", {}).get("rates", {})
-            elif "ALL" in sell_charges:
-                sell_prices = sell_charges.get("ALL", {}).get("rates", {})
-            elif "rates" in sell_charges:
-                sell_prices = sell_charges.get("rates", {})
-            elif sell_charges:
-                first_season = next(iter(sell_charges.keys()), None)
-                if first_season:
-                    sell_prices = sell_charges.get(first_season, {}).get("rates", {})
-
-            if not buy_prices:
-                _LOGGER.warning(f"No buy prices in Tesla tariff. energy_charges keys: {list(energy_charges.keys()) if energy_charges else 'empty'}")
-                return None
-
+            # Determine current season and TOU period
             from datetime import datetime as dt
-            tariff_schedule = {
-                "buy_prices": buy_prices,
-                "sell_prices": sell_prices or {},
-                "last_sync": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+            import pytz
+
+            # Get timezone from site_info
+            tz_name = site_info.get("installation_time_zone", "UTC")
+            try:
+                tz = pytz.timezone(tz_name)
+            except:
+                tz = pytz.UTC
+            now = dt.now(tz)
+            current_hour = now.hour
+            current_dow = now.weekday()  # 0=Monday, 6=Sunday
+
+            # Find current season
+            seasons = tariff.get("seasons", {})
+            current_season = None
+            for season_name, season_data in seasons.items():
+                from_month = season_data.get("fromMonth", 0)
+                to_month = season_data.get("toMonth", 0)
+                if from_month and to_month:
+                    if from_month <= now.month <= to_month:
+                        current_season = season_name
+                        break
+            if not current_season:
+                current_season = "Summer" if "Summer" in seasons else next(iter(seasons.keys()), None)
+
+            _LOGGER.debug(f"Current season: {current_season}, hour: {current_hour}, dow: {current_dow}")
+
+            # Find current TOU period
+            tou_periods = seasons.get(current_season, {}).get("tou_periods", {})
+            current_period = None
+            for period_name, period_data in tou_periods.items():
+                # Handle both list format and object format
+                periods_list = period_data if isinstance(period_data, list) else []
+                for period in periods_list:
+                    from_dow = period.get("fromDayOfWeek", 0)
+                    to_dow = period.get("toDayOfWeek", 6)
+                    from_hour = period.get("fromHour", 0)
+                    to_hour = period.get("toHour", 24)
+
+                    # Check day of week (Tesla uses 0=Sunday, Python uses 0=Monday)
+                    tesla_dow = (current_dow + 1) % 7  # Convert Python dow to Tesla dow
+                    if from_dow <= tesla_dow <= to_dow:
+                        # Check time - handle overnight periods (e.g., 21:00 to 10:00)
+                        if from_hour <= to_hour:
+                            # Normal period (e.g., 10:00 to 14:00)
+                            if from_hour <= current_hour < to_hour:
+                                current_period = period_name
+                                break
+                        else:
+                            # Overnight period (e.g., 21:00 to 10:00)
+                            if current_hour >= from_hour or current_hour < to_hour:
+                                current_period = period_name
+                                break
+                if current_period:
+                    break
+
+            if not current_period:
+                current_period = "ALL"
+            _LOGGER.info(f"Current TOU period: {current_period}")
+
+            # Get energy charges for current season
+            # tariff_content format: energy_charges.Summer.ON_PEAK = 0.48 (no 'rates' key)
+            energy_charges = tariff.get("energy_charges", {})
+            season_charges = energy_charges.get(current_season, {})
+
+            # Handle both formats: direct values or nested under 'rates'
+            if "rates" in season_charges:
+                buy_rates = season_charges.get("rates", {})
+            else:
+                buy_rates = {k: v for k, v in season_charges.items() if isinstance(v, (int, float))}
+
+            # Get sell tariff
+            sell_tariff = tariff.get("sell_tariff", {})
+            sell_energy_charges = sell_tariff.get("energy_charges", {})
+            sell_season_charges = sell_energy_charges.get(current_season, {})
+            if "rates" in sell_season_charges:
+                sell_rates = sell_season_charges.get("rates", {})
+            else:
+                sell_rates = {k: v for k, v in sell_season_charges.items() if isinstance(v, (int, float))}
+
+            # Get current prices
+            current_buy_price = buy_rates.get(current_period, buy_rates.get("ALL", 0))
+            current_sell_price = sell_rates.get(current_period, sell_rates.get("ALL", 0))
+
+            # Convert from $/kWh to c/kWh (multiply by 100)
+            current_buy_cents = round(current_buy_price * 100, 2)
+            current_sell_cents = round(current_sell_price * 100, 2)
+
+            _LOGGER.info(f"Tesla tariff prices - Buy: {current_buy_cents}c/kWh, Sell: {current_sell_cents}c/kWh (period: {current_period})")
+
+            tariff_result = {
+                "current_period": current_period,
+                "current_season": current_season,
+                "buy_price": current_buy_cents,
+                "sell_price": current_sell_cents,
+                "buy_rates": buy_rates,
+                "sell_rates": sell_rates,
+                "utility": tariff.get("utility", "Unknown"),
+                "plan_name": tariff.get("name", "Unknown"),
+                "last_sync": now.strftime("%Y-%m-%d %H:%M:%S"),
             }
 
             # Store for future use
             if DOMAIN in self._hass.data and entry.entry_id in self._hass.data[DOMAIN]:
-                self._hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = tariff_schedule
+                self._hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = tariff_result
 
-            _LOGGER.info(f"Fetched Tesla tariff: {len(buy_prices)} periods")
-            return tariff_schedule
+            return tariff_result
 
         except Exception as e:
             _LOGGER.error(f"Error fetching Tesla tariff: {e}", exc_info=True)
