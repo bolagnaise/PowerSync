@@ -385,10 +385,12 @@ class AutomationEngine:
         entry_id = self._config_entry.entry_id
         if DOMAIN in self._hass.data and entry_id in self._hass.data[DOMAIN]:
             data = self._hass.data[DOMAIN][entry_id]
-            coordinator = data.get("coordinator")
+            # Use tesla_coordinator for Tesla users, sigenergy_coordinator for Sigenergy users
+            coordinator = data.get("tesla_coordinator") or data.get("sigenergy_coordinator")
 
             if coordinator and coordinator.data:
                 coord_data = coordinator.data
+                _LOGGER.debug(f"Coordinator data keys: {list(coord_data.keys())}, battery_level={coord_data.get('battery_level')}")
 
                 # Battery state
                 state["battery_percent"] = coord_data.get("battery_level")
