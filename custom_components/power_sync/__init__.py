@@ -2114,14 +2114,14 @@ class TariffPriceView(HomeAssistantView):
 
             # Determine current season and TOU period
             from datetime import datetime as dt
-            import pytz
+            from zoneinfo import ZoneInfo
 
             # Get timezone from site_info
             tz_name = site_info.get("installation_time_zone", "UTC")
             try:
-                tz = pytz.timezone(tz_name)
+                tz = ZoneInfo(tz_name)
             except:
-                tz = pytz.UTC
+                tz = ZoneInfo("UTC")
             now = dt.now(tz)
             current_hour = now.hour
             current_dow = now.weekday()  # 0=Monday, 6=Sunday
