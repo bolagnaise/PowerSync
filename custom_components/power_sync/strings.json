@@ -230,6 +230,8 @@
           "enphase_username": "Enlighten Email",
           "enphase_password": "Enlighten Password",
           "enphase_serial": "Envoy Serial (Optional)",
+          "enphase_normal_profile": "Normal Grid Profile Name",
+          "enphase_zero_export_profile": "Zero Export Grid Profile Name",
           "inverter_restore_soc": "Restore SOC Threshold (%)",
           "fronius_load_following": "Enable Load Following Mode"
         },
@@ -241,6 +243,8 @@
           "enphase_username": "Your Enlighten account email for automatic JWT token refresh (recommended)",
           "enphase_password": "Your Enlighten account password",
           "enphase_serial": "Leave blank to auto-detect from IQ Gateway",
+          "enphase_normal_profile": "Full name of your normal grid profile (for fallback when DPEL/DER unavailable). Example: 'AS/NZS 4777.2:2020 Australia A'",
+          "enphase_zero_export_profile": "Full name of a zero-export grid profile if available (for fallback curtailment)",
           "inverter_restore_soc": "Restore inverter when battery drops below this %. Ensures battery stays topped up before evening peak. Default: 98%",
           "fronius_load_following": "Enable if you DON'T have a 0W export limit configured by your installer. Uses calculated power limits based on home load and auto-detected inverter capacity. Leave OFF if you have the 0W export profile (most users)."
         },
@@ -421,6 +425,8 @@
           "enphase_username": "Enlighten Email",
           "enphase_password": "Enlighten Password",
           "enphase_serial": "Envoy Serial (Optional)",
+          "enphase_normal_profile": "Normal Grid Profile Name",
+          "enphase_zero_export_profile": "Zero Export Grid Profile Name",
           "inverter_restore_soc": "Restore SOC Threshold (%)",
           "fronius_load_following": "Enable Load Following Mode"
         },
@@ -432,6 +438,8 @@
           "enphase_username": "Your Enlighten account email for automatic JWT token refresh (recommended)",
           "enphase_password": "Your Enlighten account password",
           "enphase_serial": "Leave blank to auto-detect from IQ Gateway",
+          "enphase_normal_profile": "Full name of your normal grid profile (for fallback when DPEL/DER unavailable). Example: 'AS/NZS 4777.2:2020 Australia A'",
+          "enphase_zero_export_profile": "Full name of a zero-export grid profile if available (for fallback curtailment)",
           "inverter_restore_soc": "Restore inverter when battery drops below this %. Ensures battery stays topped up before evening peak. Default: 98%",
           "fronius_load_following": "Enable if you DON'T have a 0W export limit configured by your installer. Uses calculated power limits based on home load and auto-detected inverter capacity. Leave OFF if you have the 0W export profile (most users)."
         }
