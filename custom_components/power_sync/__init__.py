@@ -1967,6 +1967,23 @@ class ConfigView(HomeAssistantView):
             )
 
 
+class ConfigViewLegacy(HomeAssistantView):
+    """Legacy HTTP view at old URL for backwards compatibility."""
+
+    url = "/api/power_sync/config"
+    name = "api:power_sync:config"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant, config_view: ConfigView):
+        """Initialize the view."""
+        self._config_view = config_view
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request - delegate to main ConfigView."""
+        _LOGGER.info("📱 Config HTTP request (legacy URL)")
+        return await self._config_view.get(request)
+
+
 class TariffPriceView(HomeAssistantView):
     """HTTP view to get current electricity prices from Tesla tariff schedule.
 
@@ -7357,8 +7374,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.info("📊 Sigenergy tariff HTTP endpoint registered at /api/power_sync/sigenergy_tariff")
 
     # Register HTTP endpoint for Config (for mobile app auto-detection)
-    hass.http.register_view(ConfigView(hass))
+    config_view = ConfigView(hass)
+    hass.http.register_view(config_view)
     _LOGGER.info("📱 Config HTTP endpoint registered at /api/power_sync/backend_config")
+
+    # Also register at legacy URL for backwards compatibility
+    hass.http.register_view(ConfigViewLegacy(hass, config_view))
+    _LOGGER.info("📱 Config HTTP endpoint also registered at /api/power_sync/config (legacy)")
 
     # Register HTTP endpoint for Tariff Price (for Globird users without API)
     hass.http.register_view(TariffPriceView(hass))
