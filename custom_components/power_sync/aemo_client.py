@@ -106,6 +106,10 @@ class AEMOAPIClient:
             return None
 
         prices = await self.get_current_prices()
+        if not prices:
+            _LOGGER.debug("No prices returned from AEMO API")
+        elif region not in prices:
+            _LOGGER.debug("Region %s not in AEMO response: %s", region, list(prices.keys()))
         return prices.get(region)
 
     async def check_price_spike(
@@ -128,7 +132,7 @@ class AEMOAPIClient:
         price_data = await self.get_region_price(region)
 
         if not price_data:
-            _LOGGER.warning("Could not fetch AEMO price for %s", region)
+            _LOGGER.debug("Could not fetch AEMO price for %s (API may be temporarily unavailable)", region)
             return False, None, None
 
         current_price = price_data["price"]
