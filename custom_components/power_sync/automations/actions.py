@@ -33,8 +33,8 @@ from typing import List, Dict, Any, Optional, Callable
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers import entity_registry as er, device_registry as dr
-from homeassistant.helpers.event import async_track_time_interval
-from datetime import timedelta
+from homeassistant.helpers.event import async_track_time_interval, async_track_point_in_time
+from datetime import timedelta, datetime, time as dt_time
 
 from ..const import (
     DOMAIN,
@@ -379,7 +379,8 @@ async def _get_sigenergy_controller(config_entry: ConfigEntry) -> Optional["Sige
 async def execute_actions(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
-    actions: List[Dict[str, Any]]
+    actions: List[Dict[str, Any]],
+    context: Optional[Dict[str, Any]] = None
 ) -> bool:
     """
     Execute a list of automation actions.
@@ -388,6 +389,7 @@ async def execute_actions(
         hass: Home Assistant instance
         config_entry: Config entry for this integration
         actions: List of action dicts to execute
+        context: Optional context with time_window_start, time_window_end, timezone
 
     Returns:
         True if at least one action executed successfully
@@ -402,7 +404,7 @@ async def execute_actions(
                 import json
                 params = json.loads(params) if params else {}
 
-            result = await _execute_single_action(hass, config_entry, action_type, params)
+            result = await _execute_single_action(hass, config_entry, action_type, params, context)
             if result:
                 success_count += 1
                 _LOGGER.info(f"Executed action '{action_type}'")
@@ -418,7 +420,8 @@ async def _execute_single_action(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     action_type: str,
-    params: Dict[str, Any]
+    params: Dict[str, Any],
+    context: Optional[Dict[str, Any]] = None
 ) -> bool:
     """
     Execute a single action.
@@ -428,6 +431,7 @@ async def _execute_single_action(
         config_entry: Config entry
         action_type: Type of action to execute
         params: Action parameters
+        context: Optional context with time_window_start, time_window_end, timezone
 
     Returns:
         True if action executed successfully
@@ -460,9 +464,9 @@ async def _execute_single_action(
         return await _action_set_discharge_rate(hass, config_entry, params)
     elif action_type == "set_export_limit":
         return await _action_set_export_limit(hass, config_entry, params)
-    # EV Charging Actions
+    # EV Charging Actions (pass context for time window support)
     elif action_type == "start_ev_charging":
-        return await _action_start_ev_charging(hass, config_entry, params)
+        return await _action_start_ev_charging(hass, config_entry, params, context)
     elif action_type == "stop_ev_charging":
         return await _action_stop_ev_charging(hass, config_entry, params)
     elif action_type == "set_ev_charge_limit":
@@ -470,7 +474,7 @@ async def _execute_single_action(
     elif action_type == "set_ev_charging_amps":
         return await _action_set_ev_charging_amps(hass, config_entry, params)
     elif action_type == "start_ev_charging_dynamic":
-        return await _action_start_ev_charging_dynamic(hass, config_entry, params)
+        return await _action_start_ev_charging_dynamic(hass, config_entry, params, context)
     elif action_type == "stop_ev_charging_dynamic":
         return await _action_stop_ev_charging_dynamic(hass, config_entry, params)
     else:
@@ -1006,28 +1010,42 @@ async def _action_restore_inverter(
 async def _action_start_ev_charging(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
-    params: Dict[str, Any]
+    params: Dict[str, Any],
+    context: Optional[Dict[str, Any]] = None
 ) -> bool:
     """
     Start EV charging via Tesla Fleet/Teslemetry or Tesla BLE.
 
     Uses BLE if configured as primary or both, falls back to Fleet API.
+
+    Parameters:
+        stop_outside_window: If True, schedule charging to stop at end of time window
     """
     ev_config = _get_ev_config(config_entry)
     ev_provider = ev_config["ev_provider"]
     ble_prefix = ev_config["ble_prefix"]
     vehicle_vin = params.get("vehicle_vin")
+    stop_outside_window = params.get("stop_outside_window", False)
+
+    # Get time window from context
+    time_window_start = context.get("time_window_start") if context else None
+    time_window_end = context.get("time_window_end") if context else None
+    timezone = context.get("timezone", "UTC") if context else "UTC"
+
+    charging_started = False
 
     # Try BLE first if configured
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         if _is_ble_available(hass, ble_prefix):
             result = await _start_ev_charging_ble(hass, ble_prefix)
-            if result or ev_provider == EV_PROVIDER_TESLA_BLE:
-                return result
+            if result:
+                charging_started = True
+            elif ev_provider == EV_PROVIDER_TESLA_BLE:
+                return False
             # Fall through to Fleet API if BLE failed and both are configured
 
     # Use Fleet API
-    if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+    if not charging_started and ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
         # Tesla Fleet uses switch.X_charge, not button.X_charge_start
         charge_switch_entity = await _get_tesla_ev_entity(
             hass,
@@ -1048,12 +1066,51 @@ async def _action_start_ev_charging(
                 blocking=True,
             )
             _LOGGER.info(f"Started EV charging via {charge_switch_entity}")
-            return True
+            charging_started = True
         except Exception as e:
             _LOGGER.error(f"Failed to start EV charging: {e}")
             return False
 
-    return False
+    if not charging_started:
+        return False
+
+    # Schedule stop at end of time window if requested
+    if stop_outside_window and time_window_end:
+        entry_id = config_entry.entry_id
+
+        # Cancel any existing scheduled stop
+        if entry_id in _ev_scheduled_stop:
+            cancel_func = _ev_scheduled_stop[entry_id].get("cancel")
+            if cancel_func:
+                cancel_func()
+            del _ev_scheduled_stop[entry_id]
+
+        # Calculate when the window ends
+        end_datetime = _get_window_end_datetime(time_window_end, time_window_start, timezone)
+        if end_datetime:
+            async def stop_charging_at_window_end(now) -> None:
+                """Stop charging when time window ends."""
+                _LOGGER.info(f"⏰ Time window ended, stopping EV charging")
+                await _action_stop_ev_charging(hass, config_entry, params)
+                # Clean up the scheduled stop entry
+                if entry_id in _ev_scheduled_stop:
+                    del _ev_scheduled_stop[entry_id]
+
+            cancel_func = async_track_point_in_time(
+                hass,
+                stop_charging_at_window_end,
+                end_datetime,
+            )
+
+            _ev_scheduled_stop[entry_id] = {
+                "cancel": cancel_func,
+                "end_time": end_datetime,
+            }
+            _LOGGER.info(f"⚡ EV charging started, will stop at {end_datetime.strftime('%H:%M')}")
+        else:
+            _LOGGER.warning("Could not parse time window for scheduled stop")
+
+    return True
 
 
 async def _action_stop_ev_charging(
@@ -1065,7 +1122,18 @@ async def _action_stop_ev_charging(
     Stop EV charging via Tesla Fleet/Teslemetry or Tesla BLE.
 
     Uses BLE if configured as primary or both, falls back to Fleet API.
+    Also cancels any scheduled stop from stop_outside_window.
     """
+    entry_id = config_entry.entry_id
+
+    # Cancel any scheduled stop
+    if entry_id in _ev_scheduled_stop:
+        cancel_func = _ev_scheduled_stop[entry_id].get("cancel")
+        if cancel_func:
+            cancel_func()
+            _LOGGER.debug("Cancelled scheduled EV charging stop")
+        del _ev_scheduled_stop[entry_id]
+
     ev_config = _get_ev_config(config_entry)
     ev_provider = ev_config["ev_provider"]
     ble_prefix = ev_config["ble_prefix"]
@@ -1234,6 +1302,98 @@ async def _action_set_ev_charging_amps(
 # Global storage for dynamic EV charging state per config entry
 _dynamic_ev_state: Dict[str, Dict[str, Any]] = {}
 
+# Global storage for regular EV charging scheduled stop (for stop_outside_window)
+_ev_scheduled_stop: Dict[str, Any] = {}
+
+
+def _parse_time_window(time_str: str) -> Optional[dt_time]:
+    """Parse time string (HH:MM) to time object."""
+    if not time_str:
+        return None
+    try:
+        parts = time_str.split(":")
+        return dt_time(int(parts[0]), int(parts[1]))
+    except (ValueError, IndexError):
+        return None
+
+
+def _get_window_end_datetime(
+    window_end_str: str,
+    window_start_str: str,
+    timezone_str: str
+) -> Optional[datetime]:
+    """Calculate the datetime when the time window ends.
+
+    Handles windows that cross midnight (e.g., 22:00 - 06:00).
+    Returns None if parsing fails.
+    """
+    from zoneinfo import ZoneInfo
+
+    window_end = _parse_time_window(window_end_str)
+    window_start = _parse_time_window(window_start_str)
+
+    if not window_end:
+        return None
+
+    try:
+        tz = ZoneInfo(timezone_str)
+    except Exception:
+        tz = ZoneInfo("UTC")
+
+    now = datetime.now(tz)
+    today = now.date()
+
+    # Create end datetime for today
+    end_datetime = datetime.combine(today, window_end, tzinfo=tz)
+
+    # Handle cross-midnight windows
+    if window_start and window_end < window_start:
+        # Window crosses midnight (e.g., 22:00 - 06:00)
+        # If we're past midnight (current time < start time), end is today
+        # If we're before midnight (current time >= start time), end is tomorrow
+        if now.time() >= window_start:
+            # We're in the first part of the window (before midnight)
+            # End is tomorrow
+            from datetime import timedelta as td
+            end_datetime = end_datetime + td(days=1)
+
+    # If end time has already passed today, move to tomorrow
+    if end_datetime <= now:
+        from datetime import timedelta as td
+        end_datetime = end_datetime + td(days=1)
+
+    return end_datetime
+
+
+def _is_inside_time_window(
+    window_start_str: str,
+    window_end_str: str,
+    timezone_str: str
+) -> bool:
+    """Check if current time is inside the specified time window."""
+    from zoneinfo import ZoneInfo
+
+    window_start = _parse_time_window(window_start_str)
+    window_end = _parse_time_window(window_end_str)
+
+    if not window_start or not window_end:
+        return True  # No window defined, always inside
+
+    try:
+        tz = ZoneInfo(timezone_str)
+    except Exception:
+        tz = ZoneInfo("UTC")
+
+    now = datetime.now(tz).time()
+
+    # Handle cross-midnight windows
+    if window_end < window_start:
+        # Window crosses midnight (e.g., 22:00 - 06:00)
+        return now >= window_start or now < window_end
+    else:
+        # Normal window (e.g., 06:00 - 22:00)
+        return window_start <= now < window_end
+
 
 async def _get_tesla_live_status(hass: HomeAssistant, config_entry: ConfigEntry) -> Optional[Dict[str, Any]]:
     """Get live status from Tesla API for battery and grid power.
@@ -1298,6 +1458,7 @@ async def _dynamic_ev_update(
     - Maintains a target battery charge rate (e.g., 5kW into battery)
     - Falls back to grid headroom if battery can't meet target
     - Adjusts EV amps based on available power
+    - Stops charging if outside time window (when stop_outside_window is enabled)
 
     Battery power convention: Positive = discharging, Negative = charging
     Grid power convention: Positive = importing, Negative = exporting
@@ -1307,6 +1468,20 @@ async def _dynamic_ev_update(
         return
 
     params = state.get("params", {})
+
+    # Check time window if stop_outside_window is enabled
+    stop_outside_window = params.get("stop_outside_window", False)
+    if stop_outside_window:
+        time_window_start = params.get("time_window_start")
+        time_window_end = params.get("time_window_end")
+        timezone = params.get("timezone", "UTC")
+
+        if time_window_start and time_window_end:
+            if not _is_inside_time_window(time_window_start, time_window_end, timezone):
+                _LOGGER.info("⏰ Dynamic EV: Outside time window, stopping charging")
+                await _action_stop_ev_charging_dynamic(hass, config_entry, {"stop_charging": True})
+                return
+
     # target_battery_charge_kw: How much we want the battery to charge (positive = charging into battery)
     # e.g., 5.0 means we want 5kW going INTO the battery
     target_battery_charge_kw = params.get("target_battery_charge_kw", 5.0)
@@ -1386,7 +1561,8 @@ async def _dynamic_ev_update(
 async def _action_start_ev_charging_dynamic(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
-    params: Dict[str, Any]
+    params: Dict[str, Any],
+    context: Optional[Dict[str, Any]] = None
 ) -> bool:
     """
     Start dynamic EV charging that adjusts charge rate based on battery/grid.
@@ -1402,6 +1578,7 @@ async def _action_start_ev_charging_dynamic(
         min_charge_amps: Minimum EV charge amps (default 5)
         max_charge_amps: Maximum EV charge amps (default 32)
         voltage: Assumed charging voltage for calculations (default 240)
+        stop_outside_window: If True, stop charging when outside time window (default False)
         vehicle_vin: Optional VIN to filter by specific vehicle
     """
     from ..const import DOMAIN
@@ -1418,17 +1595,24 @@ async def _action_start_ev_charging_dynamic(
     max_charge_amps = params.get("max_charge_amps", 32)
     voltage = params.get("voltage", 240)
     start_amps = params.get("start_amps", max_charge_amps)
+    stop_outside_window = params.get("stop_outside_window", False)
+
+    # Get time window from context (passed from automation trigger)
+    time_window_start = context.get("time_window_start") if context else None
+    time_window_end = context.get("time_window_end") if context else None
+    timezone = context.get("timezone", "UTC") if context else "UTC"
 
     _LOGGER.info(
         f"⚡ Starting dynamic EV charging: target_battery_charge={target_battery_charge_kw}kW, "
         f"max_grid_import={max_grid_import_kw}kW, amps={min_charge_amps}-{max_charge_amps}A"
+        f"{', stop_outside_window=' + str(time_window_start) + '-' + str(time_window_end) if stop_outside_window and time_window_start else ''}"
     )
 
     # Stop any existing dynamic charging for this entry
     await _action_stop_ev_charging_dynamic(hass, config_entry, {})
 
     # Start EV charging first
-    start_success = await _action_start_ev_charging(hass, config_entry, params)
+    start_success = await _action_start_ev_charging(hass, config_entry, params, context)
     if not start_success:
         _LOGGER.error("Dynamic EV: Failed to start EV charging")
         return False
@@ -1451,7 +1635,7 @@ async def _action_start_ev_charging_dynamic(
         timedelta(seconds=30),
     )
 
-    # Store state
+    # Store state (including time window for stop_outside_window feature)
     _dynamic_ev_state[entry_id] = {
         "active": True,
         "params": {
@@ -1460,6 +1644,10 @@ async def _action_start_ev_charging_dynamic(
             "min_charge_amps": min_charge_amps,
             "max_charge_amps": max_charge_amps,
             "voltage": voltage,
+            "stop_outside_window": stop_outside_window,
+            "time_window_start": time_window_start,
+            "time_window_end": time_window_end,
+            "timezone": timezone,
         },
         "current_amps": start_amps,
         "cancel_timer": cancel_timer,

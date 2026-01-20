@@ -287,9 +287,9 @@ class AutomationEngine:
 
                         _LOGGER.debug(f"Automation '{automation.get('name')}' conditions passed")
 
-                    # Execute actions
+                    # Execute actions (pass current_state for time window context)
                     actions_executed = await self._async_execute_automation(
-                        automation, executed_actions
+                        automation, executed_actions, current_state
                     )
 
                     if actions_executed:
@@ -500,7 +500,8 @@ class AutomationEngine:
     async def _async_execute_automation(
         self,
         automation: Dict[str, Any],
-        executed_actions: set
+        executed_actions: set,
+        current_state: Dict[str, Any]
     ) -> bool:
         """Execute an automation's actions.
 
@@ -536,10 +537,19 @@ class AutomationEngine:
             _LOGGER.debug(f"Automation '{automation_name}' has no actions to execute")
             return True  # Still successful since notification was sent
 
+        # Build context with time window info for EV charging actions
+        trigger = automation.get("trigger", {})
+        context = {
+            "time_window_start": trigger.get("time_window_start"),
+            "time_window_end": trigger.get("time_window_end"),
+            "timezone": current_state.get("user_timezone", "UTC"),
+        }
+
         result = await execute_actions(
             self._hass,
             self._config_entry,
-            actions_to_execute
+            actions_to_execute,
+            context
         )
         return result
 
