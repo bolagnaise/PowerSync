@@ -193,6 +193,8 @@ class EnphaseController(InverterController):
                         _LOGGER.info(f"Successfully obtained JWT token from Enlighten for Envoy {serial}")
                         self._token = token
                         self._token_obtained_at = datetime.now()
+                        # Update session cookie for /installer/ endpoints
+                        self._update_session_cookie()
                         return token
                     else:
                         _LOGGER.error(f"Invalid token response from Enlighten: {token[:100]}")
@@ -226,11 +228,15 @@ class EnphaseController(InverterController):
                 # If we get a 401, the caller should set force_refresh=True
                 if not self._username or not self._password:
                     _LOGGER.debug("External token provided, no credentials for refresh")
+                    # Update session cookie for /installer/ endpoints
+                    self._update_session_cookie()
                     return True
                 # We have credentials but no timestamp - this is the first use of external token
                 # Mark when we started using it so we can track age
                 self._token_obtained_at = datetime.now()
                 _LOGGER.debug("External token provided, marked timestamp for age tracking")
+                # Update session cookie for /installer/ endpoints
+                self._update_session_cookie()
                 return True
 
         # Need to get token from cloud
@@ -255,6 +261,29 @@ class EnphaseController(InverterController):
         ssl_context.verify_mode = ssl.CERT_NONE
         return ssl_context
 
+    def _update_session_cookie(self) -> None:
+        """Update the session cookie with the current JWT token.
+
+        The Enphase IQ Gateway /installer/ endpoints require the token
+        to be passed as a cookie named 'sessionId' in addition to the
+        Authorization header.
+        """
+        if self._token and self._session and self._session.cookie_jar:
+            from http.cookies import SimpleCookie
+            from yarl import URL
+
+            # Create cookie for the gateway host
+            cookie = SimpleCookie()
+            cookie["sessionId"] = self._token
+            cookie["sessionId"]["path"] = "/"
+
+            # Update the session's cookie jar
+            self._session.cookie_jar.update_cookies(
+                cookie,
+                URL(f"https://{self.host}:{self.port}/")
+            )
+            _LOGGER.debug(f"Updated session cookie with JWT token for {self.host}")
+
     async def connect(self) -> bool:
         """Connect to the Enphase IQ Gateway."""
         async with self._lock:
@@ -265,9 +294,12 @@ class EnphaseController(InverterController):
                 # Create connector with SSL context for self-signed certs
                 connector = aiohttp.TCPConnector(ssl=self._get_ssl_context())
                 timeout = aiohttp.ClientTimeout(total=self.TIMEOUT_SECONDS)
+                # Use cookie jar to store session cookies (needed for /installer/ endpoints)
+                cookie_jar = aiohttp.CookieJar(unsafe=True)  # unsafe=True for IP addresses
                 self._session = aiohttp.ClientSession(
                     connector=connector,
                     timeout=timeout,
+                    cookie_jar=cookie_jar,
                 )
 
                 # Test connection by getting device info
