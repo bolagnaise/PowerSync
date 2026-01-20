@@ -1869,8 +1869,8 @@ class SigenergyTariffView(HomeAssistantView):
 class ConfigView(HomeAssistantView):
     """HTTP view to get backend configuration for mobile app auto-detection."""
 
-    url = "/api/power_sync/config"
-    name = "api:power_sync:config"
+    url = "/api/power_sync/backend_config"
+    name = "api:power_sync:backend_config"
     requires_auth = True
 
     def __init__(self, hass: HomeAssistant):
@@ -7337,7 +7337,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Register HTTP endpoint for Config (for mobile app auto-detection)
     hass.http.register_view(ConfigView(hass))
-    _LOGGER.info("📱 Config HTTP endpoint registered at /api/power_sync/config")
+    _LOGGER.info("📱 Config HTTP endpoint registered at /api/power_sync/backend_config")
 
     # Register HTTP endpoint for Tariff Price (for Globird users without API)
     hass.http.register_view(TariffPriceView(hass))
