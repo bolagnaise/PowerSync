@@ -505,23 +505,50 @@ class EnphaseController(InverterController):
         Returns:
             True if successful
         """
-        # Firmware D8.x requires 'dynamic_pel_settings' wrapper
-        data = {
+        # Different firmware versions require different formats
+        # Try multiple formats until one works
+
+        # Format 1: Firmware D8.x with wrapper and integer enabled (1/0)
+        data_v1 = {
+            "dynamic_pel_settings": {
+                "enabled": 1 if enabled else 0,
+                "limit": limit_watts,
+            }
+        }
+        if await self._post(self.ENDPOINT_DPEL, data_v1):
+            _LOGGER.debug("DPEL succeeded with format v1 (integer enabled)")
+            return True
+
+        # Format 2: Firmware D8.x with wrapper and boolean enabled
+        data_v2 = {
             "dynamic_pel_settings": {
                 "enabled": enabled,
                 "limit": limit_watts,
             }
         }
-        # Try POST first (required by most firmware), fall back to PUT
-        if await self._post(self.ENDPOINT_DPEL, data):
+        if await self._post(self.ENDPOINT_DPEL, data_v2):
+            _LOGGER.debug("DPEL succeeded with format v2 (boolean enabled)")
             return True
 
-        # Try without wrapper for older firmware
+        # Format 3: Simple format without wrapper (older firmware)
         data_simple = {
+            "enabled": 1 if enabled else 0,
+            "limit": limit_watts,
+        }
+        if await self._put(self.ENDPOINT_DPEL, data_simple):
+            _LOGGER.debug("DPEL succeeded with simple PUT format")
+            return True
+
+        # Format 4: Simple format with boolean
+        data_simple_bool = {
             "enabled": enabled,
             "limit": limit_watts,
         }
-        return await self._put(self.ENDPOINT_DPEL, data_simple)
+        if await self._put(self.ENDPOINT_DPEL, data_simple_bool):
+            _LOGGER.debug("DPEL succeeded with simple PUT boolean format")
+            return True
+
+        return False
 
     async def _get_der_settings(self) -> Optional[dict]:
         """Get DER (Distributed Energy Resource) settings."""
@@ -705,8 +732,9 @@ class EnphaseController(InverterController):
 
             _LOGGER.warning(
                 "Export limiting not available on this Enphase system. "
-                "This may require installer-level access, a specific grid profile, "
-                "or configuring zero_export_profile for profile switching fallback."
+                "DPEL/DER endpoints failed, and grid profile switching requires installer-level credentials "
+                "(homeowner Enlighten accounts cannot switch grid profiles). "
+                "Consider disabling inverter curtailment or contact your installer for DPEL access."
             )
             return False
 
