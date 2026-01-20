@@ -625,49 +625,57 @@ class EnphaseController(InverterController):
         """
         # Different firmware versions require different formats
         # Try multiple formats until one works
-        # Note: Error "missing/incorrect enable" means field should be 'enable' not 'enabled'
+        # D8.x firmware requires: {"dynamic_pel_settings": {"enable": 1, "limit": 0}}
 
-        # Format 1: D8.x firmware - 'enable' (singular) with integer (1/0)
-        data_v1 = {
-            "enable": 1 if enabled else 0,
-            "limit": limit_watts,
+        # Format 1: D8.x - wrapped with 'enable' (singular) integer
+        data_wrapped_enable = {
+            "dynamic_pel_settings": {
+                "enable": 1 if enabled else 0,
+                "limit": limit_watts,
+            }
         }
-        if await self._post(self.ENDPOINT_DPEL, data_v1):
-            _LOGGER.debug("DPEL succeeded with format v1 (enable integer)")
+        if await self._post(self.ENDPOINT_DPEL, data_wrapped_enable):
+            _LOGGER.debug("DPEL succeeded with wrapped enable format")
             return True
 
-        # Format 2: 'enable' (singular) with boolean
-        data_v2 = {
-            "enable": enabled,
-            "limit": limit_watts,
+        # Format 2: Wrapped with 'enable' boolean
+        data_wrapped_bool = {
+            "dynamic_pel_settings": {
+                "enable": enabled,
+                "limit": limit_watts,
+            }
         }
-        if await self._post(self.ENDPOINT_DPEL, data_v2):
-            _LOGGER.debug("DPEL succeeded with format v2 (enable boolean)")
+        if await self._post(self.ENDPOINT_DPEL, data_wrapped_bool):
+            _LOGGER.debug("DPEL succeeded with wrapped enable boolean format")
             return True
 
-        # Format 3: Wrapped format with 'enabled' (some older firmware)
-        data_wrapped = {
+        # Format 3: Wrapped with 'enabled' (older firmware)
+        data_wrapped_enabled = {
             "dynamic_pel_settings": {
                 "enabled": 1 if enabled else 0,
                 "limit": limit_watts,
             }
         }
-        if await self._post(self.ENDPOINT_DPEL, data_wrapped):
-            _LOGGER.debug("DPEL succeeded with wrapped format")
+        if await self._post(self.ENDPOINT_DPEL, data_wrapped_enabled):
+            _LOGGER.debug("DPEL succeeded with wrapped enabled format")
             return True
 
-        # Format 4: PUT method with 'enable'
-        if await self._put(self.ENDPOINT_DPEL, data_v1):
-            _LOGGER.debug("DPEL succeeded with PUT enable format")
-            return True
-
-        # Format 5: PUT with 'enabled' (older firmware)
-        data_old = {
-            "enabled": 1 if enabled else 0,
+        # Format 4: Simple format - 'enable' (some firmware)
+        data_simple = {
+            "enable": 1 if enabled else 0,
             "limit": limit_watts,
         }
-        if await self._put(self.ENDPOINT_DPEL, data_old):
-            _LOGGER.debug("DPEL succeeded with PUT enabled format")
+        if await self._post(self.ENDPOINT_DPEL, data_simple):
+            _LOGGER.debug("DPEL succeeded with simple enable format")
+            return True
+
+        # Format 5: PUT methods as fallback
+        if await self._put(self.ENDPOINT_DPEL, data_wrapped_enable):
+            _LOGGER.debug("DPEL succeeded with PUT wrapped format")
+            return True
+
+        if await self._put(self.ENDPOINT_DPEL, data_simple):
+            _LOGGER.debug("DPEL succeeded with PUT simple format")
             return True
 
         return False
