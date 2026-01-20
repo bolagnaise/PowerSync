@@ -1294,20 +1294,26 @@ async def _dynamic_ev_update(
 ) -> None:
     """Periodic update function for dynamic EV charging.
 
-    Adjusts EV charge amps based on:
-    - Battery discharge rate (keep under max_battery_discharge_kw)
-    - Grid import rate (keep under max_grid_import_kw, ideally zero)
+    Uses same logic as the HA automation "Tesla Dynamic Charge Control for PW3":
+    - Maintains a target battery charge rate (e.g., 5kW into battery)
+    - Falls back to grid headroom if battery can't meet target
+    - Adjusts EV amps based on available power
+
+    Battery power convention: Positive = discharging, Negative = charging
+    Grid power convention: Positive = importing, Negative = exporting
     """
     state = _dynamic_ev_state.get(entry_id)
     if not state or not state.get("active"):
         return
 
     params = state.get("params", {})
-    max_battery_discharge_w = params.get("max_battery_discharge_kw", 10.0) * 1000
-    max_grid_import_w = params.get("max_grid_import_kw", 0.0) * 1000
+    # target_battery_charge_kw: How much we want the battery to charge (positive = charging into battery)
+    # e.g., 5.0 means we want 5kW going INTO the battery
+    target_battery_charge_kw = params.get("target_battery_charge_kw", 5.0)
+    max_grid_import_kw = params.get("max_grid_import_kw", 12.5)
     min_amps = params.get("min_charge_amps", 5)
     max_amps = params.get("max_charge_amps", 32)
-    voltage = params.get("voltage", 240)  # Assumed voltage for power calculations
+    voltage = params.get("voltage", 240)
 
     current_amps = state.get("current_amps", max_amps)
 
@@ -1317,61 +1323,57 @@ async def _dynamic_ev_update(
         _LOGGER.debug("Dynamic EV: Could not get live status, keeping current amps")
         return
 
-    battery_power = live_status.get("battery_power", 0) or 0  # Positive = discharging
-    grid_power = live_status.get("grid_power", 0) or 0  # Positive = importing
-    load_power = live_status.get("load_power", 0) or 0
-    solar_power = live_status.get("solar_power", 0) or 0
+    # Convert to kW for cleaner math (matching HA automation)
+    # battery_power: Positive = discharging, Negative = charging
+    battery_power_kw = (live_status.get("battery_power", 0) or 0) / 1000
+    grid_power_kw = (live_status.get("grid_power", 0) or 0) / 1000
+    current_ev_power_kw = (current_amps * voltage) / 1000
+
+    # Target battery power in same convention (negative = charging)
+    # If target_battery_charge_kw = 5, we want battery_power = -5 kW
+    target_battery_power_kw = -target_battery_charge_kw
+
+    # Battery deficit: How much more the battery should be charging
+    # Positive deficit = battery is charging MORE than target (surplus available for EV)
+    # Negative deficit = battery isn't meeting charge target
+    battery_deficit_kw = target_battery_power_kw - battery_power_kw
+
+    # Grid headroom: How much more we could import before hitting limit
+    grid_headroom_kw = max_grid_import_kw - grid_power_kw
+
+    # Available power for EV adjustment:
+    # - If battery has surplus (deficit > 0.1), use that surplus
+    # - Otherwise, use grid headroom
+    if battery_deficit_kw > 0.1:
+        available_power_kw = battery_deficit_kw
+    else:
+        available_power_kw = grid_headroom_kw
+
+    # Convert available power to amps
+    available_amps = (available_power_kw * 1000) / voltage
+
+    # Calculate new target amps
+    raw_new_amps = current_amps + available_amps
+    new_amps = int(round(max(min_amps, min(max_amps, raw_new_amps))))
+
+    # Clamp to 0 if below minimum (stop charging)
+    if new_amps < min_amps:
+        new_amps = 0
 
     _LOGGER.debug(
-        f"Dynamic EV: battery={battery_power:.0f}W, grid={grid_power:.0f}W, "
-        f"load={load_power:.0f}W, solar={solar_power:.0f}W, current={current_amps}A"
+        f"Dynamic EV: battery={battery_power_kw:.1f}kW (target={target_battery_power_kw:.1f}kW), "
+        f"deficit={battery_deficit_kw:.1f}kW, grid={grid_power_kw:.1f}kW (max={max_grid_import_kw:.1f}kW), "
+        f"headroom={grid_headroom_kw:.1f}kW, available={available_power_kw:.1f}kW, "
+        f"current={current_amps}A, target={new_amps}A"
     )
 
-    # Calculate how much we need to reduce (positive = need to reduce, negative = can increase)
-    battery_excess_w = max(0, battery_power - max_battery_discharge_w)
-    grid_excess_w = max(0, grid_power - max_grid_import_w)
-
-    # The total excess power we need to reduce
-    excess_w = max(battery_excess_w, grid_excess_w)
-
-    # Calculate target amps adjustment
-    # Each amp change = voltage watts change in EV charging
-    if excess_w > 0:
-        # Need to reduce amps
-        amps_to_reduce = int(excess_w / voltage) + 1  # Round up
-        new_amps = max(min_amps, current_amps - amps_to_reduce)
+    # Only update if change is >= 1 amp (avoid constant micro-adjustments)
+    if abs(new_amps - current_amps) >= 1:
         _LOGGER.info(
-            f"⚡ Dynamic EV: Reducing amps from {current_amps}A to {new_amps}A "
-            f"(battery excess={battery_excess_w:.0f}W, grid excess={grid_excess_w:.0f}W)"
+            f"⚡ Dynamic EV: Adjusting from {current_amps}A to {new_amps}A "
+            f"(battery={battery_power_kw:.1f}kW, grid={grid_power_kw:.1f}kW, "
+            f"available={available_power_kw:.1f}kW)"
         )
-    else:
-        # Check if we have headroom to increase
-        # Headroom = how much more we could discharge/import before hitting limits
-        battery_headroom_w = max_battery_discharge_w - max(0, battery_power)
-        grid_headroom_w = max_grid_import_w - max(0, grid_power)
-
-        # Also consider if we're exporting (grid_power < 0) - that's free power we could use
-        if grid_power < 0:
-            grid_headroom_w = max_grid_import_w + abs(grid_power)
-
-        # Use the smaller headroom (most constrained)
-        headroom_w = min(battery_headroom_w, grid_headroom_w)
-
-        if headroom_w > voltage:  # At least 1 amp worth of headroom
-            amps_to_increase = min(2, int(headroom_w / voltage))  # Max 2A increase at a time
-            new_amps = min(max_amps, current_amps + amps_to_increase)
-            if new_amps > current_amps:
-                _LOGGER.info(
-                    f"⚡ Dynamic EV: Increasing amps from {current_amps}A to {new_amps}A "
-                    f"(headroom={headroom_w:.0f}W)"
-                )
-            else:
-                new_amps = current_amps
-        else:
-            new_amps = current_amps
-
-    # Apply the new amps if changed
-    if new_amps != current_amps:
         success = await _action_set_ev_charging_amps(
             hass, config_entry, {"amps": new_amps}
         )
@@ -1389,11 +1391,16 @@ async def _action_start_ev_charging_dynamic(
     """
     Start dynamic EV charging that adjusts charge rate based on battery/grid.
 
+    Uses same logic as HA automation "Tesla Dynamic Charge Control for PW3":
+    - Maintains target battery charge rate while EV charges
+    - Falls back to grid headroom if battery can't meet target
+
     Parameters:
-        max_battery_discharge_kw: Max battery discharge rate before reducing EV amps (default 10.0)
-        max_grid_import_kw: Max grid import before reducing EV amps (default 0.0 = no import)
-        min_charge_amps: Minimum charge amps (default 5)
-        max_charge_amps: Maximum charge amps (default 32)
+        target_battery_charge_kw: Target battery charge rate in kW (default 5.0)
+            e.g., 5.0 means maintain 5kW charging INTO the Powerwall
+        max_grid_import_kw: Max grid import allowed (default 12.5)
+        min_charge_amps: Minimum EV charge amps (default 5)
+        max_charge_amps: Maximum EV charge amps (default 32)
         voltage: Assumed charging voltage for calculations (default 240)
         vehicle_vin: Optional VIN to filter by specific vehicle
     """
@@ -1401,17 +1408,20 @@ async def _action_start_ev_charging_dynamic(
 
     entry_id = config_entry.entry_id
 
-    # Get parameters with defaults
-    max_battery_discharge_kw = params.get("max_battery_discharge_kw", 10.0)
-    max_grid_import_kw = params.get("max_grid_import_kw", 0.0)
+    # Get parameters with defaults (support both old and new parameter names)
+    target_battery_charge_kw = params.get(
+        "target_battery_charge_kw",
+        params.get("max_battery_discharge_kw", 5.0)  # Fallback for old param name
+    )
+    max_grid_import_kw = params.get("max_grid_import_kw", 12.5)
     min_charge_amps = params.get("min_charge_amps", 5)
     max_charge_amps = params.get("max_charge_amps", 32)
     voltage = params.get("voltage", 240)
     start_amps = params.get("start_amps", max_charge_amps)
 
     _LOGGER.info(
-        f"⚡ Starting dynamic EV charging: max_discharge={max_battery_discharge_kw}kW, "
-        f"max_import={max_grid_import_kw}kW, amps={min_charge_amps}-{max_charge_amps}A"
+        f"⚡ Starting dynamic EV charging: target_battery_charge={target_battery_charge_kw}kW, "
+        f"max_grid_import={max_grid_import_kw}kW, amps={min_charge_amps}-{max_charge_amps}A"
     )
 
     # Stop any existing dynamic charging for this entry
@@ -1445,7 +1455,7 @@ async def _action_start_ev_charging_dynamic(
     _dynamic_ev_state[entry_id] = {
         "active": True,
         "params": {
-            "max_battery_discharge_kw": max_battery_discharge_kw,
+            "target_battery_charge_kw": target_battery_charge_kw,
             "max_grid_import_kw": max_grid_import_kw,
             "min_charge_amps": min_charge_amps,
             "max_charge_amps": max_charge_amps,
