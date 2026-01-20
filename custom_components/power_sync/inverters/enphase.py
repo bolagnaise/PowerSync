@@ -68,6 +68,7 @@ class EnphaseController(InverterController):
         serial: Optional[str] = None,
         normal_profile: Optional[str] = None,
         zero_export_profile: Optional[str] = None,
+        is_installer: bool = False,
     ):
         """Initialize Enphase controller.
 
@@ -91,7 +92,7 @@ class EnphaseController(InverterController):
         self._serial = serial
         self._normal_profile = normal_profile
         self._zero_export_profile = zero_export_profile
-        self._is_installer = kwargs.get('is_installer', False)
+        self._is_installer = is_installer
         self._session: Optional[aiohttp.ClientSession] = None
         self._cloud_session: Optional[aiohttp.ClientSession] = None
         self._lock = asyncio.Lock()
