@@ -1240,7 +1240,7 @@ class EnphaseController(InverterController):
                     _LOGGER.info(f"Current DPEL settings: {current_dpel}")
                 # Try high export limit values - effectively unlimited for restore
                 # 99999W first (effectively unlimited), then fall back to smaller values
-                for limit_value in [99999, 50000, 10000]:
+                for limit_value in [10000, 15000, 5000]:
                     _LOGGER.debug(f"Trying DPEL restore with limit={limit_value}")
                     success, available = await self._set_dpel(enabled=True, limit_watts=limit_value)
                     if success:
