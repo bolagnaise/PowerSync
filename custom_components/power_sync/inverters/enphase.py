@@ -682,12 +682,31 @@ class EnphaseController(InverterController):
         # - export_limit: true = limit export, false = limit production
         # - limit_value_W: the actual limit in watts
         payloads = [
-            # EU gateway format - correct field names from actual API response
-            {"dynamic_pel_settings": {"enable": enabled, "export_limit": True, "limit_value_W": float(limit_watts)}},
-            # With enable_dynamic_limiting flag (might be required for API control)
-            {"dynamic_pel_settings": {"enable": enabled, "export_limit": True, "limit_value_W": float(limit_watts), "enable_dynamic_limiting": True}},
-            # Try with export_limit false (production limiting) as fallback
-            {"dynamic_pel_settings": {"enable": enabled, "export_limit": False, "limit_value_W": float(limit_watts)}},
+            # EU gateway format - ALL fields required based on API error responses
+            # enable_dynamic_limiting + slew_rate are mandatory
+            {"dynamic_pel_settings": {
+                "enable": enabled,
+                "export_limit": True,
+                "limit_value_W": float(limit_watts),
+                "slew_rate": 2000.0,
+                "enable_dynamic_limiting": True
+            }},
+            # Try with enable_dynamic_limiting False
+            {"dynamic_pel_settings": {
+                "enable": enabled,
+                "export_limit": True,
+                "limit_value_W": float(limit_watts),
+                "slew_rate": 2000.0,
+                "enable_dynamic_limiting": False
+            }},
+            # Try production limiting instead of export
+            {"dynamic_pel_settings": {
+                "enable": enabled,
+                "export_limit": False,
+                "limit_value_W": float(limit_watts),
+                "slew_rate": 2000.0,
+                "enable_dynamic_limiting": True
+            }},
             # Legacy formats for other firmware versions
             # D8.2.x format - 'enable' boolean + 'export_limit' as value
             {"dynamic_pel_settings": {"enable": enabled, "export_limit": limit_watts}},
