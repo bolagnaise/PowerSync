@@ -1951,10 +1951,17 @@ class ConfigView(HomeAssistantView):
                     )),
                 }
 
+            # Get EV provider configuration
+            ev_provider = entry.options.get(
+                CONF_EV_PROVIDER,
+                entry.data.get(CONF_EV_PROVIDER)
+            )
+
             result = {
                 "success": True,
                 "battery_system": battery_system,
                 "electricity_provider": electricity_provider,
+                "ev_provider": ev_provider,  # Tesla (fleet_api/tesla_ble/both) or None for OCPP-only
                 "features": features,
                 "sigenergy": sigenergy_config,
             }
