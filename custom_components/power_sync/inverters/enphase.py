@@ -250,7 +250,13 @@ class EnphaseController(InverterController):
                 # We have credentials but no timestamp - this is the first use of external token
                 # Mark when we started using it so we can track age
                 self._token_obtained_at = datetime.now()
-                _LOGGER.debug("External token provided, marked timestamp for age tracking")
+                token_type = self._get_token_type()
+                _LOGGER.info(f"External token provided (type={token_type}), marked timestamp for age tracking")
+                if token_type == 'owner':
+                    _LOGGER.warning(
+                        "External token is 'owner' type - /installer/ endpoints (AGF profile switching) will NOT work. "
+                        "Need installer-level token for AGF functionality."
+                    )
                 # Update session cookie for /installer/ endpoints
                 self._update_session_cookie()
                 return True
@@ -497,7 +503,12 @@ class EnphaseController(InverterController):
                             return await self._put(endpoint, data, retry_auth=False)
                     return False, 401
                 else:
-                    _LOGGER.debug(f"PUT {endpoint} returned status {response.status}")
+                    # Log response body for debugging 400 errors
+                    try:
+                        body = await response.text()
+                        _LOGGER.debug(f"PUT {endpoint} returned status {response.status}: {body[:200]}")
+                    except:
+                        _LOGGER.debug(f"PUT {endpoint} returned status {response.status}")
                     return False, response.status
 
         except aiohttp.ClientError as e:
@@ -642,11 +653,15 @@ class EnphaseController(InverterController):
 
         # Different firmware versions require different formats
         # Try multiple formats until one works
-        # D8.x firmware requires: {"dynamic_pel_settings": {"enable": 1, "limit": 0}}
+        # D8.2.4398 firmware requires: {"dynamic_pel_settings": {"enable": true, "export_limit": 0}}
         payloads = [
-            # D8.x - wrapped with 'enable' (singular) integer
+            # D8.2.x format - 'enable' boolean + 'export_limit' (SerialPest's gateway)
+            {"dynamic_pel_settings": {"enable": enabled, "export_limit": limit_watts}},
+            # D8.x - wrapped with 'enable' integer + 'export_limit'
+            {"dynamic_pel_settings": {"enable": 1 if enabled else 0, "export_limit": limit_watts}},
+            # Older D8.x - wrapped with 'enable' integer + 'limit'
             {"dynamic_pel_settings": {"enable": 1 if enabled else 0, "limit": limit_watts}},
-            # Wrapped with 'enable' boolean
+            # Wrapped with 'enable' boolean + 'limit'
             {"dynamic_pel_settings": {"enable": enabled, "limit": limit_watts}},
             # Wrapped with 'enabled' (older firmware)
             {"dynamic_pel_settings": {"enabled": 1 if enabled else 0, "limit": limit_watts}},

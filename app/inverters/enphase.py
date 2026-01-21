@@ -528,15 +528,21 @@ class EnphaseController(InverterController):
             _LOGGER.debug("DPEL previously marked as unavailable, skipping")
             return False, False
 
-        # Firmware D8.x requires 'dynamic_pel_settings' wrapper
-        # Try multiple payload formats for maximum compatibility
+        # Different firmware versions require different formats
+        # D8.2.4398 firmware requires: {"dynamic_pel_settings": {"enable": true, "export_limit": 0}}
         payloads = [
-            # D8.x firmware format
+            # D8.2.x format - 'enable' boolean + 'export_limit' (SerialPest's gateway)
+            {"dynamic_pel_settings": {"enable": enabled, "export_limit": limit_watts}},
+            # D8.x - wrapped with 'enable' integer + 'export_limit'
+            {"dynamic_pel_settings": {"enable": 1 if enabled else 0, "export_limit": limit_watts}},
+            # Older D8.x - wrapped with 'enable' integer + 'limit'
             {"dynamic_pel_settings": {"enable": 1 if enabled else 0, "limit": limit_watts}},
-            # Alternative D8.x format with boolean
-            {"dynamic_pel_settings": {"enabled": enabled, "limit": limit_watts}},
-            # Older firmware format
-            {"enabled": enabled, "limit": limit_watts},
+            # Wrapped with 'enable' boolean + 'limit'
+            {"dynamic_pel_settings": {"enable": enabled, "limit": limit_watts}},
+            # Wrapped with 'enabled' (older firmware)
+            {"dynamic_pel_settings": {"enabled": 1 if enabled else 0, "limit": limit_watts}},
+            # Simple format
+            {"enable": 1 if enabled else 0, "limit": limit_watts},
         ]
 
         for payload in payloads:
