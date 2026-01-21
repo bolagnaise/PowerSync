@@ -176,9 +176,10 @@ def _evaluate_time_trigger(
     else:
         trigger_datetime = datetime.combine(now.date(), trigger_time)
 
-    time_diff = abs((now - trigger_datetime).total_seconds())
+    # Only trigger at or after the target time (within 60s window for polling interval)
+    time_diff_seconds = (now - trigger_datetime).total_seconds()
 
-    if time_diff <= 60:
+    if 0 <= time_diff_seconds <= 60:
         # Check if already triggered recently
         auto = store.get_by_id(automation_id)
         if auto and auto.get("last_evaluated_at"):
