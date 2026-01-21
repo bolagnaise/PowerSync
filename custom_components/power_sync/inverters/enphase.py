@@ -1022,6 +1022,13 @@ class EnphaseController(InverterController):
 
             # Method 3: AGF Grid profile switching
             # This is the modern replacement for DPEL and works on most recent firmware
+            # First, fetch and log available profiles for debugging
+            available_profiles = await self._get_available_profiles()
+            if available_profiles:
+                _LOGGER.info(f"Available AGF grid profiles on gateway: {available_profiles}")
+            else:
+                _LOGGER.warning("Could not fetch available AGF profiles from gateway")
+
             # Auto-detect profiles if not manually configured
             if not self._zero_export_profile:
                 _LOGGER.debug("No zero export profile configured, attempting auto-detection")
