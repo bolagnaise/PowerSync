@@ -676,25 +676,27 @@ class EnphaseController(InverterController):
 
         # Different firmware versions require different formats
         # Try multiple formats until one works
-        # D8.2.4398 firmware requires: {"dynamic_pel_settings": {"enable": true, "export_limit": 0}}
+        # EU gateway format discovered from GET /ivp/ss/dpel:
+        # {"dynamic_pel_settings": {"enable": bool, "export_limit": bool, "limit_value_W": float}}
+        # - enable: whether DPEL is active
+        # - export_limit: true = limit export, false = limit production
+        # - limit_value_W: the actual limit in watts
         payloads = [
-            # D8.2.x format - 'enable' boolean + 'export_limit' (SerialPest's gateway)
+            # EU gateway format - correct field names from actual API response
+            {"dynamic_pel_settings": {"enable": enabled, "export_limit": True, "limit_value_W": float(limit_watts)}},
+            # Try with export_limit false (production limiting) as fallback
+            {"dynamic_pel_settings": {"enable": enabled, "export_limit": False, "limit_value_W": float(limit_watts)}},
+            # Legacy formats for other firmware versions
+            # D8.2.x format - 'enable' boolean + 'export_limit' as value
             {"dynamic_pel_settings": {"enable": enabled, "export_limit": limit_watts}},
             # D8.x - wrapped with 'enable' integer + 'export_limit'
             {"dynamic_pel_settings": {"enable": 1 if enabled else 0, "export_limit": limit_watts}},
-            # String values (some firmware versions require strings)
-            {"dynamic_pel_settings": {"enable": "true" if enabled else "false", "export_limit": str(limit_watts)}},
-            {"dynamic_pel_settings": {"enable": "1" if enabled else "0", "export_limit": str(limit_watts)}},
             # Float export_limit (might expect decimal)
             {"dynamic_pel_settings": {"enable": enabled, "export_limit": float(limit_watts)}},
             # Older D8.x - wrapped with 'enable' integer + 'limit'
             {"dynamic_pel_settings": {"enable": 1 if enabled else 0, "limit": limit_watts}},
             # Wrapped with 'enable' boolean + 'limit'
             {"dynamic_pel_settings": {"enable": enabled, "limit": limit_watts}},
-            # Wrapped with 'enabled' (older firmware)
-            {"dynamic_pel_settings": {"enabled": 1 if enabled else 0, "limit": limit_watts}},
-            # Simple format
-            {"enable": 1 if enabled else 0, "limit": limit_watts},
         ]
 
         for payload in payloads:
