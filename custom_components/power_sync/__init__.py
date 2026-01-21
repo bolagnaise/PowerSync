@@ -3546,6 +3546,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.info("Entry state: %s", entry.state)
     _LOGGER.info("=" * 60)
 
+    # Update entry title if it has an old/incorrect name
+    electricity_provider = entry.options.get(
+        CONF_ELECTRICITY_PROVIDER,
+        entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
+    )
+    has_amber = bool(entry.data.get(CONF_AMBER_API_TOKEN))
+
+    # Determine correct title based on provider
+    if electricity_provider == "globird" or (not has_amber and entry.data.get(CONF_AEMO_SPIKE_ENABLED)):
+        expected_title = "PowerSync Globird"
+    elif electricity_provider == "flow_power":
+        expected_title = "PowerSync Flow Power"
+    else:
+        expected_title = "PowerSync Amber"
+
+    # Update title if it doesn't match (migration for old entries)
+    if entry.title != expected_title:
+        _LOGGER.info(f"Updating entry title from '{entry.title}' to '{expected_title}'")
+        hass.config_entries.async_update_entry(entry, title=expected_title)
+
     # Check pricing source configuration
     has_amber = bool(entry.data.get(CONF_AMBER_API_TOKEN))
     aemo_spike_enabled = entry.options.get(
