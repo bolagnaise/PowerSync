@@ -1264,12 +1264,13 @@ async def _action_set_ev_charging_amps(
         _LOGGER.error("set_ev_charging_amps: missing amps parameter")
         return False
 
-    # Clamp to valid range (1-48A typical, but allow up to 80A for some chargers)
-    # Note: Tesla BLE max is typically 15A
-    amps = max(1, min(80, int(amps)))
+    # Clamp to valid range (5-48A typical, but allow up to 80A for some chargers)
+    # Note: Tesla vehicles refuse charging below 5A, so we enforce 5A minimum
+    # Tesla BLE supports same 5-32A range as cloud API
+    amps = max(5, min(80, int(amps)))
 
-    # Try BLE first if configured (BLE max is typically 15A)
-    ble_amps = min(amps, 15)  # BLE charger has lower max
+    # Try BLE first if configured (BLE supports same 5-32A range as cloud API)
+    ble_amps = amps
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         if _is_ble_available(hass, ble_prefix):
             result = await _set_ev_charging_amps_ble(hass, ble_prefix, ble_amps)

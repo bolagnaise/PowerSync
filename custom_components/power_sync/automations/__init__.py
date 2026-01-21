@@ -226,6 +226,8 @@ class AutomationEngine:
         self._config_entry = config_entry
         self._weather_cache: Optional[Dict[str, Any]] = None
         self._weather_cache_time: Optional[datetime] = None
+        self._tariff_cache: Optional[Dict[str, Any]] = None
+        self._tariff_cache_time: Optional[datetime] = None
 
     async def async_evaluate_all(self) -> int:
         """
@@ -425,9 +427,40 @@ class AutomationEngine:
                 grid_status = coord_data.get("grid_status", "Active")
                 state["grid_status"] = "off_grid" if grid_status == "Islanded" else "on_grid"
 
-                # Prices
-                state["import_price"] = coord_data.get("current_import_price")
-                state["export_price"] = coord_data.get("current_export_price")
+                # Get prices for price-based triggers (settled prices from WebSocket or REST API)
+                # - Amber users: Amber API prices
+                # - Flow Power users: Either Amber or AEMO prices (based on flow_power_price_source)
+                # - Globird users: Fixed prices, use time-based triggers instead
+                amber_coord = data.get("amber_coordinator")
+                aemo_coord = data.get("aemo_sensor_coordinator")
+
+                if amber_coord and amber_coord.data:
+                    # Amber API prices (for Amber users or Flow Power with Amber source)
+                    current_prices = amber_coord.data.get("current", [])
+                    for price in current_prices:
+                        channel = price.get("channelType")
+                        if channel == "general":
+                            # Import price in $/kWh (Amber returns c/kWh)
+                            state["import_price"] = price.get("perKwh", 0) / 100
+                        elif channel == "feedIn":
+                            # Export price: negate to show earnings (Amber feedIn is negative when earning)
+                            state["export_price"] = -price.get("perKwh", 0) / 100
+                elif aemo_coord and aemo_coord.data:
+                    # AEMO wholesale prices (for Flow Power with AEMO source)
+                    current_prices = aemo_coord.data.get("current", [])
+                    for price in current_prices:
+                        channel = price.get("channelType")
+                        if channel == "general":
+                            state["import_price"] = price.get("perKwh", 0) / 100
+                        elif channel == "feedIn":
+                            state["export_price"] = -price.get("perKwh", 0) / 100
+                else:
+                    # Fallback: Tesla tariff prices (for Globird users with Tesla)
+                    # Uses the rate plan configured in the Tesla app
+                    tariff_prices = await self._async_get_tesla_tariff_prices()
+                    if tariff_prices:
+                        state["import_price"] = tariff_prices.get("import_price")
+                        state["export_price"] = tariff_prices.get("export_price")
 
         # Get EV state from Tesla Fleet entities
         try:
@@ -496,6 +529,146 @@ class AutomationEngine:
             return weather_data.get("condition")
 
         return None
+
+    async def _async_get_tesla_tariff_prices(self) -> Optional[Dict[str, float]]:
+        """Get current prices from Tesla tariff with caching (for Globird users).
+
+        Uses the rate plan configured in the Tesla app to calculate current TOU prices.
+        Caches for 5 minutes since TOU periods don't change frequently.
+        """
+        from ..const import (
+            DOMAIN, CONF_TESLA_ENERGY_SITE_ID,
+            TESLA_PROVIDER_TESLEMETRY, FLEET_API_BASE_URL, TESLEMETRY_API_BASE_URL
+        )
+        import aiohttp
+        from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+        cache_duration_seconds = 300  # 5 minutes
+
+        # Check cache
+        if self._tariff_cache_time:
+            cache_age = (datetime.utcnow() - self._tariff_cache_time).total_seconds()
+            if cache_age < cache_duration_seconds and self._tariff_cache:
+                return self._tariff_cache
+
+        # Get Tesla credentials
+        entry_id = self._config_entry.entry_id
+        if DOMAIN not in self._hass.data or entry_id not in self._hass.data[DOMAIN]:
+            return None
+
+        data = self._hass.data[DOMAIN][entry_id]
+        token_getter = data.get("token_getter")
+        site_id = self._config_entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+
+        if not site_id or not token_getter:
+            return None
+
+        try:
+            current_token, provider = token_getter()
+            if not current_token:
+                return None
+
+            session = async_get_clientsession(self._hass)
+            headers = {
+                "Authorization": f"Bearer {current_token}",
+                "Content-Type": "application/json",
+            }
+            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+            # Fetch site_info which contains tariff_content
+            async with session.get(
+                f"{api_base}/api/1/energy_sites/{site_id}/site_info",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status != 200:
+                    _LOGGER.debug(f"Failed to get Tesla tariff: {response.status}")
+                    return None
+
+                resp_data = await response.json()
+                site_info = resp_data.get("response", {})
+
+            tariff = site_info.get("tariff_content", {})
+            if not tariff:
+                return None
+
+            # Calculate current TOU period and prices
+            from zoneinfo import ZoneInfo
+            tz_name = site_info.get("installation_time_zone", "UTC")
+            try:
+                tz = ZoneInfo(tz_name)
+            except:
+                tz = ZoneInfo("UTC")
+            now = datetime.now(tz)
+
+            # Find current season
+            seasons = tariff.get("seasons", {})
+            current_season = None
+            for season_name, season_data in seasons.items():
+                from_month = season_data.get("fromMonth", 0)
+                to_month = season_data.get("toMonth", 0)
+                if from_month and to_month and from_month <= now.month <= to_month:
+                    current_season = season_name
+                    break
+            if not current_season:
+                current_season = "Summer" if "Summer" in seasons else next(iter(seasons.keys()), None)
+
+            if not current_season:
+                return None
+
+            # Find current TOU period
+            tou_periods = seasons.get(current_season, {}).get("tou_periods", {})
+            current_period = "ALL"
+            for period_name, period_data in tou_periods.items():
+                periods_list = period_data if isinstance(period_data, list) else []
+                for period in periods_list:
+                    from_dow = period.get("fromDayOfWeek", 0)
+                    to_dow = period.get("toDayOfWeek", 6)
+                    from_hour = period.get("fromHour", 0)
+                    to_hour = period.get("toHour", 24)
+
+                    tesla_dow = (now.weekday() + 1) % 7  # Convert Python dow to Tesla dow
+                    if from_dow <= tesla_dow <= to_dow:
+                        if from_hour <= to_hour:
+                            if from_hour <= now.hour < to_hour:
+                                current_period = period_name
+                                break
+                        else:
+                            if now.hour >= from_hour or now.hour < to_hour:
+                                current_period = period_name
+                                break
+                if current_period != "ALL":
+                    break
+
+            # Get energy charges
+            energy_charges = tariff.get("energy_charges", {})
+            season_charges = energy_charges.get(current_season, {})
+            buy_rates = season_charges.get("rates", season_charges) if isinstance(season_charges, dict) else {}
+            buy_rates = {k: v for k, v in buy_rates.items() if isinstance(v, (int, float))}
+
+            sell_tariff = tariff.get("sell_tariff", {})
+            sell_charges = sell_tariff.get("energy_charges", {}).get(current_season, {})
+            sell_rates = sell_charges.get("rates", sell_charges) if isinstance(sell_charges, dict) else {}
+            sell_rates = {k: v for k, v in sell_rates.items() if isinstance(v, (int, float))}
+
+            # Get current prices (Tesla tariff is in $/kWh)
+            import_price = buy_rates.get(current_period, buy_rates.get("ALL", 0))
+            export_price = sell_rates.get(current_period, sell_rates.get("ALL", 0))
+
+            result = {
+                "import_price": import_price,  # Already in $/kWh
+                "export_price": export_price,
+            }
+
+            self._tariff_cache = result
+            self._tariff_cache_time = datetime.utcnow()
+            _LOGGER.debug(f"Tesla tariff prices: import=${import_price:.4f}, export=${export_price:.4f} ({current_period})")
+
+            return result
+
+        except Exception as e:
+            _LOGGER.debug(f"Error fetching Tesla tariff prices: {e}")
+            return None
 
     async def _async_execute_automation(
         self,

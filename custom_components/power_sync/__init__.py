@@ -3431,11 +3431,12 @@ class EVVehicleCommandView(HomeAssistantView):
         ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
         ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
 
-        # Try BLE first (BLE max is typically 15A)
+        # Try BLE first (BLE supports same 5-32A range as cloud API)
         if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
             amps_entity = TESLA_BLE_NUMBER_CHARGING_AMPS.format(prefix=ble_prefix)
             if self._hass.states.get(amps_entity):
-                ble_amps = min(amps, 15)  # BLE charger has lower max
+                # Tesla vehicles refuse charging below 5A
+                ble_amps = max(5, min(32, amps))
                 try:
                     await self._hass.services.async_call(
                         "number", "set_value",
