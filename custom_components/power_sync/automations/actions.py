@@ -733,13 +733,18 @@ async def _send_expo_push(hass: HomeAssistant, title: str, message: str) -> None
     # Get registered push tokens
     push_tokens = hass.data.get(DOMAIN, {}).get("push_tokens", {})
     if not push_tokens:
-        _LOGGER.debug("No push tokens registered, skipping push notification")
+        _LOGGER.warning("📱 No push tokens registered, skipping push notification")
         return
+
+    _LOGGER.info(f"📱 Found {len(push_tokens)} registered push token(s)")
 
     # Prepare messages for Expo Push API
     messages = []
+    skipped_tokens = 0
     for token_data in push_tokens.values():
         token = token_data.get("token")
+        platform = token_data.get("platform", "unknown")
+        device = token_data.get("device_name", "unknown")
         if token and token.startswith("ExponentPushToken"):
             messages.append({
                 "to": token,
@@ -748,9 +753,13 @@ async def _send_expo_push(hass: HomeAssistant, title: str, message: str) -> None
                 "sound": "default",
                 "priority": "high",
             })
+            _LOGGER.debug(f"📱 Including token for {device} ({platform})")
+        else:
+            skipped_tokens += 1
+            _LOGGER.warning(f"📱 Skipping non-Expo token for {device} ({platform}): {token[:30] if token else 'None'}...")
 
     if not messages:
-        _LOGGER.debug("No valid Expo push tokens found")
+        _LOGGER.warning(f"📱 No valid Expo push tokens found (skipped {skipped_tokens} invalid tokens)")
         return
 
     # Send to Expo Push API

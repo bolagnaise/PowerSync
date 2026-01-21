@@ -2545,7 +2545,11 @@ class PushTokenRegisterView(HomeAssistantView):
                     _LOGGER.info(f"✅ Push token persisted to storage for {device_name} ({platform})")
                     break
 
-            _LOGGER.info(f"✅ Push token registered for {device_name} ({platform})")
+            # Log token type for debugging
+            token_type = "Expo" if push_token.startswith("ExponentPushToken") else "Unknown/FCM"
+            _LOGGER.info(f"✅ Push token registered for {device_name} ({platform}) - Token type: {token_type}")
+            if not push_token.startswith("ExponentPushToken"):
+                _LOGGER.warning(f"⚠️ Token does not start with 'ExponentPushToken' - notifications may not work! Token prefix: {push_token[:20]}...")
             return web.json_response({"success": True})
 
         except Exception as e:
