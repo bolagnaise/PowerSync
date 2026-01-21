@@ -684,6 +684,8 @@ class EnphaseController(InverterController):
         payloads = [
             # EU gateway format - correct field names from actual API response
             {"dynamic_pel_settings": {"enable": enabled, "export_limit": True, "limit_value_W": float(limit_watts)}},
+            # With enable_dynamic_limiting flag (might be required for API control)
+            {"dynamic_pel_settings": {"enable": enabled, "export_limit": True, "limit_value_W": float(limit_watts), "enable_dynamic_limiting": True}},
             # Try with export_limit false (production limiting) as fallback
             {"dynamic_pel_settings": {"enable": enabled, "export_limit": False, "limit_value_W": float(limit_watts)}},
             # Legacy formats for other firmware versions
