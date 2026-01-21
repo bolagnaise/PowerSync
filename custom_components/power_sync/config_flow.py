@@ -1179,23 +1179,21 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Handle curtailment configuration during initial setup."""
         # Only show for Tesla battery system (Sigenergy has its own DC curtailment step)
         if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
-            return await self.async_step_demand_charges()
+            return await self.async_step_weather_setup()
 
         if user_input is not None:
             # Store curtailment settings
             self._curtailment_data = {
                 CONF_BATTERY_CURTAILMENT_ENABLED: user_input.get(CONF_BATTERY_CURTAILMENT_ENABLED, False),
                 CONF_AC_INVERTER_CURTAILMENT_ENABLED: user_input.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False),
-                CONF_WEATHER_LOCATION: user_input.get(CONF_WEATHER_LOCATION, ""),
-                CONF_OPENWEATHERMAP_API_KEY: user_input.get(CONF_OPENWEATHERMAP_API_KEY, ""),
             }
 
             # If AC inverter curtailment enabled, go to inverter brand selection
             if user_input.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False):
                 return await self.async_step_inverter_brand_setup()
 
-            # Otherwise, go to demand charges
-            return await self.async_step_demand_charges()
+            # Otherwise, go to weather setup
+            return await self.async_step_weather_setup()
 
         # Get default from site_data if already set
         default_curtailment = self._site_data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
@@ -1211,12 +1209,47 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_AC_INVERTER_CURTAILMENT_ENABLED,
                     default=False,
                 ): bool,
+            }),
+        )
+
+    async def async_step_weather_setup(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle weather and solar forecast configuration during initial setup."""
+        if user_input is not None:
+            # Store weather and Solcast settings in curtailment_data
+            if not hasattr(self, '_curtailment_data'):
+                self._curtailment_data = {}
+            self._curtailment_data[CONF_WEATHER_LOCATION] = user_input.get(CONF_WEATHER_LOCATION, "")
+            self._curtailment_data[CONF_OPENWEATHERMAP_API_KEY] = user_input.get(CONF_OPENWEATHERMAP_API_KEY, "")
+            self._curtailment_data[CONF_SOLCAST_ENABLED] = user_input.get(CONF_SOLCAST_ENABLED, False)
+            self._curtailment_data[CONF_SOLCAST_API_KEY] = user_input.get(CONF_SOLCAST_API_KEY, "")
+            self._curtailment_data[CONF_SOLCAST_RESOURCE_ID] = user_input.get(CONF_SOLCAST_RESOURCE_ID, "")
+
+            # Go to demand charges
+            return await self.async_step_demand_charges()
+
+        return self.async_show_form(
+            step_id="weather_setup",
+            data_schema=vol.Schema({
                 vol.Optional(
                     CONF_WEATHER_LOCATION,
                     default="",
                 ): str,
                 vol.Optional(
                     CONF_OPENWEATHERMAP_API_KEY,
+                    default="",
+                ): str,
+                vol.Optional(
+                    CONF_SOLCAST_ENABLED,
+                    default=False,
+                ): bool,
+                vol.Optional(
+                    CONF_SOLCAST_API_KEY,
+                    default="",
+                ): str,
+                vol.Optional(
+                    CONF_SOLCAST_RESOURCE_ID,
                     default="",
                 ): str,
             }),
@@ -1350,21 +1383,12 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> FlowResult:
         """Handle optional demand charge configuration (minimal implementation)."""
         if user_input is not None:
-            # Combine all data
-            data = {
-                **self._amber_data,
-                **self._teslemetry_data,
-                **self._site_data,
-                **self._aemo_data,  # Include AEMO configuration
-                **self._flow_power_data,  # Include Flow Power configuration
-                **getattr(self, '_curtailment_data', {}),  # Include curtailment configuration
-                **getattr(self, '_inverter_data', {}),  # Include inverter configuration
-                CONF_ELECTRICITY_PROVIDER: self._selected_electricity_provider,
-            }
+            # Store demand charge configuration
+            self._demand_data = {}
 
             # Add demand charge configuration if enabled
             if user_input.get(CONF_DEMAND_CHARGE_ENABLED, False):
-                data.update({
+                self._demand_data.update({
                     CONF_DEMAND_CHARGE_ENABLED: True,
                     CONF_DEMAND_CHARGE_RATE: user_input[CONF_DEMAND_CHARGE_RATE],
                     CONF_DEMAND_CHARGE_START_TIME: user_input[CONF_DEMAND_CHARGE_START_TIME],
@@ -1375,20 +1399,14 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_DEMAND_ARTIFICIAL_PRICE: user_input.get(CONF_DEMAND_ARTIFICIAL_PRICE, False),
                 })
             else:
-                data[CONF_DEMAND_CHARGE_ENABLED] = False
+                self._demand_data[CONF_DEMAND_CHARGE_ENABLED] = False
 
             # Add supply charges (always include, even if 0)
-            data[CONF_DAILY_SUPPLY_CHARGE] = user_input.get(CONF_DAILY_SUPPLY_CHARGE, 0.0)
-            data[CONF_MONTHLY_SUPPLY_CHARGE] = user_input.get(CONF_MONTHLY_SUPPLY_CHARGE, 0.0)
+            self._demand_data[CONF_DAILY_SUPPLY_CHARGE] = user_input.get(CONF_DAILY_SUPPLY_CHARGE, 0.0)
+            self._demand_data[CONF_MONTHLY_SUPPLY_CHARGE] = user_input.get(CONF_MONTHLY_SUPPLY_CHARGE, 0.0)
 
-            # Set appropriate title based on provider
-            if self._aemo_only_mode:
-                title = "PowerSync Globird"
-            elif self._selected_electricity_provider == "flow_power":
-                title = "PowerSync Flow Power"
-            else:
-                title = "PowerSync Amber"
-            return self.async_create_entry(title=title, data=data)
+            # Route to EV charging setup
+            return await self.async_step_ev_charging_setup()
 
         # Build the form schema
         data_schema = vol.Schema(
@@ -1421,6 +1439,70 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "example_rate": "10.0",
                 "example_time": "14:00",
             },
+        )
+
+    async def async_step_ev_charging_setup(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle EV charging configuration during initial setup."""
+        if user_input is not None:
+            # Combine all data
+            data = {
+                **self._amber_data,
+                **self._teslemetry_data,
+                **self._site_data,
+                **self._aemo_data,  # Include AEMO configuration
+                **self._flow_power_data,  # Include Flow Power configuration
+                **getattr(self, '_curtailment_data', {}),  # Include curtailment configuration
+                **getattr(self, '_inverter_data', {}),  # Include inverter configuration
+                **getattr(self, '_demand_data', {}),  # Include demand charge configuration
+                CONF_ELECTRICITY_PROVIDER: self._selected_electricity_provider,
+            }
+
+            # Add EV settings
+            data[CONF_EV_CHARGING_ENABLED] = user_input.get(CONF_EV_CHARGING_ENABLED, False)
+            data[CONF_EV_PROVIDER] = user_input.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
+            data[CONF_TESLA_BLE_ENTITY_PREFIX] = user_input.get(
+                CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX
+            )
+
+            # Add OCPP settings
+            data[CONF_OCPP_ENABLED] = user_input.get(CONF_OCPP_ENABLED, False)
+            data[CONF_OCPP_PORT] = user_input.get(CONF_OCPP_PORT, DEFAULT_OCPP_PORT)
+
+            # Set appropriate title based on provider
+            if self._aemo_only_mode:
+                title = "PowerSync Globird"
+            elif self._selected_electricity_provider == "flow_power":
+                title = "PowerSync Flow Power"
+            else:
+                title = "PowerSync Amber"
+            return self.async_create_entry(title=title, data=data)
+
+        return self.async_show_form(
+            step_id="ev_charging_setup",
+            data_schema=vol.Schema({
+                vol.Optional(
+                    CONF_EV_CHARGING_ENABLED,
+                    default=False,
+                ): bool,
+                vol.Optional(
+                    CONF_EV_PROVIDER,
+                    default=EV_PROVIDER_FLEET_API,
+                ): vol.In(EV_PROVIDERS),
+                vol.Optional(
+                    CONF_TESLA_BLE_ENTITY_PREFIX,
+                    default=DEFAULT_TESLA_BLE_ENTITY_PREFIX,
+                ): str,
+                vol.Optional(
+                    CONF_OCPP_ENABLED,
+                    default=False,
+                ): bool,
+                vol.Optional(
+                    CONF_OCPP_PORT,
+                    default=DEFAULT_OCPP_PORT,
+                ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
+            }),
         )
 
     @staticmethod
@@ -1911,11 +1993,9 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             if was_curtailment_enabled and not new_curtailment_enabled:
                 await self._restore_export_rule()
 
-            # Store curtailment and automation settings
+            # Store curtailment settings (no weather options here)
             self._curtailment_options = {
                 CONF_BATTERY_CURTAILMENT_ENABLED: new_curtailment_enabled,
-                CONF_WEATHER_LOCATION: user_input.get(CONF_WEATHER_LOCATION, ""),
-                CONF_OPENWEATHERMAP_API_KEY: user_input.get(CONF_OPENWEATHERMAP_API_KEY, ""),
             }
 
             if is_sigenergy:
@@ -1926,10 +2006,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 self.hass.config_entries.async_update_entry(
                     self.config_entry, data=new_data
                 )
-                # Combine with previous options and route to EV/OCPP options
-                final_data = {**getattr(self, '_amber_options', {}), **self._curtailment_options}
-                self._final_options = final_data
-                return await self.async_step_ev_ocpp_options()
+                # Route to weather options
+                return await self.async_step_weather_options()
             else:
                 # Tesla - check if AC inverter curtailment needs configuration
                 ac_enabled = user_input.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False)
@@ -1939,10 +2017,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     # Route to AC inverter brand selection
                     return await self.async_step_inverter_brand()
 
-                # No AC inverter - combine options and route to EV/OCPP options
-                final_data = {**getattr(self, '_amber_options', {}), **self._curtailment_options}
-                self._final_options = final_data
-                return await self.async_step_ev_ocpp_options()
+                # No AC inverter - route to weather options
+                return await self.async_step_weather_options()
 
         # Build schema based on battery system
         schema_dict: dict[vol.Marker, Any] = {
@@ -1965,22 +2041,60 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 default=self._get_option(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False),
             )] = bool
 
-        # Weather location for weather-based automations (optional)
-        current_weather_location = self._get_option(CONF_WEATHER_LOCATION) or ""
-        schema_dict[vol.Optional(
-            CONF_WEATHER_LOCATION,
-            default=current_weather_location,
-        )] = str
-
-        # OpenWeatherMap API key for weather-based automations (optional)
-        schema_dict[vol.Optional(
-            CONF_OPENWEATHERMAP_API_KEY,
-            default=self._get_option(CONF_OPENWEATHERMAP_API_KEY, ""),
-        )] = str
-
         return self.async_show_form(
             step_id="curtailment_options",
             data_schema=vol.Schema(schema_dict),
+        )
+
+    async def async_step_weather_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Weather and solar forecast configuration in options flow."""
+        if user_input is not None:
+            # Store weather and Solcast settings
+            weather_options = {
+                CONF_WEATHER_LOCATION: user_input.get(CONF_WEATHER_LOCATION, ""),
+                CONF_OPENWEATHERMAP_API_KEY: user_input.get(CONF_OPENWEATHERMAP_API_KEY, ""),
+                CONF_SOLCAST_ENABLED: user_input.get(CONF_SOLCAST_ENABLED, False),
+                CONF_SOLCAST_API_KEY: user_input.get(CONF_SOLCAST_API_KEY, ""),
+                CONF_SOLCAST_RESOURCE_ID: user_input.get(CONF_SOLCAST_RESOURCE_ID, ""),
+            }
+
+            # Combine with previous options - check if came from inverter_config or curtailment_options
+            if hasattr(self, '_inverter_options') and self._inverter_options:
+                # Came from inverter_config - _inverter_options already has everything except weather
+                final_data = {**self._inverter_options, **weather_options}
+            else:
+                # Came directly from curtailment_options
+                final_data = {**getattr(self, '_amber_options', {}), **getattr(self, '_curtailment_options', {}), **weather_options}
+
+            self._final_options = final_data
+            return await self.async_step_ev_charging()
+
+        return self.async_show_form(
+            step_id="weather_options",
+            data_schema=vol.Schema({
+                vol.Optional(
+                    CONF_WEATHER_LOCATION,
+                    default=self._get_option(CONF_WEATHER_LOCATION, ""),
+                ): str,
+                vol.Optional(
+                    CONF_OPENWEATHERMAP_API_KEY,
+                    default=self._get_option(CONF_OPENWEATHERMAP_API_KEY, ""),
+                ): str,
+                vol.Optional(
+                    CONF_SOLCAST_ENABLED,
+                    default=self._get_option(CONF_SOLCAST_ENABLED, False),
+                ): bool,
+                vol.Optional(
+                    CONF_SOLCAST_API_KEY,
+                    default=self._get_option(CONF_SOLCAST_API_KEY, ""),
+                ): str,
+                vol.Optional(
+                    CONF_SOLCAST_RESOURCE_ID,
+                    default=self._get_option(CONF_SOLCAST_RESOURCE_ID, ""),
+                ): str,
+            }),
         )
 
     async def async_step_inverter_brand(
@@ -2053,9 +2167,9 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_INVERTER_RESTORE_SOC, DEFAULT_INVERTER_RESTORE_SOC
             )
 
-            # Route to EV/OCPP options instead of finishing
-            self._final_options = final_data
-            return await self.async_step_ev_ocpp_options()
+            # Store inverter config and route to weather options
+            self._inverter_options = final_data
+            return await self.async_step_weather_options()
 
         # Get brand-specific models and defaults
         # Fall back to existing config if _inverter_brand not set (options flow)
@@ -2167,10 +2281,10 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             },
         )
 
-    async def async_step_ev_ocpp_options(
+    async def async_step_ev_charging(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step for EV Charging, OCPP, and Solcast configuration."""
+        """Step for EV Charging and OCPP configuration."""
         if user_input is not None:
             # Start with existing options to preserve any settings not in this flow
             final_data = dict(self.config_entry.options)
@@ -2196,21 +2310,9 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_OCPP_PORT, DEFAULT_OCPP_PORT
             )
 
-            # Add Solcast settings
-            final_data[CONF_SOLCAST_ENABLED] = user_input.get(
-                CONF_SOLCAST_ENABLED, False
-            )
-            final_data[CONF_SOLCAST_API_KEY] = user_input.get(
-                CONF_SOLCAST_API_KEY, ""
-            )
-            final_data[CONF_SOLCAST_RESOURCE_ID] = user_input.get(
-                CONF_SOLCAST_RESOURCE_ID, ""
-            )
-
             return self.async_create_entry(title="", data=final_data)
 
-        # Build schema for EV, OCPP, and Solcast options
-        # Get current EV provider to determine if BLE prefix should be shown
+        # Build schema for EV and OCPP options
         current_ev_enabled = self._get_option(CONF_EV_CHARGING_ENABLED, False)
         current_ev_provider = self._get_option(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
 
@@ -2239,23 +2341,10 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_OCPP_PORT,
                 default=self._get_option(CONF_OCPP_PORT, DEFAULT_OCPP_PORT),
             ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
-            # Solcast Solar Forecasting
-            vol.Optional(
-                CONF_SOLCAST_ENABLED,
-                default=self._get_option(CONF_SOLCAST_ENABLED, False),
-            ): bool,
-            vol.Optional(
-                CONF_SOLCAST_API_KEY,
-                default=self._get_option(CONF_SOLCAST_API_KEY, ""),
-            ): str,
-            vol.Optional(
-                CONF_SOLCAST_RESOURCE_ID,
-                default=self._get_option(CONF_SOLCAST_RESOURCE_ID, ""),
-            ): str,
         }
 
         return self.async_show_form(
-            step_id="ev_ocpp_options",
+            step_id="ev_charging",
             data_schema=vol.Schema(schema_dict),
         )
 

@@ -195,6 +195,44 @@
         },
         "submit_button": "Next"
       },
+      "weather_setup": {
+        "title": "Weather & Solar Forecast",
+        "description": "Configure weather-based automations and solar production forecasting.\n\nWeather data enables cloud cover triggers for curtailment decisions. Solcast provides accurate solar production forecasts.",
+        "data": {
+          "weather_location": "Weather Location",
+          "openweathermap_api_key": "OpenWeatherMap API Key",
+          "solcast_enabled": "Enable Solcast Forecasting",
+          "solcast_api_key": "Solcast API Key",
+          "solcast_resource_id": "Solcast Resource ID"
+        },
+        "data_description": {
+          "weather_location": "City name or postcode for weather-based automations (e.g., Brisbane or 4000)",
+          "openweathermap_api_key": "Free API key from openweathermap.org for weather triggers. Leave blank to disable.",
+          "solcast_enabled": "Enable Solcast solar production forecasting for smarter battery management",
+          "solcast_api_key": "Your Solcast API key from solcast.com (free for residential rooftop systems)",
+          "solcast_resource_id": "Your Solcast rooftop resource ID (found in your Solcast dashboard)"
+        },
+        "submit_button": "Next"
+      },
+      "ev_charging_setup": {
+        "title": "EV Charging",
+        "description": "Configure EV charging integration and OCPP charger support.\n\nEV charging allows PowerSync to manage your Tesla vehicle charging based on electricity prices. OCPP enables control of compatible EV chargers.",
+        "data": {
+          "ev_charging_enabled": "Enable EV Charging",
+          "ev_provider": "EV Provider",
+          "tesla_ble_entity_prefix": "Tesla BLE Entity Prefix",
+          "ocpp_enabled": "Enable OCPP Server",
+          "ocpp_port": "OCPP Port"
+        },
+        "data_description": {
+          "ev_charging_enabled": "Enable price-based EV charging management for your Tesla vehicle",
+          "ev_provider": "How to communicate with your Tesla: Fleet API (cloud), Tesla BLE (local Bluetooth), or both",
+          "tesla_ble_entity_prefix": "Entity prefix for Tesla BLE integration (e.g., 'tesla_ble' for sensor.tesla_ble_battery)",
+          "ocpp_enabled": "Start an OCPP 1.6 server to control compatible EV chargers",
+          "ocpp_port": "Port for the OCPP WebSocket server (default: 9000)"
+        },
+        "submit_button": "Finish"
+      },
       "inverter_brand_setup": {
         "title": "AC-Coupled Inverter Setup",
         "description": "Select your solar inverter brand for direct curtailment control.\n\nThis allows PowerSync to shut down your AC-coupled solar inverter when feed-in prices are negative.",
@@ -384,21 +422,53 @@
         }
       },
       "curtailment_options": {
-        "title": "Curtailment & Automations Settings",
-        "description": "Configure automatic curtailment during negative feed-in tariff (FIT) prices, and optionally enable weather-based automations.\n\nWhen feed-in prices go negative, you PAY to export power. These settings prevent that by stopping battery export and optionally shutting down solar production.",
+        "title": "Curtailment Settings",
+        "description": "Configure automatic curtailment during negative feed-in tariff (FIT) prices.\n\nWhen feed-in prices go negative, you PAY to export power. These settings prevent that by stopping battery export and optionally shutting down solar production.",
         "data": {
           "battery_curtailment_enabled": "Enable Battery Export Curtailment",
           "ac_inverter_curtailment_enabled": "Enable AC-Coupled Inverter Shutdown",
-          "sigenergy_dc_curtailment_enabled": "Enable DC Solar Curtailment (Sigenergy)",
-          "weather_location": "Weather Location (Optional)",
-          "openweathermap_api_key": "OpenWeatherMap API Key (Optional)"
+          "sigenergy_dc_curtailment_enabled": "Enable DC Solar Curtailment (Sigenergy)"
         },
         "data_description": {
           "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. Sets Tesla to self-consumption mode or Sigenergy export limit to 0. This is the MAIN toggle - must be enabled for curtailment to work.",
           "ac_inverter_curtailment_enabled": "Shutdown AC-coupled solar inverter (Fronius, Sungrow, GoodWe, Enphase, etc.) when feed-in price is negative. Use this if your solar bypasses the battery and exports directly to grid. Requires inverter IP configuration in next step.",
-          "sigenergy_dc_curtailment_enabled": "Limit DC solar production via Sigenergy Modbus when feed-in price is negative. Only applies to Sigenergy systems with DC-coupled solar.",
-          "weather_location": "City name or postcode for weather-based automations (e.g., Brisbane or 4000). Used with OpenWeatherMap API.",
-          "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny/cloudy triggers). Leave blank to disable weather triggers."
+          "sigenergy_dc_curtailment_enabled": "Limit DC solar production via Sigenergy Modbus when feed-in price is negative. Only applies to Sigenergy systems with DC-coupled solar."
+        }
+      },
+      "weather_options": {
+        "title": "Weather & Solar Forecast",
+        "description": "Configure weather-based automations and solar production forecasting.\n\nWeather data enables cloud cover triggers for curtailment decisions. Solcast provides accurate solar production forecasts.",
+        "data": {
+          "weather_location": "Weather Location",
+          "openweathermap_api_key": "OpenWeatherMap API Key",
+          "solcast_enabled": "Enable Solcast Forecasting",
+          "solcast_api_key": "Solcast API Key",
+          "solcast_resource_id": "Solcast Resource ID"
+        },
+        "data_description": {
+          "weather_location": "City name or postcode for weather-based automations (e.g., Brisbane or 4000)",
+          "openweathermap_api_key": "Free API key from openweathermap.org for weather triggers. Leave blank to disable.",
+          "solcast_enabled": "Enable Solcast solar production forecasting for smarter battery management",
+          "solcast_api_key": "Your Solcast API key from solcast.com (free for residential rooftop systems)",
+          "solcast_resource_id": "Your Solcast rooftop resource ID (found in your Solcast dashboard)"
+        }
+      },
+      "ev_charging": {
+        "title": "EV Charging",
+        "description": "Configure EV charging integration and OCPP charger support.\n\nEV charging allows PowerSync to manage your Tesla vehicle charging based on electricity prices. OCPP enables control of compatible EV chargers.",
+        "data": {
+          "ev_charging_enabled": "Enable EV Charging",
+          "ev_provider": "EV Provider",
+          "tesla_ble_entity_prefix": "Tesla BLE Entity Prefix",
+          "ocpp_enabled": "Enable OCPP Server",
+          "ocpp_port": "OCPP Port"
+        },
+        "data_description": {
+          "ev_charging_enabled": "Enable price-based EV charging management for your Tesla vehicle",
+          "ev_provider": "How to communicate with your Tesla: Fleet API (cloud), Tesla BLE (local Bluetooth), or both",
+          "tesla_ble_entity_prefix": "Entity prefix for Tesla BLE integration (e.g., 'tesla_ble' for sensor.tesla_ble_battery)",
+          "ocpp_enabled": "Start an OCPP 1.6 server to control compatible EV chargers",
+          "ocpp_port": "Port for the OCPP WebSocket server (default: 9000)"
         }
       },
       "globird_options": {

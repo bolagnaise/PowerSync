@@ -107,6 +107,8 @@ class EnphaseController(InverterController):
         self._current_profile: Optional[str] = None
         self._token_obtained_at: Optional[datetime] = None
         self._enlighten_session_id: Optional[str] = None
+        # Pre-create SSL context to avoid blocking call in event loop
+        self._ssl_context = self._create_ssl_context()
 
     async def _get_enlighten_session(self) -> Optional[str]:
         """Authenticate with Enlighten cloud and get session ID.
@@ -276,12 +278,19 @@ class EnphaseController(InverterController):
         token = await self._get_token_from_cloud(serial)
         return token is not None
 
-    def _get_ssl_context(self) -> ssl.SSLContext:
-        """Get SSL context that accepts self-signed certificates."""
+    def _create_ssl_context(self) -> ssl.SSLContext:
+        """Create SSL context that accepts self-signed certificates.
+
+        Called once during __init__ to avoid blocking the event loop.
+        """
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
         return ssl_context
+
+    def _get_ssl_context(self) -> ssl.SSLContext:
+        """Get the cached SSL context."""
+        return self._ssl_context
 
     def _get_token_type(self) -> Optional[str]:
         """Get the token type (owner or installer) from the JWT payload.
@@ -774,18 +783,38 @@ class EnphaseController(InverterController):
         """Get list of available grid profiles from the IQ Gateway.
 
         Returns:
-            List of profile names, or None if unavailable
+            List of profile dicts with keys like profile_name, profile_id, profile_version, or None if unavailable
         """
         _LOGGER.debug(f"Fetching available profiles from {self.ENDPOINT_AGF_INDEX}")
         data = await self._get(self.ENDPOINT_AGF_INDEX)
         _LOGGER.debug(f"AGF index response: {data}")
-        if data and isinstance(data, list):
+
+        if not data:
+            _LOGGER.warning("AGF index returned no data - endpoint may require different authentication")
+            return None
+
+        # Handle dict response with 'profiles' key (newer firmware)
+        if isinstance(data, dict):
+            # Extract currently selected profile
+            if "selected_profile" in data:
+                self._current_profile = data["selected_profile"]
+                _LOGGER.debug(f"Current selected profile: {self._current_profile}")
+
+            # Extract profiles list
+            profiles_list = data.get("profiles")
+            if profiles_list and isinstance(profiles_list, list):
+                _LOGGER.info(f"Available grid profiles ({len(profiles_list)}): {[p.get('profile_name', p) for p in profiles_list if isinstance(p, dict)]}")
+                return profiles_list
+
+            _LOGGER.warning(f"AGF index dict missing 'profiles' key or wrong format: {list(data.keys())}")
+            return None
+
+        # Handle direct list response (older firmware)
+        if isinstance(data, list):
             _LOGGER.info(f"Available grid profiles ({len(data)}): {data}")
             return data
-        elif data:
-            _LOGGER.warning(f"AGF index returned unexpected format: {type(data)} - {str(data)[:200]}")
-        else:
-            _LOGGER.warning("AGF index returned no data - endpoint may require different authentication")
+
+        _LOGGER.warning(f"AGF index returned unexpected format: {type(data)} - {str(data)[:200]}")
         return None
 
     async def _get_current_profile(self) -> Optional[str]:
@@ -818,29 +847,37 @@ class EnphaseController(InverterController):
             _LOGGER.debug("No profiles available for auto-detection")
             return None, None
 
-        _LOGGER.info(f"Auto-detecting profiles from {len(profiles)} available: {profiles}")
+        _LOGGER.info(f"Auto-detecting profiles from {len(profiles)} available")
 
         zero_export_profile = None
         normal_profile = None
         current = await self._get_current_profile()
 
-        for profile in profiles:
-            if not isinstance(profile, str):
+        for profile_item in profiles:
+            # Handle both string profiles (old format) and dict profiles (new format)
+            if isinstance(profile_item, dict):
+                # Use profile_id for matching (includes version), profile_name for display
+                profile_name = profile_item.get("profile_name", "")
+                profile_id = profile_item.get("profile_id", profile_name)
+            elif isinstance(profile_item, str):
+                profile_name = profile_item
+                profile_id = profile_item
+            else:
                 continue
 
-            profile_lower = profile.lower()
+            profile_lower = profile_name.lower()
 
             # Detect zero export profiles (case-insensitive patterns)
             if any(pattern in profile_lower for pattern in ["0 kw export", "zero kw export", "zero export", "no export", "0kw export"]):
-                zero_export_profile = profile
-                _LOGGER.info(f"Auto-detected zero export profile: {profile}")
+                zero_export_profile = profile_id
+                _LOGGER.info(f"Auto-detected zero export profile: {profile_name} (id: {profile_id})")
 
             # Detect normal export profiles (non-zero export limits)
             elif any(pattern in profile_lower for pattern in ["5 kw export", "10 kw export", "export limit"]):
                 # Make sure it's not zero export
                 if "0 kw" not in profile_lower and "zero" not in profile_lower:
-                    normal_profile = profile
-                    _LOGGER.info(f"Auto-detected normal export profile: {profile}")
+                    normal_profile = profile_id
+                    _LOGGER.info(f"Auto-detected normal export profile: {profile_name} (id: {profile_id})")
 
         # If we didn't find a normal profile but have a current profile that's not zero-export, use it
         if not normal_profile and current:
