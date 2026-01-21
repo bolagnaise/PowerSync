@@ -782,6 +782,92 @@ class EnphaseController(InverterController):
                 return profile_name
         return None
 
+    async def _auto_detect_profiles(self) -> tuple[Optional[str], Optional[str]]:
+        """Auto-detect zero export and normal grid profiles from available profiles.
+
+        Looks for profiles matching common patterns:
+        - Zero export: "0 kW Export", "Zero Export", "No Export"
+        - Normal: "5 kW Export", "10 kW Export", or any non-zero export limit
+
+        Returns:
+            Tuple of (zero_export_profile, normal_profile). Either may be None if not found.
+        """
+        profiles = await self._get_available_profiles()
+        if not profiles:
+            _LOGGER.debug("No profiles available for auto-detection")
+            return None, None
+
+        _LOGGER.info(f"Auto-detecting profiles from {len(profiles)} available: {profiles}")
+
+        zero_export_profile = None
+        normal_profile = None
+        current = await self._get_current_profile()
+
+        for profile in profiles:
+            if not isinstance(profile, str):
+                continue
+
+            profile_lower = profile.lower()
+
+            # Detect zero export profiles
+            if any(pattern in profile_lower for pattern in ["0 kw export", "zero export", "no export", "0kw export"]):
+                zero_export_profile = profile
+                _LOGGER.info(f"Auto-detected zero export profile: {profile}")
+
+            # Detect normal export profiles (non-zero export limits)
+            elif any(pattern in profile_lower for pattern in ["5 kw export", "10 kw export", "export limit"]):
+                # Make sure it's not zero export
+                if "0 kw" not in profile_lower and "zero" not in profile_lower:
+                    normal_profile = profile
+                    _LOGGER.info(f"Auto-detected normal export profile: {profile}")
+
+        # If we didn't find a normal profile but have a current profile that's not zero-export, use it
+        if not normal_profile and current:
+            current_lower = current.lower()
+            if not any(pattern in current_lower for pattern in ["0 kw export", "zero export", "no export"]):
+                normal_profile = current
+                _LOGGER.info(f"Using current profile as normal profile: {current}")
+
+        return zero_export_profile, normal_profile
+
+    async def _ensure_profiles_configured(self) -> bool:
+        """Ensure we have zero export and normal profiles configured.
+
+        If not manually configured, attempts to auto-detect them from available profiles.
+
+        Returns:
+            True if both profiles are available (configured or auto-detected)
+        """
+        if self._zero_export_profile and self._normal_profile:
+            return True
+
+        # Try to auto-detect missing profiles
+        zero_export, normal = await self._auto_detect_profiles()
+
+        if not self._zero_export_profile and zero_export:
+            self._zero_export_profile = zero_export
+            _LOGGER.info(f"Auto-configured zero export profile: {zero_export}")
+
+        if not self._normal_profile and normal:
+            self._normal_profile = normal
+            _LOGGER.info(f"Auto-configured normal profile: {normal}")
+
+        # Log what we have
+        if self._zero_export_profile and self._normal_profile:
+            _LOGGER.info(
+                f"AGF profiles ready - zero_export: '{self._zero_export_profile}', "
+                f"normal: '{self._normal_profile}'"
+            )
+            return True
+        else:
+            missing = []
+            if not self._zero_export_profile:
+                missing.append("zero_export_profile")
+            if not self._normal_profile:
+                missing.append("normal_profile")
+            _LOGGER.warning(f"Could not auto-detect profiles: {', '.join(missing)} not found")
+            return False
+
     async def _set_grid_profile(self, profile_name: str) -> tuple[bool, bool]:
         """Set the active grid profile via AGF endpoint.
 
@@ -921,6 +1007,11 @@ class EnphaseController(InverterController):
 
             # Method 3: AGF Grid profile switching
             # This is the modern replacement for DPEL and works on most recent firmware
+            # Auto-detect profiles if not manually configured
+            if not self._zero_export_profile:
+                _LOGGER.debug("No zero export profile configured, attempting auto-detection")
+                await self._ensure_profiles_configured()
+
             if self._zero_export_profile:
                 _LOGGER.debug(f"Trying AGF profile switching to zero export profile: {self._zero_export_profile}")
                 success, available = await self._switch_to_zero_export_profile()
@@ -934,7 +1025,7 @@ class EnphaseController(InverterController):
                 if not available:
                     _LOGGER.warning("AGF endpoint also not available - no curtailment methods work on this gateway")
             else:
-                _LOGGER.debug("No zero export profile configured for AGF fallback")
+                _LOGGER.debug("No zero export profile available (manual or auto-detected) for AGF fallback")
 
             # All methods failed
             methods_tried = []
@@ -1005,6 +1096,11 @@ class EnphaseController(InverterController):
                 _LOGGER.debug("DER known to be unavailable, skipping")
 
             # Method 3: AGF Grid profile switching
+            # Auto-detect profiles if not manually configured
+            if not self._normal_profile:
+                _LOGGER.debug("No normal profile configured, attempting auto-detection")
+                await self._ensure_profiles_configured()
+
             if self._normal_profile:
                 _LOGGER.debug(f"Trying AGF profile switching to normal profile: {self._normal_profile}")
                 success, available = await self._switch_to_normal_profile()
@@ -1018,7 +1114,7 @@ class EnphaseController(InverterController):
                 if not available:
                     _LOGGER.warning("AGF endpoint also not available - no restore methods work on this gateway")
             else:
-                _LOGGER.debug("No normal profile configured for AGF fallback")
+                _LOGGER.debug("No normal profile available (manual or auto-detected) for AGF fallback")
 
             # All methods failed
             _LOGGER.warning(
