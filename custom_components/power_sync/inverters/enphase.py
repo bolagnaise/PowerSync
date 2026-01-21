@@ -1190,8 +1190,8 @@ class EnphaseController(InverterController):
                 current_dpel = await self._get_dpel_settings()
                 if current_dpel:
                     _LOGGER.info(f"Current DPEL settings: {current_dpel}")
-                # Try various export limit values - likely percentage (0-100) based on API errors
-                for limit_value in [100, 99, 50, 10000, 5000]:
+                # Try various export limit values in watts (absolute mode) or percentage
+                for limit_value in [10000, 5000, 15000, 100, 99999]:
                     _LOGGER.debug(f"Trying DPEL restore with limit={limit_value}")
                     success, available = await self._set_dpel(enabled=True, limit_watts=limit_value)
                     if success:
