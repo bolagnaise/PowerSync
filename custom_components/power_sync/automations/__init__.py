@@ -80,8 +80,8 @@ class AutomationStore:
             "trigger": automation_data.get("trigger", {}),
             "conditions": conditions,
             "actions": actions,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "updated_at": datetime.utcnow().isoformat() + "Z",
             "last_triggered_at": None,
             "last_evaluated_value": None,
             "last_evaluated_at": None,
@@ -122,7 +122,7 @@ class AutomationStore:
                     _LOGGER.debug(f"Updating automation {automation_id} with {len(automation_data.get('conditions', []))} condition(s)")
                     auto["conditions"] = automation_data["conditions"]
 
-                auto["updated_at"] = datetime.utcnow().isoformat()
+                auto["updated_at"] = datetime.utcnow().isoformat() + "Z"
                 self._data["automations"][i] = auto
                 return auto
         return None
@@ -141,7 +141,7 @@ class AutomationStore:
         for auto in self._data.get("automations", []):
             if auto.get("id") == automation_id:
                 auto["enabled"] = not auto.get("enabled", True)
-                auto["updated_at"] = datetime.utcnow().isoformat()
+                auto["updated_at"] = datetime.utcnow().isoformat() + "Z"
                 return auto["enabled"]
         return None
 
@@ -150,7 +150,7 @@ class AutomationStore:
         for auto in self._data.get("automations", []):
             if auto.get("id") == automation_id:
                 auto["paused"] = True
-                auto["updated_at"] = datetime.utcnow().isoformat()
+                auto["updated_at"] = datetime.utcnow().isoformat() + "Z"
                 return True
         return False
 
@@ -159,7 +159,7 @@ class AutomationStore:
         for auto in self._data.get("automations", []):
             if auto.get("id") == automation_id:
                 auto["paused"] = False
-                auto["updated_at"] = datetime.utcnow().isoformat()
+                auto["updated_at"] = datetime.utcnow().isoformat() + "Z"
                 return True
         return False
 
@@ -168,14 +168,14 @@ class AutomationStore:
         for auto in self._data.get("automations", []):
             if auto.get("id") == automation_id:
                 auto["last_evaluated_value"] = value
-                auto["last_evaluated_at"] = datetime.utcnow().isoformat()
+                auto["last_evaluated_at"] = datetime.utcnow().isoformat() + "Z"
                 break
 
     def mark_triggered(self, automation_id: int) -> None:
         """Mark automation as triggered."""
         for auto in self._data.get("automations", []):
             if auto.get("id") == automation_id:
-                auto["last_triggered_at"] = datetime.utcnow().isoformat()
+                auto["last_triggered_at"] = datetime.utcnow().isoformat() + "Z"
                 if auto.get("run_once"):
                     auto["paused"] = True
                 break
@@ -201,7 +201,7 @@ class AutomationStore:
             "token": push_token,
             "platform": platform,
             "device_name": device_name,
-            "registered_at": datetime.utcnow().isoformat(),
+            "registered_at": datetime.utcnow().isoformat() + "Z",
         }
         _LOGGER.info(f"📱 Push token registered for {device_name} ({platform})")
 

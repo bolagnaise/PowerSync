@@ -1101,6 +1101,8 @@ async def _action_start_ev_charging(
                 """Stop charging when time window ends."""
                 _LOGGER.info(f"⏰ Time window ended, stopping EV charging")
                 await _action_stop_ev_charging(hass, config_entry, params)
+                # Send notification that charging stopped
+                await _send_expo_push(hass, "PowerSync", "EV charging stopped - time window ended")
                 # Clean up the scheduled stop entry
                 if entry_id in _ev_scheduled_stop:
                     del _ev_scheduled_stop[entry_id]
@@ -1489,6 +1491,8 @@ async def _dynamic_ev_update(
             if not _is_inside_time_window(time_window_start, time_window_end, timezone):
                 _LOGGER.info("⏰ Dynamic EV: Outside time window, stopping charging")
                 await _action_stop_ev_charging_dynamic(hass, config_entry, {"stop_charging": True})
+                # Send notification that charging stopped
+                await _send_expo_push(hass, "PowerSync", "EV charging stopped - time window ended")
                 return
 
     # target_battery_charge_kw: How much we want the battery to charge (positive = charging into battery)
