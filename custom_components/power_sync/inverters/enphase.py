@@ -682,6 +682,11 @@ class EnphaseController(InverterController):
             {"dynamic_pel_settings": {"enable": enabled, "export_limit": limit_watts}},
             # D8.x - wrapped with 'enable' integer + 'export_limit'
             {"dynamic_pel_settings": {"enable": 1 if enabled else 0, "export_limit": limit_watts}},
+            # String values (some firmware versions require strings)
+            {"dynamic_pel_settings": {"enable": "true" if enabled else "false", "export_limit": str(limit_watts)}},
+            {"dynamic_pel_settings": {"enable": "1" if enabled else "0", "export_limit": str(limit_watts)}},
+            # Float export_limit (might expect decimal)
+            {"dynamic_pel_settings": {"enable": enabled, "export_limit": float(limit_watts)}},
             # Older D8.x - wrapped with 'enable' integer + 'limit'
             {"dynamic_pel_settings": {"enable": 1 if enabled else 0, "limit": limit_watts}},
             # Wrapped with 'enable' boolean + 'limit'
