@@ -196,7 +196,7 @@
         "submit_button": "Next"
       },
       "weather_setup": {
-        "title": "Weather & Solar Forecast",
+        "title": "Weather",
         "description": "Configure weather-based automations and solar production forecasting.\n\nWeather data enables cloud cover triggers for curtailment decisions. Solcast provides accurate solar production forecasts.",
         "data": {
           "weather_location": "Weather Location",
@@ -436,7 +436,7 @@
         }
       },
       "weather_options": {
-        "title": "Weather & Solar Forecast",
+        "title": "Weather",
         "description": "Configure weather-based automations and solar production forecasting.\n\nWeather data enables cloud cover triggers for curtailment decisions. Solcast provides accurate solar production forecasts.",
         "data": {
           "weather_location": "Weather Location",
