@@ -940,6 +940,23 @@ class EnphaseController(InverterController):
             _LOGGER.warning(f"Could not auto-detect profiles: {', '.join(missing)} not found")
             return False
 
+    def _normalize_profile_name(self, profile_name: str) -> str:
+        """Normalize profile name to API format.
+
+        Converts user-friendly format with parentheses to API format with colon.
+        E.g., "Profile Name (1.3.10)" -> "Profile Name:1.3.10"
+        """
+        import re
+        # Match pattern like " (1.3.10)" at the end and convert to ":1.3.10"
+        match = re.search(r'\s+\((\d+\.\d+\.\d+)\)$', profile_name)
+        if match:
+            version = match.group(1)
+            base_name = profile_name[:match.start()]
+            normalized = f"{base_name}:{version}"
+            _LOGGER.debug(f"Normalized profile name: '{profile_name}' -> '{normalized}'")
+            return normalized
+        return profile_name
+
     async def _set_grid_profile(self, profile_name: str) -> tuple[bool, bool]:
         """Set the active grid profile via AGF endpoint.
 
@@ -958,6 +975,9 @@ class EnphaseController(InverterController):
         if self._agf_available is False:
             _LOGGER.debug("AGF previously marked as unavailable, skipping")
             return False, False
+
+        # Normalize profile name format (convert parentheses to colon format)
+        profile_name = self._normalize_profile_name(profile_name)
 
         _LOGGER.info(f"Setting grid profile to: {profile_name}")
         data = {"selected_profile": profile_name}
