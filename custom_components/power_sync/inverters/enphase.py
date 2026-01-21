@@ -776,10 +776,16 @@ class EnphaseController(InverterController):
         Returns:
             List of profile names, or None if unavailable
         """
+        _LOGGER.debug(f"Fetching available profiles from {self.ENDPOINT_AGF_INDEX}")
         data = await self._get(self.ENDPOINT_AGF_INDEX)
+        _LOGGER.debug(f"AGF index response: {data}")
         if data and isinstance(data, list):
-            _LOGGER.debug(f"Available grid profiles: {data}")
+            _LOGGER.info(f"Available grid profiles ({len(data)}): {data}")
             return data
+        elif data:
+            _LOGGER.warning(f"AGF index returned unexpected format: {type(data)} - {str(data)[:200]}")
+        else:
+            _LOGGER.warning("AGF index returned no data - endpoint may require different authentication")
         return None
 
     async def _get_current_profile(self) -> Optional[str]:
