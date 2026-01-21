@@ -1081,6 +1081,9 @@ class EnphaseController(InverterController):
     ) -> bool:
         """Enable load following curtailment on the Enphase system.
 
+        If home_load_w is provided, sets export limit to match home load (load following).
+        Otherwise, sets export limit to 0W (zero export mode).
+
         Tries methods in order of preference:
         1. DPEL endpoint (fastest, dynamic) - for backward compatibility with older firmware
         2. DER settings endpoint
@@ -1088,10 +1091,22 @@ class EnphaseController(InverterController):
 
         Caches endpoint availability to skip known-broken endpoints on subsequent calls.
 
+        Args:
+            home_load_w: Current home load in watts. If provided, enables load following mode.
+            rated_capacity_w: System rated capacity (not currently used for Enphase).
+
         Returns:
             True if curtailment successful
         """
-        _LOGGER.info(f"Curtailing Enphase system at {self.host} (zero export mode)")
+        # Determine export limit: home load for load following, 0 for zero export
+        if home_load_w and home_load_w > 0:
+            export_limit_w = int(home_load_w)
+            mode_desc = f"load following ({export_limit_w}W)"
+        else:
+            export_limit_w = 0
+            mode_desc = "zero export"
+
+        _LOGGER.info(f"Curtailing Enphase system at {self.host} ({mode_desc})")
 
         try:
             if not await self.connect():
@@ -1101,11 +1116,14 @@ class EnphaseController(InverterController):
             # Method 1: Try DPEL endpoint first (fastest, most dynamic) - for backward compatibility
             # For systems with zero export profile as base, disabling DPEL falls back to zero export
             if self._dpel_available is not False:
-                _LOGGER.debug("Trying DPEL endpoint for curtailment")
-                # First try: enable DPEL with zero limit (traditional approach)
-                success, available = await self._set_dpel(enabled=True, limit_watts=0)
+                _LOGGER.debug(f"Trying DPEL endpoint for curtailment (limit={export_limit_w}W)")
+                # First try: enable DPEL with calculated limit (0 for zero export, home_load for load following)
+                success, available = await self._set_dpel(enabled=True, limit_watts=export_limit_w)
                 if success:
-                    _LOGGER.info(f"Successfully curtailed Enphase system at {self.host} via DPEL (zero limit)")
+                    if export_limit_w > 0:
+                        _LOGGER.info(f"Successfully curtailed Enphase system at {self.host} via DPEL (load following: {export_limit_w}W)")
+                    else:
+                        _LOGGER.info(f"Successfully curtailed Enphase system at {self.host} via DPEL (zero export)")
                     self._dpel_supported = True
                     await asyncio.sleep(1)
                     return True
@@ -1123,10 +1141,13 @@ class EnphaseController(InverterController):
 
             # Method 2: Try DER settings as second option
             if self._der_available is not False:
-                _LOGGER.debug("Trying DER settings for curtailment")
-                success, available = await self._set_der_export_limit(0)
+                _LOGGER.debug(f"Trying DER settings for curtailment (limit={export_limit_w}W)")
+                success, available = await self._set_der_export_limit(export_limit_w)
                 if success:
-                    _LOGGER.info(f"Successfully curtailed Enphase system at {self.host} via DER")
+                    if export_limit_w > 0:
+                        _LOGGER.info(f"Successfully curtailed Enphase system at {self.host} via DER (load following: {export_limit_w}W)")
+                    else:
+                        _LOGGER.info(f"Successfully curtailed Enphase system at {self.host} via DER (zero export)")
                     await asyncio.sleep(1)
                     return True
                 if not available:
@@ -1136,6 +1157,10 @@ class EnphaseController(InverterController):
 
             # Method 3: AGF Grid profile switching
             # This is the modern replacement for DPEL and works on most recent firmware
+            # NOTE: AGF profile switching only supports zero export, not load following
+            if export_limit_w > 0:
+                _LOGGER.warning(f"Load following ({export_limit_w}W) requested but DPEL/DER unavailable. "
+                               f"AGF profile switching only supports zero export mode.")
             # First, fetch and log available profiles for debugging
             available_profiles = await self._get_available_profiles()
             if available_profiles:
@@ -1213,8 +1238,9 @@ class EnphaseController(InverterController):
                 current_dpel = await self._get_dpel_settings()
                 if current_dpel:
                     _LOGGER.info(f"Current DPEL settings: {current_dpel}")
-                # Try various export limit values in watts (absolute mode) or percentage
-                for limit_value in [10000, 5000, 15000, 100, 99999]:
+                # Try high export limit values - effectively unlimited for restore
+                # 99999W first (effectively unlimited), then fall back to smaller values
+                for limit_value in [99999, 50000, 10000]:
                     _LOGGER.debug(f"Trying DPEL restore with limit={limit_value}")
                     success, available = await self._set_dpel(enabled=True, limit_watts=limit_value)
                     if success:
