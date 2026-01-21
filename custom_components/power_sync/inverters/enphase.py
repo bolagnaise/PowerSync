@@ -830,8 +830,8 @@ class EnphaseController(InverterController):
 
             profile_lower = profile.lower()
 
-            # Detect zero export profiles
-            if any(pattern in profile_lower for pattern in ["0 kw export", "zero export", "no export", "0kw export"]):
+            # Detect zero export profiles (case-insensitive patterns)
+            if any(pattern in profile_lower for pattern in ["0 kw export", "zero kw export", "zero export", "no export", "0kw export"]):
                 zero_export_profile = profile
                 _LOGGER.info(f"Auto-detected zero export profile: {profile}")
 
