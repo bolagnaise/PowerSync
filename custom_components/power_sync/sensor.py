@@ -71,6 +71,9 @@ from .const import (
     CONF_ENPHASE_USERNAME,
     CONF_ENPHASE_PASSWORD,
     CONF_ENPHASE_SERIAL,
+    CONF_ENPHASE_IS_INSTALLER,
+    CONF_ENPHASE_NORMAL_PROFILE,
+    CONF_ENPHASE_ZERO_EXPORT_PROFILE,
     CONF_FRONIUS_LOAD_FOLLOWING,
     CONF_DEMAND_CHARGE_ENABLED,
     CONF_DEMAND_CHARGE_RATE,
@@ -993,6 +996,9 @@ class InverterStatusSensor(SensorEntity):
         enphase_username = self._get_config_value(CONF_ENPHASE_USERNAME)
         enphase_password = self._get_config_value(CONF_ENPHASE_PASSWORD)
         enphase_serial = self._get_config_value(CONF_ENPHASE_SERIAL)
+        enphase_is_installer = self._get_config_value(CONF_ENPHASE_IS_INSTALLER, False)
+        enphase_normal_profile = self._get_config_value(CONF_ENPHASE_NORMAL_PROFILE)
+        enphase_zero_export_profile = self._get_config_value(CONF_ENPHASE_ZERO_EXPORT_PROFILE)
 
         if not inverter_host:
             _LOGGER.debug("Inverter host not configured - skipping poll")
@@ -1026,6 +1032,9 @@ class InverterStatusSensor(SensorEntity):
                     enphase_username=enphase_username,
                     enphase_password=enphase_password,
                     enphase_serial=enphase_serial,
+                    enphase_normal_profile=enphase_normal_profile,
+                    enphase_zero_export_profile=enphase_zero_export_profile,
+                    enphase_is_installer=enphase_is_installer,
                 )
                 if controller:
                     controller._cache_key = controller_key
