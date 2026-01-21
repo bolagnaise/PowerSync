@@ -107,8 +107,8 @@ class EnphaseController(InverterController):
         self._current_profile: Optional[str] = None
         self._token_obtained_at: Optional[datetime] = None
         self._enlighten_session_id: Optional[str] = None
-        # Pre-create SSL context to avoid blocking call in event loop
-        self._ssl_context = self._create_ssl_context()
+        # SSL context will be created lazily on first use to avoid blocking event loop
+        self._ssl_context: Optional[ssl.SSLContext] = None
 
     async def _get_enlighten_session(self) -> Optional[str]:
         """Authenticate with Enlighten cloud and get session ID.
@@ -281,15 +281,26 @@ class EnphaseController(InverterController):
     def _create_ssl_context(self) -> ssl.SSLContext:
         """Create SSL context that accepts self-signed certificates.
 
-        Called once during __init__ to avoid blocking the event loop.
+        This is a blocking call that should be run via executor.
         """
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
         return ssl_context
 
+    async def _get_ssl_context_async(self) -> ssl.SSLContext:
+        """Get SSL context, creating it via executor if needed to avoid blocking."""
+        if self._ssl_context is None:
+            loop = asyncio.get_event_loop()
+            self._ssl_context = await loop.run_in_executor(None, self._create_ssl_context)
+        return self._ssl_context
+
     def _get_ssl_context(self) -> ssl.SSLContext:
-        """Get the cached SSL context."""
+        """Get the cached SSL context (must call _get_ssl_context_async first)."""
+        if self._ssl_context is None:
+            # Fallback: create synchronously if async wasn't called first
+            # This shouldn't happen in normal use
+            self._ssl_context = self._create_ssl_context()
         return self._ssl_context
 
     def _get_token_type(self) -> Optional[str]:
@@ -386,8 +397,11 @@ class EnphaseController(InverterController):
                 if self._session and not self._session.closed:
                     return True
 
+                # Get SSL context via executor to avoid blocking event loop
+                ssl_context = await self._get_ssl_context_async()
+
                 # Create connector with SSL context for self-signed certs
-                connector = aiohttp.TCPConnector(ssl=self._get_ssl_context())
+                connector = aiohttp.TCPConnector(ssl=ssl_context)
                 timeout = aiohttp.ClientTimeout(total=self.TIMEOUT_SECONDS)
                 # Use cookie jar to store session cookies (needed for /installer/ endpoints)
                 cookie_jar = aiohttp.CookieJar(unsafe=True)  # unsafe=True for IP addresses
