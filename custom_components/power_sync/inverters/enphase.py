@@ -1186,12 +1186,16 @@ class EnphaseController(InverterController):
             # For systems with zero export profile as base, we enable DPEL with high limit to allow export
             if self._dpel_available is not False:
                 _LOGGER.debug("Trying DPEL endpoint for restore")
-                # Try enabling DPEL with high export limit (10kW) to override zero export profile
-                success, available = await self._set_dpel(enabled=True, limit_watts=10000)
-                if success:
-                    _LOGGER.info(f"Successfully restored Enphase system at {self.host} via DPEL (high limit)")
-                    await asyncio.sleep(1)
-                    return True
+                # Try various export limit values - we don't know if it's percentage or watts
+                for limit_value in [100, 10000, 5000, 99999]:
+                    _LOGGER.debug(f"Trying DPEL restore with limit={limit_value}")
+                    success, available = await self._set_dpel(enabled=True, limit_watts=limit_value)
+                    if success:
+                        _LOGGER.info(f"Successfully restored Enphase system at {self.host} via DPEL (limit={limit_value})")
+                        await asyncio.sleep(1)
+                        return True
+                    if not available:
+                        break  # Endpoint not available, don't try more values
                 # If enabling with high limit fails, try disabling (for normal profile base)
                 success, available = await self._set_dpel(enabled=False, limit_watts=0)
                 if success:
