@@ -100,6 +100,9 @@ class EnphaseController(InverterController):
         self._firmware_version: Optional[str] = None
         self._envoy_serial: Optional[str] = None
         self._dpel_supported: Optional[bool] = None
+        self._dpel_available: Optional[bool] = None  # None = unknown, True = works, False = broken (503/404)
+        self._der_available: Optional[bool] = None   # None = unknown, True = works, False = broken
+        self._agf_available: Optional[bool] = None   # None = unknown, True = works, False = broken
         self._profile_switching_supported: Optional[bool] = None
         self._current_profile: Optional[str] = None
         self._token_obtained_at: Optional[datetime] = None
@@ -464,11 +467,15 @@ class EnphaseController(InverterController):
             _LOGGER.debug(f"Error getting {endpoint}: {e}")
             return None
 
-    async def _put(self, endpoint: str, data: dict, retry_auth: bool = True) -> bool:
-        """Make a PUT request to the IQ Gateway."""
+    async def _put(self, endpoint: str, data: dict, retry_auth: bool = True) -> tuple[bool, Optional[int]]:
+        """Make a PUT request to the IQ Gateway.
+
+        Returns:
+            Tuple of (success, status_code). status_code is None on network errors.
+        """
         if not self._session:
             if not await self.connect():
-                return False
+                return False, None
 
         # Ensure we have a valid token before making authenticated requests
         await self._ensure_token()
@@ -480,7 +487,7 @@ class EnphaseController(InverterController):
             ) as response:
                 if response.status in (200, 201, 204):
                     _LOGGER.debug(f"PUT {endpoint} successful")
-                    return True
+                    return True, response.status
                 elif response.status == 401:
                     _LOGGER.error(f"Authentication required for {endpoint}")
                     # If we got 401 and haven't retried, try refreshing token
@@ -488,23 +495,27 @@ class EnphaseController(InverterController):
                         _LOGGER.info("Got 401, attempting token refresh...")
                         if await self._ensure_token(force_refresh=True):
                             return await self._put(endpoint, data, retry_auth=False)
-                    return False
+                    return False, 401
                 else:
                     _LOGGER.debug(f"PUT {endpoint} returned status {response.status}")
-                    return False
+                    return False, response.status
 
         except aiohttp.ClientError as e:
             _LOGGER.error(f"HTTP error putting {endpoint}: {e}")
-            return False
+            return False, None
         except Exception as e:
             _LOGGER.error(f"Error putting {endpoint}: {e}")
-            return False
+            return False, None
 
-    async def _post(self, endpoint: str, data: dict, retry_auth: bool = True) -> bool:
-        """Make a POST request to the IQ Gateway."""
+    async def _post(self, endpoint: str, data: dict, retry_auth: bool = True) -> tuple[bool, Optional[int]]:
+        """Make a POST request to the IQ Gateway.
+
+        Returns:
+            Tuple of (success, status_code). status_code is None on network errors.
+        """
         if not self._session:
             if not await self.connect():
-                return False
+                return False, None
 
         # Ensure we have a valid token before making authenticated requests
         await self._ensure_token()
@@ -516,7 +527,7 @@ class EnphaseController(InverterController):
             ) as response:
                 if response.status in (200, 201, 204):
                     _LOGGER.debug(f"POST {endpoint} successful")
-                    return True
+                    return True, response.status
                 elif response.status == 401:
                     _LOGGER.error(f"Authentication required for {endpoint}")
                     # If we got 401 and haven't retried, try refreshing token
@@ -524,7 +535,7 @@ class EnphaseController(InverterController):
                         _LOGGER.info("Got 401, attempting token refresh...")
                         if await self._ensure_token(force_refresh=True):
                             return await self._post(endpoint, data, retry_auth=False)
-                    return False
+                    return False, 401
                 else:
                     # Log response body for debugging 400 errors
                     try:
@@ -532,14 +543,14 @@ class EnphaseController(InverterController):
                         _LOGGER.debug(f"POST {endpoint} returned status {response.status}: {body[:200]}")
                     except:
                         _LOGGER.debug(f"POST {endpoint} returned status {response.status}")
-                    return False
+                    return False, response.status
 
         except aiohttp.ClientError as e:
             _LOGGER.error(f"HTTP error posting {endpoint}: {e}")
-            return False
+            return False, None
         except Exception as e:
             _LOGGER.error(f"Error posting {endpoint}: {e}")
-            return False
+            return False, None
 
     async def _get_info(self) -> Optional[dict]:
         """Get device info from the IQ Gateway."""
@@ -613,7 +624,7 @@ class EnphaseController(InverterController):
         """Get DPEL (Device Power Export Limit) settings."""
         return await self._get(self.ENDPOINT_DPEL)
 
-    async def _set_dpel(self, enabled: bool, limit_watts: int = 0) -> bool:
+    async def _set_dpel(self, enabled: bool, limit_watts: int = 0) -> tuple[bool, bool]:
         """Set DPEL (Device Power Export Limit) settings.
 
         Args:
@@ -621,91 +632,123 @@ class EnphaseController(InverterController):
             limit_watts: Export limit in watts (0 for zero export)
 
         Returns:
-            True if successful
+            Tuple of (success, endpoint_available).
+            endpoint_available=False means DPEL returned 503/404 (not supported on this gateway).
         """
+        # If we already know DPEL is unavailable, skip it
+        if self._dpel_available is False:
+            _LOGGER.debug("DPEL previously marked as unavailable, skipping")
+            return False, False
+
         # Different firmware versions require different formats
         # Try multiple formats until one works
         # D8.x firmware requires: {"dynamic_pel_settings": {"enable": 1, "limit": 0}}
+        payloads = [
+            # D8.x - wrapped with 'enable' (singular) integer
+            {"dynamic_pel_settings": {"enable": 1 if enabled else 0, "limit": limit_watts}},
+            # Wrapped with 'enable' boolean
+            {"dynamic_pel_settings": {"enable": enabled, "limit": limit_watts}},
+            # Wrapped with 'enabled' (older firmware)
+            {"dynamic_pel_settings": {"enabled": 1 if enabled else 0, "limit": limit_watts}},
+            # Simple format
+            {"enable": 1 if enabled else 0, "limit": limit_watts},
+        ]
 
-        # Format 1: D8.x - wrapped with 'enable' (singular) integer
-        data_wrapped_enable = {
-            "dynamic_pel_settings": {
-                "enable": 1 if enabled else 0,
-                "limit": limit_watts,
-            }
-        }
-        if await self._post(self.ENDPOINT_DPEL, data_wrapped_enable):
-            _LOGGER.debug("DPEL succeeded with wrapped enable format")
-            return True
+        for payload in payloads:
+            _LOGGER.debug(f"Trying DPEL payload: {payload}")
+            success, status = await self._post(self.ENDPOINT_DPEL, payload)
 
-        # Format 2: Wrapped with 'enable' boolean
-        data_wrapped_bool = {
-            "dynamic_pel_settings": {
-                "enable": enabled,
-                "limit": limit_watts,
-            }
-        }
-        if await self._post(self.ENDPOINT_DPEL, data_wrapped_bool):
-            _LOGGER.debug("DPEL succeeded with wrapped enable boolean format")
-            return True
+            if success:
+                self._dpel_available = True
+                _LOGGER.debug(f"DPEL succeeded with payload: {payload}")
+                return True, True
 
-        # Format 3: Wrapped with 'enabled' (older firmware)
-        data_wrapped_enabled = {
-            "dynamic_pel_settings": {
-                "enabled": 1 if enabled else 0,
-                "limit": limit_watts,
-            }
-        }
-        if await self._post(self.ENDPOINT_DPEL, data_wrapped_enabled):
-            _LOGGER.debug("DPEL succeeded with wrapped enabled format")
-            return True
+            # Check if endpoint is not available (503 Service Unavailable, 404 Not Found)
+            if status in (503, 404):
+                _LOGGER.info(f"DPEL endpoint returned {status} - marking as unavailable (legacy endpoint not supported on this gateway)")
+                self._dpel_available = False
+                return False, False
 
-        # Format 4: Simple format - 'enable' (some firmware)
-        data_simple = {
-            "enable": 1 if enabled else 0,
-            "limit": limit_watts,
-        }
-        if await self._post(self.ENDPOINT_DPEL, data_simple):
-            _LOGGER.debug("DPEL succeeded with simple enable format")
-            return True
+            # 400 errors might be payload format issues, continue trying other formats
+            if status == 400:
+                _LOGGER.debug(f"DPEL payload rejected with 400, trying next format")
+                continue
 
-        # Format 5: PUT methods as fallback
-        if await self._put(self.ENDPOINT_DPEL, data_wrapped_enable):
-            _LOGGER.debug("DPEL succeeded with PUT wrapped format")
-            return True
+        # Try PUT as fallback for older firmware
+        for payload in payloads:
+            success, status = await self._put(self.ENDPOINT_DPEL, payload)
+            if success:
+                self._dpel_available = True
+                _LOGGER.debug(f"DPEL succeeded with PUT payload: {payload}")
+                return True, True
+            if status in (503, 404):
+                _LOGGER.info(f"DPEL endpoint returned {status} - marking as unavailable")
+                self._dpel_available = False
+                return False, False
 
-        if await self._put(self.ENDPOINT_DPEL, data_simple):
-            _LOGGER.debug("DPEL succeeded with PUT simple format")
-            return True
-
-        return False
+        # All attempts failed but endpoint exists - might be config issue
+        _LOGGER.warning("All DPEL payload formats failed - endpoint exists but rejected all requests")
+        return False, True
 
     async def _get_der_settings(self) -> Optional[dict]:
         """Get DER (Distributed Energy Resource) settings."""
         return await self._get(self.ENDPOINT_DER_SETTINGS)
 
-    async def _set_der_export_limit(self, limit_watts: int) -> bool:
+    async def _set_der_export_limit(self, limit_watts: int) -> tuple[bool, bool]:
         """Set DER export limit.
 
         Args:
             limit_watts: Export limit in watts (0 for zero export)
 
         Returns:
-            True if successful
+            Tuple of (success, endpoint_available).
+            endpoint_available=False means DER returned 503/404 or region error.
         """
+        # If we already know DER is unavailable, skip it
+        if self._der_available is False:
+            _LOGGER.debug("DER previously marked as unavailable, skipping")
+            return False, False
+
         # Get current settings first
         current = await self._get_der_settings()
         if not current:
-            return False
+            _LOGGER.debug("Could not get DER settings")
+            return False, True  # Endpoint might exist but returned error
+
+        # Check for region error in current settings
+        if isinstance(current, dict) and "error" in str(current).lower():
+            error_str = str(current)
+            if "not valid for" in error_str and "region" in error_str:
+                _LOGGER.info(f"DER endpoint returned region error - marking as unavailable: {error_str[:100]}")
+                self._der_available = False
+                return False, False
 
         # Update with new export limit
         current["exportLimit"] = limit_watts
         current["exportLimitEnabled"] = limit_watts == 0 or limit_watts > 0
 
         # Try POST first (required by most firmware), fall back to PUT
-        if await self._post(self.ENDPOINT_DER_SETTINGS, current):
-            return True
-        return await self._put(self.ENDPOINT_DER_SETTINGS, current)
+        success, status = await self._post(self.ENDPOINT_DER_SETTINGS, current)
+        if success:
+            self._der_available = True
+            return True, True
+
+        if status in (503, 404):
+            _LOGGER.info(f"DER endpoint returned {status} - marking as unavailable")
+            self._der_available = False
+            return False, False
+
+        success, status = await self._put(self.ENDPOINT_DER_SETTINGS, current)
+        if success:
+            self._der_available = True
+            return True, True
+
+        if status in (503, 404):
+            _LOGGER.info(f"DER endpoint returned {status} - marking as unavailable")
+            self._der_available = False
+            return False, False
+
+        return False, True
 
     # =========================================================================
     # Grid Profile Switching (AGF - Advanced Grid Functions)
@@ -739,49 +782,68 @@ class EnphaseController(InverterController):
                 return profile_name
         return None
 
-    async def _set_grid_profile(self, profile_name: str) -> bool:
-        """Set the active grid profile.
+    async def _set_grid_profile(self, profile_name: str) -> tuple[bool, bool]:
+        """Set the active grid profile via AGF endpoint.
 
         Args:
             profile_name: Full name of the grid profile to activate
 
         Returns:
-            True if successful
+            Tuple of (success, endpoint_available).
+            endpoint_available=False means AGF returned 503/404.
         """
         if not profile_name:
             _LOGGER.error("Cannot set grid profile: no profile name provided")
-            return False
+            return False, True
+
+        # If we already know AGF is unavailable, skip it
+        if self._agf_available is False:
+            _LOGGER.debug("AGF previously marked as unavailable, skipping")
+            return False, False
 
         _LOGGER.info(f"Setting grid profile to: {profile_name}")
-
         data = {"selected_profile": profile_name}
 
         # Try PUT first (as per API documentation)
-        if await self._put(self.ENDPOINT_AGF_SET_PROFILE, data):
+        success, status = await self._put(self.ENDPOINT_AGF_SET_PROFILE, data)
+        if success:
             self._current_profile = profile_name
             self._profile_switching_supported = True
+            self._agf_available = True
             _LOGGER.info(f"Successfully set grid profile to: {profile_name}")
-            return True
+            return True, True
+
+        if status in (503, 404):
+            _LOGGER.info(f"AGF endpoint returned {status} - marking as unavailable")
+            self._agf_available = False
+            return False, False
 
         # Fall back to POST
-        if await self._post(self.ENDPOINT_AGF_SET_PROFILE, data):
+        success, status = await self._post(self.ENDPOINT_AGF_SET_PROFILE, data)
+        if success:
             self._current_profile = profile_name
             self._profile_switching_supported = True
+            self._agf_available = True
             _LOGGER.info(f"Successfully set grid profile to: {profile_name}")
-            return True
+            return True, True
+
+        if status in (503, 404):
+            _LOGGER.info(f"AGF endpoint returned {status} - marking as unavailable")
+            self._agf_available = False
+            return False, False
 
         _LOGGER.error(f"Failed to set grid profile to: {profile_name}")
-        return False
+        return False, True
 
-    async def _switch_to_zero_export_profile(self) -> bool:
+    async def _switch_to_zero_export_profile(self) -> tuple[bool, bool]:
         """Switch to zero export grid profile.
 
         Returns:
-            True if successful
+            Tuple of (success, endpoint_available).
         """
         if not self._zero_export_profile:
             _LOGGER.debug("No zero export profile configured for profile switching")
-            return False
+            return False, True  # Not a failure of the endpoint, just not configured
 
         # Store current profile so we can restore it later
         if not self._current_profile:
@@ -794,15 +856,15 @@ class EnphaseController(InverterController):
 
         return await self._set_grid_profile(self._zero_export_profile)
 
-    async def _switch_to_normal_profile(self) -> bool:
+    async def _switch_to_normal_profile(self) -> tuple[bool, bool]:
         """Switch to normal (non-zero-export) grid profile.
 
         Returns:
-            True if successful
+            Tuple of (success, endpoint_available).
         """
         if not self._normal_profile:
             _LOGGER.debug("No normal profile configured for profile switching")
-            return False
+            return False, True  # Not a failure of the endpoint, just not configured
 
         return await self._set_grid_profile(self._normal_profile)
 
@@ -814,9 +876,11 @@ class EnphaseController(InverterController):
         """Enable load following curtailment on the Enphase system.
 
         Tries methods in order of preference:
-        1. DPEL endpoint (fastest, dynamic)
+        1. DPEL endpoint (fastest, dynamic) - for backward compatibility with older firmware
         2. DER settings endpoint
-        3. Grid profile switching (slowest, takes time to propagate to micros)
+        3. AGF Grid profile switching (modern replacement for DPEL)
+
+        Caches endpoint availability to skip known-broken endpoints on subsequent calls.
 
         Returns:
             True if curtailment successful
@@ -828,43 +892,65 @@ class EnphaseController(InverterController):
                 _LOGGER.error("Cannot curtail: failed to connect to IQ Gateway")
                 return False
 
-            # Method 1: Try DPEL endpoint first (fastest, most dynamic)
-            success = await self._set_dpel(enabled=True, limit_watts=0)
-            if success:
-                _LOGGER.info(f"Successfully curtailed Enphase system at {self.host} via DPEL")
-                self._dpel_supported = True
-                await asyncio.sleep(1)
-                return True
-
-            _LOGGER.debug("DPEL not available, trying DER settings")
+            # Method 1: Try DPEL endpoint first (fastest, most dynamic) - for backward compatibility
+            if self._dpel_available is not False:
+                _LOGGER.debug("Trying DPEL endpoint for curtailment")
+                success, available = await self._set_dpel(enabled=True, limit_watts=0)
+                if success:
+                    _LOGGER.info(f"Successfully curtailed Enphase system at {self.host} via DPEL")
+                    self._dpel_supported = True
+                    await asyncio.sleep(1)
+                    return True
+                if not available:
+                    _LOGGER.info("DPEL endpoint not available on this gateway (503/404), will use fallback methods")
+            else:
+                _LOGGER.debug("DPEL known to be unavailable, skipping")
 
             # Method 2: Try DER settings as second option
-            success = await self._set_der_export_limit(0)
-            if success:
-                _LOGGER.info(f"Successfully curtailed Enphase system at {self.host} via DER")
-                await asyncio.sleep(1)
-                return True
+            if self._der_available is not False:
+                _LOGGER.debug("Trying DER settings for curtailment")
+                success, available = await self._set_der_export_limit(0)
+                if success:
+                    _LOGGER.info(f"Successfully curtailed Enphase system at {self.host} via DER")
+                    await asyncio.sleep(1)
+                    return True
+                if not available:
+                    _LOGGER.info("DER endpoint not available (503/404 or region error), will use AGF profile switching")
+            else:
+                _LOGGER.debug("DER known to be unavailable, skipping")
 
-            _LOGGER.debug("DER settings not available, trying grid profile switching")
-
-            # Method 3: Grid profile switching as last resort
-            # Note: This is slower as it takes time to propagate to microinverters
+            # Method 3: AGF Grid profile switching
+            # This is the modern replacement for DPEL and works on most recent firmware
             if self._zero_export_profile:
-                success = await self._switch_to_zero_export_profile()
+                _LOGGER.debug(f"Trying AGF profile switching to zero export profile: {self._zero_export_profile}")
+                success, available = await self._switch_to_zero_export_profile()
                 if success:
                     _LOGGER.info(
-                        f"Successfully curtailed Enphase system at {self.host} via grid profile switching. "
-                        f"Note: May take 30-60 seconds to propagate to microinverters."
+                        f"Successfully curtailed Enphase system at {self.host} via AGF profile switching "
+                        f"to '{self._zero_export_profile}'. Note: May take 30-60 seconds to propagate to microinverters."
                     )
-                    # Wait longer for profile to propagate
                     await asyncio.sleep(5)
                     return True
+                if not available:
+                    _LOGGER.warning("AGF endpoint also not available - no curtailment methods work on this gateway")
+            else:
+                _LOGGER.debug("No zero export profile configured for AGF fallback")
+
+            # All methods failed
+            methods_tried = []
+            if self._dpel_available is not False:
+                methods_tried.append("DPEL")
+            if self._der_available is not False:
+                methods_tried.append("DER")
+            if self._zero_export_profile:
+                methods_tried.append("AGF")
 
             _LOGGER.warning(
-                "Export limiting not available on this Enphase system. "
-                "DPEL/DER endpoints failed, and grid profile switching requires installer-level credentials "
-                "(homeowner Enlighten accounts cannot switch grid profiles). "
-                "Consider disabling inverter curtailment or contact your installer for DPEL access."
+                f"Export limiting not available on this Enphase system. "
+                f"Tried: {', '.join(methods_tried) if methods_tried else 'none'}. "
+                f"DPEL available: {self._dpel_available}, DER available: {self._der_available}, "
+                f"AGF available: {self._agf_available}. "
+                f"Configure zero_export_profile and normal_profile for AGF profile switching."
             )
             return False
 
@@ -876,9 +962,11 @@ class EnphaseController(InverterController):
         """Restore normal operation of the Enphase system.
 
         Tries methods in order of preference:
-        1. DPEL endpoint (fastest, dynamic)
+        1. DPEL endpoint (fastest, dynamic) - for backward compatibility
         2. DER settings endpoint
-        3. Grid profile switching (slowest, takes time to propagate to micros)
+        3. AGF Grid profile switching (modern replacement for DPEL)
+
+        Caches endpoint availability to skip known-broken endpoints on subsequent calls.
 
         Returns:
             True if restore successful
@@ -890,38 +978,54 @@ class EnphaseController(InverterController):
                 _LOGGER.error("Cannot restore: failed to connect to IQ Gateway")
                 return False
 
-            # Method 1: Try DPEL endpoint first (fastest)
-            success = await self._set_dpel(enabled=False, limit_watts=0)
-            if success:
-                _LOGGER.info(f"Successfully restored Enphase system at {self.host} via DPEL")
-                await asyncio.sleep(1)
-                return True
+            # Method 1: Try DPEL endpoint first (fastest) - for backward compatibility
+            if self._dpel_available is not False:
+                _LOGGER.debug("Trying DPEL endpoint for restore")
+                success, available = await self._set_dpel(enabled=False, limit_watts=0)
+                if success:
+                    _LOGGER.info(f"Successfully restored Enphase system at {self.host} via DPEL")
+                    await asyncio.sleep(1)
+                    return True
+                if not available:
+                    _LOGGER.info("DPEL endpoint not available on this gateway, will use fallback methods")
+            else:
+                _LOGGER.debug("DPEL known to be unavailable, skipping")
 
             # Method 2: Try DER settings (set high limit to effectively disable)
-            success = await self._set_der_export_limit(100000)  # 100kW effectively unlimited
-            if success:
-                _LOGGER.info(f"Successfully restored Enphase system at {self.host} via DER")
-                await asyncio.sleep(1)
-                return True
+            if self._der_available is not False:
+                _LOGGER.debug("Trying DER settings for restore")
+                success, available = await self._set_der_export_limit(100000)  # 100kW effectively unlimited
+                if success:
+                    _LOGGER.info(f"Successfully restored Enphase system at {self.host} via DER")
+                    await asyncio.sleep(1)
+                    return True
+                if not available:
+                    _LOGGER.info("DER endpoint not available, will use AGF profile switching")
+            else:
+                _LOGGER.debug("DER known to be unavailable, skipping")
 
-            _LOGGER.debug("DER settings not available, trying grid profile switching")
-
-            # Method 3: Grid profile switching as last resort
-            # Note: This is slower as it takes time to propagate to microinverters
+            # Method 3: AGF Grid profile switching
             if self._normal_profile:
-                success = await self._switch_to_normal_profile()
+                _LOGGER.debug(f"Trying AGF profile switching to normal profile: {self._normal_profile}")
+                success, available = await self._switch_to_normal_profile()
                 if success:
                     _LOGGER.info(
-                        f"Successfully restored Enphase system at {self.host} via grid profile switching. "
-                        f"Note: May take 30-60 seconds to propagate to microinverters."
+                        f"Successfully restored Enphase system at {self.host} via AGF profile switching "
+                        f"to '{self._normal_profile}'. Note: May take 30-60 seconds to propagate to microinverters."
                     )
-                    # Wait longer for profile to propagate
                     await asyncio.sleep(5)
                     return True
+                if not available:
+                    _LOGGER.warning("AGF endpoint also not available - no restore methods work on this gateway")
+            else:
+                _LOGGER.debug("No normal profile configured for AGF fallback")
 
+            # All methods failed
             _LOGGER.warning(
-                "Failed to restore normal operation. "
-                "Configure normal_profile for profile switching fallback."
+                f"Failed to restore normal operation. "
+                f"DPEL available: {self._dpel_available}, DER available: {self._der_available}, "
+                f"AGF available: {self._agf_available}. "
+                f"Configure normal_profile for AGF profile switching fallback."
             )
             return False
 
