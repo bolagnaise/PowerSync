@@ -1383,11 +1383,11 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             # Set appropriate title based on provider
             if self._aemo_only_mode:
-                title = "PowerSync AEMO Spike"
+                title = "PowerSync Globird"
             elif self._selected_electricity_provider == "flow_power":
-                title = "PowerSync (Flow Power)"
+                title = "PowerSync Flow Power"
             else:
-                title = "PowerSync"
+                title = "PowerSync Amber"
             return self.async_create_entry(title=title, data=data)
 
         # Build the form schema
