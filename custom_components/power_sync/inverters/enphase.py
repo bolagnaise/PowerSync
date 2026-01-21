@@ -1076,11 +1076,20 @@ class EnphaseController(InverterController):
                 return False
 
             # Method 1: Try DPEL endpoint first (fastest, most dynamic) - for backward compatibility
+            # For systems with zero export profile as base, disabling DPEL falls back to zero export
             if self._dpel_available is not False:
                 _LOGGER.debug("Trying DPEL endpoint for curtailment")
+                # First try: enable DPEL with zero limit (traditional approach)
                 success, available = await self._set_dpel(enabled=True, limit_watts=0)
                 if success:
-                    _LOGGER.info(f"Successfully curtailed Enphase system at {self.host} via DPEL")
+                    _LOGGER.info(f"Successfully curtailed Enphase system at {self.host} via DPEL (zero limit)")
+                    self._dpel_supported = True
+                    await asyncio.sleep(1)
+                    return True
+                # Second try: disable DPEL (for systems with zero export profile as base)
+                success, available = await self._set_dpel(enabled=False, limit_watts=0)
+                if success:
+                    _LOGGER.info(f"Successfully curtailed Enphase system at {self.host} via DPEL (disabled, using profile)")
                     self._dpel_supported = True
                     await asyncio.sleep(1)
                     return True
@@ -1174,11 +1183,19 @@ class EnphaseController(InverterController):
                 return False
 
             # Method 1: Try DPEL endpoint first (fastest) - for backward compatibility
+            # For systems with zero export profile as base, we enable DPEL with high limit to allow export
             if self._dpel_available is not False:
                 _LOGGER.debug("Trying DPEL endpoint for restore")
+                # Try enabling DPEL with high export limit (10kW) to override zero export profile
+                success, available = await self._set_dpel(enabled=True, limit_watts=10000)
+                if success:
+                    _LOGGER.info(f"Successfully restored Enphase system at {self.host} via DPEL (high limit)")
+                    await asyncio.sleep(1)
+                    return True
+                # If enabling with high limit fails, try disabling (for normal profile base)
                 success, available = await self._set_dpel(enabled=False, limit_watts=0)
                 if success:
-                    _LOGGER.info(f"Successfully restored Enphase system at {self.host} via DPEL")
+                    _LOGGER.info(f"Successfully restored Enphase system at {self.host} via DPEL (disabled)")
                     await asyncio.sleep(1)
                     return True
                 if not available:
