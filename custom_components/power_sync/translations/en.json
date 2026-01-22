@@ -472,7 +472,7 @@
         }
       },
       "globird_options": {
-        "title": "Globird - AEMO Spike Detection",
+        "title": "AEMO Spike Detection",
         "description": "Configure AEMO wholesale price spike detection. When prices spike above your threshold, your battery will export to the grid.",
         "data": {
           "aemo_region": "AEMO NEM Region",

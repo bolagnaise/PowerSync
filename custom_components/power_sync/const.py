@@ -173,6 +173,7 @@ ELECTRICITY_PROVIDERS = {
     "amber": "Amber Electric",
     "flow_power": "Flow Power",
     "globird": "Globird",
+    "aemo_vpp": "AEMO VPP (AGL, Engie, etc.)",
 }
 
 # Flow Power state options with export rates

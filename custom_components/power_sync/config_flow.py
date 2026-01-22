@@ -398,8 +398,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # Flow Power: Configure region and price source first
                 self._aemo_only_mode = False
                 return await self.async_step_flow_power_setup()
-            elif provider == "globird":
-                # Globird: AEMO spike only mode
+            elif provider in ("globird", "aemo_vpp"):
+                # Globird/AEMO VPP: AEMO spike only mode
                 self._aemo_only_mode = True
                 self._amber_data = {}
                 return await self.async_step_aemo_config()
@@ -417,6 +417,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "amber_desc": "Full price sync with Amber Electric API",
                 "flow_power_desc": "Flow Power with AEMO wholesale or Amber pricing",
                 "globird_desc": "AEMO spike detection for VPP exports",
+                "aemo_vpp_desc": "AEMO spike detection for VPP exports (AGL, Engie, etc.)",
             },
         )
 
@@ -1623,7 +1624,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 return await self.async_step_amber_options()
             elif self._provider == "flow_power":
                 return await self.async_step_flow_power_options()
-            elif self._provider == "globird":
+            elif self._provider in ("globird", "aemo_vpp"):
                 return await self.async_step_globird_options()
 
         current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
@@ -1717,7 +1718,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     return await self.async_step_amber_options()
                 elif self._provider == "flow_power":
                     return await self.async_step_flow_power_options()
-                elif self._provider == "globird":
+                elif self._provider in ("globird", "aemo_vpp"):
                     return await self.async_step_globird_options()
 
         current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
@@ -1821,7 +1822,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                                 return await self.async_step_amber_options()
                             elif self._provider == "flow_power":
                                 return await self.async_step_flow_power_options()
-                            elif self._provider == "globird":
+                            elif self._provider in ("globird", "aemo_vpp"):
                                 return await self.async_step_globird_options()
                         else:
                             errors["base"] = "invalid_auth"
