@@ -658,12 +658,15 @@ class EnphaseController(InverterController):
         """Get DPEL (Device Power Export Limit) settings."""
         return await self._get(self.ENDPOINT_DPEL)
 
-    async def _set_dpel(self, enabled: bool, limit_watts: int = 0) -> tuple[bool, bool]:
+    async def _set_dpel(self, enabled: bool, limit_watts: int = 0, use_production_limit: bool = False) -> tuple[bool, bool]:
         """Set DPEL (Device Power Export Limit) settings.
 
         Args:
-            enabled: Whether to enable export limiting
-            limit_watts: Export limit in watts (0 for zero export)
+            enabled: Whether to enable limiting
+            limit_watts: Limit in watts (0 for zero export/production)
+            use_production_limit: If True, limit total production. If False, limit grid export.
+                                  For load-following, use True to limit production to home load.
+                                  For zero-export, use False to block all exports.
 
         Returns:
             Tuple of (success, endpoint_available).
@@ -679,18 +682,24 @@ class EnphaseController(InverterController):
         # EU gateway format discovered from GET /ivp/ss/dpel:
         # {"dynamic_pel_settings": {"enable": bool, "export_limit": bool, "limit_value_W": float}}
         # - enable: whether DPEL is active
-        # - export_limit: true = limit export, false = limit production
+        # - export_limit: true = limit export to grid, false = limit total production
         # - limit_value_W: the actual limit in watts
         # Slew rate: 100 W/s is recommended for large systems to avoid wild fluctuations
         # (2000 W/s was too aggressive and caused instability)
         slew_rate = 100.0
+
+        # For load-following (production limiting), use export_limit: False
+        # For zero-export (export limiting), use export_limit: True
+        export_limit_flag = not use_production_limit
+        limit_type = "production" if use_production_limit else "export"
+        _LOGGER.debug(f"Setting DPEL with {limit_type} limiting: {limit_watts}W")
 
         payloads = [
             # EU gateway format - ALL fields required based on API error responses
             # enable_dynamic_limiting + slew_rate are mandatory
             {"dynamic_pel_settings": {
                 "enable": enabled,
-                "export_limit": True,
+                "export_limit": export_limit_flag,
                 "limit_value_W": float(limit_watts),
                 "slew_rate": slew_rate,
                 "enable_dynamic_limiting": True
@@ -698,15 +707,15 @@ class EnphaseController(InverterController):
             # Try with enable_dynamic_limiting False
             {"dynamic_pel_settings": {
                 "enable": enabled,
-                "export_limit": True,
+                "export_limit": export_limit_flag,
                 "limit_value_W": float(limit_watts),
                 "slew_rate": slew_rate,
                 "enable_dynamic_limiting": False
             }},
-            # Try production limiting instead of export
+            # Try opposite export_limit flag as fallback
             {"dynamic_pel_settings": {
                 "enable": enabled,
-                "export_limit": False,
+                "export_limit": not export_limit_flag,
                 "limit_value_W": float(limit_watts),
                 "slew_rate": slew_rate,
                 "enable_dynamic_limiting": True
@@ -1121,8 +1130,11 @@ class EnphaseController(InverterController):
             # For systems with zero export profile as base, disabling DPEL falls back to zero export
             if self._dpel_available is not False:
                 _LOGGER.debug(f"Trying DPEL endpoint for curtailment (limit={export_limit_w}W)")
+                # For load-following, use PRODUCTION limiting (export_limit=False) to cap total output
+                # For zero-export, use EXPORT limiting (export_limit=True) to block grid exports
+                use_production_limit = export_limit_w > 0
                 # First try: enable DPEL with calculated limit (0 for zero export, home_load for load following)
-                success, available = await self._set_dpel(enabled=True, limit_watts=export_limit_w)
+                success, available = await self._set_dpel(enabled=True, limit_watts=export_limit_w, use_production_limit=use_production_limit)
                 if success:
                     if export_limit_w > 0:
                         _LOGGER.info(f"Successfully curtailed Enphase system at {self.host} via DPEL (load following: {export_limit_w}W)")
