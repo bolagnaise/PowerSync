@@ -4290,6 +4290,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Unsupported inverter brand: {inverter_brand}")
                 return False
 
+            # Cache controller for fast load-following updates
+            hass.data[DOMAIN][entry.entry_id]["inverter_controller"] = controller
+
             if curtail:
                 # Use smart AC-coupled curtailment logic
                 # Only curtail if: import price < 0 OR (battery = 100% AND export < 1c)
@@ -4355,6 +4358,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     # Store last state
                     hass.data[DOMAIN][entry.entry_id]["inverter_last_state"] = "curtailed"
                     hass.data[DOMAIN][entry.entry_id]["inverter_power_limit_w"] = home_load_w
+                    # Track DPEL update time for Enphase refresh logic
+                    from datetime import datetime
+                    hass.data[DOMAIN][entry.entry_id]["last_dpel_update_time"] = datetime.now()
                 else:
                     _LOGGER.error(f"❌ Failed to curtail inverter")
                 return success
@@ -7831,9 +7837,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             # Get current power limit to avoid unnecessary updates
             current_limit = entry_data.get("inverter_power_limit_w")
+            last_dpel_time = entry_data.get("last_dpel_update_time")
 
-            # Only update if changed by more than 50W (avoid constant small adjustments)
-            if current_limit is not None and abs(home_load_w - current_limit) < 50:
+            # For Enphase, always re-apply DPEL at least every 45 seconds since it may timeout
+            # For other brands, only update if changed by more than 50W
+            from datetime import datetime, timedelta
+            now_time = datetime.now()
+            force_reapply = False
+            if inverter_brand == "enphase":
+                if last_dpel_time is None or (now_time - last_dpel_time) > timedelta(seconds=45):
+                    force_reapply = True
+                    _LOGGER.debug(f"Enphase DPEL refresh needed (last update: {last_dpel_time})")
+
+            if not force_reapply and current_limit is not None and abs(home_load_w - current_limit) < 50:
                 return
 
             # Get inverter controller
@@ -7850,6 +7866,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if success:
                         _LOGGER.debug(f"⚡ Fast load-following update: {home_load_w}W")
                         hass.data[DOMAIN][entry.entry_id]["inverter_power_limit_w"] = home_load_w
+                        hass.data[DOMAIN][entry.entry_id]["last_dpel_update_time"] = datetime.now()
         except Exception as err:
             _LOGGER.debug(f"Fast load-following update error (non-critical): {err}")
 

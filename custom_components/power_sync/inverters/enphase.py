@@ -681,6 +681,10 @@ class EnphaseController(InverterController):
         # - enable: whether DPEL is active
         # - export_limit: true = limit export, false = limit production
         # - limit_value_W: the actual limit in watts
+        # Slew rate: 100 W/s is recommended for large systems to avoid wild fluctuations
+        # (2000 W/s was too aggressive and caused instability)
+        slew_rate = 100.0
+
         payloads = [
             # EU gateway format - ALL fields required based on API error responses
             # enable_dynamic_limiting + slew_rate are mandatory
@@ -688,7 +692,7 @@ class EnphaseController(InverterController):
                 "enable": enabled,
                 "export_limit": True,
                 "limit_value_W": float(limit_watts),
-                "slew_rate": 2000.0,
+                "slew_rate": slew_rate,
                 "enable_dynamic_limiting": True
             }},
             # Try with enable_dynamic_limiting False
@@ -696,7 +700,7 @@ class EnphaseController(InverterController):
                 "enable": enabled,
                 "export_limit": True,
                 "limit_value_W": float(limit_watts),
-                "slew_rate": 2000.0,
+                "slew_rate": slew_rate,
                 "enable_dynamic_limiting": False
             }},
             # Try production limiting instead of export
@@ -704,7 +708,7 @@ class EnphaseController(InverterController):
                 "enable": enabled,
                 "export_limit": False,
                 "limit_value_W": float(limit_watts),
-                "slew_rate": 2000.0,
+                "slew_rate": slew_rate,
                 "enable_dynamic_limiting": True
             }},
             # Legacy formats for other firmware versions
