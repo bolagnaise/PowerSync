@@ -56,9 +56,9 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 
 ### Advanced Features
 - ⚡ **AEMO Spike Detection** - Automatically monitors Australian wholesale electricity prices and switches to spike tariff during extreme price events (configurable threshold). Includes intelligent operation mode switching - automatically saves your current Powerwall mode and switches to autonomous (TOU) mode during spikes, then restores your original mode when prices normalize
-- 🌞 **Solar Curtailment** - Automatically prevents solar export during negative pricing periods (≤0c/kWh). When Amber feed-in prices go negative, the system sets Powerwall export to "never" to avoid paying to export, then restores to "battery_ok" when prices return to positive
-- 🛡️ **Spike Protection** - Prevents Powerwall from charging from grid during Amber price spikes. Overrides buy prices when Amber detects spike status to eliminate arbitrage opportunities
-- 📤 **Export Price Boost** - Artificially increase export prices to trigger Powerwall exports at lower price points. Useful when prices are in the 20-25c range where Tesla's algorithm may not trigger exports
+- 🌞 **Solar Curtailment** - Automatically prevents solar export during negative pricing periods (≤0c/kWh). When Amber feed-in prices go negative, the system blocks grid export to avoid paying to export, then restores normal operation when prices return to positive
+- 🛡️ **Spike Protection** - Prevents your battery from charging from grid during Amber price spikes. Overrides buy prices when Amber detects spike status to eliminate arbitrage opportunities
+- 📤 **Export Price Boost** - Artificially increase export prices to trigger battery exports at lower price points. Useful when prices are in the 20-25c range where the battery's algorithm may not trigger exports
 - 🔒 **Chip Mode** - Suppress battery exports during configured hours unless price exceeds a threshold. Keeps your battery stable overnight while still capturing unexpected price spikes (inverse of Export Boost)
 - 🔌 **Flow Power + AEMO Support** - Full support for Flow Power and other wholesale electricity retailers using direct AEMO NEM pricing with configurable network tariffs
 - 🎯 **Custom TOU Schedules** - Create and manage custom time-of-use schedules for any electricity provider (not just Amber)
