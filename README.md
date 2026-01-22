@@ -38,7 +38,7 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 | Chip Mode | ✅ | ✅ |
 | DC Solar Curtailment | ✅ Export rules | ✅ Modbus TCP |
 | AC-Coupled Inverter Curtailment | ✅ | ✅ |
-| AEMO Spike Detection | ✅ | ✅ |
+| AEMO Spike Detection | ✅ | ➖ Native via Globird |
 | Force Mode Toggle | ✅ | ➖ N/A |
 | Custom TOU Schedules | ✅ | ➖ N/A |
 | **Automations** | ✅ | ✅ |
@@ -81,7 +81,7 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 ## Key Features Explained
 
 ### AEMO Spike Detection 🔋 *Tesla only*
-This option is disabled by default and is primarily intended for use with VPPs that offer AEMO Spike exports (GLOBIRD,AGL,ENGIE) and where Tesla Batteries are not natively supported.
+This option is disabled by default and is primarily intended for Tesla Powerwall users with VPPs that offer AEMO Spike exports (Globird, AGL, Engie) but don't natively support Tesla batteries. Sigenergy users on Globird don't need this feature as Globird natively supports Sigenergy for spike exports.
 Automatically monitors AEMO NEM wholesale electricity prices for your region (NSW1, QLD1, VIC1, SA1, TAS1). When prices exceed your configured threshold (e.g., $300/MWh), the system:
 - Saves your current tariff configuration
 - **Saves your current Powerwall operation mode** (self_consumption, autonomous, or backup)
