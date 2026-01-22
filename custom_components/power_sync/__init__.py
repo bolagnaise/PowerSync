@@ -4551,9 +4551,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         Converts Amber forecast data to Sigenergy's expected format and uploads
         buy/sell prices via the Sigenergy Cloud API.
+
+        Supports the same price modification features as Tesla:
+        - Export Boost: Artificially increase sell prices to encourage battery discharge
+        - Chip Mode: Suppress exports unless price exceeds threshold
+        - Spike Protection: Cap buy prices during extreme spikes
         """
         try:
-            from .sigenergy_api import SigenergyAPIClient, convert_amber_prices_to_sigenergy
+            from .sigenergy_api import (
+                SigenergyAPIClient,
+                convert_amber_prices_to_sigenergy,
+                apply_export_boost_sigenergy,
+                apply_chip_mode_sigenergy,
+                apply_spike_protection_sigenergy,
+            )
         except ImportError as e:
             _LOGGER.error(f"Failed to import sigenergy_api: {e}")
             return
@@ -4617,12 +4628,57 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.warning("No buy prices converted for Sigenergy sync")
                 return
 
+            # Apply price modifications (same features as Tesla)
+            # 1. Spike Protection - cap buy prices during extreme spikes
+            spike_protection_enabled = entry.options.get(
+                CONF_SPIKE_PROTECTION_ENABLED,
+                entry.data.get(CONF_SPIKE_PROTECTION_ENABLED, False)
+            )
+            if spike_protection_enabled:
+                # Use 100c/kWh as threshold (same as Tesla's $1/kWh spike threshold)
+                # Replace with 50c/kWh (moderate price to discourage but not completely block)
+                buy_prices = apply_spike_protection_sigenergy(
+                    buy_prices,
+                    threshold_cents=100.0,
+                    replacement_cents=50.0,
+                )
+
+            # 2. Export Boost - artificially increase sell prices to encourage discharge
+            export_boost_enabled = entry.options.get(CONF_EXPORT_BOOST_ENABLED, False)
+            if export_boost_enabled and sell_prices:
+                offset = entry.options.get(CONF_EXPORT_PRICE_OFFSET, 0) or 0
+                min_price = entry.options.get(CONF_EXPORT_MIN_PRICE, 0) or 0
+                boost_start = entry.options.get(CONF_EXPORT_BOOST_START, DEFAULT_EXPORT_BOOST_START)
+                boost_end = entry.options.get(CONF_EXPORT_BOOST_END, DEFAULT_EXPORT_BOOST_END)
+                threshold = entry.options.get(CONF_EXPORT_BOOST_THRESHOLD, DEFAULT_EXPORT_BOOST_THRESHOLD)
+                _LOGGER.info(
+                    "Applying Sigenergy export boost: offset=%.1fc, min=%.1fc, threshold=%.1fc, window=%s-%s",
+                    offset, min_price, threshold, boost_start, boost_end
+                )
+                sell_prices = apply_export_boost_sigenergy(
+                    sell_prices, offset, min_price, boost_start, boost_end, threshold
+                )
+
+            # 3. Chip Mode - suppress exports unless price exceeds threshold
+            chip_mode_enabled = entry.options.get(CONF_CHIP_MODE_ENABLED, False)
+            if chip_mode_enabled and sell_prices:
+                chip_start = entry.options.get(CONF_CHIP_MODE_START, DEFAULT_CHIP_MODE_START)
+                chip_end = entry.options.get(CONF_CHIP_MODE_END, DEFAULT_CHIP_MODE_END)
+                chip_threshold = entry.options.get(CONF_CHIP_MODE_THRESHOLD, DEFAULT_CHIP_MODE_THRESHOLD)
+                _LOGGER.info(
+                    "Applying Sigenergy Chip Mode: window=%s-%s, threshold=%.1fc",
+                    chip_start, chip_end, chip_threshold
+                )
+                sell_prices = apply_chip_mode_sigenergy(
+                    sell_prices, chip_start, chip_end, chip_threshold
+                )
+
             # Debug: Log price ranges to diagnose buy/sell mismatch
             buy_values = [p["price"] for p in buy_prices]
             sell_values = [p["price"] for p in sell_prices] if sell_prices else []
-            _LOGGER.debug(f"Buy prices range: {min(buy_values):.1f} to {max(buy_values):.1f} c/kWh")
+            _LOGGER.debug(f"Buy prices range (after modifications): {min(buy_values):.1f} to {max(buy_values):.1f} c/kWh")
             if sell_values:
-                _LOGGER.debug(f"Sell prices range: {min(sell_values):.1f} to {max(sell_values):.1f} c/kWh")
+                _LOGGER.debug(f"Sell prices range (after modifications): {min(sell_values):.1f} to {max(sell_values):.1f} c/kWh")
 
             # Get stored tokens to avoid re-authentication
             stored_access_token = entry.data.get(CONF_SIGENERGY_ACCESS_TOKEN)

@@ -118,6 +118,8 @@ Unlike full solar shutdown, Sigenergy uses zero-export mode:
 
 Prevents your battery from charging from the grid during Amber price spikes. When wholesale prices spike, your battery may see an arbitrage opportunity and charge from grid - this feature stops that behavior.
 
+**Supported Battery Systems:** Tesla Powerwall ✅ | Sigenergy ✅
+
 **The Problem:**
 During price spikes, your battery receives 30-minute averaged forecast prices (~$0.85/kWh) rather than the real-time spike prices ($10-$20/kWh). It doesn't "see" the spike and may decide to charge from grid for later arbitrage.
 
@@ -163,7 +165,9 @@ If you're on 30-minute billing (not 5-minute), spike prices get averaged out in 
 
 ### Export Price Boost
 
-Artificially increases export prices sent to Tesla to trigger Powerwall exports at lower price points. This is useful when Amber export prices are in the 20-25c range where Tesla's algorithm may not trigger exports due to its internal hysteresis.
+Artificially increases export prices sent to your battery system to trigger exports at lower price points. This is useful when Amber export prices are in the 20-25c range where the battery's algorithm may not trigger exports due to internal hysteresis.
+
+**Supported Battery Systems:** Tesla Powerwall ✅ | Sigenergy ✅
 
 **How It Works:**
 The feature adds a configurable offset to export prices and/or sets a minimum floor price, but only during a specified time window (default 5pm-9pm evening peak).
@@ -184,28 +188,28 @@ With offset=5c, min=20c, and threshold=10c:
 
 Amber export price: 18c/kWh
 → 18 >= 10 (threshold), so boost applies
-→ 18 + 5 = 23c (above min, Tesla sees 23c)
+→ 18 + 5 = 23c (above min, battery sees 23c)
 
 Amber export price: 12c/kWh
 → 12 >= 10 (threshold), so boost applies
-→ 12 + 5 = 17c (below min, Tesla sees 20c floor)
+→ 12 + 5 = 17c (below min, battery sees 20c floor)
 
 Amber export price: 5c/kWh
 → 5 < 10 (below threshold), boost skipped
-→ Tesla sees 5c (unchanged)
+→ Battery sees 5c (unchanged)
 
 Amber export price: -3c/kWh
 → -3 < 10 (below threshold), boost skipped
-→ Tesla sees -3c (unchanged)
+→ Battery sees -3c (unchanged)
 ```
 
 **Use Cases:**
-- Force Powerwall to export during evening peak when prices are moderate (20-25c)
-- Overcome Tesla's internal decision-making that may not export at certain price points
+- Force battery to export during evening peak when prices are moderate (20-25c)
+- Overcome the battery's internal decision-making that may not export at certain price points
 - Maximize battery revenue during predictable high-demand periods
 - Use activation threshold to skip boosting very low or negative prices where exporting doesn't make financial sense
 
-**Note:** The boosted price is only what Tesla sees for decision-making - you still get paid the actual Amber export rate. This feature tricks the Powerwall into exporting when it otherwise wouldn't.
+**Note:** The boosted price is only what your battery sees for decision-making - you still get paid the actual Amber export rate. This feature tricks the battery into exporting when it otherwise wouldn't.
 
 **Configuration:**
 - Enable/disable in Amber Settings (Flask web interface)
@@ -216,12 +220,14 @@ Amber export price: -3c/kWh
 
 Suppress battery exports during configured hours (typically overnight) unless the price exceeds a threshold. This is the inverse of Export Price Boost - instead of encouraging exports, it prevents them while still allowing you to capture unexpected price spikes.
 
+**Supported Battery Systems:** Tesla Powerwall ✅ | Sigenergy ✅
+
 **The Problem:**
-Tesla's algorithm may decide to export your battery overnight based on price signals you don't want to respond to. This drains your battery when you'd rather keep it charged for morning use or to capture genuine price spikes.
+Your battery's algorithm may decide to export overnight based on price signals you don't want to respond to. This drains your battery when you'd rather keep it charged for morning use or to capture genuine price spikes.
 
 **How It Works:**
-During the configured time window (default 10pm-6am), the system sets export prices to $0 for Tesla:
-- Tesla sees $0 export rate → Battery won't export (no profit incentive)
+During the configured time window (default 10pm-6am), the system sets export prices to $0:
+- Battery sees $0 export rate → Won't export (no profit incentive)
 - **Exception:** If the actual price exceeds your threshold (e.g., 30c), the original price is preserved
 - This allows capturing unexpected overnight spikes while keeping the battery stable otherwise
 
@@ -239,20 +245,20 @@ With threshold=30c between 22:00-06:00:
 
 Amber export price: 8c/kWh
 → 8 < 30 (below threshold)
-→ Tesla sees $0 (export suppressed)
+→ Battery sees $0 (export suppressed)
 
 Amber export price: 35c/kWh
 → 35 >= 30 (above threshold)
-→ Tesla sees 35c (export allowed)
+→ Battery sees 35c (export allowed)
 ```
 
 **Use Cases:**
 - Keep battery charged overnight for morning peak usage
-- Prevent Tesla's algorithm from exporting during low-value periods
+- Prevent the battery's algorithm from exporting during low-value periods
 - Still capture genuine price spikes (e.g., unexpected demand events)
 - Works with Amber SmartShift to let Amber manage overnight charging while preventing unwanted exports
 
-**Note:** Like Export Price Boost, the modified price is only what Tesla sees for decision-making - your actual earnings are based on real Amber rates.
+**Note:** Like Export Price Boost, the modified price is only what your battery sees for decision-making - your actual earnings are based on real Amber rates.
 
 **Configuration:**
 - Enable/disable in Amber Settings (Flask web interface)

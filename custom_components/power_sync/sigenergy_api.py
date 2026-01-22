@@ -680,3 +680,235 @@ def convert_amber_prices_to_sigenergy(
         _LOGGER.debug(f"Sigenergy {price_type} schedule: {slot_str}")
 
     return result
+
+
+def _is_time_in_window(hour: int, minute: int, start_hour: int, start_minute: int, end_hour: int, end_minute: int) -> bool:
+    """Check if a time slot falls within a time window.
+
+    Handles overnight windows (e.g., 22:00 to 06:00).
+    """
+    period_minutes = hour * 60 + minute
+    start_minutes = start_hour * 60 + start_minute
+    end_minutes = end_hour * 60 + end_minute
+
+    # Handle overnight windows (e.g., 22:00 to 06:00)
+    if end_minutes <= start_minutes:
+        return period_minutes >= start_minutes or period_minutes < end_minutes
+    else:
+        return start_minutes <= period_minutes < end_minutes
+
+
+def apply_export_boost_sigenergy(
+    sell_prices: list[dict],
+    offset_cents: float = 0.0,
+    min_price_cents: float = 0.0,
+    boost_start: str = "17:00",
+    boost_end: str = "21:00",
+    activation_threshold_cents: float = 0.0,
+) -> list[dict]:
+    """Apply export price boost to Sigenergy sell prices.
+
+    Artificially increases sell prices so the battery sees higher export value
+    and is more willing to discharge. Useful when export prices are in a range
+    where the algorithm may not trigger exports.
+
+    Args:
+        sell_prices: List of {timeRange: "HH:MM-HH:MM", price: float} in cents
+        offset_cents: Fixed offset to add to export prices (c/kWh)
+        min_price_cents: Minimum export price floor (c/kWh)
+        boost_start: Time to start applying boost (HH:MM format)
+        boost_end: Time to stop applying boost (HH:MM format)
+        activation_threshold_cents: Minimum actual price to activate boost
+
+    Returns:
+        Modified list with boosted export prices
+    """
+    if offset_cents == 0 and min_price_cents == 0:
+        _LOGGER.debug("Sigenergy export boost disabled (offset=0, min=0)")
+        return sell_prices
+
+    # Parse time window
+    try:
+        start_parts = boost_start.split(":")
+        start_hour, start_minute = int(start_parts[0]), int(start_parts[1])
+        end_parts = boost_end.split(":")
+        end_hour, end_minute = int(end_parts[0]), int(end_parts[1])
+    except (ValueError, IndexError) as err:
+        _LOGGER.error("Invalid export boost time format: %s", err)
+        return sell_prices
+
+    modified_count = 0
+    skipped_count = 0
+    boosted_prices = []
+
+    for slot in sell_prices:
+        time_range = slot.get("timeRange", "")
+        original_price = slot.get("price", 0)
+
+        # Parse slot start time from timeRange (e.g., "17:00-17:30")
+        try:
+            slot_start = time_range.split("-")[0]
+            hour, minute = int(slot_start.split(":")[0]), int(slot_start.split(":")[1])
+        except (ValueError, IndexError):
+            continue
+
+        # Check if slot is within boost window
+        if not _is_time_in_window(hour, minute, start_hour, start_minute, end_hour, end_minute):
+            continue
+
+        # Skip boost if actual price is below activation threshold
+        if activation_threshold_cents > 0 and original_price < activation_threshold_cents:
+            skipped_count += 1
+            _LOGGER.debug(
+                "%s: Export boost skipped - price %.2fc below threshold %.1fc",
+                time_range, original_price, activation_threshold_cents
+            )
+            continue
+
+        # Apply offset
+        boosted_price = original_price + offset_cents
+
+        # Apply minimum floor
+        boosted_price = max(boosted_price, min_price_cents)
+
+        if boosted_price != original_price:
+            modified_count += 1
+            boosted_prices.append(boosted_price)
+            _LOGGER.debug(
+                "%s: Export boost %.2fc → %.2fc",
+                time_range, original_price, boosted_price
+            )
+
+        slot["price"] = round(boosted_price, 2)
+
+    # Log summary
+    if boosted_prices:
+        avg_boost = sum(boosted_prices) / len(boosted_prices)
+        skip_msg = f", {skipped_count} skipped" if skipped_count > 0 else ""
+        _LOGGER.info(
+            "Sigenergy export boost applied to %d periods%s: avg=%.1fc, range=[%.1f-%.1fc]",
+            modified_count, skip_msg, avg_boost, min(boosted_prices), max(boosted_prices)
+        )
+    elif skipped_count > 0:
+        _LOGGER.info(
+            "Sigenergy export boost: %d periods skipped (below threshold %.1fc)",
+            skipped_count, activation_threshold_cents
+        )
+
+    return sell_prices
+
+
+def apply_chip_mode_sigenergy(
+    sell_prices: list[dict],
+    chip_start: str = "22:00",
+    chip_end: str = "06:00",
+    threshold_cents: float = 30.0,
+) -> list[dict]:
+    """Apply Chip Mode to Sigenergy sell prices - suppress exports unless price exceeds threshold.
+
+    During the configured time window, this sets export prices to 0 so the battery
+    won't export. However, if the actual price is at or above the threshold, the
+    original price is preserved to capture price spikes.
+
+    Args:
+        sell_prices: List of {timeRange: "HH:MM-HH:MM", price: float} in cents
+        chip_start: Time to start suppressing exports (HH:MM format)
+        chip_end: Time to stop suppressing exports (HH:MM format)
+        threshold_cents: Price threshold (c/kWh) - only allow export above this
+
+    Returns:
+        Modified list with suppressed export prices
+    """
+    # Parse time window
+    try:
+        start_parts = chip_start.split(":")
+        start_hour, start_minute = int(start_parts[0]), int(start_parts[1])
+        end_parts = chip_end.split(":")
+        end_hour, end_minute = int(end_parts[0]), int(end_parts[1])
+    except (ValueError, IndexError) as err:
+        _LOGGER.error("Invalid Chip Mode time format: %s", err)
+        return sell_prices
+
+    suppressed_count = 0
+    preserved_count = 0
+
+    for slot in sell_prices:
+        time_range = slot.get("timeRange", "")
+        original_price = slot.get("price", 0)
+
+        # Parse slot start time from timeRange
+        try:
+            slot_start = time_range.split("-")[0]
+            hour, minute = int(slot_start.split(":")[0]), int(slot_start.split(":")[1])
+        except (ValueError, IndexError):
+            continue
+
+        # Check if slot is within chip mode window
+        if not _is_time_in_window(hour, minute, start_hour, start_minute, end_hour, end_minute):
+            continue
+
+        # If price is above threshold, preserve it (capture spikes)
+        if original_price >= threshold_cents:
+            preserved_count += 1
+            _LOGGER.debug(
+                "%s: Chip Mode preserved - price %.2fc >= threshold %.1fc",
+                time_range, original_price, threshold_cents
+            )
+            continue
+
+        # Suppress export by setting price to 0
+        suppressed_count += 1
+        _LOGGER.debug(
+            "%s: Chip Mode suppressed - price %.2fc → 0c",
+            time_range, original_price
+        )
+        slot["price"] = 0.0
+
+    _LOGGER.info(
+        "Sigenergy Chip Mode: %d periods suppressed, %d preserved (threshold=%.1fc)",
+        suppressed_count, preserved_count, threshold_cents
+    )
+
+    return sell_prices
+
+
+def apply_spike_protection_sigenergy(
+    buy_prices: list[dict],
+    threshold_cents: float = 100.0,
+    replacement_cents: float = 50.0,
+) -> list[dict]:
+    """Apply spike protection to Sigenergy buy prices.
+
+    During price spikes, this caps buy prices to prevent the battery from
+    charging from the grid at extremely high prices.
+
+    Args:
+        buy_prices: List of {timeRange: "HH:MM-HH:MM", price: float} in cents
+        threshold_cents: Price threshold above which to apply protection (c/kWh)
+        replacement_cents: Price to use when spike is detected (c/kWh)
+
+    Returns:
+        Modified list with capped buy prices
+    """
+    protected_count = 0
+
+    for slot in buy_prices:
+        time_range = slot.get("timeRange", "")
+        original_price = slot.get("price", 0)
+
+        # If price exceeds threshold, cap it
+        if original_price > threshold_cents:
+            protected_count += 1
+            _LOGGER.debug(
+                "%s: Spike protection - price %.2fc → %.2fc (threshold=%.1fc)",
+                time_range, original_price, replacement_cents, threshold_cents
+            )
+            slot["price"] = round(replacement_cents, 2)
+
+    if protected_count > 0:
+        _LOGGER.info(
+            "Sigenergy spike protection: %d periods capped (threshold=%.1fc, replacement=%.1fc)",
+            protected_count, threshold_cents, replacement_cents
+        )
+
+    return buy_prices
