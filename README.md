@@ -38,7 +38,7 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 | Chip Mode | ✅ | ✅ |
 | DC Solar Curtailment | ✅ Export rules | ✅ Modbus TCP |
 | AC-Coupled Inverter Curtailment | ✅ | ✅ |
-| AEMO Spike Detection | ✅ | ⏳ Coming soon |
+| AEMO Spike Detection | ✅ | ✅ |
 | Force Mode Toggle | ✅ | ➖ N/A |
 | Custom TOU Schedules | ✅ | ➖ N/A |
 | **Automations** | ✅ | ✅ |
