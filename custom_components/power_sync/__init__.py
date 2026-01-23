@@ -5270,6 +5270,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                             if not switched_back:
                                 _LOGGER.error("❌ CRITICAL: Failed to switch back to autonomous after 3 attempts - system may be stuck in self_consumption mode!")
+                                # Send push notification for critical failure
+                                try:
+                                    from .automations.actions import _send_expo_push
+                                    await _send_expo_push(
+                                        hass,
+                                        "⚠️ PowerSync Alert",
+                                        "Failed to restore normal operation after force charge/discharge. System may be stuck - please check manually."
+                                    )
+                                except Exception as notify_err:
+                                    _LOGGER.warning(f"Could not send failure notification: {notify_err}")
                 except Exception as e:
                     _LOGGER.warning(f"Force mode toggle failed: {e}")
 
@@ -6917,6 +6927,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.info(f"Restored operation mode to {restore_mode}")
                 else:
                     _LOGGER.warning(f"Could not restore operation mode: {response.status}")
+                    # Send push notification for restore failure
+                    try:
+                        from .automations.actions import _send_expo_push
+                        await _send_expo_push(
+                            hass,
+                            "⚠️ PowerSync Alert",
+                            f"Failed to restore operation mode (error {response.status}). Please check your battery settings."
+                        )
+                    except Exception as notify_err:
+                        _LOGGER.debug(f"Could not send notification: {notify_err}")
 
             # Restore backup reserve if it was saved during force charge
             # If saved value is None, try to get current value from site_info or use default
@@ -6955,6 +6975,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     else:
                         text = await response.text()
                         _LOGGER.error(f"Failed to restore backup reserve: {response.status} - {text}")
+                        # Send push notification for backup reserve restore failure
+                        try:
+                            from .automations.actions import _send_expo_push
+                            await _send_expo_push(
+                                hass,
+                                "⚠️ PowerSync Alert",
+                                f"Failed to restore backup reserve to {saved_backup_reserve}%. Please check your battery settings."
+                            )
+                        except Exception as notify_err:
+                            _LOGGER.debug(f"Could not send notification: {notify_err}")
             else:
                 _LOGGER.warning("Could not determine backup reserve to restore")
 
