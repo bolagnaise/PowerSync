@@ -6830,6 +6830,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 _LOGGER.info("✅ SIGENERGY NORMAL OPERATION RESTORED")
 
+                # Send push notification for successful restore
+                try:
+                    from .automations.actions import _send_expo_push
+                    await _send_expo_push(
+                        hass,
+                        "✅ PowerSync",
+                        "Normal operation restored successfully."
+                    )
+                except Exception as notify_err:
+                    _LOGGER.debug(f"Could not send success notification: {notify_err}")
+
                 # Dispatch events for UI
                 async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
                     "active": False,
@@ -7002,6 +7013,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             force_charge_state["expires_at"] = None
 
             _LOGGER.info("✅ NORMAL OPERATION RESTORED")
+
+            # Send push notification for successful restore
+            try:
+                from .automations.actions import _send_expo_push
+                await _send_expo_push(
+                    hass,
+                    "✅ PowerSync",
+                    "Normal operation restored successfully."
+                )
+            except Exception as notify_err:
+                _LOGGER.debug(f"Could not send success notification: {notify_err}")
 
             # Dispatch events for UI
             async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
