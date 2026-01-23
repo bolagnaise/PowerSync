@@ -5180,14 +5180,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             current_mode = site_info.get("default_real_mode")
                             _LOGGER.debug(f"Current operation mode: {current_mode}")
 
+                    # Determine if we should skip the toggle
+                    skip_toggle = False
+                    force_retoggle = False
+
                     if current_mode == 'self_consumption':
-                        # User has manually set self_consumption mode - don't override their choice
-                        _LOGGER.info(f"⏭️  Skipping force toggle - already in self_consumption mode (respecting user setting)")
+                        # Check if we recently toggled - if so, Tesla might have reverted the mode
+                        # Only respect "user setting" if we haven't toggled in the last 10 minutes
+                        from homeassistant.util import dt as dt_util
+                        last_toggle_time = hass.data[DOMAIN].get(entry.entry_id, {}).get("last_force_toggle_time")
+                        now = dt_util.utcnow()
+
+                        if last_toggle_time and (now - last_toggle_time).total_seconds() < 600:
+                            # We toggled recently - Tesla likely reverted the mode, not user
+                            _LOGGER.info(f"⚠️ Mode reverted to self_consumption after recent toggle ({(now - last_toggle_time).total_seconds():.0f}s ago) - will re-toggle")
+                            force_retoggle = True
+                        else:
+                            # User has manually set self_consumption mode - don't override their choice
+                            _LOGGER.info(f"⏭️  Skipping force toggle - already in self_consumption mode (respecting user setting)")
+                            skip_toggle = True
                     elif current_mode and current_mode != 'autonomous':
                         # Not in TOU mode (e.g., backup mode) - don't toggle
                         _LOGGER.info(f"⏭️  Skipping force toggle - not in TOU mode (current: {current_mode})")
-                    else:
-                        # In autonomous (TOU) mode - check if already optimizing before toggling
+                        skip_toggle = True
+
+                    if not skip_toggle:
+                        # In autonomous (TOU) mode or need to re-toggle - check if already optimizing before toggling
                         async with session.get(
                             f"{api_base}/api/1/energy_sites/{site_id}/live_status",
                             headers=headers,
@@ -5202,27 +5220,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 grid_power = 0
                                 battery_power = 0
 
-                        if grid_power < 0:
+                        if not force_retoggle and grid_power < 0:
                             # Negative grid_power means exporting - already doing what we want
                             _LOGGER.info(f"⏭️  Skipping force toggle - already exporting ({abs(grid_power):.0f}W to grid)")
-                        elif battery_power < 0:
+                        elif not force_retoggle and battery_power < 0:
                             # Negative battery_power means charging - already doing what we want
                             _LOGGER.info(f"⏭️  Skipping force toggle - battery already charging ({abs(battery_power):.0f}W)")
                         else:
-                            _LOGGER.info(f"🔄 Force mode toggle - grid: {grid_power:.0f}W, battery: {battery_power:.0f}W")
+                            if force_retoggle:
+                                _LOGGER.info(f"🔄 Re-toggling to autonomous (Tesla reverted mode)")
+                            else:
+                                _LOGGER.info(f"🔄 Force mode toggle - grid: {grid_power:.0f}W, battery: {battery_power:.0f}W")
 
-                            # Switch to self_consumption
-                            async with session.post(
-                                f"{api_base}/api/1/energy_sites/{site_id}/operation",
-                                headers=headers,
-                                json={"default_real_mode": "self_consumption"},
-                                timeout=aiohttp.ClientTimeout(total=30),
-                            ) as response:
-                                if response.status == 200:
-                                    _LOGGER.debug("Switched to self_consumption mode")
+                                # Switch to self_consumption first (only if not already in self_consumption)
+                                async with session.post(
+                                    f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                                    headers=headers,
+                                    json={"default_real_mode": "self_consumption"},
+                                    timeout=aiohttp.ClientTimeout(total=30),
+                                ) as response:
+                                    if response.status == 200:
+                                        _LOGGER.debug("Switched to self_consumption mode")
 
-                            # Wait briefly
-                            await asyncio.sleep(5)
+                                # Wait briefly
+                                await asyncio.sleep(5)
 
                             # Switch back to autonomous (with retries and verification - critical to not stay in self_consumption)
                             switched_back = False
@@ -5254,12 +5275,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                             if current_mode == "autonomous":
                                                 _LOGGER.info("🔄 Force mode toggle complete - verified autonomous")
                                                 switched_back = True
+                                                # Track successful toggle time to detect Tesla reversions
+                                                from homeassistant.util import dt as dt_util
+                                                if entry.entry_id not in hass.data[DOMAIN]:
+                                                    hass.data[DOMAIN][entry.entry_id] = {}
+                                                hass.data[DOMAIN][entry.entry_id]["last_force_toggle_time"] = dt_util.utcnow()
                                                 break
                                             else:
                                                 _LOGGER.warning(f"⚠️ Mode verification failed: expected 'autonomous', got '{current_mode}' (attempt {attempt+1}/3)")
                                         else:
                                             _LOGGER.warning(f"Could not verify mode (status {verify_response.status}) - assuming success")
                                             switched_back = True
+                                            # Track toggle time even when assuming success
+                                            from homeassistant.util import dt as dt_util
+                                            if entry.entry_id not in hass.data[DOMAIN]:
+                                                hass.data[DOMAIN][entry.entry_id] = {}
+                                            hass.data[DOMAIN][entry.entry_id]["last_force_toggle_time"] = dt_util.utcnow()
                                             break
 
                                 except Exception as e:
