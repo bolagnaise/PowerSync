@@ -1,10 +1,10 @@
-"""Amber Electric WebSocket client for real-time price updates (threaded version for Home Assistant)"""
+"""Amber Electric WebSocket client for real-time price updates (interval-based polling version)"""
 import asyncio
 import json
 import logging
 import re
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 import websockets
 
@@ -223,16 +223,18 @@ _LOGGER.addFilter(SensitiveDataFilter())
 
 class AmberWebSocketClient:
     """
-    Async WebSocket client for Amber Electric real-time price updates.
+    Interval-based WebSocket client for Amber Electric price updates.
 
-    Maintains a persistent connection to Amber's WebSocket API and caches
-    the latest price data for instant access. Auto-reconnects with exponential
-    backoff on connection failures.
+    Connects to Amber's WebSocket API at each 5-minute interval boundary,
+    fetches the current price, then disconnects. This approach avoids
+    rate limiting issues that occur with persistent connections.
 
-    Designed for Home Assistant's asyncio event loop.
+    Price intervals align with Amber's 5-minute pricing blocks:
+    :00, :05, :10, :15, :20, :25, :30, :35, :40, :45, :50, :55
     """
 
     WS_URL = "wss://api-ws.amber.com.au"
+    INTERVAL_MINUTES = 5  # Amber price interval
 
     def __init__(self, api_token: str, site_id: str, sync_callback=None):
         """
@@ -247,7 +249,6 @@ class AmberWebSocketClient:
         self.site_id = site_id
 
         # Connection state
-        self._websocket = None
         self._running = False
         self._thread = None
         self._loop = None
@@ -258,14 +259,11 @@ class AmberWebSocketClient:
         self._last_update: Optional[datetime] = None
 
         # Health monitoring
-        self._connection_status = "disconnected"  # disconnected, connecting, connected, reconnecting
+        self._connection_status = "disconnected"  # disconnected, connecting, connected
         self._message_count = 0
+        self._fetch_count = 0
         self._error_count = 0
         self._last_error: Optional[str] = None
-
-        # Reconnection settings
-        self._reconnect_delay = 1  # Start with 1 second
-        self._max_reconnect_delay = 60  # Max 60 seconds
 
         # Stale cache warning debounce (only warn once until data is fresh again)
         self._stale_warning_logged = False
@@ -275,10 +273,10 @@ class AmberWebSocketClient:
         self._last_sync_trigger: Optional[datetime] = None
         self._sync_cooldown_seconds = 60  # Minimum 60s between sync triggers
 
-        _LOGGER.info(f"AmberWebSocketClient initialized for site {site_id} (token: {api_token[:8]}...)")
+        _LOGGER.info(f"AmberWebSocketClient initialized for site {site_id} (interval-based polling mode)")
 
     async def start(self):
-        """Start the WebSocket client in a background thread (like Flask version)."""
+        """Start the WebSocket client in a background thread."""
         if self._running:
             _LOGGER.warning("WebSocket client already running")
             return
@@ -286,17 +284,17 @@ class AmberWebSocketClient:
         self._running = True
         self._thread = threading.Thread(target=self._run_event_loop, daemon=True, name="AmberWebSocket")
         self._thread.start()
-        _LOGGER.info("✅ WebSocket client thread started")
+        _LOGGER.info("WebSocket client thread started (interval-based polling)")
 
     def _run_event_loop(self):
         """Run the asyncio event loop in the background thread."""
         try:
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
-            _LOGGER.info("🔄 WebSocket thread event loop created")
-            self._loop.run_until_complete(self._connect_and_listen())
+            _LOGGER.info("WebSocket thread event loop created")
+            self._loop.run_until_complete(self._interval_polling_loop())
         except Exception as e:
-            _LOGGER.error(f"💥 Event loop error: {e}", exc_info=True)
+            _LOGGER.error(f"Event loop error: {e}", exc_info=True)
             self._error_count += 1
             self._last_error = str(e)
         finally:
@@ -309,161 +307,194 @@ class AmberWebSocketClient:
         _LOGGER.info("Stopping WebSocket client")
         self._running = False
 
-        # Schedule cleanup in the event loop if it exists
-        if self._loop and self._loop.is_running():
-            asyncio.run_coroutine_threadsafe(self._cleanup(), self._loop)
-
         # Wait for thread to finish
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5)
 
         _LOGGER.info("WebSocket client stopped")
 
-    async def _cleanup(self):
-        """Clean up WebSocket connection."""
-        if self._websocket:
-            try:
-                await self._websocket.close()
-            except Exception as e:
-                _LOGGER.error(f"Error closing WebSocket: {e}")
-            finally:
-                self._websocket = None
+    def _get_next_interval_time(self) -> datetime:
+        """
+        Calculate the next 5-minute interval boundary.
 
-    async def _connect_and_listen(self):
-        """Connect to WebSocket and listen for messages with auto-reconnect."""
-        _LOGGER.info("🚀 WebSocket task started, entering connection loop")
+        Returns:
+            datetime: Next interval time (e.g., if now is 14:07, returns 14:10)
+        """
+        now = datetime.now(timezone.utc)
+        # Round up to next 5-minute boundary
+        minutes = now.minute
+        next_interval_minute = ((minutes // self.INTERVAL_MINUTES) + 1) * self.INTERVAL_MINUTES
+
+        if next_interval_minute >= 60:
+            # Roll over to next hour
+            next_time = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        else:
+            next_time = now.replace(minute=next_interval_minute, second=0, microsecond=0)
+
+        return next_time
+
+    def _get_seconds_until_next_interval(self) -> float:
+        """
+        Calculate seconds until the next 5-minute interval.
+
+        Returns:
+            float: Seconds to wait (adds 5 seconds buffer for price to be available)
+        """
+        next_interval = self._get_next_interval_time()
+        now = datetime.now(timezone.utc)
+        wait_seconds = (next_interval - now).total_seconds()
+
+        # Add 5 second buffer to ensure price is available after interval starts
+        return max(0, wait_seconds) + 5
+
+    async def _interval_polling_loop(self):
+        """
+        Main loop that connects at each 5-minute interval.
+
+        1. Wait until next interval boundary (+5s buffer)
+        2. Connect to WebSocket
+        3. Subscribe and wait for price update
+        4. Disconnect
+        5. Repeat
+        """
+        _LOGGER.info("Starting interval-based polling loop")
+
+        # Do an immediate fetch on startup
+        await self._fetch_price_once()
+
         while self._running:
             try:
-                self._connection_status = "connecting"
-                _LOGGER.info(f"Connecting to Amber WebSocket at {self.WS_URL}")
+                # Calculate wait time until next interval
+                wait_seconds = self._get_seconds_until_next_interval()
+                next_interval = self._get_next_interval_time()
 
-                # Set up headers with authentication
-                headers = {
-                    "authorization": f"Bearer {self.api_token}"
-                }
+                _LOGGER.debug(
+                    f"Next price fetch at {next_interval.strftime('%H:%M:%S')} UTC "
+                    f"(waiting {wait_seconds:.0f}s)"
+                )
 
-                # Connect to WebSocket (no custom SSL context - match Flask behavior)
-                async with websockets.connect(
-                    self.WS_URL,
-                    additional_headers=headers,
-                    ping_interval=30,  # Send ping every 30 seconds
-                    ping_timeout=10,   # Wait 10 seconds for pong
-                ) as websocket:
-                    self._websocket = websocket
-                    self._connection_status = "connected"
-                    self._reconnect_delay = 1  # Reset reconnect delay on successful connection
-                    _LOGGER.info("✅ WebSocket connected successfully")
+                # Wait until next interval (check running status periodically)
+                wait_start = datetime.now(timezone.utc)
+                while self._running:
+                    remaining = wait_seconds - (datetime.now(timezone.utc) - wait_start).total_seconds()
+                    if remaining <= 0:
+                        break
+                    # Sleep in small chunks to allow clean shutdown
+                    await asyncio.sleep(min(remaining, 5))
 
-                    # Send subscription request
-                    subscribe_message = {
-                        "service": "live-prices",
-                        "action": "subscribe",
-                        "data": {
-                            "siteId": self.site_id
-                        }
-                    }
-                    subscribe_json = json.dumps(subscribe_message)
-                    _LOGGER.info(f"📡 Sending subscription: {subscribe_json}")
-                    await websocket.send(subscribe_json)
-                    _LOGGER.info(f"📡 Subscription sent for site {self.site_id}, waiting for response...")
+                if not self._running:
+                    break
 
-                    # Listen for messages with periodic status logging
-                    _LOGGER.info("🎧 Listening for WebSocket messages...")
-                    last_status_log = datetime.now(timezone.utc)
-                    message_wait_timeout = 120  # Log status every 2 minutes if no messages
-
-                    while self._running:
-                        try:
-                            # Wait for message with timeout for status logging
-                            message = await asyncio.wait_for(
-                                websocket.recv(),
-                                timeout=message_wait_timeout
-                            )
-                            self._handle_message(message)
-                        except asyncio.TimeoutError:
-                            # No message received within timeout - log status
-                            elapsed = (datetime.now(timezone.utc) - last_status_log).total_seconds()
-                            _LOGGER.debug(
-                                f"⏳ WebSocket waiting for messages... "
-                                f"(no data for {elapsed:.0f}s, connection: {self._connection_status}, "
-                                f"messages received: {self._message_count})"
-                            )
-                            last_status_log = datetime.now(timezone.utc)
-                            # Continue waiting - connection is still open
-                            continue
-                        except websockets.exceptions.ConnectionClosedOK as e:
-                            # Clean closure (1000 normal, 1001 going away) - not an error, just reconnect
-                            _LOGGER.debug(f"WebSocket closed cleanly: {e.code} {e.reason}")
-                            break  # Exit inner loop to reconnect
-                        except websockets.exceptions.ConnectionClosedError as e:
-                            # Error closure (1002+) - log as warning
-                            _LOGGER.warning(f"WebSocket connection closed with error: {e.code} {e.reason}")
-                            break  # Exit inner loop to reconnect
-                        except websockets.exceptions.ConnectionClosed as e:
-                            # Catch-all for any other connection closed scenarios
-                            _LOGGER.debug(f"WebSocket connection closed: {e.code} {e.reason}")
-                            break  # Exit inner loop to reconnect
-                        except Exception as e:
-                            # Only log as error if it's NOT a connection closed exception
-                            _LOGGER.error(f"Error handling message: {e}", exc_info=True)
-                            self._error_count += 1
-                            self._last_error = str(e)
-
-                    # If we exit the loop normally (not due to exception), connection closed cleanly
-                    _LOGGER.debug("WebSocket message loop ended, will reconnect")
-
-            except websockets.exceptions.ConnectionClosedOK as e:
-                # Clean closure during connect/subscribe - just reconnect
-                _LOGGER.debug(f"WebSocket closed cleanly during setup: {e.code} {e.reason}")
-                self._connection_status = "disconnected"
-                self._websocket = None
-            except websockets.exceptions.ConnectionClosed as e:
-                _LOGGER.debug(f"WebSocket connection closed: {e.code} {e.reason}")
-                self._connection_status = "disconnected"
-                self._websocket = None
+                # Fetch price at this interval
+                await self._fetch_price_once()
 
             except Exception as e:
-                _LOGGER.error(f"WebSocket error: {e}", exc_info=True)
-                self._connection_status = "disconnected"
-                self._websocket = None
+                _LOGGER.error(f"Error in polling loop: {e}", exc_info=True)
                 self._error_count += 1
                 self._last_error = str(e)
+                # Wait before retrying
+                await asyncio.sleep(30)
 
-            # Reconnect with exponential backoff if still running
-            if self._running:
-                self._connection_status = "reconnecting"
-                _LOGGER.debug(f"WebSocket reconnecting in {self._reconnect_delay}s...")
-                await asyncio.sleep(self._reconnect_delay)
+    async def _fetch_price_once(self):
+        """
+        Connect to WebSocket, fetch current price, then disconnect.
 
-                # Exponential backoff (double delay each time, up to max)
-                self._reconnect_delay = min(self._reconnect_delay * 2, self._max_reconnect_delay)
+        This is a single fetch operation:
+        1. Connect to WebSocket
+        2. Send subscription
+        3. Wait for price update (with timeout)
+        4. Store price in cache
+        5. Disconnect
+        """
+        self._fetch_count += 1
+        self._connection_status = "connecting"
 
-    def _handle_message(self, message: str):
+        try:
+            _LOGGER.debug(f"Connecting to Amber WebSocket for price fetch #{self._fetch_count}")
+
+            headers = {
+                "authorization": f"Bearer {self.api_token}"
+            }
+
+            # Connect with short timeout since we only need one message
+            async with websockets.connect(
+                self.WS_URL,
+                additional_headers=headers,
+                close_timeout=5,
+            ) as websocket:
+                self._connection_status = "connected"
+
+                # Send subscription request
+                subscribe_message = {
+                    "service": "live-prices",
+                    "action": "subscribe",
+                    "data": {
+                        "siteId": self.site_id
+                    }
+                }
+                await websocket.send(json.dumps(subscribe_message))
+                _LOGGER.debug(f"Subscription sent for site {self.site_id}")
+
+                # Wait for messages (subscription confirmation + price update)
+                # Timeout after 30 seconds if no price received
+                price_received = False
+                timeout = 30
+                start_time = datetime.now(timezone.utc)
+
+                while not price_received:
+                    elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+                    if elapsed > timeout:
+                        _LOGGER.warning(f"Timeout waiting for price update after {timeout}s")
+                        break
+
+                    try:
+                        message = await asyncio.wait_for(
+                            websocket.recv(),
+                            timeout=timeout - elapsed
+                        )
+                        price_received = self._handle_message(message)
+                    except asyncio.TimeoutError:
+                        _LOGGER.warning("Timeout waiting for WebSocket message")
+                        break
+
+                # Connection will be closed by context manager
+
+            self._connection_status = "disconnected"
+
+            if price_received:
+                _LOGGER.info(f"Price fetch #{self._fetch_count} successful")
+            else:
+                _LOGGER.warning(f"Price fetch #{self._fetch_count} completed without price update")
+
+        except Exception as e:
+            self._connection_status = "disconnected"
+            _LOGGER.error(f"Error fetching price: {e}")
+            self._error_count += 1
+            self._last_error = str(e)
+
+    def _handle_message(self, message: str) -> bool:
         """
         Handle incoming WebSocket message.
 
         Args:
             message: Raw message string from WebSocket
+
+        Returns:
+            bool: True if this was a price update message
         """
         try:
-            # Log raw message for debugging (full message, not truncated)
-            _LOGGER.info(f"📨 Raw WebSocket message ({len(message)} bytes): {message}")
-
             data = json.loads(message)
-
-            # Log parsed message structure
-            _LOGGER.info(f"📨 Parsed message keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
             self._message_count += 1
 
             # Validate message structure
             if not isinstance(data, dict):
                 _LOGGER.warning(f"Unexpected message format (not a dict): {type(data)}")
-                return
+                return False
 
             # Handle subscription confirmation
             if data.get("action") == "subscribe" and data.get("status") == 200:
-                _LOGGER.info("✅ Subscription confirmed by server")
-                return
+                _LOGGER.debug("Subscription confirmed by server")
+                return False
 
             # Handle price updates
             if data.get("action") == "price-update" or (
@@ -476,9 +507,8 @@ class AmberWebSocketClient:
                 # Verify site ID matches (if siteId is present)
                 if "siteId" in price_data and price_data.get("siteId") != self.site_id:
                     _LOGGER.warning(f"Received price update for different site: {price_data.get('siteId')}")
-                    return
+                    return False
 
-                # Update cache with new prices
                 # Convert Amber's "prices" array to general/feedIn dict format
                 prices_array = price_data.get("prices", [])
                 converted_prices = {}
@@ -492,47 +522,50 @@ class AmberWebSocketClient:
                 with self._price_lock:
                     self._cached_prices = converted_prices
                     self._last_update = datetime.now(timezone.utc)
-                    self._stale_warning_logged = False  # Reset stale warning on fresh data
+                    self._stale_warning_logged = False
 
                 # Log the price update
                 general_price = converted_prices.get("general", {}).get("perKwh")
                 feedin_price = converted_prices.get("feedIn", {}).get("perKwh")
                 if general_price is not None and feedin_price is not None:
-                    _LOGGER.info(f"💰 Price update: buy={general_price:.2f}¢/kWh, sell={feedin_price:.2f}¢/kWh")
+                    _LOGGER.info(f"Price update: buy={general_price:.2f}c/kWh, sell={feedin_price:.2f}c/kWh")
 
-                # Notify coordinator when price data arrives (cooldown prevents notification spam)
+                # Notify coordinator when price data arrives
                 if self._should_trigger_sync():
                     self._trigger_sync(converted_prices)
 
+                return True
+
             elif data.get("type") == "subscription-success":
-                _LOGGER.info("✅ Subscription confirmed by server")
+                _LOGGER.debug("Subscription confirmed by server")
+                return False
 
             elif data.get("type") == "error":
                 error_msg = data.get("message", "Unknown error")
                 _LOGGER.error(f"WebSocket error from server: {error_msg}")
                 self._error_count += 1
                 self._last_error = error_msg
+                return False
 
             else:
-                # Log ALL unhandled messages at INFO level for debugging
-                # This helps us understand what Amber actually sends
-                _LOGGER.info(f"📨 Unhandled message - action={data.get('action')}, type={data.get('type')}, service={data.get('service')}, keys={list(data.keys())}")
+                _LOGGER.debug(f"Unhandled message type: action={data.get('action')}, type={data.get('type')}")
+                return False
 
         except json.JSONDecodeError as e:
             _LOGGER.error(f"Failed to parse WebSocket message as JSON: {e}")
             self._error_count += 1
             self._last_error = f"JSON parse error: {e}"
+            return False
 
         except Exception as e:
             _LOGGER.error(f"Error processing WebSocket message: {e}", exc_info=True)
             self._error_count += 1
             self._last_error = str(e)
+            return False
 
     def _should_trigger_sync(self) -> bool:
         """
         Check if enough time has passed since last sync trigger.
-
-        Implements cooldown to prevent rapid re-syncs from WebSocket message bursts.
 
         Returns:
             bool: True if sync should be triggered, False if in cooldown period
@@ -551,9 +584,6 @@ class AmberWebSocketClient:
         """
         Notify sync coordinator of new price data.
 
-        Runs callback in thread pool executor to avoid blocking WebSocket event loop.
-        Updates last trigger time to implement cooldown.
-
         Args:
             prices_data: Dictionary with price data to pass to coordinator
         """
@@ -563,13 +593,12 @@ class AmberWebSocketClient:
         try:
             self._last_sync_trigger = datetime.now(timezone.utc)
 
-            # Run callback in separate thread to avoid blocking WebSocket
+            # Run callback in separate thread to avoid blocking
             from concurrent.futures import ThreadPoolExecutor
             executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="WS-Notify")
             executor.submit(self._sync_callback, prices_data)
 
-            # Don't wait for completion - fire and forget
-            _LOGGER.info("📡 Notified sync coordinator of WebSocket price update")
+            _LOGGER.debug("Notified sync coordinator of price update")
 
         except Exception as e:
             _LOGGER.error(f"Error notifying sync coordinator: {e}", exc_info=True)
@@ -591,27 +620,24 @@ class AmberWebSocketClient:
         """
         with self._price_lock:
             if not self._cached_prices or not self._last_update:
-                _LOGGER.debug(f"WebSocket cache empty: cached_prices={bool(self._cached_prices)}, last_update={self._last_update}, message_count={self._message_count}")
+                _LOGGER.debug(f"WebSocket cache empty: cached_prices={bool(self._cached_prices)}, last_update={self._last_update}")
                 return None
 
             # Check if data is stale
             age = (datetime.now(timezone.utc) - self._last_update).total_seconds()
             if age > max_age_seconds:
-                # Only warn once until data becomes fresh again (debounce spam)
                 if not self._stale_warning_logged:
                     _LOGGER.info(f"Cached WebSocket data is {age:.1f}s old (max: {max_age_seconds}s) - using REST fallback")
                     self._stale_warning_logged = True
                 return None
 
             # Convert to Amber API format
-            # WebSocket provides: {"general": {...}, "feedIn": {...}}
-            # API expects: [{"channelType": "general", ...}, {"channelType": "feedIn", ...}]
             result = []
 
             if "general" in self._cached_prices:
                 general_data = self._cached_prices["general"].copy()
                 general_data["channelType"] = "general"
-                general_data["type"] = "CurrentInterval"  # WebSocket always provides current
+                general_data["type"] = "CurrentInterval"
                 result.append(general_data)
 
             if "feedIn" in self._cached_prices:
@@ -636,10 +662,13 @@ class AmberWebSocketClient:
 
         return {
             "status": self._connection_status,
+            "mode": "interval-polling",
+            "interval_minutes": self.INTERVAL_MINUTES,
             "connected": self._connection_status == "connected",
             "last_update": last_update_str,
             "age_seconds": age_seconds,
             "message_count": self._message_count,
+            "fetch_count": self._fetch_count,
             "error_count": self._error_count,
             "last_error": self._last_error,
             "has_cached_data": has_cached,
@@ -649,19 +678,14 @@ class AmberWebSocketClient:
         """
         Check if WebSocket thread is alive and restart if needed.
 
-        Call this periodically (e.g., from coordinator update) to ensure
-        the WebSocket connection stays alive even after unexpected failures.
-
         Returns:
             bool: True if thread was restarted, False if already running
         """
         if not self._running:
-            # Client was explicitly stopped, don't restart
             return False
 
         if self._thread is None or not self._thread.is_alive():
             _LOGGER.warning("WebSocket thread died unexpectedly - restarting...")
-            self._connection_status = "reconnecting"
             self._thread = threading.Thread(
                 target=self._run_event_loop,
                 daemon=True,
