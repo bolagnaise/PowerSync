@@ -17,6 +17,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, time as dt_time, timedelta
 from typing import Dict, Any, Optional, List, TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
     from . import AutomationStore
@@ -184,14 +185,28 @@ def _evaluate_time_trigger(
         auto = store.get_by_id(automation_id)
         if auto and auto.get("last_evaluated_at"):
             try:
-                last_eval = datetime.fromisoformat(auto["last_evaluated_at"])
-                # Compare in UTC for consistency
+                last_eval_str = auto["last_evaluated_at"]
+                # Handle both naive and aware datetime strings
+                # Stored format is: datetime.utcnow().isoformat() + "Z" (e.g., "2026-01-24T04:00:00.123456Z")
+                if last_eval_str.endswith("Z"):
+                    # Parse as UTC and make timezone-aware
+                    last_eval = datetime.fromisoformat(last_eval_str.rstrip("Z")).replace(tzinfo=ZoneInfo('UTC'))
+                else:
+                    # Try parsing with timezone info, or assume UTC if naive
+                    try:
+                        last_eval = datetime.fromisoformat(last_eval_str)
+                        if last_eval.tzinfo is None:
+                            last_eval = last_eval.replace(tzinfo=ZoneInfo('UTC'))
+                    except ValueError:
+                        last_eval = datetime.fromisoformat(last_eval_str).replace(tzinfo=ZoneInfo('UTC'))
+
+                # Convert now to UTC for consistent comparison
                 if hasattr(now, 'tzinfo') and now.tzinfo is not None:
-                    from zoneinfo import ZoneInfo
-                    now_utc = now.astimezone(ZoneInfo('UTC')).replace(tzinfo=None)
+                    now_utc = now.astimezone(ZoneInfo('UTC'))
                     since_last = (now_utc - last_eval).total_seconds()
                 else:
-                    since_last = (now - last_eval).total_seconds()
+                    # now is naive, treat as UTC
+                    since_last = (now.replace(tzinfo=ZoneInfo('UTC')) - last_eval).total_seconds()
 
                 if since_last < 300:
                     return TriggerResult(triggered=False, reason="Already triggered recently")
