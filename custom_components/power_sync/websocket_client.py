@@ -338,14 +338,15 @@ class AmberWebSocketClient:
         Calculate seconds until the next 5-minute interval.
 
         Returns:
-            float: Seconds to wait (adds 5 seconds buffer for price to be available)
+            float: Seconds to wait (adds 10 seconds buffer for price to be available)
         """
         next_interval = self._get_next_interval_time()
         now = datetime.now(timezone.utc)
         wait_seconds = (next_interval - now).total_seconds()
 
-        # Add 5 second buffer to ensure price is available after interval starts
-        return max(0, wait_seconds) + 5
+        # Add 10 second buffer - connect shortly after interval starts
+        # Price may take up to 45s to arrive, handled by timeout in _fetch_price_once
+        return max(0, wait_seconds) + 10
 
     async def _interval_polling_loop(self):
         """
@@ -436,9 +437,9 @@ class AmberWebSocketClient:
                 _LOGGER.debug(f"Subscription sent for site {self.site_id}")
 
                 # Wait for messages (subscription confirmation + price update)
-                # Timeout after 30 seconds if no price received
+                # Timeout after 60 seconds - prices can arrive up to 45s after interval start
                 price_received = False
-                timeout = 30
+                timeout = 60
                 start_time = datetime.now(timezone.utc)
 
                 while not price_received:
