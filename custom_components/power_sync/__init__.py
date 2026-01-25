@@ -7156,6 +7156,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ) as response:
                 if response.status == 200:
                     _LOGGER.info(f"✅ Operation mode set to {mode}")
+                    # When user explicitly sets self_consumption, clear the force toggle time
+                    # This tells TOU sync that this is intentional, not a Tesla reversion
+                    if mode == "self_consumption":
+                        if entry.entry_id in hass.data[DOMAIN]:
+                            hass.data[DOMAIN][entry.entry_id].pop("last_force_toggle_time", None)
+                            _LOGGER.debug("Cleared last_force_toggle_time (user set self_consumption)")
                 else:
                     text = await response.text()
                     _LOGGER.error(f"Failed to set operation mode: {response.status} - {text}")
