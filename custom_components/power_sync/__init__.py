@@ -779,11 +779,11 @@ class AEMOSpikeManager:
                         _LOGGER.info("Saved current tariff for restoration after spike (name: %s)",
                                     self._saved_tariff.get("name", "unknown"))
                     else:
-                        _LOGGER.warning("Could not extract tariff from response - restore may not work")
+                        _LOGGER.warning("Could not extract tariff from tariff_rate response - will try site_info")
                 else:
-                    _LOGGER.warning("Could not save current tariff: %s", response.status)
+                    _LOGGER.warning("tariff_rate endpoint returned %s - will try site_info fallback", response.status)
 
-            # Step 2: Get and save current operation mode
+            # Step 2: Get and save current operation mode (and tariff fallback)
             async with session.get(
                 f"{api_base}/api/1/energy_sites/{self.site_id}/site_info",
                 headers=headers,
@@ -791,8 +791,19 @@ class AEMOSpikeManager:
             ) as response:
                 if response.status == 200:
                     data = await response.json()
-                    self._saved_operation_mode = data.get("response", {}).get("default_real_mode")
+                    site_info = data.get("response", {})
+                    self._saved_operation_mode = site_info.get("default_real_mode")
                     _LOGGER.info("Saved operation mode: %s", self._saved_operation_mode)
+
+                    # Fallback: if tariff wasn't saved from tariff_rate, try to get it from site_info
+                    if not self._saved_tariff:
+                        site_tariff = site_info.get("tariff_content_v2") or site_info.get("tariff_content")
+                        if site_tariff:
+                            self._saved_tariff = site_tariff
+                            _LOGGER.info("Saved tariff from site_info fallback (name: %s)",
+                                        site_tariff.get("name", "unknown"))
+                        else:
+                            _LOGGER.warning("No tariff found in site_info either - restore may not work")
 
             # Step 3: Switch to autonomous mode for best export behavior
             if self._saved_operation_mode != "autonomous":
@@ -5958,6 +5969,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "active": False,
         "saved_tariff": None,
         "saved_operation_mode": None,
+        "saved_backup_reserve": None,
         "expires_at": None,
         "cancel_expiry_timer": None,
     }
@@ -5994,6 +6006,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "expires_at": force_discharge_state["expires_at"].isoformat() if force_discharge_state["expires_at"] else None,
                 "saved_tariff": force_discharge_state["saved_tariff"],
                 "saved_operation_mode": force_discharge_state["saved_operation_mode"],
+                "saved_backup_reserve": force_discharge_state["saved_backup_reserve"],
             }
 
         stored_data["force_mode_state"] = state_to_save
@@ -6073,6 +6086,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_discharge_state["expires_at"] = expires_at
                     force_discharge_state["saved_tariff"] = persisted_force_state.get("saved_tariff")
                     force_discharge_state["saved_operation_mode"] = persisted_force_state.get("saved_operation_mode")
+                    force_discharge_state["saved_backup_reserve"] = persisted_force_state.get("saved_backup_reserve")
 
                     # Re-setup expiry timer
                     async def auto_restore_discharge(_now):
@@ -6202,6 +6216,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
 
             # Step 1: Save current tariff (if not already in discharge mode)
+            tariff_saved_from_site_info = False
             if not force_discharge_state["active"]:
                 _LOGGER.info("Saving current tariff before force discharge...")
                 async with session.get(
@@ -6219,11 +6234,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             _LOGGER.info("Saved current tariff for restoration after discharge (name: %s)",
                                         saved_tariff.get("name", "unknown"))
                         else:
-                            _LOGGER.warning("Could not extract tariff from response - restore may not work")
+                            _LOGGER.warning("Could not extract tariff from tariff_rate response - will try site_info")
                     else:
-                        _LOGGER.warning("Could not save current tariff: %s", response.status)
+                        _LOGGER.warning("tariff_rate endpoint returned %s - will try site_info fallback", response.status)
 
-                # Step 2: Get and save current operation mode
+                # Step 2: Get and save current operation mode, backup reserve, and tariff (fallback)
                 async with session.get(
                     f"{api_base}/api/1/energy_sites/{site_id}/site_info",
                     headers=headers,
@@ -6231,8 +6246,51 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ) as response:
                     if response.status == 200:
                         data = await response.json()
-                        force_discharge_state["saved_operation_mode"] = data.get("response", {}).get("default_real_mode")
-                        _LOGGER.info("Saved operation mode: %s", force_discharge_state["saved_operation_mode"])
+                        site_info = data.get("response", {})
+                        force_discharge_state["saved_operation_mode"] = site_info.get("default_real_mode")
+                        force_discharge_state["saved_backup_reserve"] = site_info.get("backup_reserve_percent")
+                        _LOGGER.info("Saved operation mode: %s, backup reserve: %s%%",
+                                     force_discharge_state["saved_operation_mode"],
+                                     force_discharge_state["saved_backup_reserve"])
+
+                        # Fallback: if tariff wasn't saved from tariff_rate, try to get it from site_info
+                        if not force_discharge_state.get("saved_tariff"):
+                            site_tariff = site_info.get("tariff_content_v2") or site_info.get("tariff_content")
+                            if site_tariff:
+                                force_discharge_state["saved_tariff"] = site_tariff
+                                tariff_saved_from_site_info = True
+                                _LOGGER.info("Saved tariff from site_info fallback (name: %s)",
+                                            site_tariff.get("name", "unknown"))
+                            else:
+                                _LOGGER.warning("No tariff found in site_info either")
+                                # For Globird users, warn that tariff may not be restored
+                                electricity_provider = entry.options.get(
+                                    CONF_ELECTRICITY_PROVIDER,
+                                    entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
+                                )
+                                if electricity_provider == "globird":
+                                    try:
+                                        from .automations.actions import _send_expo_push
+                                        await _send_expo_push(
+                                            hass,
+                                            "⚠️ PowerSync Warning",
+                                            "Could not save your current tariff. After force discharge ends, you may need to reconfigure your TOU schedule."
+                                        )
+                                    except Exception as notify_err:
+                                        _LOGGER.debug(f"Could not send notification: {notify_err}")
+
+                # Step 2b: Set backup reserve to 0% to allow full discharge
+                _LOGGER.info("Setting backup reserve to 0%% to allow full discharge...")
+                async with session.post(
+                    f"{api_base}/api/1/energy_sites/{site_id}/backup",
+                    headers=headers,
+                    json={"backup_reserve_percent": 0},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 200:
+                        _LOGGER.info("Set backup reserve to 0%%")
+                    else:
+                        _LOGGER.warning("Could not set backup reserve to 0%%: %s", response.status)
 
             # Step 3: Switch to autonomous mode for best export behavior
             if force_discharge_state.get("saved_operation_mode") != "autonomous":
@@ -6303,7 +6361,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         from homeassistant.util import dt as dt_util
 
         # Very high sell rate to encourage Powerwall to export all energy
-        sell_rate_discharge = 10.00  # $10/kWh - huge incentive to discharge
+        sell_rate_discharge = 20.00  # $20/kWh - huge incentive to discharge
         sell_rate_normal = 0.08      # 8c/kWh normal feed-in
 
         # Buy rate to discourage import during discharge
@@ -6575,11 +6633,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             _LOGGER.info("Saved current tariff for restoration after charge (name: %s)",
                                         saved_tariff.get("name", "unknown"))
                         else:
-                            _LOGGER.warning("Could not extract tariff from response - restore may not work")
+                            _LOGGER.warning("Could not extract tariff from tariff_rate response - will try site_info")
                     else:
-                        _LOGGER.warning("Could not save current tariff: %s", response.status)
+                        _LOGGER.warning("tariff_rate endpoint returned %s - will try site_info fallback", response.status)
 
-                # Step 2: Get and save current operation mode and backup reserve
+                # Step 2: Get and save current operation mode, backup reserve, and tariff (fallback)
                 async with session.get(
                     f"{api_base}/api/1/energy_sites/{site_id}/site_info",
                     headers=headers,
@@ -6595,6 +6653,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                      force_charge_state["saved_backup_reserve"])
                         if force_charge_state["saved_backup_reserve"] is None:
                             _LOGGER.warning("backup_reserve_percent not in site_info response - will use default on restore")
+
+                        # Fallback: if tariff wasn't saved from tariff_rate, try to get it from site_info
+                        if not force_charge_state.get("saved_tariff"):
+                            site_tariff = site_info.get("tariff_content_v2") or site_info.get("tariff_content")
+                            if site_tariff:
+                                force_charge_state["saved_tariff"] = site_tariff
+                                _LOGGER.info("Saved tariff from site_info fallback (name: %s)",
+                                            site_tariff.get("name", "unknown"))
+                            else:
+                                _LOGGER.warning("No tariff found in site_info either")
+                                # For Globird users, warn that tariff may not be restored
+                                electricity_provider = entry.options.get(
+                                    CONF_ELECTRICITY_PROVIDER,
+                                    entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
+                                )
+                                if electricity_provider == "globird":
+                                    try:
+                                        from .automations.actions import _send_expo_push
+                                        await _send_expo_push(
+                                            hass,
+                                            "⚠️ PowerSync Warning",
+                                            "Could not save your current tariff. After force charge ends, you may need to reconfigure your TOU schedule."
+                                        )
+                                    except Exception as notify_err:
+                                        _LOGGER.debug(f"Could not send notification: {notify_err}")
                     else:
                         text = await response.text()
                         _LOGGER.error(f"Failed to get site_info for saving: {response.status} - {text}")
@@ -6872,6 +6955,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 force_discharge_state["active"] = False
                 force_discharge_state["saved_tariff"] = None
                 force_discharge_state["saved_operation_mode"] = None
+                force_discharge_state["saved_backup_reserve"] = None
                 force_discharge_state["expires_at"] = None
                 force_charge_state["active"] = False
                 force_charge_state["saved_tariff"] = None
@@ -6971,8 +7055,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 else:
                     _LOGGER.error("Failed to restore saved tariff")
             else:
-                _LOGGER.warning("No saved tariff to restore, triggering sync")
-                await handle_sync_tou(ServiceCall(DOMAIN, SERVICE_SYNC_TOU, {}))
+                # No saved tariff - for Globird users this is a problem since sync does nothing
+                if electricity_provider == "globird":
+                    _LOGGER.warning("No saved tariff to restore for Globird user - tariff may need manual reconfiguration")
+                    try:
+                        from .automations.actions import _send_expo_push
+                        await _send_expo_push(
+                            hass,
+                            "⚠️ PowerSync Alert",
+                            "Could not restore your Globird tariff. You may need to reconfigure your TOU schedule in the Tesla app."
+                        )
+                    except Exception as notify_err:
+                        _LOGGER.debug(f"Could not send notification: {notify_err}")
+                else:
+                    _LOGGER.warning("No saved tariff to restore, triggering sync")
+                    await handle_sync_tou(ServiceCall(DOMAIN, SERVICE_SYNC_TOU, {}))
 
             # Restore operation mode (prefer discharge saved mode, then charge)
             restore_mode = (
@@ -7002,12 +7099,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     except Exception as notify_err:
                         _LOGGER.debug(f"Could not send notification: {notify_err}")
 
-            # Restore backup reserve if it was saved during force charge
-            # If saved value is None, try to get current value from site_info or use default
-            saved_backup_reserve = force_charge_state.get("saved_backup_reserve")
+            # Restore backup reserve if it was saved during force charge OR force discharge
+            # For discharge: only restore if current SoC > saved reserve (to prevent grid imports)
+            saved_backup_reserve = (
+                force_discharge_state.get("saved_backup_reserve") or
+                force_charge_state.get("saved_backup_reserve")
+            )
+            was_discharging = force_discharge_state.get("active")
 
             if saved_backup_reserve is None:
-                # Try to get current backup reserve from API to check if it's at 100%
+                # Try to get current backup reserve from API to check if it's at extreme values
                 _LOGGER.warning("No saved backup reserve found - checking current value")
                 try:
                     async with session.get(
@@ -7019,36 +7120,67 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             data = await response.json()
                             current_reserve = data.get("response", {}).get("backup_reserve_percent")
                             _LOGGER.info(f"Current backup reserve is {current_reserve}%")
-                            # If it's at 100% (force charge set it), restore to default 20%
-                            if current_reserve == 100:
+                            # If it's at 100% (force charge) or 0% (force discharge), restore to default 20%
+                            if current_reserve in (0, 100):
                                 saved_backup_reserve = 20
-                                _LOGGER.info("Backup reserve at 100% from force charge - will restore to default 20%")
+                                _LOGGER.info(f"Backup reserve at {current_reserve}% from force mode - will restore to default 20%")
                 except Exception as e:
                     _LOGGER.warning(f"Could not check current backup reserve: {e}")
 
             if saved_backup_reserve is not None:
-                _LOGGER.info(f"Restoring backup reserve to: {saved_backup_reserve}%")
-                async with session.post(
-                    f"{api_base}/api/1/energy_sites/{site_id}/backup",
-                    headers=headers,
-                    json={"backup_reserve_percent": saved_backup_reserve},
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    if response.status == 200:
-                        _LOGGER.info(f"✅ Restored backup reserve to {saved_backup_reserve}%")
-                    else:
-                        text = await response.text()
-                        _LOGGER.error(f"Failed to restore backup reserve: {response.status} - {text}")
-                        # Send push notification for backup reserve restore failure
-                        try:
-                            from .automations.actions import _send_expo_push
-                            await _send_expo_push(
-                                hass,
-                                "⚠️ PowerSync Alert",
-                                f"Failed to restore backup reserve to {saved_backup_reserve}%. Please check your battery settings."
-                            )
-                        except Exception as notify_err:
-                            _LOGGER.debug(f"Could not send notification: {notify_err}")
+                # For discharge restore: check if SoC > backup reserve to prevent imports
+                should_restore_reserve = True
+                if was_discharging:
+                    try:
+                        # Get current battery SoC from coordinator
+                        coordinator = hass.data[DOMAIN][entry.entry_id].get("coordinator")
+                        if coordinator and coordinator.data:
+                            current_soc = coordinator.data.get("battery_level", 100)
+                            if current_soc < saved_backup_reserve:
+                                _LOGGER.warning(
+                                    f"SoC ({current_soc:.1f}%%) is below saved backup reserve ({saved_backup_reserve}%%) - "
+                                    f"skipping reserve restore to prevent grid imports"
+                                )
+                                should_restore_reserve = False
+                                # Send notification about this
+                                try:
+                                    from .automations.actions import _send_expo_push
+                                    await _send_expo_push(
+                                        hass,
+                                        "⚠️ PowerSync",
+                                        f"Battery at {current_soc:.0f}%% after discharge. Backup reserve kept at 0%% to prevent imports. "
+                                        f"Manually set reserve when ready."
+                                    )
+                                except Exception as notify_err:
+                                    _LOGGER.debug(f"Could not send notification: {notify_err}")
+                            else:
+                                _LOGGER.info(f"SoC ({current_soc:.1f}%%) is above saved reserve ({saved_backup_reserve}%%) - safe to restore")
+                    except Exception as e:
+                        _LOGGER.warning(f"Could not check SoC for reserve restore: {e}")
+
+                if should_restore_reserve:
+                    _LOGGER.info(f"Restoring backup reserve to: {saved_backup_reserve}%")
+                    async with session.post(
+                        f"{api_base}/api/1/energy_sites/{site_id}/backup",
+                        headers=headers,
+                        json={"backup_reserve_percent": saved_backup_reserve},
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as response:
+                        if response.status == 200:
+                            _LOGGER.info(f"✅ Restored backup reserve to {saved_backup_reserve}%")
+                        else:
+                            text = await response.text()
+                            _LOGGER.error(f"Failed to restore backup reserve: {response.status} - {text}")
+                            # Send push notification for backup reserve restore failure
+                            try:
+                                from .automations.actions import _send_expo_push
+                                await _send_expo_push(
+                                    hass,
+                                    "⚠️ PowerSync Alert",
+                                    f"Failed to restore backup reserve to {saved_backup_reserve}%. Please check your battery settings."
+                                )
+                            except Exception as notify_err:
+                                _LOGGER.debug(f"Could not send notification: {notify_err}")
             else:
                 _LOGGER.warning("Could not determine backup reserve to restore")
 
@@ -7056,6 +7188,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             force_discharge_state["active"] = False
             force_discharge_state["saved_tariff"] = None
             force_discharge_state["saved_operation_mode"] = None
+            force_discharge_state["saved_backup_reserve"] = None
             force_discharge_state["expires_at"] = None
 
             # Clear charge state
