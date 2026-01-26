@@ -98,10 +98,10 @@
         <a href="https://github.com/bolagnaise/PowerSync" class="back-link">&larr; Back to PowerSync</a>
 
         <h1>Privacy Policy</h1>
-        <p class="effective-date">Effective Date: January 9, 2026</p>
+        <p class="effective-date">Effective Date: January 26, 2026</p>
 
         <div class="summary">
-            <p><strong>PowerSync is designed with privacy in mind.</strong> The App operates primarily on your local network and does not collect, store, or transmit your personal energy data to our servers.</p>
+            <p><strong>PowerSync is designed with privacy in mind.</strong> The system operates primarily on your local network via Home Assistant and does not collect, store, or transmit your personal energy data to our servers.</p>
         </div>
 
         <h2>1. Information We Don't Collect</h2>
@@ -114,14 +114,15 @@
             <li>Access your contacts, photos, or other personal data</li>
         </ul>
 
-        <h2>2. Information Stored on Your Device</h2>
-        <p>The following information is stored locally on your device only:</p>
+        <h2>2. Information Stored Locally</h2>
+        <p>The following information is stored on your device and/or your Home Assistant instance:</p>
 
         <h3>2.1 Connection Credentials</h3>
         <ul>
+            <li>Home Assistant URL and Long-Lived Access Token (stored in device keychain)</li>
             <li>IP addresses of your local energy hardware</li>
-            <li>API tokens for Amber Electric (stored in device keychain)</li>
-            <li>Authentication tokens for energy hardware (stored in device keychain)</li>
+            <li>API tokens for Amber Electric (stored in Home Assistant)</li>
+            <li>Authentication tokens for energy hardware (stored in Home Assistant)</li>
         </ul>
 
         <h3>2.2 Configuration Settings</h3>
@@ -137,19 +138,43 @@
             <li>Recent system status (for widgets and quick access)</li>
         </ul>
 
-        <p><strong>This data never leaves your device</strong> except when communicating directly with your local energy hardware (over your home network) or Amber Electric's API (to fetch your prices).</p>
+        <h3>2.4 Push Notification Token</h3>
+        <ul>
+            <li>Your Expo Push Token is stored in Home Assistant to enable push notifications</li>
+            <li>This token is sent to Expo's servers when delivering notifications (see section 3.4)</li>
+        </ul>
+
+        <p><strong>This data stays within your control</strong> (your device and your Home Assistant instance) except when communicating with third-party services described in section 3.</p>
 
         <h2>3. Third-Party Services</h2>
 
-        <h3>3.1 Amber Electric</h3>
-        <p>When you connect your Amber Electric account, the App communicates directly with Amber Electric's servers to retrieve your current and forecast electricity prices. This communication is between your device and Amber Electric. We do not act as an intermediary or store this data on our servers.</p>
+        <h3>3.1 Home Assistant</h3>
+        <p>PowerSync operates as a Home Assistant custom integration. All energy data, credentials, and configuration are stored on your Home Assistant instance. The mobile app connects to your Home Assistant server to display data and send commands.</p>
+
+        <h3>3.2 Amber Electric</h3>
+        <p>When you connect your Amber Electric account, Home Assistant communicates directly with Amber Electric's servers to retrieve your current and forecast electricity prices. We do not act as an intermediary or store this data on our servers.</p>
         <p>Amber Electric's privacy policy: <a href="https://www.amber.com.au/privacy">https://www.amber.com.au/privacy</a></p>
 
-        <h3>3.2 Local Hardware Communication</h3>
-        <p>The App communicates with your energy hardware (Tesla Powerwall, inverters, etc.) over your local network. This communication stays within your home network and does not pass through any external servers we control.</p>
+        <h3>3.3 Local Hardware Communication</h3>
+        <p>Home Assistant communicates with your energy hardware (Tesla Powerwall, inverters, etc.) over your local network. This communication stays within your home network and does not pass through any external servers we control.</p>
 
-        <h3>3.3 Tesla (Powerwall Users)</h3>
-        <p>For Tesla Powerwall users, the App connects directly to your Powerwall Gateway on your local network. We do not use Tesla's cloud API or access your Tesla account.</p>
+        <h3>3.4 Tesla (Powerwall Users)</h3>
+        <p>For Tesla Powerwall users, PowerSync supports multiple connection methods:</p>
+        <ul>
+            <li><strong>Local TEDAPI:</strong> Direct connection to your Powerwall Gateway on your local network for real-time control and monitoring.</li>
+            <li><strong>Tesla Fleet API (optional):</strong> Cloud-based connection to Tesla's servers for additional features like individual battery health data. Requires Tesla account authentication.</li>
+            <li><strong>Teslemetry (optional):</strong> Third-party cloud service that provides Tesla Fleet API access. If used, your data passes through Teslemetry's servers.</li>
+        </ul>
+        <p>You choose which connection methods to enable. Local-only operation is fully supported.</p>
+
+        <h3>3.5 Push Notifications (Expo)</h3>
+        <p>The mobile app uses Expo Push Notifications to deliver alerts (e.g., price spikes, forecast discrepancies). When notifications are sent:</p>
+        <ul>
+            <li>Your device's push token is stored in Home Assistant</li>
+            <li>Notification content (including price data) passes through Expo's servers to reach your device</li>
+            <li>Expo may retain notification metadata according to their privacy policy</li>
+        </ul>
+        <p>Expo's privacy policy: <a href="https://expo.dev/privacy">https://expo.dev/privacy</a></p>
 
         <h2>4. Data Security</h2>
         <ul>
@@ -182,7 +207,7 @@
             <p><strong>Third-Party Trademark Notice:</strong> Tesla, Powerwall, and other product names are trademarks of their respective owners. PowerSync is an independent third-party application and is not affiliated with Tesla, Inc. or any hardware manufacturer.</p>
         </div>
 
-        <p style="margin-top: 2rem; font-size: 0.875rem; color: var(--muted);">Last Updated: January 9, 2026</p>
+        <p style="margin-top: 2rem; font-size: 0.875rem; color: var(--muted);">Last Updated: January 26, 2026</p>
     </div>
 </body>
 </html>
