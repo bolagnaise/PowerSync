@@ -548,6 +548,13 @@ CONF_SPIKE_PROTECTION_ENABLED = "spike_protection_enabled"
 # arrive via the Amber API at :35/:60 seconds into each 5-minute period
 CONF_SETTLED_PRICES_ONLY = "settled_prices_only"
 
+# Forecast Discrepancy Alert configuration
+# Compares predicted forecast against conservative/low forecast and alerts if
+# they differ significantly (indicates forecast model may be unreliable)
+CONF_FORECAST_DISCREPANCY_ALERT = "forecast_discrepancy_alert"
+CONF_FORECAST_DISCREPANCY_THRESHOLD = "forecast_discrepancy_threshold"
+DEFAULT_FORECAST_DISCREPANCY_THRESHOLD = 10.0  # c/kWh - alert if avg difference > 10c
+
 # Alpha: Force tariff mode toggle
 # After uploading a tariff, briefly switch to self_consumption then back to autonomous
 # to force Powerwall to immediately recalculate behavior based on new prices

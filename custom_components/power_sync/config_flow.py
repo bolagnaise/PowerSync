@@ -103,6 +103,10 @@ from .const import (
     CONF_SPIKE_PROTECTION_ENABLED,
     # Settled prices only mode
     CONF_SETTLED_PRICES_ONLY,
+    # Forecast discrepancy alert
+    CONF_FORECAST_DISCREPANCY_ALERT,
+    CONF_FORECAST_DISCREPANCY_THRESHOLD,
+    DEFAULT_FORECAST_DISCREPANCY_THRESHOLD,
     # Alpha: Force tariff mode toggle
     CONF_FORCE_TARIFF_MODE_TOGGLE,
     # Inverter curtailment configuration
@@ -559,6 +563,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # Store Amber settings in _amber_data
             self._amber_data[CONF_SPIKE_PROTECTION_ENABLED] = user_input.get(CONF_SPIKE_PROTECTION_ENABLED, False)
             self._amber_data[CONF_SETTLED_PRICES_ONLY] = user_input.get(CONF_SETTLED_PRICES_ONLY, False)
+            self._amber_data[CONF_FORECAST_DISCREPANCY_ALERT] = user_input.get(CONF_FORECAST_DISCREPANCY_ALERT, False)
+            self._amber_data[CONF_FORECAST_DISCREPANCY_THRESHOLD] = user_input.get(CONF_FORECAST_DISCREPANCY_THRESHOLD, DEFAULT_FORECAST_DISCREPANCY_THRESHOLD)
             # Force tariff mode toggle only applies to Tesla
             if is_tesla:
                 self._amber_data[CONF_FORCE_TARIFF_MODE_TOGGLE] = user_input.get(CONF_FORCE_TARIFF_MODE_TOGGLE, False)
@@ -602,6 +608,9 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # Spike and price protection settings
             vol.Optional(CONF_SPIKE_PROTECTION_ENABLED, default=False): bool,
             vol.Optional(CONF_SETTLED_PRICES_ONLY, default=False): bool,
+            # Forecast discrepancy alert (notifies when predicted differs from conservative)
+            vol.Optional(CONF_FORECAST_DISCREPANCY_ALERT, default=False): bool,
+            vol.Optional(CONF_FORECAST_DISCREPANCY_THRESHOLD, default=DEFAULT_FORECAST_DISCREPANCY_THRESHOLD): vol.Coerce(float),
         }
 
         # Only show force mode toggle for Tesla (it's a Tesla-specific feature)
@@ -1881,6 +1890,14 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_SETTLED_PRICES_ONLY,
                 default=self._get_option(CONF_SETTLED_PRICES_ONLY, False),
             ): bool,
+            vol.Optional(
+                CONF_FORECAST_DISCREPANCY_ALERT,
+                default=self._get_option(CONF_FORECAST_DISCREPANCY_ALERT, False),
+            ): bool,
+            vol.Optional(
+                CONF_FORECAST_DISCREPANCY_THRESHOLD,
+                default=self._get_option(CONF_FORECAST_DISCREPANCY_THRESHOLD, DEFAULT_FORECAST_DISCREPANCY_THRESHOLD),
+            ): vol.Coerce(float),
         }
 
         # Only show force mode toggle for Tesla (it's a Tesla-specific feature)

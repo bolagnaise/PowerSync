@@ -105,6 +105,8 @@ from .const import (
     CONF_EXPORT_BOOST_START,
     CONF_EXPORT_BOOST_END,
     CONF_EXPORT_BOOST_THRESHOLD,
+    DEFAULT_EXPORT_PRICE_OFFSET,
+    DEFAULT_EXPORT_MIN_PRICE,
     DEFAULT_EXPORT_BOOST_START,
     DEFAULT_EXPORT_BOOST_END,
     DEFAULT_EXPORT_BOOST_THRESHOLD,
@@ -120,6 +122,10 @@ from .const import (
     CONF_SPIKE_PROTECTION_ENABLED,
     # Settled prices only mode
     CONF_SETTLED_PRICES_ONLY,
+    # Forecast discrepancy alert configuration
+    CONF_FORECAST_DISCREPANCY_ALERT,
+    CONF_FORECAST_DISCREPANCY_THRESHOLD,
+    DEFAULT_FORECAST_DISCREPANCY_THRESHOLD,
     # Alpha: Force tariff mode toggle
     CONF_FORCE_TARIFF_MODE_TOGGLE,
     # AC-Coupled Inverter Curtailment configuration
@@ -2009,6 +2015,349 @@ class ConfigViewLegacy(HomeAssistantView):
         """Handle GET request - delegate to main ConfigView."""
         _LOGGER.info("📱 Config HTTP request (legacy URL)")
         return await self._config_view.get(request)
+
+
+class ProviderConfigView(HomeAssistantView):
+    """HTTP view for electricity provider configuration.
+
+    GET: Returns current provider type and all relevant settings
+    POST: Updates provider settings via config entry options
+    """
+
+    url = "/api/power_sync/provider_config"
+    name = "api:power_sync:provider_config"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request for provider configuration."""
+        _LOGGER.info("⚡ Provider config HTTP GET request")
+
+        # Find the power_sync entry
+        entry = None
+        for config_entry in self._hass.config_entries.async_entries(DOMAIN):
+            entry = config_entry
+            break
+
+        if not entry:
+            return web.json_response(
+                {"success": False, "error": "PowerSync not configured"},
+                status=503
+            )
+
+        try:
+            # Get battery system and electricity provider
+            battery_system = entry.data.get(CONF_BATTERY_SYSTEM, "tesla")
+            electricity_provider = entry.options.get(
+                CONF_ELECTRICITY_PROVIDER,
+                entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
+            )
+
+            # Build provider-specific config based on provider type
+            config = {}
+
+            if electricity_provider == "amber":
+                # Amber Electric settings
+                config = {
+                    "auto_sync": entry.options.get(
+                        CONF_AUTO_SYNC_ENABLED,
+                        entry.data.get(CONF_AUTO_SYNC_ENABLED, True)
+                    ),
+                    "forecast_type": entry.options.get(
+                        CONF_AMBER_FORECAST_TYPE,
+                        entry.data.get(CONF_AMBER_FORECAST_TYPE, "current")
+                    ),
+                    "spike_protection_enabled": entry.options.get(
+                        CONF_SPIKE_PROTECTION_ENABLED,
+                        entry.data.get(CONF_SPIKE_PROTECTION_ENABLED, False)
+                    ),
+                    "settled_prices_only": entry.options.get(
+                        CONF_SETTLED_PRICES_ONLY,
+                        entry.data.get(CONF_SETTLED_PRICES_ONLY, False)
+                    ),
+                    # Export Boost settings
+                    "export_boost_enabled": entry.options.get(
+                        CONF_EXPORT_BOOST_ENABLED,
+                        entry.data.get(CONF_EXPORT_BOOST_ENABLED, False)
+                    ),
+                    "export_price_offset": entry.options.get(
+                        CONF_EXPORT_PRICE_OFFSET,
+                        entry.data.get(CONF_EXPORT_PRICE_OFFSET, DEFAULT_EXPORT_PRICE_OFFSET)
+                    ),
+                    "export_min_price": entry.options.get(
+                        CONF_EXPORT_MIN_PRICE,
+                        entry.data.get(CONF_EXPORT_MIN_PRICE, DEFAULT_EXPORT_MIN_PRICE)
+                    ),
+                    "export_boost_start": entry.options.get(
+                        CONF_EXPORT_BOOST_START,
+                        entry.data.get(CONF_EXPORT_BOOST_START, DEFAULT_EXPORT_BOOST_START)
+                    ),
+                    "export_boost_end": entry.options.get(
+                        CONF_EXPORT_BOOST_END,
+                        entry.data.get(CONF_EXPORT_BOOST_END, DEFAULT_EXPORT_BOOST_END)
+                    ),
+                    "export_boost_threshold": entry.options.get(
+                        CONF_EXPORT_BOOST_THRESHOLD,
+                        entry.data.get(CONF_EXPORT_BOOST_THRESHOLD, DEFAULT_EXPORT_BOOST_THRESHOLD)
+                    ),
+                    # Chip Mode settings
+                    "chip_mode_enabled": entry.options.get(
+                        CONF_CHIP_MODE_ENABLED,
+                        entry.data.get(CONF_CHIP_MODE_ENABLED, False)
+                    ),
+                    "chip_mode_start": entry.options.get(
+                        CONF_CHIP_MODE_START,
+                        entry.data.get(CONF_CHIP_MODE_START, DEFAULT_CHIP_MODE_START)
+                    ),
+                    "chip_mode_end": entry.options.get(
+                        CONF_CHIP_MODE_END,
+                        entry.data.get(CONF_CHIP_MODE_END, DEFAULT_CHIP_MODE_END)
+                    ),
+                    "chip_mode_threshold": entry.options.get(
+                        CONF_CHIP_MODE_THRESHOLD,
+                        entry.data.get(CONF_CHIP_MODE_THRESHOLD, DEFAULT_CHIP_MODE_THRESHOLD)
+                    ),
+                }
+
+            elif electricity_provider == "flow_power":
+                # Flow Power settings
+                config = {
+                    "auto_sync": entry.options.get(
+                        CONF_AUTO_SYNC_ENABLED,
+                        entry.data.get(CONF_AUTO_SYNC_ENABLED, True)
+                    ),
+                    "state": entry.options.get(
+                        CONF_FLOW_POWER_STATE,
+                        entry.data.get(CONF_FLOW_POWER_STATE, "NSW1")
+                    ),
+                    "price_source": entry.options.get(
+                        CONF_FLOW_POWER_PRICE_SOURCE,
+                        entry.data.get(CONF_FLOW_POWER_PRICE_SOURCE, "amber")
+                    ),
+                    # Network Tariff settings
+                    "network_distributor": entry.options.get(
+                        CONF_NETWORK_DISTRIBUTOR,
+                        entry.data.get(CONF_NETWORK_DISTRIBUTOR, "")
+                    ),
+                    "network_tariff_code": entry.options.get(
+                        CONF_NETWORK_TARIFF_CODE,
+                        entry.data.get(CONF_NETWORK_TARIFF_CODE, "")
+                    ),
+                    "network_use_manual_rates": entry.options.get(
+                        CONF_NETWORK_USE_MANUAL_RATES,
+                        entry.data.get(CONF_NETWORK_USE_MANUAL_RATES, False)
+                    ),
+                    "network_tariff_type": entry.options.get(
+                        CONF_NETWORK_TARIFF_TYPE,
+                        entry.data.get(CONF_NETWORK_TARIFF_TYPE, "flat")
+                    ),
+                    "network_flat_rate": entry.options.get(
+                        CONF_NETWORK_FLAT_RATE,
+                        entry.data.get(CONF_NETWORK_FLAT_RATE, 0.0)
+                    ),
+                    "network_peak_rate": entry.options.get(
+                        CONF_NETWORK_PEAK_RATE,
+                        entry.data.get(CONF_NETWORK_PEAK_RATE, 0.0)
+                    ),
+                    "network_shoulder_rate": entry.options.get(
+                        CONF_NETWORK_SHOULDER_RATE,
+                        entry.data.get(CONF_NETWORK_SHOULDER_RATE, 0.0)
+                    ),
+                    "network_offpeak_rate": entry.options.get(
+                        CONF_NETWORK_OFFPEAK_RATE,
+                        entry.data.get(CONF_NETWORK_OFFPEAK_RATE, 0.0)
+                    ),
+                    "network_peak_start": entry.options.get(
+                        CONF_NETWORK_PEAK_START,
+                        entry.data.get(CONF_NETWORK_PEAK_START, "")
+                    ),
+                    "network_peak_end": entry.options.get(
+                        CONF_NETWORK_PEAK_END,
+                        entry.data.get(CONF_NETWORK_PEAK_END, "")
+                    ),
+                    "network_offpeak_start": entry.options.get(
+                        CONF_NETWORK_OFFPEAK_START,
+                        entry.data.get(CONF_NETWORK_OFFPEAK_START, "")
+                    ),
+                    "network_offpeak_end": entry.options.get(
+                        CONF_NETWORK_OFFPEAK_END,
+                        entry.data.get(CONF_NETWORK_OFFPEAK_END, "")
+                    ),
+                    "network_other_fees": entry.options.get(
+                        CONF_NETWORK_OTHER_FEES,
+                        entry.data.get(CONF_NETWORK_OTHER_FEES, 0.0)
+                    ),
+                    "network_include_gst": entry.options.get(
+                        CONF_NETWORK_INCLUDE_GST,
+                        entry.data.get(CONF_NETWORK_INCLUDE_GST, True)
+                    ),
+                    # PEA settings
+                    "pea_enabled": entry.options.get(
+                        CONF_PEA_ENABLED,
+                        entry.data.get(CONF_PEA_ENABLED, False)
+                    ),
+                    "flow_power_base_rate": entry.options.get(
+                        CONF_FLOW_POWER_BASE_RATE,
+                        entry.data.get(CONF_FLOW_POWER_BASE_RATE, FLOW_POWER_DEFAULT_BASE_RATE)
+                    ),
+                    "pea_custom_value": entry.options.get(
+                        CONF_PEA_CUSTOM_VALUE,
+                        entry.data.get(CONF_PEA_CUSTOM_VALUE, None)
+                    ),
+                    # Demand Charges settings
+                    "demand_charge_enabled": entry.options.get(
+                        CONF_DEMAND_CHARGE_ENABLED,
+                        entry.data.get(CONF_DEMAND_CHARGE_ENABLED, False)
+                    ),
+                    "demand_charge_rate": entry.options.get(
+                        CONF_DEMAND_CHARGE_RATE,
+                        entry.data.get(CONF_DEMAND_CHARGE_RATE, 0.0)
+                    ),
+                    "demand_charge_start_time": entry.options.get(
+                        CONF_DEMAND_CHARGE_START_TIME,
+                        entry.data.get(CONF_DEMAND_CHARGE_START_TIME, "16:00")
+                    ),
+                    "demand_charge_end_time": entry.options.get(
+                        CONF_DEMAND_CHARGE_END_TIME,
+                        entry.data.get(CONF_DEMAND_CHARGE_END_TIME, "21:00")
+                    ),
+                    "demand_charge_days": entry.options.get(
+                        CONF_DEMAND_CHARGE_DAYS,
+                        entry.data.get(CONF_DEMAND_CHARGE_DAYS, [0, 1, 2, 3, 4])
+                    ),
+                    "demand_charge_billing_day": entry.options.get(
+                        CONF_DEMAND_CHARGE_BILLING_DAY,
+                        entry.data.get(CONF_DEMAND_CHARGE_BILLING_DAY, 1)
+                    ),
+                }
+
+            elif electricity_provider in ("globird", "aemo_vpp"):
+                # Globird / AEMO VPP settings
+                config = {
+                    "aemo_region": entry.options.get(
+                        CONF_AEMO_REGION,
+                        entry.data.get(CONF_AEMO_REGION, "NSW1")
+                    ),
+                    "aemo_spike_threshold": entry.options.get(
+                        CONF_AEMO_SPIKE_THRESHOLD,
+                        entry.data.get(CONF_AEMO_SPIKE_THRESHOLD, 300)
+                    ),
+                    "aemo_spike_enabled": entry.options.get(
+                        CONF_AEMO_SPIKE_ENABLED,
+                        entry.data.get(CONF_AEMO_SPIKE_ENABLED, True)
+                    ),
+                }
+
+            result = {
+                "success": True,
+                "electricity_provider": electricity_provider,
+                "battery_system": battery_system,
+                "config": config,
+            }
+
+            _LOGGER.info(f"✅ Provider config response: provider={electricity_provider}")
+            return web.json_response(result)
+
+        except Exception as e:
+            _LOGGER.error(f"Error fetching provider config: {e}", exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500
+            )
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Handle POST request to update provider configuration."""
+        _LOGGER.info("⚡ Provider config HTTP POST request")
+
+        # Find the power_sync entry
+        entry = None
+        for config_entry in self._hass.config_entries.async_entries(DOMAIN):
+            entry = config_entry
+            break
+
+        if not entry:
+            return web.json_response(
+                {"success": False, "error": "PowerSync not configured"},
+                status=503
+            )
+
+        try:
+            data = await request.json()
+            _LOGGER.info(f"Provider config update request: {data}")
+
+            # Map incoming config keys to config entry option keys
+            key_mapping = {
+                # Common
+                "auto_sync": CONF_AUTO_SYNC_ENABLED,
+                # Amber
+                "forecast_type": CONF_AMBER_FORECAST_TYPE,
+                "spike_protection_enabled": CONF_SPIKE_PROTECTION_ENABLED,
+                "settled_prices_only": CONF_SETTLED_PRICES_ONLY,
+                "export_boost_enabled": CONF_EXPORT_BOOST_ENABLED,
+                "export_price_offset": CONF_EXPORT_PRICE_OFFSET,
+                "export_min_price": CONF_EXPORT_MIN_PRICE,
+                "export_boost_start": CONF_EXPORT_BOOST_START,
+                "export_boost_end": CONF_EXPORT_BOOST_END,
+                "export_boost_threshold": CONF_EXPORT_BOOST_THRESHOLD,
+                "chip_mode_enabled": CONF_CHIP_MODE_ENABLED,
+                "chip_mode_start": CONF_CHIP_MODE_START,
+                "chip_mode_end": CONF_CHIP_MODE_END,
+                "chip_mode_threshold": CONF_CHIP_MODE_THRESHOLD,
+                # Flow Power
+                "state": CONF_FLOW_POWER_STATE,
+                "price_source": CONF_FLOW_POWER_PRICE_SOURCE,
+                "network_distributor": CONF_NETWORK_DISTRIBUTOR,
+                "network_tariff_code": CONF_NETWORK_TARIFF_CODE,
+                "network_use_manual_rates": CONF_NETWORK_USE_MANUAL_RATES,
+                "network_tariff_type": CONF_NETWORK_TARIFF_TYPE,
+                "network_flat_rate": CONF_NETWORK_FLAT_RATE,
+                "network_peak_rate": CONF_NETWORK_PEAK_RATE,
+                "network_shoulder_rate": CONF_NETWORK_SHOULDER_RATE,
+                "network_offpeak_rate": CONF_NETWORK_OFFPEAK_RATE,
+                "network_peak_start": CONF_NETWORK_PEAK_START,
+                "network_peak_end": CONF_NETWORK_PEAK_END,
+                "network_offpeak_start": CONF_NETWORK_OFFPEAK_START,
+                "network_offpeak_end": CONF_NETWORK_OFFPEAK_END,
+                "network_other_fees": CONF_NETWORK_OTHER_FEES,
+                "network_include_gst": CONF_NETWORK_INCLUDE_GST,
+                "pea_enabled": CONF_PEA_ENABLED,
+                "flow_power_base_rate": CONF_FLOW_POWER_BASE_RATE,
+                "pea_custom_value": CONF_PEA_CUSTOM_VALUE,
+                "demand_charge_enabled": CONF_DEMAND_CHARGE_ENABLED,
+                "demand_charge_rate": CONF_DEMAND_CHARGE_RATE,
+                "demand_charge_start_time": CONF_DEMAND_CHARGE_START_TIME,
+                "demand_charge_end_time": CONF_DEMAND_CHARGE_END_TIME,
+                "demand_charge_days": CONF_DEMAND_CHARGE_DAYS,
+                "demand_charge_billing_day": CONF_DEMAND_CHARGE_BILLING_DAY,
+                # Globird / AEMO VPP
+                "aemo_region": CONF_AEMO_REGION,
+                "aemo_spike_threshold": CONF_AEMO_SPIKE_THRESHOLD,
+                "aemo_spike_enabled": CONF_AEMO_SPIKE_ENABLED,
+            }
+
+            # Build new options dict starting with existing options
+            new_options = dict(entry.options)
+
+            # Update only the keys that were provided
+            for key, value in data.items():
+                if key in key_mapping:
+                    new_options[key_mapping[key]] = value
+
+            # Update the config entry
+            self._hass.config_entries.async_update_entry(entry, options=new_options)
+
+            _LOGGER.info(f"✅ Provider config updated successfully")
+            return web.json_response({"success": True})
+
+        except Exception as e:
+            _LOGGER.error(f"Error updating provider config: {e}", exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500
+            )
 
 
 class TariffPriceView(HomeAssistantView):
@@ -4811,6 +5160,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         from .tariff_converter import (
             convert_amber_to_tesla_tariff,
             extract_most_recent_actual_interval,
+            compare_forecast_types,
         )
 
         # Determine price source: AEMO API or Amber
@@ -4911,6 +5261,47 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_AMBER_FORECAST_TYPE, "predicted")
         )
         _LOGGER.info(f"Using forecast type: {forecast_type}")
+
+        # Check for forecast discrepancy (Amber only, on initial forecast sync)
+        # Compares predicted vs conservative/low to detect unreliable forecasts
+        forecast_discrepancy_alert_enabled = entry.options.get(
+            CONF_FORECAST_DISCREPANCY_ALERT,
+            entry.data.get(CONF_FORECAST_DISCREPANCY_ALERT, False)
+        )
+        if (
+            sync_mode == 'initial_forecast' and
+            not use_aemo_sensor and
+            forecast_discrepancy_alert_enabled and
+            forecast_data
+        ):
+            discrepancy_threshold = entry.options.get(
+                CONF_FORECAST_DISCREPANCY_THRESHOLD,
+                entry.data.get(CONF_FORECAST_DISCREPANCY_THRESHOLD, DEFAULT_FORECAST_DISCREPANCY_THRESHOLD)
+            )
+            discrepancy_result = compare_forecast_types(forecast_data, threshold=discrepancy_threshold)
+
+            if discrepancy_result.get("has_discrepancy"):
+                avg_diff = discrepancy_result.get("avg_difference", 0)
+                max_diff = discrepancy_result.get("max_difference", 0)
+                samples = discrepancy_result.get("samples", 0)
+
+                _LOGGER.warning(
+                    "⚠️ Amber forecast discrepancy: predicted vs conservative differ by avg %.1fc/kWh "
+                    "(max %.1fc, %d samples). Consider switching to 'conservative' forecast type.",
+                    avg_diff, max_diff, samples
+                )
+
+                # Send mobile push notification
+                try:
+                    from .automations.actions import _send_expo_push
+                    await _send_expo_push(
+                        hass,
+                        "Forecast Discrepancy Alert",
+                        f"Amber predicted vs conservative prices differ by avg {avg_diff:.0f}c/kWh (max {max_diff:.0f}c). "
+                        f"The predicted forecast may be unreliable. Consider switching to conservative.",
+                    )
+                except Exception as notify_err:
+                    _LOGGER.debug(f"Could not send forecast discrepancy notification: {notify_err}")
 
         # Fetch Powerwall timezone from site_info
         # This ensures correct timezone handling for TOU schedule alignment
@@ -7803,6 +8194,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register HTTP endpoint for Tariff Price (for Globird users without API)
     hass.http.register_view(TariffPriceView(hass))
     _LOGGER.info("💰 Tariff price HTTP endpoint registered at /api/power_sync/tariff_price")
+
+    # Register HTTP endpoint for Provider Config (for mobile app electricity provider settings)
+    hass.http.register_view(ProviderConfigView(hass))
+    _LOGGER.info("⚡ Provider config HTTP endpoint registered at /api/power_sync/provider_config")
 
     # Register HTTP endpoints for Automations (for mobile app)
     hass.http.register_view(AutomationsView(hass))

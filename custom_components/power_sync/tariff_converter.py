@@ -153,6 +153,104 @@ def extract_most_recent_actual_interval(
     return None
 
 
+def compare_forecast_types(
+    forecast_data: list[dict[str, Any]],
+    threshold: float = 10.0,
+) -> dict[str, Any]:
+    """
+    Compare predicted vs conservative (low) forecast prices.
+
+    Analyzes future forecast intervals to detect when the "predicted" forecast
+    significantly differs from the "low" (conservative) forecast. Large differences
+    may indicate the forecast model is unreliable.
+
+    Args:
+        forecast_data: List of Amber price points (30-min or 5-min resolution)
+        threshold: Average price difference threshold in c/kWh to flag as discrepancy
+
+    Returns:
+        Dict with:
+            - has_discrepancy: bool - True if avg difference exceeds threshold
+            - avg_difference: float - Average absolute difference (c/kWh)
+            - max_difference: float - Maximum difference found (c/kWh)
+            - samples: int - Number of forecast intervals compared
+            - details: list - List of {time, predicted, low, diff} for top differences
+    """
+    differences = []
+    details = []
+
+    for point in forecast_data:
+        interval_type = point.get("type", "")
+        channel_type = point.get("channelType", "")
+        advanced_price = point.get("advancedPrice")
+
+        # Only compare ForecastInterval for general (import) channel
+        if interval_type != "ForecastInterval" or channel_type != "general":
+            continue
+
+        if not advanced_price or not isinstance(advanced_price, dict):
+            continue
+
+        predicted = advanced_price.get("predicted")
+        low = advanced_price.get("low")
+
+        if predicted is None or low is None:
+            continue
+
+        diff = abs(predicted - low)
+        differences.append(diff)
+
+        nem_time = point.get("nemTime", "")
+        details.append({
+            "time": nem_time,
+            "predicted": round(predicted, 2),
+            "low": round(low, 2),
+            "diff": round(diff, 2),
+        })
+
+    if not differences:
+        return {
+            "has_discrepancy": False,
+            "avg_difference": 0.0,
+            "max_difference": 0.0,
+            "samples": 0,
+            "details": [],
+        }
+
+    avg_diff = sum(differences) / len(differences)
+    max_diff = max(differences)
+
+    # Sort details by difference descending and take top 5
+    details.sort(key=lambda x: x["diff"], reverse=True)
+    top_details = details[:5]
+
+    has_discrepancy = avg_diff > threshold
+
+    if has_discrepancy:
+        _LOGGER.warning(
+            "⚠️ Forecast discrepancy detected: avg=%.1fc/kWh, max=%.1fc/kWh (threshold=%.1fc)",
+            avg_diff, max_diff, threshold
+        )
+        for d in top_details:
+            _LOGGER.warning(
+                "   %s: predicted=%.1fc, low=%.1fc, diff=%.1fc",
+                d["time"], d["predicted"], d["low"], d["diff"]
+            )
+    else:
+        _LOGGER.debug(
+            "Forecast types aligned: avg_diff=%.1fc/kWh, max=%.1fc/kWh",
+            avg_diff, max_diff
+        )
+
+    return {
+        "has_discrepancy": has_discrepancy,
+        "avg_difference": round(avg_diff, 2),
+        "max_difference": round(max_diff, 2),
+        "samples": len(differences),
+        "details": top_details,
+    }
+
+
 def _build_demand_charge_rates(
     start_time: str,
     end_time: str,
