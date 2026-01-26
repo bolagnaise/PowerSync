@@ -158,11 +158,11 @@ def compare_forecast_types(
     threshold: float = 10.0,
 ) -> dict[str, Any]:
     """
-    Compare predicted vs conservative (low) forecast prices.
+    Compare predicted vs conservative (high) forecast prices.
 
     Analyzes future forecast intervals to detect when the "predicted" forecast
-    significantly differs from the "low" (conservative) forecast. Large differences
-    may indicate the forecast model is unreliable.
+    significantly differs from the "high" (conservative) forecast. Large differences
+    may indicate the predicted forecast is unreliable/overly optimistic.
 
     Args:
         forecast_data: List of Amber price points (30-min or 5-min resolution)
@@ -174,7 +174,7 @@ def compare_forecast_types(
             - avg_difference: float - Average absolute difference (c/kWh)
             - max_difference: float - Maximum difference found (c/kWh)
             - samples: int - Number of forecast intervals compared
-            - details: list - List of {time, predicted, low, diff} for top differences
+            - details: list - List of {time, predicted, conservative, diff} for top differences
     """
     differences = []
     details = []
@@ -192,19 +192,19 @@ def compare_forecast_types(
             continue
 
         predicted = advanced_price.get("predicted")
-        low = advanced_price.get("low")
+        conservative = advanced_price.get("high")  # high = conservative estimate
 
-        if predicted is None or low is None:
+        if predicted is None or conservative is None:
             continue
 
-        diff = abs(predicted - low)
+        diff = abs(predicted - conservative)
         differences.append(diff)
 
         nem_time = point.get("nemTime", "")
         details.append({
             "time": nem_time,
             "predicted": round(predicted, 2),
-            "low": round(low, 2),
+            "conservative": round(conservative, 2),
             "diff": round(diff, 2),
         })
 
@@ -233,8 +233,8 @@ def compare_forecast_types(
         )
         for d in top_details:
             _LOGGER.warning(
-                "   %s: predicted=%.1fc, low=%.1fc, diff=%.1fc",
-                d["time"], d["predicted"], d["low"], d["diff"]
+                "   %s: predicted=%.1fc, conservative=%.1fc, diff=%.1fc",
+                d["time"], d["predicted"], d["conservative"], d["diff"]
             )
     else:
         _LOGGER.debug(
