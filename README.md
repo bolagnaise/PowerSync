@@ -67,8 +67,10 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 
 - Home Assistant installed and running
 - HACS (Home Assistant Community Store) installed
-- Amber Electric API token ([get one here](https://app.amber.com.au/developers))
-- Tesla API access (see [Tesla API Options](#tesla-api-options) below)
+- **For Amber users:** Amber Electric API token ([get one here](https://app.amber.com.au/developers))
+- **For Flow Power users:** Flow Power API credentials
+- **For Globird/AEMO VPP users:** No API token required (uses AEMO spike detection)
+- Tesla or Sigenergy battery system with API access (see [Tesla API Options](#tesla-api-options) below)
 
 ### Installation Steps
 
@@ -89,10 +91,11 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
    - Click to add
 
 3. **Configure**
-   - Enter your **Amber API token** ([get one here](https://app.amber.com.au/developers))
-   - Enter your **Tesla API credentials** (Teslemetry key or leave empty for Tesla Fleet)
-   - Select your Tesla energy site and Amber site
-   - Enable automatic TOU schedule syncing (recommended)
+   - Select your **electricity provider** (Amber, Flow Power, Globird, AEMO VPP)
+   - Enter provider credentials if required (Amber API token, Flow Power credentials)
+   - Select your **battery system** (Tesla Powerwall or Sigenergy)
+   - Enter battery API credentials (Teslemetry key, Tesla Fleet, or Sigenergy Cloud)
+   - Configure additional options as needed
 
 4. **Verify Setup**
    - Check that new sensors appear:
