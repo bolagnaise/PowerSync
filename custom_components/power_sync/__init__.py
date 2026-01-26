@@ -772,8 +772,14 @@ class AEMOSpikeManager:
             ) as response:
                 if response.status == 200:
                     data = await response.json()
-                    self._saved_tariff = data.get("response", {}).get("tariff_content_v2")
-                    _LOGGER.info("Saved current tariff for restoration after spike")
+                    resp = data.get("response", {})
+                    # Try tariff_content_v2 first, then fall back to tariff_content
+                    self._saved_tariff = resp.get("tariff_content_v2") or resp.get("tariff_content")
+                    if self._saved_tariff:
+                        _LOGGER.info("Saved current tariff for restoration after spike (name: %s)",
+                                    self._saved_tariff.get("name", "unknown"))
+                    else:
+                        _LOGGER.warning("Could not extract tariff from response - restore may not work")
                 else:
                     _LOGGER.warning("Could not save current tariff: %s", response.status)
 
@@ -6205,8 +6211,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ) as response:
                     if response.status == 200:
                         data = await response.json()
-                        force_discharge_state["saved_tariff"] = data.get("response", {}).get("tariff_content_v2")
-                        _LOGGER.info("Saved current tariff for restoration after discharge")
+                        resp = data.get("response", {})
+                        # Try tariff_content_v2 first, then fall back to tariff_content
+                        saved_tariff = resp.get("tariff_content_v2") or resp.get("tariff_content")
+                        force_discharge_state["saved_tariff"] = saved_tariff
+                        if saved_tariff:
+                            _LOGGER.info("Saved current tariff for restoration after discharge (name: %s)",
+                                        saved_tariff.get("name", "unknown"))
+                        else:
+                            _LOGGER.warning("Could not extract tariff from response - restore may not work")
                     else:
                         _LOGGER.warning("Could not save current tariff: %s", response.status)
 
@@ -6285,7 +6298,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     def _create_discharge_tariff(duration_minutes: int) -> dict:
         """Create a Tesla tariff optimized for exporting (force discharge).
 
-        Uses the same tariff structure as the working Flask implementation.
+        Uses the standard Tesla tariff structure.
         """
         from homeassistant.util import dt as dt_util
 
@@ -6354,7 +6367,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 }]
             }
 
-        # Create Tesla tariff structure (matching Flask implementation)
+        # Create Tesla tariff structure
         tariff = {
             "name": f"Force Discharge ({duration_minutes}min)",
             "utility": "PowerSync",
@@ -6554,8 +6567,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ) as response:
                     if response.status == 200:
                         data = await response.json()
-                        force_charge_state["saved_tariff"] = data.get("response", {}).get("tariff_content_v2")
-                        _LOGGER.info("Saved current tariff for restoration after charge")
+                        resp = data.get("response", {})
+                        # Try tariff_content_v2 first, then fall back to tariff_content
+                        saved_tariff = resp.get("tariff_content_v2") or resp.get("tariff_content")
+                        force_charge_state["saved_tariff"] = saved_tariff
+                        if saved_tariff:
+                            _LOGGER.info("Saved current tariff for restoration after charge (name: %s)",
+                                        saved_tariff.get("name", "unknown"))
+                        else:
+                            _LOGGER.warning("Could not extract tariff from response - restore may not work")
                     else:
                         _LOGGER.warning("Could not save current tariff: %s", response.status)
 
@@ -6656,7 +6676,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     def _create_charge_tariff(duration_minutes: int) -> dict:
         """Create a Tesla tariff optimized for charging from grid (force charge).
 
-        Uses the same tariff structure as the working Flask implementation.
+        Uses the standard Tesla tariff structure.
         """
         from homeassistant.util import dt as dt_util
 
@@ -6726,7 +6746,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 }]
             }
 
-        # Create Tesla tariff structure (matching Flask implementation)
+        # Create Tesla tariff structure
         tariff = {
             "name": f"Force Charge ({duration_minutes}min)",
             "utility": "PowerSync",

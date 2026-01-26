@@ -294,9 +294,6 @@ Examples:
         station_id = stations[0].get("stationId") or stations[0].get("id") or stations[0].get("sn")
         print(f"  Station ID: {station_id}")
 
-    print(f"\nFor Flask web app:")
-    print(f"  Use the same credentials above in the Settings page")
-
     print("\n[+] Test completed successfully!")
     return 0
 
