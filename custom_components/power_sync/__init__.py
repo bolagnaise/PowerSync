@@ -2068,7 +2068,7 @@ class ProviderConfigView(HomeAssistantView):
                     ),
                     "forecast_type": entry.options.get(
                         CONF_AMBER_FORECAST_TYPE,
-                        entry.data.get(CONF_AMBER_FORECAST_TYPE, "current")
+                        entry.data.get(CONF_AMBER_FORECAST_TYPE, "predicted")
                     ),
                     "spike_protection_enabled": entry.options.get(
                         CONF_SPIKE_PROTECTION_ENABLED,
@@ -2077,6 +2077,15 @@ class ProviderConfigView(HomeAssistantView):
                     "settled_prices_only": entry.options.get(
                         CONF_SETTLED_PRICES_ONLY,
                         entry.data.get(CONF_SETTLED_PRICES_ONLY, False)
+                    ),
+                    # Forecast Discrepancy Alert settings
+                    "forecast_discrepancy_alert": entry.options.get(
+                        CONF_FORECAST_DISCREPANCY_ALERT,
+                        entry.data.get(CONF_FORECAST_DISCREPANCY_ALERT, False)
+                    ),
+                    "forecast_discrepancy_threshold": entry.options.get(
+                        CONF_FORECAST_DISCREPANCY_THRESHOLD,
+                        entry.data.get(CONF_FORECAST_DISCREPANCY_THRESHOLD, DEFAULT_FORECAST_DISCREPANCY_THRESHOLD)
                     ),
                     # Export Boost settings
                     "export_boost_enabled": entry.options.get(
@@ -2296,6 +2305,8 @@ class ProviderConfigView(HomeAssistantView):
                 "forecast_type": CONF_AMBER_FORECAST_TYPE,
                 "spike_protection_enabled": CONF_SPIKE_PROTECTION_ENABLED,
                 "settled_prices_only": CONF_SETTLED_PRICES_ONLY,
+                "forecast_discrepancy_alert": CONF_FORECAST_DISCREPANCY_ALERT,
+                "forecast_discrepancy_threshold": CONF_FORECAST_DISCREPANCY_THRESHOLD,
                 "export_boost_enabled": CONF_EXPORT_BOOST_ENABLED,
                 "export_price_offset": CONF_EXPORT_PRICE_OFFSET,
                 "export_min_price": CONF_EXPORT_MIN_PRICE,
