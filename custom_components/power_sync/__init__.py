@@ -6921,7 +6921,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     else:
                         _LOGGER.warning(f"Could not switch to self_consumption: {response.status}")
 
-            # Check if user is using Amber (restore via sync instead of saved tariff)
+            # Check if user is using dynamic pricing (restore via sync instead of saved tariff)
             electricity_provider = entry.options.get(
                 CONF_ELECTRICITY_PROVIDER,
                 entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
@@ -6930,9 +6930,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Find saved tariff (prefer discharge, then charge)
             saved_tariff = force_discharge_state.get("saved_tariff") or force_charge_state.get("saved_tariff")
 
-            if electricity_provider == "amber":
-                # Amber users - trigger a fresh sync to get current prices
-                _LOGGER.info("Amber user - triggering sync to restore normal operation")
+            # Dynamic pricing providers should sync fresh prices, not restore stale saved tariff
+            dynamic_providers = ("amber", "flow_power", "aemo_vpp")
+            if electricity_provider in dynamic_providers:
+                # Dynamic pricing users - trigger a fresh sync to get current prices
+                _LOGGER.info(f"{electricity_provider} user - triggering sync to restore normal operation")
                 await handle_sync_tou(ServiceCall(DOMAIN, SERVICE_SYNC_TOU, {}))
             elif saved_tariff:
                 # Non-Amber users - restore the saved tariff
