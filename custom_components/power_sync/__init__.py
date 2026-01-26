@@ -3594,11 +3594,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         electricity_provider == "flow_power" and
         flow_power_price_source in ("aemo_sensor", "aemo")
     )
+    has_aemo_vpp = electricity_provider == "aemo_vpp"
 
     if has_amber:
         _LOGGER.info("Running in Amber TOU Sync mode (provider: %s)", electricity_provider)
     elif has_flow_power_aemo:
         _LOGGER.info("Running in Flow Power mode with AEMO API pricing")
+    elif has_aemo_vpp:
+        _LOGGER.info("Running in AEMO VPP mode with AEMO API pricing")
     elif aemo_spike_enabled:
         _LOGGER.info("Running in AEMO Spike Detection only mode (Globird)")
     else:
@@ -3830,9 +3833,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Check for "aemo_sensor" (legacy) or "aemo" (new) price source
     # Both now use the direct AEMO API
-    use_aemo_pricing = flow_power_price_source in ("aemo_sensor", "aemo")
+    # Also enable for AEMO VPP users who always use AEMO pricing
+    use_aemo_pricing = (
+        flow_power_price_source in ("aemo_sensor", "aemo") or
+        electricity_provider == "aemo_vpp"
+    )
 
-    if use_aemo_pricing and flow_power_state:
+    # Determine AEMO region - Flow Power uses flow_power_state, AEMO VPP uses aemo_region
+    aemo_region = flow_power_state
+    if electricity_provider == "aemo_vpp":
+        aemo_region = entry.options.get(
+            CONF_AEMO_REGION,
+            entry.data.get(CONF_AEMO_REGION, "")
+        )
+
+    if use_aemo_pricing and aemo_region:
         from .coordinator import AEMOPriceCoordinator
 
         # Get aiohttp session from Home Assistant
@@ -3840,19 +3855,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         aemo_sensor_coordinator = AEMOPriceCoordinator(
             hass,
-            flow_power_state,  # Region code (NSW1, QLD1, VIC1, SA1, TAS1)
+            aemo_region,  # Region code (NSW1, QLD1, VIC1, SA1, TAS1)
             session,
         )
         try:
             await aemo_sensor_coordinator.async_config_entry_first_refresh()
             _LOGGER.info(
                 "AEMO Price Coordinator initialized for region %s (direct API)",
-                flow_power_state,
+                aemo_region,
             )
         except Exception as e:
             _LOGGER.error("Failed to initialize AEMO price coordinator: %s", e)
             aemo_sensor_coordinator = None
-    elif use_aemo_pricing and not flow_power_state:
+    elif use_aemo_pricing and not aemo_region:
         _LOGGER.warning("AEMO price source selected but no region configured")
 
     # Initialize Solcast Solar Forecast Coordinator if enabled
@@ -4798,9 +4813,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Determine price source: AEMO API or Amber
         # Support both "aemo_sensor" (legacy) and "aemo" (new) price source names
+        # AEMO VPP always uses AEMO pricing
         use_aemo_sensor = (
             aemo_sensor_coordinator is not None and
-            flow_power_price_source in ("aemo_sensor", "aemo")
+            (flow_power_price_source in ("aemo_sensor", "aemo") or electricity_provider == "aemo_vpp")
         )
 
         if use_aemo_sensor:
@@ -5068,6 +5084,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             from .tariff_converter import apply_flow_power_export
             _LOGGER.info("Applying Flow Power export rates for state: %s", flow_power_state)
             tariff = apply_flow_power_export(tariff, flow_power_state)
+
+        # Apply network tariff for AEMO VPP users (wholesale prices don't include network fees)
+        if electricity_provider == "aemo_vpp":
+            from .tariff_converter import apply_network_tariff
+            _LOGGER.info("Applying network tariff to AEMO VPP wholesale prices")
+
+            tariff = apply_network_tariff(
+                tariff,
+                # Library-based pricing (primary)
+                distributor=entry.options.get(CONF_NETWORK_DISTRIBUTOR),
+                tariff_code=entry.options.get(CONF_NETWORK_TARIFF_CODE),
+                use_manual_rates=entry.options.get(CONF_NETWORK_USE_MANUAL_RATES, False),
+                # Manual pricing (fallback)
+                tariff_type=entry.options.get(CONF_NETWORK_TARIFF_TYPE, "flat"),
+                flat_rate=entry.options.get(CONF_NETWORK_FLAT_RATE, 8.0),
+                peak_rate=entry.options.get(CONF_NETWORK_PEAK_RATE, 15.0),
+                shoulder_rate=entry.options.get(CONF_NETWORK_SHOULDER_RATE, 5.0),
+                offpeak_rate=entry.options.get(CONF_NETWORK_OFFPEAK_RATE, 2.0),
+                peak_start=entry.options.get(CONF_NETWORK_PEAK_START, "16:00"),
+                peak_end=entry.options.get(CONF_NETWORK_PEAK_END, "21:00"),
+                offpeak_start=entry.options.get(CONF_NETWORK_OFFPEAK_START, "10:00"),
+                offpeak_end=entry.options.get(CONF_NETWORK_OFFPEAK_END, "15:00"),
+                other_fees=entry.options.get(CONF_NETWORK_OTHER_FEES, 1.5),
+                include_gst=entry.options.get(CONF_NETWORK_INCLUDE_GST, True),
+            )
 
         # Apply export price boost for Amber users (if enabled)
         if electricity_provider == "amber":
