@@ -1090,36 +1090,36 @@ async def send_tariff_to_tesla(
             sell_values = list(sell_prices.values()) if sell_prices else [0]
             unique_buy = len(set(buy_values))
             unique_sell = len(set(sell_values))
-            _LOGGER.info(
-                "PAYLOAD DEBUG: Sending %d buy prices (min=$%.4f, max=$%.4f, avg=$%.4f, unique=%d)",
+            _LOGGER.debug(
+                "TOU payload: %d buy prices (min=$%.4f, max=$%.4f, avg=$%.4f, unique=%d)",
                 len(buy_values), min(buy_values), max(buy_values),
                 sum(buy_values)/len(buy_values), unique_buy
             )
-            _LOGGER.info(
-                "PAYLOAD DEBUG: Sending %d sell prices (min=$%.4f, max=$%.4f, unique=%d)",
+            _LOGGER.debug(
+                "TOU payload: %d sell prices (min=$%.4f, max=$%.4f, unique=%d)",
                 len(sell_values), min(sell_values), max(sell_values), unique_sell
             )
             # Log sample periods to verify variation
             sample_periods = ["PERIOD_00_00", "PERIOD_06_00", "PERIOD_12_00", "PERIOD_18_00"]
             for period in sample_periods:
                 if period in buy_prices:
-                    _LOGGER.info(
-                        "PAYLOAD DEBUG: %s buy=$%.4f sell=$%.4f",
+                    _LOGGER.debug(
+                        "TOU sample: %s buy=$%.4f sell=$%.4f",
                         period, buy_prices[period], sell_prices.get(period, 0)
                     )
-            # CRITICAL: If all prices are the same, log a warning
+            # Log if prices appear flat (informational only)
             if unique_buy == 1:
-                _LOGGER.warning(
-                    "PAYLOAD DEBUG: ALL BUY PRICES ARE IDENTICAL ($%.4f) - this will cause flat tariff!",
+                _LOGGER.debug(
+                    "All buy prices are identical ($%.4f) - tariff will appear flat",
                     buy_values[0]
                 )
-            if unique_buy <= 2:
-                _LOGGER.warning(
-                    "PAYLOAD DEBUG: Only %d unique buy prices - tariff may appear flat",
+            elif unique_buy <= 2:
+                _LOGGER.debug(
+                    "Only %d unique buy prices - tariff may appear flat",
                     unique_buy
                 )
     except Exception as err:
-        _LOGGER.warning("PAYLOAD DEBUG: Error logging payload details: %s", err)
+        _LOGGER.debug("Error logging payload details: %s", err)
 
     # Use correct API base URL based on provider
     api_base = TESLEMETRY_API_BASE_URL if api_provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
