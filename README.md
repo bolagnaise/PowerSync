@@ -68,7 +68,7 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 - Home Assistant installed and running
 - HACS (Home Assistant Community Store) installed
 - **For Amber users:** Amber Electric API token ([get one here](https://app.amber.com.au/developers))
-- **For Flow Power users:** Flow Power API credentials
+- **For Flow Power users:** Uses AEMO wholesale pricing (or Amber API if you have one)
 - **For Globird/AEMO VPP users:** No API token required (uses AEMO spike detection)
 - Tesla or Sigenergy battery system with API access (see [Tesla API Options](#tesla-api-options) below)
 
@@ -92,7 +92,7 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 
 3. **Configure**
    - Select your **electricity provider** (Amber, Flow Power, Globird, AEMO VPP)
-   - Enter provider credentials if required (Amber API token, Flow Power credentials)
+   - Enter Amber API token if using Amber (or optionally for Flow Power)
    - Select your **battery system** (Tesla Powerwall or Sigenergy)
    - Enter battery API credentials (Teslemetry key, Tesla Fleet, or Sigenergy Cloud)
    - Configure additional options as needed
