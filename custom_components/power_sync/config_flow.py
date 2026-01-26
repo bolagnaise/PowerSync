@@ -398,12 +398,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # Flow Power: Configure region and price source first
                 self._aemo_only_mode = False
                 return await self.async_step_flow_power_setup()
-            elif provider == "aemo_vpp":
-                # AEMO VPP: Full TOU sync with AEMO pricing + network tariffs
-                self._aemo_only_mode = False
-                return await self.async_step_aemo_vpp_setup()
-            elif provider == "globird":
-                # Globird: AEMO spike only mode (static tariff)
+            elif provider in ("globird", "aemo_vpp"):
+                # Globird/AEMO VPP: AEMO spike only mode (static tariff)
                 self._aemo_only_mode = True
                 self._amber_data = {}
                 return await self.async_step_aemo_config()
@@ -420,8 +416,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={
                 "amber_desc": "Full price sync with Amber Electric API",
                 "flow_power_desc": "Flow Power with AEMO wholesale or Amber pricing",
-                "globird_desc": "AEMO spike detection only (static tariff)",
-                "aemo_vpp_desc": "Full TOU sync with AEMO wholesale + network tariffs (AGL VPP, Engie, etc.)",
+                "globird_desc": "AEMO spike detection for static tariff users",
+                "aemo_vpp_desc": "AEMO spike detection for VPP exports (AGL, Engie, etc.)",
             },
         )
 
@@ -508,93 +504,6 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     None, vol.All(vol.Coerce(float), vol.Range(min=-50.0, max=50.0))
                 ),
                 # Sync and other settings
-                vol.Optional(CONF_AUTO_SYNC_ENABLED, default=True): bool,
-                vol.Optional(CONF_BATTERY_CURTAILMENT_ENABLED, default=False): bool,
-            }),
-            errors=errors,
-            description_placeholders={
-                "rate_hint": "Select your network tariff from the dropdown",
-            },
-        )
-
-    async def async_step_aemo_vpp_setup(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Handle AEMO VPP setup - region, network tariff, spike detection."""
-        errors: dict[str, str] = {}
-
-        if user_input is not None:
-            # Parse combined tariff selection (format: "distributor:code")
-            combined = user_input.get(CONF_NETWORK_TARIFF_COMBINED, "energex:6900")
-            if ":" in combined:
-                distributor, tariff_code = combined.split(":", 1)
-                user_input[CONF_NETWORK_DISTRIBUTOR] = distributor
-                user_input[CONF_NETWORK_TARIFF_CODE] = tariff_code
-            # Remove combined key before storing
-            user_input.pop(CONF_NETWORK_TARIFF_COMBINED, None)
-
-            # Store AEMO VPP configuration (uses AEMO region for pricing)
-            self._flow_power_data = user_input  # Reuse flow_power_data storage
-            self._amber_data = {}  # No Amber API needed
-
-            # Store AEMO spike config from user input
-            self._aemo_data = {
-                CONF_AEMO_SPIKE_ENABLED: user_input.get(CONF_AEMO_SPIKE_ENABLED, True),
-                CONF_AEMO_REGION: user_input.get(CONF_AEMO_REGION, "NSW1"),
-                CONF_AEMO_SPIKE_THRESHOLD: user_input.get(CONF_AEMO_SPIKE_THRESHOLD, 300.0),
-            }
-
-            # Route based on battery system selection
-            if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
-                return await self.async_step_sigenergy_credentials()
-            else:
-                return await self.async_step_tesla_provider()
-
-        return self.async_show_form(
-            step_id="aemo_vpp_setup",
-            data_schema=vol.Schema({
-                # AEMO Region for wholesale pricing
-                vol.Required(CONF_AEMO_REGION, default="NSW1"): vol.In(AEMO_REGIONS),
-                # Network Tariff - Combined dropdown with all distributors and tariffs
-                vol.Required(CONF_NETWORK_TARIFF_COMBINED, default="energex:6900"): vol.In(ALL_NETWORK_TARIFFS),
-                # Manual override - enable to enter rates manually instead of using library
-                vol.Optional(CONF_NETWORK_USE_MANUAL_RATES, default=False): bool,
-                # Manual rate entry (used when use_manual_rates=True)
-                vol.Optional(CONF_NETWORK_TARIFF_TYPE, default="flat"): vol.In(NETWORK_TARIFF_TYPES),
-                vol.Optional(CONF_NETWORK_FLAT_RATE, default=8.0): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.0, max=50.0)
-                ),
-                vol.Optional(CONF_NETWORK_PEAK_RATE, default=15.0): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.0, max=50.0)
-                ),
-                vol.Optional(CONF_NETWORK_SHOULDER_RATE, default=5.0): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.0, max=50.0)
-                ),
-                vol.Optional(CONF_NETWORK_OFFPEAK_RATE, default=2.0): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.0, max=50.0)
-                ),
-                vol.Optional(CONF_NETWORK_PEAK_START, default="16:00"): vol.In(
-                    {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}
-                ),
-                vol.Optional(CONF_NETWORK_PEAK_END, default="21:00"): vol.In(
-                    {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}
-                ),
-                vol.Optional(CONF_NETWORK_OFFPEAK_START, default="10:00"): vol.In(
-                    {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}
-                ),
-                vol.Optional(CONF_NETWORK_OFFPEAK_END, default="15:00"): vol.In(
-                    {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}
-                ),
-                vol.Optional(CONF_NETWORK_OTHER_FEES, default=1.5): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.0, max=20.0)
-                ),
-                vol.Optional(CONF_NETWORK_INCLUDE_GST, default=True): bool,
-                # AEMO Spike Detection
-                vol.Optional(CONF_AEMO_SPIKE_ENABLED, default=True): bool,
-                vol.Optional(CONF_AEMO_SPIKE_THRESHOLD, default=300.0): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.0, max=20000.0)
-                ),
-                # Sync settings
                 vol.Optional(CONF_AUTO_SYNC_ENABLED, default=True): bool,
                 vol.Optional(CONF_BATTERY_CURTAILMENT_ENABLED, default=False): bool,
             }),
@@ -1715,9 +1624,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 return await self.async_step_amber_options()
             elif self._provider == "flow_power":
                 return await self.async_step_flow_power_options()
-            elif self._provider == "aemo_vpp":
-                return await self.async_step_aemo_vpp_options()
-            elif self._provider == "globird":
+            elif self._provider in ("globird", "aemo_vpp"):
                 return await self.async_step_globird_options()
 
         current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
@@ -1811,9 +1718,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     return await self.async_step_amber_options()
                 elif self._provider == "flow_power":
                     return await self.async_step_flow_power_options()
-                elif self._provider == "aemo_vpp":
-                    return await self.async_step_aemo_vpp_options()
-                elif self._provider == "globird":
+                elif self._provider in ("globird", "aemo_vpp"):
                     return await self.async_step_globird_options()
 
         current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
@@ -1917,9 +1822,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                                 return await self.async_step_amber_options()
                             elif self._provider == "flow_power":
                                 return await self.async_step_flow_power_options()
-                            elif self._provider == "aemo_vpp":
-                                return await self.async_step_aemo_vpp_options()
-                            elif self._provider == "globird":
+                            elif self._provider in ("globird", "aemo_vpp"):
                                 return await self.async_step_globird_options()
                         else:
                             errors["base"] = "invalid_auth"
@@ -2607,115 +2510,6 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_MONTHLY_SUPPLY_CHARGE,
                         default=self._get_option(CONF_MONTHLY_SUPPLY_CHARGE, 0.0),
                     ): vol.Coerce(float),
-                }
-            ),
-        )
-
-    async def async_step_aemo_vpp_options(
-        self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
-        """Step 2d: AEMO VPP specific options - region, network tariff, spike detection."""
-        if user_input is not None:
-            # Parse combined tariff selection (format: "distributor:code")
-            combined = user_input.get(CONF_NETWORK_TARIFF_COMBINED)
-            if combined and ":" in combined:
-                distributor, tariff_code = combined.split(":", 1)
-                user_input[CONF_NETWORK_DISTRIBUTOR] = distributor
-                user_input[CONF_NETWORK_TARIFF_CODE] = tariff_code
-            # Remove combined key before storing
-            user_input.pop(CONF_NETWORK_TARIFF_COMBINED, None)
-
-            # Add provider to the data
-            user_input[CONF_ELECTRICITY_PROVIDER] = "aemo_vpp"
-            # Store options and route to curtailment options
-            self._amber_options = user_input
-            return await self.async_step_curtailment_options()
-
-        # Build current combined tariff value from stored options
-        current_distributor = self._get_option(CONF_NETWORK_DISTRIBUTOR, "energex")
-        current_tariff_code = self._get_option(CONF_NETWORK_TARIFF_CODE, "6900")
-        current_combined = f"{current_distributor}:{current_tariff_code}"
-        # Validate it exists in options, otherwise use default
-        if current_combined not in ALL_NETWORK_TARIFFS:
-            current_combined = "energex:6900"
-
-        return self.async_show_form(
-            step_id="aemo_vpp_options",
-            data_schema=vol.Schema(
-                {
-                    # AEMO Region for wholesale pricing
-                    vol.Required(
-                        CONF_AEMO_REGION,
-                        default=self._get_option(CONF_AEMO_REGION, "NSW1"),
-                    ): vol.In(AEMO_REGIONS),
-                    # Network Tariff - Combined dropdown with all distributors and tariffs
-                    vol.Optional(
-                        CONF_NETWORK_TARIFF_COMBINED,
-                        default=current_combined,
-                    ): vol.In(ALL_NETWORK_TARIFFS),
-                    vol.Optional(
-                        CONF_NETWORK_USE_MANUAL_RATES,
-                        default=self._get_option(CONF_NETWORK_USE_MANUAL_RATES, False),
-                    ): bool,
-                    # Network Tariff - Manual rate entry (used when use_manual_rates=True)
-                    vol.Optional(
-                        CONF_NETWORK_TARIFF_TYPE,
-                        default=self._get_option(CONF_NETWORK_TARIFF_TYPE, "flat"),
-                    ): vol.In(NETWORK_TARIFF_TYPES),
-                    vol.Optional(
-                        CONF_NETWORK_FLAT_RATE,
-                        default=self._get_option(CONF_NETWORK_FLAT_RATE, 8.0),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0)),
-                    vol.Optional(
-                        CONF_NETWORK_PEAK_RATE,
-                        default=self._get_option(CONF_NETWORK_PEAK_RATE, 15.0),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0)),
-                    vol.Optional(
-                        CONF_NETWORK_SHOULDER_RATE,
-                        default=self._get_option(CONF_NETWORK_SHOULDER_RATE, 5.0),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0)),
-                    vol.Optional(
-                        CONF_NETWORK_OFFPEAK_RATE,
-                        default=self._get_option(CONF_NETWORK_OFFPEAK_RATE, 2.0),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0)),
-                    vol.Optional(
-                        CONF_NETWORK_PEAK_START,
-                        default=self._get_option(CONF_NETWORK_PEAK_START, "16:00"),
-                    ): vol.In({f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}),
-                    vol.Optional(
-                        CONF_NETWORK_PEAK_END,
-                        default=self._get_option(CONF_NETWORK_PEAK_END, "21:00"),
-                    ): vol.In({f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}),
-                    vol.Optional(
-                        CONF_NETWORK_OFFPEAK_START,
-                        default=self._get_option(CONF_NETWORK_OFFPEAK_START, "10:00"),
-                    ): vol.In({f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}),
-                    vol.Optional(
-                        CONF_NETWORK_OFFPEAK_END,
-                        default=self._get_option(CONF_NETWORK_OFFPEAK_END, "15:00"),
-                    ): vol.In({f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}),
-                    vol.Optional(
-                        CONF_NETWORK_OTHER_FEES,
-                        default=self._get_option(CONF_NETWORK_OTHER_FEES, 1.5),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=20.0)),
-                    vol.Optional(
-                        CONF_NETWORK_INCLUDE_GST,
-                        default=self._get_option(CONF_NETWORK_INCLUDE_GST, True),
-                    ): bool,
-                    # AEMO Spike Detection
-                    vol.Optional(
-                        CONF_AEMO_SPIKE_ENABLED,
-                        default=self._get_option(CONF_AEMO_SPIKE_ENABLED, True),
-                    ): bool,
-                    vol.Optional(
-                        CONF_AEMO_SPIKE_THRESHOLD,
-                        default=self._get_option(CONF_AEMO_SPIKE_THRESHOLD, 300.0),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=20000.0)),
-                    # Sync settings
-                    vol.Optional(
-                        CONF_AUTO_SYNC_ENABLED,
-                        default=self._get_option(CONF_AUTO_SYNC_ENABLED, True),
-                    ): bool,
                 }
             ),
         )
