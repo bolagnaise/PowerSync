@@ -4801,6 +4801,199 @@ class PriceRecommendationView(HomeAssistantView):
             }, status=500)
 
 
+class AutoScheduleSettingsView(HomeAssistantView):
+    """API endpoint for auto-schedule settings per vehicle.
+
+    GET /api/power_sync/ev/auto_schedule/settings
+    Returns auto-schedule settings for all vehicles.
+
+    POST /api/power_sync/ev/auto_schedule/settings
+    Update settings for a vehicle.
+    """
+    url = "/api/power_sync/ev/auto_schedule/settings"
+    name = "api:power_sync:ev:auto_schedule:settings"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self._hass = hass
+        self._config_entry = entry
+
+    async def get(self, request):
+        """Get auto-schedule settings for all vehicles."""
+        try:
+            from .automations.ev_charging_planner import get_auto_schedule_executor
+
+            executor = get_auto_schedule_executor()
+            if not executor:
+                return web.json_response({
+                    "success": False,
+                    "error": "Auto-schedule executor not initialized"
+                }, status=503)
+
+            settings = {}
+            for vehicle_id, vehicle_settings in executor._settings.items():
+                settings[vehicle_id] = vehicle_settings.to_dict()
+
+            return web.json_response({
+                "success": True,
+                "settings": settings,
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting auto-schedule settings: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+    async def post(self, request):
+        """Update auto-schedule settings for a vehicle."""
+        try:
+            from .automations.ev_charging_planner import get_auto_schedule_executor
+
+            data = await request.json()
+            vehicle_id = data.get("vehicle_id", "_default")
+
+            executor = get_auto_schedule_executor()
+            if not executor:
+                return web.json_response({
+                    "success": False,
+                    "error": "Auto-schedule executor not initialized"
+                }, status=503)
+
+            # Update settings
+            updated_settings = executor.update_settings(vehicle_id, data)
+
+            # Save to storage
+            entry_id = self._config_entry.entry_id
+            store = self._hass.data.get(DOMAIN, {}).get(entry_id, {}).get("store")
+            if store:
+                await executor.save_settings(store)
+
+            return web.json_response({
+                "success": True,
+                "settings": updated_settings.to_dict(),
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error updating auto-schedule settings: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
+class AutoScheduleStatusView(HomeAssistantView):
+    """API endpoint for auto-schedule status per vehicle.
+
+    GET /api/power_sync/ev/auto_schedule/status
+    Returns current auto-schedule execution status for all vehicles.
+    """
+    url = "/api/power_sync/ev/auto_schedule/status"
+    name = "api:power_sync:ev:auto_schedule:status"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self._hass = hass
+        self._config_entry = entry
+
+    async def get(self, request):
+        """Get auto-schedule status for all vehicles."""
+        try:
+            from .automations.ev_charging_planner import get_auto_schedule_executor
+
+            executor = get_auto_schedule_executor()
+            if not executor:
+                return web.json_response({
+                    "success": False,
+                    "error": "Auto-schedule executor not initialized"
+                }, status=503)
+
+            # Get all states and settings
+            states = executor.get_all_states()
+            settings = {}
+            for vehicle_id, vehicle_settings in executor._settings.items():
+                settings[vehicle_id] = {
+                    "enabled": vehicle_settings.enabled,
+                    "priority": vehicle_settings.priority.value,
+                    "target_soc": vehicle_settings.target_soc,
+                    "departure_time": vehicle_settings.departure_time,
+                }
+
+            return web.json_response({
+                "success": True,
+                "states": states,
+                "settings": settings,
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting auto-schedule status: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
+class AutoScheduleToggleView(HomeAssistantView):
+    """API endpoint to enable/disable auto-schedule for a vehicle.
+
+    POST /api/power_sync/ev/auto_schedule/toggle
+    Toggle auto-schedule on/off for a vehicle.
+    """
+    url = "/api/power_sync/ev/auto_schedule/toggle"
+    name = "api:power_sync:ev:auto_schedule:toggle"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self._hass = hass
+        self._config_entry = entry
+
+    async def post(self, request):
+        """Toggle auto-schedule for a vehicle."""
+        try:
+            from .automations.ev_charging_planner import get_auto_schedule_executor
+
+            data = await request.json()
+            vehicle_id = data.get("vehicle_id", "_default")
+            enabled = data.get("enabled")
+
+            executor = get_auto_schedule_executor()
+            if not executor:
+                return web.json_response({
+                    "success": False,
+                    "error": "Auto-schedule executor not initialized"
+                }, status=503)
+
+            settings = executor.get_settings(vehicle_id)
+
+            if enabled is not None:
+                settings.enabled = bool(enabled)
+            else:
+                # Toggle
+                settings.enabled = not settings.enabled
+
+            # Save to storage
+            entry_id = self._config_entry.entry_id
+            store = self._hass.data.get(DOMAIN, {}).get(entry_id, {}).get("store")
+            if store:
+                await executor.save_settings(store)
+
+            _LOGGER.info(f"Auto-schedule {'enabled' if settings.enabled else 'disabled'} for {vehicle_id}")
+
+            return web.json_response({
+                "success": True,
+                "vehicle_id": vehicle_id,
+                "enabled": settings.enabled,
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error toggling auto-schedule: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PowerSync from a config entry."""
     _LOGGER.info("=" * 60)
@@ -9119,12 +9312,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.http.register_view(ChargingBoostView(hass, entry))
     hass.http.register_view(EVWidgetDataView(hass, entry))
     hass.http.register_view(PriceRecommendationView(hass, entry))
+    hass.http.register_view(AutoScheduleSettingsView(hass, entry))
+    hass.http.register_view(AutoScheduleStatusView(hass, entry))
+    hass.http.register_view(AutoScheduleToggleView(hass, entry))
     _LOGGER.info("🚗 EV HTTP endpoints registered at /api/power_sync/ev/*")
     _LOGGER.info("☀️ Solar surplus EV endpoints registered")
     _LOGGER.info("📊 EV charging session/statistics endpoints registered")
     _LOGGER.info("💰 EV price recommendation endpoint registered")
     _LOGGER.info("📅 EV charging schedule/forecast endpoints registered")
     _LOGGER.info("📱 EV widget data endpoint registered")
+    _LOGGER.info("🤖 Auto-schedule endpoints registered at /api/power_sync/ev/auto_schedule/*")
 
     # Initialize session manager for EV charging tracking
     from .automations.ev_charging_session import ChargingSessionManager, set_session_manager
@@ -9134,11 +9331,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.info("📊 EV charging session manager initialized")
 
     # Initialize charging planner for smart scheduling
-    from .automations.ev_charging_planner import ChargingPlanner, set_charging_planner
+    from .automations.ev_charging_planner import (
+        ChargingPlanner,
+        set_charging_planner,
+        AutoScheduleExecutor,
+        set_auto_schedule_executor,
+    )
     charging_planner = ChargingPlanner(hass, entry)
     set_charging_planner(charging_planner)
     hass.data[DOMAIN][entry.entry_id]["charging_planner"] = charging_planner
     _LOGGER.info("📅 EV charging planner initialized")
+
+    # Initialize auto-schedule executor for automatic plan execution
+    auto_schedule_executor = AutoScheduleExecutor(hass, entry, charging_planner)
+    set_auto_schedule_executor(auto_schedule_executor)
+    hass.data[DOMAIN][entry.entry_id]["auto_schedule_executor"] = auto_schedule_executor
+
+    # Load saved settings
+    if store:
+        await auto_schedule_executor.load_settings(store)
+    _LOGGER.info("🤖 Auto-schedule executor initialized")
 
     # ======================================================================
     # SYNC BATTERY HEALTH SERVICE (from mobile app TEDAPI scans)
@@ -9612,13 +9824,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Set up automation evaluation timer (every 30 seconds)
     async def auto_evaluate_automations(now):
-        """Evaluate all user automations."""
+        """Evaluate all user automations and auto-schedule."""
         try:
             triggered_count = await automation_engine.async_evaluate_all()
             if triggered_count > 0:
                 _LOGGER.info(f"🤖 Automation evaluation: {triggered_count} automation(s) triggered")
         except Exception as e:
             _LOGGER.error(f"Error evaluating automations: {e}")
+
+        # Also evaluate auto-schedule executor
+        try:
+            from .automations.ev_charging_planner import get_auto_schedule_executor
+            from .automations.actions import _get_tesla_live_status
+
+            executor = get_auto_schedule_executor()
+            if executor:
+                # Get live status for evaluation
+                live_status = await _get_tesla_live_status(hass, entry)
+                if live_status:
+                    # Get current price if available
+                    current_price = None
+                    entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                    amber_prices = entry_data.get("amber_prices", {})
+                    if amber_prices:
+                        current_price = amber_prices.get("import_cents")
+
+                    await executor.evaluate(live_status, current_price)
+        except Exception as e:
+            _LOGGER.debug(f"Auto-schedule evaluation error: {e}")
 
     automation_cancel_timer = async_track_utc_time_change(
         hass,

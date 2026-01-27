@@ -1183,3 +1183,508 @@ def set_charging_planner(planner: ChargingPlanner) -> None:
     """Set the global charging planner instance."""
     global _charging_planner
     _charging_planner = planner
+
+
+# =============================================================================
+# Auto-Schedule Executor
+# =============================================================================
+
+@dataclass
+class AutoScheduleSettings:
+    """Settings for automatic schedule execution per vehicle."""
+    enabled: bool = False
+    vehicle_id: str = "_default"
+    display_name: str = "EV"
+
+    # Target settings
+    target_soc: int = 80
+    departure_time: Optional[str] = None  # HH:MM format
+    departure_days: List[int] = field(default_factory=lambda: [0, 1, 2, 3, 4])  # Mon-Fri
+
+    # Priority mode
+    priority: ChargingPriority = ChargingPriority.COST_OPTIMIZED
+
+    # Constraints
+    min_battery_soc: int = 80  # Home battery must be above this before EV charging
+    max_grid_price_cents: float = 25.0  # Don't charge from grid above this price
+    min_surplus_kw: float = 1.5  # Minimum solar surplus to charge
+
+    # Charger settings
+    charger_type: str = "tesla"  # tesla, ocpp, generic
+    min_charge_amps: int = 5
+    max_charge_amps: int = 32
+    voltage: int = 240
+
+    # Optional entity overrides for generic chargers
+    charger_switch_entity: Optional[str] = None
+    charger_amps_entity: Optional[str] = None
+    ocpp_charger_id: Optional[int] = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "enabled": self.enabled,
+            "vehicle_id": self.vehicle_id,
+            "display_name": self.display_name,
+            "target_soc": self.target_soc,
+            "departure_time": self.departure_time,
+            "departure_days": self.departure_days,
+            "priority": self.priority.value,
+            "min_battery_soc": self.min_battery_soc,
+            "max_grid_price_cents": self.max_grid_price_cents,
+            "min_surplus_kw": self.min_surplus_kw,
+            "charger_type": self.charger_type,
+            "min_charge_amps": self.min_charge_amps,
+            "max_charge_amps": self.max_charge_amps,
+            "voltage": self.voltage,
+            "charger_switch_entity": self.charger_switch_entity,
+            "charger_amps_entity": self.charger_amps_entity,
+            "ocpp_charger_id": self.ocpp_charger_id,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AutoScheduleSettings":
+        """Create from dictionary."""
+        priority_str = data.get("priority", "cost_optimized")
+        try:
+            priority = ChargingPriority(priority_str)
+        except ValueError:
+            priority = ChargingPriority.COST_OPTIMIZED
+
+        return cls(
+            enabled=data.get("enabled", False),
+            vehicle_id=data.get("vehicle_id", "_default"),
+            display_name=data.get("display_name", "EV"),
+            target_soc=data.get("target_soc", 80),
+            departure_time=data.get("departure_time"),
+            departure_days=data.get("departure_days", [0, 1, 2, 3, 4]),
+            priority=priority,
+            min_battery_soc=data.get("min_battery_soc", 80),
+            max_grid_price_cents=data.get("max_grid_price_cents", 25.0),
+            min_surplus_kw=data.get("min_surplus_kw", 1.5),
+            charger_type=data.get("charger_type", "tesla"),
+            min_charge_amps=data.get("min_charge_amps", 5),
+            max_charge_amps=data.get("max_charge_amps", 32),
+            voltage=data.get("voltage", 240),
+            charger_switch_entity=data.get("charger_switch_entity"),
+            charger_amps_entity=data.get("charger_amps_entity"),
+            ocpp_charger_id=data.get("ocpp_charger_id"),
+        )
+
+
+@dataclass
+class AutoScheduleState:
+    """Current state of auto-schedule execution for a vehicle."""
+    vehicle_id: str
+    is_charging: bool = False
+    current_window: Optional[PlannedChargingWindow] = None
+    current_plan: Optional[ChargingPlan] = None
+    last_plan_update: Optional[datetime] = None
+    last_decision: str = "idle"
+    last_decision_reason: str = ""
+    started_at: Optional[datetime] = None
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for API."""
+        return {
+            "vehicle_id": self.vehicle_id,
+            "is_charging": self.is_charging,
+            "current_window": {
+                "start_time": self.current_window.start_time,
+                "end_time": self.current_window.end_time,
+                "source": self.current_window.source,
+                "price_cents_kwh": self.current_window.price_cents_kwh,
+            } if self.current_window else None,
+            "last_decision": self.last_decision,
+            "last_decision_reason": self.last_decision_reason,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "plan_summary": {
+                "windows": len(self.current_plan.windows) if self.current_plan else 0,
+                "estimated_solar_kwh": self.current_plan.estimated_solar_kwh if self.current_plan else 0,
+                "estimated_grid_kwh": self.current_plan.estimated_grid_kwh if self.current_plan else 0,
+                "estimated_cost_cents": self.current_plan.estimated_cost_cents if self.current_plan else 0,
+            } if self.current_plan else None,
+        }
+
+
+class AutoScheduleExecutor:
+    """
+    Automatically executes charging plans based on optimal windows.
+
+    Integrates with:
+    - ChargingPlanner for optimal window generation
+    - PriceForecaster for Amber/Globird/FlowPower pricing
+    - SolarForecaster for Solcast surplus predictions
+    - Dynamic EV charging actions for actual control
+    """
+
+    def __init__(self, hass, config_entry, planner: ChargingPlanner):
+        self.hass = hass
+        self.config_entry = config_entry
+        self.planner = planner
+
+        # Settings per vehicle (loaded from storage)
+        self._settings: Dict[str, AutoScheduleSettings] = {}
+
+        # Runtime state per vehicle
+        self._state: Dict[str, AutoScheduleState] = {}
+
+        # Plan regeneration interval (regenerate every 15 minutes)
+        self._plan_update_interval = timedelta(minutes=15)
+
+    async def load_settings(self, store) -> None:
+        """Load settings from storage."""
+        try:
+            stored_data = await store.async_load() if hasattr(store, 'async_load') else {}
+            if not stored_data:
+                stored_data = {}
+
+            auto_schedule_data = stored_data.get("auto_schedule_settings", {})
+
+            for vehicle_id, settings_dict in auto_schedule_data.items():
+                self._settings[vehicle_id] = AutoScheduleSettings.from_dict(settings_dict)
+                self._state[vehicle_id] = AutoScheduleState(vehicle_id=vehicle_id)
+
+            _LOGGER.debug(f"Loaded auto-schedule settings for {len(self._settings)} vehicles")
+        except Exception as e:
+            _LOGGER.error(f"Failed to load auto-schedule settings: {e}")
+
+    async def save_settings(self, store) -> None:
+        """Save settings to storage."""
+        try:
+            stored_data = await store.async_load() if hasattr(store, 'async_load') else {}
+            if not stored_data:
+                stored_data = {}
+
+            auto_schedule_data = {}
+            for vehicle_id, settings in self._settings.items():
+                auto_schedule_data[vehicle_id] = settings.to_dict()
+
+            stored_data["auto_schedule_settings"] = auto_schedule_data
+
+            if hasattr(store, 'async_save'):
+                store._data = stored_data
+                await store.async_save(stored_data)
+
+            _LOGGER.debug(f"Saved auto-schedule settings for {len(self._settings)} vehicles")
+        except Exception as e:
+            _LOGGER.error(f"Failed to save auto-schedule settings: {e}")
+
+    def get_settings(self, vehicle_id: str) -> AutoScheduleSettings:
+        """Get settings for a vehicle, creating defaults if needed."""
+        if vehicle_id not in self._settings:
+            self._settings[vehicle_id] = AutoScheduleSettings(vehicle_id=vehicle_id)
+            self._state[vehicle_id] = AutoScheduleState(vehicle_id=vehicle_id)
+        return self._settings[vehicle_id]
+
+    def update_settings(self, vehicle_id: str, updates: dict) -> AutoScheduleSettings:
+        """Update settings for a vehicle."""
+        settings = self.get_settings(vehicle_id)
+
+        for key, value in updates.items():
+            if key == "priority" and isinstance(value, str):
+                try:
+                    value = ChargingPriority(value)
+                except ValueError:
+                    continue
+            if hasattr(settings, key):
+                setattr(settings, key, value)
+
+        return settings
+
+    def get_state(self, vehicle_id: str) -> AutoScheduleState:
+        """Get current state for a vehicle."""
+        if vehicle_id not in self._state:
+            self._state[vehicle_id] = AutoScheduleState(vehicle_id=vehicle_id)
+        return self._state[vehicle_id]
+
+    def get_all_states(self) -> Dict[str, dict]:
+        """Get all vehicle states."""
+        return {vid: state.to_dict() for vid, state in self._state.items()}
+
+    async def evaluate(self, live_status: dict, current_price_cents: Optional[float] = None) -> None:
+        """
+        Evaluate all vehicles and start/stop charging as needed.
+
+        This should be called periodically (e.g., every 30-60 seconds).
+
+        Args:
+            live_status: Current Powerwall/system status with battery_soc, solar_power, etc.
+            current_price_cents: Current import price (from Amber/tariff)
+        """
+        for vehicle_id, settings in self._settings.items():
+            if not settings.enabled:
+                continue
+
+            try:
+                await self._evaluate_vehicle(vehicle_id, settings, live_status, current_price_cents)
+            except Exception as e:
+                _LOGGER.error(f"Auto-schedule evaluation failed for {vehicle_id}: {e}")
+
+    async def _evaluate_vehicle(
+        self,
+        vehicle_id: str,
+        settings: AutoScheduleSettings,
+        live_status: dict,
+        current_price_cents: Optional[float],
+    ) -> None:
+        """Evaluate and control charging for a single vehicle."""
+        state = self.get_state(vehicle_id)
+        now = datetime.now()
+
+        # Check if we need to regenerate the plan
+        if (
+            state.current_plan is None or
+            state.last_plan_update is None or
+            now - state.last_plan_update > self._plan_update_interval
+        ):
+            await self._regenerate_plan(vehicle_id, settings, state)
+
+        if state.current_plan is None:
+            state.last_decision = "no_plan"
+            state.last_decision_reason = "No charging plan available"
+            return
+
+        # Get current conditions
+        battery_soc = live_status.get("battery_soc", 0)
+        solar_power_kw = live_status.get("solar_power", 0) / 1000
+        grid_power_kw = live_status.get("grid_power", 0) / 1000
+        load_power_kw = live_status.get("load_power", 0) / 1000
+
+        # Calculate current surplus
+        current_surplus_kw = max(0, solar_power_kw - load_power_kw)
+
+        # Use price from parameter or estimate
+        if current_price_cents is None:
+            current_price_cents = await self._get_current_price()
+
+        # Check battery priority
+        if battery_soc < settings.min_battery_soc:
+            if state.is_charging:
+                await self._stop_charging(vehicle_id, settings, state)
+                state.last_decision = "stopped"
+                state.last_decision_reason = f"Battery {battery_soc:.0f}% < min {settings.min_battery_soc}%"
+            else:
+                state.last_decision = "waiting"
+                state.last_decision_reason = f"Battery {battery_soc:.0f}% < min {settings.min_battery_soc}%"
+            return
+
+        # Use planner's should_charge_now logic
+        should_charge, reason, source = await self.planner.should_charge_now(
+            vehicle_id=vehicle_id,
+            plan=state.current_plan,
+            current_surplus_kw=current_surplus_kw,
+            current_price_cents=current_price_cents,
+            battery_soc=battery_soc,
+            min_battery_soc=settings.min_battery_soc,
+        )
+
+        # Apply additional constraints based on priority mode
+        if should_charge and source.startswith("grid"):
+            # Check price constraint
+            if current_price_cents > settings.max_grid_price_cents:
+                should_charge = False
+                reason = f"Grid price {current_price_cents:.0f}c > max {settings.max_grid_price_cents:.0f}c"
+
+            # Solar-only mode doesn't allow grid
+            if settings.priority == ChargingPriority.SOLAR_ONLY:
+                should_charge = False
+                reason = "Solar-only mode - no grid charging"
+
+        # Check surplus constraint for solar charging
+        if should_charge and source == "solar_surplus":
+            if current_surplus_kw < settings.min_surplus_kw:
+                should_charge = False
+                reason = f"Surplus {current_surplus_kw:.1f}kW < min {settings.min_surplus_kw:.1f}kW"
+
+        # Find current window (if in one)
+        current_window = None
+        for window in state.current_plan.windows:
+            window_start = datetime.fromisoformat(window.start_time)
+            window_end = datetime.fromisoformat(window.end_time)
+            if window_start <= now < window_end:
+                current_window = window
+                break
+
+        state.current_window = current_window
+
+        # Take action
+        if should_charge and not state.is_charging:
+            await self._start_charging(vehicle_id, settings, state, source)
+            state.last_decision = "started"
+            state.last_decision_reason = reason
+        elif not should_charge and state.is_charging:
+            await self._stop_charging(vehicle_id, settings, state)
+            state.last_decision = "stopped"
+            state.last_decision_reason = reason
+        else:
+            state.last_decision = "charging" if state.is_charging else "waiting"
+            state.last_decision_reason = reason
+
+    async def _regenerate_plan(
+        self,
+        vehicle_id: str,
+        settings: AutoScheduleSettings,
+        state: AutoScheduleState,
+    ) -> None:
+        """Regenerate the charging plan based on current forecasts."""
+        now = datetime.now()
+
+        # Determine target time
+        target_time = None
+        if settings.departure_time:
+            # Parse departure time
+            try:
+                dep_hour, dep_min = map(int, settings.departure_time.split(":"))
+                target_time = now.replace(hour=dep_hour, minute=dep_min, second=0, microsecond=0)
+
+                # If departure is in the past today, use tomorrow
+                if target_time <= now:
+                    target_time += timedelta(days=1)
+
+                # Check if target day is in departure_days
+                while target_time.weekday() not in settings.departure_days:
+                    target_time += timedelta(days=1)
+            except ValueError:
+                _LOGGER.warning(f"Invalid departure time format: {settings.departure_time}")
+
+        # Get current SoC (estimate - could be improved with actual EV API)
+        current_soc = 50  # Default estimate
+
+        try:
+            plan = await self.planner.create_plan(
+                vehicle_id=vehicle_id,
+                current_soc=current_soc,
+                target_soc=settings.target_soc,
+                target_time=target_time,
+                priority=settings.priority,
+                charger_power_kw=(settings.max_charge_amps * settings.voltage) / 1000,
+            )
+
+            state.current_plan = plan
+            state.last_plan_update = now
+
+            _LOGGER.info(
+                f"Auto-schedule: Regenerated plan for {vehicle_id} - "
+                f"{len(plan.windows)} windows, {plan.estimated_solar_kwh:.1f}kWh solar, "
+                f"{plan.estimated_grid_kwh:.1f}kWh grid, ${plan.estimated_cost_cents/100:.2f} est cost"
+            )
+        except Exception as e:
+            _LOGGER.error(f"Failed to regenerate plan for {vehicle_id}: {e}")
+
+    async def _get_current_price(self) -> float:
+        """Get current import price from available sources."""
+        from ..const import DOMAIN
+
+        try:
+            entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
+
+            # Try Amber price first
+            amber_coordinator = entry_data.get("amber_coordinator")
+            if amber_coordinator and hasattr(amber_coordinator, 'current_import_price'):
+                price = amber_coordinator.current_import_price
+                if price is not None:
+                    return price
+
+            # Try tariff schedule
+            tariff_schedule = entry_data.get("tariff_schedule", {})
+            if tariff_schedule:
+                # Get current period price
+                now = datetime.now()
+                period_key = f"PERIOD_{now.hour:02d}_{30 if now.minute >= 30 else 0:02d}"
+                buy_prices = tariff_schedule.get("buy_prices", {})
+                if period_key in buy_prices:
+                    # Convert from $/kWh to cents
+                    return buy_prices[period_key] * 100
+
+            # Default fallback based on time of day
+            hour = datetime.now().hour
+            if 7 <= hour < 9 or 17 <= hour < 21:
+                return 45.0  # Peak
+            elif 9 <= hour < 17:
+                return 25.0  # Shoulder
+            else:
+                return 15.0  # Off-peak
+
+        except Exception as e:
+            _LOGGER.debug(f"Failed to get current price: {e}")
+            return 25.0  # Default shoulder rate
+
+    async def _start_charging(
+        self,
+        vehicle_id: str,
+        settings: AutoScheduleSettings,
+        state: AutoScheduleState,
+        source: str,
+    ) -> None:
+        """Start dynamic charging for the vehicle."""
+        from .actions import _action_start_ev_charging_dynamic
+
+        # Determine mode based on source
+        if source == "solar_surplus":
+            dynamic_mode = "solar_surplus"
+        else:
+            dynamic_mode = "battery_target"
+
+        params = {
+            "vehicle_vin": vehicle_id if vehicle_id != "_default" else None,
+            "dynamic_mode": dynamic_mode,
+            "min_charge_amps": settings.min_charge_amps,
+            "max_charge_amps": settings.max_charge_amps,
+            "voltage": settings.voltage,
+            "charger_type": settings.charger_type,
+            "min_battery_soc": settings.min_battery_soc,
+            "pause_below_soc": settings.min_battery_soc - 10,
+            "charger_switch_entity": settings.charger_switch_entity,
+            "charger_amps_entity": settings.charger_amps_entity,
+            "ocpp_charger_id": settings.ocpp_charger_id,
+        }
+
+        try:
+            success = await _action_start_ev_charging_dynamic(
+                self.hass, self.config_entry, params, context=None
+            )
+
+            if success:
+                state.is_charging = True
+                state.started_at = datetime.now()
+                _LOGGER.info(f"Auto-schedule: Started {dynamic_mode} charging for {vehicle_id}")
+            else:
+                _LOGGER.warning(f"Auto-schedule: Failed to start charging for {vehicle_id}")
+        except Exception as e:
+            _LOGGER.error(f"Auto-schedule: Error starting charging for {vehicle_id}: {e}")
+
+    async def _stop_charging(
+        self,
+        vehicle_id: str,
+        settings: AutoScheduleSettings,
+        state: AutoScheduleState,
+    ) -> None:
+        """Stop charging for the vehicle."""
+        from .actions import _action_stop_ev_charging_dynamic
+
+        params = {"vehicle_id": vehicle_id if vehicle_id != "_default" else None}
+
+        try:
+            await _action_stop_ev_charging_dynamic(self.hass, self.config_entry, params)
+            state.is_charging = False
+            state.started_at = None
+            state.current_window = None
+            _LOGGER.info(f"Auto-schedule: Stopped charging for {vehicle_id}")
+        except Exception as e:
+            _LOGGER.error(f"Auto-schedule: Error stopping charging for {vehicle_id}: {e}")
+
+
+# Global auto-schedule executor instance
+_auto_schedule_executor: Optional[AutoScheduleExecutor] = None
+
+
+def get_auto_schedule_executor() -> Optional[AutoScheduleExecutor]:
+    """Get the global auto-schedule executor instance."""
+    return _auto_schedule_executor
+
+
+def set_auto_schedule_executor(executor: AutoScheduleExecutor) -> None:
+    """Set the global auto-schedule executor instance."""
+    global _auto_schedule_executor
+    _auto_schedule_executor = executor
