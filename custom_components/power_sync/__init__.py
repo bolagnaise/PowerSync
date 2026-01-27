@@ -2668,6 +2668,13 @@ class AutomationsView(HomeAssistantView):
         try:
             data = await request.json()
             _LOGGER.debug(f"📱 Creating automation with data: name={data.get('name')}, actions={data.get('actions')}")
+            # Ensure store._data has required keys (recovery from corrupted state)
+            if not hasattr(store, '_data') or store._data is None:
+                store._data = {}
+            if "automations" not in store._data:
+                store._data["automations"] = []
+            if "next_id" not in store._data:
+                store._data["next_id"] = 1
             automation = store.create(data)
             await store.async_save()
             return web.json_response({
