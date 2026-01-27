@@ -306,51 +306,82 @@ class SolarForecaster:
     async def _get_solcast_forecast(self, hours: int) -> Optional[List[Dict[str, Any]]]:
         """Get forecast from Solcast integration if available."""
         try:
-            # Look for Solcast sensors
+            # Look for Solcast sensors - try multiple patterns
             solcast_entity = None
+            solcast_patterns = ["solcast_pv_forecast", "solcast_forecast", "solcast"]
+
             for entity_id in self.hass.states.async_entity_ids("sensor"):
-                if "solcast" in entity_id.lower() and "forecast" in entity_id.lower():
-                    solcast_entity = entity_id
+                entity_lower = entity_id.lower()
+                for pattern in solcast_patterns:
+                    if pattern in entity_lower and "forecast" in entity_lower:
+                        solcast_entity = entity_id
+                        _LOGGER.debug(f"Found Solcast entity: {entity_id}")
+                        break
+                if solcast_entity:
                     break
 
             if not solcast_entity:
+                _LOGGER.debug("No Solcast forecast entity found")
                 return None
 
             state = self.hass.states.get(solcast_entity)
             if not state or not state.attributes:
+                _LOGGER.debug(f"Solcast entity {solcast_entity} has no state or attributes")
                 return None
 
-            # Solcast stores forecast in attributes
+            # Solcast stores forecast in attributes - try multiple attribute names
             forecasts = state.attributes.get("forecasts", [])
             if not forecasts:
-                # Try detailedForecast or similar
                 forecasts = state.attributes.get("detailedForecast", [])
+            if not forecasts:
+                forecasts = state.attributes.get("forecast_today", [])
+            if not forecasts:
+                forecasts = state.attributes.get("detailed_forecast", [])
 
             if not forecasts:
                 return None
 
             result = []
             now = datetime.now()
-            for entry in forecasts[:hours]:
+
+            # Solcast provides 30-minute intervals, so we need 2x entries for hourly data
+            # Aggregate into hourly buckets
+            hourly_data = {}
+
+            for entry in forecasts[:hours * 2]:  # Get 2x entries for 30-min intervals
                 # Solcast format varies by integration version
                 period_end = entry.get("period_end") or entry.get("period")
                 pv_estimate = entry.get("pv_estimate") or entry.get("pv_estimate10") or 0
 
                 if isinstance(period_end, str):
                     try:
-                        hour_dt = datetime.fromisoformat(period_end.replace("Z", "+00:00"))
+                        period_dt = datetime.fromisoformat(period_end.replace("Z", "+00:00"))
                     except ValueError:
                         continue
                 else:
-                    hour_dt = period_end
+                    period_dt = period_end
 
+                # Round down to hour for aggregation
+                hour_key = period_dt.replace(minute=0, second=0, microsecond=0)
+
+                if hour_key not in hourly_data:
+                    hourly_data[hour_key] = {"total_kw": 0, "count": 0}
+
+                # pv_estimate is average kW during 30-min period
+                # Sum the averages, we'll divide by count later
+                hourly_data[hour_key]["total_kw"] += float(pv_estimate)
+                hourly_data[hour_key]["count"] += 1
+
+            # Convert to hourly averages
+            for hour_dt, data in sorted(hourly_data.items())[:hours]:
+                avg_kw = data["total_kw"] / data["count"] if data["count"] > 0 else 0
                 result.append({
                     "hour": hour_dt.isoformat(),
-                    "pv_estimate_kw": float(pv_estimate),
+                    "pv_estimate_kw": avg_kw,
                     "confidence": 0.8,  # Solcast is generally reliable
                 })
 
-            _LOGGER.debug(f"Got {len(result)} hours of Solcast forecast")
+            _LOGGER.debug(f"Got {len(result)} hours of Solcast forecast (aggregated from 30-min intervals)")
             return result if result else None
 
         except Exception as e:
