@@ -47,6 +47,9 @@ class AutomationStore:
 
     def get_all(self) -> List[Dict[str, Any]]:
         """Get all automations."""
+        # Ensure automations key exists (recovery from corrupted state)
+        if "automations" not in self._data:
+            self._data["automations"] = []
         return self._data.get("automations", [])
 
     def get_by_id(self, automation_id: int) -> Optional[Dict[str, Any]]:
@@ -58,6 +61,12 @@ class AutomationStore:
 
     def create(self, automation_data: Dict[str, Any]) -> Dict[str, Any]:
         """Create a new automation."""
+        # Ensure required keys exist (recovery from corrupted state)
+        if "automations" not in self._data:
+            self._data["automations"] = []
+        if "next_id" not in self._data:
+            self._data["next_id"] = 1
+
         automation_id = self._data.get("next_id", 1)
         self._data["next_id"] = automation_id + 1
 
