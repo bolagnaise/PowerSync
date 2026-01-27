@@ -1312,10 +1312,308 @@ async def _action_set_ev_charging_amps(
 # =============================================================================
 
 # Global storage for dynamic EV charging state per config entry
-_dynamic_ev_state: Dict[str, Dict[str, Any]] = {}
+# Structure: { entry_id: { vehicle_id: { state... }, ... }, ... }
+_dynamic_ev_state: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
 # Global storage for regular EV charging scheduled stop (for stop_outside_window)
 _ev_scheduled_stop: Dict[str, Any] = {}
+
+# Default vehicle ID for single-vehicle setups
+DEFAULT_VEHICLE_ID = "_default"
+
+
+def _calculate_solar_surplus(live_status: dict, current_ev_power_kw: float, config: dict) -> float:
+    """
+    Calculate available solar surplus for EV charging.
+
+    Two methods are supported:
+    - direct: surplus = solar - load - battery_charge - buffer
+    - grid_based (AmpPilot style): surplus = -grid + current_ev + battery_charge
+
+    Args:
+        live_status: Dict with solar_power, grid_power, battery_power, load_power (all in W)
+        current_ev_power_kw: Current EV charging power in kW (sum of all EVs currently charging)
+        config: Dict with surplus_calculation method and household_buffer_kw
+
+    Returns:
+        Available surplus in kW (always >= 0)
+    """
+    # Convert from W to kW
+    solar_kw = (live_status.get("solar_power") or 0) / 1000
+    grid_kw = (live_status.get("grid_power") or 0) / 1000  # Positive = import, Negative = export
+    battery_kw = (live_status.get("battery_power") or 0) / 1000  # Positive = discharge, Negative = charge
+    load_kw = (live_status.get("load_power") or 0) / 1000
+    buffer_kw = config.get("household_buffer_kw", 0.5)
+
+    method = config.get("surplus_calculation", "grid_based")
+
+    if method == "grid_based":
+        # AmpPilot style: what's being exported + EV power + battery charge
+        # If grid_kw is negative (exporting), -grid_kw is positive (available surplus)
+        # Add back current EV power (since we want to know what's available if EV wasn't charging)
+        # Add battery charging power (we can redirect it to EV instead)
+        battery_charge_kw = max(0, -battery_kw)  # Only count when charging (negative = charging)
+        surplus = -grid_kw + current_ev_power_kw + battery_charge_kw
+        _LOGGER.debug(
+            f"Surplus calc (grid_based): grid={grid_kw:.2f}kW, ev={current_ev_power_kw:.2f}kW, "
+            f"bat_charge={battery_charge_kw:.2f}kW → raw={surplus:.2f}kW, after_buffer={max(0, surplus - buffer_kw):.2f}kW"
+        )
+    else:  # direct method
+        # Direct calculation: what solar is producing minus what's being used
+        # IMPORTANT: If load sensor includes EV power (e.g., mobile connector), we need to
+        # subtract it to get the "real" household load, then calculate true surplus
+        battery_charge_kw = max(0, -battery_kw)
+        real_household_load_kw = load_kw - current_ev_power_kw  # Remove EV from house load
+        surplus = solar_kw - real_household_load_kw - battery_charge_kw
+        _LOGGER.debug(
+            f"Surplus calc (direct): solar={solar_kw:.2f}kW, load={load_kw:.2f}kW (real={real_household_load_kw:.2f}kW), "
+            f"bat_charge={battery_charge_kw:.2f}kW → raw={surplus:.2f}kW, after_buffer={max(0, surplus - buffer_kw):.2f}kW"
+        )
+
+    # Apply buffer and ensure non-negative
+    return max(0, surplus - buffer_kw)
+
+
+def get_price_recommendation(
+    import_price_cents: float,
+    export_price_cents: float,
+    surplus_kw: float,
+    battery_soc: float,
+    min_battery_soc: float = 80,
+    prefer_export_threshold_cents: float = 15.0,
+) -> dict:
+    """
+    Get a charging recommendation based on current prices and surplus.
+
+    Logic:
+    - If surplus > 0 and battery SoC >= min: recommend charge (free solar)
+    - If export price > threshold and surplus > 0: recommend export (sell high)
+    - If import price < export price (negative spread): recommend charge (arbitrage)
+    - If import price very low (< 5c): recommend charge (cheap grid)
+    - Otherwise: recommend wait
+
+    Args:
+        import_price_cents: Current import price in cents/kWh
+        export_price_cents: Current export price (feed-in tariff) in cents/kWh
+        surplus_kw: Current solar surplus in kW
+        battery_soc: Current battery SoC (0-100)
+        min_battery_soc: Minimum battery SoC before EV charging (default 80)
+        prefer_export_threshold_cents: Export price above which to prefer selling (default 15c)
+
+    Returns:
+        Dictionary with recommendation, reason, and prices
+    """
+    recommendation = "wait"
+    reason = "No clear advantage to charge now"
+
+    # Check for solar surplus first (best option - free energy)
+    if surplus_kw >= 1.0 and battery_soc >= min_battery_soc:
+        recommendation = "charge"
+        reason = f"Solar surplus available ({surplus_kw:.1f}kW) - free charging!"
+    elif surplus_kw >= 1.0 and battery_soc < min_battery_soc:
+        recommendation = "wait"
+        reason = f"Solar surplus available but battery only at {battery_soc:.0f}% (need {min_battery_soc}%)"
+    # Check if export price is high enough to prefer selling
+    elif surplus_kw > 0 and export_price_cents >= prefer_export_threshold_cents:
+        recommendation = "export"
+        reason = f"High export rate ({export_price_cents:.1f}c/kWh) - sell to grid instead"
+    # Check for arbitrage opportunity (import < export is rare but possible)
+    elif import_price_cents < export_price_cents:
+        recommendation = "charge"
+        reason = f"Arbitrage: import ({import_price_cents:.1f}c) cheaper than export ({export_price_cents:.1f}c)"
+    # Check for very cheap grid power (off-peak)
+    elif import_price_cents < 10:
+        recommendation = "charge"
+        reason = f"Very cheap grid power ({import_price_cents:.1f}c/kWh) - good time to charge"
+    # Check for cheap-ish grid power
+    elif import_price_cents < 20:
+        recommendation = "charge"
+        reason = f"Reasonable grid price ({import_price_cents:.1f}c/kWh)"
+    # High import price - wait for cheaper
+    elif import_price_cents > 35:
+        recommendation = "wait"
+        reason = f"High grid price ({import_price_cents:.1f}c/kWh) - wait for cheaper rates"
+    else:
+        recommendation = "wait"
+        reason = f"Grid at {import_price_cents:.1f}c/kWh - consider waiting for solar or off-peak"
+
+    return {
+        "import_price_cents": round(import_price_cents, 2),
+        "export_price_cents": round(export_price_cents, 2),
+        "surplus_kw": round(surplus_kw, 2),
+        "recommendation": recommendation,
+        "reason": reason,
+    }
+
+
+def _distribute_surplus(entry_id: str, vehicle_id: str, total_surplus_kw: float, strategy: str) -> float:
+    """
+    Distribute available surplus between multiple vehicles based on strategy.
+
+    Args:
+        entry_id: Config entry ID
+        vehicle_id: The vehicle requesting its allocation
+        total_surplus_kw: Total available surplus in kW
+        strategy: Distribution strategy (even, priority_first, priority_only)
+
+    Returns:
+        Allocated surplus for this vehicle in kW
+    """
+    vehicles = _dynamic_ev_state.get(entry_id, {})
+    active_vehicles = [
+        (vid, v) for vid, v in vehicles.items()
+        if v.get("active") and not v.get("paused")
+    ]
+
+    if len(active_vehicles) <= 1:
+        _LOGGER.debug(f"Distribute surplus: single vehicle {vehicle_id[:8]}... gets all {total_surplus_kw:.2f}kW")
+        return total_surplus_kw
+
+    # Get current vehicle info
+    my_vehicle = vehicles.get(vehicle_id, {})
+    my_priority = my_vehicle.get("priority", 1)
+    my_params = my_vehicle.get("params", {})
+
+    vehicle_names = [(vid[:8], v.get("priority", 1)) for vid, v in active_vehicles]
+    _LOGGER.debug(f"Distribute surplus: {len(active_vehicles)} vehicles active: {vehicle_names}, strategy={strategy}")
+
+    allocated = 0.0
+
+    if strategy == "even":
+        # Split evenly between all active vehicles
+        allocated = total_surplus_kw / len(active_vehicles)
+
+    elif strategy == "priority_first":
+        # Highest priority (lowest number) gets first allocation up to max
+        # Sort by priority (1 = highest priority)
+        sorted_vehicles = sorted(active_vehicles, key=lambda x: x[1].get("priority", 1))
+
+        if my_priority == 1:
+            # Primary vehicle gets first allocation up to max
+            max_kw = (my_params.get("max_charge_amps", 32) * my_params.get("voltage", 240)) / 1000
+            allocated = min(total_surplus_kw, max_kw)
+        else:
+            # Secondary vehicles get the remainder
+            remaining = total_surplus_kw
+            for vid, v in sorted_vehicles:
+                if v.get("priority", 1) < my_priority:
+                    v_params = v.get("params", {})
+                    v_max_kw = (v_params.get("max_charge_amps", 32) * v_params.get("voltage", 240)) / 1000
+                    remaining = max(0, remaining - min(remaining, v_max_kw))
+            allocated = remaining
+
+    elif strategy == "priority_only":
+        # Only the highest priority vehicle gets surplus
+        if my_priority == 1:
+            allocated = total_surplus_kw
+        else:
+            allocated = 0
+
+    else:
+        allocated = total_surplus_kw
+
+    _LOGGER.debug(
+        f"Distribute surplus: {vehicle_id[:8]}... (priority={my_priority}) "
+        f"gets {allocated:.2f}kW of {total_surplus_kw:.2f}kW ({strategy})"
+    )
+    return allocated
+
+
+async def _set_vehicle_amps(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_id: str,
+    amps: int,
+    params: dict
+) -> bool:
+    """
+    Set charging amps for any charger type (Tesla, OCPP, generic HA entities).
+
+    Args:
+        hass: Home Assistant instance
+        config_entry: Config entry
+        vehicle_id: Vehicle identifier (VIN for Tesla, charger ID for OCPP)
+        amps: Target charging amperage (0 = stop charging)
+        params: Charger parameters including charger_type
+
+    Returns:
+        True if successful
+    """
+    charger_type = params.get("charger_type", "tesla")
+
+    if charger_type == "tesla":
+        if amps == 0:
+            return await _action_stop_ev_charging(hass, config_entry, {"vehicle_vin": vehicle_id})
+        return await _action_set_ev_charging_amps(hass, config_entry, {
+            "amps": amps,
+            "vehicle_vin": vehicle_id if vehicle_id != DEFAULT_VEHICLE_ID else None
+        })
+
+    elif charger_type == "ocpp":
+        ocpp_charger_id = params.get("ocpp_charger_id")
+        if not ocpp_charger_id:
+            _LOGGER.error("OCPP charger ID not configured")
+            return False
+        return await _set_ocpp_charging_amps(hass, ocpp_charger_id, amps)
+
+    elif charger_type == "generic":
+        # Use HA service calls to switch and number entities
+        switch_entity = params.get("charger_switch_entity")
+        amps_entity = params.get("charger_amps_entity")
+
+        try:
+            if amps == 0:
+                # Turn off charger
+                if switch_entity:
+                    await hass.services.async_call(
+                        "switch", "turn_off",
+                        {"entity_id": switch_entity},
+                        blocking=True
+                    )
+            else:
+                # Set amps and ensure charger is on
+                if amps_entity:
+                    await hass.services.async_call(
+                        "number", "set_value",
+                        {"entity_id": amps_entity, "value": amps},
+                        blocking=True
+                    )
+                if switch_entity:
+                    await hass.services.async_call(
+                        "switch", "turn_on",
+                        {"entity_id": switch_entity},
+                        blocking=True
+                    )
+            _LOGGER.info(f"Set generic charger to {amps}A via {amps_entity or switch_entity}")
+            return True
+        except Exception as e:
+            _LOGGER.error(f"Failed to set generic charger amps: {e}")
+            return False
+
+    _LOGGER.warning(f"Unknown charger type: {charger_type}")
+    return False
+
+
+async def _set_ocpp_charging_amps(hass: HomeAssistant, charger_id: int, amps: int) -> bool:
+    """Set charging amps for an OCPP charger."""
+    from ..const import DOMAIN
+
+    try:
+        # Find the OCPP charger controller in hass.data
+        for entry_id, entry_data in hass.data.get(DOMAIN, {}).items():
+            if isinstance(entry_data, dict) and "ocpp_server" in entry_data:
+                ocpp_server = entry_data["ocpp_server"]
+                if hasattr(ocpp_server, "set_charging_profile"):
+                    success = await ocpp_server.set_charging_profile(charger_id, amps)
+                    if success:
+                        _LOGGER.info(f"Set OCPP charger {charger_id} to {amps}A")
+                        return True
+
+        _LOGGER.warning(f"OCPP server not found or charger {charger_id} not available")
+        return False
+    except Exception as e:
+        _LOGGER.error(f"Failed to set OCPP charging amps: {e}")
+        return False
 
 
 def _parse_time_window(time_str: str) -> Optional[dt_time]:
@@ -1459,27 +1757,270 @@ async def _get_tesla_live_status(hass: HomeAssistant, config_entry: ConfigEntry)
         return None
 
 
-async def _dynamic_ev_update(
+async def _dynamic_ev_update_surplus(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     entry_id: str,
+    vehicle_id: str,
 ) -> None:
-    """Periodic update function for dynamic EV charging.
-
-    Uses same logic as the HA automation "Tesla Dynamic Charge Control for PW3":
-    - Maintains a target battery charge rate (e.g., 5kW into battery)
-    - Falls back to grid headroom if battery can't meet target
-    - Adjusts EV amps based on available power
-    - Stops charging if outside time window (when stop_outside_window is enabled)
-
-    Battery power convention: Positive = discharging, Negative = charging
-    Grid power convention: Positive = importing, Negative = exporting
     """
-    state = _dynamic_ev_state.get(entry_id)
+    Solar surplus mode update - adjusts EV charging amps based on available solar surplus.
+
+    This mode prioritizes battery SoC and only charges the EV when there's excess solar
+    that would otherwise be exported to the grid.
+    """
+    vehicles = _dynamic_ev_state.get(entry_id, {})
+    state = vehicles.get(vehicle_id)
     if not state or not state.get("active"):
         return
 
     params = state.get("params", {})
+
+    # Get live status
+    live_status = await _get_tesla_live_status(hass, config_entry)
+    if not live_status:
+        _LOGGER.debug("Solar surplus EV: Could not get live status")
+        return
+
+    battery_soc = live_status.get("battery_soc") or 0
+
+    # Battery priority check
+    min_soc = params.get("min_battery_soc", 80)
+    pause_soc = params.get("pause_below_soc", 70)
+
+    # Don't start charging until battery reaches min_soc
+    if not state.get("charging_started"):
+        if battery_soc < min_soc:
+            state["paused"] = True
+            state["paused_reason"] = f"Waiting for battery to reach {min_soc}% (currently {battery_soc:.0f}%)"
+            _LOGGER.debug(f"Solar surplus EV: {state['paused_reason']}")
+            return
+        else:
+            state["paused"] = False
+            state["paused_reason"] = None
+
+    # Pause if battery drops below pause threshold
+    if state.get("charging_started") and battery_soc < pause_soc:
+        if not state.get("paused"):
+            state["paused"] = True
+            state["paused_reason"] = f"Battery dropped to {battery_soc:.0f}% (pause threshold: {pause_soc}%)"
+            _LOGGER.info(f"⚡ Solar surplus EV: Pausing - {state['paused_reason']}")
+            await _set_vehicle_amps(hass, config_entry, vehicle_id, 0, params)
+            state["current_amps"] = 0
+
+            # Send pause notification
+            notify_on_error = params.get("notify_on_error", True)
+            if notify_on_error:
+                try:
+                    vehicle_name = params.get("vehicle_name", vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id)
+                    await _send_expo_push(
+                        hass,
+                        "EV Charging Paused",
+                        f"{vehicle_name}: Battery at {battery_soc:.0f}% (below {pause_soc}%)"
+                    )
+                except Exception as e:
+                    _LOGGER.debug(f"Could not send pause notification: {e}")
+        return
+
+    # Resume if battery recovered
+    if state.get("paused") and battery_soc >= min_soc:
+        was_paused = state.get("paused")
+        state["paused"] = False
+        state["paused_reason"] = None
+        _LOGGER.info(f"⚡ Solar surplus EV: Resuming - battery at {battery_soc:.0f}%")
+
+        # Send resume notification
+        if was_paused:
+            notify_on_start = params.get("notify_on_start", True)
+            if notify_on_start:
+                try:
+                    vehicle_name = params.get("vehicle_name", vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id)
+                    await _send_expo_push(
+                        hass,
+                        "EV Charging Resumed",
+                        f"{vehicle_name}: Battery recovered to {battery_soc:.0f}%"
+                    )
+                except Exception as e:
+                    _LOGGER.debug(f"Could not send resume notification: {e}")
+
+    # Calculate current EV power for THIS vehicle
+    voltage = params.get("voltage", 240)
+    current_amps = state.get("current_amps", 0)
+    current_ev_kw = (current_amps * voltage) / 1000
+
+    # Calculate TOTAL EV power from ALL active vehicles (important for 2+ car scenarios)
+    # This ensures surplus calculation accounts for all EVs' consumption
+    total_ev_power_kw = 0.0
+    all_vehicles = _dynamic_ev_state.get(entry_id, {})
+    for vid, v_state in all_vehicles.items():
+        if v_state.get("active") and not v_state.get("paused"):
+            v_amps = v_state.get("current_amps", 0)
+            v_voltage = v_state.get("params", {}).get("voltage", 240)
+            total_ev_power_kw += (v_amps * v_voltage) / 1000
+
+    # Calculate available surplus using TOTAL EV power (so we know true surplus if no EVs were charging)
+    surplus_kw = _calculate_solar_surplus(live_status, total_ev_power_kw, params)
+
+    # Apply dual vehicle distribution strategy
+    strategy = params.get("dual_vehicle_strategy", "priority_first")
+    my_surplus_kw = _distribute_surplus(entry_id, vehicle_id, surplus_kw, strategy)
+
+    # Convert to amps
+    available_amps = (my_surplus_kw * 1000) / voltage
+
+    # Apply constraints
+    min_amps = params.get("min_charge_amps", 5)
+    max_amps = params.get("max_charge_amps", 32)
+    new_amps = int(round(max(0, min(max_amps, available_amps))))
+
+    # Hysteresis: don't start unless we have sustained surplus
+    sustained_minutes = params.get("sustained_surplus_minutes", 2)
+    stop_delay_minutes = params.get("stop_delay_minutes", 5)
+
+    if new_amps < min_amps:
+        # Not enough surplus
+        if current_amps > 0:
+            # Track how long we've been below threshold
+            low_surplus_start = state.get("low_surplus_start")
+            if low_surplus_start is None:
+                state["low_surplus_start"] = datetime.now()
+            elif (datetime.now() - low_surplus_start).total_seconds() >= stop_delay_minutes * 60:
+                # Stop charging after delay
+                _LOGGER.info(f"⚡ Solar surplus EV: Stopping - insufficient surplus for {stop_delay_minutes} min")
+                new_amps = 0
+            else:
+                # Keep current amps during grace period
+                new_amps = current_amps
+        else:
+            new_amps = 0
+    else:
+        # Sufficient surplus - reset low surplus timer
+        state["low_surplus_start"] = None
+
+        if current_amps == 0:
+            # Track how long we've had surplus before starting
+            high_surplus_start = state.get("high_surplus_start")
+            if high_surplus_start is None:
+                state["high_surplus_start"] = datetime.now()
+            elif (datetime.now() - high_surplus_start).total_seconds() >= sustained_minutes * 60:
+                # Start charging after sustained surplus
+                _LOGGER.info(f"⚡ Solar surplus EV: Starting - sustained surplus for {sustained_minutes} min")
+                state["charging_started"] = True
+
+                # Send notification when solar charging actually begins
+                notify_on_start = params.get("notify_on_start", True)
+                if notify_on_start:
+                    try:
+                        vehicle_name = params.get("vehicle_name", vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id)
+                        await _send_expo_push(
+                            hass,
+                            "Solar EV Charging Started",
+                            f"{vehicle_name}: {surplus_kw:.1f}kW surplus available"
+                        )
+                    except Exception as e:
+                        _LOGGER.debug(f"Could not send solar start notification: {e}")
+            else:
+                # Don't start yet, waiting for sustained surplus
+                new_amps = 0
+        else:
+            state["high_surplus_start"] = None
+
+    # Store decision reason
+    state["allocated_surplus_kw"] = my_surplus_kw
+    state["reason"] = (
+        f"Surplus: {surplus_kw:.1f}kW, Allocated: {my_surplus_kw:.1f}kW, "
+        f"Battery: {battery_soc:.0f}%, Target: {new_amps}A"
+    )
+
+    # Update charging session with current power reading
+    if current_amps > 0:
+        try:
+            from .ev_charging_session import get_session_manager
+            session_manager = get_session_manager()
+            if session_manager:
+                # Determine if we're charging from solar
+                is_solar = my_surplus_kw >= (current_ev_kw * 0.8)  # 80%+ from solar counts as solar
+
+                # Get current prices (default values if not available)
+                import_price = 30.0  # Default 30c/kWh
+                export_price = 8.0   # Default 8c/kWh FiT
+
+                # Try to get actual prices from config entry data
+                entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
+                price_data = entry_data.get("current_prices", {})
+                if price_data:
+                    import_price = price_data.get("import_cents", 30.0)
+                    export_price = price_data.get("export_cents", 8.0)
+
+                await session_manager.update_session(
+                    vehicle_id=vehicle_id,
+                    power_kw=current_ev_kw,
+                    amps=current_amps,
+                    is_solar=is_solar,
+                    import_price_cents=import_price,
+                    export_price_cents=export_price,
+                    battery_soc=int(battery_soc) if battery_soc else None,
+                )
+        except Exception as e:
+            _LOGGER.debug(f"Could not update session: {e}")
+
+    # Only update if change is significant (>= 1 amp)
+    if abs(new_amps - current_amps) >= 1:
+        _LOGGER.info(
+            f"⚡ Solar surplus EV: {current_amps}A -> {new_amps}A "
+            f"(surplus={my_surplus_kw:.1f}kW, battery={battery_soc:.0f}%)"
+        )
+        success = await _set_vehicle_amps(hass, config_entry, vehicle_id, new_amps, params)
+        if success:
+            state["current_amps"] = new_amps
+            state["target_amps"] = new_amps
+
+            # End session when transitioning to 0 amps (stopping charging)
+            if new_amps == 0 and current_amps > 0:
+                try:
+                    from .ev_charging_session import get_session_manager
+                    session_manager = get_session_manager()
+                    if session_manager:
+                        reason = "insufficient_surplus"
+                        if state.get("paused"):
+                            reason = "battery_low"
+                        await session_manager.end_session(
+                            vehicle_id=vehicle_id,
+                            reason=reason,
+                            end_soc=int(battery_soc) if battery_soc else None,
+                        )
+                        _LOGGER.debug(f"Solar surplus EV: Ended session for {vehicle_id} ({reason})")
+                except Exception as e:
+                    _LOGGER.debug(f"Could not end session: {e}")
+
+
+async def _dynamic_ev_update(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    entry_id: str,
+    vehicle_id: str = DEFAULT_VEHICLE_ID,
+) -> None:
+    """Periodic update function for dynamic EV charging.
+
+    Supports two modes:
+    - battery_target: Maintains a target battery charge rate (e.g., 5kW into battery)
+    - solar_surplus: Only charges EV when there's excess solar
+
+    Battery power convention: Positive = discharging, Negative = charging
+    Grid power convention: Positive = importing, Negative = exporting
+    """
+    vehicles = _dynamic_ev_state.get(entry_id, {})
+    state = vehicles.get(vehicle_id)
+    if not state or not state.get("active"):
+        return
+
+    params = state.get("params", {})
+
+    # Check which mode we're in
+    mode = params.get("dynamic_mode", "battery_target")
+    if mode == "solar_surplus":
+        await _dynamic_ev_update_surplus(hass, config_entry, entry_id, vehicle_id)
+        return
 
     # Check time window if stop_outside_window is enabled
     stop_outside_window = params.get("stop_outside_window", False)
@@ -1571,6 +2112,47 @@ async def _dynamic_ev_update(
         else:
             _LOGGER.warning(f"Dynamic EV: Failed to set amps to {new_amps}A")
 
+    # Update session tracking (battery target mode)
+    try:
+        from ..const import DOMAIN
+        from .ev_charging_session import get_session_manager
+        session_manager = get_session_manager()
+        if session_manager:
+            if current_amps > 0 and new_amps > 0:
+                # Session update - still charging
+                # In battery target mode, determine if using solar based on grid import
+                # If grid import is low relative to EV power, we're mostly on solar
+                is_solar = grid_power_kw < (current_ev_power_kw * 0.3)
+
+                # Get price info if available
+                import_price = 0.0
+                export_price = 0.0
+                price_data = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("price_data", {})
+                if price_data:
+                    import_price = price_data.get("import_price_cents", 0.0)
+                    export_price = price_data.get("export_price_cents", 0.0)
+
+                await session_manager.update_session(
+                    vehicle_id=vehicle_id,
+                    power_kw=current_ev_power_kw,
+                    amps=current_amps,
+                    is_solar=is_solar,
+                    import_price_cents=import_price,
+                    export_price_cents=export_price,
+                )
+            elif current_amps > 0 and new_amps == 0:
+                # Session end - charging stopped
+                live_soc = live_status.get("ev_state_of_charge")
+                end_soc = int(live_soc) if live_soc else None
+                await session_manager.end_session(
+                    vehicle_id=vehicle_id,
+                    reason="battery_target_stop",
+                    end_soc=end_soc,
+                )
+                _LOGGER.debug(f"Dynamic EV: Ended session for {vehicle_id}")
+    except Exception as e:
+        _LOGGER.debug(f"Dynamic EV: Session tracking failed: {e}")
+
 
 async def _action_start_ev_charging_dynamic(
     hass: HomeAssistant,
@@ -1579,68 +2161,109 @@ async def _action_start_ev_charging_dynamic(
     context: Optional[Dict[str, Any]] = None
 ) -> bool:
     """
-    Start dynamic EV charging that adjusts charge rate based on battery/grid.
+    Start dynamic EV charging that adjusts charge rate based on battery/grid or solar surplus.
 
-    Uses same logic as HA automation "Tesla Dynamic Charge Control for PW3":
-    - Maintains target battery charge rate while EV charges
-    - Falls back to grid headroom if battery can't meet target
+    Supports two modes:
+    - battery_target: Maintains target battery charge rate while EV charges
+    - solar_surplus: Only charges EV when there's excess solar (battery priority)
 
-    Parameters:
+    Parameters (battery_target mode):
         target_battery_charge_kw: Target battery charge rate in kW (default 5.0)
-            e.g., 5.0 means maintain 5kW charging INTO the Powerwall
         max_grid_import_kw: Max grid import allowed (default 12.5)
+
+    Parameters (solar_surplus mode):
+        household_buffer_kw: Buffer to keep from surplus (default 0.5)
+        surplus_calculation: Method - "grid_based" or "direct" (default grid_based)
+        min_battery_soc: Don't start until battery reaches this % (default 80)
+        pause_below_soc: Pause if battery drops below this % (default 70)
+        sustained_surplus_minutes: Wait time before starting (default 2)
+        stop_delay_minutes: Wait time before stopping (default 5)
+        dual_vehicle_strategy: "even", "priority_first", "priority_only" (default priority_first)
+
+    Common parameters:
+        dynamic_mode: "battery_target" or "solar_surplus" (default battery_target)
         min_charge_amps: Minimum EV charge amps (default 5)
         max_charge_amps: Maximum EV charge amps (default 32)
-        voltage: Assumed charging voltage for calculations (default 240)
-        stop_outside_window: If True, stop charging when outside time window (default False)
+        voltage: Assumed charging voltage (default 240)
+        stop_outside_window: Stop when outside time window (default False)
         vehicle_vin: Optional VIN to filter by specific vehicle
+        charger_type: "tesla", "ocpp", or "generic" (default tesla)
+        priority: Vehicle priority for dual-vehicle setups (default 1)
     """
     from ..const import DOMAIN
 
     entry_id = config_entry.entry_id
+    vehicle_id = params.get("vehicle_vin") or params.get("vehicle_id") or DEFAULT_VEHICLE_ID
 
-    # Get parameters with defaults (support both old and new parameter names)
-    target_battery_charge_kw = params.get(
-        "target_battery_charge_kw",
-        params.get("max_battery_discharge_kw", 5.0)  # Fallback for old param name
-    )
-    max_grid_import_kw = params.get("max_grid_import_kw", 12.5)
+    # Determine mode
+    dynamic_mode = params.get("dynamic_mode", "battery_target")
+
+    # Get common parameters with defaults
     min_charge_amps = params.get("min_charge_amps", 5)
     max_charge_amps = params.get("max_charge_amps", 32)
     voltage = params.get("voltage", 240)
-    start_amps = params.get("start_amps", max_charge_amps)
     stop_outside_window = params.get("stop_outside_window", False)
+    charger_type = params.get("charger_type", "tesla")
+    priority = params.get("priority", 1)
+
+    # Mode-specific parameters
+    if dynamic_mode == "solar_surplus":
+        mode_params = {
+            "household_buffer_kw": params.get("household_buffer_kw", 0.5),
+            "surplus_calculation": params.get("surplus_calculation", "grid_based"),
+            "min_battery_soc": params.get("min_battery_soc", 80),
+            "pause_below_soc": params.get("pause_below_soc", 70),
+            "sustained_surplus_minutes": params.get("sustained_surplus_minutes", 2),
+            "stop_delay_minutes": params.get("stop_delay_minutes", 5),
+            "dual_vehicle_strategy": params.get("dual_vehicle_strategy", "priority_first"),
+        }
+        start_amps = 0  # Don't start immediately in solar surplus mode
+        _LOGGER.info(
+            f"⚡ Starting solar surplus EV charging: buffer={mode_params['household_buffer_kw']}kW, "
+            f"min_soc={mode_params['min_battery_soc']}%, amps={min_charge_amps}-{max_charge_amps}A"
+        )
+    else:
+        # Battery target mode (existing behavior)
+        target_battery_charge_kw = params.get(
+            "target_battery_charge_kw",
+            params.get("max_battery_discharge_kw", 5.0)  # Fallback for old param name
+        )
+        mode_params = {
+            "target_battery_charge_kw": target_battery_charge_kw,
+            "max_grid_import_kw": params.get("max_grid_import_kw", 12.5),
+        }
+        start_amps = params.get("start_amps", max_charge_amps)
+        _LOGGER.info(
+            f"⚡ Starting dynamic EV charging: target_battery_charge={target_battery_charge_kw}kW, "
+            f"max_grid_import={mode_params['max_grid_import_kw']}kW, amps={min_charge_amps}-{max_charge_amps}A"
+        )
 
     # Get time window from context (passed from automation trigger)
     time_window_start = context.get("time_window_start") if context else None
     time_window_end = context.get("time_window_end") if context else None
     timezone = context.get("timezone", "UTC") if context else "UTC"
 
-    _LOGGER.info(
-        f"⚡ Starting dynamic EV charging: target_battery_charge={target_battery_charge_kw}kW, "
-        f"max_grid_import={max_grid_import_kw}kW, amps={min_charge_amps}-{max_charge_amps}A"
-        f"{', stop_outside_window=' + str(time_window_start) + '-' + str(time_window_end) if stop_outside_window and time_window_start else ''}"
-    )
+    # Stop any existing dynamic charging for this vehicle
+    await _action_stop_ev_charging_dynamic(hass, config_entry, {"vehicle_id": vehicle_id})
 
-    # Stop any existing dynamic charging for this entry
-    await _action_stop_ev_charging_dynamic(hass, config_entry, {})
+    # For battery_target mode, start EV charging immediately
+    # For solar_surplus mode, we wait for sufficient surplus before starting
+    if dynamic_mode == "battery_target":
+        start_success = await _action_start_ev_charging(hass, config_entry, params, context)
+        if not start_success:
+            _LOGGER.error("Dynamic EV: Failed to start EV charging")
+            return False
 
-    # Start EV charging first
-    start_success = await _action_start_ev_charging(hass, config_entry, params, context)
-    if not start_success:
-        _LOGGER.error("Dynamic EV: Failed to start EV charging")
-        return False
+        # Set initial amps
+        amps_success = await _action_set_ev_charging_amps(
+            hass, config_entry, {"amps": start_amps}
+        )
+        if not amps_success:
+            _LOGGER.warning(f"Dynamic EV: Failed to set initial amps to {start_amps}A")
 
-    # Set initial amps
-    amps_success = await _action_set_ev_charging_amps(
-        hass, config_entry, {"amps": start_amps}
-    )
-    if not amps_success:
-        _LOGGER.warning(f"Dynamic EV: Failed to set initial amps to {start_amps}A")
-
-    # Create the periodic update callback
+    # Create the periodic update callback for this vehicle
     async def periodic_update(now) -> None:
-        await _dynamic_ev_update(hass, config_entry, entry_id)
+        await _dynamic_ev_update(hass, config_entry, entry_id, vehicle_id)
 
     # Schedule the periodic update (every 30 seconds)
     cancel_timer = async_track_time_interval(
@@ -1649,29 +2272,85 @@ async def _action_start_ev_charging_dynamic(
         timedelta(seconds=30),
     )
 
-    # Store state (including time window for stop_outside_window feature)
-    _dynamic_ev_state[entry_id] = {
-        "active": True,
-        "params": {
-            "target_battery_charge_kw": target_battery_charge_kw,
-            "max_grid_import_kw": max_grid_import_kw,
-            "min_charge_amps": min_charge_amps,
-            "max_charge_amps": max_charge_amps,
-            "voltage": voltage,
-            "stop_outside_window": stop_outside_window,
-            "time_window_start": time_window_start,
-            "time_window_end": time_window_end,
-            "timezone": timezone,
-        },
-        "current_amps": start_amps,
-        "cancel_timer": cancel_timer,
+    # Build full params dict
+    full_params = {
+        "dynamic_mode": dynamic_mode,
+        "min_charge_amps": min_charge_amps,
+        "max_charge_amps": max_charge_amps,
+        "voltage": voltage,
+        "stop_outside_window": stop_outside_window,
+        "time_window_start": time_window_start,
+        "time_window_end": time_window_end,
+        "timezone": timezone,
+        "charger_type": charger_type,
+        **mode_params,
+        # Pass through generic charger entities if present
+        "charger_switch_entity": params.get("charger_switch_entity"),
+        "charger_amps_entity": params.get("charger_amps_entity"),
+        "ocpp_charger_id": params.get("ocpp_charger_id"),
     }
 
-    # Also store in hass.data for access from other places
+    # Initialize entry-level state dict if needed
+    if entry_id not in _dynamic_ev_state:
+        _dynamic_ev_state[entry_id] = {}
+
+    # Store vehicle-specific state
+    _dynamic_ev_state[entry_id][vehicle_id] = {
+        "active": True,
+        "params": full_params,
+        "current_amps": start_amps,
+        "target_amps": start_amps,
+        "cancel_timer": cancel_timer,
+        "priority": priority,
+        "paused": False,
+        "paused_reason": None,
+        "charging_started": dynamic_mode == "battery_target",  # Already started for battery_target
+        "allocated_surplus_kw": 0,
+        "reason": "",
+        "session_id": None,  # Will be set when session tracking starts
+    }
+
+    # Start charging session tracking
+    try:
+        from .ev_charging_session import get_session_manager
+        session_manager = get_session_manager()
+        if session_manager:
+            # Get initial SoC if available
+            initial_soc = None
+            live_status = await _get_tesla_live_status(hass, config_entry)
+            if live_status:
+                initial_soc = live_status.get("battery_soc")
+
+            session = await session_manager.start_session(
+                vehicle_id=vehicle_id,
+                mode=dynamic_mode,
+                start_soc=int(initial_soc) if initial_soc else None,
+            )
+            _dynamic_ev_state[entry_id][vehicle_id]["session_id"] = session.id
+            _LOGGER.info(f"📊 Started charging session {session.id}")
+    except Exception as e:
+        _LOGGER.debug(f"Could not start session tracking: {e}")
+
+    # Also store in hass.data for access from other places (for API endpoints)
     if DOMAIN in hass.data and entry_id in hass.data[DOMAIN]:
         hass.data[DOMAIN][entry_id]["dynamic_ev_state"] = _dynamic_ev_state[entry_id]
 
-    _LOGGER.info(f"⚡ Dynamic EV charging started (update every 30s)")
+    mode_label = "solar surplus" if dynamic_mode == "solar_surplus" else "battery target"
+    _LOGGER.info(f"⚡ Dynamic EV charging started ({mode_label} mode, vehicle={vehicle_id})")
+
+    # Send push notification if enabled
+    notify_on_start = params.get("notify_on_start", True)
+    if notify_on_start:
+        try:
+            vehicle_name = params.get("vehicle_name", vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id)
+            await _send_expo_push(
+                hass,
+                "EV Charging Started",
+                f"{vehicle_name}: {mode_label} mode activated"
+            )
+        except Exception as e:
+            _LOGGER.debug(f"Could not send start notification: {e}")
+
     return True
 
 
@@ -1684,32 +2363,87 @@ async def _action_stop_ev_charging_dynamic(
     Stop dynamic EV charging and cancel the adjustment timer.
 
     Parameters:
+        vehicle_id: Specific vehicle to stop (default: stop all)
         stop_charging: If True (default), also stop the EV charging. If False, just stop adjustments.
     """
     from ..const import DOMAIN
 
     entry_id = config_entry.entry_id
     stop_charging = params.get("stop_charging", True)
+    vehicle_id = params.get("vehicle_id") or params.get("vehicle_vin")
 
-    state = _dynamic_ev_state.get(entry_id)
-    if state:
-        # Cancel the timer
-        cancel_timer = state.get("cancel_timer")
-        if cancel_timer:
-            cancel_timer()
-            _LOGGER.debug("Dynamic EV: Cancelled periodic timer")
+    vehicles = _dynamic_ev_state.get(entry_id, {})
 
-        state["active"] = False
+    if vehicle_id:
+        # Stop specific vehicle
+        vehicle_ids_to_stop = [vehicle_id] if vehicle_id in vehicles else []
+    else:
+        # Stop all vehicles for this entry
+        vehicle_ids_to_stop = list(vehicles.keys())
+
+    for vid in vehicle_ids_to_stop:
+        state = vehicles.get(vid)
+        if state:
+            # Cancel the timer
+            cancel_timer = state.get("cancel_timer")
+            if cancel_timer:
+                cancel_timer()
+                _LOGGER.debug(f"Dynamic EV: Cancelled periodic timer for {vid}")
+
+            # End charging session tracking
+            try:
+                from .ev_charging_session import get_session_manager
+                session_manager = get_session_manager()
+                if session_manager and state.get("session_id"):
+                    # Try to get current SoC for end_soc
+                    end_soc = None
+                    try:
+                        live_status = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("live_status", {})
+                        if live_status.get("ev_state_of_charge"):
+                            end_soc = int(live_status["ev_state_of_charge"])
+                    except Exception:
+                        pass
+
+                    await session_manager.end_session(
+                        vehicle_id=vid,
+                        reason="manual" if params.get("manual_stop") else "stopped",
+                        end_soc=end_soc,
+                    )
+                    _LOGGER.debug(f"Dynamic EV: Ended charging session for {vid}")
+            except Exception as e:
+                _LOGGER.warning(f"Dynamic EV: Failed to end session for {vid}: {e}")
+
+            # Send stop notification if enabled
+            notify_on_complete = state.get("params", {}).get("notify_on_complete", True)
+            if notify_on_complete:
+                try:
+                    vehicle_name = state.get("params", {}).get("vehicle_name", vid[:8] if len(vid) > 8 else vid)
+                    reason = params.get("stop_reason", "manually stopped")
+                    await _send_expo_push(
+                        hass,
+                        "EV Charging Stopped",
+                        f"{vehicle_name}: {reason}"
+                    )
+                except Exception as e:
+                    _LOGGER.debug(f"Could not send stop notification: {e}")
+
+            state["active"] = False
+            del vehicles[vid]
+            _LOGGER.info(f"⚡ Dynamic EV charging stopped for {vid}")
+
+    # Clean up entry if no vehicles remain
+    if not vehicles and entry_id in _dynamic_ev_state:
         del _dynamic_ev_state[entry_id]
 
-        # Remove from hass.data
-        if DOMAIN in hass.data and entry_id in hass.data[DOMAIN]:
+    # Update hass.data
+    if DOMAIN in hass.data and entry_id in hass.data[DOMAIN]:
+        if _dynamic_ev_state.get(entry_id):
+            hass.data[DOMAIN][entry_id]["dynamic_ev_state"] = _dynamic_ev_state[entry_id]
+        else:
             hass.data[DOMAIN][entry_id].pop("dynamic_ev_state", None)
 
-        _LOGGER.info("⚡ Dynamic EV charging stopped")
-
     # Stop EV charging if requested
-    if stop_charging:
+    if stop_charging and vehicle_ids_to_stop:
         return await _action_stop_ev_charging(hass, config_entry, params)
 
     return True

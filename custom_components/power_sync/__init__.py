@@ -3922,6 +3922,885 @@ class EVVehicleCommandView(HomeAssistantView):
             }, status=500)
 
 
+class SolarSurplusStatusView(HomeAssistantView):
+    """HTTP view to get solar surplus charging status for mobile app."""
+
+    url = "/api/power_sync/ev/solar_surplus_status"
+    name = "api:power_sync:ev:solar_surplus_status"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request for solar surplus status."""
+        try:
+            from .automations.actions import _dynamic_ev_state, _get_tesla_live_status, _calculate_solar_surplus
+
+            # Get config entry
+            entries = self._hass.config_entries.async_entries(DOMAIN)
+            if not entries:
+                return web.json_response({
+                    "success": False,
+                    "error": "PowerSync not configured"
+                }, status=400)
+
+            entry = entries[0]
+            entry_id = entry.entry_id
+
+            # Get live status for surplus calculation
+            live_status = await _get_tesla_live_status(self._hass, entry)
+
+            surplus_kw = 0.0
+            battery_soc = 0.0
+
+            if live_status:
+                battery_soc = live_status.get("battery_soc") or 0
+                # Calculate surplus with default config
+                surplus_kw = _calculate_solar_surplus(live_status, 0, {"surplus_calculation": "grid_based", "household_buffer_kw": 0.5})
+
+            # Get per-vehicle states
+            vehicles_state = []
+            entry_vehicles = _dynamic_ev_state.get(entry_id, {})
+
+            for vehicle_id, state in entry_vehicles.items():
+                if state.get("active"):
+                    params = state.get("params", {})
+                    vehicles_state.append({
+                        "vehicle_id": vehicle_id,
+                        "active": state.get("active", False),
+                        "mode": params.get("dynamic_mode", "battery_target"),
+                        "current_amps": state.get("current_amps", 0),
+                        "target_amps": state.get("target_amps", 0),
+                        "allocated_surplus_kw": state.get("allocated_surplus_kw", 0),
+                        "reason": state.get("reason", ""),
+                        "paused": state.get("paused", False),
+                        "paused_reason": state.get("paused_reason"),
+                        "priority": state.get("priority", 1),
+                        "charging_started": state.get("charging_started", False),
+                    })
+
+            return web.json_response({
+                "success": True,
+                "surplus_kw": round(surplus_kw, 2),
+                "battery_soc": round(battery_soc, 1),
+                "solar_power_kw": round((live_status.get("solar_power") or 0) / 1000, 2) if live_status else 0,
+                "grid_power_kw": round((live_status.get("grid_power") or 0) / 1000, 2) if live_status else 0,
+                "vehicles": vehicles_state,
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting solar surplus status: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
+class VehicleChargingConfigView(HomeAssistantView):
+    """HTTP view to manage vehicle charging configurations."""
+
+    url = "/api/power_sync/ev/vehicle_config"
+    name = "api:power_sync:ev:vehicle_config"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    def _get_store(self):
+        """Get the automation store from hass.data for config persistence."""
+        if DOMAIN not in self._hass.data:
+            return None
+        # Find store from any entry
+        for entry_id, entry_data in self._hass.data.get(DOMAIN, {}).items():
+            if isinstance(entry_data, dict) and "automation_store" in entry_data:
+                return entry_data["automation_store"]
+        return None
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request - get all vehicle charging configs."""
+        try:
+            store = self._get_store()
+            if not store:
+                return web.json_response({
+                    "success": True,
+                    "configs": []
+                })
+
+            # Get stored vehicle configs
+            data = await store.async_load() if hasattr(store, 'async_load') else {}
+            vehicle_configs = data.get("vehicle_charging_configs", []) if data else []
+
+            return web.json_response({
+                "success": True,
+                "configs": vehicle_configs
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error fetching vehicle configs: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Handle POST request - update vehicle charging config."""
+        try:
+            data = await request.json()
+            vehicle_id = data.get("vehicle_id")
+
+            if not vehicle_id:
+                return web.json_response({
+                    "success": False,
+                    "error": "vehicle_id is required"
+                }, status=400)
+
+            store = self._get_store()
+            if not store:
+                return web.json_response({
+                    "success": False,
+                    "error": "Storage not available"
+                }, status=503)
+
+            # Load existing configs
+            stored_data = await store.async_load() if hasattr(store, 'async_load') else {}
+            if not stored_data:
+                stored_data = {}
+            vehicle_configs = stored_data.get("vehicle_charging_configs", [])
+
+            # Find and update or add config
+            config_found = False
+            for i, config in enumerate(vehicle_configs):
+                if config.get("vehicle_id") == vehicle_id:
+                    # Update existing config
+                    vehicle_configs[i] = {**config, **data}
+                    config_found = True
+                    break
+
+            if not config_found:
+                # Add new config with defaults
+                new_config = {
+                    "vehicle_id": vehicle_id,
+                    "display_name": data.get("display_name", f"Vehicle {vehicle_id}"),
+                    "charger_type": data.get("charger_type", "tesla"),
+                    "charger_switch_entity": data.get("charger_switch_entity"),
+                    "charger_amps_entity": data.get("charger_amps_entity"),
+                    "ocpp_charger_id": data.get("ocpp_charger_id"),
+                    "min_amps": data.get("min_amps", 5),
+                    "max_amps": data.get("max_amps", 32),
+                    "voltage": data.get("voltage", 240),
+                    "solar_charging_enabled": data.get("solar_charging_enabled", False),
+                    "priority": data.get("priority", 1),
+                    "min_battery_soc": data.get("min_battery_soc", 80),
+                    "pause_below_soc": data.get("pause_below_soc", 70),
+                }
+                vehicle_configs.append(new_config)
+
+            # Save updated configs
+            stored_data["vehicle_charging_configs"] = vehicle_configs
+            if hasattr(store, 'async_save'):
+                store._data = stored_data
+                await store.async_save()
+
+            return web.json_response({
+                "success": True,
+                "config": vehicle_configs[-1] if not config_found else next(c for c in vehicle_configs if c.get("vehicle_id") == vehicle_id)
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error updating vehicle config: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
+class SolarSurplusConfigView(HomeAssistantView):
+    """HTTP view to manage global solar surplus settings."""
+
+    url = "/api/power_sync/ev/solar_surplus_config"
+    name = "api:power_sync:ev:solar_surplus_config"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    def _get_store(self):
+        """Get the automation store from hass.data for config persistence."""
+        if DOMAIN not in self._hass.data:
+            return None
+        for entry_id, entry_data in self._hass.data.get(DOMAIN, {}).items():
+            if isinstance(entry_data, dict) and "automation_store" in entry_data:
+                return entry_data["automation_store"]
+        return None
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request - get solar surplus config."""
+        try:
+            store = self._get_store()
+            default_config = {
+                "enabled": False,
+                "household_buffer_kw": 0.5,
+                "surplus_calculation": "grid_based",
+                "sustained_surplus_minutes": 2,
+                "stop_delay_minutes": 5,
+                "dual_vehicle_strategy": "priority_first",
+            }
+
+            if not store:
+                return web.json_response({
+                    "success": True,
+                    "config": default_config
+                })
+
+            stored_data = await store.async_load() if hasattr(store, 'async_load') else {}
+            config = stored_data.get("solar_surplus_config", default_config) if stored_data else default_config
+
+            return web.json_response({
+                "success": True,
+                "config": {**default_config, **config}
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error fetching solar surplus config: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Handle POST request - update solar surplus config."""
+        try:
+            data = await request.json()
+
+            store = self._get_store()
+            if not store:
+                return web.json_response({
+                    "success": False,
+                    "error": "Storage not available"
+                }, status=503)
+
+            # Load and update config
+            stored_data = await store.async_load() if hasattr(store, 'async_load') else {}
+            if not stored_data:
+                stored_data = {}
+
+            current_config = stored_data.get("solar_surplus_config", {})
+            updated_config = {**current_config, **data}
+
+            # Validate config values
+            if "household_buffer_kw" in updated_config:
+                updated_config["household_buffer_kw"] = max(0, min(5, float(updated_config["household_buffer_kw"])))
+            if "sustained_surplus_minutes" in updated_config:
+                updated_config["sustained_surplus_minutes"] = max(1, min(30, int(updated_config["sustained_surplus_minutes"])))
+            if "stop_delay_minutes" in updated_config:
+                updated_config["stop_delay_minutes"] = max(1, min(30, int(updated_config["stop_delay_minutes"])))
+            if "surplus_calculation" in updated_config:
+                if updated_config["surplus_calculation"] not in ("grid_based", "direct"):
+                    updated_config["surplus_calculation"] = "grid_based"
+            if "dual_vehicle_strategy" in updated_config:
+                if updated_config["dual_vehicle_strategy"] not in ("even", "priority_first", "priority_only"):
+                    updated_config["dual_vehicle_strategy"] = "priority_first"
+
+            stored_data["solar_surplus_config"] = updated_config
+            if hasattr(store, 'async_save'):
+                store._data = stored_data
+                await store.async_save()
+
+            return web.json_response({
+                "success": True,
+                "config": updated_config
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error updating solar surplus config: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
+class ChargingSessionsView(HomeAssistantView):
+    """HTTP view to get EV charging session history."""
+
+    url = "/api/power_sync/ev/sessions"
+    name = "api:power_sync:ev:sessions"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    def _get_session_manager(self):
+        """Get the charging session manager."""
+        from .automations.ev_charging_session import get_session_manager
+        return get_session_manager()
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request - get charging session history.
+
+        Query parameters:
+            vehicle_id: Filter by vehicle (optional)
+            days: Number of days to look back (default 30)
+            limit: Maximum sessions to return (default 100)
+        """
+        try:
+            manager = self._get_session_manager()
+            if not manager:
+                return web.json_response({
+                    "success": True,
+                    "sessions": [],
+                    "message": "Session tracking not initialized"
+                })
+
+            vehicle_id = request.query.get("vehicle_id")
+            days = int(request.query.get("days", 30))
+            limit = int(request.query.get("limit", 100))
+
+            sessions = await manager.get_session_history(
+                vehicle_id=vehicle_id,
+                days=days,
+                limit=limit,
+            )
+
+            # Also include any active sessions
+            active_sessions = []
+            for vid, session in manager.active_sessions.items():
+                if vehicle_id is None or vid == vehicle_id:
+                    active_sessions.append({
+                        **session.to_dict(),
+                        "is_active": True,
+                    })
+
+            return web.json_response({
+                "success": True,
+                "sessions": [s.to_dict() for s in sessions],
+                "active_sessions": active_sessions,
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error fetching charging sessions: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
+class ChargingStatisticsView(HomeAssistantView):
+    """HTTP view to get EV charging statistics."""
+
+    url = "/api/power_sync/ev/statistics"
+    name = "api:power_sync:ev:statistics"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    def _get_session_manager(self):
+        """Get the charging session manager."""
+        from .automations.ev_charging_session import get_session_manager
+        return get_session_manager()
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request - get charging statistics.
+
+        Query parameters:
+            vehicle_id: Filter by vehicle (optional)
+            days: Number of days to analyze (default 30)
+        """
+        try:
+            manager = self._get_session_manager()
+            if not manager:
+                return web.json_response({
+                    "success": True,
+                    "statistics": {
+                        "period_days": 30,
+                        "total_sessions": 0,
+                        "total_energy_kwh": 0,
+                        "solar_energy_kwh": 0,
+                        "grid_energy_kwh": 0,
+                        "solar_percentage": 0,
+                        "total_cost_dollars": 0,
+                        "total_savings_dollars": 0,
+                        "avg_cost_per_kwh_cents": 0,
+                        "avg_session_duration_minutes": 0,
+                        "avg_session_energy_kwh": 0,
+                        "by_vehicle": {},
+                        "by_day": [],
+                    },
+                    "message": "Session tracking not initialized"
+                })
+
+            vehicle_id = request.query.get("vehicle_id")
+            days = int(request.query.get("days", 30))
+
+            statistics = await manager.get_statistics(
+                vehicle_id=vehicle_id,
+                days=days,
+            )
+
+            return web.json_response({
+                "success": True,
+                "statistics": statistics,
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error calculating charging statistics: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
+class ChargingScheduleView(HomeAssistantView):
+    """HTTP view to get/update charging schedules."""
+
+    url = "/api/power_sync/ev/schedule"
+    name = "api:power_sync:ev:schedule"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    def _get_planner(self):
+        """Get the charging planner."""
+        from .automations.ev_charging_planner import get_charging_planner
+        return get_charging_planner()
+
+    def _get_store(self):
+        """Get the automation store."""
+        if DOMAIN not in self._hass.data:
+            return None
+        for entry_id, entry_data in self._hass.data.get(DOMAIN, {}).items():
+            if isinstance(entry_data, dict) and "automation_store" in entry_data:
+                return entry_data["automation_store"]
+        return None
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request - get charging plan/schedule.
+
+        Query parameters:
+            vehicle_id: Vehicle to get schedule for
+            current_soc: Current state of charge (%)
+            target_soc: Target state of charge (default 80%)
+            target_time: Optional ISO format deadline
+            priority: Charging priority (solar_only, solar_preferred, cost_optimized, time_critical)
+        """
+        try:
+            planner = self._get_planner()
+            if not planner:
+                return web.json_response({
+                    "success": False,
+                    "error": "Charging planner not initialized"
+                }, status=503)
+
+            vehicle_id = request.query.get("vehicle_id", "_default")
+            current_soc = int(request.query.get("current_soc", 50))
+            target_soc = int(request.query.get("target_soc", 80))
+            target_time_str = request.query.get("target_time")
+            priority_str = request.query.get("priority", "solar_preferred")
+
+            # Parse target time
+            target_time = None
+            if target_time_str:
+                try:
+                    target_time = datetime.fromisoformat(target_time_str.replace("Z", "+00:00"))
+                except ValueError:
+                    pass
+
+            # Parse priority
+            from .automations.ev_charging_planner import ChargingPriority
+            try:
+                priority = ChargingPriority(priority_str)
+            except ValueError:
+                priority = ChargingPriority.SOLAR_PREFERRED
+
+            # Generate plan
+            plan = await planner.plan_charging(
+                vehicle_id=vehicle_id,
+                current_soc=current_soc,
+                target_soc=target_soc,
+                target_time=target_time,
+                priority=priority,
+            )
+
+            return web.json_response({
+                "success": True,
+                "schedule": plan.to_dict(),
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting charging schedule: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Handle POST request - update schedule settings.
+
+        Body:
+            vehicle_id: Vehicle to update
+            schedule_enabled: Enable/disable scheduled charging
+            default_target_soc: Default target SoC
+            departure_time: Default departure time (HH:MM)
+            departure_days: Days of week for departure (0=Mon)
+            priority: Charging priority preference
+        """
+        try:
+            data = await request.json()
+            vehicle_id = data.get("vehicle_id", "_default")
+
+            store = self._get_store()
+            if not store:
+                return web.json_response({
+                    "success": False,
+                    "error": "Storage not available"
+                }, status=503)
+
+            # Load existing schedule settings
+            stored_data = await store.async_load() if hasattr(store, 'async_load') else {}
+            if not stored_data:
+                stored_data = {}
+
+            schedules = stored_data.get("charging_schedules", {})
+            vehicle_schedule = schedules.get(vehicle_id, {})
+
+            # Update fields
+            if "schedule_enabled" in data:
+                vehicle_schedule["schedule_enabled"] = bool(data["schedule_enabled"])
+            if "default_target_soc" in data:
+                vehicle_schedule["default_target_soc"] = max(20, min(100, int(data["default_target_soc"])))
+            if "departure_time" in data:
+                vehicle_schedule["departure_time"] = data["departure_time"]
+            if "departure_days" in data:
+                vehicle_schedule["departure_days"] = [int(d) for d in data["departure_days"] if 0 <= int(d) <= 6]
+            if "priority" in data:
+                valid_priorities = ["solar_only", "solar_preferred", "cost_optimized", "time_critical"]
+                if data["priority"] in valid_priorities:
+                    vehicle_schedule["priority"] = data["priority"]
+
+            schedules[vehicle_id] = vehicle_schedule
+            stored_data["charging_schedules"] = schedules
+
+            if hasattr(store, 'async_save'):
+                store._data = stored_data
+                await store.async_save()
+
+            return web.json_response({
+                "success": True,
+                "schedule": vehicle_schedule,
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error updating charging schedule: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
+class SurplusForecastView(HomeAssistantView):
+    """HTTP view to get solar surplus forecast."""
+
+    url = "/api/power_sync/ev/surplus_forecast"
+    name = "api:power_sync:ev:surplus_forecast"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request - get surplus forecast.
+
+        Query parameters:
+            hours: Number of hours to forecast (default 24)
+        """
+        try:
+            from .automations.ev_charging_planner import SurplusForecaster
+
+            hours = int(request.query.get("hours", 24))
+            hours = max(1, min(48, hours))  # Limit to 48 hours
+
+            forecaster = SurplusForecaster(self._hass)
+            forecast = await forecaster.forecast_surplus(hours)
+
+            return web.json_response({
+                "success": True,
+                "forecast": [
+                    {
+                        "hour": f.hour,
+                        "solar_kw": round(f.solar_kw, 2),
+                        "load_kw": round(f.load_kw, 2),
+                        "surplus_kw": round(f.surplus_kw, 2),
+                        "confidence": round(f.confidence, 2),
+                    }
+                    for f in forecast
+                ],
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting surplus forecast: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
+class ChargingBoostView(HomeAssistantView):
+    """HTTP view to trigger immediate boost charge."""
+
+    url = "/api/power_sync/ev/boost"
+    name = "api:power_sync:ev:boost"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant, config_entry: ConfigEntry):
+        """Initialize the view."""
+        self._hass = hass
+        self._config_entry = config_entry
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Handle POST request - start boost charge.
+
+        Body:
+            vehicle_id: Vehicle to boost charge
+            duration_minutes: Duration of boost (default 60)
+            target_soc: Optional target SoC to reach
+        """
+        try:
+            data = await request.json()
+            vehicle_id = data.get("vehicle_id")
+            duration_minutes = int(data.get("duration_minutes", 60))
+            target_soc = data.get("target_soc")
+
+            from .automations.actions import execute_actions
+
+            # Execute start_ev_charging action with max amps
+            actions = [{
+                "action_type": "start_ev_charging",
+                "parameters": {
+                    "vehicle_vin": vehicle_id if vehicle_id != "_default" else None,
+                }
+            }]
+
+            success = await execute_actions(self._hass, self._config_entry, actions)
+
+            if success:
+                # Also set to max charging amps
+                amps_actions = [{
+                    "action_type": "set_ev_charging_amps",
+                    "parameters": {
+                        "amps": 32,  # Max standard amps
+                        "vehicle_vin": vehicle_id if vehicle_id != "_default" else None,
+                    }
+                }]
+                await execute_actions(self._hass, self._config_entry, amps_actions)
+
+            return web.json_response({
+                "success": success,
+                "message": "Boost charge started" if success else "Failed to start boost charge",
+                "duration_minutes": duration_minutes,
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error starting boost charge: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
+class EVWidgetDataView(HomeAssistantView):
+    """API endpoint for EV widget data (home screen widgets).
+
+    GET /api/power_sync/ev/widget_data
+    Returns compact data suitable for home screen widgets.
+    """
+    url = "/api/power_sync/ev/widget_data"
+    name = "api:power_sync:ev:widget_data"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self._hass = hass
+        self._config_entry = entry
+
+    async def get(self, request):
+        """Get widget data for EV charging status."""
+        try:
+            from .automations.actions import _dynamic_ev_state, _calculate_solar_surplus, _get_tesla_live_status
+
+            entry_id = self._config_entry.entry_id
+
+            # Get live status
+            live_status = await _get_tesla_live_status(self._hass, self._config_entry)
+
+            # Calculate current surplus
+            surplus_kw = 0.0
+            if live_status:
+                surplus_kw = _calculate_solar_surplus(live_status, 0, {"household_buffer_kw": 0.5})
+
+            # Get dynamic EV state
+            vehicles = _dynamic_ev_state.get(entry_id, {})
+
+            widget_data = []
+            for vehicle_id, state in vehicles.items():
+                if not state.get("active"):
+                    continue
+
+                params = state.get("params", {})
+                current_amps = state.get("current_amps", 0)
+                voltage = params.get("voltage", 240)
+                current_power_kw = (current_amps * voltage) / 1000
+
+                # Determine charging source
+                if current_amps == 0:
+                    source = "idle"
+                elif state.get("allocated_surplus_kw", 0) >= current_power_kw * 0.8:
+                    source = "solar"
+                else:
+                    source = "grid"
+
+                # Get vehicle SoC if available
+                current_soc = 0
+                target_soc = params.get("target_soc", 80)
+                if live_status:
+                    current_soc = live_status.get("ev_state_of_charge", 0) or 0
+
+                # Estimate ETA (rough calculation)
+                eta_minutes = None
+                if current_power_kw > 0 and target_soc > current_soc:
+                    battery_capacity_kwh = params.get("battery_capacity_kwh", 60)
+                    energy_needed_kwh = (target_soc - current_soc) / 100 * battery_capacity_kwh
+                    eta_minutes = int(energy_needed_kwh / current_power_kw * 60)
+
+                vehicle_name = params.get("vehicle_name", vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id)
+
+                widget_data.append({
+                    "vehicle_name": vehicle_name,
+                    "is_charging": current_amps > 0,
+                    "current_soc": current_soc,
+                    "target_soc": target_soc,
+                    "current_power_kw": round(current_power_kw, 2),
+                    "source": source,
+                    "eta_minutes": eta_minutes,
+                    "surplus_kw": round(surplus_kw, 2),
+                })
+
+            # If no active vehicles, return status with no vehicles
+            if not widget_data:
+                widget_data.append({
+                    "vehicle_name": "No Active Vehicle",
+                    "is_charging": False,
+                    "current_soc": 0,
+                    "target_soc": 80,
+                    "current_power_kw": 0,
+                    "source": "idle",
+                    "eta_minutes": None,
+                    "surplus_kw": round(surplus_kw, 2),
+                })
+
+            return web.json_response({
+                "success": True,
+                "widgets": widget_data,
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting widget data: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
+class PriceRecommendationView(HomeAssistantView):
+    """API endpoint for EV charging price recommendation.
+
+    GET /api/power_sync/ev/price_recommendation
+    Returns current price-based charging recommendation.
+    """
+    url = "/api/power_sync/ev/price_recommendation"
+    name = "api:power_sync:ev:price_recommendation"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self._hass = hass
+        self._config_entry = entry
+
+    async def get(self, request):
+        """Get price-based charging recommendation."""
+        try:
+            from .automations.actions import (
+                get_price_recommendation,
+                _calculate_solar_surplus,
+                _get_tesla_live_status,
+            )
+
+            entry_id = self._config_entry.entry_id
+
+            # Get live status for surplus and battery
+            live_status = await _get_tesla_live_status(self._hass, self._config_entry)
+
+            surplus_kw = 0.0
+            battery_soc = 0.0
+
+            if live_status:
+                battery_soc = live_status.get("battery_soc") or 0
+                surplus_kw = _calculate_solar_surplus(live_status, 0, {"household_buffer_kw": 0.5})
+
+            # Get current prices
+            import_price_cents = 30.0  # Default
+            export_price_cents = 8.0   # Default FiT
+
+            # Try to get actual prices from stored data
+            entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id, {})
+
+            # Check for Amber prices
+            amber_prices = entry_data.get("amber_prices", {})
+            if amber_prices:
+                import_price_cents = amber_prices.get("import_cents", 30.0)
+                export_price_cents = amber_prices.get("export_cents", 8.0)
+
+            # Check for price_data (alternative storage)
+            price_data = entry_data.get("price_data", {})
+            if price_data:
+                import_price_cents = price_data.get("import_price_cents", import_price_cents)
+                export_price_cents = price_data.get("export_price_cents", export_price_cents)
+
+            # Get min battery SoC from config if available
+            min_battery_soc = 80
+            solar_config = entry_data.get("solar_surplus_config", {})
+            if solar_config:
+                min_battery_soc = solar_config.get("min_battery_soc", 80)
+
+            # Get recommendation
+            recommendation = get_price_recommendation(
+                import_price_cents=import_price_cents,
+                export_price_cents=export_price_cents,
+                surplus_kw=surplus_kw,
+                battery_soc=battery_soc,
+                min_battery_soc=min_battery_soc,
+            )
+
+            return web.json_response({
+                "success": True,
+                **recommendation,
+                "battery_soc": round(battery_soc, 1),
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting price recommendation: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PowerSync from a config entry."""
     _LOGGER.info("=" * 60)
@@ -8230,7 +9109,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.http.register_view(EVVehiclesView(hass))
     hass.http.register_view(EVVehiclesSyncView(hass))
     hass.http.register_view(EVVehicleCommandView(hass))
+    hass.http.register_view(SolarSurplusStatusView(hass))
+    hass.http.register_view(VehicleChargingConfigView(hass))
+    hass.http.register_view(SolarSurplusConfigView(hass))
+    hass.http.register_view(ChargingSessionsView(hass))
+    hass.http.register_view(ChargingStatisticsView(hass))
+    hass.http.register_view(ChargingScheduleView(hass))
+    hass.http.register_view(SurplusForecastView(hass))
+    hass.http.register_view(ChargingBoostView(hass, entry))
+    hass.http.register_view(EVWidgetDataView(hass, entry))
+    hass.http.register_view(PriceRecommendationView(hass, entry))
     _LOGGER.info("🚗 EV HTTP endpoints registered at /api/power_sync/ev/*")
+    _LOGGER.info("☀️ Solar surplus EV endpoints registered")
+    _LOGGER.info("📊 EV charging session/statistics endpoints registered")
+    _LOGGER.info("💰 EV price recommendation endpoint registered")
+    _LOGGER.info("📅 EV charging schedule/forecast endpoints registered")
+    _LOGGER.info("📱 EV widget data endpoint registered")
+
+    # Initialize session manager for EV charging tracking
+    from .automations.ev_charging_session import ChargingSessionManager, set_session_manager
+    session_manager = ChargingSessionManager(hass)
+    set_session_manager(session_manager)
+    hass.data[DOMAIN][entry.entry_id]["session_manager"] = session_manager
+    _LOGGER.info("📊 EV charging session manager initialized")
+
+    # Initialize charging planner for smart scheduling
+    from .automations.ev_charging_planner import ChargingPlanner, set_charging_planner
+    charging_planner = ChargingPlanner(hass, entry)
+    set_charging_planner(charging_planner)
+    hass.data[DOMAIN][entry.entry_id]["charging_planner"] = charging_planner
+    _LOGGER.info("📅 EV charging planner initialized")
 
     # ======================================================================
     # SYNC BATTERY HEALTH SERVICE (from mobile app TEDAPI scans)
