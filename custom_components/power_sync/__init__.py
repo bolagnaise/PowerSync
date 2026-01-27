@@ -4908,27 +4908,36 @@ class PriceRecommendationView(HomeAssistantView):
                                 current_period_type = period_type
                                 break
 
-            # Get buy/sell prices for current period
+            # Get buy prices for current period
             energy_charges = tariff.get("energy_charges", {})
-            buy_price = 0.0
-            sell_price = 0.0
-
             season_charges = energy_charges.get(current_season, {})
-            for charge_period, rate in season_charges.items():
-                if charge_period.upper() == current_period_type.upper():
-                    buy_price = rate
-                    break
 
-            # Get sell (feed-in) price
+            # Handle both formats: direct values or nested under 'rates'
+            if "rates" in season_charges:
+                buy_rates = season_charges.get("rates", {})
+            else:
+                buy_rates = {k: v for k, v in season_charges.items() if isinstance(v, (int, float))}
+
+            buy_price = buy_rates.get(current_period_type, buy_rates.get("ALL", 0))
+
+            # Get sell (feed-in) prices - same structure as buy
             sell_tariff = tariff.get("sell_tariff", {})
-            if sell_tariff:
-                sell_price = sell_tariff.get("rate", 0.0)
+            sell_energy_charges = sell_tariff.get("energy_charges", {})
+            sell_season_charges = sell_energy_charges.get(current_season, {})
+            if "rates" in sell_season_charges:
+                sell_rates = sell_season_charges.get("rates", {})
+            else:
+                sell_rates = {k: v for k, v in sell_season_charges.items() if isinstance(v, (int, float))}
 
-            # Convert to cents (tariff is typically in $/kWh, multiply by 100)
-            # But Tesla tariff is already in cents per kWh
+            sell_price = sell_rates.get(current_period_type, sell_rates.get("ALL", 0))
+
+            # Convert from $/kWh to c/kWh (multiply by 100)
+            import_cents = round(buy_price * 100, 2)
+            export_cents = round(sell_price * 100, 2)
+
             return {
-                "import_cents": buy_price,
-                "export_cents": sell_price,
+                "import_cents": import_cents,
+                "export_cents": export_cents,
             }
 
         except Exception as e:
