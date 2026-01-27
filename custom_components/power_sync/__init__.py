@@ -4029,9 +4029,9 @@ class VehicleChargingConfigView(HomeAssistantView):
                     "configs": []
                 })
 
-            # Get stored vehicle configs
-            data = await store.async_load() if hasattr(store, 'async_load') else {}
-            vehicle_configs = data.get("vehicle_charging_configs", []) if data else []
+            # Get stored vehicle configs (use _data directly, it's already loaded)
+            data = getattr(store, '_data', {}) or {}
+            vehicle_configs = data.get("vehicle_charging_configs", [])
 
             return web.json_response({
                 "success": True,
@@ -4064,10 +4064,8 @@ class VehicleChargingConfigView(HomeAssistantView):
                     "error": "Storage not available"
                 }, status=503)
 
-            # Load existing configs
-            stored_data = await store.async_load() if hasattr(store, 'async_load') else {}
-            if not stored_data:
-                stored_data = {}
+            # Get existing configs (use _data directly, it's already loaded at startup)
+            stored_data = getattr(store, '_data', {}) or {}
             vehicle_configs = stored_data.get("vehicle_charging_configs", [])
 
             # Find and update or add config
@@ -4098,10 +4096,9 @@ class VehicleChargingConfigView(HomeAssistantView):
                 }
                 vehicle_configs.append(new_config)
 
-            # Save updated configs
-            stored_data["vehicle_charging_configs"] = vehicle_configs
-            if hasattr(store, 'async_save'):
-                store._data = stored_data
+            # Save updated configs (update key in existing _data, don't overwrite)
+            if hasattr(store, '_data') and hasattr(store, 'async_save'):
+                store._data["vehicle_charging_configs"] = vehicle_configs
                 await store.async_save()
 
             return web.json_response({
@@ -4156,8 +4153,8 @@ class SolarSurplusConfigView(HomeAssistantView):
                     "config": default_config
                 })
 
-            stored_data = await store.async_load() if hasattr(store, 'async_load') else {}
-            config = stored_data.get("solar_surplus_config", default_config) if stored_data else default_config
+            stored_data = getattr(store, '_data', {}) or {}
+            config = stored_data.get("solar_surplus_config", default_config)
 
             return web.json_response({
                 "success": True,
@@ -4183,11 +4180,8 @@ class SolarSurplusConfigView(HomeAssistantView):
                     "error": "Storage not available"
                 }, status=503)
 
-            # Load and update config
-            stored_data = await store.async_load() if hasattr(store, 'async_load') else {}
-            if not stored_data:
-                stored_data = {}
-
+            # Get existing config (use _data directly)
+            stored_data = getattr(store, '_data', {}) or {}
             current_config = stored_data.get("solar_surplus_config", {})
             updated_config = {**current_config, **data}
 
@@ -4205,9 +4199,9 @@ class SolarSurplusConfigView(HomeAssistantView):
                 if updated_config["dual_vehicle_strategy"] not in ("even", "priority_first", "priority_only"):
                     updated_config["dual_vehicle_strategy"] = "priority_first"
 
-            stored_data["solar_surplus_config"] = updated_config
-            if hasattr(store, 'async_save'):
-                store._data = stored_data
+            # Save updated config (update key in existing _data, don't overwrite)
+            if hasattr(store, '_data') and hasattr(store, 'async_save'):
+                store._data["solar_surplus_config"] = updated_config
                 await store.async_save()
 
             return web.json_response({
@@ -4463,11 +4457,8 @@ class ChargingScheduleView(HomeAssistantView):
                     "error": "Storage not available"
                 }, status=503)
 
-            # Load existing schedule settings
-            stored_data = await store.async_load() if hasattr(store, 'async_load') else {}
-            if not stored_data:
-                stored_data = {}
-
+            # Get existing schedule settings (use _data directly)
+            stored_data = getattr(store, '_data', {}) or {}
             schedules = stored_data.get("charging_schedules", {})
             vehicle_schedule = schedules.get(vehicle_id, {})
 
@@ -4486,10 +4477,10 @@ class ChargingScheduleView(HomeAssistantView):
                     vehicle_schedule["priority"] = data["priority"]
 
             schedules[vehicle_id] = vehicle_schedule
-            stored_data["charging_schedules"] = schedules
 
-            if hasattr(store, 'async_save'):
-                store._data = stored_data
+            # Save updated schedules (update key in existing _data, don't overwrite)
+            if hasattr(store, '_data') and hasattr(store, 'async_save'):
+                store._data["charging_schedules"] = schedules
                 await store.async_save()
 
             return web.json_response({
