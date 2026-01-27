@@ -4751,30 +4751,42 @@ class PriceRecommendationView(HomeAssistantView):
                 battery_soc = live_status.get("battery_soc") or 0
                 surplus_kw = _calculate_solar_surplus(live_status, 0, {"household_buffer_kw": 0.5})
 
-            # Get current prices
+            # Get current prices based on electricity provider
             import_price_cents = 30.0  # Default
             export_price_cents = 8.0   # Default FiT
             price_source = "default"
 
-            # Try to get actual prices from stored data
+            # Get electricity provider from config
+            electricity_provider = self._config_entry.options.get(
+                CONF_ELECTRICITY_PROVIDER,
+                self._config_entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
+            )
+
             entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id, {})
 
-            # Check for Amber prices
-            amber_prices = entry_data.get("amber_prices", {})
-            if amber_prices:
-                import_price_cents = amber_prices.get("import_cents", 30.0)
-                export_price_cents = amber_prices.get("export_cents", 8.0)
-                price_source = "amber"
+            if electricity_provider in ("amber", "flow_power"):
+                # Amber/Flow Power: Read from HA price sensors
+                try:
+                    import_sensor = self._hass.states.get(f"sensor.power_sync_current_import_price")
+                    export_sensor = self._hass.states.get(f"sensor.power_sync_current_export_price")
 
-            # Check for price_data (alternative storage)
-            price_data = entry_data.get("price_data", {})
-            if price_data:
-                import_price_cents = price_data.get("import_price_cents", import_price_cents)
-                export_price_cents = price_data.get("export_price_cents", export_price_cents)
-                price_source = "price_data"
+                    if import_sensor and import_sensor.state not in ("unavailable", "unknown", None):
+                        # Sensor is in $/kWh, convert to cents
+                        import_price_cents = float(import_sensor.state) * 100
+                        price_source = electricity_provider
 
-            # If no price data found, try Tesla tariff (for Globird and other non-API providers)
-            if price_source == "default":
+                    if export_sensor and export_sensor.state not in ("unavailable", "unknown", None):
+                        # Export sensor is in $/kWh (earnings format), convert to cents
+                        # Negate because sensor shows positive for earnings, we want rate
+                        export_price_cents = -float(export_sensor.state) * 100
+                        price_source = electricity_provider
+
+                    _LOGGER.debug(f"Using {electricity_provider} sensor prices: import={import_price_cents}c, export={export_price_cents}c")
+                except Exception as e:
+                    _LOGGER.debug(f"Could not read price sensors: {e}")
+
+            elif electricity_provider in ("globird", "aemo_vpp"):
+                # Globird/AEMO VPP: Read from Tesla tariff
                 try:
                     tariff_prices = await self._fetch_tariff_prices()
                     if tariff_prices:
@@ -4784,6 +4796,20 @@ class PriceRecommendationView(HomeAssistantView):
                         _LOGGER.debug(f"Using Tesla tariff prices: import={import_price_cents}c, export={export_price_cents}c")
                 except Exception as e:
                     _LOGGER.debug(f"Could not fetch tariff prices: {e}")
+
+            # Fallback: Check stored data if still using defaults
+            if price_source == "default":
+                amber_prices = entry_data.get("amber_prices", {})
+                if amber_prices:
+                    import_price_cents = amber_prices.get("import_cents", 30.0)
+                    export_price_cents = amber_prices.get("export_cents", 8.0)
+                    price_source = "amber_stored"
+
+                price_data = entry_data.get("price_data", {})
+                if price_data:
+                    import_price_cents = price_data.get("import_price_cents", import_price_cents)
+                    export_price_cents = price_data.get("export_price_cents", export_price_cents)
+                    price_source = "price_data"
 
             # Get min battery SoC from config if available
             min_battery_soc = 80
