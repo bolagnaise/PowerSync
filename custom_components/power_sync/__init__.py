@@ -4754,6 +4754,7 @@ class PriceRecommendationView(HomeAssistantView):
             # Get current prices
             import_price_cents = 30.0  # Default
             export_price_cents = 8.0   # Default FiT
+            price_source = "default"
 
             # Try to get actual prices from stored data
             entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id, {})
@@ -4763,12 +4764,26 @@ class PriceRecommendationView(HomeAssistantView):
             if amber_prices:
                 import_price_cents = amber_prices.get("import_cents", 30.0)
                 export_price_cents = amber_prices.get("export_cents", 8.0)
+                price_source = "amber"
 
             # Check for price_data (alternative storage)
             price_data = entry_data.get("price_data", {})
             if price_data:
                 import_price_cents = price_data.get("import_price_cents", import_price_cents)
                 export_price_cents = price_data.get("export_price_cents", export_price_cents)
+                price_source = "price_data"
+
+            # If no price data found, try Tesla tariff (for Globird and other non-API providers)
+            if price_source == "default":
+                try:
+                    tariff_prices = await self._fetch_tariff_prices()
+                    if tariff_prices:
+                        import_price_cents = tariff_prices.get("import_cents", import_price_cents)
+                        export_price_cents = tariff_prices.get("export_cents", export_price_cents)
+                        price_source = "tesla_tariff"
+                        _LOGGER.debug(f"Using Tesla tariff prices: import={import_price_cents}c, export={export_price_cents}c")
+                except Exception as e:
+                    _LOGGER.debug(f"Could not fetch tariff prices: {e}")
 
             # Get min battery SoC from config if available
             min_battery_soc = 80
@@ -4797,6 +4812,128 @@ class PriceRecommendationView(HomeAssistantView):
                 "success": False,
                 "error": str(e)
             }, status=500)
+
+    async def _fetch_tariff_prices(self) -> dict | None:
+        """Fetch current prices from Tesla tariff (for Globird/non-API providers).
+
+        Returns dict with import_cents and export_cents, or None if unavailable.
+        """
+        try:
+            current_token, provider = get_tesla_api_token(self._hass, self._config_entry)
+            site_id = self._config_entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+
+            if not site_id or not current_token:
+                return None
+
+            session = async_get_clientsession(self._hass)
+            headers = {
+                "Authorization": f"Bearer {current_token}",
+                "Content-Type": "application/json",
+            }
+            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+            # Fetch site_info which contains tariff_content
+            async with session.get(
+                f"{api_base}/api/1/energy_sites/{site_id}/site_info",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status != 200:
+                    return None
+
+                data = await response.json()
+                site_info = data.get("response", {})
+
+            # Get tariff_content from site_info
+            tariff = site_info.get("tariff_content", {})
+            if not tariff:
+                return None
+
+            # Determine current TOU period and get prices
+            from datetime import datetime as dt
+            from zoneinfo import ZoneInfo
+
+            tz_name = site_info.get("installation_time_zone", "UTC")
+            try:
+                tz = ZoneInfo(tz_name)
+            except:
+                tz = ZoneInfo("UTC")
+            now = dt.now(tz)
+
+            # Find current season
+            seasons = tariff.get("seasons", {})
+            current_season = None
+            for season_name, season_data in seasons.items():
+                from_month = season_data.get("fromMonth", 0)
+                to_month = season_data.get("toMonth", 0)
+                if from_month and to_month:
+                    if from_month <= now.month <= to_month:
+                        current_season = season_name
+                        break
+                    elif from_month > to_month:  # Wraps around year (e.g., Nov-Feb)
+                        if now.month >= from_month or now.month <= to_month:
+                            current_season = season_name
+                            break
+
+            if not current_season:
+                current_season = list(seasons.keys())[0] if seasons else None
+
+            if not current_season:
+                return None
+
+            # Get TOU periods for current season
+            tou_periods = seasons.get(current_season, {}).get("tou_periods", {})
+
+            # Find which TOU period we're in based on current time
+            current_dow = now.weekday()  # 0=Monday, 6=Sunday
+            current_hour = now.hour
+            current_period_type = "OFF_PEAK"  # Default
+
+            for period_type, periods in tou_periods.items():
+                for period in periods:
+                    from_dow = period.get("fromDayOfWeek", 0)
+                    to_dow = period.get("toDayOfWeek", 6)
+                    from_hour = period.get("fromHour", 0)
+                    to_hour = period.get("toHour", 0)
+
+                    # Check day of week
+                    if from_dow <= current_dow <= to_dow:
+                        # Check hour (handle overnight periods)
+                        if from_hour <= to_hour:
+                            if from_hour <= current_hour < to_hour:
+                                current_period_type = period_type
+                                break
+                        else:  # Overnight period
+                            if current_hour >= from_hour or current_hour < to_hour:
+                                current_period_type = period_type
+                                break
+
+            # Get buy/sell prices for current period
+            energy_charges = tariff.get("energy_charges", {})
+            buy_price = 0.0
+            sell_price = 0.0
+
+            season_charges = energy_charges.get(current_season, {})
+            for charge_period, rate in season_charges.items():
+                if charge_period.upper() == current_period_type.upper():
+                    buy_price = rate
+                    break
+
+            # Get sell (feed-in) price
+            sell_tariff = tariff.get("sell_tariff", {})
+            if sell_tariff:
+                sell_price = sell_tariff.get("rate", 0.0)
+
+            # Convert to cents (tariff is typically in $/kWh, multiply by 100)
+            # But Tesla tariff is already in cents per kWh
+            return {
+                "import_cents": buy_price,
+                "export_cents": sell_price,
+            }
+
+        except Exception as e:
+            _LOGGER.debug(f"Error fetching tariff prices: {e}")
+            return None
 
 
 class AutoScheduleSettingsView(HomeAssistantView):
