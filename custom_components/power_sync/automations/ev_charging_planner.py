@@ -528,9 +528,11 @@ class PriceForecaster:
 
     async def get_price_forecast(self, hours: int = 24) -> List[PriceForecast]:
         """
-        Get hourly price forecast.
+        Get hourly price forecast (provider-aware).
 
-        Tries Amber API first, falls back to TOU estimation.
+        For Amber/Flow Power: uses Amber API forecast
+        For Globird: uses Tesla tariff TOU schedule
+        Falls back to generic TOU estimation.
 
         Args:
             hours: Number of hours to forecast
@@ -538,10 +540,25 @@ class PriceForecaster:
         Returns:
             List of PriceForecast objects
         """
-        # Try Amber forecast
-        amber_forecast = await self._get_amber_forecast(hours)
-        if amber_forecast:
-            return amber_forecast
+        from ..const import CONF_ELECTRICITY_PROVIDER
+
+        # Get electricity provider
+        electricity_provider = self.config_entry.options.get(
+            CONF_ELECTRICITY_PROVIDER,
+            self.config_entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
+        )
+
+        if electricity_provider in ("amber", "flow_power"):
+            # Try Amber forecast
+            amber_forecast = await self._get_amber_forecast(hours)
+            if amber_forecast:
+                return amber_forecast
+
+        elif electricity_provider in ("globird", "aemo_vpp"):
+            # Try Tesla tariff forecast
+            tariff_forecast = await self._get_tariff_forecast(hours)
+            if tariff_forecast:
+                return tariff_forecast
 
         # Fall back to TOU estimation
         return await self._estimate_tou_prices(hours)
@@ -594,6 +611,77 @@ class PriceForecaster:
 
         except Exception as e:
             _LOGGER.debug(f"Could not get Amber forecast: {e}")
+            return None
+
+    async def _get_tariff_forecast(self, hours: int) -> Optional[List[PriceForecast]]:
+        """Get forecast from Tesla tariff schedule (for Globird users)."""
+        try:
+            from ..const import DOMAIN
+
+            entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
+            tariff_schedule = entry_data.get("tariff_schedule", {})
+
+            if not tariff_schedule:
+                return None
+
+            # Get current prices from tariff
+            buy_price_cents = tariff_schedule.get("buy_price", 30)
+            sell_price_cents = tariff_schedule.get("sell_price", 0)
+            buy_rates = tariff_schedule.get("buy_rates", {})
+            sell_rates = tariff_schedule.get("sell_rates", {})
+
+            forecasts = []
+            now = datetime.now()
+
+            for h in range(hours):
+                hour_dt = now + timedelta(hours=h)
+                hour = hour_dt.hour
+                is_weekend = hour_dt.weekday() >= 5
+
+                # Determine TOU period based on typical patterns
+                if is_weekend:
+                    period_type = "OFF_PEAK"
+                elif 7 <= hour < 9 or 17 <= hour < 21:
+                    period_type = "ON_PEAK"
+                elif 21 <= hour or hour < 7:
+                    period_type = "OFF_PEAK"
+                else:
+                    period_type = "SHOULDER"
+
+                # Get rate for this period from tariff
+                import_rate = buy_rates.get(period_type, buy_rates.get("ALL", buy_price_cents / 100))
+                export_rate = sell_rates.get(period_type, sell_rates.get("ALL", sell_price_cents / 100))
+
+                # Convert to cents if in dollars
+                if import_rate < 1:  # Likely in $/kWh
+                    import_cents = import_rate * 100
+                else:
+                    import_cents = import_rate
+
+                if export_rate < 1:
+                    export_cents = export_rate * 100
+                else:
+                    export_cents = export_rate
+
+                # Determine display period
+                if import_cents < 20:
+                    period = "offpeak"
+                elif import_cents > 35:
+                    period = "peak"
+                else:
+                    period = "shoulder"
+
+                forecasts.append(PriceForecast(
+                    hour=hour_dt.isoformat(),
+                    import_cents=import_cents,
+                    export_cents=export_cents,
+                    period=period,
+                ))
+
+            return forecasts
+
+        except Exception as e:
+            _LOGGER.debug(f"Could not get tariff forecast: {e}")
             return None
 
     async def _estimate_tou_prices(self, hours: int) -> List[PriceForecast]:
@@ -1573,28 +1661,47 @@ class AutoScheduleExecutor:
             _LOGGER.error(f"Failed to regenerate plan for {vehicle_id}: {e}")
 
     async def _get_current_price(self) -> float:
-        """Get current import price from available sources."""
-        from ..const import DOMAIN
+        """Get current import price from available sources (provider-aware)."""
+        from ..const import DOMAIN, CONF_ELECTRICITY_PROVIDER
 
         try:
             entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
 
-            # Try Amber price first
-            amber_coordinator = entry_data.get("amber_coordinator")
-            if amber_coordinator and hasattr(amber_coordinator, 'current_import_price'):
-                price = amber_coordinator.current_import_price
-                if price is not None:
-                    return price
+            # Get electricity provider
+            electricity_provider = self.config_entry.options.get(
+                CONF_ELECTRICITY_PROVIDER,
+                self.config_entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
+            )
 
-            # Try tariff schedule
+            if electricity_provider in ("amber", "flow_power"):
+                # Amber/Flow Power: Read from HA price sensors
+                import_sensor = self.hass.states.get("sensor.power_sync_current_import_price")
+                if import_sensor and import_sensor.state not in ("unavailable", "unknown", None):
+                    # Sensor is in $/kWh, convert to cents
+                    return float(import_sensor.state) * 100
+
+                # Fallback to coordinator
+                amber_coordinator = entry_data.get("amber_coordinator")
+                if amber_coordinator and hasattr(amber_coordinator, 'current_import_price'):
+                    price = amber_coordinator.current_import_price
+                    if price is not None:
+                        return price
+
+            elif electricity_provider in ("globird", "aemo_vpp"):
+                # Globird: Read from tariff schedule (populated by TariffPriceView)
+                tariff_schedule = entry_data.get("tariff_schedule", {})
+                if tariff_schedule:
+                    buy_price = tariff_schedule.get("buy_price")
+                    if buy_price is not None:
+                        return buy_price  # Already in cents
+
+            # Fallback: Try tariff schedule for any provider
             tariff_schedule = entry_data.get("tariff_schedule", {})
             if tariff_schedule:
-                # Get current period price
                 now = datetime.now()
                 period_key = f"PERIOD_{now.hour:02d}_{30 if now.minute >= 30 else 0:02d}"
                 buy_prices = tariff_schedule.get("buy_prices", {})
                 if period_key in buy_prices:
-                    # Convert from $/kWh to cents
                     return buy_prices[period_key] * 100
 
             # Default fallback based on time of day
