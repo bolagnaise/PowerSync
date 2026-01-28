@@ -4468,28 +4468,34 @@ class ChargingScheduleView(HomeAssistantView):
         # Try to find Tesla vehicle battery sensors
         all_states = self._hass.states.async_all()
 
-        # Look for battery level sensors
+        # Look for Tesla-specific battery level sensors
+        # Must contain "tesla" or common Tesla model names to avoid matching other devices
+        tesla_keywords = ['tesla', 'model_3', 'model_y', 'model_s', 'model_x', 'cybertruck']
+
         for state in all_states:
             entity_id = state.entity_id
+            entity_id_lower = entity_id.lower()
             state_value = state.state
 
             if state_value in ("unavailable", "unknown", "None", None):
                 continue
 
-            # Match common Tesla battery sensor patterns:
-            # sensor.*_battery (Tesla Fleet)
-            # sensor.*_battery_level (Teslemetry)
-            # sensor.*_charge_level (Tesla BLE)
-            if re.match(r"sensor\.\w+_(battery|battery_level|charge_level)$", entity_id, re.IGNORECASE):
+            # Only match sensors that:
+            # 1. Contain a Tesla keyword AND
+            # 2. End with battery/battery_level/charge_level
+            has_tesla_keyword = any(kw in entity_id_lower for kw in tesla_keywords)
+            is_battery_sensor = re.search(r"(battery|battery_level|charge_level)$", entity_id_lower)
+
+            if has_tesla_keyword and is_battery_sensor:
                 try:
                     level = float(state_value)
                     if 0 <= level <= 100:
-                        _LOGGER.debug(f"ChargingScheduleView: Found vehicle SoC from {entity_id}: {level}%")
+                        _LOGGER.debug(f"ChargingScheduleView: Found Tesla vehicle SoC from {entity_id}: {level}%")
                         return int(level)
                 except (ValueError, TypeError):
                     continue
 
-        # Check cached Tesla vehicles
+        # Check cached Tesla vehicles from PowerSync
         for entry_id, entry_data in self._hass.data.get(DOMAIN, {}).items():
             if isinstance(entry_data, dict):
                 tesla_vehicles = entry_data.get("tesla_vehicles", [])
