@@ -3943,7 +3943,7 @@ class SolarSurplusStatusView(HomeAssistantView):
     async def get(self, request: web.Request) -> web.Response:
         """Handle GET request for solar surplus status."""
         try:
-            from .automations.actions import _dynamic_ev_state, _get_tesla_live_status, _calculate_solar_surplus
+            from .automations.actions import _dynamic_ev_state, _calculate_solar_surplus
 
             # Get config entry
             entries = self._hass.config_entries.async_entries(DOMAIN)
@@ -3955,17 +3955,43 @@ class SolarSurplusStatusView(HomeAssistantView):
 
             entry = entries[0]
             entry_id = entry.entry_id
+            entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id, {})
 
-            # Get live status for surplus calculation
-            live_status = await _get_tesla_live_status(self._hass, entry)
-
-            surplus_kw = 0.0
+            # Get data from tesla_coordinator (preferred) or sigenergy_coordinator
             battery_soc = 0.0
+            solar_power_kw = 0.0
+            grid_power_kw = 0.0
+            battery_power_kw = 0.0
+            load_power_kw = 0.0
 
-            if live_status:
-                battery_soc = live_status.get("battery_soc") or 0
-                # Calculate surplus with default config
-                surplus_kw = _calculate_solar_surplus(live_status, 0, {"surplus_calculation": "grid_based", "household_buffer_kw": 0.5})
+            tesla_coordinator = entry_data.get("tesla_coordinator")
+            sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
+
+            if tesla_coordinator and tesla_coordinator.data:
+                # Tesla coordinator stores values in kW
+                solar_power_kw = tesla_coordinator.data.get("solar_power", 0)
+                grid_power_kw = tesla_coordinator.data.get("grid_power", 0)
+                battery_power_kw = tesla_coordinator.data.get("battery_power", 0)
+                load_power_kw = tesla_coordinator.data.get("load_power", 0)
+                battery_soc = tesla_coordinator.data.get("battery_level", 0)
+                _LOGGER.debug(f"Solar surplus status from tesla_coordinator: battery_soc={battery_soc}%")
+            elif sigenergy_coordinator and sigenergy_coordinator.data:
+                solar_power_kw = sigenergy_coordinator.data.get("solar_power", 0)
+                grid_power_kw = sigenergy_coordinator.data.get("grid_power", 0)
+                battery_power_kw = sigenergy_coordinator.data.get("battery_power", 0)
+                load_power_kw = sigenergy_coordinator.data.get("load_power", 0)
+                battery_soc = sigenergy_coordinator.data.get("battery_level", 0)
+                _LOGGER.debug(f"Solar surplus status from sigenergy_coordinator: battery_soc={battery_soc}%")
+
+            # Calculate surplus
+            live_status = {
+                "solar_power": solar_power_kw * 1000,  # _calculate_solar_surplus expects watts
+                "grid_power": grid_power_kw * 1000,
+                "battery_power": battery_power_kw * 1000,
+                "load_power": load_power_kw * 1000,
+                "battery_soc": battery_soc,
+            }
+            surplus_kw = _calculate_solar_surplus(live_status, 0, {"surplus_calculation": "grid_based", "household_buffer_kw": 0.5})
 
             # Get per-vehicle states
             vehicles_state = []
@@ -3992,8 +4018,8 @@ class SolarSurplusStatusView(HomeAssistantView):
                 "success": True,
                 "surplus_kw": round(surplus_kw, 2),
                 "battery_soc": round(battery_soc, 1),
-                "solar_power_kw": round((live_status.get("solar_power") or 0) / 1000, 2) if live_status else 0,
-                "grid_power_kw": round((live_status.get("grid_power") or 0) / 1000, 2) if live_status else 0,
+                "solar_power_kw": round(solar_power_kw, 2),
+                "grid_power_kw": round(grid_power_kw, 2),
                 "vehicles": vehicles_state,
             })
 
