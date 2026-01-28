@@ -2322,8 +2322,14 @@ class AutoScheduleExecutor:
         else:
             dynamic_mode = "battery_target"
 
+        # Only pass vehicle_vin if it looks like a valid VIN (17 chars)
+        # Otherwise use None to let the system find the default vehicle
+        vehicle_vin = None
+        if vehicle_id and vehicle_id != "_default" and len(vehicle_id) == 17:
+            vehicle_vin = vehicle_id
+
         params = {
-            "vehicle_vin": vehicle_id if vehicle_id != "_default" else None,
+            "vehicle_vin": vehicle_vin,
             "dynamic_mode": dynamic_mode,
             "min_charge_amps": settings.min_charge_amps,
             "max_charge_amps": settings.max_charge_amps,
@@ -2377,7 +2383,12 @@ class AutoScheduleExecutor:
         """
         from .actions import _action_stop_ev_charging_dynamic
 
-        params = {"vehicle_id": vehicle_id if vehicle_id != "_default" else None}
+        # Only pass vehicle_id if it looks like a valid VIN (17 chars)
+        vid = None
+        if vehicle_id and vehicle_id != "_default" and len(vehicle_id) == 17:
+            vid = vehicle_id
+
+        params = {"vehicle_id": vid}
 
         try:
             await _action_stop_ev_charging_dynamic(self.hass, self.config_entry, params)
