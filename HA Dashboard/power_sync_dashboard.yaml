@@ -192,6 +192,16 @@ views:
           tooltip:
             x:
               format: HH:mm
+            y:
+              formatter: |
+                EVAL:function(value) {
+                  if (value === null || value === undefined) return '';
+                  const cents = value * 100;
+                  if (Math.abs(cents) >= 1000) {
+                    return '$' + value.toFixed(2);
+                  }
+                  return cents.toFixed(0) + '¢';
+                }
       - type: custom:apexcharts-card
         header:
           show: true
@@ -278,6 +288,16 @@ views:
           tooltip:
             x:
               format: HH:mm
+            y:
+              formatter: |
+                EVAL:function(value) {
+                  if (value === null || value === undefined) return '';
+                  const cents = value * 100;
+                  if (Math.abs(cents) >= 1000) {
+                    return '$' + value.toFixed(2);
+                  }
+                  return cents.toFixed(0) + '¢';
+                }
       # Solar Curtailment Status Cards - Side by Side
       - type: horizontal-stack
         cards:
