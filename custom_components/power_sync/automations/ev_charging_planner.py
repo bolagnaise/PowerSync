@@ -856,7 +856,18 @@ class ChargingPlanner:
 
         # Calculate hours until deadline
         if target_time:
-            hours_available = max(1, int((target_time - datetime.now()).total_seconds() / 3600))
+            # Ensure both datetimes are comparable (handle timezone-aware vs naive)
+            now = datetime.now()
+            if target_time.tzinfo is not None and now.tzinfo is None:
+                # target_time is timezone-aware, make now naive by removing tz or use target's timezone
+                try:
+                    now = datetime.now(target_time.tzinfo)
+                except Exception:
+                    # Fallback: strip timezone from target_time
+                    target_time = target_time.replace(tzinfo=None)
+            elif target_time.tzinfo is None and now.tzinfo is not None:
+                now = now.replace(tzinfo=None)
+            hours_available = max(1, int((target_time - now).total_seconds() / 3600))
         else:
             hours_available = 24
 
@@ -1816,7 +1827,7 @@ class AutoScheduleExecutor:
         current_soc = 50  # Default estimate
 
         try:
-            plan = await self.planner.create_plan(
+            plan = await self.planner.plan_charging(
                 vehicle_id=vehicle_id,
                 current_soc=current_soc,
                 target_soc=settings.target_soc,
