@@ -564,7 +564,7 @@ class PriceForecaster:
         return await self._estimate_tou_prices(hours)
 
     async def _get_amber_forecast(self, hours: int) -> Optional[List[PriceForecast]]:
-        """Get forecast from Amber API if configured."""
+        """Get forecast from Amber coordinator data."""
         try:
             from ..const import DOMAIN, CONF_AMBER_API_TOKEN
 
@@ -573,26 +573,70 @@ class PriceForecaster:
             if not amber_token:
                 return None
 
-            # Try to get forecast from stored data
+            # Get forecast from amber_coordinator
             entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
-            price_data = entry_data.get("price_forecast", {})
+            amber_coordinator = entry_data.get("amber_coordinator")
 
-            if not price_data:
+            if not amber_coordinator or not amber_coordinator.data:
+                _LOGGER.debug("No Amber coordinator data available")
                 return None
 
-            forecasts = []
+            # Get forecast data from coordinator (Amber API format)
+            forecast_data = amber_coordinator.data.get("forecast", [])
+            if not forecast_data:
+                _LOGGER.debug("No forecast data in Amber coordinator")
+                return None
+
+            # Parse Amber forecast into our format
+            # Group by hour and separate import/export prices
+            hourly_prices = {}
             now = datetime.now()
 
-            for h in range(hours):
-                hour_dt = now + timedelta(hours=h)
-                hour_key = hour_dt.strftime("%Y-%m-%dT%H:00")
+            for price_item in forecast_data:
+                # Parse the NEM time
+                nem_time = price_item.get("nemTime") or price_item.get("startTime")
+                if not nem_time:
+                    continue
 
-                # Get price for this hour
-                hour_price = price_data.get(hour_key, {})
-                import_cents = hour_price.get("per_kwh", 30)  # Default 30c
-                export_cents = hour_price.get("feed_in_tariff", 8)  # Default 8c
+                try:
+                    # Parse ISO format time
+                    if "T" in nem_time:
+                        hour_dt = datetime.fromisoformat(nem_time.replace("Z", "+00:00"))
+                        # Convert to local time
+                        hour_dt = hour_dt.replace(tzinfo=None)
+                    else:
+                        continue
 
-                # Determine period
+                    hour_key = hour_dt.strftime("%Y-%m-%dT%H:00")
+
+                    if hour_key not in hourly_prices:
+                        hourly_prices[hour_key] = {"import": None, "export": None, "hour_dt": hour_dt}
+
+                    channel = price_item.get("channelType", "general")
+                    per_kwh = price_item.get("perKwh", 0)
+
+                    if channel == "general":
+                        # Use first price of the hour (or average if multiple)
+                        if hourly_prices[hour_key]["import"] is None:
+                            hourly_prices[hour_key]["import"] = per_kwh
+                    elif channel == "feedIn":
+                        if hourly_prices[hour_key]["export"] is None:
+                            hourly_prices[hour_key]["export"] = per_kwh
+
+                except Exception as e:
+                    _LOGGER.debug(f"Error parsing forecast item: {e}")
+                    continue
+
+            # Convert to PriceForecast list, sorted by time
+            forecasts = []
+            sorted_hours = sorted(hourly_prices.items(), key=lambda x: x[1]["hour_dt"])
+
+            for hour_key, prices in sorted_hours[:hours]:
+                import_cents = prices["import"] if prices["import"] is not None else 30
+                export_cents = prices["export"] if prices["export"] is not None else 8
+                hour_dt = prices["hour_dt"]
+
+                # Determine period based on price
                 if import_cents < 15:
                     period = "offpeak"
                 elif import_cents > 35:
@@ -607,7 +651,16 @@ class PriceForecaster:
                     period=period,
                 ))
 
-            return forecasts
+            if forecasts:
+                _LOGGER.info(f"Got {len(forecasts)} hours of Amber price forecast")
+                # Log a few sample prices for debugging
+                if len(forecasts) >= 3:
+                    _LOGGER.debug(
+                        f"Sample prices: now={forecasts[0].import_cents:.1f}c, "
+                        f"+1h={forecasts[1].import_cents:.1f}c, +2h={forecasts[2].import_cents:.1f}c"
+                    )
+
+            return forecasts if forecasts else None
 
         except Exception as e:
             _LOGGER.debug(f"Could not get Amber forecast: {e}")
@@ -1019,57 +1072,111 @@ class ChargingPlanner:
         surplus_forecast: List[SurplusForecast],
         price_forecast: List[PriceForecast],
     ) -> ChargingPlan:
-        """Plan charging to minimize cost."""
-        # Combine forecasts and sort by effective cost
+        """
+        Plan charging to minimize cost while meeting departure deadline.
+
+        Strategy:
+        1. Get all available charging windows before departure time
+        2. Sort by price (cheapest first), with solar surplus as free (0 cost)
+        3. Select cheapest windows until energy requirement is met
+        4. If deadline is tight, prioritize meeting deadline over cost
+
+        Example scenarios:
+        - Plugged in at 11am with 1c/kWh price -> charge immediately
+        - Arrive home 6pm at 58c/kWh, depart 6am with 15-20c overnight -> wait for cheap overnight
+        """
+        now = datetime.now()
+
+        _LOGGER.info(
+            f"Planning cost-optimized charging: need {energy_needed_kwh:.1f}kWh, "
+            f"charger={charger_power_kw}kW, target_time={target_time}"
+        )
+
+        # Build charging options from price forecast (within deadline)
         charging_options = []
 
-        for i, surplus in enumerate(surplus_forecast):
-            if i < len(price_forecast):
-                price = price_forecast[i]
+        for i, price in enumerate(price_forecast):
+            try:
+                hour_dt = datetime.fromisoformat(price.hour)
+            except:
+                continue
 
-                # Solar surplus is free
-                if surplus.surplus_kw >= 1.0:
-                    charging_options.append({
-                        "hour": surplus.hour,
-                        "source": "solar_surplus",
-                        "power_kw": min(surplus.surplus_kw, charger_power_kw),
-                        "cost_cents": 0,
-                        "confidence": surplus.confidence,
-                    })
+            # Skip if past departure time
+            if target_time and hour_dt >= target_time:
+                continue
 
-                # Grid option (if no/insufficient solar)
-                remaining_power = charger_power_kw - max(0, surplus.surplus_kw)
-                if remaining_power > 0:
-                    charging_options.append({
-                        "hour": price.hour,
-                        "source": f"grid_{price.period}",
-                        "power_kw": remaining_power,
-                        "cost_cents": price.import_cents,
-                        "confidence": 0.95,
-                    })
+            # Skip if in the past
+            if hour_dt < now - timedelta(hours=1):
+                continue
+
+            # Check for solar surplus at this hour
+            solar_available = 0
+            if i < len(surplus_forecast):
+                solar_available = surplus_forecast[i].surplus_kw
+
+            # Solar surplus is free
+            if solar_available >= 1.0:
+                charging_options.append({
+                    "hour": price.hour,
+                    "hour_dt": hour_dt,
+                    "source": "solar_surplus",
+                    "power_kw": min(solar_available, charger_power_kw),
+                    "cost_cents": 0,  # Solar is free
+                    "actual_price": price.import_cents,  # Store actual price for reference
+                    "confidence": surplus_forecast[i].confidence if i < len(surplus_forecast) else 0.5,
+                })
+
+            # Grid option
+            grid_power = charger_power_kw - max(0, solar_available)
+            if grid_power > 0.5:  # At least 0.5kW from grid
+                charging_options.append({
+                    "hour": price.hour,
+                    "hour_dt": hour_dt,
+                    "source": f"grid_{price.period}",
+                    "power_kw": grid_power,
+                    "cost_cents": price.import_cents,
+                    "actual_price": price.import_cents,
+                    "confidence": 0.95,
+                })
+
+        # Log available options
+        if charging_options:
+            prices = [opt["cost_cents"] for opt in charging_options]
+            _LOGGER.info(
+                f"Found {len(charging_options)} charging options, "
+                f"prices range: {min(prices):.1f}c - {max(prices):.1f}c"
+            )
 
         # Sort by cost (cheapest first)
-        charging_options.sort(key=lambda x: x["cost_cents"])
+        # Secondary sort by time to prefer earlier slots at same price
+        charging_options.sort(key=lambda x: (x["cost_cents"], x["hour_dt"]))
 
-        # Allocate energy
+        # Log top 5 cheapest options
+        for i, opt in enumerate(charging_options[:5]):
+            _LOGGER.debug(
+                f"  Option {i+1}: {opt['hour_dt'].strftime('%H:%M')} - "
+                f"{opt['cost_cents']:.1f}c/kWh ({opt['source']})"
+            )
+
+        # Allocate energy to cheapest windows
         windows = []
         energy_allocated = 0
         solar_energy = 0
         grid_energy = 0
         total_cost = 0
-
         used_hours = set()
 
         for option in charging_options:
             if energy_allocated >= energy_needed_kwh:
                 break
 
-            if option["hour"] in used_hours:
+            # Skip if already used this hour
+            hour_key = option["hour_dt"].strftime("%Y-%m-%dT%H")
+            if hour_key in used_hours:
                 continue
 
             energy_this_hour = min(option["power_kw"], energy_needed_kwh - energy_allocated)
-
-            hour_dt = datetime.fromisoformat(option["hour"])
+            hour_dt = option["hour_dt"]
             end_dt = hour_dt + timedelta(hours=1)
 
             windows.append(PlannedChargingWindow(
@@ -1089,10 +1196,27 @@ class ChargingPlanner:
                 grid_energy += energy_this_hour
                 total_cost += energy_this_hour * option["cost_cents"]
 
-            used_hours.add(option["hour"])
+            used_hours.add(hour_key)
 
-        # Sort by time for display
+        # Sort windows by time for display
         windows.sort(key=lambda w: w.start_time)
+
+        # Calculate if we can meet target
+        can_meet = energy_allocated >= energy_needed_kwh * 0.9
+
+        # Log the plan
+        _LOGGER.info(
+            f"Cost-optimized plan: {len(windows)} windows, "
+            f"{solar_energy:.1f}kWh solar + {grid_energy:.1f}kWh grid, "
+            f"est cost ${total_cost/100:.2f}, can_meet={can_meet}"
+        )
+
+        # Log each window
+        for w in windows:
+            _LOGGER.debug(
+                f"  Window: {w.start_time[:16]} - {w.price_cents_kwh:.1f}c/kWh "
+                f"({w.source}, {w.estimated_energy_kwh:.1f}kWh)"
+            )
 
         plan = ChargingPlan(
             vehicle_id=vehicle_id,
@@ -1104,8 +1228,8 @@ class ChargingPlanner:
             estimated_solar_kwh=solar_energy,
             estimated_grid_kwh=grid_energy,
             estimated_cost_cents=total_cost,
-            confidence=0.7,
-            can_meet_target=energy_allocated >= energy_needed_kwh * 0.9,
+            confidence=0.8 if can_meet else 0.5,
+            can_meet_target=can_meet,
         )
 
         return plan
@@ -1222,6 +1346,13 @@ class ChargingPlanner:
         """
         Real-time decision: should we charge right now?
 
+        Strategy:
+        1. Always respect home battery priority (min SoC)
+        2. If in a planned window from cost-optimized plan, charge
+        3. Opportunistic: charge on solar surplus (free)
+        4. Opportunistic: charge if current price is very cheap (< plan avg or < 10c)
+        5. Otherwise wait for planned windows or better prices
+
         Args:
             vehicle_id: Vehicle identifier
             plan: Current charging plan
@@ -1241,21 +1372,66 @@ class ChargingPlanner:
 
         # Check if we're in a planned window
         for window in plan.windows:
-            window_start = datetime.fromisoformat(window.start_time)
-            window_end = datetime.fromisoformat(window.end_time)
+            try:
+                window_start = datetime.fromisoformat(window.start_time)
+                window_end = datetime.fromisoformat(window.end_time)
 
-            if window_start <= now < window_end:
-                return True, f"In planned {window.source} window", window.source
+                if window_start <= now < window_end:
+                    _LOGGER.debug(
+                        f"In planned window: {window_start.strftime('%H:%M')}-{window_end.strftime('%H:%M')} "
+                        f"({window.source}, {window.price_cents_kwh:.1f}c/kWh)"
+                    )
+                    return True, f"In planned {window.source} window ({window.price_cents_kwh:.0f}c)", window.source
+            except Exception as e:
+                _LOGGER.debug(f"Error parsing window time: {e}")
+                continue
 
-        # Check for opportunistic solar
+        # Check for opportunistic solar (always take free power)
         if current_surplus_kw >= 1.5:
-            return True, f"Solar surplus available ({current_surplus_kw:.1f}kW)", "solar_surplus"
+            return True, f"Solar surplus ({current_surplus_kw:.1f}kW)", "solar_surplus"
 
-        # Check for cheap grid
-        if current_price_cents < 15:
-            return True, f"Offpeak rate ({current_price_cents:.0f}c/kWh)", "grid_offpeak"
+        # Calculate average planned price for comparison
+        if plan.windows:
+            planned_prices = [w.price_cents_kwh for w in plan.windows if w.price_cents_kwh > 0]
+            avg_planned_price = sum(planned_prices) / len(planned_prices) if planned_prices else 30
+            min_planned_price = min(planned_prices) if planned_prices else 30
+        else:
+            avg_planned_price = 30
+            min_planned_price = 30
 
-        return False, "Waiting for better conditions", "waiting"
+        # Opportunistic: if current price is better than our best planned window, charge now
+        # This handles the case where prices dropped since we made the plan
+        if current_price_cents <= min_planned_price and current_price_cents < 20:
+            _LOGGER.info(
+                f"Opportunistic charging: current {current_price_cents:.1f}c <= "
+                f"best planned {min_planned_price:.1f}c"
+            )
+            return True, f"Better than planned ({current_price_cents:.0f}c ≤ {min_planned_price:.0f}c)", "grid_opportunistic"
+
+        # Opportunistic: very cheap power (< 10c) - always charge
+        if current_price_cents < 10:
+            return True, f"Very cheap power ({current_price_cents:.0f}c/kWh)", "grid_offpeak"
+
+        # Opportunistic: negative pricing (getting paid to use power)
+        if current_price_cents < 0:
+            return True, f"Negative pricing ({current_price_cents:.0f}c/kWh) - getting paid!", "grid_negative"
+
+        # Check how far away the next planned window is
+        next_window_start = None
+        for window in sorted(plan.windows, key=lambda w: w.start_time):
+            try:
+                window_start = datetime.fromisoformat(window.start_time)
+                if window_start > now:
+                    next_window_start = window_start
+                    break
+            except:
+                continue
+
+        if next_window_start:
+            hours_until = (next_window_start - now).total_seconds() / 3600
+            return False, f"Waiting for {next_window_start.strftime('%H:%M')} ({hours_until:.1f}h, {min_planned_price:.0f}c)", "waiting"
+
+        return False, f"Waiting for better rates (current: {current_price_cents:.0f}c)", "waiting"
 
 
 # Global planner instance (initialized by __init__.py)
