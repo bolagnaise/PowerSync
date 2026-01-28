@@ -1709,7 +1709,7 @@ class AutoScheduleExecutor:
     async def _get_vehicle_soc(self, vehicle_id: str) -> int:
         """Get current SoC for a vehicle from Home Assistant entities.
 
-        Searches for Tesla Fleet, Teslemetry, and Tesla BLE battery sensors.
+        Uses the same approach as EVVehiclesView to find Tesla vehicles.
 
         Args:
             vehicle_id: Vehicle identifier
@@ -1717,46 +1717,73 @@ class AutoScheduleExecutor:
         Returns:
             Current battery level (0-100), defaults to 50 if not found.
         """
-        import re
+        from ..const import (
+            DOMAIN,
+            CONF_TESLA_BLE_ENTITY_PREFIX,
+            DEFAULT_TESLA_BLE_ENTITY_PREFIX,
+            TESLA_BLE_SENSOR_CHARGE_LEVEL,
+        )
+        from homeassistant.helpers import entity_registry as er, device_registry as dr
 
-        # Try to find Tesla vehicle battery sensors
-        all_states = self.hass.states.async_all()
+        # Method 1: Check Tesla BLE sensor with configured prefix
+        config = {}
+        entries = self.hass.config_entries.async_entries(DOMAIN)
+        if entries:
+            config = dict(entries[0].options)
 
-        # Look for Tesla-specific battery level sensors
-        # Must contain "tesla" or common Tesla model names to avoid matching other devices
-        tesla_keywords = ['tesla', 'model_3', 'model_y', 'model_s', 'model_x', 'cybertruck']
+        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+        ble_charge_level_entity = TESLA_BLE_SENSOR_CHARGE_LEVEL.format(prefix=ble_prefix)
+        ble_state = self.hass.states.get(ble_charge_level_entity)
 
-        for state in all_states:
-            entity_id = state.entity_id
-            entity_id_lower = entity_id.lower()
-            state_value = state.state
+        if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
+            try:
+                level = float(ble_state.state)
+                if 0 <= level <= 100:
+                    _LOGGER.debug(f"Found Tesla BLE SoC from {ble_charge_level_entity}: {level}%")
+                    return int(level)
+            except (ValueError, TypeError):
+                pass
 
-            if state_value in ("unavailable", "unknown", "None", None):
+        # Method 2: Check Tesla Fleet/Teslemetry entities via device registry
+        entity_registry = er.async_get(self.hass)
+        device_registry = dr.async_get(self.hass)
+
+        tesla_integrations = ["tesla_fleet", "teslemetry"]
+
+        for device in device_registry.devices.values():
+            is_tesla_device = False
+            for identifier in device.identifiers:
+                if len(identifier) >= 2 and identifier[0] in tesla_integrations:
+                    is_tesla_device = True
+                    break
+
+            if not is_tesla_device:
                 continue
 
-            # Only match sensors that:
-            # 1. Contain a Tesla keyword AND
-            # 2. End with battery/battery_level/charge_level
-            has_tesla_keyword = any(kw in entity_id_lower for kw in tesla_keywords)
-            is_battery_sensor = re.search(r"(battery|battery_level|charge_level)$", entity_id_lower)
-
-            if has_tesla_keyword and is_battery_sensor:
-                try:
-                    level = float(state_value)
-                    if 0 <= level <= 100:
-                        _LOGGER.debug(f"Found Tesla vehicle SoC from {entity_id}: {level}%")
-                        return int(level)
-                except (ValueError, TypeError):
+            # Find battery/charge_level sensor for this Tesla device
+            for entity in entity_registry.entities.values():
+                if entity.device_id != device.id:
                     continue
 
-        # Also check coordinator data if available
-        from ..const import DOMAIN
-        entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
+                entity_id = entity.entity_id
+                entity_id_lower = entity_id.lower()
 
-        # Check for synced Tesla vehicles with battery data
+                # Match battery sensors (battery, battery_level, charge_level)
+                if entity_id.startswith("sensor.") and any(x in entity_id_lower for x in ["battery", "charge_level"]):
+                    state = self.hass.states.get(entity_id)
+                    if state and state.state not in ("unavailable", "unknown", "None", None):
+                        try:
+                            level = float(state.state)
+                            if 0 <= level <= 100:
+                                _LOGGER.debug(f"Found Tesla Fleet/Teslemetry SoC from {entity_id}: {level}%")
+                                return int(level)
+                        except (ValueError, TypeError):
+                            continue
+
+        # Method 3: Check cached Tesla vehicles from PowerSync
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
         tesla_vehicles = entry_data.get("tesla_vehicles", [])
         for vehicle in tesla_vehicles:
-            # Match by ID if provided, or use first vehicle
             vid = str(vehicle.get("id", ""))
             if vehicle_id == "_default" or vehicle_id == vid or vehicle_id in vid:
                 battery_level = vehicle.get("battery_level")
