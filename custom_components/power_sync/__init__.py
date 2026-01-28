@@ -5141,7 +5141,7 @@ class AutoScheduleSettingsView(HomeAssistantView):
     async def post(self, request):
         """Update auto-schedule settings for a vehicle."""
         try:
-            from .automations.ev_charging_planner import get_auto_schedule_executor
+            from .automations.ev_charging_planner import get_auto_schedule_executor, ChargingPlanner
 
             data = await request.json()
             vehicle_id = data.get("vehicle_id", "_default")
@@ -5162,9 +5162,20 @@ class AutoScheduleSettingsView(HomeAssistantView):
             if store:
                 await executor.save_settings(store)
 
+            # Regenerate plan immediately with new settings
+            plan_data = None
+            try:
+                await executor._regenerate_plan(vehicle_id)
+                state = executor.get_state(vehicle_id)
+                if state.current_plan:
+                    plan_data = state.current_plan.to_dict()
+            except Exception as e:
+                _LOGGER.warning(f"Failed to regenerate plan after settings update: {e}")
+
             return web.json_response({
                 "success": True,
                 "settings": updated_settings.to_dict(),
+                "plan": plan_data,
             })
 
         except Exception as e:
