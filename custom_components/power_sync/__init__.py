@@ -5498,6 +5498,46 @@ class PriceLevelChargingSettingsView(HomeAssistantView):
             }, status=500)
 
 
+class PriceLevelChargingStatusView(HomeAssistantView):
+    """API endpoint for price-level charging status.
+
+    GET /api/power_sync/ev/price_level_charging/status
+    Returns current charging state and decision reason.
+    """
+    url = "/api/power_sync/ev/price_level_charging/status"
+    name = "api:power_sync:ev:price_level_charging:status"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self._hass = hass
+        self._config_entry = entry
+
+    async def get(self, request):
+        """Get price-level charging status."""
+        try:
+            from .automations.ev_charging_planner import get_price_level_executor
+
+            executor = get_price_level_executor()
+            if executor:
+                state = executor.get_state()
+                return web.json_response({
+                    "success": True,
+                    "status": state,
+                })
+            else:
+                return web.json_response({
+                    "success": False,
+                    "error": "Price-level charging executor not initialized"
+                }, status=503)
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting price-level charging status: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
 class ScheduledChargingSettingsView(HomeAssistantView):
     """API endpoint for scheduled charging settings (time window + max price).
 
@@ -5586,6 +5626,92 @@ class ScheduledChargingSettingsView(HomeAssistantView):
 
         except Exception as e:
             _LOGGER.error(f"Error updating scheduled charging settings: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
+class ScheduledChargingStatusView(HomeAssistantView):
+    """API endpoint for scheduled charging status.
+
+    GET /api/power_sync/ev/scheduled_charging/status
+    Returns current charging state and decision reason.
+    """
+    url = "/api/power_sync/ev/scheduled_charging/status"
+    name = "api:power_sync:ev:scheduled_charging:status"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self._hass = hass
+        self._config_entry = entry
+
+    async def get(self, request):
+        """Get scheduled charging status."""
+        try:
+            from .automations.ev_charging_planner import get_scheduled_charging_executor
+
+            executor = get_scheduled_charging_executor()
+            if executor:
+                state = executor.get_state()
+                return web.json_response({
+                    "success": True,
+                    "status": state,
+                })
+            else:
+                return web.json_response({
+                    "success": False,
+                    "error": "Scheduled charging executor not initialized"
+                }, status=503)
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting scheduled charging status: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
+class EVChargingCoordinatorStatusView(HomeAssistantView):
+    """API endpoint for EV charging coordinator status.
+
+    GET /api/power_sync/ev/coordinator/status
+    Returns combined charging state from all modes.
+    """
+    url = "/api/power_sync/ev/coordinator/status"
+    name = "api:power_sync:ev:coordinator:status"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self._hass = hass
+        self._config_entry = entry
+
+    async def get(self, request):
+        """Get coordinator status with all mode decisions."""
+        try:
+            from .automations.ev_charging_planner import (
+                get_ev_charging_coordinator,
+                get_price_level_executor,
+                get_scheduled_charging_executor,
+            )
+
+            coordinator = get_ev_charging_coordinator()
+            price_level = get_price_level_executor()
+            scheduled = get_scheduled_charging_executor()
+
+            response = {
+                "success": True,
+                "coordinator": coordinator.get_state() if coordinator else None,
+                "modes": {
+                    "price_level": price_level.get_state() if price_level else None,
+                    "scheduled": scheduled.get_state() if scheduled else None,
+                },
+            }
+
+            return web.json_response(response)
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting coordinator status: {e}", exc_info=True)
             return web.json_response({
                 "success": False,
                 "error": str(e)
@@ -10006,7 +10132,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.http.register_view(AutoScheduleStatusView(hass, entry))
     hass.http.register_view(AutoScheduleToggleView(hass, entry))
     hass.http.register_view(PriceLevelChargingSettingsView(hass, entry))
+    hass.http.register_view(PriceLevelChargingStatusView(hass, entry))
     hass.http.register_view(ScheduledChargingSettingsView(hass, entry))
+    hass.http.register_view(ScheduledChargingStatusView(hass, entry))
+    hass.http.register_view(EVChargingCoordinatorStatusView(hass, entry))
     hass.http.register_view(HomePowerSettingsView(hass, entry))
     _LOGGER.info("🚗 EV HTTP endpoints registered at /api/power_sync/ev/*")
     _LOGGER.info("☀️ Solar surplus EV endpoints registered")
@@ -10029,6 +10158,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         set_charging_planner,
         AutoScheduleExecutor,
         set_auto_schedule_executor,
+        PriceLevelChargingExecutor,
+        set_price_level_executor,
+        ScheduledChargingExecutor,
+        set_scheduled_charging_executor,
+        EVChargingModeCoordinator,
+        set_ev_charging_coordinator,
     )
     charging_planner = ChargingPlanner(hass, entry)
     set_charging_planner(charging_planner)
@@ -10044,6 +10179,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if store:
         await auto_schedule_executor.load_settings(store)
     _LOGGER.info("🤖 Auto-schedule executor initialized")
+
+    # Initialize price-level charging executor
+    price_level_executor = PriceLevelChargingExecutor(hass, entry)
+    set_price_level_executor(price_level_executor)
+    hass.data[DOMAIN][entry.entry_id]["price_level_executor"] = price_level_executor
+    _LOGGER.info("💰 Price-level charging executor initialized")
+
+    # Initialize scheduled charging executor
+    scheduled_charging_executor = ScheduledChargingExecutor(hass, entry)
+    set_scheduled_charging_executor(scheduled_charging_executor)
+    hass.data[DOMAIN][entry.entry_id]["scheduled_charging_executor"] = scheduled_charging_executor
+    _LOGGER.info("⏰ Scheduled charging executor initialized")
+
+    # Initialize EV charging mode coordinator (combines Price-Level + Scheduled)
+    ev_charging_coordinator = EVChargingModeCoordinator(hass, entry)
+    set_ev_charging_coordinator(ev_charging_coordinator)
+    hass.data[DOMAIN][entry.entry_id]["ev_charging_coordinator"] = ev_charging_coordinator
+    _LOGGER.info("🔄 EV charging mode coordinator initialized (combines multiple modes)")
 
     # ======================================================================
     # SYNC BATTERY HEALTH SERVICE (from mobile app TEDAPI scans)
@@ -10525,53 +10678,62 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.error(f"Error evaluating automations: {e}")
 
-        # Also evaluate auto-schedule executor
+        # Also evaluate auto-schedule executor and price-level charging
         try:
-            from .automations.ev_charging_planner import get_auto_schedule_executor
+            from .automations.ev_charging_planner import (
+                get_auto_schedule_executor,
+                get_ev_charging_coordinator,
+            )
 
+            # Get live status from coordinator (more reliable than API calls)
+            entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            tesla_coordinator = entry_data.get("tesla_coordinator")
+            sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
+
+            live_status = {}
+            if tesla_coordinator and tesla_coordinator.data:
+                live_status = {
+                    "battery_soc": tesla_coordinator.data.get("battery_level", 0),
+                    "solar_power": tesla_coordinator.data.get("solar_power", 0),
+                    "grid_power": tesla_coordinator.data.get("grid_power", 0),
+                    "load_power": tesla_coordinator.data.get("load_power", 0),
+                }
+            elif sigenergy_coordinator and sigenergy_coordinator.data:
+                live_status = {
+                    "battery_soc": sigenergy_coordinator.data.get("battery_level", 0),
+                    "solar_power": sigenergy_coordinator.data.get("solar_power", 0),
+                    "grid_power": sigenergy_coordinator.data.get("grid_power", 0),
+                    "load_power": sigenergy_coordinator.data.get("load_power", 0),
+                }
+
+            # Get current price from Amber coordinator if available
+            current_price = None
+            amber_coordinator = entry_data.get("amber_coordinator")
+            if amber_coordinator and amber_coordinator.data:
+                current_prices = amber_coordinator.data.get("current", [])
+                for price in current_prices:
+                    if price.get("channelType") == "general":
+                        current_price = price.get("perKwh")
+                        break
+
+            # Fallback to stored amber_prices
+            if current_price is None:
+                amber_prices = entry_data.get("amber_prices", {})
+                if amber_prices:
+                    current_price = amber_prices.get("import_cents")
+
+            # Evaluate auto-schedule executor (handles Smart Schedule mode with per-vehicle settings)
             executor = get_auto_schedule_executor()
-            if executor:
-                # Get live status from coordinator (more reliable than API calls)
-                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-                tesla_coordinator = entry_data.get("tesla_coordinator")
-                sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
+            if executor and live_status:
+                await executor.evaluate(live_status, current_price)
 
-                live_status = {}
-                if tesla_coordinator and tesla_coordinator.data:
-                    live_status = {
-                        "battery_soc": tesla_coordinator.data.get("battery_level", 0),
-                        "solar_power": tesla_coordinator.data.get("solar_power", 0),
-                        "grid_power": tesla_coordinator.data.get("grid_power", 0),
-                        "load_power": tesla_coordinator.data.get("load_power", 0),
-                    }
-                elif sigenergy_coordinator and sigenergy_coordinator.data:
-                    live_status = {
-                        "battery_soc": sigenergy_coordinator.data.get("battery_level", 0),
-                        "solar_power": sigenergy_coordinator.data.get("solar_power", 0),
-                        "grid_power": sigenergy_coordinator.data.get("grid_power", 0),
-                        "load_power": sigenergy_coordinator.data.get("load_power", 0),
-                    }
+            # Evaluate coordinated charging modes (Price-Level + Scheduled combined with OR logic)
+            coordinator = get_ev_charging_coordinator()
+            if coordinator:
+                await coordinator.evaluate(live_status, current_price)
 
-                if live_status:
-                    # Get current price from Amber coordinator if available
-                    current_price = None
-                    amber_coordinator = entry_data.get("amber_coordinator")
-                    if amber_coordinator and amber_coordinator.data:
-                        current_prices = amber_coordinator.data.get("current", [])
-                        for price in current_prices:
-                            if price.get("channelType") == "general":
-                                current_price = price.get("perKwh")
-                                break
-
-                    # Fallback to stored amber_prices
-                    if current_price is None:
-                        amber_prices = entry_data.get("amber_prices", {})
-                        if amber_prices:
-                            current_price = amber_prices.get("import_cents")
-
-                    await executor.evaluate(live_status, current_price)
         except Exception as e:
-            _LOGGER.debug(f"Auto-schedule evaluation error: {e}")
+            _LOGGER.debug(f"EV charging evaluation error: {e}")
 
     automation_cancel_timer = async_track_utc_time_change(
         hass,

@@ -16,6 +16,8 @@ from datetime import datetime, timedelta, time as dt_time
 from typing import Optional, List, Dict, Any, Tuple
 from enum import Enum
 
+import aiohttp
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -1437,9 +1439,9 @@ class ChargingPlanner:
             except Exception as e:
                 _LOGGER.debug(f"Error checking time_critical deadline: {e}")
 
-        # Check if battery priority is met (skip for time_critical which is handled above)
-        if battery_soc < min_battery_soc and not is_time_critical:
-            return False, f"Battery at {battery_soc:.0f}% (min: {min_battery_soc}%)", "waiting"
+        # Note: min_battery_soc is used to prevent battery DISCHARGE during surplus
+        # calculation, but does NOT block charging from solar/grid.
+        # The Powerwall's own backup reserve handles discharge protection.
 
         # Check if we're in a planned window
         for window in plan.windows:
@@ -1540,7 +1542,7 @@ class AutoScheduleSettings:
     priority: ChargingPriority = ChargingPriority.COST_OPTIMIZED
 
     # Constraints
-    min_battery_soc: int = 80  # Home battery must be above this before EV charging
+    min_battery_soc: int = 80  # Home battery can discharge to this level for EV charging
     max_grid_price_cents: float = 25.0  # Don't charge from grid above this price
     min_surplus_kw: float = 1.5  # Minimum solar surplus to charge
 
@@ -1619,6 +1621,10 @@ class AutoScheduleState:
     last_decision_reason: str = ""
     started_at: Optional[datetime] = None
 
+    # Backup reserve management - track original to restore after charging
+    original_backup_reserve: Optional[int] = None
+    backup_reserve_modified: bool = False
+
     def to_dict(self) -> dict:
         """Convert to dictionary for API."""
         return {
@@ -1633,6 +1639,8 @@ class AutoScheduleState:
             "last_decision": self.last_decision,
             "last_decision_reason": self.last_decision_reason,
             "started_at": self.started_at.isoformat() if self.started_at else None,
+            "original_backup_reserve": self.original_backup_reserve,
+            "backup_reserve_modified": self.backup_reserve_modified,
             "plan_summary": {
                 "windows": len(self.current_plan.windows) if self.current_plan else 0,
                 "estimated_solar_kwh": self.current_plan.estimated_solar_kwh if self.current_plan else 0,
@@ -1870,6 +1878,29 @@ class AutoScheduleExecutor:
         state = self.get_state(vehicle_id)
         now = datetime.now()
 
+        # Get EV's current SoC to check if we've reached target
+        ev_soc = await self._get_vehicle_soc(vehicle_id)
+
+        # Check if EV has reached target SoC - if so, restore backup reserve
+        if ev_soc >= settings.target_soc:
+            if state.backup_reserve_modified:
+                _LOGGER.info(
+                    f"Auto-schedule: EV reached target SoC ({ev_soc}% >= {settings.target_soc}%), "
+                    f"restoring backup reserve"
+                )
+                await self._restore_backup_reserve(state)
+
+            # Stop charging if still charging
+            if state.is_charging:
+                await self._stop_charging(vehicle_id, settings, state)
+                state.last_decision = "complete"
+                state.last_decision_reason = f"EV reached target {settings.target_soc}%"
+                return
+            else:
+                state.last_decision = "complete"
+                state.last_decision_reason = f"EV at {ev_soc}% (target: {settings.target_soc}%)"
+                return
+
         # Check if we need to regenerate the plan
         if (
             state.current_plan is None or
@@ -1896,17 +1927,10 @@ class AutoScheduleExecutor:
         if current_price_cents is None:
             current_price_cents = await self._get_current_price()
 
-        # Check battery priority (except for time_critical mode which must meet deadline)
+        # Note: min_battery_soc affects surplus calculation (prevents discharge),
+        # but does NOT block EV charging from solar or grid.
+        # The Powerwall's own backup reserve handles discharge protection.
         is_time_critical = settings.priority == ChargingPriority.TIME_CRITICAL
-        if battery_soc < settings.min_battery_soc and not is_time_critical:
-            if state.is_charging:
-                await self._stop_charging(vehicle_id, settings, state)
-                state.last_decision = "stopped"
-                state.last_decision_reason = f"Battery {battery_soc:.0f}% < min {settings.min_battery_soc}%"
-            else:
-                state.last_decision = "waiting"
-                state.last_decision_reason = f"Battery {battery_soc:.0f}% < min {settings.min_battery_soc}%"
-            return
 
         # Use planner's should_charge_now logic
         should_charge, reason, source = await self.planner.should_charge_now(
@@ -2065,6 +2089,98 @@ class AutoScheduleExecutor:
             _LOGGER.debug(f"Failed to get current price: {e}")
             return 25.0  # Default shoulder rate
 
+    async def _get_current_backup_reserve(self) -> Optional[int]:
+        """Get the current Powerwall backup reserve percentage."""
+        try:
+            from ..const import (
+                CONF_TESLA_ENERGY_SITE_ID,
+                TESLA_PROVIDER_TESLEMETRY,
+                TESLEMETRY_API_BASE_URL,
+                FLEET_API_BASE_URL,
+            )
+            from .. import get_tesla_api_token
+
+            current_token, provider = get_tesla_api_token(self.hass, self.config_entry)
+            site_id = self.config_entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+
+            if not site_id or not current_token:
+                _LOGGER.debug("No Tesla site ID or token for backup reserve")
+                return None
+
+            from aiohttp import ClientSession
+            from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+            session = async_get_clientsession(self.hass)
+            headers = {
+                "Authorization": f"Bearer {current_token}",
+                "Content-Type": "application/json",
+            }
+            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+            async with session.get(
+                f"{api_base}/api/1/energy_sites/{site_id}/site_info",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    site_info = data.get("response", {})
+                    reserve = site_info.get("backup_reserve_percent")
+                    _LOGGER.debug(f"Current backup reserve: {reserve}%")
+                    return reserve
+                else:
+                    _LOGGER.warning(f"Failed to get backup reserve: {response.status}")
+                    return None
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting backup reserve: {e}")
+            return None
+
+    async def _set_backup_reserve(self, percent: int) -> bool:
+        """Set the Powerwall backup reserve percentage."""
+        try:
+            from ..const import (
+                CONF_TESLA_ENERGY_SITE_ID,
+                TESLA_PROVIDER_TESLEMETRY,
+                TESLEMETRY_API_BASE_URL,
+                FLEET_API_BASE_URL,
+            )
+            from .. import get_tesla_api_token
+
+            current_token, provider = get_tesla_api_token(self.hass, self.config_entry)
+            site_id = self.config_entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+
+            if not site_id or not current_token:
+                _LOGGER.warning("No Tesla site ID or token for setting backup reserve")
+                return False
+
+            from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+            session = async_get_clientsession(self.hass)
+            headers = {
+                "Authorization": f"Bearer {current_token}",
+                "Content-Type": "application/json",
+            }
+            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+            async with session.post(
+                f"{api_base}/api/1/energy_sites/{site_id}/backup",
+                headers=headers,
+                json={"backup_reserve_percent": percent},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status == 200:
+                    _LOGGER.info(f"✅ EV Charging: Set backup reserve to {percent}%")
+                    return True
+                else:
+                    text = await response.text()
+                    _LOGGER.error(f"Failed to set backup reserve: {response.status} - {text}")
+                    return False
+
+        except Exception as e:
+            _LOGGER.error(f"Error setting backup reserve: {e}")
+            return False
+
     async def _start_charging(
         self,
         vehicle_id: str,
@@ -2074,6 +2190,20 @@ class AutoScheduleExecutor:
     ) -> None:
         """Start dynamic charging for the vehicle."""
         from .actions import _action_start_ev_charging_dynamic
+
+        # Set backup reserve to allow battery discharge down to min_battery_soc
+        # This lets the home battery contribute to EV charging
+        if not state.backup_reserve_modified:
+            current_reserve = await self._get_current_backup_reserve()
+            if current_reserve is not None:
+                state.original_backup_reserve = current_reserve
+                # Set backup reserve to min_battery_soc to allow discharge to that level
+                if await self._set_backup_reserve(settings.min_battery_soc):
+                    state.backup_reserve_modified = True
+                    _LOGGER.info(
+                        f"Auto-schedule: Set backup reserve from {current_reserve}% to {settings.min_battery_soc}% "
+                        f"to allow battery discharge for EV charging"
+                    )
 
         # Determine mode based on source
         if source == "solar_surplus":
@@ -2114,8 +2244,14 @@ class AutoScheduleExecutor:
         vehicle_id: str,
         settings: AutoScheduleSettings,
         state: AutoScheduleState,
+        restore_backup_reserve: bool = False,
     ) -> None:
-        """Stop charging for the vehicle."""
+        """Stop charging for the vehicle.
+
+        Args:
+            restore_backup_reserve: If True, restore the original backup reserve
+                                   (used when EV charging is complete/target reached)
+        """
         from .actions import _action_stop_ev_charging_dynamic
 
         params = {"vehicle_id": vehicle_id if vehicle_id != "_default" else None}
@@ -2126,8 +2262,26 @@ class AutoScheduleExecutor:
             state.started_at = None
             state.current_window = None
             _LOGGER.info(f"Auto-schedule: Stopped charging for {vehicle_id}")
+
+            # Restore backup reserve if requested (EV charging complete)
+            if restore_backup_reserve:
+                await self._restore_backup_reserve(state)
+
         except Exception as e:
             _LOGGER.error(f"Auto-schedule: Error stopping charging for {vehicle_id}: {e}")
+
+    async def _restore_backup_reserve(self, state: AutoScheduleState) -> None:
+        """Restore the original backup reserve after EV charging completes."""
+        if state.backup_reserve_modified and state.original_backup_reserve is not None:
+            if await self._set_backup_reserve(state.original_backup_reserve):
+                _LOGGER.info(
+                    f"Auto-schedule: Restored backup reserve to original {state.original_backup_reserve}% "
+                    f"after EV charging complete"
+                )
+                state.backup_reserve_modified = False
+                state.original_backup_reserve = None
+            else:
+                _LOGGER.warning("Auto-schedule: Failed to restore backup reserve")
 
 
 # Global auto-schedule executor instance
@@ -2143,3 +2297,632 @@ def set_auto_schedule_executor(executor: AutoScheduleExecutor) -> None:
     """Set the global auto-schedule executor instance."""
     global _auto_schedule_executor
     _auto_schedule_executor = executor
+
+
+# ============================================================================
+# PRICE-LEVEL CHARGING EXECUTOR
+# ============================================================================
+
+@dataclass
+class PriceLevelChargingState:
+    """State for price-level charging."""
+    is_charging: bool = False
+    last_decision: str = "idle"
+    last_decision_reason: str = ""
+    charging_mode: str = ""  # "recovery" or "opportunity"
+
+
+class PriceLevelChargingExecutor:
+    """
+    Executes price-level charging based on current price thresholds.
+
+    Two modes:
+    - Recovery: Below recovery_soc, charge when price <= recovery_price_cents
+    - Opportunity: Above recovery_soc, charge when price <= opportunity_price_cents
+    """
+
+    def __init__(
+        self,
+        hass: "HomeAssistant",
+        config_entry: "ConfigEntry",
+    ):
+        from ..const import DOMAIN
+        self.hass = hass
+        self.config_entry = config_entry
+        self._domain = DOMAIN
+        self._state = PriceLevelChargingState()
+
+    def _get_settings(self) -> dict:
+        """Get price-level charging settings from store."""
+        entry_data = self.hass.data.get(self._domain, {}).get(self.config_entry.entry_id, {})
+        store = entry_data.get("automation_store")
+
+        defaults = {
+            "enabled": False,
+            "recovery_soc": 40,
+            "recovery_price_cents": 30,
+            "opportunity_price_cents": 10,
+        }
+
+        if store:
+            stored_data = getattr(store, '_data', {}) or {}
+            settings = stored_data.get("price_level_charging", {})
+            defaults.update(settings)
+
+        return defaults
+
+    async def _get_ev_soc(self) -> Optional[int]:
+        """Get EV's current state of charge."""
+        entry_data = self.hass.data.get(self._domain, {}).get(self.config_entry.entry_id, {})
+        tesla_vehicles = entry_data.get("tesla_vehicles", [])
+
+        for vehicle in tesla_vehicles:
+            battery_level = vehicle.get("battery_level")
+            if battery_level is not None:
+                return int(battery_level)
+
+        return None
+
+    async def _start_charging(self, mode: str, reason: str) -> bool:
+        """Start EV charging."""
+        from .actions import _action_start_ev_charging_dynamic
+
+        params = {
+            "vehicle_vin": None,  # Use default vehicle
+            "dynamic_mode": "battery_target",
+            "min_charge_amps": 5,
+            "max_charge_amps": 32,
+            "voltage": 240,
+            "charger_type": "tesla",
+        }
+
+        try:
+            success = await _action_start_ev_charging_dynamic(
+                self.hass, self.config_entry, params, context=None
+            )
+
+            if success:
+                self._state.is_charging = True
+                self._state.charging_mode = mode
+                self._state.last_decision = "started"
+                self._state.last_decision_reason = reason
+                _LOGGER.info(f"Price-level charging: Started ({mode}) - {reason}")
+                return True
+            else:
+                _LOGGER.warning(f"Price-level charging: Failed to start - {reason}")
+                return False
+
+        except Exception as e:
+            _LOGGER.error(f"Price-level charging: Error starting: {e}")
+            return False
+
+    async def _stop_charging(self, reason: str) -> bool:
+        """Stop EV charging."""
+        from .actions import _action_stop_ev_charging_dynamic
+
+        params = {"vehicle_id": None}
+
+        try:
+            await _action_stop_ev_charging_dynamic(self.hass, self.config_entry, params)
+            self._state.is_charging = False
+            self._state.charging_mode = ""
+            self._state.last_decision = "stopped"
+            self._state.last_decision_reason = reason
+            _LOGGER.info(f"Price-level charging: Stopped - {reason}")
+            return True
+
+        except Exception as e:
+            _LOGGER.error(f"Price-level charging: Error stopping: {e}")
+            return False
+
+    async def get_charging_decision(self, current_price_cents: Optional[float]) -> Tuple[bool, str, str]:
+        """
+        Get charging decision without taking action.
+
+        Returns:
+            Tuple of (should_charge, reason, mode)
+            mode is "price_level_recovery" or "price_level_opportunity"
+        """
+        settings = self._get_settings()
+
+        # Check if enabled
+        if not settings.get("enabled", False):
+            self._state.last_decision = "disabled"
+            self._state.last_decision_reason = "Price-level charging is disabled"
+            return False, "Price-level charging is disabled", ""
+
+        # Get current EV SoC
+        ev_soc = await self._get_ev_soc()
+        if ev_soc is None:
+            self._state.last_decision = "waiting"
+            self._state.last_decision_reason = "Could not get EV state of charge"
+            return False, "Could not get EV state of charge", ""
+
+        # Get price
+        if current_price_cents is None:
+            self._state.last_decision = "waiting"
+            self._state.last_decision_reason = "No price data available"
+            return False, "No price data available", ""
+
+        recovery_soc = settings.get("recovery_soc", 40)
+        recovery_price = settings.get("recovery_price_cents", 30)
+        opportunity_price = settings.get("opportunity_price_cents", 10)
+
+        # Recovery mode: Below recovery_soc, charge if price is low enough
+        if ev_soc < recovery_soc:
+            if current_price_cents <= recovery_price:
+                reason = f"Recovery: EV {ev_soc}% < {recovery_soc}%, price {current_price_cents:.1f}c <= {recovery_price}c"
+                self._state.last_decision = "wants_charge"
+                self._state.last_decision_reason = reason
+                return True, reason, "price_level_recovery"
+            else:
+                reason = f"Recovery: EV {ev_soc}% < {recovery_soc}%, but price {current_price_cents:.1f}c > {recovery_price}c"
+                self._state.last_decision = "waiting"
+                self._state.last_decision_reason = reason
+                return False, reason, ""
+
+        # Opportunity mode: Above recovery_soc, only charge if price is very low
+        else:
+            if current_price_cents <= opportunity_price:
+                reason = f"Opportunity: EV {ev_soc}%, price {current_price_cents:.1f}c <= {opportunity_price}c"
+                self._state.last_decision = "wants_charge"
+                self._state.last_decision_reason = reason
+                return True, reason, "price_level_opportunity"
+            else:
+                reason = f"EV {ev_soc}% >= {recovery_soc}%, price {current_price_cents:.1f}c > {opportunity_price}c"
+                self._state.last_decision = "waiting"
+                self._state.last_decision_reason = reason
+                return False, reason, ""
+
+    async def evaluate(self, current_price_cents: Optional[float]) -> None:
+        """
+        Evaluate charging decision (legacy method for standalone use).
+        For coordinated mode, use get_charging_decision() instead.
+        """
+        should_charge, reason, mode = await self.get_charging_decision(current_price_cents)
+
+        # Take action
+        if should_charge and not self._state.is_charging:
+            await self._start_charging(mode, reason)
+        elif not should_charge and self._state.is_charging:
+            await self._stop_charging(reason)
+        else:
+            self._state.last_decision = "charging" if self._state.is_charging else "waiting"
+            self._state.last_decision_reason = reason
+
+    def update_charging_state(self, is_charging: bool, mode: str = "", reason: str = "") -> None:
+        """Update internal state when coordinator controls charging."""
+        self._state.is_charging = is_charging
+        self._state.charging_mode = mode if is_charging else ""
+        self._state.last_decision = "charging" if is_charging else "waiting"
+        if reason:
+            self._state.last_decision_reason = reason
+
+    def get_state(self) -> dict:
+        """Get current state for API."""
+        settings = self._get_settings()
+        return {
+            "enabled": settings.get("enabled", False),
+            "is_charging": self._state.is_charging,
+            "charging_mode": self._state.charging_mode,
+            "last_decision": self._state.last_decision,
+            "last_decision_reason": self._state.last_decision_reason,
+            "settings": settings,
+        }
+
+
+# Global price-level charging executor instance
+_price_level_executor: Optional[PriceLevelChargingExecutor] = None
+
+
+def get_price_level_executor() -> Optional[PriceLevelChargingExecutor]:
+    """Get the global price-level charging executor instance."""
+    return _price_level_executor
+
+
+def set_price_level_executor(executor: PriceLevelChargingExecutor) -> None:
+    """Set the global price-level charging executor instance."""
+    global _price_level_executor
+    _price_level_executor = executor
+
+
+# ============================================================================
+# SCHEDULED CHARGING EXECUTOR
+# ============================================================================
+
+@dataclass
+class ScheduledChargingState:
+    """State for scheduled charging."""
+    is_charging: bool = False
+    last_decision: str = "idle"
+    last_decision_reason: str = ""
+
+
+class ScheduledChargingExecutor:
+    """
+    Executes scheduled charging based on time window and max price.
+
+    Charges when:
+    - Current time is within start_time - end_time window
+    - Current price is <= max_price_cents
+    """
+
+    def __init__(
+        self,
+        hass: "HomeAssistant",
+        config_entry: "ConfigEntry",
+    ):
+        from ..const import DOMAIN
+        self.hass = hass
+        self.config_entry = config_entry
+        self._domain = DOMAIN
+        self._state = ScheduledChargingState()
+
+    def _get_settings(self) -> dict:
+        """Get scheduled charging settings from store."""
+        entry_data = self.hass.data.get(self._domain, {}).get(self.config_entry.entry_id, {})
+        store = entry_data.get("automation_store")
+
+        defaults = {
+            "enabled": False,
+            "start_time": "00:00",
+            "end_time": "06:00",
+            "max_price_cents": 30,
+        }
+
+        if store:
+            stored_data = getattr(store, '_data', {}) or {}
+            settings = stored_data.get("scheduled_charging", {})
+            defaults.update(settings)
+
+        return defaults
+
+    def _is_in_time_window(self, start_time_str: str, end_time_str: str) -> bool:
+        """Check if current time is within the scheduled window."""
+        try:
+            now = datetime.now()
+            current_time = now.time()
+
+            # Parse start and end times
+            start_parts = start_time_str.split(":")
+            end_parts = end_time_str.split(":")
+
+            start_time = dt_time(int(start_parts[0]), int(start_parts[1]))
+            end_time = dt_time(int(end_parts[0]), int(end_parts[1]))
+
+            # Handle overnight windows (e.g., 22:00 - 06:00)
+            if start_time <= end_time:
+                # Same day window
+                return start_time <= current_time <= end_time
+            else:
+                # Overnight window
+                return current_time >= start_time or current_time <= end_time
+
+        except Exception as e:
+            _LOGGER.error(f"Error parsing time window: {e}")
+            return False
+
+    async def _start_charging(self, reason: str) -> bool:
+        """Start EV charging."""
+        from .actions import _action_start_ev_charging_dynamic
+
+        params = {
+            "vehicle_vin": None,
+            "dynamic_mode": "battery_target",
+            "min_charge_amps": 5,
+            "max_charge_amps": 32,
+            "voltage": 240,
+            "charger_type": "tesla",
+        }
+
+        try:
+            success = await _action_start_ev_charging_dynamic(
+                self.hass, self.config_entry, params, context=None
+            )
+
+            if success:
+                self._state.is_charging = True
+                self._state.last_decision = "started"
+                self._state.last_decision_reason = reason
+                _LOGGER.info(f"Scheduled charging: Started - {reason}")
+                return True
+            else:
+                _LOGGER.warning(f"Scheduled charging: Failed to start - {reason}")
+                return False
+
+        except Exception as e:
+            _LOGGER.error(f"Scheduled charging: Error starting: {e}")
+            return False
+
+    async def _stop_charging(self, reason: str) -> bool:
+        """Stop EV charging."""
+        from .actions import _action_stop_ev_charging_dynamic
+
+        params = {"vehicle_id": None}
+
+        try:
+            await _action_stop_ev_charging_dynamic(self.hass, self.config_entry, params)
+            self._state.is_charging = False
+            self._state.last_decision = "stopped"
+            self._state.last_decision_reason = reason
+            _LOGGER.info(f"Scheduled charging: Stopped - {reason}")
+            return True
+
+        except Exception as e:
+            _LOGGER.error(f"Scheduled charging: Error stopping: {e}")
+            return False
+
+    async def get_charging_decision(self, current_price_cents: Optional[float]) -> Tuple[bool, str, str]:
+        """
+        Get charging decision without taking action.
+
+        Returns:
+            Tuple of (should_charge, reason, mode)
+            mode is "scheduled"
+        """
+        settings = self._get_settings()
+
+        # Check if enabled
+        if not settings.get("enabled", False):
+            self._state.last_decision = "disabled"
+            self._state.last_decision_reason = "Scheduled charging is disabled"
+            return False, "Scheduled charging is disabled", ""
+
+        start_time = settings.get("start_time", "00:00")
+        end_time = settings.get("end_time", "06:00")
+        max_price = settings.get("max_price_cents", 30)
+
+        # Check if in time window
+        in_window = self._is_in_time_window(start_time, end_time)
+
+        if not in_window:
+            reason = f"Outside schedule ({start_time}-{end_time})"
+            self._state.last_decision = "waiting"
+            self._state.last_decision_reason = reason
+            return False, reason, ""
+
+        # In time window - check price
+        if current_price_cents is None:
+            # No price data - charge anyway during window
+            reason = f"Scheduled: {start_time}-{end_time}, no price data"
+            self._state.last_decision = "wants_charge"
+            self._state.last_decision_reason = reason
+            return True, reason, "scheduled"
+        elif current_price_cents <= max_price:
+            reason = f"Scheduled: {start_time}-{end_time}, price {current_price_cents:.1f}c <= {max_price}c"
+            self._state.last_decision = "wants_charge"
+            self._state.last_decision_reason = reason
+            return True, reason, "scheduled"
+        else:
+            reason = f"Scheduled: {start_time}-{end_time}, but price {current_price_cents:.1f}c > {max_price}c"
+            self._state.last_decision = "waiting"
+            self._state.last_decision_reason = reason
+            return False, reason, ""
+
+    async def evaluate(self, current_price_cents: Optional[float]) -> None:
+        """
+        Evaluate charging decision (legacy method for standalone use).
+        For coordinated mode, use get_charging_decision() instead.
+        """
+        should_charge, reason, mode = await self.get_charging_decision(current_price_cents)
+
+        # Take action
+        if should_charge and not self._state.is_charging:
+            await self._start_charging(reason)
+        elif not should_charge and self._state.is_charging:
+            await self._stop_charging(reason)
+        else:
+            self._state.last_decision = "charging" if self._state.is_charging else "waiting"
+            self._state.last_decision_reason = reason
+
+    def update_charging_state(self, is_charging: bool, reason: str = "") -> None:
+        """Update internal state when coordinator controls charging."""
+        self._state.is_charging = is_charging
+        self._state.last_decision = "charging" if is_charging else "waiting"
+        if reason:
+            self._state.last_decision_reason = reason
+
+    def get_state(self) -> dict:
+        """Get current state for API."""
+        settings = self._get_settings()
+        return {
+            "enabled": settings.get("enabled", False),
+            "is_charging": self._state.is_charging,
+            "last_decision": self._state.last_decision,
+            "last_decision_reason": self._state.last_decision_reason,
+            "settings": settings,
+        }
+
+
+# Global scheduled charging executor instance
+_scheduled_charging_executor: Optional[ScheduledChargingExecutor] = None
+
+
+def get_scheduled_charging_executor() -> Optional[ScheduledChargingExecutor]:
+    """Get the global scheduled charging executor instance."""
+    return _scheduled_charging_executor
+
+
+def set_scheduled_charging_executor(executor: ScheduledChargingExecutor) -> None:
+    """Set the global scheduled charging executor instance."""
+    global _scheduled_charging_executor
+    _scheduled_charging_executor = executor
+
+
+# ============================================================================
+# EV CHARGING MODE COORDINATOR
+# ============================================================================
+
+@dataclass
+class ChargingModeDecision:
+    """Decision from a charging mode."""
+    mode_name: str
+    wants_charge: bool
+    reason: str
+    source: str  # e.g., "price_level_recovery", "scheduled", "smart_schedule"
+
+
+class EVChargingModeCoordinator:
+    """
+    Coordinates multiple EV charging modes using OR logic.
+
+    If ANY enabled mode says "charge", charging starts.
+    Only stops when ALL enabled modes say "don't charge".
+    """
+
+    def __init__(
+        self,
+        hass: "HomeAssistant",
+        config_entry: "ConfigEntry",
+    ):
+        from ..const import DOMAIN
+        self.hass = hass
+        self.config_entry = config_entry
+        self._domain = DOMAIN
+        self._is_charging = False
+        self._active_modes: List[str] = []
+        self._last_reason = ""
+
+    async def _start_charging(self, modes: List[str], reason: str) -> bool:
+        """Start EV charging."""
+        from .actions import _action_start_ev_charging_dynamic
+
+        params = {
+            "vehicle_vin": None,
+            "dynamic_mode": "battery_target",
+            "min_charge_amps": 5,
+            "max_charge_amps": 32,
+            "voltage": 240,
+            "charger_type": "tesla",
+        }
+
+        try:
+            success = await _action_start_ev_charging_dynamic(
+                self.hass, self.config_entry, params, context=None
+            )
+
+            if success:
+                self._is_charging = True
+                self._active_modes = modes
+                self._last_reason = reason
+                _LOGGER.info(f"EV Coordinator: Started charging - modes: {modes}, reason: {reason}")
+                return True
+            else:
+                _LOGGER.warning(f"EV Coordinator: Failed to start charging")
+                return False
+
+        except Exception as e:
+            _LOGGER.error(f"EV Coordinator: Error starting charging: {e}")
+            return False
+
+    async def _stop_charging(self, reason: str) -> bool:
+        """Stop EV charging."""
+        from .actions import _action_stop_ev_charging_dynamic
+
+        params = {"vehicle_id": None}
+
+        try:
+            await _action_stop_ev_charging_dynamic(self.hass, self.config_entry, params)
+            self._is_charging = False
+            self._active_modes = []
+            self._last_reason = reason
+            _LOGGER.info(f"EV Coordinator: Stopped charging - {reason}")
+            return True
+
+        except Exception as e:
+            _LOGGER.error(f"EV Coordinator: Error stopping charging: {e}")
+            return False
+
+    async def evaluate(
+        self,
+        live_status: dict,
+        current_price_cents: Optional[float],
+    ) -> None:
+        """
+        Evaluate all charging modes and coordinate start/stop.
+
+        Uses OR logic: if ANY enabled mode wants to charge, charge.
+        """
+        decisions: List[ChargingModeDecision] = []
+
+        # Get decision from Price-Level charging
+        price_level_exec = get_price_level_executor()
+        if price_level_exec:
+            wants_charge, reason, source = await price_level_exec.get_charging_decision(current_price_cents)
+            decisions.append(ChargingModeDecision(
+                mode_name="Price-Level",
+                wants_charge=wants_charge,
+                reason=reason,
+                source=source,
+            ))
+
+        # Get decision from Scheduled charging
+        scheduled_exec = get_scheduled_charging_executor()
+        if scheduled_exec:
+            wants_charge, reason, source = await scheduled_exec.get_charging_decision(current_price_cents)
+            decisions.append(ChargingModeDecision(
+                mode_name="Scheduled",
+                wants_charge=wants_charge,
+                reason=reason,
+                source=source,
+            ))
+
+        # Note: Smart Schedule (AutoScheduleExecutor) is handled separately
+        # because it has per-vehicle settings and manages backup reserve
+
+        # Combine decisions using OR logic
+        modes_wanting_charge = [d for d in decisions if d.wants_charge]
+
+        if modes_wanting_charge:
+            # At least one mode wants to charge
+            active_modes = [d.mode_name for d in modes_wanting_charge]
+            combined_reason = " | ".join([d.reason for d in modes_wanting_charge])
+
+            if not self._is_charging:
+                await self._start_charging(active_modes, combined_reason)
+
+            # Update executor states
+            for d in decisions:
+                if d.mode_name == "Price-Level" and price_level_exec:
+                    price_level_exec.update_charging_state(True, d.source, combined_reason)
+                elif d.mode_name == "Scheduled" and scheduled_exec:
+                    scheduled_exec.update_charging_state(True, combined_reason)
+
+            self._active_modes = active_modes
+            self._last_reason = combined_reason
+
+        else:
+            # No mode wants to charge
+            if self._is_charging:
+                reasons = [d.reason for d in decisions if d.reason]
+                combined_reason = " | ".join(reasons) if reasons else "No mode wants to charge"
+                await self._stop_charging(combined_reason)
+
+            # Update executor states
+            if price_level_exec:
+                price_level_exec.update_charging_state(False)
+            if scheduled_exec:
+                scheduled_exec.update_charging_state(False)
+
+    def get_state(self) -> dict:
+        """Get coordinator state for API."""
+        return {
+            "is_charging": self._is_charging,
+            "active_modes": self._active_modes,
+            "last_reason": self._last_reason,
+        }
+
+
+# Global coordinator instance
+_ev_charging_coordinator: Optional[EVChargingModeCoordinator] = None
+
+
+def get_ev_charging_coordinator() -> Optional[EVChargingModeCoordinator]:
+    """Get the global EV charging mode coordinator instance."""
+    return _ev_charging_coordinator
+
+
+def set_ev_charging_coordinator(coordinator: EVChargingModeCoordinator) -> None:
+    """Set the global EV charging mode coordinator instance."""
+    global _ev_charging_coordinator
+    _ev_charging_coordinator = coordinator
