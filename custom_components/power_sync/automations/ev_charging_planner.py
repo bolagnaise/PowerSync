@@ -856,18 +856,16 @@ class ChargingPlanner:
 
         # Calculate hours until deadline
         if target_time:
-            # Ensure both datetimes are comparable (handle timezone-aware vs naive)
             now = datetime.now()
-            if target_time.tzinfo is not None and now.tzinfo is None:
-                # target_time is timezone-aware, make now naive by removing tz or use target's timezone
+            # Convert target_time to naive local time for comparison
+            target_time_local = target_time
+            if target_time.tzinfo is not None:
                 try:
-                    now = datetime.now(target_time.tzinfo)
+                    local_tz = datetime.now().astimezone().tzinfo
+                    target_time_local = target_time.astimezone(local_tz).replace(tzinfo=None)
                 except Exception:
-                    # Fallback: strip timezone from target_time
-                    target_time = target_time.replace(tzinfo=None)
-            elif target_time.tzinfo is None and now.tzinfo is not None:
-                now = now.replace(tzinfo=None)
-            hours_available = max(1, int((target_time - now).total_seconds() / 3600))
+                    target_time_local = target_time.replace(tzinfo=None)
+            hours_available = max(1, int((target_time_local - now).total_seconds() / 3600))
         else:
             hours_available = 24
 
@@ -1098,19 +1096,26 @@ class ChargingPlanner:
         """
         now = datetime.now()
 
-        # Normalize target_time to match now's timezone awareness
+        # Convert target_time to naive local time for comparison
+        # Price forecast hours are stored as naive local time strings
+        target_time_local = None
         if target_time:
-            if target_time.tzinfo is not None and now.tzinfo is None:
+            if target_time.tzinfo is not None:
+                # Convert UTC target_time to local time, then strip timezone
                 try:
-                    now = datetime.now(target_time.tzinfo)
+                    import zoneinfo
+                    # Try to get local timezone
+                    local_tz = datetime.now().astimezone().tzinfo
+                    target_time_local = target_time.astimezone(local_tz).replace(tzinfo=None)
                 except Exception:
-                    target_time = target_time.replace(tzinfo=None)
-            elif target_time.tzinfo is None and now.tzinfo is not None:
-                now = now.replace(tzinfo=None)
+                    # Fallback: assume price hours are in same tz as target, strip both
+                    target_time_local = target_time.replace(tzinfo=None)
+            else:
+                target_time_local = target_time
 
         _LOGGER.info(
             f"Planning cost-optimized charging: need {energy_needed_kwh:.1f}kWh, "
-            f"charger={charger_power_kw}kW, target_time={target_time}"
+            f"charger={charger_power_kw}kW, target_time={target_time} (local: {target_time_local})"
         )
 
         # Build charging options from price forecast (within deadline)
@@ -1119,16 +1124,14 @@ class ChargingPlanner:
         for i, price in enumerate(price_forecast):
             try:
                 hour_dt = datetime.fromisoformat(price.hour)
-                # Normalize hour_dt to match now's timezone awareness
-                if hour_dt.tzinfo is not None and now.tzinfo is None:
+                # Price hours are naive local time - strip any timezone to ensure naive comparison
+                if hour_dt.tzinfo is not None:
                     hour_dt = hour_dt.replace(tzinfo=None)
-                elif hour_dt.tzinfo is None and now.tzinfo is not None:
-                    hour_dt = hour_dt.replace(tzinfo=now.tzinfo)
             except:
                 continue
 
-            # Skip if past departure time
-            if target_time and hour_dt >= target_time:
+            # Skip if past departure time (compare naive local times)
+            if target_time_local and hour_dt >= target_time_local:
                 continue
 
             # Skip if in the past
@@ -1282,16 +1285,19 @@ class ChargingPlanner:
 
         # Calculate minimum hours needed
         hours_needed = energy_needed_kwh / charger_power_kw
-        # Ensure both datetimes are comparable (handle timezone-aware vs naive)
         now = datetime.now()
-        if target_time.tzinfo is not None and now.tzinfo is None:
+
+        # Convert target_time to naive local time for comparison
+        # Price forecast hours are stored as naive local time strings
+        target_time_local = target_time
+        if target_time.tzinfo is not None:
             try:
-                now = datetime.now(target_time.tzinfo)
+                local_tz = datetime.now().astimezone().tzinfo
+                target_time_local = target_time.astimezone(local_tz).replace(tzinfo=None)
             except Exception:
-                target_time = target_time.replace(tzinfo=None)
-        elif target_time.tzinfo is None and now.tzinfo is not None:
-            now = now.replace(tzinfo=None)
-        hours_available = max(1, int((target_time - now).total_seconds() / 3600))
+                target_time_local = target_time.replace(tzinfo=None)
+
+        hours_available = max(1, int((target_time_local - now).total_seconds() / 3600))
 
         if hours_needed > hours_available:
             # Can't meet target even charging continuously
@@ -1315,12 +1321,11 @@ class ChargingPlanner:
                 break
 
             hour_dt = datetime.fromisoformat(surplus.hour)
-            # Normalize hour_dt to match now's timezone awareness
-            if hour_dt.tzinfo is not None and now.tzinfo is None:
+            # Price hours are naive local time - strip any timezone
+            if hour_dt.tzinfo is not None:
                 hour_dt = hour_dt.replace(tzinfo=None)
-            elif hour_dt.tzinfo is None and now.tzinfo is not None:
-                hour_dt = hour_dt.replace(tzinfo=now.tzinfo)
-            if target_time and hour_dt >= target_time:
+
+            if target_time_local and hour_dt >= target_time_local:
                 continue  # Skip hours after deadline
 
             # Use whatever is available
