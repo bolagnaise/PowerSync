@@ -4657,17 +4657,45 @@ class EVWidgetDataView(HomeAssistantView):
     async def get(self, request):
         """Get widget data for EV charging status."""
         try:
-            from .automations.actions import _dynamic_ev_state, _calculate_solar_surplus, _get_tesla_live_status
+            from .automations.actions import _dynamic_ev_state, _calculate_solar_surplus
 
             entry_id = self._config_entry.entry_id
+            entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id, {})
 
-            # Get live status
-            live_status = await _get_tesla_live_status(self._hass, self._config_entry)
+            # Get data from coordinator (preferred over separate API call)
+            solar_power_kw = 0.0
+            grid_power_kw = 0.0
+            battery_power_kw = 0.0
+            load_power_kw = 0.0
+            battery_soc = 0.0
+
+            tesla_coordinator = entry_data.get("tesla_coordinator")
+            sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
+
+            if tesla_coordinator and tesla_coordinator.data:
+                solar_power_kw = tesla_coordinator.data.get("solar_power", 0)
+                grid_power_kw = tesla_coordinator.data.get("grid_power", 0)
+                battery_power_kw = tesla_coordinator.data.get("battery_power", 0)
+                load_power_kw = tesla_coordinator.data.get("load_power", 0)
+                battery_soc = tesla_coordinator.data.get("battery_level", 0)
+            elif sigenergy_coordinator and sigenergy_coordinator.data:
+                solar_power_kw = sigenergy_coordinator.data.get("solar_power", 0)
+                grid_power_kw = sigenergy_coordinator.data.get("grid_power", 0)
+                battery_power_kw = sigenergy_coordinator.data.get("battery_power", 0)
+                load_power_kw = sigenergy_coordinator.data.get("load_power", 0)
+                battery_soc = sigenergy_coordinator.data.get("battery_level", 0)
+
+            # Build live_status dict for surplus calculation (expects watts)
+            live_status = {
+                "solar_power": solar_power_kw * 1000,
+                "grid_power": grid_power_kw * 1000,
+                "battery_power": battery_power_kw * 1000,
+                "load_power": load_power_kw * 1000,
+                "battery_soc": battery_soc,
+            }
 
             # Calculate current surplus
-            surplus_kw = 0.0
-            if live_status:
-                surplus_kw = _calculate_solar_surplus(live_status, 0, {"household_buffer_kw": 0.5})
+            surplus_kw = _calculate_solar_surplus(live_status, 0, {"household_buffer_kw": 0.5})
 
             # Get dynamic EV state
             vehicles = _dynamic_ev_state.get(entry_id, {})
@@ -4762,20 +4790,44 @@ class PriceRecommendationView(HomeAssistantView):
             from .automations.actions import (
                 get_price_recommendation,
                 _calculate_solar_surplus,
-                _get_tesla_live_status,
             )
 
             entry_id = self._config_entry.entry_id
+            entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id, {})
 
-            # Get live status for surplus and battery
-            live_status = await _get_tesla_live_status(self._hass, self._config_entry)
-
-            surplus_kw = 0.0
+            # Get data from coordinator (preferred over separate API call)
+            solar_power_kw = 0.0
+            grid_power_kw = 0.0
+            battery_power_kw = 0.0
+            load_power_kw = 0.0
             battery_soc = 0.0
 
-            if live_status:
-                battery_soc = live_status.get("battery_soc") or 0
-                surplus_kw = _calculate_solar_surplus(live_status, 0, {"household_buffer_kw": 0.5})
+            tesla_coordinator = entry_data.get("tesla_coordinator")
+            sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
+
+            if tesla_coordinator and tesla_coordinator.data:
+                solar_power_kw = tesla_coordinator.data.get("solar_power", 0)
+                grid_power_kw = tesla_coordinator.data.get("grid_power", 0)
+                battery_power_kw = tesla_coordinator.data.get("battery_power", 0)
+                load_power_kw = tesla_coordinator.data.get("load_power", 0)
+                battery_soc = tesla_coordinator.data.get("battery_level", 0)
+            elif sigenergy_coordinator and sigenergy_coordinator.data:
+                solar_power_kw = sigenergy_coordinator.data.get("solar_power", 0)
+                grid_power_kw = sigenergy_coordinator.data.get("grid_power", 0)
+                battery_power_kw = sigenergy_coordinator.data.get("battery_power", 0)
+                load_power_kw = sigenergy_coordinator.data.get("load_power", 0)
+                battery_soc = sigenergy_coordinator.data.get("battery_level", 0)
+
+            # Build live_status dict for surplus calculation (expects watts)
+            live_status = {
+                "solar_power": solar_power_kw * 1000,
+                "grid_power": grid_power_kw * 1000,
+                "battery_power": battery_power_kw * 1000,
+                "load_power": load_power_kw * 1000,
+                "battery_soc": battery_soc,
+            }
+
+            surplus_kw = _calculate_solar_surplus(live_status, 0, {"household_buffer_kw": 0.5})
 
             # Get current prices based on electricity provider
             import_price_cents = 30.0  # Default
@@ -4787,8 +4839,6 @@ class PriceRecommendationView(HomeAssistantView):
                 CONF_ELECTRICITY_PROVIDER,
                 self._config_entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
             )
-
-            entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id, {})
 
             if electricity_provider in ("amber", "flow_power"):
                 # Amber/Flow Power: Read from coordinator data
@@ -10031,19 +10081,46 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Also evaluate auto-schedule executor
         try:
             from .automations.ev_charging_planner import get_auto_schedule_executor
-            from .automations.actions import _get_tesla_live_status
 
             executor = get_auto_schedule_executor()
             if executor:
-                # Get live status for evaluation
-                live_status = await _get_tesla_live_status(hass, entry)
+                # Get live status from coordinator (more reliable than API calls)
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                tesla_coordinator = entry_data.get("tesla_coordinator")
+                sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
+
+                live_status = {}
+                if tesla_coordinator and tesla_coordinator.data:
+                    live_status = {
+                        "battery_soc": tesla_coordinator.data.get("battery_level", 0),
+                        "solar_power": tesla_coordinator.data.get("solar_power", 0),
+                        "grid_power": tesla_coordinator.data.get("grid_power", 0),
+                        "load_power": tesla_coordinator.data.get("load_power", 0),
+                    }
+                elif sigenergy_coordinator and sigenergy_coordinator.data:
+                    live_status = {
+                        "battery_soc": sigenergy_coordinator.data.get("battery_level", 0),
+                        "solar_power": sigenergy_coordinator.data.get("solar_power", 0),
+                        "grid_power": sigenergy_coordinator.data.get("grid_power", 0),
+                        "load_power": sigenergy_coordinator.data.get("load_power", 0),
+                    }
+
                 if live_status:
-                    # Get current price if available
+                    # Get current price from Amber coordinator if available
                     current_price = None
-                    entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-                    amber_prices = entry_data.get("amber_prices", {})
-                    if amber_prices:
-                        current_price = amber_prices.get("import_cents")
+                    amber_coordinator = entry_data.get("amber_coordinator")
+                    if amber_coordinator and amber_coordinator.data:
+                        current_prices = amber_coordinator.data.get("current", [])
+                        for price in current_prices:
+                            if price.get("channelType") == "general":
+                                current_price = price.get("perKwh")
+                                break
+
+                    # Fallback to stored amber_prices
+                    if current_price is None:
+                        amber_prices = entry_data.get("amber_prices", {})
+                        if amber_prices:
+                            current_price = amber_prices.get("import_cents")
 
                     await executor.evaluate(live_status, current_price)
         except Exception as e:
