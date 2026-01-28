@@ -4454,6 +4454,56 @@ class ChargingScheduleView(HomeAssistantView):
                 return entry_data["automation_store"]
         return None
 
+    async def _get_vehicle_soc(self, vehicle_id: str) -> int:
+        """Get current SoC for a vehicle from Home Assistant entities.
+
+        Args:
+            vehicle_id: Vehicle identifier
+
+        Returns:
+            Current battery level (0-100), defaults to 50 if not found.
+        """
+        import re
+
+        # Try to find Tesla vehicle battery sensors
+        all_states = self._hass.states.async_all()
+
+        # Look for battery level sensors
+        for state in all_states:
+            entity_id = state.entity_id
+            state_value = state.state
+
+            if state_value in ("unavailable", "unknown", "None", None):
+                continue
+
+            # Match common Tesla battery sensor patterns:
+            # sensor.*_battery (Tesla Fleet)
+            # sensor.*_battery_level (Teslemetry)
+            # sensor.*_charge_level (Tesla BLE)
+            if re.match(r"sensor\.\w+_(battery|battery_level|charge_level)$", entity_id, re.IGNORECASE):
+                try:
+                    level = float(state_value)
+                    if 0 <= level <= 100:
+                        _LOGGER.debug(f"ChargingScheduleView: Found vehicle SoC from {entity_id}: {level}%")
+                        return int(level)
+                except (ValueError, TypeError):
+                    continue
+
+        # Check cached Tesla vehicles
+        for entry_id, entry_data in self._hass.data.get(DOMAIN, {}).items():
+            if isinstance(entry_data, dict):
+                tesla_vehicles = entry_data.get("tesla_vehicles", [])
+                for vehicle in tesla_vehicles:
+                    vid = str(vehicle.get("id", ""))
+                    if vehicle_id == "_default" or vehicle_id == vid or vehicle_id in vid:
+                        battery_level = vehicle.get("battery_level")
+                        if battery_level is not None:
+                            _LOGGER.debug(f"ChargingScheduleView: Found vehicle SoC from cached data: {battery_level}%")
+                            return int(battery_level)
+
+        _LOGGER.warning(f"ChargingScheduleView: Could not find SoC for vehicle {vehicle_id}, using default 50%")
+        return 50
+
     async def get(self, request: web.Request) -> web.Response:
         """Handle GET request - get charging plan/schedule.
 
@@ -4473,10 +4523,19 @@ class ChargingScheduleView(HomeAssistantView):
                 }, status=503)
 
             vehicle_id = request.query.get("vehicle_id", "_default")
-            current_soc = int(request.query.get("current_soc", 50))
+            current_soc_param = request.query.get("current_soc")
             target_soc = int(request.query.get("target_soc", 80))
             target_time_str = request.query.get("target_time")
             priority_str = request.query.get("priority", "solar_preferred")
+
+            # Get actual SoC from vehicle sensors if not provided, or if 0/50 (defaults)
+            current_soc = 50  # Default fallback
+            if current_soc_param and int(current_soc_param) not in (0, 50):
+                # Explicit SoC provided, use it
+                current_soc = int(current_soc_param)
+            else:
+                # Try to get actual SoC from Home Assistant sensors
+                current_soc = await self._get_vehicle_soc(vehicle_id)
 
             # Parse target time
             target_time = None
@@ -5338,7 +5397,7 @@ class PriceLevelChargingSettingsView(HomeAssistantView):
 
             return web.json_response({
                 "success": True,
-                "data": settings,
+                "settings": settings,
             })
 
         except Exception as e:
@@ -5381,7 +5440,7 @@ class PriceLevelChargingSettingsView(HomeAssistantView):
 
             return web.json_response({
                 "success": True,
-                "data": settings,
+                "settings": settings,
             })
 
         except Exception as e:
@@ -5432,7 +5491,7 @@ class ScheduledChargingSettingsView(HomeAssistantView):
 
             return web.json_response({
                 "success": True,
-                "data": settings,
+                "settings": settings,
             })
 
         except Exception as e:
@@ -5475,7 +5534,7 @@ class ScheduledChargingSettingsView(HomeAssistantView):
 
             return web.json_response({
                 "success": True,
-                "data": settings,
+                "settings": settings,
             })
 
         except Exception as e:
@@ -5525,7 +5584,7 @@ class HomePowerSettingsView(HomeAssistantView):
 
             return web.json_response({
                 "success": True,
-                "data": settings,
+                "settings": settings,
             })
 
         except Exception as e:
@@ -5567,7 +5626,7 @@ class HomePowerSettingsView(HomeAssistantView):
 
             return web.json_response({
                 "success": True,
-                "data": settings,
+                "settings": settings,
             })
 
         except Exception as e:

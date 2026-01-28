@@ -1706,6 +1706,61 @@ class AutoScheduleExecutor:
         """Get all vehicle states."""
         return {vid: state.to_dict() for vid, state in self._state.items()}
 
+    async def _get_vehicle_soc(self, vehicle_id: str) -> int:
+        """Get current SoC for a vehicle from Home Assistant entities.
+
+        Searches for Tesla Fleet, Teslemetry, and Tesla BLE battery sensors.
+
+        Args:
+            vehicle_id: Vehicle identifier
+
+        Returns:
+            Current battery level (0-100), defaults to 50 if not found.
+        """
+        import re
+
+        # Try to find Tesla vehicle battery sensors
+        all_states = self.hass.states.async_all()
+
+        # Look for battery level sensors
+        for state in all_states:
+            entity_id = state.entity_id
+            state_value = state.state
+
+            if state_value in ("unavailable", "unknown", "None", None):
+                continue
+
+            # Match common Tesla battery sensor patterns:
+            # sensor.*_battery (Tesla Fleet)
+            # sensor.*_battery_level (Teslemetry)
+            # sensor.*_charge_level (Tesla BLE)
+            if re.match(r"sensor\.\w+_(battery|battery_level|charge_level)$", entity_id, re.IGNORECASE):
+                try:
+                    level = float(state_value)
+                    if 0 <= level <= 100:
+                        _LOGGER.debug(f"Found vehicle SoC from {entity_id}: {level}%")
+                        return int(level)
+                except (ValueError, TypeError):
+                    continue
+
+        # Also check coordinator data if available
+        from ..const import DOMAIN
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
+
+        # Check for synced Tesla vehicles with battery data
+        tesla_vehicles = entry_data.get("tesla_vehicles", [])
+        for vehicle in tesla_vehicles:
+            # Match by ID if provided, or use first vehicle
+            vid = str(vehicle.get("id", ""))
+            if vehicle_id == "_default" or vehicle_id == vid or vehicle_id in vid:
+                battery_level = vehicle.get("battery_level")
+                if battery_level is not None:
+                    _LOGGER.debug(f"Found vehicle SoC from cached data: {battery_level}%")
+                    return int(battery_level)
+
+        _LOGGER.warning(f"Could not find SoC for vehicle {vehicle_id}, using default 50%")
+        return 50
+
     async def evaluate(self, live_status: dict, current_price_cents: Optional[float] = None) -> None:
         """
         Evaluate all vehicles and start/stop charging as needed.
@@ -1852,8 +1907,8 @@ class AutoScheduleExecutor:
             except ValueError:
                 _LOGGER.warning(f"Invalid departure time format: {settings.departure_time}")
 
-        # Get current SoC (estimate - could be improved with actual EV API)
-        current_soc = 50  # Default estimate
+        # Get current SoC from vehicle sensors
+        current_soc = await self._get_vehicle_soc(vehicle_id)
 
         try:
             plan = await self.planner.plan_charging(
