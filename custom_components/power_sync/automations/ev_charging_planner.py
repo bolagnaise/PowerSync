@@ -1769,15 +1769,22 @@ class AutoScheduleExecutor:
                 entity_id_lower = entity_id.lower()
 
                 # Match battery level sensors (not power sensors, not powerwall)
-                # We want: battery, battery_level, charge_level
-                # We don't want: battery_power, powerwall (those are Powerwall, not EV)
+                # We want: battery_level, charge_level (percentage sensors)
+                # We don't want: battery_power, powerwall, battery (power sensors)
                 if entity_id.startswith("sensor."):
-                    # Skip powerwall entities and power sensors
-                    if "powerwall" in entity_id_lower or "_power" in entity_id_lower:
+                    # Skip powerwall entities entirely
+                    if "powerwall" in entity_id_lower:
+                        _LOGGER.debug(f"Skipping Powerwall entity {entity_id}")
                         continue
 
-                    # Match battery level sensors
-                    if any(x in entity_id_lower for x in ["battery", "charge_level"]):
+                    # Skip power sensors (battery_power, etc)
+                    if "battery_power" in entity_id_lower or entity_id_lower.endswith("_power"):
+                        _LOGGER.debug(f"Skipping power sensor {entity_id}")
+                        continue
+
+                    # Only match explicit level sensors (battery_level, charge_level)
+                    # NOT just "battery" which could match battery_power
+                    if any(x in entity_id_lower for x in ["battery_level", "charge_level", "_level"]):
                         state = self.hass.states.get(entity_id)
                         if state and state.state not in ("unavailable", "unknown", "None", None):
                             try:
