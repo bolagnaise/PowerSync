@@ -4508,17 +4508,25 @@ class ChargingScheduleView(HomeAssistantView):
                 entity_id = entity.entity_id
                 entity_id_lower = entity_id.lower()
 
-                # Match battery sensors (battery, battery_level, charge_level)
-                if entity_id.startswith("sensor.") and any(x in entity_id_lower for x in ["battery", "charge_level"]):
-                    state = self._hass.states.get(entity_id)
-                    if state and state.state not in ("unavailable", "unknown", "None", None):
-                        try:
-                            level = float(state.state)
-                            if 0 <= level <= 100:
-                                _LOGGER.debug(f"ChargingScheduleView: Found Tesla Fleet/Teslemetry SoC from {entity_id}: {level}%")
-                                return int(level)
-                        except (ValueError, TypeError):
-                            continue
+                # Match battery level sensors (not power sensors, not powerwall)
+                # We want: battery, battery_level, charge_level
+                # We don't want: battery_power, powerwall (those are Powerwall, not EV)
+                if entity_id.startswith("sensor."):
+                    # Skip powerwall entities and power sensors
+                    if "powerwall" in entity_id_lower or "_power" in entity_id_lower:
+                        continue
+
+                    # Match battery level sensors
+                    if any(x in entity_id_lower for x in ["battery", "charge_level"]):
+                        state = self._hass.states.get(entity_id)
+                        if state and state.state not in ("unavailable", "unknown", "None", None):
+                            try:
+                                level = float(state.state)
+                                if 0 <= level <= 100:
+                                    _LOGGER.debug(f"ChargingScheduleView: Found Tesla Fleet/Teslemetry SoC from {entity_id}: {level}%")
+                                    return int(level)
+                            except (ValueError, TypeError):
+                                continue
 
         # Method 3: Check cached Tesla vehicles from PowerSync
         for entry_id, entry_data in self._hass.data.get(DOMAIN, {}).items():
