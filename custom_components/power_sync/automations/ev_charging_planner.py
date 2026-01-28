@@ -1625,6 +1625,10 @@ class AutoScheduleState:
     original_backup_reserve: Optional[int] = None
     backup_reserve_modified: bool = False
 
+    # Cached SoC - used when vehicle is asleep and can't report live SoC
+    last_known_soc: Optional[int] = None
+    last_soc_update: Optional[datetime] = None
+
     def to_dict(self) -> dict:
         """Convert to dictionary for API."""
         return {
@@ -1641,6 +1645,8 @@ class AutoScheduleState:
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "original_backup_reserve": self.original_backup_reserve,
             "backup_reserve_modified": self.backup_reserve_modified,
+            "last_known_soc": self.last_known_soc,
+            "last_soc_update": self.last_soc_update.isoformat() if self.last_soc_update else None,
             "plan_summary": {
                 "windows": len(self.current_plan.windows) if self.current_plan else 0,
                 "estimated_solar_kwh": self.current_plan.estimated_solar_kwh if self.current_plan else 0,
@@ -1672,11 +1678,22 @@ class AutoScheduleExecutor:
         # Runtime state per vehicle
         self._state: Dict[str, AutoScheduleState] = {}
 
+        # Cached SoC values per vehicle (persisted to storage)
+        # Used when vehicle is asleep and can't report live SoC
+        self._cached_soc: Dict[str, dict] = {}  # {vehicle_id: {"soc": int, "updated": isoformat}}
+
+        # Store reference for saving cached SoC
+        self._store = None
+        self._last_cache_save: Optional[datetime] = None
+        self._cache_save_interval = timedelta(minutes=5)  # Save cache every 5 minutes max
+
         # Plan regeneration interval (regenerate every 15 minutes)
         self._plan_update_interval = timedelta(minutes=15)
 
     async def load_settings(self, store) -> None:
         """Load settings from storage."""
+        self._store = store  # Store reference for saving cached SoC later
+
         try:
             stored_data = await store.async_load() if hasattr(store, 'async_load') else {}
             if not stored_data:
@@ -1688,7 +1705,21 @@ class AutoScheduleExecutor:
                 self._settings[vehicle_id] = AutoScheduleSettings.from_dict(settings_dict)
                 self._state[vehicle_id] = AutoScheduleState(vehicle_id=vehicle_id)
 
-            _LOGGER.debug(f"Loaded auto-schedule settings for {len(self._settings)} vehicles")
+            # Load cached SoC values
+            self._cached_soc = stored_data.get("cached_vehicle_soc", {})
+
+            # Restore last known SoC to state from cache
+            for vehicle_id, soc_data in self._cached_soc.items():
+                if vehicle_id in self._state:
+                    self._state[vehicle_id].last_known_soc = soc_data.get("soc")
+                    if soc_data.get("updated"):
+                        try:
+                            self._state[vehicle_id].last_soc_update = datetime.fromisoformat(soc_data["updated"])
+                        except (ValueError, TypeError):
+                            pass
+
+            _LOGGER.debug(f"Loaded auto-schedule settings for {len(self._settings)} vehicles, "
+                         f"cached SoC for {len(self._cached_soc)} vehicles")
         except Exception as e:
             _LOGGER.error(f"Failed to load auto-schedule settings: {e}")
 
@@ -1704,6 +1735,9 @@ class AutoScheduleExecutor:
                 auto_schedule_data[vehicle_id] = settings.to_dict()
 
             stored_data["auto_schedule_settings"] = auto_schedule_data
+
+            # Save cached SoC values
+            stored_data["cached_vehicle_soc"] = self._cached_soc
 
             if hasattr(store, 'async_save'):
                 store._data = stored_data
@@ -1745,16 +1779,74 @@ class AutoScheduleExecutor:
         """Get all vehicle states."""
         return {vid: state.to_dict() for vid, state in self._state.items()}
 
+    def _cache_vehicle_soc(self, vehicle_id: str, soc: int) -> None:
+        """Cache the vehicle SoC for use when vehicle is asleep."""
+        now = datetime.now()
+        self._cached_soc[vehicle_id] = {
+            "soc": soc,
+            "updated": now.isoformat(),
+        }
+
+        # Also update state if it exists
+        if vehicle_id in self._state:
+            self._state[vehicle_id].last_known_soc = soc
+            self._state[vehicle_id].last_soc_update = now
+
+        _LOGGER.debug(f"Cached SoC for vehicle {vehicle_id}: {soc}%")
+
+    def _get_cached_soc(self, vehicle_id: str) -> Optional[int]:
+        """Get cached SoC for a vehicle, or None if not cached or stale."""
+        # Check state first (in-memory)
+        if vehicle_id in self._state and self._state[vehicle_id].last_known_soc is not None:
+            return self._state[vehicle_id].last_known_soc
+
+        # Check persisted cache
+        if vehicle_id in self._cached_soc:
+            return self._cached_soc[vehicle_id].get("soc")
+
+        # Check for _default vehicle
+        if "_default" in self._cached_soc:
+            return self._cached_soc["_default"].get("soc")
+
+        return None
+
+    async def _save_cached_soc_if_needed(self) -> None:
+        """Save cached SoC to storage if enough time has passed since last save."""
+        if self._store is None:
+            return
+
+        now = datetime.now()
+        if self._last_cache_save and (now - self._last_cache_save) < self._cache_save_interval:
+            return  # Too soon since last save
+
+        try:
+            stored_data = await self._store.async_load() if hasattr(self._store, 'async_load') else {}
+            if not stored_data:
+                stored_data = {}
+
+            stored_data["cached_vehicle_soc"] = self._cached_soc
+
+            if hasattr(self._store, 'async_save'):
+                self._store._data = stored_data
+                await self._store.async_save(stored_data)
+
+            self._last_cache_save = now
+            _LOGGER.debug(f"Saved cached SoC for {len(self._cached_soc)} vehicles")
+        except Exception as e:
+            _LOGGER.warning(f"Failed to save cached SoC: {e}")
+
     async def _get_vehicle_soc(self, vehicle_id: str) -> int:
         """Get current SoC for a vehicle from Home Assistant entities.
 
         Uses the same approach as EVVehiclesView to find Tesla vehicles.
+        Caches the SoC so we can use it when the vehicle is asleep.
 
         Args:
             vehicle_id: Vehicle identifier
 
         Returns:
-            Current battery level (0-100), defaults to 50 if not found.
+            Current battery level (0-100). Uses cached value if vehicle is asleep,
+            or defaults to 50 if no cached value exists.
         """
         from ..const import (
             DOMAIN,
@@ -1763,6 +1855,8 @@ class AutoScheduleExecutor:
             TESLA_BLE_SENSOR_CHARGE_LEVEL,
         )
         from homeassistant.helpers import entity_registry as er, device_registry as dr
+
+        live_soc = None
 
         # Method 1: Check Tesla BLE sensor with configured prefix
         config = {}
@@ -1778,74 +1872,88 @@ class AutoScheduleExecutor:
             try:
                 level = float(ble_state.state)
                 if 0 <= level <= 100:
-                    _LOGGER.debug(f"Found Tesla BLE SoC from {ble_charge_level_entity}: {level}%")
-                    return int(level)
+                    live_soc = int(level)
+                    _LOGGER.debug(f"Found Tesla BLE SoC from {ble_charge_level_entity}: {live_soc}%")
             except (ValueError, TypeError):
                 pass
 
         # Method 2: Check Tesla Fleet/Teslemetry entities via device registry
-        entity_registry = er.async_get(self.hass)
-        device_registry = dr.async_get(self.hass)
+        if live_soc is None:
+            entity_registry = er.async_get(self.hass)
+            device_registry = dr.async_get(self.hass)
 
-        tesla_integrations = ["tesla_fleet", "teslemetry"]
+            tesla_integrations = ["tesla_fleet", "teslemetry"]
 
-        for device in device_registry.devices.values():
-            is_tesla_device = False
-            for identifier in device.identifiers:
-                if len(identifier) >= 2 and identifier[0] in tesla_integrations:
-                    is_tesla_device = True
+            for device in device_registry.devices.values():
+                if live_soc is not None:
                     break
 
-            if not is_tesla_device:
-                continue
+                is_tesla_device = False
+                for identifier in device.identifiers:
+                    if len(identifier) >= 2 and identifier[0] in tesla_integrations:
+                        is_tesla_device = True
+                        break
 
-            # Find battery/charge_level sensor for this Tesla device
-            for entity in entity_registry.entities.values():
-                if entity.device_id != device.id:
+                if not is_tesla_device:
                     continue
 
-                entity_id = entity.entity_id
-                entity_id_lower = entity_id.lower()
-
-                # Match battery level sensors (not power sensors, not powerwall)
-                # We want: battery_level, charge_level (percentage sensors)
-                # We don't want: battery_power, powerwall, battery (power sensors)
-                if entity_id.startswith("sensor."):
-                    # Skip powerwall entities entirely
-                    if "powerwall" in entity_id_lower:
-                        _LOGGER.debug(f"Skipping Powerwall entity {entity_id}")
+                # Find battery/charge_level sensor for this Tesla device
+                for entity in entity_registry.entities.values():
+                    if entity.device_id != device.id:
                         continue
 
-                    # Skip power sensors (battery_power, etc)
-                    if "battery_power" in entity_id_lower or entity_id_lower.endswith("_power"):
-                        _LOGGER.debug(f"Skipping power sensor {entity_id}")
-                        continue
+                    entity_id = entity.entity_id
+                    entity_id_lower = entity_id.lower()
 
-                    # Only match explicit level sensors (battery_level, charge_level)
-                    # NOT just "battery" which could match battery_power
-                    if any(x in entity_id_lower for x in ["battery_level", "charge_level", "_level"]):
-                        state = self.hass.states.get(entity_id)
-                        if state and state.state not in ("unavailable", "unknown", "None", None):
-                            try:
-                                level = float(state.state)
-                                if 0 <= level <= 100:
-                                    _LOGGER.debug(f"Found Tesla Fleet/Teslemetry SoC from {entity_id}: {level}%")
-                                    return int(level)
-                            except (ValueError, TypeError):
-                                continue
+                    # Match battery level sensors (not power sensors, not powerwall)
+                    if entity_id.startswith("sensor."):
+                        # Skip powerwall entities entirely
+                        if "powerwall" in entity_id_lower:
+                            continue
+
+                        # Skip power sensors (battery_power, etc)
+                        if "battery_power" in entity_id_lower or entity_id_lower.endswith("_power"):
+                            continue
+
+                        # Only match explicit level sensors (battery_level, charge_level)
+                        if any(x in entity_id_lower for x in ["battery_level", "charge_level", "_level"]):
+                            state = self.hass.states.get(entity_id)
+                            if state and state.state not in ("unavailable", "unknown", "None", None):
+                                try:
+                                    level = float(state.state)
+                                    if 0 <= level <= 100:
+                                        live_soc = int(level)
+                                        _LOGGER.debug(f"Found Tesla Fleet/Teslemetry SoC from {entity_id}: {live_soc}%")
+                                        break
+                                except (ValueError, TypeError):
+                                    continue
 
         # Method 3: Check cached Tesla vehicles from PowerSync
-        entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
-        tesla_vehicles = entry_data.get("tesla_vehicles", [])
-        for vehicle in tesla_vehicles:
-            vid = str(vehicle.get("id", ""))
-            if vehicle_id == "_default" or vehicle_id == vid or vehicle_id in vid:
-                battery_level = vehicle.get("battery_level")
-                if battery_level is not None:
-                    _LOGGER.debug(f"Found vehicle SoC from cached data: {battery_level}%")
-                    return int(battery_level)
+        if live_soc is None:
+            entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
+            tesla_vehicles = entry_data.get("tesla_vehicles", [])
+            for vehicle in tesla_vehicles:
+                vid = str(vehicle.get("id", ""))
+                if vehicle_id == "_default" or vehicle_id == vid or vehicle_id in vid:
+                    battery_level = vehicle.get("battery_level")
+                    if battery_level is not None:
+                        live_soc = int(battery_level)
+                        _LOGGER.debug(f"Found vehicle SoC from cached data: {live_soc}%")
+                        break
 
-        _LOGGER.warning(f"Could not find SoC for vehicle {vehicle_id}, using default 50%")
+        # If we got a live SoC, cache it and return
+        if live_soc is not None:
+            self._cache_vehicle_soc(vehicle_id, live_soc)
+            return live_soc
+
+        # Vehicle is likely asleep - use cached SoC
+        cached_soc = self._get_cached_soc(vehicle_id)
+        if cached_soc is not None:
+            _LOGGER.info(f"Vehicle {vehicle_id} appears asleep, using cached SoC: {cached_soc}%")
+            return cached_soc
+
+        # No cached value available - use default
+        _LOGGER.warning(f"Could not find SoC for vehicle {vehicle_id} and no cached value, using default 50%")
         return 50
 
     async def evaluate(self, live_status: dict, current_price_cents: Optional[float] = None) -> None:
@@ -1866,6 +1974,9 @@ class AutoScheduleExecutor:
                 await self._evaluate_vehicle(vehicle_id, settings, live_status, current_price_cents)
             except Exception as e:
                 _LOGGER.error(f"Auto-schedule evaluation failed for {vehicle_id}: {e}")
+
+        # Periodically save cached SoC values to storage
+        await self._save_cached_soc_if_needed()
 
     async def _evaluate_vehicle(
         self,
