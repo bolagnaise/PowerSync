@@ -3436,6 +3436,15 @@ class EVVehiclesSyncView(HomeAssistantView):
         """Initialize the view."""
         self._hass = hass
 
+    def _get_store(self):
+        """Get the automation store from hass.data for config persistence."""
+        if DOMAIN not in self._hass.data:
+            return None
+        for entry_id, entry_data in self._hass.data.get(DOMAIN, {}).items():
+            if isinstance(entry_data, dict) and "automation_store" in entry_data:
+                return entry_data["automation_store"]
+        return None
+
     async def post(self, request: web.Request) -> web.Response:
         """Handle POST request to sync vehicles."""
         try:
@@ -3444,9 +3453,46 @@ class EVVehiclesSyncView(HomeAssistantView):
             for entry in tesla_entries:
                 await self._hass.config_entries.async_reload(entry.entry_id)
 
-            # Return updated vehicle list
+            # Get updated vehicle list
             vehicles_view = EVVehiclesView(self._hass)
-            return await vehicles_view.get(request)
+            response = await vehicles_view.get(request)
+
+            # Parse response to get vehicles
+            response_data = json.loads(response.body)
+            vehicles = response_data.get("vehicles", [])
+
+            # Auto-create vehicle configs for new vehicles
+            if vehicles:
+                store = self._get_store()
+                if store:
+                    stored_data = getattr(store, '_data', {}) or {}
+                    vehicle_configs = stored_data.get("vehicle_charging_configs", [])
+                    existing_ids = {c.get("vehicle_id") for c in vehicle_configs}
+
+                    configs_added = 0
+                    for i, vehicle in enumerate(vehicles):
+                        vehicle_id = vehicle.get("vehicle_id") or vehicle.get("vin")
+                        if vehicle_id and vehicle_id not in existing_ids:
+                            # Create default config for new vehicle
+                            new_config = {
+                                "vehicle_id": vehicle_id,
+                                "display_name": vehicle.get("display_name", f"Vehicle {i + 1}"),
+                                "priority": i + 1,  # First vehicle = 1 (primary), second = 2, etc.
+                                "solar_charging_enabled": True,
+                            }
+                            vehicle_configs.append(new_config)
+                            configs_added += 1
+                            _LOGGER.info(f"Auto-created vehicle config for {vehicle_id}")
+
+                    if configs_added > 0:
+                        stored_data["vehicle_charging_configs"] = vehicle_configs
+                        store._data = stored_data
+                        await store.async_save()
+                        _LOGGER.info(f"Saved {configs_added} new vehicle config(s)")
+
+            # Return response with sync count
+            response_data["synced"] = len(vehicles)
+            return web.json_response(response_data)
 
         except Exception as e:
             _LOGGER.error(f"Error syncing vehicles: {e}", exc_info=True)
