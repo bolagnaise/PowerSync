@@ -1387,16 +1387,18 @@ class ChargingPlanner:
         current_price_cents: float,
         battery_soc: float,
         min_battery_soc: int = 80,
+        is_time_critical: bool = False,
     ) -> Tuple[bool, str, str]:
         """
         Real-time decision: should we charge right now?
 
         Strategy:
-        1. Always respect home battery priority (min SoC)
-        2. If in a planned window from cost-optimized plan, charge
-        3. Opportunistic: charge on solar surplus (free)
-        4. Opportunistic: charge if current price is very cheap (< plan avg or < 10c)
-        5. Otherwise wait for planned windows or better prices
+        1. For time_critical mode: prioritize meeting deadline over all else
+        2. For other modes: respect home battery priority (min SoC)
+        3. If in a planned window from cost-optimized plan, charge
+        4. Opportunistic: charge on solar surplus (free)
+        5. Opportunistic: charge if current price is very cheap (< plan avg or < 10c)
+        6. Otherwise wait for planned windows or better prices
 
         Args:
             vehicle_id: Vehicle identifier
@@ -1405,14 +1407,38 @@ class ChargingPlanner:
             current_price_cents: Current import price
             battery_soc: Current home battery SoC
             min_battery_soc: Minimum home battery SoC before EV charging
+            is_time_critical: If True, meeting deadline takes priority over battery/price
 
         Returns:
             Tuple of (should_charge, reason, source)
         """
         now = datetime.now()
 
-        # Check if battery priority is met
-        if battery_soc < min_battery_soc:
+        # For time_critical mode with a deadline, check if we need to charge NOW to meet target
+        if is_time_critical and plan.target_time and not plan.can_meet_target:
+            # We're behind schedule - charge immediately regardless of price/battery
+            return True, f"Must charge to meet deadline (behind schedule)", "grid_deadline"
+
+        if is_time_critical and plan.target_time:
+            # Check if we're in a critical window where we MUST charge to meet deadline
+            try:
+                target_dt = datetime.fromisoformat(plan.target_time)
+                if target_dt.tzinfo is not None:
+                    # Convert to local naive time
+                    local_tz = datetime.now().astimezone().tzinfo
+                    target_dt = target_dt.astimezone(local_tz).replace(tzinfo=None)
+
+                hours_remaining = (target_dt - now).total_seconds() / 3600
+                hours_needed = plan.energy_needed_kwh / 7.0  # Assume ~7kW charger
+
+                # If we need to charge continuously to meet target, do it now
+                if hours_remaining <= hours_needed * 1.2:  # 20% buffer
+                    return True, f"Critical: {hours_remaining:.1f}h left, need {hours_needed:.1f}h", "grid_deadline"
+            except Exception as e:
+                _LOGGER.debug(f"Error checking time_critical deadline: {e}")
+
+        # Check if battery priority is met (skip for time_critical which is handled above)
+        if battery_soc < min_battery_soc and not is_time_critical:
             return False, f"Battery at {battery_soc:.0f}% (min: {min_battery_soc}%)", "waiting"
 
         # Check if we're in a planned window
@@ -1870,8 +1896,9 @@ class AutoScheduleExecutor:
         if current_price_cents is None:
             current_price_cents = await self._get_current_price()
 
-        # Check battery priority
-        if battery_soc < settings.min_battery_soc:
+        # Check battery priority (except for time_critical mode which must meet deadline)
+        is_time_critical = settings.priority == ChargingPriority.TIME_CRITICAL
+        if battery_soc < settings.min_battery_soc and not is_time_critical:
             if state.is_charging:
                 await self._stop_charging(vehicle_id, settings, state)
                 state.last_decision = "stopped"
@@ -1889,12 +1916,13 @@ class AutoScheduleExecutor:
             current_price_cents=current_price_cents,
             battery_soc=battery_soc,
             min_battery_soc=settings.min_battery_soc,
+            is_time_critical=is_time_critical,
         )
 
         # Apply additional constraints based on priority mode
         if should_charge and source.startswith("grid"):
-            # Check price constraint
-            if current_price_cents > settings.max_grid_price_cents:
+            # Check price constraint (but not for time_critical - deadline takes priority)
+            if current_price_cents > settings.max_grid_price_cents and not is_time_critical:
                 should_charge = False
                 reason = f"Grid price {current_price_cents:.0f}c > max {settings.max_grid_price_cents:.0f}c"
 
