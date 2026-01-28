@@ -2351,18 +2351,7 @@ class AutoScheduleExecutor:
                 state.is_charging = True
                 state.started_at = datetime.now()
                 _LOGGER.info(f"Auto-schedule: Started {dynamic_mode} charging for {vehicle_id}")
-
-                # Send push notification
-                try:
-                    from .actions import _send_expo_push
-                    mode_label = "solar" if source == "solar_surplus" else "smart schedule"
-                    await _send_expo_push(
-                        self.hass,
-                        "EV Charging Started",
-                        f"Smart charging ({mode_label}) started"
-                    )
-                except Exception as e:
-                    _LOGGER.debug(f"Could not send start notification: {e}")
+                # Note: Notifications are sent by _action_start_ev_charging_dynamic
             else:
                 _LOGGER.warning(f"Auto-schedule: Failed to start charging for {vehicle_id}")
         except Exception as e:
@@ -2396,18 +2385,7 @@ class AutoScheduleExecutor:
             state.started_at = None
             state.current_window = None
             _LOGGER.info(f"Auto-schedule: Stopped charging for {vehicle_id}")
-
-            # Send push notification
-            try:
-                from .actions import _send_expo_push
-                reason_short = state.last_decision_reason[:50] if state.last_decision_reason else "Schedule complete"
-                await _send_expo_push(
-                    self.hass,
-                    "EV Charging Stopped",
-                    f"Smart schedule: {reason_short}"
-                )
-            except Exception as e:
-                _LOGGER.debug(f"Could not send stop notification: {e}")
+            # Note: Notifications are sent by _action_stop_ev_charging_dynamic
 
             # Restore backup reserve if requested (EV charging complete)
             if restore_backup_reserve:
@@ -2533,19 +2511,7 @@ class PriceLevelChargingExecutor:
                 self._state.last_decision = "started"
                 self._state.last_decision_reason = reason
                 _LOGGER.info(f"Price-level charging: Started ({mode}) - {reason}")
-
-                # Send push notification
-                try:
-                    from .actions import _send_expo_push
-                    mode_label = "recovery" if "recovery" in mode else "opportunity"
-                    await _send_expo_push(
-                        self.hass,
-                        "EV Charging Started",
-                        f"Price-level ({mode_label}): {reason}"
-                    )
-                except Exception as e:
-                    _LOGGER.debug(f"Could not send start notification: {e}")
-
+                # Note: Notifications are sent by _action_start_ev_charging_dynamic
                 return True
             else:
                 _LOGGER.warning(f"Price-level charging: Failed to start - {reason}")
@@ -2568,18 +2534,7 @@ class PriceLevelChargingExecutor:
             self._state.last_decision = "stopped"
             self._state.last_decision_reason = reason
             _LOGGER.info(f"Price-level charging: Stopped - {reason}")
-
-            # Send push notification
-            try:
-                from .actions import _send_expo_push
-                await _send_expo_push(
-                    self.hass,
-                    "EV Charging Stopped",
-                    f"Price-level: {reason[:50]}"
-                )
-            except Exception as e:
-                _LOGGER.debug(f"Could not send stop notification: {e}")
-
+            # Note: Notifications are sent by _action_stop_ev_charging_dynamic
             return True
 
         except Exception as e:
@@ -2796,18 +2751,7 @@ class ScheduledChargingExecutor:
                 self._state.last_decision = "started"
                 self._state.last_decision_reason = reason
                 _LOGGER.info(f"Scheduled charging: Started - {reason}")
-
-                # Send push notification
-                try:
-                    from .actions import _send_expo_push
-                    await _send_expo_push(
-                        self.hass,
-                        "EV Charging Started",
-                        f"Scheduled charging: {reason}"
-                    )
-                except Exception as e:
-                    _LOGGER.debug(f"Could not send start notification: {e}")
-
+                # Note: Notifications are sent by _action_start_ev_charging_dynamic
                 return True
             else:
                 _LOGGER.warning(f"Scheduled charging: Failed to start - {reason}")
@@ -2829,18 +2773,7 @@ class ScheduledChargingExecutor:
             self._state.last_decision = "stopped"
             self._state.last_decision_reason = reason
             _LOGGER.info(f"Scheduled charging: Stopped - {reason}")
-
-            # Send push notification
-            try:
-                from .actions import _send_expo_push
-                await _send_expo_push(
-                    self.hass,
-                    "EV Charging Stopped",
-                    f"Scheduled charging: {reason[:50]}"
-                )
-            except Exception as e:
-                _LOGGER.debug(f"Could not send stop notification: {e}")
-
+            # Note: Notifications are sent by _action_stop_ev_charging_dynamic
             return True
 
         except Exception as e:
@@ -3001,19 +2934,7 @@ class EVChargingModeCoordinator:
                 self._active_modes = modes
                 self._last_reason = reason
                 _LOGGER.info(f"EV Coordinator: Started charging - modes: {modes}, reason: {reason}")
-
-                # Send push notification
-                try:
-                    from .actions import _send_expo_push
-                    modes_str = ", ".join(modes) if modes else "smart"
-                    await _send_expo_push(
-                        self.hass,
-                        "EV Charging Started",
-                        f"Modes: {modes_str}"
-                    )
-                except Exception as e:
-                    _LOGGER.debug(f"Could not send start notification: {e}")
-
+                # Note: Notifications are sent by _action_start_ev_charging_dynamic
                 return True
             else:
                 _LOGGER.warning(f"EV Coordinator: Failed to start charging")
@@ -3035,18 +2956,7 @@ class EVChargingModeCoordinator:
             self._active_modes = []
             self._last_reason = reason
             _LOGGER.info(f"EV Coordinator: Stopped charging - {reason}")
-
-            # Send push notification
-            try:
-                from .actions import _send_expo_push
-                await _send_expo_push(
-                    self.hass,
-                    "EV Charging Stopped",
-                    f"{reason[:50]}"
-                )
-            except Exception as e:
-                _LOGGER.debug(f"Could not send stop notification: {e}")
-
+            # Note: Notifications are sent by _action_stop_ev_charging_dynamic
             return True
 
         except Exception as e:

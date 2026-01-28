@@ -2259,7 +2259,8 @@ async def _action_start_ev_charging_dynamic(
             hass, config_entry, {"amps": start_amps}
         )
         if not amps_success:
-            _LOGGER.warning(f"Dynamic EV: Failed to set initial amps to {start_amps}A")
+            # This is expected - Tesla reports lower max amps until charging actually starts
+            _LOGGER.debug(f"Dynamic EV: Could not set initial amps to {start_amps}A (will adjust once charging starts)")
 
     # Create the periodic update callback for this vehicle
     async def periodic_update(now) -> None:
