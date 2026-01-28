@@ -1674,18 +1674,14 @@ class AutoScheduleExecutor:
             )
 
             if electricity_provider in ("amber", "flow_power"):
-                # Amber/Flow Power: Read from HA price sensors
-                import_sensor = self.hass.states.get("sensor.power_sync_current_import_price")
-                if import_sensor and import_sensor.state not in ("unavailable", "unknown", None):
-                    # Sensor is in $/kWh, convert to cents
-                    return float(import_sensor.state) * 100
-
-                # Fallback to coordinator
+                # Amber/Flow Power: Read from coordinator data
                 amber_coordinator = entry_data.get("amber_coordinator")
-                if amber_coordinator and hasattr(amber_coordinator, 'current_import_price'):
-                    price = amber_coordinator.current_import_price
-                    if price is not None:
-                        return price
+                if amber_coordinator and amber_coordinator.data:
+                    current_prices = amber_coordinator.data.get("current", [])
+                    for price in current_prices:
+                        if price.get("channelType") == "general":
+                            # perKwh is in cents for Amber
+                            return price.get("perKwh", 30.0)
 
             elif electricity_provider in ("globird", "aemo_vpp"):
                 # Globird: Read from tariff schedule (populated by TariffPriceView)

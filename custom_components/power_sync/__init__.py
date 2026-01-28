@@ -4765,25 +4765,25 @@ class PriceRecommendationView(HomeAssistantView):
             entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id, {})
 
             if electricity_provider in ("amber", "flow_power"):
-                # Amber/Flow Power: Read from HA price sensors
+                # Amber/Flow Power: Read from coordinator data
                 try:
-                    import_sensor = self._hass.states.get(f"sensor.power_sync_current_import_price")
-                    export_sensor = self._hass.states.get(f"sensor.power_sync_current_export_price")
+                    amber_coordinator = entry_data.get("amber_coordinator")
+                    if amber_coordinator and amber_coordinator.data:
+                        current_prices = amber_coordinator.data.get("current", [])
+                        for price in current_prices:
+                            channel = price.get("channelType", "")
+                            if channel == "general":
+                                # perKwh is in cents for Amber
+                                import_price_cents = price.get("perKwh", 30.0)
+                                price_source = electricity_provider
+                            elif channel == "feedIn":
+                                # feedIn is negative when you earn (Amber format)
+                                export_price_cents = price.get("perKwh", -8.0)
+                                price_source = electricity_provider
 
-                    if import_sensor and import_sensor.state not in ("unavailable", "unknown", None):
-                        # Sensor is in $/kWh, convert to cents
-                        import_price_cents = float(import_sensor.state) * 100
-                        price_source = electricity_provider
-
-                    if export_sensor and export_sensor.state not in ("unavailable", "unknown", None):
-                        # Export sensor is in $/kWh (earnings format), convert to cents
-                        # Negate because sensor shows positive for earnings, we want rate
-                        export_price_cents = -float(export_sensor.state) * 100
-                        price_source = electricity_provider
-
-                    _LOGGER.debug(f"Using {electricity_provider} sensor prices: import={import_price_cents}c, export={export_price_cents}c")
+                        _LOGGER.debug(f"Using {electricity_provider} coordinator prices: import={import_price_cents}c, export={export_price_cents}c")
                 except Exception as e:
-                    _LOGGER.debug(f"Could not read price sensors: {e}")
+                    _LOGGER.debug(f"Could not read coordinator prices: {e}")
 
             elif electricity_provider in ("globird", "aemo_vpp"):
                 # Globird/AEMO VPP: Read from Tesla tariff
