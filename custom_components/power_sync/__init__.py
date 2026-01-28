@@ -5165,8 +5165,9 @@ class AutoScheduleSettingsView(HomeAssistantView):
             # Regenerate plan immediately with new settings
             plan_data = None
             try:
-                await executor._regenerate_plan(vehicle_id)
+                settings = executor.get_settings(vehicle_id)
                 state = executor.get_state(vehicle_id)
+                await executor._regenerate_plan(vehicle_id, settings, state)
                 if state.current_plan:
                     plan_data = state.current_plan.to_dict()
             except Exception as e:

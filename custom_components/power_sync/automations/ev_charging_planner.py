@@ -1098,6 +1098,16 @@ class ChargingPlanner:
         """
         now = datetime.now()
 
+        # Normalize target_time to match now's timezone awareness
+        if target_time:
+            if target_time.tzinfo is not None and now.tzinfo is None:
+                try:
+                    now = datetime.now(target_time.tzinfo)
+                except Exception:
+                    target_time = target_time.replace(tzinfo=None)
+            elif target_time.tzinfo is None and now.tzinfo is not None:
+                now = now.replace(tzinfo=None)
+
         _LOGGER.info(
             f"Planning cost-optimized charging: need {energy_needed_kwh:.1f}kWh, "
             f"charger={charger_power_kw}kW, target_time={target_time}"
@@ -1109,6 +1119,11 @@ class ChargingPlanner:
         for i, price in enumerate(price_forecast):
             try:
                 hour_dt = datetime.fromisoformat(price.hour)
+                # Normalize hour_dt to match now's timezone awareness
+                if hour_dt.tzinfo is not None and now.tzinfo is None:
+                    hour_dt = hour_dt.replace(tzinfo=None)
+                elif hour_dt.tzinfo is None and now.tzinfo is not None:
+                    hour_dt = hour_dt.replace(tzinfo=now.tzinfo)
             except:
                 continue
 
