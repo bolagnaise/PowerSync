@@ -1267,7 +1267,16 @@ class ChargingPlanner:
 
         # Calculate minimum hours needed
         hours_needed = energy_needed_kwh / charger_power_kw
-        hours_available = max(1, int((target_time - datetime.now()).total_seconds() / 3600))
+        # Ensure both datetimes are comparable (handle timezone-aware vs naive)
+        now = datetime.now()
+        if target_time.tzinfo is not None and now.tzinfo is None:
+            try:
+                now = datetime.now(target_time.tzinfo)
+            except Exception:
+                target_time = target_time.replace(tzinfo=None)
+        elif target_time.tzinfo is None and now.tzinfo is not None:
+            now = now.replace(tzinfo=None)
+        hours_available = max(1, int((target_time - now).total_seconds() / 3600))
 
         if hours_needed > hours_available:
             # Can't meet target even charging continuously

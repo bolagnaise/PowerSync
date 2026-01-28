@@ -5297,6 +5297,286 @@ class AutoScheduleToggleView(HomeAssistantView):
             }, status=500)
 
 
+class PriceLevelChargingSettingsView(HomeAssistantView):
+    """API endpoint for price-level charging settings (Recovery + Opportunity).
+
+    GET /api/power_sync/ev/price_level_charging/settings
+    Returns price-level charging settings.
+
+    POST /api/power_sync/ev/price_level_charging/settings
+    Update price-level charging settings.
+    """
+    url = "/api/power_sync/ev/price_level_charging/settings"
+    name = "api:power_sync:ev:price_level_charging:settings"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self._hass = hass
+        self._config_entry = entry
+
+    def _get_store(self):
+        """Get the automation store from hass.data."""
+        entry_id = self._config_entry.entry_id
+        return self._hass.data.get(DOMAIN, {}).get(entry_id, {}).get("automation_store")
+
+    async def get(self, request):
+        """Get price-level charging settings."""
+        try:
+            store = self._get_store()
+            settings = {
+                "enabled": False,
+                "recovery_soc": 40,
+                "recovery_price_cents": 30,
+                "opportunity_price_cents": 10,
+            }
+
+            if store:
+                stored_data = getattr(store, '_data', {}) or {}
+                stored_settings = stored_data.get("price_level_charging", {})
+                settings.update(stored_settings)
+
+            return web.json_response({
+                "success": True,
+                "data": settings,
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting price-level charging settings: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+    async def post(self, request):
+        """Update price-level charging settings."""
+        try:
+            data = await request.json()
+            store = self._get_store()
+
+            if not store:
+                return web.json_response({
+                    "success": False,
+                    "error": "Storage not available"
+                }, status=503)
+
+            stored_data = getattr(store, '_data', {}) or {}
+            settings = stored_data.get("price_level_charging", {
+                "enabled": False,
+                "recovery_soc": 40,
+                "recovery_price_cents": 30,
+                "opportunity_price_cents": 10,
+            })
+
+            # Update with provided values
+            for key in ["enabled", "recovery_soc", "recovery_price_cents", "opportunity_price_cents"]:
+                if key in data:
+                    settings[key] = data[key]
+
+            stored_data["price_level_charging"] = settings
+            store._data = stored_data
+            await store.async_save()
+
+            _LOGGER.info(f"Price-level charging settings updated: enabled={settings.get('enabled')}")
+
+            return web.json_response({
+                "success": True,
+                "data": settings,
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error updating price-level charging settings: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
+class ScheduledChargingSettingsView(HomeAssistantView):
+    """API endpoint for scheduled charging settings (time window + max price).
+
+    GET /api/power_sync/ev/scheduled_charging/settings
+    Returns scheduled charging settings.
+
+    POST /api/power_sync/ev/scheduled_charging/settings
+    Update scheduled charging settings.
+    """
+    url = "/api/power_sync/ev/scheduled_charging/settings"
+    name = "api:power_sync:ev:scheduled_charging:settings"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self._hass = hass
+        self._config_entry = entry
+
+    def _get_store(self):
+        """Get the automation store from hass.data."""
+        entry_id = self._config_entry.entry_id
+        return self._hass.data.get(DOMAIN, {}).get(entry_id, {}).get("automation_store")
+
+    async def get(self, request):
+        """Get scheduled charging settings."""
+        try:
+            store = self._get_store()
+            settings = {
+                "enabled": False,
+                "start_time": "00:00",
+                "end_time": "06:00",
+                "max_price_cents": 30,
+            }
+
+            if store:
+                stored_data = getattr(store, '_data', {}) or {}
+                stored_settings = stored_data.get("scheduled_charging", {})
+                settings.update(stored_settings)
+
+            return web.json_response({
+                "success": True,
+                "data": settings,
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting scheduled charging settings: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+    async def post(self, request):
+        """Update scheduled charging settings."""
+        try:
+            data = await request.json()
+            store = self._get_store()
+
+            if not store:
+                return web.json_response({
+                    "success": False,
+                    "error": "Storage not available"
+                }, status=503)
+
+            stored_data = getattr(store, '_data', {}) or {}
+            settings = stored_data.get("scheduled_charging", {
+                "enabled": False,
+                "start_time": "00:00",
+                "end_time": "06:00",
+                "max_price_cents": 30,
+            })
+
+            # Update with provided values
+            for key in ["enabled", "start_time", "end_time", "max_price_cents"]:
+                if key in data:
+                    settings[key] = data[key]
+
+            stored_data["scheduled_charging"] = settings
+            store._data = stored_data
+            await store.async_save()
+
+            _LOGGER.info(f"Scheduled charging settings updated: enabled={settings.get('enabled')}")
+
+            return web.json_response({
+                "success": True,
+                "data": settings,
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error updating scheduled charging settings: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
+class HomePowerSettingsView(HomeAssistantView):
+    """API endpoint for home power setup settings.
+
+    GET /api/power_sync/ev/home_power/settings
+    Returns home power settings.
+
+    POST /api/power_sync/ev/home_power/settings
+    Update home power settings.
+    """
+    url = "/api/power_sync/ev/home_power/settings"
+    name = "api:power_sync:ev:home_power:settings"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self._hass = hass
+        self._config_entry = entry
+
+    def _get_store(self):
+        """Get the automation store from hass.data."""
+        entry_id = self._config_entry.entry_id
+        return self._hass.data.get(DOMAIN, {}).get(entry_id, {}).get("automation_store")
+
+    async def get(self, request):
+        """Get home power settings."""
+        try:
+            store = self._get_store()
+            settings = {
+                "phase_type": "single",
+                "max_charge_speed_enabled": False,
+                "max_amps_per_phase": 32,
+            }
+
+            if store:
+                stored_data = getattr(store, '_data', {}) or {}
+                stored_settings = stored_data.get("home_power_settings", {})
+                settings.update(stored_settings)
+
+            return web.json_response({
+                "success": True,
+                "data": settings,
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting home power settings: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+    async def post(self, request):
+        """Update home power settings."""
+        try:
+            data = await request.json()
+            store = self._get_store()
+
+            if not store:
+                return web.json_response({
+                    "success": False,
+                    "error": "Storage not available"
+                }, status=503)
+
+            stored_data = getattr(store, '_data', {}) or {}
+            settings = stored_data.get("home_power_settings", {
+                "phase_type": "single",
+                "max_charge_speed_enabled": False,
+                "max_amps_per_phase": 32,
+            })
+
+            # Update with provided values
+            for key in ["phase_type", "max_charge_speed_enabled", "max_amps_per_phase"]:
+                if key in data:
+                    settings[key] = data[key]
+
+            stored_data["home_power_settings"] = settings
+            store._data = stored_data
+            await store.async_save()
+
+            _LOGGER.info(f"Home power settings updated: phase_type={settings.get('phase_type')}")
+
+            return web.json_response({
+                "success": True,
+                "data": settings,
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error updating home power settings: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PowerSync from a config entry."""
     _LOGGER.info("=" * 60)
@@ -9618,6 +9898,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.http.register_view(AutoScheduleSettingsView(hass, entry))
     hass.http.register_view(AutoScheduleStatusView(hass, entry))
     hass.http.register_view(AutoScheduleToggleView(hass, entry))
+    hass.http.register_view(PriceLevelChargingSettingsView(hass, entry))
+    hass.http.register_view(ScheduledChargingSettingsView(hass, entry))
+    hass.http.register_view(HomePowerSettingsView(hass, entry))
     _LOGGER.info("🚗 EV HTTP endpoints registered at /api/power_sync/ev/*")
     _LOGGER.info("☀️ Solar surplus EV endpoints registered")
     _LOGGER.info("📊 EV charging session/statistics endpoints registered")
