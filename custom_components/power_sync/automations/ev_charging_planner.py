@@ -1315,6 +1315,11 @@ class ChargingPlanner:
                 break
 
             hour_dt = datetime.fromisoformat(surplus.hour)
+            # Normalize hour_dt to match now's timezone awareness
+            if hour_dt.tzinfo is not None and now.tzinfo is None:
+                hour_dt = hour_dt.replace(tzinfo=None)
+            elif hour_dt.tzinfo is None and now.tzinfo is not None:
+                hour_dt = hour_dt.replace(tzinfo=now.tzinfo)
             if target_time and hour_dt >= target_time:
                 continue  # Skip hours after deadline
 
