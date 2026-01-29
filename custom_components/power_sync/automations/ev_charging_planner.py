@@ -1064,16 +1064,14 @@ class ChargingPlanner:
                 solar_energy += energy_this_hour
                 total_confidence += forecast.confidence
 
-        # Second pass: fill with offpeak grid if needed
+        # Second pass: fill with cheapest grid hours if needed
+        # Sort by price (cheapest first) to prefer offpeak/cheap hours
         remaining_energy = energy_needed_kwh - solar_energy
-        if remaining_energy > 0:
-            # Find offpeak hours
-            offpeak_hours = [
-                p for p in price_forecast
-                if p.period == "offpeak"
-            ]
+        if remaining_energy > 0 and price_forecast:
+            # Sort all hours by price (cheapest first)
+            sorted_by_price = sorted(price_forecast, key=lambda p: p.import_cents)
 
-            for price_data in offpeak_hours:
+            for price_data in sorted_by_price:
                 if grid_energy >= remaining_energy:
                     break
 
@@ -1089,14 +1087,18 @@ class ChargingPlanner:
                 hour_dt = datetime.fromisoformat(price_data.hour)
                 end_dt = hour_dt + timedelta(hours=1)
 
+                # Label source based on period type
+                source = f"grid_{price_data.period}" if price_data.period else "grid_cheap"
+                reason = "offpeak_rate" if price_data.period == "offpeak" else "cheap_rate"
+
                 windows.append(PlannedChargingWindow(
                     start_time=price_data.hour,
                     end_time=end_dt.isoformat(),
-                    source="grid_offpeak",
+                    source=source,
                     estimated_power_kw=charger_power_kw,
                     estimated_energy_kwh=energy_this_hour,
                     price_cents_kwh=price_data.import_cents,
-                    reason="offpeak_rate",
+                    reason=reason,
                 ))
 
                 grid_energy += energy_this_hour
@@ -1110,6 +1112,16 @@ class ChargingPlanner:
         total_energy = solar_energy + grid_energy
         can_meet = total_energy >= energy_needed_kwh * 0.9
 
+        # Generate warning if target can't be met
+        warning = None
+        if not can_meet:
+            if not windows:
+                warning = "No charging windows available - check price/solar forecast"
+            elif solar_energy == 0 and grid_energy == 0:
+                warning = "No solar or grid windows could be planned"
+            else:
+                warning = f"Planned {total_energy:.1f}kWh but need {energy_needed_kwh:.1f}kWh"
+
         plan = ChargingPlan(
             vehicle_id=vehicle_id,
             current_soc=current_soc,
@@ -1122,6 +1134,7 @@ class ChargingPlanner:
             estimated_cost_cents=total_cost,
             confidence=total_confidence / len(windows) if windows else 0,
             can_meet_target=can_meet,
+            warning=warning,
         )
 
         return plan
