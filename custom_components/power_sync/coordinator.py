@@ -1561,3 +1561,261 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(f"Error fetching Solcast forecast: {err}") from err
         except Exception as err:
             raise UpdateFailed(f"Unexpected error fetching Solcast forecast: {err}") from err
+
+
+class OctopusPriceCoordinator(DataUpdateCoordinator):
+    """Coordinator to fetch Octopus Energy UK price data.
+
+    Fetches half-hourly import and export rates from the Octopus Energy API.
+    Converts to Amber-compatible format for use with existing tariff conversion.
+
+    Key differences from Amber:
+    - Prices in pence/kWh (not cents)
+    - Prices include VAT (5%)
+    - 30-minute intervals
+    - Prices published daily after 4pm UK time for next day
+    - Can go negative (you get paid to use electricity)
+    - Price cap at 100p/kWh
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        product_code: str,
+        tariff_code: str,
+        gsp_region: str,
+        export_product_code: str | None = None,
+        export_tariff_code: str | None = None,
+    ) -> None:
+        """Initialize the coordinator.
+
+        Args:
+            hass: HomeAssistant instance
+            product_code: Octopus product code (e.g., "AGILE-24-10-01")
+            tariff_code: Full tariff code including region (e.g., "E-1R-AGILE-24-10-01-A")
+            gsp_region: UK Grid Supply Point region code (e.g., "A")
+            export_product_code: Optional export product code for Agile Outgoing/Flux
+            export_tariff_code: Optional export tariff code
+        """
+        from .octopus_api import OctopusAPIClient
+
+        self.product_code = product_code
+        self.tariff_code = tariff_code
+        self.gsp_region = gsp_region
+        self.export_product_code = export_product_code
+        self.export_tariff_code = export_tariff_code
+        self.session = async_get_clientsession(hass)
+        self._client = OctopusAPIClient(self.session)
+
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_octopus_prices",
+            update_interval=timedelta(minutes=30),  # Octopus updates less frequently than Amber
+        )
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Fetch data from Octopus API and convert to Amber-compatible format.
+
+        Returns:
+            dict with 'current', 'forecast', 'export_rates', and 'last_update'
+            in Amber-compatible format for use with tariff conversion.
+        """
+        try:
+            from datetime import timezone
+
+            now = datetime.now(timezone.utc)
+
+            # Fetch import rates for next 48 hours
+            period_from = now - timedelta(hours=1)  # Include recent past
+            period_to = now + timedelta(hours=48)
+
+            import_rates = await self._client.get_current_rates(
+                self.product_code,
+                self.tariff_code,
+                period_from=period_from,
+                period_to=period_to,
+                page_size=200,  # 48 hours = 96 periods, add buffer
+            )
+
+            if not import_rates:
+                raise UpdateFailed(
+                    f"No import rates returned from Octopus API for {self.tariff_code}"
+                )
+
+            # Fetch export rates if configured
+            export_rates = []
+            if self.export_product_code and self.export_tariff_code:
+                export_rates = await self._client.get_export_rates(
+                    self.export_product_code,
+                    self.export_tariff_code,
+                    period_from=period_from,
+                    period_to=period_to,
+                    page_size=200,
+                )
+
+            # Convert to Amber-compatible format
+            current_prices = []
+            forecast_prices = []
+
+            for rate in import_rates:
+                valid_from_str = rate.get("valid_from", "")
+                valid_to_str = rate.get("valid_to", "")
+                price_pence = rate.get("value_inc_vat", 0)
+
+                if not valid_from_str or not valid_to_str:
+                    continue
+
+                # Parse timestamps
+                try:
+                    valid_from = datetime.fromisoformat(valid_from_str.replace("Z", "+00:00"))
+                    valid_to = datetime.fromisoformat(valid_to_str.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+
+                # Determine interval type based on timing
+                # Octopus uses valid_to as the interval end time (same convention as Amber's nemTime)
+                if valid_from <= now < valid_to:
+                    interval_type = "CurrentInterval"
+                elif valid_to <= now:
+                    interval_type = "ActualInterval"
+                else:
+                    interval_type = "ForecastInterval"
+
+                # Build Amber-compatible price entry
+                # Note: price_pence is in pence/kWh, which maps directly to cents for Tesla
+                # (Tesla doesn't care about currency, just the numeric value)
+                amber_entry = {
+                    "nemTime": valid_to.isoformat(),  # Amber uses interval END time
+                    "perKwh": price_pence,  # pence/kWh (treated as cents)
+                    "channelType": "general",
+                    "type": interval_type,
+                    "duration": 30,  # 30-minute intervals
+                    "valid_from": valid_from.isoformat(),
+                    "valid_to": valid_to.isoformat(),
+                }
+
+                if interval_type == "CurrentInterval":
+                    current_prices.append(amber_entry)
+                forecast_prices.append(amber_entry)
+
+            # Process export rates if available
+            export_forecast = []
+            for rate in export_rates:
+                valid_from_str = rate.get("valid_from", "")
+                valid_to_str = rate.get("valid_to", "")
+                price_pence = rate.get("value_inc_vat", 0)
+
+                if not valid_from_str or not valid_to_str:
+                    continue
+
+                try:
+                    valid_from = datetime.fromisoformat(valid_from_str.replace("Z", "+00:00"))
+                    valid_to = datetime.fromisoformat(valid_to_str.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+
+                if valid_from <= now < valid_to:
+                    interval_type = "CurrentInterval"
+                elif valid_to <= now:
+                    interval_type = "ActualInterval"
+                else:
+                    interval_type = "ForecastInterval"
+
+                # Export prices: Amber uses negative for "you get paid"
+                # Octopus export rates are positive (payment to you)
+                # Convert to Amber convention: negative = payment to you
+                amber_entry = {
+                    "nemTime": valid_to.isoformat(),
+                    "perKwh": -price_pence,  # Negative = you get paid
+                    "channelType": "feedIn",
+                    "type": interval_type,
+                    "duration": 30,
+                    "valid_from": valid_from.isoformat(),
+                    "valid_to": valid_to.isoformat(),
+                }
+
+                if interval_type == "CurrentInterval":
+                    current_prices.append(amber_entry)
+                export_forecast.append(amber_entry)
+
+            # If no export rates configured, create synthetic export prices
+            # (typically 0 for non-export tariffs, or use SEG rates)
+            if not export_rates:
+                for rate in import_rates:
+                    valid_from_str = rate.get("valid_from", "")
+                    valid_to_str = rate.get("valid_to", "")
+
+                    if not valid_from_str or not valid_to_str:
+                        continue
+
+                    try:
+                        valid_from = datetime.fromisoformat(valid_from_str.replace("Z", "+00:00"))
+                        valid_to = datetime.fromisoformat(valid_to_str.replace("Z", "+00:00"))
+                    except ValueError:
+                        continue
+
+                    if valid_from <= now < valid_to:
+                        interval_type = "CurrentInterval"
+                    elif valid_to <= now:
+                        interval_type = "ActualInterval"
+                    else:
+                        interval_type = "ForecastInterval"
+
+                    # Default export rate: Smart Export Guarantee minimum (typically 4.1p)
+                    # or 0 if tariff doesn't support export
+                    default_export_pence = 4.1  # SEG minimum
+
+                    amber_entry = {
+                        "nemTime": valid_to.isoformat(),
+                        "perKwh": -default_export_pence,  # Negative = you get paid
+                        "channelType": "feedIn",
+                        "type": interval_type,
+                        "duration": 30,
+                        "valid_from": valid_from.isoformat(),
+                        "valid_to": valid_to.isoformat(),
+                    }
+
+                    if interval_type == "CurrentInterval":
+                        current_prices.append(amber_entry)
+                    export_forecast.append(amber_entry)
+
+            # Combine import and export forecasts
+            combined_forecast = forecast_prices + export_forecast
+
+            # Log summary
+            current_import = next(
+                (p["perKwh"] for p in current_prices if p["channelType"] == "general"),
+                None,
+            )
+            current_export = next(
+                (p["perKwh"] for p in current_prices if p["channelType"] == "feedIn"),
+                None,
+            )
+
+            _LOGGER.info(
+                "Octopus API data for %s: current_import=%.2fp/kWh, current_export=%.2fp/kWh, "
+                "forecast_periods=%d (import=%d, export=%d)",
+                self.tariff_code,
+                current_import or 0,
+                -(current_export or 0),  # Un-negate for display
+                len(combined_forecast),
+                len(forecast_prices),
+                len(export_forecast),
+            )
+
+            return {
+                "current": current_prices,
+                "forecast": combined_forecast,
+                "export_rates": export_forecast,
+                "last_update": dt_util.utcnow(),
+                "source": "octopus_api",
+                "product_code": self.product_code,
+                "tariff_code": self.tariff_code,
+                "gsp_region": self.gsp_region,
+            }
+
+        except UpdateFailed:
+            raise
+        except Exception as err:
+            raise UpdateFailed(f"Error fetching Octopus data: {err}") from err

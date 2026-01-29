@@ -161,6 +161,12 @@ from .const import (
     CONF_SIGENERGY_TOKEN_EXPIRES_AT,
     # Battery system selection
     CONF_BATTERY_SYSTEM,
+    # Octopus Energy UK configuration
+    CONF_OCTOPUS_PRODUCT_CODE,
+    CONF_OCTOPUS_TARIFF_CODE,
+    CONF_OCTOPUS_REGION,
+    CONF_OCTOPUS_EXPORT_PRODUCT_CODE,
+    CONF_OCTOPUS_EXPORT_TARIFF_CODE,
     # OpenWeatherMap for automations weather triggers
     CONF_OPENWEATHERMAP_API_KEY,
     # EV BLE configuration
@@ -187,6 +193,7 @@ from .coordinator import (
     SigenergyEnergyCoordinator,
     DemandChargeCoordinator,
     AEMOSensorCoordinator,
+    OctopusPriceCoordinator,
 )
 import re
 
@@ -6212,6 +6219,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         expected_title = "PowerSync Globird"
     elif electricity_provider == "flow_power":
         expected_title = "PowerSync Flow Power"
+    elif electricity_provider == "octopus":
+        expected_title = "PowerSync Octopus"
     else:
         expected_title = "PowerSync Amber"
 
@@ -6241,10 +6250,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         flow_power_price_source in ("aemo_sensor", "aemo")
     )
 
+    # Check for Octopus Energy UK configuration
+    has_octopus = electricity_provider == "octopus" and bool(
+        entry.data.get(CONF_OCTOPUS_PRODUCT_CODE)
+    )
+
     if has_amber:
         _LOGGER.info("Running in Amber TOU Sync mode (provider: %s)", electricity_provider)
     elif has_flow_power_aemo:
         _LOGGER.info("Running in Flow Power mode with AEMO API pricing")
+    elif has_octopus:
+        _LOGGER.info("Running in Octopus Energy UK mode with dynamic pricing")
     elif aemo_spike_enabled:
         _LOGGER.info("Running in AEMO Spike Detection only mode (%s)", electricity_provider)
     else:
@@ -6534,6 +6550,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.error("Failed to initialize Solcast coordinator: %s", e)
             solcast_coordinator = None
 
+    # Initialize Octopus Energy UK Price Coordinator if configured
+    octopus_coordinator = None
+    if has_octopus:
+        octopus_product_code = entry.data.get(CONF_OCTOPUS_PRODUCT_CODE)
+        octopus_tariff_code = entry.data.get(CONF_OCTOPUS_TARIFF_CODE)
+        octopus_region = entry.data.get(CONF_OCTOPUS_REGION, "C")
+        octopus_export_product_code = entry.data.get(CONF_OCTOPUS_EXPORT_PRODUCT_CODE)
+        octopus_export_tariff_code = entry.data.get(CONF_OCTOPUS_EXPORT_TARIFF_CODE)
+
+        if octopus_product_code and octopus_tariff_code:
+            octopus_coordinator = OctopusPriceCoordinator(
+                hass,
+                product_code=octopus_product_code,
+                tariff_code=octopus_tariff_code,
+                gsp_region=octopus_region,
+                export_product_code=octopus_export_product_code,
+                export_tariff_code=octopus_export_tariff_code,
+            )
+            try:
+                await octopus_coordinator.async_config_entry_first_refresh()
+                _LOGGER.info(
+                    "Octopus Energy Coordinator initialized: product=%s, tariff=%s, region=%s",
+                    octopus_product_code,
+                    octopus_tariff_code,
+                    octopus_region,
+                )
+            except Exception as e:
+                _LOGGER.error("Failed to initialize Octopus coordinator: %s", e)
+                octopus_coordinator = None
+        else:
+            _LOGGER.warning("Octopus mode enabled but product/tariff codes not configured")
+
     # Initialize persistent storage for data that survives HA restarts
     # (like Teslemetry's RestoreEntity pattern for export rule state)
     store = Store(hass, STORAGE_VERSION, f"{STORAGE_KEY}.{entry.entry_id}")
@@ -6562,6 +6610,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "aemo_spike_manager": aemo_spike_manager,
         "aemo_sensor_coordinator": aemo_sensor_coordinator,  # For Flow Power AEMO-only mode
         "solcast_coordinator": solcast_coordinator,  # For Solcast solar forecasting
+        "octopus_coordinator": octopus_coordinator,  # For Octopus Energy UK pricing
         "ws_client": ws_client,  # Store for cleanup on unload
         "entry": entry,
         "auto_sync_cancel": None,  # Will store the timer cancel function
@@ -7443,14 +7492,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             compare_forecast_types,
         )
 
-        # Determine price source: AEMO API or Amber
+        # Determine price source: AEMO API, Octopus, or Amber
         # Support both "aemo_sensor" (legacy) and "aemo" (new) price source names
         use_aemo_sensor = (
             aemo_sensor_coordinator is not None and
             flow_power_price_source in ("aemo_sensor", "aemo")
         )
 
-        if use_aemo_sensor:
+        # Check for Octopus Energy UK pricing source
+        use_octopus = (
+            octopus_coordinator is not None and
+            electricity_provider_check == "octopus"
+        )
+
+        if use_octopus:
+            _LOGGER.info("🐙 Using Octopus Energy UK for pricing data")
+        elif use_aemo_sensor:
             _LOGGER.info("📊 Using AEMO API for pricing data")
         else:
             _LOGGER.info("🟠 Using Amber for pricing data")
@@ -7464,7 +7521,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         general_price = None
         feedin_price = None
 
-        if use_aemo_sensor:
+        if use_octopus:
+            # Octopus Energy UK mode: Refresh Octopus coordinator
+            await octopus_coordinator.async_request_refresh()
+
+            if not octopus_coordinator.data:
+                _LOGGER.error("No Octopus API data available")
+                return
+
+            # Current price from Octopus API data
+            current_prices = octopus_coordinator.data.get("current", [])
+            if current_prices:
+                current_actual_interval = {'general': None, 'feedIn': None}
+                for price in current_prices:
+                    channel = price.get('channelType')
+                    if channel in ['general', 'feedIn']:
+                        current_actual_interval[channel] = price
+                general_price = current_actual_interval.get('general', {}).get('perKwh') if current_actual_interval.get('general') else None
+                feedin_price = current_actual_interval.get('feedIn', {}).get('perKwh') if current_actual_interval.get('feedIn') else None
+                _LOGGER.info(f"🐙 Using Octopus API price for current interval: general={general_price:.2f}p/kWh")
+        elif use_aemo_sensor:
             # AEMO mode: Refresh AEMO coordinator
             await aemo_sensor_coordinator.async_request_refresh()
 
@@ -7519,7 +7595,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.info(f"🔄 Price changed - proceeding with re-sync")
 
         # Get forecast data from appropriate coordinator
-        if use_aemo_sensor:
+        if use_octopus:
+            # Octopus coordinator already refreshed above
+            forecast_data = octopus_coordinator.data.get("forecast", [])
+            if not forecast_data:
+                _LOGGER.error("No Octopus forecast data available from API")
+                return
+            _LOGGER.info(f"Using Octopus API forecast: {len(forecast_data) // 2} periods")
+        elif use_aemo_sensor:
             # AEMO coordinator already refreshed above
             forecast_data = aemo_sensor_coordinator.data.get("forecast", [])
             if not forecast_data:
@@ -7551,6 +7634,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if (
             sync_mode == 'initial_forecast' and
             not use_aemo_sensor and
+            not use_octopus and  # Octopus doesn't have multiple forecast types
             forecast_discrepancy_alert_enabled and
             forecast_data
         ):

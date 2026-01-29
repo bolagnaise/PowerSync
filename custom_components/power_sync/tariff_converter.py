@@ -977,6 +977,7 @@ def _build_tariff_structure(
         "amber": "Amber Electric",
         "flow_power": "Flow Power",
         "globird": "Globird",  # Added for safety, though TOU sync should be skipped for Globird
+        "octopus": "Octopus Energy",
     }
     provider_name = provider_names.get(electricity_provider, electricity_provider.title())
     # Build TOU periods
@@ -1896,3 +1897,60 @@ def apply_chip_mode(
         _LOGGER.info("Chip Mode: no periods in configured window")
 
     return tariff
+
+
+def convert_octopus_to_tesla_tariff(
+    octopus_data: Dict[str, Any],
+    tesla_energy_site_id: str = "",
+) -> Dict[str, Any] | None:
+    """
+    Convert Octopus Energy UK price data to Tesla tariff format.
+
+    Octopus price data is already converted to Amber-compatible format by
+    OctopusPriceCoordinator, so we can delegate to convert_amber_to_tesla_tariff.
+
+    Args:
+        octopus_data: Data from OctopusPriceCoordinator with 'forecast' key containing
+                      Amber-compatible price entries
+        tesla_energy_site_id: Tesla energy site ID (optional)
+
+    Returns:
+        Tesla-compatible tariff structure, or None if conversion fails
+
+    Key differences from Amber handled by OctopusPriceCoordinator:
+    - Prices in pence/kWh (treated as cents for Tesla)
+    - Currency: GBP (not AUD) - Tesla is currency-agnostic
+    - Timezone: Europe/London (not Australia/*)
+    - 30-minute intervals (same as Amber)
+    """
+    if not octopus_data:
+        _LOGGER.error("No Octopus data provided for tariff conversion")
+        return None
+
+    forecast_data = octopus_data.get("forecast", [])
+    if not forecast_data:
+        _LOGGER.error("No forecast data in Octopus response")
+        return None
+
+    # Use the existing Amber conversion with Octopus branding
+    # OctopusPriceCoordinator already converts to Amber-compatible format
+    result = convert_amber_to_tesla_tariff(
+        forecast_data,
+        tesla_energy_site_id=tesla_energy_site_id,
+        electricity_provider="octopus",
+    )
+
+    if result:
+        # Log conversion summary
+        product_code = octopus_data.get("product_code", "unknown")
+        tariff_code = octopus_data.get("tariff_code", "unknown")
+        gsp_region = octopus_data.get("gsp_region", "unknown")
+
+        _LOGGER.info(
+            "Converted Octopus tariff to Tesla format: product=%s, tariff=%s, region=%s",
+            product_code,
+            tariff_code,
+            gsp_region,
+        )
+
+    return result

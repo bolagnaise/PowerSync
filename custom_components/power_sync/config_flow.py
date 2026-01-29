@@ -168,6 +168,17 @@ from .const import (
     CONF_SOLCAST_ENABLED,
     CONF_SOLCAST_API_KEY,
     CONF_SOLCAST_RESOURCE_ID,
+    # Octopus Energy UK configuration
+    CONF_OCTOPUS_PRODUCT,
+    CONF_OCTOPUS_REGION,
+    CONF_OCTOPUS_PRODUCT_CODE,
+    CONF_OCTOPUS_TARIFF_CODE,
+    CONF_OCTOPUS_EXPORT_PRODUCT_CODE,
+    CONF_OCTOPUS_EXPORT_TARIFF_CODE,
+    OCTOPUS_PRODUCTS,
+    OCTOPUS_PRODUCT_CODES,
+    OCTOPUS_EXPORT_PRODUCT_CODES,
+    OCTOPUS_GSP_REGIONS,
 )
 
 # Combined network tariff key for config flow
@@ -373,6 +384,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._aemo_only_mode: bool = False  # True if using AEMO spike only (no Amber)
         self._aemo_data: dict[str, Any] = {}
         self._flow_power_data: dict[str, Any] = {}
+        self._octopus_data: dict[str, Any] = {}  # Octopus Energy UK configuration
         self._selected_electricity_provider: str = "amber"
         self._custom_tariff_data: dict[str, Any] = {}  # Custom tariff for non-Amber users
 
@@ -408,6 +420,11 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._aemo_only_mode = True
                 self._amber_data = {}
                 return await self.async_step_aemo_config()
+            elif provider == "octopus":
+                # Octopus Energy UK: Dynamic pricing
+                self._aemo_only_mode = False
+                self._amber_data = {}  # No Amber API needed
+                return await self.async_step_octopus()
             else:
                 # Default to Amber
                 self._aemo_only_mode = False
@@ -423,6 +440,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "flow_power_desc": "Flow Power with AEMO wholesale or Amber pricing",
                 "globird_desc": "AEMO spike detection for static tariff users",
                 "aemo_vpp_desc": "AEMO spike detection for VPP exports (AGL, Engie, etc.)",
+                "octopus_desc": "Octopus Energy UK with dynamic Agile pricing",
             },
         )
 
@@ -515,6 +533,79 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
             description_placeholders={
                 "rate_hint": "Select your network tariff from the dropdown",
+            },
+        )
+
+    async def async_step_octopus(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle Octopus Energy UK configuration."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            # Build tariff code from product + region
+            product_key = user_input.get(CONF_OCTOPUS_PRODUCT, "agile")
+            region = user_input.get(CONF_OCTOPUS_REGION, "C")
+
+            # Map product selection to actual product codes
+            product_code = OCTOPUS_PRODUCT_CODES.get(product_key, OCTOPUS_PRODUCT_CODES["agile"])
+            tariff_code = f"E-1R-{product_code}-{region}"
+
+            # Get export product/tariff codes if available
+            export_product_code = OCTOPUS_EXPORT_PRODUCT_CODES.get(product_key)
+            export_tariff_code = f"E-1R-{export_product_code}-{region}" if export_product_code else None
+
+            # Validate by fetching current prices
+            try:
+                from .octopus_api import OctopusAPIClient
+
+                client = OctopusAPIClient(async_get_clientsession(self.hass))
+                rates = await client.get_current_rates(product_code, tariff_code, page_size=5)
+
+                if not rates:
+                    errors["base"] = "no_prices"
+                    _LOGGER.error(
+                        "No Octopus prices found for tariff %s in region %s",
+                        tariff_code, region
+                    )
+            except Exception as err:
+                errors["base"] = "cannot_connect"
+                _LOGGER.exception("Error validating Octopus tariff: %s", err)
+
+            if not errors:
+                # Store Octopus data
+                self._octopus_data = {
+                    CONF_OCTOPUS_PRODUCT: product_key,
+                    CONF_OCTOPUS_REGION: region,
+                    CONF_OCTOPUS_PRODUCT_CODE: product_code,
+                    CONF_OCTOPUS_TARIFF_CODE: tariff_code,
+                    CONF_OCTOPUS_EXPORT_PRODUCT_CODE: export_product_code,
+                    CONF_OCTOPUS_EXPORT_TARIFF_CODE: export_tariff_code,
+                }
+
+                _LOGGER.info(
+                    "Octopus tariff validated: product=%s, tariff=%s, region=%s",
+                    product_code, tariff_code, region
+                )
+
+                # Route based on battery system selection
+                if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
+                    return await self.async_step_sigenergy_credentials()
+                else:
+                    return await self.async_step_tesla_provider()
+
+        # Build form schema
+        data_schema = vol.Schema({
+            vol.Required(CONF_OCTOPUS_PRODUCT, default="agile"): vol.In(OCTOPUS_PRODUCTS),
+            vol.Required(CONF_OCTOPUS_REGION, default="C"): vol.In(OCTOPUS_GSP_REGIONS),
+        })
+
+        return self.async_show_form(
+            step_id="octopus",
+            data_schema=data_schema,
+            errors=errors,
+            description_placeholders={
+                "octopus_url": "https://octopus.energy/smart/agile/",
             },
         )
 
@@ -853,6 +944,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             **self._amber_data,
             **self._site_data,  # Include Amber site ID for NEM region auto-detection
             **self._flow_power_data,
+            **self._octopus_data,  # Include Octopus Energy UK configuration
             **self._sigenergy_data,
             **self._aemo_data,  # Include AEMO configuration
         }
@@ -1645,6 +1737,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 **self._site_data,
                 **self._aemo_data,  # Include AEMO configuration
                 **self._flow_power_data,  # Include Flow Power configuration
+                **self._octopus_data,  # Include Octopus Energy UK configuration
                 **getattr(self, '_curtailment_data', {}),  # Include curtailment configuration
                 **getattr(self, '_inverter_data', {}),  # Include inverter configuration
                 **getattr(self, '_demand_data', {}),  # Include demand charge configuration
@@ -1671,6 +1764,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 title = "PowerSync Globird"
             elif self._selected_electricity_provider == "flow_power":
                 title = "PowerSync Flow Power"
+            elif self._selected_electricity_provider == "octopus":
+                title = "PowerSync Octopus"
             else:
                 title = "PowerSync Amber"
             return self.async_create_entry(title=title, data=data)
@@ -1821,6 +1916,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 return await self.async_step_flow_power_options()
             elif self._provider in ("globird", "aemo_vpp"):
                 return await self.async_step_globird_options()
+            elif self._provider == "octopus":
+                return await self.async_step_octopus_options()
 
         current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
         current_tesla_provider = self.config_entry.data.get(CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_TESLEMETRY)
@@ -1915,6 +2012,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     return await self.async_step_flow_power_options()
                 elif self._provider in ("globird", "aemo_vpp"):
                     return await self.async_step_globird_options()
+                elif self._provider == "octopus":
+                    return await self.async_step_octopus_options()
 
         current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
         current_modbus_host = self._get_option(CONF_SIGENERGY_MODBUS_HOST, "")
@@ -2762,6 +2861,88 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             ),
             description_placeholders={
                 "tariff_hint": "Enable 'Configure Custom Tariff' to set your TOU rates for EV charging",
+            },
+        )
+
+    async def async_step_octopus_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step 2d: Octopus Energy UK specific options."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            # Build tariff code from product + region
+            product_key = user_input.get(CONF_OCTOPUS_PRODUCT, "agile")
+            region = user_input.get(CONF_OCTOPUS_REGION, "C")
+
+            # Map product selection to actual product codes
+            product_code = OCTOPUS_PRODUCT_CODES.get(product_key, OCTOPUS_PRODUCT_CODES["agile"])
+            tariff_code = f"E-1R-{product_code}-{region}"
+
+            # Get export product/tariff codes if available
+            export_product_code = OCTOPUS_EXPORT_PRODUCT_CODES.get(product_key)
+            export_tariff_code = f"E-1R-{export_product_code}-{region}" if export_product_code else None
+
+            # Validate by fetching current prices
+            try:
+                from .octopus_api import OctopusAPIClient
+
+                client = OctopusAPIClient(async_get_clientsession(self.hass))
+                rates = await client.get_current_rates(product_code, tariff_code, page_size=5)
+
+                if not rates:
+                    errors["base"] = "no_prices"
+                    _LOGGER.error(
+                        "No Octopus prices found for tariff %s in region %s",
+                        tariff_code, region
+                    )
+            except Exception as err:
+                errors["base"] = "cannot_connect"
+                _LOGGER.exception("Error validating Octopus tariff: %s", err)
+
+            if not errors:
+                # Store Octopus options
+                self._amber_options = {
+                    CONF_ELECTRICITY_PROVIDER: "octopus",
+                    CONF_OCTOPUS_PRODUCT: product_key,
+                    CONF_OCTOPUS_REGION: region,
+                    CONF_OCTOPUS_PRODUCT_CODE: product_code,
+                    CONF_OCTOPUS_TARIFF_CODE: tariff_code,
+                    CONF_OCTOPUS_EXPORT_PRODUCT_CODE: export_product_code,
+                    CONF_OCTOPUS_EXPORT_TARIFF_CODE: export_tariff_code,
+                    CONF_AUTO_SYNC_ENABLED: user_input.get(CONF_AUTO_SYNC_ENABLED, True),
+                    CONF_BATTERY_CURTAILMENT_ENABLED: user_input.get(CONF_BATTERY_CURTAILMENT_ENABLED, False),
+                }
+
+                _LOGGER.info(
+                    "Octopus options validated: product=%s, tariff=%s, region=%s",
+                    product_code, tariff_code, region
+                )
+
+                # Continue to curtailment options
+                return await self.async_step_curtailment_options()
+
+        # Get current values
+        current_product = self._get_option(CONF_OCTOPUS_PRODUCT, "agile")
+        current_region = self._get_option(CONF_OCTOPUS_REGION, "C")
+
+        return self.async_show_form(
+            step_id="octopus_options",
+            data_schema=vol.Schema({
+                vol.Required(CONF_OCTOPUS_PRODUCT, default=current_product): vol.In(OCTOPUS_PRODUCTS),
+                vol.Required(CONF_OCTOPUS_REGION, default=current_region): vol.In(OCTOPUS_GSP_REGIONS),
+                vol.Optional(
+                    CONF_AUTO_SYNC_ENABLED,
+                    default=self._get_option(CONF_AUTO_SYNC_ENABLED, True),
+                ): bool,
+                vol.Optional(
+                    CONF_BATTERY_CURTAILMENT_ENABLED,
+                    default=self._get_option(CONF_BATTERY_CURTAILMENT_ENABLED, False),
+                ): bool,
+            }),
+            errors=errors,
+            description_placeholders={
+                "octopus_url": "https://octopus.energy/smart/agile/",
             },
         )
 

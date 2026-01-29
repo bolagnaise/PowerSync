@@ -98,6 +98,19 @@
         },
         "submit_button": "Next"
       },
+      "octopus": {
+        "title": "Octopus Energy UK Configuration",
+        "description": "Configure your Octopus Energy tariff. Select your product and GSP region.\n\n**Agile Octopus**: Dynamic half-hourly pricing based on wholesale rates.\n**Octopus Go**: EV tariff with cheap overnight rates (00:30-05:30).\n**Octopus Flux**: Solar/battery optimized export tariff.\n**Tracker**: Daily price tracking based on wholesale rates.\n\nFind your GSP region on your Octopus bill or at {octopus_url}",
+        "data": {
+          "octopus_product": "Octopus Product",
+          "octopus_region": "GSP Region"
+        },
+        "data_description": {
+          "octopus_product": "Select your Octopus tariff product",
+          "octopus_region": "Your Grid Supply Point region - check your Octopus bill for your GSP code (single letter A-P)"
+        },
+        "submit_button": "Next"
+      },
       "custom_tariff": {
         "title": "Custom Tariff Configuration",
         "description": "Configure your electricity tariff rates for EV charging price decisions.\n\n{info}\n\n{skip_hint}",
@@ -296,6 +309,7 @@
       "no_stations": "No Sigenergy stations found for this account.",
       "no_station_selected": "Please select a Sigenergy station.",
       "modbus_host_required": "Sigenergy IP address is required for energy data.",
+      "no_prices": "No Octopus prices found for this tariff and region. Check your product and GSP region are correct.",
       "unknown": "An unexpected error occurred. Please try again."
     },
     "abort": {
@@ -444,6 +458,22 @@
         },
         "data_description": {
           "configure_custom_tariff": "Enable to configure your TOU rates for EV charging price decisions"
+        }
+      },
+      "octopus_options": {
+        "title": "Octopus Energy UK Options",
+        "description": "Configure your Octopus Energy tariff settings.\n\n**Product**: Select your Octopus tariff product.\n**GSP Region**: Your Grid Supply Point region (A-P).\n\nFind your GSP region on your Octopus bill or at {octopus_url}",
+        "data": {
+          "octopus_product": "Octopus Product",
+          "octopus_region": "GSP Region",
+          "auto_sync_enabled": "Enable automatic TOU schedule syncing",
+          "battery_curtailment_enabled": "Enable Battery Export Curtailment (stop export at negative prices)"
+        },
+        "data_description": {
+          "octopus_product": "Select your Octopus tariff product",
+          "octopus_region": "Your Grid Supply Point region - check your Octopus bill for your GSP code (single letter A-P)",
+          "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices",
+          "battery_curtailment_enabled": "Stop battery from exporting when prices are negative to avoid paying to export"
         }
       },
       "custom_tariff_options": {

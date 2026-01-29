@@ -3,7 +3,7 @@
 
   # PowerSync
 
-  A Home Assistant integration for intelligent battery energy management in Australia. Supports **Tesla Powerwall** and **Sigenergy** battery systems. Automatically sync with Amber Electric or Flow Power (AEMO wholesale) dynamic pricing, and capitalize on AEMO wholesale price spikes to maximize your battery's earning potential.
+  A Home Assistant integration for intelligent battery energy management in **Australia** and the **UK**. Supports **Tesla Powerwall** and **Sigenergy** battery systems. Automatically sync with dynamic electricity pricing from **Amber Electric**, **Flow Power** (AU), or **Octopus Energy** (UK), and capitalize on wholesale price spikes to maximize your battery's earning potential.
 
   <a href="https://paypal.me/benboller" target="_blank"><img src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" alt="Buy Me A Coffee" style="height: 41px !important;width: 174px !important;box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;-webkit-box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;" ></a>
 
@@ -21,7 +21,7 @@
 
 ## Disclaimer
 
-This is an unofficial integration and is not affiliated with or endorsed by Tesla, Inc., Sigenergy, or Amber Electric. Use at your own risk. The developers are not responsible for any damages or issues that may arise from the use of this software.
+This is an unofficial integration and is not affiliated with or endorsed by Tesla, Inc., Sigenergy, Amber Electric, or Octopus Energy. Use at your own risk. The developers are not responsible for any damages or issues that may arise from the use of this software.
 
 ## Features
 
@@ -44,11 +44,20 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 - **Tesla Powerwall** - Fleet API or Teslemetry proxy
 - **Sigenergy** - Sigenergy Cloud API for tariff sync + Modbus TCP for real-time energy data
 
+### Supported Electricity Providers
+
+| Provider | Country | Pricing Type | API Auth Required |
+|----------|---------|--------------|-------------------|
+| **Amber Electric** | 🇦🇺 Australia | Dynamic 30-min | ✅ API Token |
+| **Flow Power** | 🇦🇺 Australia | AEMO Wholesale | ❌ No (uses AEMO API) |
+| **Globird / AEMO VPP** | 🇦🇺 Australia | Static + Spike Detection | ❌ No |
+| **Octopus Energy** | 🇬🇧 UK | Dynamic 30-min | ❌ No (public API) |
+
 ### Core Functionality
-- **Automatic TOU Tariff Sync** - Updates your battery system with Amber Electric pricing every 5 minutes
-- **Real-time Pricing** - Monitor current and historical electricity prices with live updates via WebSocket
+- **Automatic TOU Tariff Sync** - Updates your battery system with dynamic pricing every 5 minutes (Amber/Octopus) or 30 minutes (Flow Power/AEMO)
+- **Real-time Pricing** - Monitor current and historical electricity prices with live updates
 - **Near Real-Time Energy Monitoring** - Energy usage updates every 30 seconds
-- **Timezone Support** - Auto-detects timezone from Amber data for accurate time display across all Australian states
+- **Timezone Support** - Auto-detects timezone for accurate time display (Australia and UK)
 
 ### Advanced Features
 - **AEMO Spike Detection** - Monitors wholesale prices and switches to spike tariff during extreme price events
@@ -67,9 +76,10 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 
 - Home Assistant installed and running
 - HACS (Home Assistant Community Store) installed
-- **For Amber users:** Amber Electric API token ([get one here](https://app.amber.com.au/developers))
-- **For Flow Power users:** Uses AEMO wholesale pricing (or Amber API if you have one)
-- **For Globird/AEMO VPP users:** No API token required (uses AEMO spike detection)
+- **For Amber users (AU):** Amber Electric API token ([get one here](https://app.amber.com.au/developers))
+- **For Flow Power users (AU):** Uses AEMO wholesale pricing (or Amber API if you have one)
+- **For Globird/AEMO VPP users (AU):** No API token required (uses AEMO spike detection)
+- **For Octopus Energy users (UK):** No API token required (uses public Octopus API)
 - Tesla or Sigenergy battery system with API access (see [Tesla API Options](#tesla-api-options) below)
 
 ### Installation Steps
@@ -91,8 +101,10 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
    - Click to add
 
 3. **Configure**
-   - Select your **electricity provider** (Amber, Flow Power, Globird, AEMO VPP)
-   - Enter Amber API token if using Amber (or optionally for Flow Power)
+   - Select your **electricity provider**:
+     - **Australia:** Amber, Flow Power, Globird, AEMO VPP
+     - **UK:** Octopus Energy
+   - Enter API tokens if required (Amber needs token; Octopus doesn't)
    - Select your **battery system** (Tesla Powerwall or Sigenergy)
    - Enter battery API credentials (Teslemetry key, Tesla Fleet, or Sigenergy Cloud)
    - Configure additional options as needed
@@ -277,6 +289,52 @@ Full support for Sigenergy DC-coupled battery systems as an alternative to Tesla
 
 ---
 
+## Octopus Energy UK Support
+
+Full support for UK users with **Octopus Energy** dynamic tariffs.
+
+**Supported Products:**
+| Product | Description |
+|---------|-------------|
+| **Agile Octopus** | Dynamic half-hourly pricing based on wholesale rates |
+| **Octopus Go** | EV tariff with cheap overnight rates (00:30-05:30) |
+| **Octopus Flux** | Solar/battery optimized import/export tariff |
+| **Octopus Tracker** | Daily wholesale price tracking |
+
+**Features:**
+- **No API token required** - Uses Octopus public pricing API
+- **Half-hourly pricing** - Same 30-minute resolution as Amber Electric
+- **Automatic TOU sync** - Uploads pricing to Tesla/Sigenergy
+- **Regional pricing** - Select your GSP (Grid Supply Point) region
+- **Negative prices** - Handles negative wholesale prices (you get paid to use electricity)
+- **Export rates** - Supports Agile Outgoing and Flux export tariffs
+
+**Configuration:**
+1. Select **Octopus Energy (UK)** as your electricity provider
+2. Choose your **product** (Agile, Go, Flux, Tracker)
+3. Select your **GSP region** (A-P) - find this on your Octopus bill
+4. Configure your battery system (Tesla or Sigenergy)
+
+**GSP Regions:**
+| Code | Region |
+|------|--------|
+| A | Eastern England |
+| B | East Midlands |
+| C | London |
+| D | Merseyside and North Wales |
+| E | Midlands |
+| F | North Eastern |
+| G | North Western |
+| H | Southern |
+| J | South Eastern |
+| K | South Wales |
+| L | South Western |
+| M | Yorkshire |
+| N | South Scotland |
+| P | North Scotland |
+
+---
+
 ## AC-Coupled Inverter Curtailment
 
 Control AC-coupled solar inverters directly during negative pricing periods. This feature works with **any battery system** (Tesla, Sigenergy, or others).
@@ -325,9 +383,9 @@ service: power_sync.restore_normal
 1. Enable the `switch.auto_sync_tou_schedule` switch (enabled by default)
 2. The integration runs a background timer that checks every 5 minutes
 3. If auto-sync is enabled, it automatically:
-   - Fetches the latest Amber pricing forecast
-   - Converts it to Tesla TOU format
-   - Sends it to your Powerwall via the configured API
+   - Fetches the latest pricing forecast from your provider (Amber, Octopus, AEMO)
+   - Converts it to your battery system's TOU format
+   - Sends it to your Powerwall/Sigenergy via the configured API
 4. If auto-sync is disabled, the timer skips syncing
 
 **No automation required!** Just leave the switch on and the integration handles everything automatically.
@@ -389,6 +447,10 @@ The Force Charge and Force Discharge controls require `input_select` helpers:
   - If using Tesla Fleet: Ensure the Tesla Fleet integration is loaded and working
   - If using Teslemetry: Ensure your Tesla account is linked in Teslemetry
 - **TOU sync failing**: Check Home Assistant logs for detailed error messages
+- **Octopus prices not loading**:
+  - Verify your GSP region code (A-P) is correct - check your Octopus bill
+  - Ensure the product code matches your actual tariff (Agile, Go, Flux, Tracker)
+  - Octopus publishes next-day prices after 4pm UK time - prices may be limited before then
 
 **Enable Debug Logging:**
 ```yaml

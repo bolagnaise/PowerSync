@@ -174,6 +174,59 @@ ELECTRICITY_PROVIDERS = {
     "flow_power": "Flow Power",
     "globird": "Globird",
     "aemo_vpp": "AEMO VPP (AGL, Engie, etc.)",
+    "octopus": "Octopus Energy (UK)",
+}
+
+# Octopus Energy UK configuration
+CONF_OCTOPUS_PRODUCT = "octopus_product"
+CONF_OCTOPUS_REGION = "octopus_region"
+CONF_OCTOPUS_PRODUCT_CODE = "octopus_product_code"
+CONF_OCTOPUS_TARIFF_CODE = "octopus_tariff_code"
+CONF_OCTOPUS_EXPORT_PRODUCT_CODE = "octopus_export_product_code"
+CONF_OCTOPUS_EXPORT_TARIFF_CODE = "octopus_export_tariff_code"
+
+# Octopus API base URL
+OCTOPUS_API_BASE_URL = "https://api.octopus.energy/v1"
+
+# Octopus products
+OCTOPUS_PRODUCTS = {
+    "agile": "Agile Octopus (dynamic half-hourly)",
+    "go": "Octopus Go (EV tariff)",
+    "flux": "Octopus Flux (solar/battery)",
+    "tracker": "Octopus Tracker (daily price)",
+}
+
+# Octopus product codes (latest versions)
+OCTOPUS_PRODUCT_CODES = {
+    "agile": "AGILE-24-10-01",
+    "go": "GO-VAR-22-10-14",
+    "flux": "FLUX-IMPORT-23-02-14",
+    "tracker": "SILVER-FLEX-BB-23-02-08",
+}
+
+# Octopus export product codes
+OCTOPUS_EXPORT_PRODUCT_CODES = {
+    "agile": "AGILE-OUTGOING-19-05-13",  # Agile Outgoing for dynamic export
+    "flux": "FLUX-EXPORT-23-02-14",  # Flux export tariff
+}
+
+# UK Grid Supply Points (GSP) - Octopus regional pricing
+# Each region has different wholesale prices due to transmission constraints
+OCTOPUS_GSP_REGIONS = {
+    "A": "Eastern England",
+    "B": "East Midlands",
+    "C": "London",
+    "D": "Merseyside and North Wales",
+    "E": "Midlands",
+    "F": "North Eastern",
+    "G": "North Western",
+    "H": "Southern",
+    "J": "South Eastern",
+    "K": "South Wales",
+    "L": "South Western",
+    "M": "Yorkshire",
+    "N": "South Scotland",
+    "P": "North Scotland",
 }
 
 # Flow Power state options with export rates
