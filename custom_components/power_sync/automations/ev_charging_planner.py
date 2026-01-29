@@ -2179,6 +2179,10 @@ class AutoScheduleExecutor:
             solar_config = await self._get_solar_surplus_config()
             min_battery_for_ev = solar_config.get("min_battery_soc", 80)
 
+            # Get home power settings for phases
+            home_power = await self._get_home_power_settings()
+            phases = 3 if home_power.get("phase_type") == "three" else 1
+
             # Check if battery needs priority (battery below threshold)
             if battery_soc < min_battery_for_ev:
                 should_charge = False
@@ -2189,14 +2193,17 @@ class AutoScheduleExecutor:
                 )
             else:
                 # Battery is above threshold, check surplus requirement
-                min_surplus = settings.get_min_surplus_kw()
+                # Calculate min surplus from home power settings
+                min_charge_amps = 5  # Tesla minimum
+                voltage = 230  # Australia standard
+                min_surplus = (min_charge_amps * voltage * phases) / 1000
                 if current_surplus_kw < min_surplus:
                     should_charge = False
                     reason = f"Surplus {current_surplus_kw:.1f}kW < min {min_surplus:.1f}kW"
                     _LOGGER.info(
                         f"Auto-schedule: In solar window but no surplus - "
                         f"solar={solar_power_kw:.1f}kW, load={load_power_kw:.1f}kW, "
-                        f"surplus={current_surplus_kw:.1f}kW < {min_surplus:.1f}kW needed (phases={settings.phases})"
+                        f"surplus={current_surplus_kw:.1f}kW < {min_surplus:.1f}kW needed (phases={phases})"
                     )
 
         # Find current window (if in one)
@@ -2368,6 +2375,34 @@ class AutoScheduleExecutor:
         except Exception as e:
             _LOGGER.debug(f"Failed to get solar surplus config: {e}")
             return {"min_battery_soc": 80}
+
+    async def _get_home_power_settings(self) -> dict:
+        """Get home power settings from storage.
+
+        Returns:
+            Config dict with phase_type, max_amps_per_phase, etc.
+        """
+        try:
+            from ..const import DOMAIN
+            entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
+
+            # Try to get from automation_store
+            automation_store = entry_data.get("automation_store")
+            if automation_store:
+                stored_data = getattr(automation_store, '_data', {}) or {}
+                config = stored_data.get("home_power_settings", {})
+                if config:
+                    return config
+
+            # Return defaults
+            return {
+                "phase_type": "single",
+                "max_charge_speed_enabled": False,
+                "max_amps_per_phase": 32,
+            }
+        except Exception as e:
+            _LOGGER.debug(f"Failed to get home power settings: {e}")
+            return {"phase_type": "single", "max_amps_per_phase": 32}
 
     async def _get_sigenergy_controller(self):
         """Get a SigEnergy controller instance."""
