@@ -1719,6 +1719,10 @@ class AutoScheduleState:
     original_backup_reserve: Optional[int] = None
     backup_reserve_modified: bool = False
 
+    # Curtailment override management - track original export rule to restore after charging
+    original_export_rule: Optional[str] = None
+    curtailment_override_active: bool = False
+
     # Cached SoC - used when vehicle is asleep and can't report live SoC
     last_known_soc: Optional[int] = None
     last_soc_update: Optional[datetime] = None
@@ -1739,6 +1743,8 @@ class AutoScheduleState:
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "original_backup_reserve": self.original_backup_reserve,
             "backup_reserve_modified": self.backup_reserve_modified,
+            "original_export_rule": self.original_export_rule,
+            "curtailment_override_active": self.curtailment_override_active,
             "last_known_soc": self.last_known_soc,
             "last_soc_update": self.last_soc_update.isoformat() if self.last_soc_update else None,
             "plan_summary": {
@@ -2062,13 +2068,19 @@ class AutoScheduleExecutor:
         """
         for vehicle_id, settings in self._settings.items():
             if not settings.enabled:
-                # Restore backup reserve if it was modified and auto-schedule is now disabled
+                # Restore backup reserve and curtailment if modified and auto-schedule is now disabled
                 state = self._states.get(vehicle_id)
-                if state and state.backup_reserve_modified:
-                    _LOGGER.info(
-                        f"Auto-schedule disabled for {vehicle_id}, restoring backup reserve"
-                    )
-                    await self._restore_backup_reserve(state)
+                if state:
+                    if state.backup_reserve_modified:
+                        _LOGGER.info(
+                            f"Auto-schedule disabled for {vehicle_id}, restoring backup reserve"
+                        )
+                        await self._restore_backup_reserve(state)
+                    if state.curtailment_override_active:
+                        _LOGGER.info(
+                            f"Auto-schedule disabled for {vehicle_id}, restoring curtailment"
+                        )
+                        await self._restore_curtailment(state)
                     # Also stop charging if still active
                     if state.is_charging:
                         await self._stop_charging(vehicle_id, settings, state)
@@ -2586,6 +2598,204 @@ class AutoScheduleExecutor:
             _LOGGER.error(f"Error setting Tesla backup reserve: {e}")
             return False
 
+    async def _get_current_export_rule(self) -> Optional[str]:
+        """Get the current grid export rule.
+
+        Returns:
+            Export rule: "never", "pv_only", or "battery_ok"
+        """
+        # Only Tesla Powerwall supports export rule control
+        if self._is_sigenergy_system():
+            return None
+
+        try:
+            from ..const import (
+                CONF_TESLA_ENERGY_SITE_ID,
+                TESLA_PROVIDER_TESLEMETRY,
+                TESLEMETRY_API_BASE_URL,
+                FLEET_API_BASE_URL,
+            )
+            from .. import get_tesla_api_token
+
+            current_token, provider = get_tesla_api_token(self.hass, self.config_entry)
+            site_id = self.config_entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+
+            if not site_id or not current_token:
+                return None
+
+            from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+            session = async_get_clientsession(self.hass)
+            headers = {
+                "Authorization": f"Bearer {current_token}",
+                "Content-Type": "application/json",
+            }
+            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+            async with session.get(
+                f"{api_base}/api/1/energy_sites/{site_id}/site_info",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    site_info = data.get("response", {})
+                    components = site_info.get("components", {})
+                    # Map Tesla API values to our rules
+                    disallow_export = components.get("disallow_charge_from_grid_with_solar_installed", False)
+                    customer_preferred = components.get("customer_preferred_export_rule")
+                    if customer_preferred:
+                        return customer_preferred
+                    return "never" if disallow_export else "pv_only"
+                return None
+
+        except Exception as e:
+            _LOGGER.debug(f"Error getting export rule: {e}")
+            return None
+
+    async def _set_export_rule(self, rule: str) -> bool:
+        """Set the grid export rule.
+
+        Args:
+            rule: "never", "pv_only", or "battery_ok"
+
+        Returns:
+            True if successful
+        """
+        # Only Tesla Powerwall supports export rule control
+        if self._is_sigenergy_system():
+            _LOGGER.debug("SigEnergy does not support export rule control")
+            return False
+
+        if rule not in ("never", "pv_only", "battery_ok"):
+            _LOGGER.warning(f"Invalid export rule: {rule}")
+            return False
+
+        try:
+            from ..const import (
+                CONF_TESLA_ENERGY_SITE_ID,
+                TESLA_PROVIDER_TESLEMETRY,
+                TESLEMETRY_API_BASE_URL,
+                FLEET_API_BASE_URL,
+            )
+            from .. import get_tesla_api_token
+
+            current_token, provider = get_tesla_api_token(self.hass, self.config_entry)
+            site_id = self.config_entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+
+            if not site_id or not current_token:
+                _LOGGER.warning("No Tesla site ID or token for setting export rule")
+                return False
+
+            from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+            session = async_get_clientsession(self.hass)
+            headers = {
+                "Authorization": f"Bearer {current_token}",
+                "Content-Type": "application/json",
+            }
+            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+            # Map our rule names to Tesla API
+            disallow_export = rule == "never"
+
+            async with session.post(
+                f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
+                headers=headers,
+                json={
+                    "disallow_charge_from_grid_with_solar_installed": disallow_export,
+                    "customer_preferred_export_rule": rule,
+                },
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status == 200:
+                    _LOGGER.info(f"✅ EV Charging: Set grid export rule to '{rule}'")
+                    return True
+                else:
+                    text = await response.text()
+                    _LOGGER.error(f"Failed to set export rule: {response.status} - {text}")
+                    return False
+
+        except Exception as e:
+            _LOGGER.error(f"Error setting export rule: {e}")
+            return False
+
+    async def _disable_curtailment_for_ev(self, state: AutoScheduleState) -> bool:
+        """Disable curtailment to allow full solar production for EV charging.
+
+        When solar surplus EV charging starts, we want to use all available solar
+        rather than curtailing it. This sets export rule to 'pv_only' and marks
+        that we've overridden the curtailment system.
+
+        Args:
+            state: The vehicle's auto-schedule state
+
+        Returns:
+            True if curtailment was disabled (or already disabled)
+        """
+        if state.curtailment_override_active:
+            return True  # Already overridden
+
+        # Get current export rule
+        current_rule = await self._get_current_export_rule()
+        if current_rule is None:
+            _LOGGER.debug("Could not get current export rule, skipping curtailment override")
+            return False
+
+        # Only override if currently curtailed (export = never)
+        if current_rule != "never":
+            _LOGGER.debug(f"Export rule is '{current_rule}', no curtailment override needed")
+            return True
+
+        # Save original rule and set to pv_only to allow full solar production
+        state.original_export_rule = current_rule
+        if await self._set_export_rule("pv_only"):
+            state.curtailment_override_active = True
+            _LOGGER.info(
+                f"☀️ EV Charging: Disabled curtailment for solar surplus charging "
+                f"(export rule: never → pv_only)"
+            )
+
+            # Mark this as EV override so curtailment scheduler doesn't immediately revert it
+            from ..const import DOMAIN
+            entry_data = self.hass.data.setdefault(DOMAIN, {}).setdefault(self.config_entry.entry_id, {})
+            entry_data["ev_curtailment_override"] = True
+            entry_data["cached_export_rule"] = "pv_only"
+
+            return True
+        return False
+
+    async def _restore_curtailment(self, state: AutoScheduleState) -> None:
+        """Restore curtailment after EV charging stops.
+
+        Args:
+            state: The vehicle's auto-schedule state
+        """
+        if not state.curtailment_override_active:
+            return
+
+        # Clear the EV override flag first
+        from ..const import DOMAIN
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
+        if entry_data:
+            entry_data.pop("ev_curtailment_override", None)
+
+        # Restore original export rule if we saved one
+        if state.original_export_rule:
+            if await self._set_export_rule(state.original_export_rule):
+                _LOGGER.info(
+                    f"☀️ EV Charging: Restored curtailment after charging stopped "
+                    f"(export rule: pv_only → {state.original_export_rule})"
+                )
+                # Update cached rule
+                if entry_data:
+                    entry_data["cached_export_rule"] = state.original_export_rule
+            else:
+                _LOGGER.warning("Failed to restore export rule after EV charging")
+
+        state.curtailment_override_active = False
+        state.original_export_rule = None
+
     async def _start_charging(
         self,
         vehicle_id: str,
@@ -2613,6 +2823,9 @@ class AutoScheduleExecutor:
         # Determine mode based on source
         if source == "solar_surplus":
             dynamic_mode = "solar_surplus"
+            # Disable curtailment to allow full solar production for EV charging
+            # This prevents solar being curtailed when we could use it to charge the EV
+            await self._disable_curtailment_for_ev(state)
         else:
             dynamic_mode = "battery_target"
 
@@ -2684,6 +2897,9 @@ class AutoScheduleExecutor:
             # Restore backup reserve if requested (EV charging complete)
             if restore_backup_reserve:
                 await self._restore_backup_reserve(state)
+
+            # Always restore curtailment when stopping (if it was overridden)
+            await self._restore_curtailment(state)
 
         except Exception as e:
             _LOGGER.error(f"Auto-schedule: Error stopping charging for {vehicle_id}: {e}")

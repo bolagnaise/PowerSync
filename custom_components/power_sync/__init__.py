@@ -7686,6 +7686,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.debug("Solar curtailment is disabled, skipping check")
             return
 
+        # Skip if EV charging has overridden curtailment to allow full solar production
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        if entry_data.get("ev_curtailment_override"):
+            _LOGGER.info("☀️ Solar curtailment skipped - EV charging using solar surplus")
+            return
+
         # Skip if no Amber coordinator (AEMO-only mode) - curtailment requires Amber prices
         if not amber_coordinator:
             _LOGGER.debug("Solar curtailment skipped - no Amber coordinator (AEMO-only mode)")
@@ -7981,6 +7987,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         if not curtailment_enabled:
             _LOGGER.debug("Solar curtailment is disabled, skipping check")
+            return
+
+        # Skip if EV charging has overridden curtailment to allow full solar production
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        if entry_data.get("ev_curtailment_override"):
+            _LOGGER.info("☀️ Solar curtailment skipped - EV charging using solar surplus")
             return
 
         _LOGGER.info("=== Starting solar curtailment check (WebSocket event-driven) ===")
