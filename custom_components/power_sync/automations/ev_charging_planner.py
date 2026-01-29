@@ -752,6 +752,14 @@ class PriceForecaster:
                     f"{forecasts[min(12, len(forecasts)-1)].import_cents:.1f}c in 12h"
                 )
 
+                # Log any free/cheap periods found
+                free_periods = [(f.hour, f.import_cents, f.period) for f in forecasts if f.import_cents <= 0]
+                cheap_periods = [(f.hour, f.import_cents, f.period) for f in forecasts if 0 < f.import_cents <= 10]
+                if free_periods:
+                    _LOGGER.info(f"⚡ Found {len(free_periods)} FREE periods (0c): {[f[0][11:16] for f in free_periods[:5]]}")
+                if cheap_periods:
+                    _LOGGER.info(f"💰 Found {len(cheap_periods)} cheap periods (≤10c): {[(f[0][11:16], f'{f[1]:.0f}c') for f in cheap_periods[:5]]}")
+
             return forecasts
 
         except Exception as e:
@@ -784,13 +792,18 @@ class PriceForecaster:
                     if from_hour <= to_hour:
                         # Normal period (e.g., 10:00 to 14:00)
                         if from_hour <= hour < to_hour:
+                            _LOGGER.debug(
+                                f"TOU match: hour={hour}, dow={tesla_dow} -> {period_name} "
+                                f"(from_hour={from_hour}, to_hour={to_hour})"
+                            )
                             return period_name
                     else:
                         # Overnight period (e.g., 21:00 to 10:00)
                         if hour >= from_hour or hour < to_hour:
                             return period_name
 
-        # Default fallback
+        # Default fallback - log when we fall back to ALL
+        _LOGGER.debug(f"TOU fallback: hour={hour}, dow={tesla_dow} -> ALL (no match found)")
         return "ALL"
 
     async def _estimate_tou_prices(self, hours: int) -> List[PriceForecast]:
@@ -2082,7 +2095,7 @@ class AutoScheduleExecutor:
         for vehicle_id, settings in self._settings.items():
             if not settings.enabled:
                 # Restore backup reserve and curtailment if modified and auto-schedule is now disabled
-                state = self._states.get(vehicle_id)
+                state = self._state.get(vehicle_id)
                 if state:
                     if state.backup_reserve_modified:
                         _LOGGER.info(
