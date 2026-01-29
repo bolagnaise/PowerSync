@@ -542,7 +542,7 @@ class PriceForecaster:
         Returns:
             List of PriceForecast objects
         """
-        from ..const import CONF_ELECTRICITY_PROVIDER
+        from ..const import CONF_ELECTRICITY_PROVIDER, CONF_AMBER_API_TOKEN
 
         # Get electricity provider
         electricity_provider = self.config_entry.options.get(
@@ -550,14 +550,18 @@ class PriceForecaster:
             self.config_entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
         )
 
-        if electricity_provider in ("amber", "flow_power"):
-            # Try Amber forecast
+        # Always try Amber forecast first if configured (even for Globird)
+        # SIG Energy/Tesla tariffs use Amber wholesale pricing, so Amber forecast
+        # gives us the best forward-looking price data
+        amber_token = self.config_entry.data.get(CONF_AMBER_API_TOKEN)
+        if amber_token:
             amber_forecast = await self._get_amber_forecast(hours)
             if amber_forecast:
+                _LOGGER.debug(f"Using Amber forecast for {electricity_provider} provider")
                 return amber_forecast
 
-        elif electricity_provider in ("globird", "aemo_vpp"):
-            # Try Tesla tariff forecast
+        # Fall back to Tesla tariff TOU schedule (fixed rates per period)
+        if electricity_provider in ("globird", "aemo_vpp"):
             tariff_forecast = await self._get_tariff_forecast(hours)
             if tariff_forecast:
                 return tariff_forecast
