@@ -1038,7 +1038,10 @@ class ChargingPlanner:
                     target_time_local = target_time.astimezone(local_tz).replace(tzinfo=None)
                 except Exception:
                     target_time_local = target_time.replace(tzinfo=None)
-            hours_available = max(1, int((target_time_local - now).total_seconds() / 3600))
+            # Use ceil to ensure we include the final hour up to target time
+            # Add 1 extra hour as buffer to ensure we capture all available cheap windows
+            import math
+            hours_available = max(1, math.ceil((target_time_local - now).total_seconds() / 3600) + 1)
         else:
             hours_available = 24
 
@@ -1342,7 +1345,13 @@ class ChargingPlanner:
                 })
 
             # Grid option
-            grid_power = charger_power_kw - max(0, solar_available)
+            # When grid is free (0c) or negative, use full charger power - don't reduce for solar
+            # Solar forecast is uncertain, but free grid is guaranteed
+            if price.import_cents <= 0:
+                grid_power = charger_power_kw  # Full power when grid is free/negative
+            else:
+                grid_power = charger_power_kw - max(0, solar_available)
+
             if grid_power > 0.5:  # At least 0.5kW from grid
                 charging_options.append({
                     "hour": price.hour,
@@ -1513,7 +1522,9 @@ class ChargingPlanner:
             except Exception:
                 target_time_local = target_time.replace(tzinfo=None)
 
-        hours_available = max(1, int((target_time_local - now).total_seconds() / 3600))
+        # Use ceil to ensure we include the final hour up to target time
+        import math
+        hours_available = max(1, math.ceil((target_time_local - now).total_seconds() / 3600) + 1)
 
         if hours_needed > hours_available:
             # Can't meet target even charging continuously
