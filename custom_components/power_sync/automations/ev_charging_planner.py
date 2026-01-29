@@ -1717,8 +1717,8 @@ class AutoScheduleExecutor:
         self._last_cache_save: Optional[datetime] = None
         self._cache_save_interval = timedelta(minutes=5)  # Save cache every 5 minutes max
 
-        # Plan regeneration interval (regenerate every 15 minutes)
-        self._plan_update_interval = timedelta(minutes=15)
+        # Plan regeneration interval (regenerate every 5 minutes to match Amber/AEMO pricing)
+        self._plan_update_interval = timedelta(minutes=5)
 
     async def load_settings(self, store) -> None:
         """Load settings from storage."""
