@@ -2175,15 +2175,29 @@ class AutoScheduleExecutor:
         # - Single phase: 5A × 230V = 1.15kW
         # - Three phase: 5A × 230V × 3 = 3.45kW
         if should_charge and source == "solar_surplus":
-            min_surplus = settings.get_min_surplus_kw()
-            if current_surplus_kw < min_surplus:
+            # Get solar surplus config to check min_battery_soc
+            solar_config = await self._get_solar_surplus_config()
+            min_battery_for_ev = solar_config.get("min_battery_soc", 80)
+
+            # Check if battery needs priority (battery below threshold)
+            if battery_soc < min_battery_for_ev:
                 should_charge = False
-                reason = f"Surplus {current_surplus_kw:.1f}kW < min {min_surplus:.1f}kW"
+                reason = f"Battery {battery_soc:.0f}% < {min_battery_for_ev}% (charging battery first)"
                 _LOGGER.info(
-                    f"Auto-schedule: In solar window but no surplus - "
-                    f"solar={solar_power_kw:.1f}kW, load={load_power_kw:.1f}kW, "
-                    f"surplus={current_surplus_kw:.1f}kW < {min_surplus:.1f}kW needed (phases={settings.phases})"
+                    f"Auto-schedule: Solar surplus blocked - battery at {battery_soc:.0f}% "
+                    f"needs to reach {min_battery_for_ev}% before EV charging"
                 )
+            else:
+                # Battery is above threshold, check surplus requirement
+                min_surplus = settings.get_min_surplus_kw()
+                if current_surplus_kw < min_surplus:
+                    should_charge = False
+                    reason = f"Surplus {current_surplus_kw:.1f}kW < min {min_surplus:.1f}kW"
+                    _LOGGER.info(
+                        f"Auto-schedule: In solar window but no surplus - "
+                        f"solar={solar_power_kw:.1f}kW, load={load_power_kw:.1f}kW, "
+                        f"surplus={current_surplus_kw:.1f}kW < {min_surplus:.1f}kW needed (phases={settings.phases})"
+                    )
 
         # Find current window (if in one)
         current_window = None
@@ -2324,6 +2338,36 @@ class AutoScheduleExecutor:
         """Check if this is a SigEnergy system (vs Tesla Powerwall)."""
         from ..const import CONF_SIGENERGY_STATION_ID
         return bool(self.config_entry.data.get(CONF_SIGENERGY_STATION_ID))
+
+    async def _get_solar_surplus_config(self) -> dict:
+        """Get the solar surplus config from storage.
+
+        Returns:
+            Config dict with min_battery_soc, household_buffer_kw, etc.
+        """
+        try:
+            from ..const import DOMAIN
+            entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
+
+            # Try to get from automation_store
+            automation_store = entry_data.get("automation_store")
+            if automation_store:
+                stored_data = getattr(automation_store, '_data', {}) or {}
+                config = stored_data.get("solar_surplus_config", {})
+                if config:
+                    return config
+
+            # Return defaults
+            return {
+                "enabled": False,
+                "household_buffer_kw": 0.5,
+                "sustained_surplus_minutes": 2,
+                "stop_delay_minutes": 5,
+                "min_battery_soc": 80,
+            }
+        except Exception as e:
+            _LOGGER.debug(f"Failed to get solar surplus config: {e}")
+            return {"min_battery_soc": 80}
 
     async def _get_sigenergy_controller(self):
         """Get a SigEnergy controller instance."""
