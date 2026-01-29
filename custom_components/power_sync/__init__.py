@@ -9526,7 +9526,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # ======================================================================
 
     async def handle_set_backup_reserve(call: ServiceCall) -> None:
-        """Set the Powerwall backup reserve percentage."""
+        """Set the battery backup reserve percentage.
+
+        Supports both Tesla Powerwall and SigEnergy systems.
+        """
         percent = call.data.get("percent")
         if percent is None:
             _LOGGER.error("Missing 'percent' parameter for set_backup_reserve")
@@ -9543,34 +9546,77 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         _LOGGER.info(f"🔋 Setting backup reserve to {percent}%")
 
-        try:
-            current_token, provider = get_tesla_api_token(hass, entry)
-            site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
-            if not site_id or not current_token:
-                _LOGGER.error("Missing Tesla site ID or token for set_backup_reserve")
-                return
+        # Check if this is a SigEnergy system
+        is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
 
-            session = async_get_clientsession(hass)
-            headers = {
-                "Authorization": f"Bearer {current_token}",
-                "Content-Type": "application/json",
-            }
-            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+        if is_sigenergy:
+            # SigEnergy via Modbus
+            try:
+                from .inverters.sigenergy import SigenergyController
 
-            async with session.post(
-                f"{api_base}/api/1/energy_sites/{site_id}/backup",
-                headers=headers,
-                json={"backup_reserve_percent": percent},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status == 200:
-                    _LOGGER.info(f"✅ Backup reserve set to {percent}%")
+                modbus_host = entry.options.get(
+                    CONF_SIGENERGY_MODBUS_HOST,
+                    entry.data.get(CONF_SIGENERGY_MODBUS_HOST)
+                )
+                if not modbus_host:
+                    _LOGGER.error("SigEnergy Modbus host not configured for set_backup_reserve")
+                    return
+
+                modbus_port = entry.options.get(
+                    CONF_SIGENERGY_MODBUS_PORT,
+                    entry.data.get(CONF_SIGENERGY_MODBUS_PORT, 502)
+                )
+                modbus_slave_id = entry.options.get(
+                    CONF_SIGENERGY_MODBUS_SLAVE_ID,
+                    entry.data.get(CONF_SIGENERGY_MODBUS_SLAVE_ID, 247)
+                )
+
+                controller = SigenergyController(
+                    host=modbus_host,
+                    port=modbus_port,
+                    slave_id=modbus_slave_id,
+                )
+
+                success = await controller.set_backup_reserve(percent)
+                await controller.disconnect()
+
+                if success:
+                    _LOGGER.info(f"✅ SigEnergy backup reserve set to {percent}%")
                 else:
-                    text = await response.text()
-                    _LOGGER.error(f"Failed to set backup reserve: {response.status} - {text}")
+                    _LOGGER.error(f"Failed to set SigEnergy backup reserve")
 
-        except Exception as e:
-            _LOGGER.error(f"Error setting backup reserve: {e}", exc_info=True)
+            except Exception as e:
+                _LOGGER.error(f"Error setting SigEnergy backup reserve: {e}", exc_info=True)
+        else:
+            # Tesla Powerwall via Fleet API
+            try:
+                current_token, provider = get_tesla_api_token(hass, entry)
+                site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+                if not site_id or not current_token:
+                    _LOGGER.error("Missing Tesla site ID or token for set_backup_reserve")
+                    return
+
+                session = async_get_clientsession(hass)
+                headers = {
+                    "Authorization": f"Bearer {current_token}",
+                    "Content-Type": "application/json",
+                }
+                api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+                async with session.post(
+                    f"{api_base}/api/1/energy_sites/{site_id}/backup",
+                    headers=headers,
+                    json={"backup_reserve_percent": percent},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 200:
+                        _LOGGER.info(f"✅ Tesla backup reserve set to {percent}%")
+                    else:
+                        text = await response.text()
+                        _LOGGER.error(f"Failed to set Tesla backup reserve: {response.status} - {text}")
+
+            except Exception as e:
+                _LOGGER.error(f"Error setting Tesla backup reserve: {e}", exc_info=True)
 
     async def handle_set_operation_mode(call: ServiceCall) -> None:
         """Set the Powerwall operation mode."""

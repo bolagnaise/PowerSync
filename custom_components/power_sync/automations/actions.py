@@ -2,7 +2,7 @@
 Action execution logic for HA automations.
 
 Supported actions:
-- set_backup_reserve: Set battery backup reserve percentage (Tesla only)
+- set_backup_reserve: Set battery backup reserve percentage (Tesla/Sigenergy)
 - preserve_charge: Prevent battery discharge (Tesla: set export to "never", Sigenergy: set discharge to 0)
 - set_operation_mode: Set Powerwall operation mode (Tesla only)
 - force_discharge: Force battery discharge for a duration (Tesla/Sigenergy)
@@ -492,11 +492,10 @@ async def _action_set_backup_reserve(
     config_entry: ConfigEntry,
     params: Dict[str, Any]
 ) -> bool:
-    """Set battery backup reserve percentage (Tesla only)."""
-    if _is_sigenergy(config_entry):
-        _LOGGER.warning("set_backup_reserve not supported for Sigenergy")
-        return False
+    """Set battery backup reserve percentage.
 
+    Supports both Tesla Powerwall and SigEnergy systems.
+    """
     from ..const import DOMAIN, SERVICE_SET_BACKUP_RESERVE
 
     # Accept both "percent" and "reserve_percent" for flexibility

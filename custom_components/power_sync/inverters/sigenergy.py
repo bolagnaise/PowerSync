@@ -44,6 +44,9 @@ class SigenergyController(InverterController):
     REG_PCS_EXPORT_LIMIT = 40042          # PCS export limit (U32, gain 1000)
     REG_ESS_MAX_CHARGE_LIMIT = 40032      # ESS max charging (U32, gain 1000, kW)
     REG_ESS_MAX_DISCHARGE_LIMIT = 40034   # ESS max discharging (U32, gain 1000, kW)
+    REG_ESS_BACKUP_SOC = 40046            # ESS backup SOC (U16, gain 10, %)
+    REG_ESS_CHARGE_CUTOFF_SOC = 40047     # ESS charge cut-off SOC (U16, gain 10, %)
+    REG_ESS_DISCHARGE_CUTOFF_SOC = 40048  # ESS discharge cut-off SOC (U16, gain 10, %)
 
     # Input registers (read-only) - Real-time power
     REG_PV_POWER = 30035                  # PV power (S32, gain 1000, kW)
@@ -797,6 +800,123 @@ class SigenergyController(InverterController):
 
         except Exception as e:
             _LOGGER.error(f"Error setting discharge rate limit: {e}")
+            return False
+
+    async def get_backup_reserve(self) -> Optional[int]:
+        """Get the current backup reserve (backup SOC) percentage.
+
+        Returns:
+            Backup reserve percentage (0-100) or None on error
+        """
+        try:
+            if not await self.connect():
+                return None
+
+            regs = await self._read_holding_registers(self.REG_ESS_BACKUP_SOC, 1)
+            if regs and len(regs) >= 1:
+                # U16 with gain 10
+                reserve_pct = regs[0] / self.GAIN_SOC
+                _LOGGER.debug(f"Sigenergy backup reserve: {reserve_pct}%")
+                return int(reserve_pct)
+            return None
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting backup reserve: {e}")
+            return None
+
+    async def set_backup_reserve(self, percent: int) -> bool:
+        """Set the backup reserve (backup SOC) percentage.
+
+        This is the minimum battery level that will be preserved.
+        The battery won't discharge below this level except in backup/outage mode.
+
+        Args:
+            percent: Backup reserve percentage (0-100)
+
+        Returns:
+            True if successful
+        """
+        try:
+            if not await self.connect():
+                return False
+
+            if percent < 0:
+                percent = 0
+            if percent > 100:
+                percent = 100
+
+            # U16 with gain 10
+            scaled_value = int(percent * self.GAIN_SOC)
+
+            _LOGGER.info(f"Setting Sigenergy backup reserve to {percent}%")
+            success = await self._write_holding_registers(self.REG_ESS_BACKUP_SOC, [scaled_value])
+
+            if success:
+                _LOGGER.info(f"✅ Successfully set Sigenergy backup reserve to {percent}%")
+            else:
+                _LOGGER.error(f"Failed to set Sigenergy backup reserve")
+
+            return success
+
+        except Exception as e:
+            _LOGGER.error(f"Error setting backup reserve: {e}")
+            return False
+
+    async def get_discharge_cutoff_soc(self) -> Optional[int]:
+        """Get the discharge cut-off SOC percentage.
+
+        Returns:
+            Discharge cut-off SOC percentage (0-100) or None on error
+        """
+        try:
+            if not await self.connect():
+                return None
+
+            regs = await self._read_holding_registers(self.REG_ESS_DISCHARGE_CUTOFF_SOC, 1)
+            if regs and len(regs) >= 1:
+                cutoff_pct = regs[0] / self.GAIN_SOC
+                _LOGGER.debug(f"Sigenergy discharge cut-off SOC: {cutoff_pct}%")
+                return int(cutoff_pct)
+            return None
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting discharge cut-off SOC: {e}")
+            return None
+
+    async def set_discharge_cutoff_soc(self, percent: int) -> bool:
+        """Set the discharge cut-off SOC percentage.
+
+        The battery will stop discharging when it reaches this level.
+
+        Args:
+            percent: Discharge cut-off SOC percentage (0-100)
+
+        Returns:
+            True if successful
+        """
+        try:
+            if not await self.connect():
+                return False
+
+            if percent < 0:
+                percent = 0
+            if percent > 100:
+                percent = 100
+
+            scaled_value = int(percent * self.GAIN_SOC)
+
+            _LOGGER.info(f"Setting Sigenergy discharge cut-off SOC to {percent}%")
+            success = await self._write_holding_registers(self.REG_ESS_DISCHARGE_CUTOFF_SOC, [scaled_value])
+
+            if success:
+                _LOGGER.info(f"✅ Successfully set Sigenergy discharge cut-off SOC to {percent}%")
+            else:
+                _LOGGER.error(f"Failed to set Sigenergy discharge cut-off SOC")
+
+            return success
+
+        except Exception as e:
+            _LOGGER.error(f"Error setting discharge cut-off SOC: {e}")
             return False
 
     async def __aenter__(self):

@@ -2320,8 +2320,74 @@ class AutoScheduleExecutor:
             _LOGGER.debug(f"Failed to get current price: {e}")
             return 25.0  # Default shoulder rate
 
+    def _is_sigenergy_system(self) -> bool:
+        """Check if this is a SigEnergy system (vs Tesla Powerwall)."""
+        from ..const import CONF_SIGENERGY_STATION_ID
+        return bool(self.config_entry.data.get(CONF_SIGENERGY_STATION_ID))
+
+    async def _get_sigenergy_controller(self):
+        """Get a SigEnergy controller instance."""
+        from ..const import (
+            CONF_SIGENERGY_MODBUS_HOST,
+            CONF_SIGENERGY_MODBUS_PORT,
+            CONF_SIGENERGY_MODBUS_SLAVE_ID,
+        )
+        from ..inverters.sigenergy import SigenergyController
+
+        modbus_host = self.config_entry.options.get(
+            CONF_SIGENERGY_MODBUS_HOST,
+            self.config_entry.data.get(CONF_SIGENERGY_MODBUS_HOST)
+        )
+        if not modbus_host:
+            _LOGGER.warning("SigEnergy Modbus host not configured")
+            return None
+
+        modbus_port = self.config_entry.options.get(
+            CONF_SIGENERGY_MODBUS_PORT,
+            self.config_entry.data.get(CONF_SIGENERGY_MODBUS_PORT, 502)
+        )
+        modbus_slave_id = self.config_entry.options.get(
+            CONF_SIGENERGY_MODBUS_SLAVE_ID,
+            self.config_entry.data.get(CONF_SIGENERGY_MODBUS_SLAVE_ID, 247)
+        )
+
+        return SigenergyController(
+            host=modbus_host,
+            port=modbus_port,
+            slave_id=modbus_slave_id,
+        )
+
     async def _get_current_backup_reserve(self) -> Optional[int]:
-        """Get the current Powerwall backup reserve percentage."""
+        """Get the current battery backup reserve percentage.
+
+        Supports both Tesla Powerwall and SigEnergy systems.
+        """
+        # Check if SigEnergy system
+        if self._is_sigenergy_system():
+            return await self._get_sigenergy_backup_reserve()
+
+        # Tesla Powerwall
+        return await self._get_tesla_backup_reserve()
+
+    async def _get_sigenergy_backup_reserve(self) -> Optional[int]:
+        """Get backup reserve from SigEnergy via Modbus."""
+        try:
+            controller = await self._get_sigenergy_controller()
+            if not controller:
+                return None
+
+            reserve = await controller.get_backup_reserve()
+            await controller.disconnect()
+
+            _LOGGER.debug(f"SigEnergy backup reserve: {reserve}%")
+            return reserve
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting SigEnergy backup reserve: {e}")
+            return None
+
+    async def _get_tesla_backup_reserve(self) -> Optional[int]:
+        """Get backup reserve from Tesla Powerwall via Fleet API."""
         try:
             from ..const import (
                 CONF_TESLA_ENERGY_SITE_ID,
@@ -2338,7 +2404,6 @@ class AutoScheduleExecutor:
                 _LOGGER.debug("No Tesla site ID or token for backup reserve")
                 return None
 
-            from aiohttp import ClientSession
             from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
             session = async_get_clientsession(self.hass)
@@ -2357,18 +2422,48 @@ class AutoScheduleExecutor:
                     data = await response.json()
                     site_info = data.get("response", {})
                     reserve = site_info.get("backup_reserve_percent")
-                    _LOGGER.debug(f"Current backup reserve: {reserve}%")
+                    _LOGGER.debug(f"Tesla backup reserve: {reserve}%")
                     return reserve
                 else:
-                    _LOGGER.warning(f"Failed to get backup reserve: {response.status}")
+                    _LOGGER.warning(f"Failed to get Tesla backup reserve: {response.status}")
                     return None
 
         except Exception as e:
-            _LOGGER.error(f"Error getting backup reserve: {e}")
+            _LOGGER.error(f"Error getting Tesla backup reserve: {e}")
             return None
 
     async def _set_backup_reserve(self, percent: int) -> bool:
-        """Set the Powerwall backup reserve percentage."""
+        """Set the battery backup reserve percentage.
+
+        Supports both Tesla Powerwall and SigEnergy systems.
+        """
+        # Check if SigEnergy system
+        if self._is_sigenergy_system():
+            return await self._set_sigenergy_backup_reserve(percent)
+
+        # Tesla Powerwall
+        return await self._set_tesla_backup_reserve(percent)
+
+    async def _set_sigenergy_backup_reserve(self, percent: int) -> bool:
+        """Set backup reserve on SigEnergy via Modbus."""
+        try:
+            controller = await self._get_sigenergy_controller()
+            if not controller:
+                return False
+
+            success = await controller.set_backup_reserve(percent)
+            await controller.disconnect()
+
+            if success:
+                _LOGGER.info(f"✅ EV Charging: Set SigEnergy backup reserve to {percent}%")
+            return success
+
+        except Exception as e:
+            _LOGGER.error(f"Error setting SigEnergy backup reserve: {e}")
+            return False
+
+    async def _set_tesla_backup_reserve(self, percent: int) -> bool:
+        """Set backup reserve on Tesla Powerwall via Fleet API."""
         try:
             from ..const import (
                 CONF_TESLA_ENERGY_SITE_ID,
@@ -2401,15 +2496,15 @@ class AutoScheduleExecutor:
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as response:
                 if response.status == 200:
-                    _LOGGER.info(f"✅ EV Charging: Set backup reserve to {percent}%")
+                    _LOGGER.info(f"✅ EV Charging: Set Tesla backup reserve to {percent}%")
                     return True
                 else:
                     text = await response.text()
-                    _LOGGER.error(f"Failed to set backup reserve: {response.status} - {text}")
+                    _LOGGER.error(f"Failed to set Tesla backup reserve: {response.status} - {text}")
                     return False
 
         except Exception as e:
-            _LOGGER.error(f"Error setting backup reserve: {e}")
+            _LOGGER.error(f"Error setting Tesla backup reserve: {e}")
             return False
 
     async def _start_charging(

@@ -76,7 +76,7 @@ restore_normal:
 
 set_backup_reserve:
   name: Set Backup Reserve
-  description: Set the Powerwall backup reserve percentage (0-100%)
+  description: Set the battery backup reserve percentage (0-100%). Supports both Tesla Powerwall and SigEnergy systems.
   fields:
     percent:
       name: Percent
