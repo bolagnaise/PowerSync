@@ -87,6 +87,7 @@ async def _get_tesla_ev_entity(
 
     # Find devices from Tesla integrations
     tesla_devices = []
+    all_domains_found = set()
     for device in device_registry.devices.values():
         for identifier in device.identifiers:
             # Use index access instead of tuple unpacking (identifiers can have >2 values)
@@ -94,15 +95,19 @@ async def _get_tesla_ev_entity(
                 continue
             domain = identifier[0]
             identifier_value = identifier[1]
+            all_domains_found.add(domain)
             if domain in TESLA_EV_INTEGRATIONS:
                 # Check if it's a vehicle (VIN is 17 chars, non-numeric)
                 if len(str(identifier_value)) == 17 and not str(identifier_value).isdigit():
                     if vehicle_vin is None or identifier_value == vehicle_vin:
                         tesla_devices.append(device)
+                        _LOGGER.debug(f"Found Tesla device: {device.name}, identifier: {identifier}")
                         break
+                else:
+                    _LOGGER.debug(f"Tesla device skipped (not VIN): {device.name}, identifier: {identifier_value}")
 
     if not tesla_devices:
-        _LOGGER.warning("No Tesla EV devices found in device registry (looking for tesla_fleet/teslemetry integrations)")
+        _LOGGER.warning(f"No Tesla EV devices found. Looking for domains {TESLA_EV_INTEGRATIONS}, found domains: {sorted(all_domains_found)}")
         return None
 
     # Use first vehicle if no specific VIN provided
