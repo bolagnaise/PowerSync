@@ -1180,7 +1180,16 @@ class ChargingPlanner:
 
         # Sort by cost (cheapest first)
         # Secondary sort by time to prefer earlier slots at same price
-        charging_options.sort(key=lambda x: (x["cost_cents"], x["hour_dt"]))
+        # Third: when grid is free (0c), prefer it over solar (grid is guaranteed, solar is forecast)
+        def sort_key(x):
+            cost = x["cost_cents"]
+            time = x["hour_dt"]
+            # When cost is 0 (free), prefer grid over solar
+            # 0 = grid (preferred), 1 = solar
+            source_pref = 0 if x["source"].startswith("grid") and cost <= 0 else 1
+            return (cost, time, source_pref)
+
+        charging_options.sort(key=sort_key)
 
         # Log top 5 cheapest options
         for i, opt in enumerate(charging_options[:5]):
