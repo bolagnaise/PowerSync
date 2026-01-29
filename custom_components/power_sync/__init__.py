@@ -10770,6 +10770,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     # buy_price is already in cents from fetch_tesla_tariff_schedule
                     current_price = tariff_schedule.get("buy_price")
 
+            # Fallback to Sigenergy tariff (for Sigenergy users with Amber)
+            if current_price is None:
+                sigenergy_tariff = entry_data.get("sigenergy_tariff", {})
+                if sigenergy_tariff:
+                    buy_prices = sigenergy_tariff.get("buy_prices", [])
+                    if buy_prices:
+                        # Find current time slot price
+                        # Format: [{"timeRange": "10:00-10:30", "price": 25.0}, ...]
+                        now = datetime.now()
+                        current_time = f"{now.hour:02d}:{30 if now.minute >= 30 else 0:02d}"
+                        for slot in buy_prices:
+                            time_range = slot.get("timeRange", "")
+                            if time_range.startswith(current_time):
+                                current_price = slot.get("price")
+                                break
+
             # Evaluate auto-schedule executor (handles Smart Schedule mode with per-vehicle settings)
             executor = get_auto_schedule_executor()
             if executor and live_status:

@@ -562,6 +562,11 @@ class PriceForecaster:
             if tariff_forecast:
                 return tariff_forecast
 
+        # Try Sigenergy tariff if available (for Sigenergy users with Amber)
+        sigenergy_forecast = await self._get_sigenergy_tariff_forecast(hours)
+        if sigenergy_forecast:
+            return sigenergy_forecast
+
         # Fall back to TOU estimation
         return await self._estimate_tou_prices(hours)
 
@@ -764,6 +769,94 @@ class PriceForecaster:
 
         except Exception as e:
             _LOGGER.warning(f"Could not get tariff forecast: {e}")
+            return None
+
+    async def _get_sigenergy_tariff_forecast(self, hours: int) -> Optional[List[PriceForecast]]:
+        """Get forecast from Sigenergy tariff schedule (for Sigenergy users with Amber).
+
+        Sigenergy tariff is stored as list of 30-min slots:
+        {"buy_prices": [{"timeRange": "10:00-10:30", "price": 25.0}, ...]}
+        """
+        try:
+            from ..const import DOMAIN
+
+            entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
+            sigenergy_tariff = entry_data.get("sigenergy_tariff", {})
+
+            if not sigenergy_tariff:
+                return None
+
+            buy_prices = sigenergy_tariff.get("buy_prices", [])
+            sell_prices = sigenergy_tariff.get("sell_prices", [])
+
+            if not buy_prices:
+                return None
+
+            # Convert time slot prices to dict for fast lookup
+            # Format: {("10", "00"): 25.0, ("10", "30"): 28.0, ...}
+            buy_price_map = {}
+            sell_price_map = {}
+
+            for slot in buy_prices:
+                time_range = slot.get("timeRange", "")
+                if "-" in time_range:
+                    start_time = time_range.split("-")[0]
+                    if ":" in start_time:
+                        h, m = start_time.split(":")
+                        buy_price_map[(h, m)] = slot.get("price", 30.0)
+
+            for slot in sell_prices:
+                time_range = slot.get("timeRange", "")
+                if "-" in time_range:
+                    start_time = time_range.split("-")[0]
+                    if ":" in start_time:
+                        h, m = start_time.split(":")
+                        sell_price_map[(h, m)] = slot.get("price", 8.0)
+
+            # Generate hourly forecasts
+            forecasts = []
+            now = datetime.now()
+
+            for h in range(hours):
+                hour_dt = now + timedelta(hours=h)
+                hour_str = f"{hour_dt.hour:02d}"
+
+                # Get price for :00 slot (use as representative for the hour)
+                import_cents = buy_price_map.get((hour_str, "00"), 30.0)
+                export_cents = sell_price_map.get((hour_str, "00"), 8.0)
+
+                # Also check :30 slot and use average if both exist
+                import_30 = buy_price_map.get((hour_str, "30"))
+                export_30 = sell_price_map.get((hour_str, "30"))
+                if import_30 is not None:
+                    import_cents = (import_cents + import_30) / 2
+                if export_30 is not None:
+                    export_cents = (export_cents + export_30) / 2
+
+                # Determine period based on price
+                if import_cents <= 0:
+                    period = "super_offpeak"
+                elif import_cents < 15:
+                    period = "offpeak"
+                elif import_cents > 35:
+                    period = "peak"
+                else:
+                    period = "shoulder"
+
+                forecasts.append(PriceForecast(
+                    hour=hour_dt.isoformat(),
+                    import_cents=import_cents,
+                    export_cents=export_cents,
+                    period=period,
+                ))
+
+            if forecasts:
+                _LOGGER.info(f"Got {len(forecasts)} hours of Sigenergy tariff forecast")
+
+            return forecasts if forecasts else None
+
+        except Exception as e:
+            _LOGGER.warning(f"Could not get Sigenergy tariff forecast: {e}")
             return None
 
     def _find_tou_period(self, tou_periods: dict, hour: int, tesla_dow: int) -> str:
@@ -2357,7 +2450,7 @@ class AutoScheduleExecutor:
                     if buy_price is not None:
                         return buy_price  # Already in cents
 
-            # Fallback: Try tariff schedule for any provider
+            # Fallback: Try tariff schedule for any provider (Amber format with PERIOD_HH_MM keys)
             tariff_schedule = entry_data.get("tariff_schedule", {})
             if tariff_schedule:
                 now = datetime.now()
@@ -2365,6 +2458,20 @@ class AutoScheduleExecutor:
                 buy_prices = tariff_schedule.get("buy_prices", {})
                 if period_key in buy_prices:
                     return buy_prices[period_key] * 100
+
+            # Fallback: Try Sigenergy tariff (for Sigenergy users with Amber)
+            sigenergy_tariff = entry_data.get("sigenergy_tariff", {})
+            if sigenergy_tariff:
+                buy_prices = sigenergy_tariff.get("buy_prices", [])
+                if buy_prices:
+                    # Find current time slot price
+                    # Format: [{"timeRange": "10:00-10:30", "price": 25.0}, ...]
+                    now = datetime.now()
+                    current_time = f"{now.hour:02d}:{30 if now.minute >= 30 else 0:02d}"
+                    for slot in buy_prices:
+                        time_range = slot.get("timeRange", "")
+                        if time_range.startswith(current_time):
+                            return slot.get("price", 30.0)  # Already in cents
 
             # Default fallback based on time of day
             hour = datetime.now().hour

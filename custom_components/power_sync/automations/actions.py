@@ -1968,6 +1968,27 @@ async def _dynamic_ev_update_surplus(
                     import_price = tariff_schedule.get("buy_price", 30.0)
                     export_price = tariff_schedule.get("sell_price", 8.0)
 
+                # Fallback to Sigenergy tariff (for Sigenergy users with Amber)
+                elif entry_data.get("sigenergy_tariff"):
+                    from datetime import datetime
+                    sigenergy_tariff = entry_data.get("sigenergy_tariff", {})
+                    buy_prices = sigenergy_tariff.get("buy_prices", [])
+                    sell_prices = sigenergy_tariff.get("sell_prices", [])
+                    if buy_prices:
+                        now = datetime.now()
+                        current_time = f"{now.hour:02d}:{30 if now.minute >= 30 else 0:02d}"
+                        for slot in buy_prices:
+                            if slot.get("timeRange", "").startswith(current_time):
+                                import_price = slot.get("price", 30.0)
+                                break
+                    if sell_prices:
+                        now = datetime.now()
+                        current_time = f"{now.hour:02d}:{30 if now.minute >= 30 else 0:02d}"
+                        for slot in sell_prices:
+                            if slot.get("timeRange", "").startswith(current_time):
+                                export_price = slot.get("price", 8.0)
+                                break
+
                 # Fallback to stored current_prices
                 else:
                     price_data = entry_data.get("current_prices", {})
