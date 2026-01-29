@@ -1173,18 +1173,34 @@ class ChargingPlanner:
         # Log available options
         if charging_options:
             prices = [opt["cost_cents"] for opt in charging_options]
+            grid_options = [opt for opt in charging_options if opt["source"].startswith("grid")]
+            negative_price_windows = [opt for opt in grid_options if opt["cost_cents"] < 0]
+            free_grid_windows = [opt for opt in grid_options if opt["cost_cents"] == 0]
+
             _LOGGER.info(
                 f"Found {len(charging_options)} charging options, "
                 f"prices range: {min(prices):.1f}c - {max(prices):.1f}c"
             )
 
+            # Log special pricing conditions
+            if negative_price_windows:
+                _LOGGER.info(
+                    f"💰 {len(negative_price_windows)} negative price windows available "
+                    f"(get PAID to charge!) - cheapest: {min(opt['cost_cents'] for opt in negative_price_windows):.1f}c/kWh"
+                )
+            if free_grid_windows:
+                _LOGGER.info(
+                    f"⚡ {len(free_grid_windows)} free grid windows available (0c/kWh) - "
+                    f"preferring over solar forecast"
+                )
+
         # Sort by cost (cheapest first)
         # Secondary sort by time to prefer earlier slots at same price
-        # Third: when grid is free (0c), prefer it over solar (grid is guaranteed, solar is forecast)
+        # Third: when grid is free/negative, prefer it over solar (grid is guaranteed, solar is forecast)
         def sort_key(x):
             cost = x["cost_cents"]
             time = x["hour_dt"]
-            # When cost is 0 (free), prefer grid over solar
+            # When cost is <= 0 (free or negative), prefer grid over solar
             # 0 = grid (preferred), 1 = solar
             source_pref = 0 if x["source"].startswith("grid") and cost <= 0 else 1
             return (cost, time, source_pref)
@@ -1193,9 +1209,14 @@ class ChargingPlanner:
 
         # Log top 5 cheapest options
         for i, opt in enumerate(charging_options[:5]):
+            price_note = ""
+            if opt["cost_cents"] < 0:
+                price_note = " 💰 GET PAID"
+            elif opt["cost_cents"] == 0 and opt["source"].startswith("grid"):
+                price_note = " ⚡ FREE"
             _LOGGER.debug(
                 f"  Option {i+1}: {opt['hour_dt'].strftime('%H:%M')} - "
-                f"{opt['cost_cents']:.1f}c/kWh ({opt['source']})"
+                f"{opt['cost_cents']:.1f}c/kWh ({opt['source']}){price_note}"
             )
 
         # Allocate energy to cheapest windows
