@@ -2062,6 +2062,16 @@ class AutoScheduleExecutor:
         """
         for vehicle_id, settings in self._settings.items():
             if not settings.enabled:
+                # Restore backup reserve if it was modified and auto-schedule is now disabled
+                state = self._states.get(vehicle_id)
+                if state and state.backup_reserve_modified:
+                    _LOGGER.info(
+                        f"Auto-schedule disabled for {vehicle_id}, restoring backup reserve"
+                    )
+                    await self._restore_backup_reserve(state)
+                    # Also stop charging if still active
+                    if state.is_charging:
+                        await self._stop_charging(vehicle_id, settings, state)
                 continue
 
             try:
@@ -2198,7 +2208,8 @@ class AutoScheduleExecutor:
             state.last_decision = "started"
             state.last_decision_reason = reason
         elif not should_charge and state.is_charging:
-            await self._stop_charging(vehicle_id, settings, state)
+            # Restore backup reserve when stopping - we'll set it again when next window starts
+            await self._stop_charging(vehicle_id, settings, state, restore_backup_reserve=True)
             state.last_decision = "stopped"
             state.last_decision_reason = reason
         else:
