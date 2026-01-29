@@ -2790,6 +2790,96 @@ def convert_custom_tariff_to_schedule(custom_tariff: dict) -> dict:
         return {}
 
 
+def get_current_price_from_tariff_schedule(tariff_schedule: dict) -> tuple[float, float, str]:
+    """Calculate current buy/sell price from tariff_schedule TOU periods.
+
+    This recalculates the current TOU period and price in real-time based on
+    the stored TOU periods, ensuring prices update when periods change.
+
+    Args:
+        tariff_schedule: Tariff schedule dict with tou_periods, buy_rates, sell_rates
+
+    Returns:
+        Tuple of (buy_price_cents, sell_price_cents, current_period)
+    """
+    from datetime import datetime as dt
+
+    try:
+        now = dt.now()
+        current_hour = now.hour
+        current_dow = now.weekday()  # Python: 0=Monday, 6=Sunday
+
+        # Get TOU periods and rates
+        tou_periods = tariff_schedule.get("tou_periods", {})
+        buy_rates = tariff_schedule.get("buy_rates", {})
+        sell_rates = tariff_schedule.get("sell_rates", {})
+
+        # If no TOU periods, use cached prices
+        if not tou_periods:
+            return (
+                tariff_schedule.get("buy_price", 25.0),
+                tariff_schedule.get("sell_price", 8.0),
+                tariff_schedule.get("current_period", "UNKNOWN")
+            )
+
+        # Find current TOU period
+        current_period = None
+        for period_name, period_data in tou_periods.items():
+            periods_list = period_data if isinstance(period_data, list) else []
+            for period in periods_list:
+                from_dow = period.get("fromDayOfWeek", 0)
+                to_dow = period.get("toDayOfWeek", 6)
+                from_hour = period.get("fromHour", 0)
+                to_hour = period.get("toHour", 24)
+
+                # Check day of week (Tesla format: 0=Sunday, Python: 0=Monday)
+                tesla_dow = (current_dow + 1) % 7
+                if from_dow <= tesla_dow <= to_dow:
+                    # Handle overnight periods (e.g., 21:00 to 07:00)
+                    if from_hour <= to_hour:
+                        # Normal period
+                        if from_hour <= current_hour < to_hour:
+                            current_period = period_name
+                            break
+                    else:
+                        # Overnight period
+                        if current_hour >= from_hour or current_hour < to_hour:
+                            current_period = period_name
+                            break
+            if current_period:
+                break
+
+        if not current_period:
+            current_period = "OFF_PEAK"  # Default to off-peak
+
+        # Get prices for current period (rates are in $/kWh, convert to cents)
+        # Note: buy_rates may already be in cents if from custom tariff, or $/kWh if from Tesla
+        buy_rate = buy_rates.get(current_period, buy_rates.get("ALL", buy_rates.get("OFF_PEAK", 0.25)))
+        sell_rate = sell_rates.get(current_period, sell_rates.get("ALL", 0.08))
+
+        # Convert to cents if rates appear to be in $/kWh (< 1.0)
+        if buy_rate < 1.0:
+            buy_price_cents = round(buy_rate * 100, 2)
+        else:
+            buy_price_cents = buy_rate
+
+        if sell_rate < 1.0:
+            sell_price_cents = round(sell_rate * 100, 2)
+        else:
+            sell_price_cents = sell_rate
+
+        return (buy_price_cents, sell_price_cents, current_period)
+
+    except Exception as e:
+        _LOGGER.debug(f"Error calculating price from TOU periods: {e}")
+        # Fallback to cached prices
+        return (
+            tariff_schedule.get("buy_price", 25.0),
+            tariff_schedule.get("sell_price", 8.0),
+            "UNKNOWN"
+        )
+
+
 class AutomationsView(HomeAssistantView):
     """HTTP view to manage automations for mobile app."""
 
@@ -5326,6 +5416,7 @@ class PriceRecommendationView(HomeAssistantView):
             import_price_cents = 30.0  # Default
             export_price_cents = 8.0   # Default FiT
             price_source = "default"
+            tariff_info = {}  # Additional tariff metadata for response
 
             # Get electricity provider from config
             electricity_provider = self._config_entry.options.get(
@@ -5355,14 +5446,25 @@ class PriceRecommendationView(HomeAssistantView):
                     _LOGGER.debug(f"Could not read coordinator prices: {e}")
 
             elif electricity_provider in ("globird", "aemo_vpp"):
-                # Globird/AEMO VPP: Read from Tesla tariff
+                # Globird/AEMO VPP: Read from Tesla/custom tariff with real-time TOU
                 try:
                     tariff_prices = await self._fetch_tariff_prices()
                     if tariff_prices:
                         import_price_cents = tariff_prices.get("import_cents", import_price_cents)
                         export_price_cents = tariff_prices.get("export_cents", export_price_cents)
-                        price_source = "tesla_tariff"
-                        _LOGGER.debug(f"Using Tesla tariff prices: import={import_price_cents}c, export={export_price_cents}c")
+                        # Determine source based on tariff type
+                        if tariff_prices.get("is_custom"):
+                            price_source = "custom_tariff"
+                        else:
+                            price_source = "tesla_tariff"
+                        # Capture tariff metadata for response
+                        tariff_info = {
+                            "tariff_name": tariff_prices.get("tariff_name"),
+                            "utility": tariff_prices.get("utility"),
+                            "current_period": tariff_prices.get("current_period"),
+                            "is_custom": tariff_prices.get("is_custom", False),
+                        }
+                        _LOGGER.debug(f"Using {price_source} prices: import={import_price_cents}c, export={export_price_cents}c, period={tariff_info.get('current_period')}")
                 except Exception as e:
                     _LOGGER.debug(f"Could not fetch tariff prices: {e}")
 
@@ -5395,11 +5497,19 @@ class PriceRecommendationView(HomeAssistantView):
                 min_battery_soc=min_battery_soc,
             )
 
-            return web.json_response({
+            # Build response with tariff info if available
+            response = {
                 "success": True,
                 **recommendation,
                 "battery_soc": round(battery_soc, 1),
-            })
+                "price_source": price_source,
+            }
+
+            # Include tariff metadata for custom/Tesla tariff users
+            if tariff_info:
+                response["tariff_info"] = tariff_info
+
+            return web.json_response(response)
 
         except Exception as e:
             _LOGGER.error(f"Error getting price recommendation: {e}", exc_info=True)
@@ -5409,29 +5519,57 @@ class PriceRecommendationView(HomeAssistantView):
             }, status=500)
 
     async def _fetch_tariff_prices(self) -> dict | None:
-        """Fetch current prices from Tesla tariff (for Globird/non-API providers).
+        """Fetch current prices from Tesla/custom tariff (for Globird/non-API providers).
 
-        Returns dict with import_cents and export_cents, or None if unavailable.
-        Uses stored tariff_schedule if available (populated on startup),
-        otherwise fetches from Tesla API.
+        Returns dict with import_cents, export_cents, and tariff metadata.
+        Uses real-time TOU calculation to ensure prices update when periods change.
         """
         try:
             entry_data = self._hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id, {})
 
-            # First, check stored tariff_schedule (populated by fetch_tesla_tariff_schedule on startup)
+            # Check stored tariff_schedule (from Tesla or custom tariff)
             tariff_schedule = entry_data.get("tariff_schedule", {})
-            if tariff_schedule and tariff_schedule.get("buy_price") is not None:
-                return {
-                    "import_cents": tariff_schedule.get("buy_price", 30.0),
-                    "export_cents": tariff_schedule.get("sell_price", 8.0),
-                }
+            if tariff_schedule:
+                # Use real-time TOU calculation if TOU periods are defined
+                if tariff_schedule.get("tou_periods"):
+                    buy_cents, sell_cents, current_period = get_current_price_from_tariff_schedule(tariff_schedule)
+                    return {
+                        "import_cents": buy_cents,
+                        "export_cents": sell_cents,
+                        "current_period": current_period,
+                        "tariff_name": tariff_schedule.get("plan_name", "Custom Tariff"),
+                        "utility": tariff_schedule.get("utility", "Unknown"),
+                        "is_custom": tariff_schedule.get("is_custom", False),
+                    }
+                # Fallback to cached prices
+                elif tariff_schedule.get("buy_price") is not None:
+                    return {
+                        "import_cents": tariff_schedule.get("buy_price", 30.0),
+                        "export_cents": tariff_schedule.get("sell_price", 8.0),
+                        "current_period": tariff_schedule.get("current_period", "UNKNOWN"),
+                        "tariff_name": tariff_schedule.get("plan_name", "Tesla Tariff"),
+                        "utility": tariff_schedule.get("utility", "Tesla"),
+                        "is_custom": tariff_schedule.get("is_custom", False),
+                    }
 
-            # Fallback: Fetch fresh from Tesla API and store it
+            # Fallback: Fetch fresh from Tesla API
             tariff_data = await fetch_tesla_tariff_schedule(self._hass, self._config_entry)
             if tariff_data:
+                # Use real-time TOU calculation if available
+                if tariff_data.get("tou_periods"):
+                    buy_cents, sell_cents, current_period = get_current_price_from_tariff_schedule(tariff_data)
+                else:
+                    buy_cents = tariff_data.get("buy_price", 30.0)
+                    sell_cents = tariff_data.get("sell_price", 8.0)
+                    current_period = tariff_data.get("current_period", "UNKNOWN")
+
                 return {
-                    "import_cents": tariff_data.get("buy_price", 30.0),
-                    "export_cents": tariff_data.get("sell_price", 8.0),
+                    "import_cents": buy_cents,
+                    "export_cents": sell_cents,
+                    "current_period": current_period,
+                    "tariff_name": tariff_data.get("plan_name", "Tesla Tariff"),
+                    "utility": tariff_data.get("utility", "Tesla"),
+                    "is_custom": False,
                 }
 
             return None

@@ -574,17 +574,19 @@ class AutomationEngine:
         return None
 
     async def _async_get_tesla_tariff_prices(self) -> Optional[Dict[str, float]]:
-        """Get current prices from Tesla tariff with caching (for Globird users).
+        """Get current prices from Tesla/custom tariff with real-time TOU calculation.
 
-        Uses the rate plan configured in the Tesla app to calculate current TOU prices.
-        First checks stored tariff_schedule (populated on startup), then falls back to API.
+        Uses the rate plan configured in the Tesla app or custom tariff to calculate
+        current TOU prices. Recalculates from TOU periods to ensure prices update
+        when periods change (e.g., peak → off-peak transitions).
         Returns prices in $/kWh.
         """
         from ..const import DOMAIN
+        from ..__init__ import get_current_price_from_tariff_schedule
 
-        cache_duration_seconds = 300  # 5 minutes
+        cache_duration_seconds = 60  # 1 minute (reduced for TOU accuracy)
 
-        # Check cache
+        # Check cache (shorter duration for TOU accuracy)
         if self._tariff_cache_time:
             cache_age = (datetime.utcnow() - self._tariff_cache_time).total_seconds()
             if cache_age < cache_duration_seconds and self._tariff_cache:
@@ -597,32 +599,56 @@ class AutomationEngine:
         data = self._hass.data[DOMAIN][entry_id]
 
         try:
-            # First, try stored tariff_schedule (populated by fetch_tesla_tariff_schedule on startup)
+            # First, try stored tariff_schedule (from Tesla or custom tariff)
             tariff_schedule = data.get("tariff_schedule", {})
-            if tariff_schedule and tariff_schedule.get("buy_price") is not None:
-                # tariff_schedule has buy_price/sell_price in cents, convert to $/kWh
-                import_price = tariff_schedule.get("buy_price", 30.0) / 100
-                export_price = tariff_schedule.get("sell_price", 8.0) / 100
+            if tariff_schedule:
+                # Use real-time TOU calculation for accurate period pricing
+                if tariff_schedule.get("tou_periods"):
+                    buy_cents, sell_cents, current_period = get_current_price_from_tariff_schedule(tariff_schedule)
+                    import_price = buy_cents / 100  # Convert cents to $/kWh
+                    export_price = sell_cents / 100
 
-                result = {
-                    "import_price": import_price,
-                    "export_price": export_price,
-                }
+                    result = {
+                        "import_price": import_price,
+                        "export_price": export_price,
+                        "current_period": current_period,
+                    }
 
-                self._tariff_cache = result
-                self._tariff_cache_time = datetime.utcnow()
-                _LOGGER.debug(f"Tesla tariff prices (from cache): import=${import_price:.4f}, export=${export_price:.4f}")
+                    self._tariff_cache = result
+                    self._tariff_cache_time = datetime.utcnow()
+                    _LOGGER.debug(f"Tariff prices (TOU calc): import=${import_price:.4f}, export=${export_price:.4f}, period={current_period}")
 
-                return result
+                    return result
+
+                # Fallback to cached buy_price/sell_price if no TOU periods
+                elif tariff_schedule.get("buy_price") is not None:
+                    import_price = tariff_schedule.get("buy_price", 30.0) / 100
+                    export_price = tariff_schedule.get("sell_price", 8.0) / 100
+
+                    result = {
+                        "import_price": import_price,
+                        "export_price": export_price,
+                    }
+
+                    self._tariff_cache = result
+                    self._tariff_cache_time = datetime.utcnow()
+                    _LOGGER.debug(f"Tariff prices (cached): import=${import_price:.4f}, export=${export_price:.4f}")
+
+                    return result
 
             # Fallback: Fetch fresh from Tesla API using the shared function
             from ..__init__ import fetch_tesla_tariff_schedule
             tariff_data = await fetch_tesla_tariff_schedule(self._hass, self._config_entry)
 
             if tariff_data:
-                # tariff_data has buy_price/sell_price in cents, convert to $/kWh
-                import_price = tariff_data.get("buy_price", 30.0) / 100
-                export_price = tariff_data.get("sell_price", 8.0) / 100
+                # Use real-time TOU calculation if available
+                if tariff_data.get("tou_periods"):
+                    buy_cents, sell_cents, current_period = get_current_price_from_tariff_schedule(tariff_data)
+                    import_price = buy_cents / 100
+                    export_price = sell_cents / 100
+                else:
+                    import_price = tariff_data.get("buy_price", 30.0) / 100
+                    export_price = tariff_data.get("sell_price", 8.0) / 100
 
                 result = {
                     "import_price": import_price,
@@ -631,14 +657,14 @@ class AutomationEngine:
 
                 self._tariff_cache = result
                 self._tariff_cache_time = datetime.utcnow()
-                _LOGGER.debug(f"Tesla tariff prices (from API): import=${import_price:.4f}, export=${export_price:.4f}")
+                _LOGGER.debug(f"Tariff prices (from API): import=${import_price:.4f}, export=${export_price:.4f}")
 
                 return result
 
             return None
 
         except Exception as e:
-            _LOGGER.debug(f"Error fetching Tesla tariff prices: {e}")
+            _LOGGER.debug(f"Error fetching tariff prices: {e}")
             return None
 
     async def _async_execute_automation(

@@ -2431,8 +2431,13 @@ class AutoScheduleExecutor:
             _LOGGER.error(f"Failed to regenerate plan for {vehicle_id}: {e}")
 
     async def _get_current_price(self) -> float:
-        """Get current import price from available sources (provider-aware)."""
+        """Get current import price from available sources (provider-aware).
+
+        Uses real-time TOU calculation for custom/Tesla tariffs to ensure prices
+        update when TOU periods change throughout the day.
+        """
         from ..const import DOMAIN, CONF_ELECTRICITY_PROVIDER
+        from ..__init__ import get_current_price_from_tariff_schedule
 
         try:
             entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
@@ -2444,7 +2449,7 @@ class AutoScheduleExecutor:
             )
 
             if electricity_provider in ("amber", "flow_power"):
-                # Amber/Flow Power: Read from coordinator data
+                # Amber/Flow Power: Read from coordinator data (live API prices)
                 amber_coordinator = entry_data.get("amber_coordinator")
                 if amber_coordinator and amber_coordinator.data:
                     current_prices = amber_coordinator.data.get("current", [])
@@ -2454,16 +2459,28 @@ class AutoScheduleExecutor:
                             return price.get("perKwh", 30.0)
 
             elif electricity_provider in ("globird", "aemo_vpp"):
-                # Globird: Read from tariff schedule (populated by TariffPriceView)
+                # Globird/AEMO VPP: Use real-time TOU calculation from tariff schedule
                 tariff_schedule = entry_data.get("tariff_schedule", {})
                 if tariff_schedule:
+                    # Use real-time TOU calculation if TOU periods are defined
+                    if tariff_schedule.get("tou_periods"):
+                        buy_cents, _, current_period = get_current_price_from_tariff_schedule(tariff_schedule)
+                        _LOGGER.debug(f"Current price from TOU: {buy_cents}c ({current_period})")
+                        return buy_cents
+                    # Fallback to cached buy_price
                     buy_price = tariff_schedule.get("buy_price")
                     if buy_price is not None:
                         return buy_price  # Already in cents
 
-            # Fallback: Try tariff schedule for any provider (Amber format with PERIOD_HH_MM keys)
+            # Fallback: Try tariff schedule with TOU calculation for any provider
             tariff_schedule = entry_data.get("tariff_schedule", {})
             if tariff_schedule:
+                # Real-time TOU calculation
+                if tariff_schedule.get("tou_periods"):
+                    buy_cents, _, _ = get_current_price_from_tariff_schedule(tariff_schedule)
+                    return buy_cents
+
+                # Try Amber format with PERIOD_HH_MM keys
                 now = datetime.now()
                 period_key = f"PERIOD_{now.hour:02d}_{30 if now.minute >= 30 else 0:02d}"
                 buy_prices = tariff_schedule.get("buy_prices", {})
