@@ -85,9 +85,31 @@ async def _get_tesla_ev_entity(
     entity_registry = er.async_get(hass)
     device_registry = dr.async_get(hass)
 
+    # EV-specific entity patterns that only vehicles have (not energy products)
+    ev_entity_markers = [
+        r"button\..*_charge",  # charge_start, force_data_update
+        r"switch\..*_charge$",  # charger switch
+        r"number\..*_charge_limit",  # charge limit
+        r"number\..*_charging_amps",  # charging amps
+        r"sensor\..*_battery_level$",  # vehicle battery (not Powerwall)
+        r"device_tracker\.",  # vehicle location
+    ]
+    ev_marker_patterns = [re.compile(p, re.IGNORECASE) for p in ev_entity_markers]
+
+    def _device_has_ev_entities(device_id: str) -> bool:
+        """Check if device has EV-specific entities."""
+        for entity in entity_registry.entities.values():
+            if entity.device_id == device_id:
+                for marker in ev_marker_patterns:
+                    if marker.search(entity.entity_id):
+                        return True
+        return False
+
     # Find devices from Tesla integrations
     tesla_devices = []
     all_domains_found = set()
+    all_tesla_domain_devices = []  # Track all devices from Tesla domains
+
     for device in device_registry.devices.values():
         for identifier in device.identifiers:
             # Use index access instead of tuple unpacking (identifiers can have >2 values)
@@ -102,17 +124,32 @@ async def _get_tesla_ev_entity(
                 is_all_digit = id_str.isdigit()
                 _LOGGER.debug(f"Tesla domain device: {device.name}, domain={domain}, id={id_str}, len={id_len}, all_digit={is_all_digit}")
 
+                all_tesla_domain_devices.append((device, domain, id_str))
+
                 # Check if it's a vehicle (VIN is 17 chars, not all numeric)
                 if id_len == 17 and not is_all_digit:
                     if vehicle_vin is None or identifier_value == vehicle_vin:
                         tesla_devices.append(device)
-                        _LOGGER.info(f"Found Tesla EV vehicle: {device.name}, VIN: {id_str}")
+                        _LOGGER.info(f"Found Tesla EV vehicle by VIN: {device.name}, VIN: {id_str}")
                         break
                 else:
-                    _LOGGER.debug(f"Tesla device skipped (not VIN format): {device.name}, id={id_str} (len={id_len}, all_digit={is_all_digit})")
+                    _LOGGER.debug(f"Tesla device skipped VIN check (not VIN format): {device.name}, id={id_str} (len={id_len}, all_digit={is_all_digit})")
+
+    # Fallback: if no VIN-based devices found, check for devices with EV entities
+    if not tesla_devices and all_tesla_domain_devices:
+        _LOGGER.debug(f"No VIN-based devices found, checking {len(all_tesla_domain_devices)} Tesla domain devices for EV entities")
+        for device, domain, id_str in all_tesla_domain_devices:
+            if _device_has_ev_entities(device.id):
+                tesla_devices.append(device)
+                _LOGGER.info(f"Found Tesla EV device by entity detection: {device.name}, domain={domain}, id={id_str}")
+                break
 
     if not tesla_devices:
         _LOGGER.warning(f"No Tesla EV devices found. Looking for domains {TESLA_EV_INTEGRATIONS}, found domains: {sorted(all_domains_found)}")
+        if all_tesla_domain_devices:
+            _LOGGER.warning(f"Found {len(all_tesla_domain_devices)} Tesla domain devices but none matched VIN format or had EV entities:")
+            for device, domain, id_str in all_tesla_domain_devices[:5]:
+                _LOGGER.warning(f"  - {device.name}: domain={domain}, id={id_str}")
         return None
 
     # Use first vehicle if no specific VIN provided
