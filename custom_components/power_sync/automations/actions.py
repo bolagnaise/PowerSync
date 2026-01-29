@@ -97,14 +97,19 @@ async def _get_tesla_ev_entity(
             identifier_value = identifier[1]
             all_domains_found.add(domain)
             if domain in TESLA_EV_INTEGRATIONS:
-                # Check if it's a vehicle (VIN is 17 chars, non-numeric)
-                if len(str(identifier_value)) == 17 and not str(identifier_value).isdigit():
+                id_str = str(identifier_value)
+                id_len = len(id_str)
+                is_all_digit = id_str.isdigit()
+                _LOGGER.debug(f"Tesla domain device: {device.name}, domain={domain}, id={id_str}, len={id_len}, all_digit={is_all_digit}")
+
+                # Check if it's a vehicle (VIN is 17 chars, not all numeric)
+                if id_len == 17 and not is_all_digit:
                     if vehicle_vin is None or identifier_value == vehicle_vin:
                         tesla_devices.append(device)
-                        _LOGGER.debug(f"Found Tesla device: {device.name}, identifier: {identifier}")
+                        _LOGGER.info(f"Found Tesla EV vehicle: {device.name}, VIN: {id_str}")
                         break
                 else:
-                    _LOGGER.debug(f"Tesla device skipped (not VIN): {device.name}, identifier: {identifier_value}")
+                    _LOGGER.debug(f"Tesla device skipped (not VIN format): {device.name}, id={id_str} (len={id_len}, all_digit={is_all_digit})")
 
     if not tesla_devices:
         _LOGGER.warning(f"No Tesla EV devices found. Looking for domains {TESLA_EV_INTEGRATIONS}, found domains: {sorted(all_domains_found)}")
