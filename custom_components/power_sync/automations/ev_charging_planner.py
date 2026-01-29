@@ -1963,8 +1963,8 @@ class AutoScheduleExecutor:
                         pass
 
             if self._cached_soc:
-                _LOGGER.info(f"Restored cached SoC for {len(self._cached_soc)} vehicles: "
-                            f"{', '.join(f'{v}={d.get(\"soc\")}%' for v, d in self._cached_soc.items())}")
+                soc_summary = ', '.join(f"{v}={d.get('soc')}%" for v, d in self._cached_soc.items())
+                _LOGGER.info(f"Restored cached SoC for {len(self._cached_soc)} vehicles: {soc_summary}")
 
             _LOGGER.debug(f"Loaded auto-schedule settings for {len(self._settings)} vehicles")
         except Exception as e:
