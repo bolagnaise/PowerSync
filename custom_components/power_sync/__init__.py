@@ -2658,6 +2658,138 @@ async def fetch_tesla_tariff_schedule(hass: HomeAssistant, entry: ConfigEntry) -
         return None
 
 
+def convert_custom_tariff_to_schedule(custom_tariff: dict) -> dict:
+    """Convert custom_tariff format to tariff_schedule format.
+
+    This converts the user-configured custom tariff (Tesla tariff_content format)
+    to the internal tariff_schedule format used by the EV charging planner.
+
+    Args:
+        custom_tariff: Custom tariff configuration from automation_store
+
+    Returns:
+        tariff_schedule dict with: current_period, current_season, buy_price, sell_price,
+        buy_rates, sell_rates, tou_periods, seasons, utility, plan_name, last_sync
+    """
+    from datetime import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    try:
+        # Get current time for determining current period
+        now = dt.now()
+        current_hour = now.hour
+        current_dow = now.weekday()  # 0=Monday, 6=Sunday
+
+        # Extract seasons from custom tariff
+        seasons = custom_tariff.get("seasons", {})
+
+        # Find current season
+        current_season = None
+        for season_name, season_data in seasons.items():
+            from_month = season_data.get("fromMonth", 1)
+            to_month = season_data.get("toMonth", 12)
+            # Handle year-spanning seasons (e.g., Nov-Feb)
+            if from_month <= to_month:
+                if from_month <= now.month <= to_month:
+                    current_season = season_name
+                    break
+            else:
+                if now.month >= from_month or now.month <= to_month:
+                    current_season = season_name
+                    break
+
+        if not current_season:
+            # Default to first season or "All Year"
+            current_season = "All Year" if "All Year" in seasons else next(iter(seasons.keys()), "All Year")
+
+        _LOGGER.debug(f"Custom tariff - Current season: {current_season}, hour: {current_hour}, dow: {current_dow}")
+
+        # Get TOU periods for current season
+        tou_periods = seasons.get(current_season, {}).get("tou_periods", {})
+
+        # Find current TOU period
+        current_period = None
+        for period_name, period_data in tou_periods.items():
+            periods_list = period_data if isinstance(period_data, list) else []
+            for period in periods_list:
+                from_dow = period.get("fromDayOfWeek", 0)
+                to_dow = period.get("toDayOfWeek", 6)
+                from_hour = period.get("fromHour", 0)
+                to_hour = period.get("toHour", 24)
+
+                # Check day of week (Tesla format: 0=Sunday, Python: 0=Monday)
+                tesla_dow = (current_dow + 1) % 7
+                if from_dow <= tesla_dow <= to_dow:
+                    # Handle overnight periods (e.g., 21:00 to 07:00)
+                    if from_hour <= to_hour:
+                        # Normal period
+                        if from_hour <= current_hour < to_hour:
+                            current_period = period_name
+                            break
+                    else:
+                        # Overnight period
+                        if current_hour >= from_hour or current_hour < to_hour:
+                            current_period = period_name
+                            break
+            if current_period:
+                break
+
+        if not current_period:
+            current_period = "OFF_PEAK"  # Default to off-peak
+
+        _LOGGER.debug(f"Custom tariff - Current TOU period: {current_period}")
+
+        # Get energy charges
+        energy_charges = custom_tariff.get("energy_charges", {})
+        season_charges = energy_charges.get(current_season, {})
+
+        # Build buy_rates dict ($/kWh)
+        buy_rates = {}
+        for period, rate in season_charges.items():
+            if isinstance(rate, (int, float)):
+                buy_rates[period] = rate
+
+        # Get sell tariff / feed-in tariff
+        sell_tariff = custom_tariff.get("sell_tariff", {})
+        sell_energy_charges = sell_tariff.get("energy_charges", {})
+        sell_season_charges = sell_energy_charges.get(current_season, {})
+
+        # Build sell_rates dict ($/kWh)
+        sell_rates = {}
+        for period, rate in sell_season_charges.items():
+            if isinstance(rate, (int, float)):
+                sell_rates[period] = rate
+
+        # Get current prices
+        current_buy_price = buy_rates.get(current_period, buy_rates.get("ALL", buy_rates.get("OFF_PEAK", 0)))
+        current_sell_price = sell_rates.get(current_period, sell_rates.get("ALL", 0))
+
+        # Convert from $/kWh to c/kWh
+        current_buy_cents = round(current_buy_price * 100, 2)
+        current_sell_cents = round(current_sell_price * 100, 2)
+
+        _LOGGER.info(f"Custom tariff: Buy {current_buy_cents}c/kWh, Sell {current_sell_cents}c/kWh (period: {current_period})")
+
+        return {
+            "current_period": current_period,
+            "current_season": current_season,
+            "buy_price": current_buy_cents,
+            "sell_price": current_sell_cents,
+            "buy_rates": buy_rates,
+            "sell_rates": sell_rates,
+            "tou_periods": tou_periods,
+            "seasons": seasons,
+            "utility": custom_tariff.get("utility", "Custom"),
+            "plan_name": custom_tariff.get("name", "Custom Tariff"),
+            "last_sync": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "is_custom": True,  # Flag to indicate this is a custom tariff
+        }
+
+    except Exception as e:
+        _LOGGER.error(f"Error converting custom tariff to schedule: {e}", exc_info=True)
+        return {}
+
+
 class AutomationsView(HomeAssistantView):
     """HTTP view to manage automations for mobile app."""
 
@@ -2928,6 +3060,168 @@ class AutomationGroupsView(HomeAssistantView):
                 "success": True,
                 "groups": ["Default Group"]
             })
+
+
+class CustomTariffView(HomeAssistantView):
+    """HTTP view to manage custom tariff for non-Amber users.
+
+    This allows Globird/AEMO VPP/Other users to define their TOU tariff structure
+    which is then used for EV charging price decisions and Sigenergy Cloud tariff sync.
+    """
+
+    url = "/api/power_sync/custom_tariff"
+    name = "api:power_sync:custom_tariff"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    def _get_store(self):
+        """Get the automation store from hass.data."""
+        if DOMAIN not in self._hass.data:
+            return None
+        # Find any config entry to get the automation store
+        for entry_id, entry_data in self._hass.data.get(DOMAIN, {}).items():
+            if isinstance(entry_data, dict) and "automation_store" in entry_data:
+                return entry_data["automation_store"]
+        return None
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request - return current custom tariff."""
+        _LOGGER.info("📱 Custom tariff HTTP GET request")
+
+        store = self._get_store()
+        if not store:
+            return web.json_response(
+                {"success": False, "error": "Automation store not initialized"},
+                status=503
+            )
+
+        try:
+            custom_tariff = store.get_custom_tariff()
+            return web.json_response({
+                "success": True,
+                "custom_tariff": custom_tariff
+            })
+        except Exception as e:
+            _LOGGER.error(f"Error fetching custom tariff: {e}", exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500
+            )
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Handle POST request - save custom tariff."""
+        _LOGGER.info("📱 Custom tariff HTTP POST request")
+
+        store = self._get_store()
+        if not store:
+            return web.json_response(
+                {"success": False, "error": "Automation store not initialized"},
+                status=503
+            )
+
+        try:
+            data = await request.json()
+            _LOGGER.debug(f"📱 Saving custom tariff: name={data.get('name')}")
+
+            # Validate required fields
+            if not data.get("name"):
+                return web.json_response(
+                    {"success": False, "error": "Tariff name is required"},
+                    status=400
+                )
+
+            if not data.get("energy_charges"):
+                return web.json_response(
+                    {"success": False, "error": "Energy charges are required"},
+                    status=400
+                )
+
+            store.set_custom_tariff(data)
+            await store.async_save()
+
+            # Also update the tariff_schedule in hass.data for immediate use
+            tariff_schedule = convert_custom_tariff_to_schedule(data)
+            for entry_id, entry_data in self._hass.data.get(DOMAIN, {}).items():
+                if isinstance(entry_data, dict) and "automation_store" in entry_data:
+                    entry_data["tariff_schedule"] = tariff_schedule
+                    _LOGGER.info(f"Updated tariff_schedule in hass.data for entry {entry_id}")
+                    break
+
+            return web.json_response({
+                "success": True,
+                "custom_tariff": store.get_custom_tariff()
+            })
+        except Exception as e:
+            _LOGGER.error(f"Error saving custom tariff: {e}", exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500
+            )
+
+    async def delete(self, request: web.Request) -> web.Response:
+        """Handle DELETE request - remove custom tariff."""
+        _LOGGER.info("📱 Custom tariff HTTP DELETE request")
+
+        store = self._get_store()
+        if not store:
+            return web.json_response(
+                {"success": False, "error": "Automation store not initialized"},
+                status=503
+            )
+
+        try:
+            deleted = store.delete_custom_tariff()
+            await store.async_save()
+
+            # Clear tariff_schedule in hass.data
+            for entry_id, entry_data in self._hass.data.get(DOMAIN, {}).items():
+                if isinstance(entry_data, dict) and "automation_store" in entry_data:
+                    entry_data.pop("tariff_schedule", None)
+                    break
+
+            return web.json_response({
+                "success": True,
+                "deleted": deleted
+            })
+        except Exception as e:
+            _LOGGER.error(f"Error deleting custom tariff: {e}", exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500
+            )
+
+
+class CustomTariffTemplatesView(HomeAssistantView):
+    """HTTP view to get preset tariff templates."""
+
+    url = "/api/power_sync/custom_tariff/templates"
+    name = "api:power_sync:custom_tariff_templates"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request - return preset tariff templates."""
+        from .tariff_templates import TARIFF_TEMPLATES
+
+        _LOGGER.info("📱 Custom tariff templates HTTP GET request")
+
+        try:
+            return web.json_response({
+                "success": True,
+                "templates": TARIFF_TEMPLATES
+            })
+        except Exception as e:
+            _LOGGER.error(f"Error fetching tariff templates: {e}", exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500
+            )
 
 
 class PushTokenRegisterView(HomeAssistantView):
@@ -10112,6 +10406,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.http.register_view(AutomationGroupsView(hass))
     _LOGGER.info("⚡ Automations HTTP endpoints registered at /api/power_sync/automations")
 
+    # Register HTTP endpoints for Custom Tariff (for non-Amber users)
+    hass.http.register_view(CustomTariffView(hass))
+    hass.http.register_view(CustomTariffTemplatesView(hass))
+    _LOGGER.info("💰 Custom tariff HTTP endpoints registered at /api/power_sync/custom_tariff")
+
     # Register HTTP endpoint for push token registration
     hass.http.register_view(PushTokenRegisterView(hass))
     _LOGGER.info("📱 Push token registration endpoint registered at /api/power_sync/push/register")
@@ -10692,6 +10991,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     automation_store = AutomationStore(hass)
     await automation_store.async_load()
+
+    # Handle initial custom tariff from config flow (if present)
+    initial_custom_tariff = entry.data.get("initial_custom_tariff")
+    if initial_custom_tariff:
+        # Store the custom tariff in automation_store
+        automation_store.set_custom_tariff(initial_custom_tariff)
+        await automation_store.async_save()
+        _LOGGER.info(f"Initial custom tariff stored: {initial_custom_tariff.get('name')}")
+
+        # Remove from config_entry.data (it's now in automation_store)
+        new_data = dict(entry.data)
+        del new_data["initial_custom_tariff"]
+        hass.config_entries.async_update_entry(entry, data=new_data)
+
+    # For non-Amber users, populate tariff_schedule from custom_tariff
+    electricity_provider = entry.options.get(
+        CONF_ELECTRICITY_PROVIDER,
+        entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
+    )
+    if electricity_provider in ("globird", "aemo_vpp", "other"):
+        # Try to get custom tariff from automation_store
+        custom_tariff = automation_store.get_custom_tariff()
+        if custom_tariff:
+            tariff_schedule = convert_custom_tariff_to_schedule(custom_tariff)
+            hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = tariff_schedule
+            _LOGGER.info(f"Custom tariff loaded for {electricity_provider}: {custom_tariff.get('name')}")
 
     automation_engine = AutomationEngine(hass, automation_store, entry)
 

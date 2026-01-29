@@ -374,6 +374,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._aemo_data: dict[str, Any] = {}
         self._flow_power_data: dict[str, Any] = {}
         self._selected_electricity_provider: str = "amber"
+        self._custom_tariff_data: dict[str, Any] = {}  # Custom tariff for non-Amber users
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -853,11 +854,16 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             **self._site_data,  # Include Amber site ID for NEM region auto-detection
             **self._flow_power_data,
             **self._sigenergy_data,
+            **self._aemo_data,  # Include AEMO configuration
         }
 
         # Add electricity provider if set
         if self._selected_electricity_provider:
             final_data[CONF_ELECTRICITY_PROVIDER] = self._selected_electricity_provider
+
+        # Include custom tariff data if configured (will be moved to automation_store on setup)
+        if self._custom_tariff_data:
+            final_data["initial_custom_tariff"] = self._custom_tariff_data
 
         # Generate title based on station ID
         station_id = self._sigenergy_data.get(CONF_SIGENERGY_STATION_ID, "Unknown")
@@ -1006,6 +1012,10 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         ),
                     }
 
+                    # For Globird/AEMO VPP users, offer custom tariff configuration
+                    if self._selected_electricity_provider in ("globird", "aemo_vpp", "other"):
+                        return await self.async_step_custom_tariff()
+
                     # Route based on battery system selection
                     if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
                         return await self.async_step_sigenergy_credentials()
@@ -1048,6 +1058,178 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
             description_placeholders={
                 "threshold_hint": "300 = $300/MWh (typical spike level)",
+            },
+        )
+
+    async def async_step_custom_tariff(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure custom tariff for non-Amber users (Globird/AEMO VPP/Other).
+
+        This step allows users to define their TOU tariff structure which is then
+        used for EV charging price decisions and Sigenergy Cloud tariff sync.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            # User can skip tariff configuration
+            skip_tariff = user_input.get("skip_tariff", False)
+
+            if skip_tariff:
+                self._custom_tariff_data = {}  # No custom tariff
+            else:
+                # Parse and validate tariff data
+                tariff_type = user_input.get("tariff_type", "tou")
+
+                # Get rates (in cents, will be converted to $/kWh)
+                peak_rate = user_input.get("peak_rate", 45) / 100
+                shoulder_rate = user_input.get("shoulder_rate", 28) / 100
+                offpeak_rate = user_input.get("offpeak_rate", 15) / 100
+                super_offpeak_rate = user_input.get("super_offpeak_rate")
+                if super_offpeak_rate is not None:
+                    super_offpeak_rate = super_offpeak_rate / 100
+                fit_rate = user_input.get("fit_rate", 5) / 100
+
+                # Parse time strings
+                peak_start = user_input.get("peak_start", "15:00")
+                peak_end = user_input.get("peak_end", "21:00")
+                super_offpeak_start = user_input.get("super_offpeak_start")
+                super_offpeak_end = user_input.get("super_offpeak_end")
+
+                # Build TOU periods based on tariff type
+                tou_periods = {}
+
+                if tariff_type == "flat":
+                    # Flat rate - single ALL period
+                    tou_periods["ALL"] = [
+                        {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 0, "toHour": 24}
+                    ]
+                    energy_charges = {"ALL": peak_rate}  # Use peak_rate as the flat rate
+                else:
+                    # TOU - build periods from time inputs
+                    try:
+                        peak_start_hour = int(peak_start.split(":")[0])
+                        peak_end_hour = int(peak_end.split(":")[0])
+                    except (ValueError, IndexError):
+                        peak_start_hour = 15
+                        peak_end_hour = 21
+
+                    # Peak: weekdays only
+                    tou_periods["PEAK"] = [
+                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": peak_start_hour, "toHour": peak_end_hour}
+                    ]
+
+                    # Super off-peak if configured (e.g., solar soak period)
+                    if super_offpeak_start and super_offpeak_end:
+                        try:
+                            sop_start = int(super_offpeak_start.split(":")[0])
+                            sop_end = int(super_offpeak_end.split(":")[0])
+                            tou_periods["SUPER_OFF_PEAK"] = [
+                                {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": sop_start, "toHour": sop_end}
+                            ]
+                        except (ValueError, IndexError):
+                            pass
+
+                    # Shoulder: weekday morning (7am to peak start)
+                    if peak_start_hour > 7:
+                        tou_periods["SHOULDER"] = [
+                            {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 7, "toHour": peak_start_hour}
+                        ]
+
+                    # Off-peak: overnight and weekends
+                    tou_periods["OFF_PEAK"] = [
+                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": peak_end_hour, "toHour": 24},
+                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 0, "toHour": 7},
+                        {"fromDayOfWeek": 0, "toDayOfWeek": 0, "fromHour": 0, "toHour": 24},  # Sunday
+                        {"fromDayOfWeek": 6, "toDayOfWeek": 6, "fromHour": 0, "toHour": 24},  # Saturday
+                    ]
+
+                    # Build energy charges
+                    energy_charges = {
+                        "PEAK": peak_rate,
+                        "OFF_PEAK": offpeak_rate,
+                    }
+                    if "SHOULDER" in tou_periods:
+                        energy_charges["SHOULDER"] = shoulder_rate
+                    if "SUPER_OFF_PEAK" in tou_periods and super_offpeak_rate is not None:
+                        energy_charges["SUPER_OFF_PEAK"] = super_offpeak_rate
+
+                # Build custom tariff in Tesla format
+                provider_name = {
+                    "globird": "Globird Energy",
+                    "aemo_vpp": "VPP Provider",
+                    "other": "Custom Provider",
+                }.get(self._selected_electricity_provider, "Custom")
+
+                self._custom_tariff_data = {
+                    "name": user_input.get("plan_name", f"{provider_name} TOU"),
+                    "utility": provider_name,
+                    "seasons": {
+                        "All Year": {
+                            "fromMonth": 1,
+                            "toMonth": 12,
+                            "tou_periods": tou_periods,
+                        }
+                    },
+                    "energy_charges": {
+                        "All Year": energy_charges,
+                    },
+                    "sell_tariff": {
+                        "energy_charges": {
+                            "All Year": {
+                                "ALL": fit_rate,
+                            }
+                        }
+                    },
+                }
+
+            # Route to battery-specific setup
+            if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
+                return await self.async_step_sigenergy_credentials()
+            else:
+                return await self.async_step_tesla_provider()
+
+        # Build hour options for time selection
+        hour_options = {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}
+
+        # Schema for custom tariff configuration
+        data_schema = vol.Schema(
+            {
+                vol.Optional("skip_tariff", default=False): bool,
+                vol.Optional("plan_name", default=""): str,
+                vol.Required("tariff_type", default="tou"): vol.In({
+                    "flat": "Flat Rate (single rate all day)",
+                    "tou": "Time of Use (peak/shoulder/off-peak)",
+                }),
+                vol.Required("peak_rate", default=45): vol.All(
+                    vol.Coerce(float), vol.Range(min=0, max=100)
+                ),
+                vol.Optional("shoulder_rate", default=28): vol.All(
+                    vol.Coerce(float), vol.Range(min=0, max=100)
+                ),
+                vol.Required("offpeak_rate", default=15): vol.All(
+                    vol.Coerce(float), vol.Range(min=0, max=100)
+                ),
+                vol.Optional("super_offpeak_rate"): vol.All(
+                    vol.Coerce(float), vol.Range(min=0, max=100)
+                ),
+                vol.Required("fit_rate", default=5): vol.All(
+                    vol.Coerce(float), vol.Range(min=0, max=50)
+                ),
+                vol.Optional("peak_start", default="15:00"): vol.In(hour_options),
+                vol.Optional("peak_end", default="21:00"): vol.In(hour_options),
+                vol.Optional("super_offpeak_start"): vol.In(hour_options),
+                vol.Optional("super_offpeak_end"): vol.In(hour_options),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="custom_tariff",
+            data_schema=data_schema,
+            errors=errors,
+            description_placeholders={
+                "info": "Configure your electricity tariff rates. All rates are in cents/kWh.",
+                "skip_hint": "Check 'Skip tariff configuration' to use default estimation instead.",
             },
         )
 
@@ -1468,6 +1650,10 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 **getattr(self, '_demand_data', {}),  # Include demand charge configuration
                 CONF_ELECTRICITY_PROVIDER: self._selected_electricity_provider,
             }
+
+            # Include custom tariff data if configured (will be moved to automation_store on setup)
+            if self._custom_tariff_data:
+                data["initial_custom_tariff"] = self._custom_tariff_data
 
             # Add EV settings
             data[CONF_EV_CHARGING_ENABLED] = user_input.get(CONF_EV_CHARGING_ENABLED, False)
@@ -2540,8 +2726,16 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             user_input[CONF_ELECTRICITY_PROVIDER] = "globird"
             # Enable AEMO spike detection for Globird
             user_input[CONF_AEMO_SPIKE_ENABLED] = True
-            # Store options and route to curtailment options (weather, inverter config)
+
+            # Check if user wants to configure custom tariff
+            configure_tariff = user_input.pop("configure_custom_tariff", False)
+
+            # Store options and route accordingly
             self._amber_options = user_input
+
+            if configure_tariff:
+                return await self.async_step_custom_tariff_options()
+
             return await self.async_step_curtailment_options()
 
         # Build region choices for AEMO
@@ -2560,6 +2754,201 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_AEMO_SPIKE_THRESHOLD,
                         default=self._get_option(CONF_AEMO_SPIKE_THRESHOLD, 300.0),
                     ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=20000.0)),
+                    vol.Optional(
+                        "configure_custom_tariff",
+                        default=False,
+                    ): bool,
                 }
             ),
+            description_placeholders={
+                "tariff_hint": "Enable 'Configure Custom Tariff' to set your TOU rates for EV charging",
+            },
+        )
+
+    async def async_step_custom_tariff_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure custom tariff rates for Globird/AEMO VPP users.
+
+        This allows users to define their TOU tariff structure which is used
+        for EV charging price decisions and Sigenergy Cloud tariff sync.
+        """
+        from .const import DOMAIN
+
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            # Build custom tariff from user input
+            tariff_type = user_input.get("tariff_type", "tou")
+
+            # Get rates (in cents, will be converted to $/kWh)
+            peak_rate = user_input.get("peak_rate", 45) / 100
+            shoulder_rate = user_input.get("shoulder_rate", 28) / 100
+            offpeak_rate = user_input.get("offpeak_rate", 15) / 100
+            super_offpeak_rate = user_input.get("super_offpeak_rate")
+            if super_offpeak_rate is not None:
+                super_offpeak_rate = super_offpeak_rate / 100
+            fit_rate = user_input.get("fit_rate", 5) / 100
+
+            # Parse time strings
+            peak_start = user_input.get("peak_start", "15:00")
+            peak_end = user_input.get("peak_end", "21:00")
+            super_offpeak_start = user_input.get("super_offpeak_start")
+            super_offpeak_end = user_input.get("super_offpeak_end")
+
+            # Build TOU periods
+            tou_periods = {}
+
+            if tariff_type == "flat":
+                tou_periods["ALL"] = [
+                    {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 0, "toHour": 24}
+                ]
+                energy_charges = {"ALL": peak_rate}
+            else:
+                try:
+                    peak_start_hour = int(peak_start.split(":")[0])
+                    peak_end_hour = int(peak_end.split(":")[0])
+                except (ValueError, IndexError):
+                    peak_start_hour = 15
+                    peak_end_hour = 21
+
+                tou_periods["PEAK"] = [
+                    {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": peak_start_hour, "toHour": peak_end_hour}
+                ]
+
+                if super_offpeak_start and super_offpeak_end:
+                    try:
+                        sop_start = int(super_offpeak_start.split(":")[0])
+                        sop_end = int(super_offpeak_end.split(":")[0])
+                        tou_periods["SUPER_OFF_PEAK"] = [
+                            {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": sop_start, "toHour": sop_end}
+                        ]
+                    except (ValueError, IndexError):
+                        pass
+
+                if peak_start_hour > 7:
+                    tou_periods["SHOULDER"] = [
+                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 7, "toHour": peak_start_hour}
+                    ]
+
+                tou_periods["OFF_PEAK"] = [
+                    {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": peak_end_hour, "toHour": 24},
+                    {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 0, "toHour": 7},
+                    {"fromDayOfWeek": 0, "toDayOfWeek": 0, "fromHour": 0, "toHour": 24},
+                    {"fromDayOfWeek": 6, "toDayOfWeek": 6, "fromHour": 0, "toHour": 24},
+                ]
+
+                energy_charges = {
+                    "PEAK": peak_rate,
+                    "OFF_PEAK": offpeak_rate,
+                }
+                if "SHOULDER" in tou_periods:
+                    energy_charges["SHOULDER"] = shoulder_rate
+                if "SUPER_OFF_PEAK" in tou_periods and super_offpeak_rate is not None:
+                    energy_charges["SUPER_OFF_PEAK"] = super_offpeak_rate
+
+            # Build custom tariff
+            custom_tariff = {
+                "name": user_input.get("plan_name", "Custom TOU"),
+                "utility": "Globird Energy",
+                "seasons": {
+                    "All Year": {
+                        "fromMonth": 1,
+                        "toMonth": 12,
+                        "tou_periods": tou_periods,
+                    }
+                },
+                "energy_charges": {
+                    "All Year": energy_charges,
+                },
+                "sell_tariff": {
+                    "energy_charges": {
+                        "All Year": {
+                            "ALL": fit_rate,
+                        }
+                    }
+                },
+            }
+
+            # Save custom tariff to automation_store
+            if DOMAIN in self.hass.data:
+                for entry_id, entry_data in self.hass.data.get(DOMAIN, {}).items():
+                    if isinstance(entry_data, dict) and "automation_store" in entry_data:
+                        store = entry_data["automation_store"]
+                        store.set_custom_tariff(custom_tariff)
+                        await store.async_save()
+
+                        # Also update tariff_schedule for immediate use
+                        from . import convert_custom_tariff_to_schedule
+                        tariff_schedule = convert_custom_tariff_to_schedule(custom_tariff)
+                        entry_data["tariff_schedule"] = tariff_schedule
+                        _LOGGER.info("Custom tariff saved via options flow")
+                        break
+
+            # Continue to curtailment options
+            return await self.async_step_curtailment_options()
+
+        # Build hour options
+        hour_options = {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}
+
+        # Get current custom tariff if exists
+        current_tariff = None
+        if DOMAIN in self.hass.data:
+            for entry_id, entry_data in self.hass.data.get(DOMAIN, {}).items():
+                if isinstance(entry_data, dict) and "automation_store" in entry_data:
+                    store = entry_data["automation_store"]
+                    current_tariff = store.get_custom_tariff()
+                    break
+
+        # Set defaults from current tariff or use standard defaults
+        default_peak = 45
+        default_shoulder = 28
+        default_offpeak = 15
+        default_fit = 5
+        default_peak_start = "15:00"
+        default_peak_end = "21:00"
+
+        if current_tariff:
+            charges = current_tariff.get("energy_charges", {}).get("All Year", {})
+            default_peak = int(charges.get("PEAK", 0.45) * 100)
+            default_shoulder = int(charges.get("SHOULDER", 0.28) * 100)
+            default_offpeak = int(charges.get("OFF_PEAK", 0.15) * 100)
+
+            sell_charges = current_tariff.get("sell_tariff", {}).get("energy_charges", {}).get("All Year", {})
+            default_fit = int(sell_charges.get("ALL", 0.05) * 100)
+
+        return self.async_show_form(
+            step_id="custom_tariff_options",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional("plan_name", default=""): str,
+                    vol.Required("tariff_type", default="tou"): vol.In({
+                        "flat": "Flat Rate (single rate all day)",
+                        "tou": "Time of Use (peak/shoulder/off-peak)",
+                    }),
+                    vol.Required("peak_rate", default=default_peak): vol.All(
+                        vol.Coerce(float), vol.Range(min=0, max=100)
+                    ),
+                    vol.Optional("shoulder_rate", default=default_shoulder): vol.All(
+                        vol.Coerce(float), vol.Range(min=0, max=100)
+                    ),
+                    vol.Required("offpeak_rate", default=default_offpeak): vol.All(
+                        vol.Coerce(float), vol.Range(min=0, max=100)
+                    ),
+                    vol.Optional("super_offpeak_rate"): vol.All(
+                        vol.Coerce(float), vol.Range(min=0, max=100)
+                    ),
+                    vol.Required("fit_rate", default=default_fit): vol.All(
+                        vol.Coerce(float), vol.Range(min=0, max=50)
+                    ),
+                    vol.Optional("peak_start", default=default_peak_start): vol.In(hour_options),
+                    vol.Optional("peak_end", default=default_peak_end): vol.In(hour_options),
+                    vol.Optional("super_offpeak_start"): vol.In(hour_options),
+                    vol.Optional("super_offpeak_end"): vol.In(hour_options),
+                }
+            ),
+            errors=errors,
+            description_placeholders={
+                "info": "Configure your electricity tariff rates. All rates are in cents/kWh.",
+            },
         )

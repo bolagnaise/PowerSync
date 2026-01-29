@@ -94,6 +94,32 @@
         },
         "submit_button": "Next"
       },
+      "custom_tariff": {
+        "title": "Custom Tariff Configuration",
+        "description": "Configure your electricity tariff rates for EV charging price decisions.\n\n{info}\n\n{skip_hint}",
+        "data": {
+          "skip_tariff": "Skip tariff configuration",
+          "plan_name": "Plan Name (optional)",
+          "tariff_type": "Tariff Type",
+          "peak_rate": "Peak Rate (c/kWh)",
+          "shoulder_rate": "Shoulder Rate (c/kWh)",
+          "offpeak_rate": "Off-Peak Rate (c/kWh)",
+          "super_offpeak_rate": "Super Off-Peak Rate (c/kWh)",
+          "fit_rate": "Feed-in Tariff (c/kWh)",
+          "peak_start": "Peak Start Time",
+          "peak_end": "Peak End Time",
+          "super_offpeak_start": "Super Off-Peak Start Time",
+          "super_offpeak_end": "Super Off-Peak End Time"
+        },
+        "data_description": {
+          "skip_tariff": "Check to use default estimation instead of configuring custom rates",
+          "tariff_type": "Flat rate uses a single price all day. Time of Use has different prices for peak, shoulder, and off-peak periods.",
+          "super_offpeak_rate": "Optional: For plans with free or cheap solar soak periods (e.g., 10am-2pm)",
+          "super_offpeak_start": "Start time of super off-peak period (e.g., 10:00 for solar soak)",
+          "super_offpeak_end": "End time of super off-peak period (e.g., 14:00 for solar soak)"
+        },
+        "submit_button": "Next"
+      },
       "battery_system": {
         "title": "Select Battery System",
         "description": "Choose your battery storage system:\n\n**Tesla Powerwall**: Connect via Fleet API or Teslemetry.\n\n**Sigenergy**: Connect via Sigenergy Cloud API.",
@@ -473,10 +499,37 @@
       },
       "globird_options": {
         "title": "AEMO Spike Detection",
-        "description": "Configure AEMO wholesale price spike detection. When prices spike above your threshold, your battery will export to the grid.",
+        "description": "Configure AEMO wholesale price spike detection. When prices spike above your threshold, your battery will export to the grid.\n\n{tariff_hint}",
         "data": {
           "aemo_region": "AEMO NEM Region",
-          "aemo_spike_threshold": "Spike Threshold ($/MWh)"
+          "aemo_spike_threshold": "Spike Threshold ($/MWh)",
+          "configure_custom_tariff": "Configure Custom Tariff"
+        },
+        "data_description": {
+          "configure_custom_tariff": "Enable to configure your TOU rates for EV charging price decisions"
+        }
+      },
+      "custom_tariff_options": {
+        "title": "Custom Tariff Configuration",
+        "description": "Configure your electricity tariff rates for EV charging price decisions.\n\n{info}",
+        "data": {
+          "plan_name": "Plan Name (optional)",
+          "tariff_type": "Tariff Type",
+          "peak_rate": "Peak Rate (c/kWh)",
+          "shoulder_rate": "Shoulder Rate (c/kWh)",
+          "offpeak_rate": "Off-Peak Rate (c/kWh)",
+          "super_offpeak_rate": "Super Off-Peak Rate (c/kWh)",
+          "fit_rate": "Feed-in Tariff (c/kWh)",
+          "peak_start": "Peak Start Time",
+          "peak_end": "Peak End Time",
+          "super_offpeak_start": "Super Off-Peak Start Time",
+          "super_offpeak_end": "Super Off-Peak End Time"
+        },
+        "data_description": {
+          "tariff_type": "Flat rate uses a single price all day. Time of Use has different prices for peak, shoulder, and off-peak periods.",
+          "super_offpeak_rate": "Optional: For plans with free or cheap solar soak periods (e.g., 10am-2pm)",
+          "super_offpeak_start": "Start time of super off-peak period (e.g., 10:00 for solar soak)",
+          "super_offpeak_end": "End time of super off-peak period (e.g., 14:00 for solar soak)"
         }
       },
       "inverter_brand": {

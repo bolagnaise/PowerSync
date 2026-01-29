@@ -674,12 +674,23 @@ class PriceForecaster:
             return None
 
     async def _get_tariff_forecast(self, hours: int) -> Optional[List[PriceForecast]]:
-        """Get forecast from Tesla tariff schedule (for Globird users)."""
+        """Get forecast from tariff schedule (Tesla tariff or custom tariff for Globird users)."""
         try:
             from ..const import DOMAIN
 
             entry_data = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id, {})
             tariff_schedule = entry_data.get("tariff_schedule", {})
+
+            # If no tariff_schedule, try custom_tariff from automation_store
+            if not tariff_schedule:
+                automation_store = entry_data.get("automation_store")
+                if automation_store:
+                    custom_tariff = automation_store.get_custom_tariff()
+                    if custom_tariff:
+                        # Convert custom_tariff to tariff_schedule format
+                        from .. import convert_custom_tariff_to_schedule
+                        tariff_schedule = convert_custom_tariff_to_schedule(custom_tariff)
+                        _LOGGER.debug(f"Using custom tariff for forecast: {custom_tariff.get('name')}")
 
             if not tariff_schedule:
                 return None

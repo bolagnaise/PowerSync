@@ -225,6 +225,40 @@ class AutomationStore:
             return True
         return False
 
+    # Custom tariff management (for non-Amber users)
+    def get_custom_tariff(self) -> Optional[Dict[str, Any]]:
+        """Get custom tariff configuration.
+
+        Returns the custom tariff if configured, or None if not set.
+        Custom tariffs are used by Globird/AEMO VPP/Other users who don't have
+        live price APIs to define their TOU tariff structure.
+        """
+        return self._data.get("custom_tariff")
+
+    def set_custom_tariff(self, tariff: Dict[str, Any]) -> None:
+        """Save custom tariff configuration.
+
+        Args:
+            tariff: Custom tariff configuration following Tesla's tariff_content format.
+                   Should include: name, utility, seasons, energy_charges, sell_tariff.
+        """
+        tariff["updated_at"] = datetime.utcnow().isoformat() + "Z"
+        if "created_at" not in tariff:
+            tariff["created_at"] = tariff["updated_at"]
+        self._data["custom_tariff"] = tariff
+        _LOGGER.info(f"Custom tariff saved: {tariff.get('name', 'Unnamed')}")
+
+    def delete_custom_tariff(self) -> bool:
+        """Delete custom tariff configuration.
+
+        Returns True if a tariff was deleted, False if none existed.
+        """
+        if "custom_tariff" in self._data:
+            del self._data["custom_tariff"]
+            _LOGGER.info("Custom tariff deleted")
+            return True
+        return False
+
 
 class AutomationEngine:
     """Main automation engine that evaluates and executes automations."""
