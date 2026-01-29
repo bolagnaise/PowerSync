@@ -2155,6 +2155,11 @@ class AutoScheduleExecutor:
             if current_surplus_kw < settings.min_surplus_kw:
                 should_charge = False
                 reason = f"Surplus {current_surplus_kw:.1f}kW < min {settings.min_surplus_kw:.1f}kW"
+                _LOGGER.info(
+                    f"Auto-schedule: In solar window but no surplus - "
+                    f"solar={solar_power_kw:.1f}kW, load={load_power_kw:.1f}kW, "
+                    f"surplus={current_surplus_kw:.1f}kW < {settings.min_surplus_kw:.1f}kW needed"
+                )
 
         # Find current window (if in one)
         current_window = None
@@ -2166,6 +2171,12 @@ class AutoScheduleExecutor:
                 break
 
         state.current_window = current_window
+
+        # Log the decision
+        _LOGGER.debug(
+            f"Auto-schedule decision for {vehicle_id}: should_charge={should_charge}, "
+            f"reason={reason}, source={source}, is_charging={state.is_charging}"
+        )
 
         # Take action
         if should_charge and not state.is_charging:
