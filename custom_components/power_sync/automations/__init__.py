@@ -259,6 +259,47 @@ class AutomationStore:
             return True
         return False
 
+    # Vehicle SOC persistence (survives HA restarts)
+    def get_vehicle_soc(self, vehicle_id: str) -> Optional[Dict[str, Any]]:
+        """Get persisted vehicle SOC data.
+
+        Returns dict with 'soc', 'updated_at', and optionally 'charging_state'.
+        """
+        vehicle_socs = self._data.get("vehicle_socs", {})
+        return vehicle_socs.get(vehicle_id)
+
+    def set_vehicle_soc(self, vehicle_id: str, soc: int, charging_state: Optional[str] = None) -> None:
+        """Persist vehicle SOC data.
+
+        Args:
+            vehicle_id: Vehicle identifier (VIN or charger ID)
+            soc: State of charge percentage (0-100)
+            charging_state: Optional charging state (e.g., 'Charging', 'Complete', 'Disconnected')
+        """
+        if "vehicle_socs" not in self._data:
+            self._data["vehicle_socs"] = {}
+
+        self._data["vehicle_socs"][vehicle_id] = {
+            "soc": soc,
+            "charging_state": charging_state,
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+        }
+        _LOGGER.debug(f"Vehicle SOC persisted: {vehicle_id} = {soc}%")
+
+    def get_all_vehicle_socs(self) -> Dict[str, Dict[str, Any]]:
+        """Get all persisted vehicle SOC data."""
+        return self._data.get("vehicle_socs", {})
+
+    def clear_vehicle_soc(self, vehicle_id: str) -> bool:
+        """Clear persisted SOC for a vehicle.
+
+        Returns True if cleared, False if not found.
+        """
+        if "vehicle_socs" in self._data and vehicle_id in self._data["vehicle_socs"]:
+            del self._data["vehicle_socs"][vehicle_id]
+            return True
+        return False
+
 
 class AutomationEngine:
     """Main automation engine that evaluates and executes automations."""

@@ -1939,17 +1939,23 @@ class AutoScheduleExecutor:
             self._cached_soc = stored_data.get("cached_vehicle_soc", {})
 
             # Restore last known SoC to state from cache
+            # Create state entries for vehicles with cached SOC even if no settings exist
             for vehicle_id, soc_data in self._cached_soc.items():
-                if vehicle_id in self._state:
-                    self._state[vehicle_id].last_known_soc = soc_data.get("soc")
-                    if soc_data.get("updated"):
-                        try:
-                            self._state[vehicle_id].last_soc_update = datetime.fromisoformat(soc_data["updated"])
-                        except (ValueError, TypeError):
-                            pass
+                if vehicle_id not in self._state:
+                    self._state[vehicle_id] = AutoScheduleState(vehicle_id=vehicle_id)
 
-            _LOGGER.debug(f"Loaded auto-schedule settings for {len(self._settings)} vehicles, "
-                         f"cached SoC for {len(self._cached_soc)} vehicles")
+                self._state[vehicle_id].last_known_soc = soc_data.get("soc")
+                if soc_data.get("updated"):
+                    try:
+                        self._state[vehicle_id].last_soc_update = datetime.fromisoformat(soc_data["updated"])
+                    except (ValueError, TypeError):
+                        pass
+
+            if self._cached_soc:
+                _LOGGER.info(f"Restored cached SoC for {len(self._cached_soc)} vehicles: "
+                            f"{', '.join(f'{v}={d.get(\"soc\")}%' for v, d in self._cached_soc.items())}")
+
+            _LOGGER.debug(f"Loaded auto-schedule settings for {len(self._settings)} vehicles")
         except Exception as e:
             _LOGGER.error(f"Failed to load auto-schedule settings: {e}")
 
@@ -2009,9 +2015,17 @@ class AutoScheduleExecutor:
         """Get all vehicle states."""
         return {vid: state.to_dict() for vid, state in self._state.items()}
 
-    def _cache_vehicle_soc(self, vehicle_id: str, soc: int) -> None:
-        """Cache the vehicle SoC for use when vehicle is asleep."""
+    async def _cache_vehicle_soc(self, vehicle_id: str, soc: int) -> None:
+        """Cache the vehicle SoC for use when vehicle is asleep.
+
+        Saves immediately to ensure persistence across restarts.
+        """
         now = datetime.now()
+
+        # Check if SOC actually changed to avoid unnecessary saves
+        old_soc = self._cached_soc.get(vehicle_id, {}).get("soc")
+        soc_changed = old_soc != soc
+
         self._cached_soc[vehicle_id] = {
             "soc": soc,
             "updated": now.isoformat(),
@@ -2023,6 +2037,10 @@ class AutoScheduleExecutor:
             self._state[vehicle_id].last_soc_update = now
 
         _LOGGER.debug(f"Cached SoC for vehicle {vehicle_id}: {soc}%")
+
+        # Save immediately if SOC changed (ensures persistence across restarts)
+        if soc_changed and self._store is not None:
+            await self._force_save_cached_soc()
 
     def _get_cached_soc(self, vehicle_id: str) -> Optional[int]:
         """Get cached SoC for a vehicle, or None if not cached or stale."""
@@ -2040,14 +2058,10 @@ class AutoScheduleExecutor:
 
         return None
 
-    async def _save_cached_soc_if_needed(self) -> None:
-        """Save cached SoC to storage if enough time has passed since last save."""
+    async def _force_save_cached_soc(self) -> None:
+        """Force save cached SoC to storage immediately."""
         if self._store is None:
             return
-
-        now = datetime.now()
-        if self._last_cache_save and (now - self._last_cache_save) < self._cache_save_interval:
-            return  # Too soon since last save
 
         try:
             stored_data = await self._store.async_load() if hasattr(self._store, 'async_load') else {}
@@ -2060,10 +2074,21 @@ class AutoScheduleExecutor:
                 self._store._data = stored_data
                 await self._store.async_save(stored_data)
 
-            self._last_cache_save = now
-            _LOGGER.debug(f"Saved cached SoC for {len(self._cached_soc)} vehicles")
+            self._last_cache_save = datetime.now()
+            _LOGGER.debug(f"Force-saved cached SoC for {len(self._cached_soc)} vehicles")
         except Exception as e:
-            _LOGGER.warning(f"Failed to save cached SoC: {e}")
+            _LOGGER.warning(f"Failed to force-save cached SoC: {e}")
+
+    async def _save_cached_soc_if_needed(self) -> None:
+        """Save cached SoC to storage if enough time has passed since last save."""
+        if self._store is None:
+            return
+
+        now = datetime.now()
+        if self._last_cache_save and (now - self._last_cache_save) < self._cache_save_interval:
+            return  # Too soon since last save
+
+        await self._force_save_cached_soc()
 
     async def _get_vehicle_soc(self, vehicle_id: str) -> int:
         """Get current SoC for a vehicle from Home Assistant entities.
@@ -2173,7 +2198,7 @@ class AutoScheduleExecutor:
 
         # If we got a live SoC, cache it and return
         if live_soc is not None:
-            self._cache_vehicle_soc(vehicle_id, live_soc)
+            await self._cache_vehicle_soc(vehicle_id, live_soc)
             return live_soc
 
         # Vehicle is likely asleep - use cached SoC
