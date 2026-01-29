@@ -543,14 +543,10 @@ class AutomationEngine:
         """Get current prices from Tesla tariff with caching (for Globird users).
 
         Uses the rate plan configured in the Tesla app to calculate current TOU prices.
-        Caches for 5 minutes since TOU periods don't change frequently.
+        First checks stored tariff_schedule (populated on startup), then falls back to API.
+        Returns prices in $/kWh.
         """
-        from ..const import (
-            DOMAIN, CONF_TESLA_ENERGY_SITE_ID,
-            TESLA_PROVIDER_TESLEMETRY, FLEET_API_BASE_URL, TESLEMETRY_API_BASE_URL
-        )
-        import aiohttp
-        from homeassistant.helpers.aiohttp_client import async_get_clientsession
+        from ..const import DOMAIN
 
         cache_duration_seconds = 300  # 5 minutes
 
@@ -560,120 +556,52 @@ class AutomationEngine:
             if cache_age < cache_duration_seconds and self._tariff_cache:
                 return self._tariff_cache
 
-        # Get Tesla credentials
         entry_id = self._config_entry.entry_id
         if DOMAIN not in self._hass.data or entry_id not in self._hass.data[DOMAIN]:
             return None
 
         data = self._hass.data[DOMAIN][entry_id]
-        token_getter = data.get("token_getter")
-        site_id = self._config_entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
-
-        if not site_id or not token_getter:
-            return None
 
         try:
-            current_token, provider = token_getter()
-            if not current_token:
-                return None
+            # First, try stored tariff_schedule (populated by fetch_tesla_tariff_schedule on startup)
+            tariff_schedule = data.get("tariff_schedule", {})
+            if tariff_schedule and tariff_schedule.get("buy_price") is not None:
+                # tariff_schedule has buy_price/sell_price in cents, convert to $/kWh
+                import_price = tariff_schedule.get("buy_price", 30.0) / 100
+                export_price = tariff_schedule.get("sell_price", 8.0) / 100
 
-            session = async_get_clientsession(self._hass)
-            headers = {
-                "Authorization": f"Bearer {current_token}",
-                "Content-Type": "application/json",
-            }
-            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+                result = {
+                    "import_price": import_price,
+                    "export_price": export_price,
+                }
 
-            # Fetch site_info which contains tariff_content
-            async with session.get(
-                f"{api_base}/api/1/energy_sites/{site_id}/site_info",
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status != 200:
-                    _LOGGER.debug(f"Failed to get Tesla tariff: {response.status}")
-                    return None
+                self._tariff_cache = result
+                self._tariff_cache_time = datetime.utcnow()
+                _LOGGER.debug(f"Tesla tariff prices (from cache): import=${import_price:.4f}, export=${export_price:.4f}")
 
-                resp_data = await response.json()
-                site_info = resp_data.get("response", {})
+                return result
 
-            tariff = site_info.get("tariff_content", {})
-            if not tariff:
-                return None
+            # Fallback: Fetch fresh from Tesla API using the shared function
+            from ..__init__ import fetch_tesla_tariff_schedule
+            tariff_data = await fetch_tesla_tariff_schedule(self._hass, self._config_entry)
 
-            # Calculate current TOU period and prices
-            from zoneinfo import ZoneInfo
-            tz_name = site_info.get("installation_time_zone", "UTC")
-            try:
-                tz = ZoneInfo(tz_name)
-            except:
-                tz = ZoneInfo("UTC")
-            now = datetime.now(tz)
+            if tariff_data:
+                # tariff_data has buy_price/sell_price in cents, convert to $/kWh
+                import_price = tariff_data.get("buy_price", 30.0) / 100
+                export_price = tariff_data.get("sell_price", 8.0) / 100
 
-            # Find current season
-            seasons = tariff.get("seasons", {})
-            current_season = None
-            for season_name, season_data in seasons.items():
-                from_month = season_data.get("fromMonth", 0)
-                to_month = season_data.get("toMonth", 0)
-                if from_month and to_month and from_month <= now.month <= to_month:
-                    current_season = season_name
-                    break
-            if not current_season:
-                current_season = "Summer" if "Summer" in seasons else next(iter(seasons.keys()), None)
+                result = {
+                    "import_price": import_price,
+                    "export_price": export_price,
+                }
 
-            if not current_season:
-                return None
+                self._tariff_cache = result
+                self._tariff_cache_time = datetime.utcnow()
+                _LOGGER.debug(f"Tesla tariff prices (from API): import=${import_price:.4f}, export=${export_price:.4f}")
 
-            # Find current TOU period
-            tou_periods = seasons.get(current_season, {}).get("tou_periods", {})
-            current_period = "ALL"
-            for period_name, period_data in tou_periods.items():
-                periods_list = period_data if isinstance(period_data, list) else []
-                for period in periods_list:
-                    from_dow = period.get("fromDayOfWeek", 0)
-                    to_dow = period.get("toDayOfWeek", 6)
-                    from_hour = period.get("fromHour", 0)
-                    to_hour = period.get("toHour", 24)
+                return result
 
-                    tesla_dow = (now.weekday() + 1) % 7  # Convert Python dow to Tesla dow
-                    if from_dow <= tesla_dow <= to_dow:
-                        if from_hour <= to_hour:
-                            if from_hour <= now.hour < to_hour:
-                                current_period = period_name
-                                break
-                        else:
-                            if now.hour >= from_hour or now.hour < to_hour:
-                                current_period = period_name
-                                break
-                if current_period != "ALL":
-                    break
-
-            # Get energy charges
-            energy_charges = tariff.get("energy_charges", {})
-            season_charges = energy_charges.get(current_season, {})
-            buy_rates = season_charges.get("rates", season_charges) if isinstance(season_charges, dict) else {}
-            buy_rates = {k: v for k, v in buy_rates.items() if isinstance(v, (int, float))}
-
-            sell_tariff = tariff.get("sell_tariff", {})
-            sell_charges = sell_tariff.get("energy_charges", {}).get(current_season, {})
-            sell_rates = sell_charges.get("rates", sell_charges) if isinstance(sell_charges, dict) else {}
-            sell_rates = {k: v for k, v in sell_rates.items() if isinstance(v, (int, float))}
-
-            # Get current prices (Tesla tariff is in $/kWh)
-            import_price = buy_rates.get(current_period, buy_rates.get("ALL", 0))
-            export_price = sell_rates.get(current_period, sell_rates.get("ALL", 0))
-
-            result = {
-                "import_price": import_price,  # Already in $/kWh
-                "export_price": export_price,
-            }
-
-            self._tariff_cache = result
-            self._tariff_cache_time = datetime.utcnow()
-            _LOGGER.debug(f"Tesla tariff prices: import=${import_price:.4f}, export=${export_price:.4f} ({current_period})")
-
-            return result
+            return None
 
         except Exception as e:
             _LOGGER.debug(f"Error fetching Tesla tariff prices: {e}")

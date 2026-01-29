@@ -1951,10 +1951,29 @@ async def _dynamic_ev_update_surplus(
 
                 # Try to get actual prices from config entry data
                 entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
-                price_data = entry_data.get("current_prices", {})
-                if price_data:
-                    import_price = price_data.get("import_cents", 30.0)
-                    export_price = price_data.get("export_cents", 8.0)
+
+                # Try Amber coordinator first
+                amber_coordinator = entry_data.get("amber_coordinator")
+                if amber_coordinator and amber_coordinator.data:
+                    current_prices = amber_coordinator.data.get("current", [])
+                    for price in current_prices:
+                        if price.get("channelType") == "general":
+                            import_price = price.get("perKwh", 30.0)
+                        elif price.get("channelType") == "feedIn":
+                            export_price = abs(price.get("perKwh", 8.0))
+
+                # Fallback to tariff_schedule (for Globird/AEMO VPP users)
+                elif entry_data.get("tariff_schedule"):
+                    tariff_schedule = entry_data.get("tariff_schedule", {})
+                    import_price = tariff_schedule.get("buy_price", 30.0)
+                    export_price = tariff_schedule.get("sell_price", 8.0)
+
+                # Fallback to stored current_prices
+                else:
+                    price_data = entry_data.get("current_prices", {})
+                    if price_data:
+                        import_price = price_data.get("import_cents", 30.0)
+                        export_price = price_data.get("export_cents", 8.0)
 
                 await session_manager.update_session(
                     vehicle_id=vehicle_id,
