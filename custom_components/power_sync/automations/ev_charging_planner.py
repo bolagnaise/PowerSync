@@ -679,11 +679,17 @@ class PriceForecaster:
             if not tariff_schedule:
                 return None
 
-            # Get current prices from tariff
-            buy_price_cents = tariff_schedule.get("buy_price", 30)
-            sell_price_cents = tariff_schedule.get("sell_price", 0)
+            # Get rates and TOU schedule
             buy_rates = tariff_schedule.get("buy_rates", {})
             sell_rates = tariff_schedule.get("sell_rates", {})
+            tou_periods = tariff_schedule.get("tou_periods", {})
+            current_season = tariff_schedule.get("current_season", "Summer")
+
+            if not buy_rates:
+                _LOGGER.debug("No buy_rates in tariff schedule")
+                return None
+
+            _LOGGER.debug(f"Tariff forecast using rates: {buy_rates}, TOU periods: {list(tou_periods.keys())}")
 
             forecasts = []
             now = datetime.now()
@@ -691,37 +697,41 @@ class PriceForecaster:
             for h in range(hours):
                 hour_dt = now + timedelta(hours=h)
                 hour = hour_dt.hour
-                is_weekend = hour_dt.weekday() >= 5
+                dow = hour_dt.weekday()
+                tesla_dow = (dow + 1) % 7  # Convert Python dow to Tesla dow (0=Sunday)
 
-                # Determine TOU period based on typical patterns
-                if is_weekend:
-                    period_type = "OFF_PEAK"
-                elif 7 <= hour < 9 or 17 <= hour < 21:
-                    period_type = "ON_PEAK"
-                elif 21 <= hour or hour < 7:
-                    period_type = "OFF_PEAK"
-                else:
-                    period_type = "SHOULDER"
+                # Find the TOU period for this hour using the actual schedule
+                period_type = self._find_tou_period(tou_periods, hour, tesla_dow)
 
-                # Get rate for this period from tariff
-                import_rate = buy_rates.get(period_type, buy_rates.get("ALL", buy_price_cents / 100))
-                export_rate = sell_rates.get(period_type, sell_rates.get("ALL", sell_price_cents / 100))
+                # Get rate for this period - try exact match, then common variations
+                import_rate = None
+                for rate_key in [period_type, period_type.replace("_", ""), "ALL"]:
+                    if rate_key in buy_rates:
+                        import_rate = buy_rates[rate_key]
+                        break
 
-                # Convert to cents if in dollars
-                if import_rate < 1:  # Likely in $/kWh
-                    import_cents = import_rate * 100
-                else:
-                    import_cents = import_rate
+                if import_rate is None:
+                    # Still not found - use first available rate
+                    import_rate = next(iter(buy_rates.values()), 0.30)
 
-                if export_rate < 1:
-                    export_cents = export_rate * 100
-                else:
-                    export_cents = export_rate
+                export_rate = None
+                for rate_key in [period_type, period_type.replace("_", ""), "ALL"]:
+                    if rate_key in sell_rates:
+                        export_rate = sell_rates[rate_key]
+                        break
 
-                # Determine display period
-                if import_cents < 20:
+                if export_rate is None:
+                    export_rate = next(iter(sell_rates.values()), 0)
+
+                # Convert to cents if in dollars (rates < 1 are likely $/kWh)
+                import_cents = import_rate * 100 if import_rate < 1 else import_rate
+                export_cents = export_rate * 100 if export_rate < 1 else export_rate
+
+                # Determine display period name
+                period_lower = period_type.lower()
+                if "off" in period_lower or "super" in period_lower:
                     period = "offpeak"
-                elif import_cents > 35:
+                elif "on" in period_lower or "peak" in period_lower:
                     period = "peak"
                 else:
                     period = "shoulder"
@@ -733,11 +743,55 @@ class PriceForecaster:
                     period=period,
                 ))
 
+            if forecasts:
+                # Log sample prices for debugging
+                _LOGGER.info(
+                    f"Tariff forecast: {len(forecasts)} hours, "
+                    f"prices: {forecasts[0].import_cents:.1f}c now, "
+                    f"{forecasts[min(3, len(forecasts)-1)].import_cents:.1f}c in 3h, "
+                    f"{forecasts[min(12, len(forecasts)-1)].import_cents:.1f}c in 12h"
+                )
+
             return forecasts
 
         except Exception as e:
-            _LOGGER.debug(f"Could not get tariff forecast: {e}")
+            _LOGGER.warning(f"Could not get tariff forecast: {e}")
             return None
+
+    def _find_tou_period(self, tou_periods: dict, hour: int, tesla_dow: int) -> str:
+        """
+        Find the TOU period for a given hour and day of week.
+
+        Args:
+            tou_periods: Dict of period_name -> list of time ranges
+            hour: Hour of day (0-23)
+            tesla_dow: Day of week in Tesla format (0=Sunday)
+
+        Returns:
+            Period name (e.g., 'ON_PEAK', 'OFF_PEAK', 'SUPER_OFF_PEAK')
+        """
+        for period_name, period_data in tou_periods.items():
+            periods_list = period_data if isinstance(period_data, list) else []
+            for period in periods_list:
+                from_dow = period.get("fromDayOfWeek", 0)
+                to_dow = period.get("toDayOfWeek", 6)
+                from_hour = period.get("fromHour", 0)
+                to_hour = period.get("toHour", 24)
+
+                # Check day of week
+                if from_dow <= tesla_dow <= to_dow:
+                    # Check time - handle overnight periods (e.g., 21:00 to 10:00)
+                    if from_hour <= to_hour:
+                        # Normal period (e.g., 10:00 to 14:00)
+                        if from_hour <= hour < to_hour:
+                            return period_name
+                    else:
+                        # Overnight period (e.g., 21:00 to 10:00)
+                        if hour >= from_hour or hour < to_hour:
+                            return period_name
+
+        # Default fallback
+        return "ALL"
 
     async def _estimate_tou_prices(self, hours: int) -> List[PriceForecast]:
         """

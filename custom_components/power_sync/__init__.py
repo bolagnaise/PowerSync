@@ -2597,6 +2597,8 @@ class TariffPriceView(HomeAssistantView):
                 "sell_price": current_sell_cents,
                 "buy_rates": buy_rates,
                 "sell_rates": sell_rates,
+                "tou_periods": tou_periods,  # Include full TOU schedule for planning
+                "seasons": seasons,  # Include season definitions
                 "utility": tariff.get("utility", "Unknown"),
                 "plan_name": tariff.get("name", "Unknown"),
                 "last_sync": now.strftime("%Y-%m-%d %H:%M:%S"),
