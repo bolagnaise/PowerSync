@@ -128,10 +128,12 @@ async def _get_tesla_ev_entity(
 
                 # Check if it's a vehicle (VIN is 17 chars, not all numeric)
                 if id_len == 17 and not is_all_digit:
-                    if vehicle_vin is None or identifier_value == vehicle_vin:
+                    if vehicle_vin is None or id_str == vehicle_vin:
                         tesla_devices.append(device)
                         _LOGGER.info(f"Found Tesla EV vehicle by VIN: {device.name}, VIN: {id_str}")
                         break
+                    else:
+                        _LOGGER.debug(f"Tesla device VIN format OK but doesn't match filter: {device.name}, VIN={id_str}, filter={vehicle_vin}")
                 else:
                     _LOGGER.debug(f"Tesla device skipped VIN check (not VIN format): {device.name}, id={id_str} (len={id_len}, all_digit={is_all_digit})")
 
