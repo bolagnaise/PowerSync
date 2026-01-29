@@ -1628,13 +1628,22 @@ class AutoScheduleSettings:
     # Constraints
     min_battery_soc: int = 80  # Home battery can discharge to this level for EV charging
     max_grid_price_cents: float = 25.0  # Don't charge from grid above this price
-    min_surplus_kw: float = 1.5  # Minimum solar surplus to charge
 
     # Charger settings
     charger_type: str = "tesla"  # tesla, ocpp, generic
-    min_charge_amps: int = 5
+    min_charge_amps: int = 5  # Tesla minimum is 5A
     max_charge_amps: int = 32
-    voltage: int = 240
+    voltage: int = 230  # Australia standard voltage
+    phases: int = 1  # 1 for single phase, 3 for three phase
+
+    def get_min_surplus_kw(self) -> float:
+        """Calculate minimum surplus based on charger electrical requirements.
+
+        Tesla requires minimum 5A to charge:
+        - Single phase: 5A × 230V = 1.15kW
+        - Three phase: 5A × 230V × 3 = 3.45kW
+        """
+        return (self.min_charge_amps * self.voltage * self.phases) / 1000
 
     # Optional entity overrides for generic chargers
     charger_switch_entity: Optional[str] = None
@@ -1653,11 +1662,12 @@ class AutoScheduleSettings:
             "priority": self.priority.value,
             "min_battery_soc": self.min_battery_soc,
             "max_grid_price_cents": self.max_grid_price_cents,
-            "min_surplus_kw": self.min_surplus_kw,
             "charger_type": self.charger_type,
             "min_charge_amps": self.min_charge_amps,
             "max_charge_amps": self.max_charge_amps,
             "voltage": self.voltage,
+            "phases": self.phases,
+            "min_surplus_kw": self.get_min_surplus_kw(),  # Calculated from phases/voltage/amps
             "charger_switch_entity": self.charger_switch_entity,
             "charger_amps_entity": self.charger_amps_entity,
             "ocpp_charger_id": self.ocpp_charger_id,
@@ -1682,11 +1692,11 @@ class AutoScheduleSettings:
             priority=priority,
             min_battery_soc=data.get("min_battery_soc", 80),
             max_grid_price_cents=data.get("max_grid_price_cents", 25.0),
-            min_surplus_kw=data.get("min_surplus_kw", 1.5),
             charger_type=data.get("charger_type", "tesla"),
             min_charge_amps=data.get("min_charge_amps", 5),
             max_charge_amps=data.get("max_charge_amps", 32),
-            voltage=data.get("voltage", 240),
+            voltage=data.get("voltage", 230),
+            phases=data.get("phases", 1),
             charger_switch_entity=data.get("charger_switch_entity"),
             charger_amps_entity=data.get("charger_amps_entity"),
             ocpp_charger_id=data.get("ocpp_charger_id"),
@@ -2151,14 +2161,18 @@ class AutoScheduleExecutor:
                 reason = "Solar-only mode - no grid charging"
 
         # Check surplus constraint for solar charging
+        # Tesla requires minimum 5A to charge:
+        # - Single phase: 5A × 230V = 1.15kW
+        # - Three phase: 5A × 230V × 3 = 3.45kW
         if should_charge and source == "solar_surplus":
-            if current_surplus_kw < settings.min_surplus_kw:
+            min_surplus = settings.get_min_surplus_kw()
+            if current_surplus_kw < min_surplus:
                 should_charge = False
-                reason = f"Surplus {current_surplus_kw:.1f}kW < min {settings.min_surplus_kw:.1f}kW"
+                reason = f"Surplus {current_surplus_kw:.1f}kW < min {min_surplus:.1f}kW"
                 _LOGGER.info(
                     f"Auto-schedule: In solar window but no surplus - "
                     f"solar={solar_power_kw:.1f}kW, load={load_power_kw:.1f}kW, "
-                    f"surplus={current_surplus_kw:.1f}kW < {settings.min_surplus_kw:.1f}kW needed"
+                    f"surplus={current_surplus_kw:.1f}kW < {min_surplus:.1f}kW needed (phases={settings.phases})"
                 )
 
         # Find current window (if in one)
