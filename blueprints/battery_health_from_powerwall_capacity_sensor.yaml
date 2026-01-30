@@ -53,17 +53,23 @@ trigger:
   - platform: time_pattern
     hours: "/6"
 
+variables:
+  capacity_sensor: !input capacity_sensor
+  sensor_unit: !input sensor_unit
+  original_capacity_wh: !input original_capacity_wh
+  battery_count: !input battery_count
+
 condition:
   - condition: template
     value_template: >
-      {{ states(inputs.capacity_sensor) not in ['unknown', 'unavailable', 'none', ''] }}
+      {{ states(capacity_sensor) not in ['unknown', 'unavailable', 'none', ''] }}
 
 action:
   - variables:
-      original_wh: "{{ inputs.original_capacity_wh | float(0) }}"
-      raw_capacity: "{{ states(inputs.capacity_sensor) | float(0) }}"
+      original_wh: "{{ original_capacity_wh | float(0) }}"
+      raw_capacity: "{{ states(capacity_sensor) | float(0) }}"
       current_wh: >
-        {% if inputs.sensor_unit == 'kwh' %}
+        {% if sensor_unit == 'kwh' %}
           {{ (raw_capacity * 1000) | round(0) }}
         {% else %}
           {{ raw_capacity | round(0) }}
@@ -79,5 +85,5 @@ action:
       original_capacity_wh: "{{ original_wh | round(0) }}"
       current_capacity_wh: "{{ current_wh }}"
       degradation_percent: "{{ degradation_percent }}"
-      battery_count: "{{ inputs.battery_count | int(1) }}"
+      battery_count: "{{ battery_count | int(1) }}"
       scanned_at: "{{ now().isoformat() }}"
