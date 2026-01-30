@@ -461,25 +461,6 @@ service: power_sync.restore_normal
 
 ---
 
-## Example Automations (Optional)
-
-**Force immediate sync on price spike:**
-```yaml
-automation:
-  - alias: "Force TOU Sync on Price Spike"
-    trigger:
-      - platform: state
-        entity_id: sensor.current_electricity_price
-    condition:
-      - condition: numeric_state
-        entity_id: sensor.current_electricity_price
-        above: 0.30
-    action:
-      - service: power_sync.sync_tou_schedule
-```
-
----
-
 ## Pre-built Dashboard (Optional)
 
 A pre-built Lovelace dashboard is included for visualizing all PowerSync data.
