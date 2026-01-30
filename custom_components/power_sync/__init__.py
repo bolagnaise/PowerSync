@@ -4024,17 +4024,21 @@ class EVVehicleCommandView(HomeAssistantView):
                 if len(identifier) < 2:
                     continue
                 domain = identifier[0]
-                identifier_value = identifier[1]
+                identifier_value = str(identifier[1])
                 if domain in self.TESLA_INTEGRATIONS:
-                    if len(str(identifier_value)) == 17 and not str(identifier_value).isdigit():
+                    if len(identifier_value) == 17 and not identifier_value.isdigit():
+                        _LOGGER.debug(f"Found Tesla device: {device.name} with VIN {identifier_value}, looking for VIN {vehicle_vin}")
                         if vehicle_vin is None or identifier_value == vehicle_vin:
                             tesla_devices.append(device)
+                            _LOGGER.debug(f"Added device {device.name} to tesla_devices list")
                             break
 
         if not tesla_devices:
+            _LOGGER.debug(f"No Tesla devices found for VIN {vehicle_vin}")
             return None
 
         target_device = tesla_devices[0]
+        _LOGGER.debug(f"Using target device: {target_device.name} for pattern {entity_pattern}")
 
         pattern = re.compile(entity_pattern, re.IGNORECASE)
         for entity in entity_registry.entities.values():
@@ -4180,9 +4184,11 @@ class EVVehicleCommandView(HomeAssistantView):
         """Get current charging state."""
         # Tesla Fleet uses sensor.*_charging (no _state suffix)
         charging_entity = await self._get_tesla_ev_entity(r"sensor\..*_charging$", vehicle_vin)
+        _LOGGER.debug(f"Charging state check for VIN {vehicle_vin}: found entity {charging_entity}")
         if charging_entity:
             state = self._hass.states.get(charging_entity)
             if state and state.state not in ("unavailable", "unknown"):
+                _LOGGER.debug(f"Charging state for {charging_entity}: {state.state}")
                 return state.state.lower()
         return ""
 
