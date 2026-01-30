@@ -3981,6 +3981,34 @@ class EVVehicleCommandView(HomeAssistantView):
             return dict(entries[0].options)
         return {}
 
+    def _get_vin_from_vehicle_id(self, vehicle_id: str) -> str | None:
+        """Look up VIN from vehicle_id (sequential number in vehicle list).
+
+        The mobile app sends vehicle_id as a sequential number (1, 2, 3...)
+        from the vehicles list. We need to map this back to the actual VIN.
+        """
+        device_registry = dr.async_get(self._hass)
+
+        # Build list of vehicles in same order as EVVehiclesView
+        vehicle_num = 0
+        for device in device_registry.devices.values():
+            for identifier in device.identifiers:
+                if len(identifier) < 2:
+                    continue
+                domain = identifier[0]
+                identifier_value = str(identifier[1])
+                if domain in self.TESLA_INTEGRATIONS:
+                    # Check if this looks like a VIN (17 chars, not all digits)
+                    if len(identifier_value) == 17 and not identifier_value.isdigit():
+                        vehicle_num += 1
+                        if str(vehicle_num) == str(vehicle_id):
+                            _LOGGER.debug(f"Mapped vehicle_id {vehicle_id} to VIN {identifier_value}")
+                            return identifier_value
+                        break
+
+        _LOGGER.warning(f"Could not find VIN for vehicle_id {vehicle_id}")
+        return None
+
     async def _get_tesla_ev_entity(self, entity_pattern: str, vehicle_vin: str | None = None) -> str | None:
         """Find a Tesla EV entity by pattern."""
         import re
@@ -4382,7 +4410,13 @@ class EVVehicleCommandView(HomeAssistantView):
                     "error": f"Invalid command. Must be one of: {', '.join(valid_commands)}"
                 }, status=400)
 
+            # Get VIN from request body, or look up from vehicle_id in URL path
             vehicle_vin = data.get("vin")
+            if not vehicle_vin and vehicle_id:
+                # Map vehicle_id (sequential number) to VIN
+                vehicle_vin = self._get_vin_from_vehicle_id(vehicle_id)
+                _LOGGER.info(f"Mapped vehicle_id {vehicle_id} to VIN: {vehicle_vin}")
+
             success = False
             message = ""
 
