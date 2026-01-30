@@ -4237,13 +4237,20 @@ class EVVehicleCommandView(HomeAssistantView):
             charge_switch_entity = await self._get_tesla_ev_entity(r"switch\..*_charge$", vehicle_vin)
             if charge_switch_entity:
                 try:
-                    await self._hass.services.async_call(
-                        "switch", "turn_on",
-                        {"entity_id": charge_switch_entity},
-                        blocking=True,
+                    # Use timeout to prevent hanging on slow Tesla API responses
+                    await asyncio.wait_for(
+                        self._hass.services.async_call(
+                            "switch", "turn_on",
+                            {"entity_id": charge_switch_entity},
+                            blocking=True,
+                        ),
+                        timeout=30.0
                     )
                     _LOGGER.info(f"Started charging via Fleet API: {charge_switch_entity}")
                     return True, "Charging started"
+                except asyncio.TimeoutError:
+                    _LOGGER.warning(f"Start charging command timed out (30s) - command may still be processing")
+                    return True, "Charging command sent (response timed out)"
                 except Exception as e:
                     _LOGGER.error(f"Fleet API start charging failed: {e}")
                     return False, f"Failed to start charging: {e}"
@@ -4289,13 +4296,20 @@ class EVVehicleCommandView(HomeAssistantView):
             charge_switch_entity = await self._get_tesla_ev_entity(r"switch\..*_charge$", vehicle_vin)
             if charge_switch_entity:
                 try:
-                    await self._hass.services.async_call(
-                        "switch", "turn_off",
-                        {"entity_id": charge_switch_entity},
-                        blocking=True,
+                    # Use timeout to prevent hanging on slow Tesla API responses
+                    await asyncio.wait_for(
+                        self._hass.services.async_call(
+                            "switch", "turn_off",
+                            {"entity_id": charge_switch_entity},
+                            blocking=True,
+                        ),
+                        timeout=30.0
                     )
                     _LOGGER.info(f"Stopped charging via Fleet API: {charge_switch_entity}")
                     return True, "Charging stopped"
+                except asyncio.TimeoutError:
+                    _LOGGER.warning(f"Stop charging command timed out (30s) - command may still be processing")
+                    return True, "Stop command sent (response timed out)"
                 except Exception as e:
                     _LOGGER.error(f"Fleet API stop charging failed: {e}")
                     return False, f"Failed to stop charging: {e}"
