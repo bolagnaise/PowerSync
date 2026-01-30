@@ -7730,15 +7730,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 except Exception as notify_err:
                     _LOGGER.debug(f"Could not send forecast discrepancy notification: {notify_err}")
 
-        # Check for price spikes (extreme prices in forecast)
-        # This catches cases where forecast predicts unrealistic prices
+        # Check for price spikes (extreme prices in settled/actual data)
+        # Only runs on REST API sync (Stage 3/4 at :35/:60) when actual prices are available
+        # This avoids false alerts from potentially inaccurate forecast prices
         # Works for all providers with forecast data (Amber, Octopus, Flow Power, etc.)
         price_spike_alert_enabled = entry.options.get(
             CONF_PRICE_SPIKE_ALERT,
             entry.data.get(CONF_PRICE_SPIKE_ALERT, False)
         )
         if (
-            sync_mode == 'initial_forecast' and
+            sync_mode == 'rest_api_check' and
             price_spike_alert_enabled and
             forecast_data
         ):
@@ -7772,7 +7773,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         await _send_expo_push(
                             hass,
                             "Import Price Spike Alert",
-                            f"Forecast shows {spike_count} intervals above ${import_threshold/100:.0f}/kWh import. "
+                            f"Settled prices show {spike_count} intervals above ${import_threshold/100:.0f}/kWh import. "
                             f"Max: ${max_price/100:.2f}/kWh at {spike_time}. "
                             f"Consider reducing grid usage during these periods.",
                         )
@@ -7794,7 +7795,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         await _send_expo_push(
                             hass,
                             "Export Price Spike Alert",
-                            f"Forecast shows {spike_count} intervals above ${export_threshold/100:.2f}/kWh export. "
+                            f"Settled prices show {spike_count} intervals above ${export_threshold/100:.2f}/kWh export. "
                             f"Max: ${max_price/100:.2f}/kWh at {spike_time}. "
                             f"Great time to export power to the grid!",
                         )
