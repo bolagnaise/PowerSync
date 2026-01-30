@@ -44,15 +44,6 @@ blueprint:
           max: 10
           step: 1
           mode: box
-    update_interval_hours:
-      name: Update interval (hours)
-      default: 6
-      selector:
-        number:
-          min: 1
-          max: 24
-          step: 1
-          mode: slider
 
 mode: single
 
@@ -60,7 +51,7 @@ trigger:
   - platform: homeassistant
     event: start
   - platform: time_pattern
-    hours: "/{{ (inputs.update_interval_hours | int(6)) }}"
+    hours: "/6"
 
 condition:
   - condition: template
