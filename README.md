@@ -17,7 +17,9 @@
 
   Monitor your battery, view live pricing, control EV charging, and create powerful automations from your phone.
 
-  **Android Beta:** [Join the testers group](https://groups.google.com/g/powersync-testers) first, then [opt-in to the beta](https://play.google.com/apps/testing/com.powersync.mobile).
+  **iOS Beta:** [Join via TestFlight](https://testflight.apple.com/join/FhnUtSFy)
+
+  **Android Beta:** [Join the testers group](https://groups.google.com/g/powersync-testers) first, then [opt-in to the beta](https://play.google.com/apps/testing/com.powersync.mobile)
 
 </div>
 
