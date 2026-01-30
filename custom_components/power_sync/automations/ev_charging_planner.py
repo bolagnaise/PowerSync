@@ -111,6 +111,155 @@ class ChargingPlan:
         }
 
 
+# ============================================================================
+# Module-level helper functions for EV state detection
+# ============================================================================
+
+async def get_ev_location(hass: "HomeAssistant", config_entry: "ConfigEntry") -> str:
+    """
+    Get EV location from Home Assistant entities.
+
+    Args:
+        hass: Home Assistant instance
+        config_entry: Config entry
+
+    Returns:
+        Location string: "home", "work", "not_home", or "unknown"
+    """
+    from ..const import (
+        DOMAIN,
+        CONF_TESLA_BLE_ENTITY_PREFIX,
+        DEFAULT_TESLA_BLE_ENTITY_PREFIX,
+    )
+    from homeassistant.helpers import entity_registry as er, device_registry as dr
+
+    location = "unknown"
+
+    # Method 1: Tesla BLE - if available, vehicle is nearby (assume "home")
+    config = dict(config_entry.options) if config_entry else {}
+    ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+    ble_charger_entity = f"switch.{ble_prefix}_charger"
+    ble_state = hass.states.get(ble_charger_entity)
+
+    if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
+        location = "home"
+        _LOGGER.debug(f"Tesla BLE detected, assuming location=home")
+        return location
+
+    # Method 2: Check Tesla Fleet/Teslemetry device_tracker entities
+    entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
+
+    tesla_integrations = ["tesla_fleet", "teslemetry"]
+
+    for device in device_registry.devices.values():
+        if location != "unknown":
+            break
+
+        is_tesla_vehicle = False
+        for identifier in device.identifiers:
+            if len(identifier) >= 2 and identifier[0] in tesla_integrations:
+                id_str = str(identifier[1])
+                if len(id_str) == 17 and not id_str.isdigit():
+                    is_tesla_vehicle = True
+                    break
+
+        if not is_tesla_vehicle:
+            continue
+
+        for entity in entity_registry.entities.values():
+            if entity.device_id != device.id:
+                continue
+
+            entity_id = entity.entity_id
+            entity_id_lower = entity_id.lower()
+
+            if entity_id.startswith("device_tracker.") and "_location" in entity_id_lower:
+                state = hass.states.get(entity_id)
+                if state and state.state not in ("unavailable", "unknown", "None", None):
+                    location = state.state.lower()
+                    _LOGGER.debug(f"Found EV location from {entity_id}: {location}")
+                    break
+
+            elif entity_id.startswith("binary_sensor.") and "located_at_home" in entity_id_lower:
+                state = hass.states.get(entity_id)
+                if state and state.state == "on":
+                    location = "home"
+                    _LOGGER.debug(f"Found EV at home from {entity_id}")
+                    break
+
+    return location
+
+
+async def is_ev_plugged_in(hass: "HomeAssistant", config_entry: "ConfigEntry") -> bool:
+    """
+    Check if EV is plugged in from Home Assistant entities.
+
+    Args:
+        hass: Home Assistant instance
+        config_entry: Config entry
+
+    Returns:
+        True if plugged in, False otherwise
+    """
+    from ..const import (
+        DOMAIN,
+        CONF_TESLA_BLE_ENTITY_PREFIX,
+        DEFAULT_TESLA_BLE_ENTITY_PREFIX,
+    )
+    from homeassistant.helpers import entity_registry as er, device_registry as dr
+
+    # Method 1: Tesla BLE
+    config = dict(config_entry.options) if config_entry else {}
+    ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+    ble_charger_entity = f"switch.{ble_prefix}_charger"
+    ble_state = hass.states.get(ble_charger_entity)
+
+    if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
+        return True
+
+    # Method 2: Check Tesla Fleet/Teslemetry entities
+    entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
+
+    tesla_integrations = ["tesla_fleet", "teslemetry"]
+
+    for device in device_registry.devices.values():
+        is_tesla_vehicle = False
+        for identifier in device.identifiers:
+            if len(identifier) >= 2 and identifier[0] in tesla_integrations:
+                id_str = str(identifier[1])
+                if len(id_str) == 17 and not id_str.isdigit():
+                    is_tesla_vehicle = True
+                    break
+
+        if not is_tesla_vehicle:
+            continue
+
+        for entity in entity_registry.entities.values():
+            if entity.device_id != device.id:
+                continue
+
+            entity_id = entity.entity_id
+            entity_id_lower = entity_id.lower()
+
+            if entity_id.startswith("binary_sensor.") and "charge_cable" in entity_id_lower:
+                state = hass.states.get(entity_id)
+                if state:
+                    is_plugged = state.state == "on"
+                    _LOGGER.debug(f"Found plugged in state from {entity_id}: {is_plugged}")
+                    return is_plugged
+
+            elif entity_id.startswith("sensor.") and "_charging" in entity_id_lower and "charging_" not in entity_id_lower:
+                state = hass.states.get(entity_id)
+                if state and state.state not in ("unavailable", "unknown", "None", None):
+                    if state.state.lower() in ("charging", "complete", "stopped"):
+                        _LOGGER.debug(f"EV plugged in (charging state: {state.state})")
+                        return True
+
+    return False
+
+
 class LoadProfileEstimator:
     """Estimates household load based on historical patterns."""
 
@@ -2222,6 +2371,173 @@ class AutoScheduleExecutor:
         _LOGGER.warning(f"Could not find SoC for vehicle {vehicle_id} and no cached value, using default 50%")
         return 50
 
+    async def _get_vehicle_location(self, vehicle_id: str) -> str:
+        """Get current location for a vehicle from Home Assistant entities.
+
+        Args:
+            vehicle_id: Vehicle identifier
+
+        Returns:
+            Location string: "home", "work", "not_home", or "unknown"
+        """
+        from ..const import (
+            DOMAIN,
+            CONF_TESLA_BLE_ENTITY_PREFIX,
+            DEFAULT_TESLA_BLE_ENTITY_PREFIX,
+        )
+        from homeassistant.helpers import entity_registry as er, device_registry as dr
+
+        location = "unknown"
+
+        # Method 1: Tesla BLE - if available, vehicle is nearby (assume "home")
+        config = {}
+        entries = self.hass.config_entries.async_entries(DOMAIN)
+        if entries:
+            config = dict(entries[0].options)
+
+        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+        ble_charger_entity = f"switch.{ble_prefix}_charger"
+        ble_state = self.hass.states.get(ble_charger_entity)
+
+        if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
+            # BLE only works when car is nearby - assume home
+            location = "home"
+            _LOGGER.debug(f"Tesla BLE detected, assuming location=home")
+            return location
+
+        # Method 2: Check Tesla Fleet/Teslemetry device_tracker entities
+        entity_registry = er.async_get(self.hass)
+        device_registry = dr.async_get(self.hass)
+
+        tesla_integrations = ["tesla_fleet", "teslemetry"]
+
+        for device in device_registry.devices.values():
+            if location != "unknown":
+                break
+
+            is_tesla_device = False
+            device_name = None
+            for identifier in device.identifiers:
+                if len(identifier) >= 2 and identifier[0] in tesla_integrations:
+                    # Check if this is a vehicle (VIN format: 17 chars, not all digits)
+                    id_str = str(identifier[1])
+                    if len(id_str) == 17 and not id_str.isdigit():
+                        is_tesla_device = True
+                        device_name = device.name
+                        break
+
+            if not is_tesla_device:
+                continue
+
+            # Find location entities for this Tesla vehicle
+            for entity in entity_registry.entities.values():
+                if entity.device_id != device.id:
+                    continue
+
+                entity_id = entity.entity_id
+                entity_id_lower = entity_id.lower()
+
+                # Check device_tracker for location (Tesla Fleet/Teslemetry)
+                if entity_id.startswith("device_tracker.") and "_location" in entity_id_lower:
+                    state = self.hass.states.get(entity_id)
+                    if state and state.state not in ("unavailable", "unknown", "None", None):
+                        location = state.state.lower()
+                        _LOGGER.debug(f"Found vehicle location from {entity_id}: {location}")
+                        break
+
+                # Check binary_sensor for located_at_home (Teslemetry)
+                elif entity_id.startswith("binary_sensor.") and "located_at_home" in entity_id_lower:
+                    state = self.hass.states.get(entity_id)
+                    if state and state.state == "on":
+                        location = "home"
+                        _LOGGER.debug(f"Found vehicle at home from {entity_id}")
+                        break
+
+                # Check binary_sensor for located_at_work (Teslemetry)
+                elif entity_id.startswith("binary_sensor.") and "located_at_work" in entity_id_lower:
+                    state = self.hass.states.get(entity_id)
+                    if state and state.state == "on" and location != "home":
+                        location = "work"
+                        _LOGGER.debug(f"Found vehicle at work from {entity_id}")
+                        break
+
+        return location
+
+    async def _is_vehicle_plugged_in(self, vehicle_id: str) -> bool:
+        """Check if vehicle is plugged in from Home Assistant entities.
+
+        Args:
+            vehicle_id: Vehicle identifier
+
+        Returns:
+            True if plugged in, False otherwise
+        """
+        from ..const import (
+            DOMAIN,
+            CONF_TESLA_BLE_ENTITY_PREFIX,
+            DEFAULT_TESLA_BLE_ENTITY_PREFIX,
+        )
+        from homeassistant.helpers import entity_registry as er, device_registry as dr
+
+        # Method 1: Tesla BLE
+        config = {}
+        entries = self.hass.config_entries.async_entries(DOMAIN)
+        if entries:
+            config = dict(entries[0].options)
+
+        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+        ble_charger_entity = f"switch.{ble_prefix}_charger"
+        ble_state = self.hass.states.get(ble_charger_entity)
+
+        if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
+            # If BLE charger entity is available, vehicle is likely plugged in at home
+            return True
+
+        # Method 2: Check Tesla Fleet/Teslemetry entities
+        entity_registry = er.async_get(self.hass)
+        device_registry = dr.async_get(self.hass)
+
+        tesla_integrations = ["tesla_fleet", "teslemetry"]
+
+        for device in device_registry.devices.values():
+            is_tesla_device = False
+            for identifier in device.identifiers:
+                if len(identifier) >= 2 and identifier[0] in tesla_integrations:
+                    id_str = str(identifier[1])
+                    if len(id_str) == 17 and not id_str.isdigit():
+                        is_tesla_device = True
+                        break
+
+            if not is_tesla_device:
+                continue
+
+            # Find plugged in sensor for this Tesla vehicle
+            for entity in entity_registry.entities.values():
+                if entity.device_id != device.id:
+                    continue
+
+                entity_id = entity.entity_id
+                entity_id_lower = entity_id.lower()
+
+                # Check binary_sensor for charge_cable (plugged in)
+                if entity_id.startswith("binary_sensor.") and "charge_cable" in entity_id_lower:
+                    state = self.hass.states.get(entity_id)
+                    if state:
+                        is_plugged = state.state == "on"
+                        _LOGGER.debug(f"Found plugged in state from {entity_id}: {is_plugged}")
+                        return is_plugged
+
+                # Also check charging state sensor
+                elif entity_id.startswith("sensor.") and "_charging" in entity_id_lower and "charging_" not in entity_id_lower:
+                    state = self.hass.states.get(entity_id)
+                    if state and state.state not in ("unavailable", "unknown", "None", None):
+                        # If actively charging, must be plugged in
+                        if state.state.lower() in ("charging", "complete", "stopped"):
+                            _LOGGER.debug(f"Vehicle plugged in (charging state: {state.state})")
+                            return True
+
+        return False
+
     async def evaluate(self, live_status: dict, current_price_cents: Optional[float] = None) -> None:
         """
         Evaluate all vehicles and start/stop charging as needed.
@@ -2270,6 +2586,28 @@ class AutoScheduleExecutor:
         """Evaluate and control charging for a single vehicle."""
         state = self.get_state(vehicle_id)
         now = datetime.now()
+
+        # Check if vehicle is at home - only charge at home
+        location = await get_ev_location(self.hass, self.config_entry)
+        if location not in ("home", "unknown"):
+            # Vehicle is away - don't try to charge
+            if state.is_charging:
+                # Stop any active charging session tracking
+                state.is_charging = False
+            state.last_decision = "away"
+            state.last_decision_reason = f"Vehicle not at home (location: {location})"
+            _LOGGER.debug(f"Auto-schedule: Vehicle {vehicle_id} not at home ({location}), skipping")
+            return
+
+        # Check if vehicle is plugged in
+        plugged_in = await is_ev_plugged_in(self.hass, self.config_entry)
+        if not plugged_in:
+            if state.is_charging:
+                state.is_charging = False
+            state.last_decision = "unplugged"
+            state.last_decision_reason = "Vehicle not plugged in"
+            _LOGGER.debug(f"Auto-schedule: Vehicle {vehicle_id} not plugged in, skipping")
+            return
 
         # Get EV's current SoC to check if we've reached target
         ev_soc = await self._get_vehicle_soc(vehicle_id)
@@ -3264,6 +3602,20 @@ class PriceLevelChargingExecutor:
             self._state.last_decision_reason = "Price-level charging is disabled"
             return False, "Price-level charging is disabled", ""
 
+        # Check if vehicle is at home
+        location = await get_ev_location(self.hass, self.config_entry)
+        if location not in ("home", "unknown"):
+            self._state.last_decision = "away"
+            self._state.last_decision_reason = f"Vehicle not at home (location: {location})"
+            return False, f"Vehicle not at home ({location})", ""
+
+        # Check if vehicle is plugged in
+        plugged_in = await is_ev_plugged_in(self.hass, self.config_entry)
+        if not plugged_in:
+            self._state.last_decision = "unplugged"
+            self._state.last_decision_reason = "Vehicle not plugged in"
+            return False, "Vehicle not plugged in", ""
+
         # Get current EV SoC
         ev_soc = await self._get_ev_soc()
         if ev_soc is None:
@@ -3502,6 +3854,20 @@ class ScheduledChargingExecutor:
             self._state.last_decision = "disabled"
             self._state.last_decision_reason = "Scheduled charging is disabled"
             return False, "Scheduled charging is disabled", ""
+
+        # Check if vehicle is at home
+        location = await get_ev_location(self.hass, self.config_entry)
+        if location not in ("home", "unknown"):
+            self._state.last_decision = "away"
+            self._state.last_decision_reason = f"Vehicle not at home (location: {location})"
+            return False, f"Vehicle not at home ({location})", ""
+
+        # Check if vehicle is plugged in
+        plugged_in = await is_ev_plugged_in(self.hass, self.config_entry)
+        if not plugged_in:
+            self._state.last_decision = "unplugged"
+            self._state.last_decision_reason = "Vehicle not plugged in"
+            return False, "Vehicle not plugged in", ""
 
         start_time = settings.get("start_time", "00:00")
         end_time = settings.get("end_time", "06:00")
