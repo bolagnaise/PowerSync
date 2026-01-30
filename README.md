@@ -444,23 +444,6 @@ service: power_sync.restore_normal
 
 ---
 
-## Automatic TOU Syncing
-
-**The integration automatically syncs your TOU schedule every 5 minutes** when the auto-sync switch is enabled.
-
-**How it works:**
-1. Enable the `switch.auto_sync_tou_schedule` switch (enabled by default)
-2. The integration runs a background timer that checks every 5 minutes
-3. If auto-sync is enabled, it automatically:
-   - Fetches the latest pricing forecast from your provider (Amber, Octopus, AEMO)
-   - Converts it to your battery system's TOU format
-   - Sends it to your Powerwall/Sigenergy via the configured API
-4. If auto-sync is disabled, the timer skips syncing
-
-**No automation required!** Just leave the switch on and the integration handles everything automatically.
-
----
-
 ## Pre-built Dashboard (Optional)
 
 A pre-built Lovelace dashboard is included for visualizing all PowerSync data.
