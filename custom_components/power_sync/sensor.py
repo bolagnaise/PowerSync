@@ -726,9 +726,15 @@ class TariffScheduleSensor(SensorEntity):
 
     @property
     def native_value(self) -> Any:
-        """Return the state - number of periods in schedule."""
+        """Return the state - current tariff period or last sync time."""
         tariff_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("tariff_schedule")
         if tariff_data:
+            # For Tesla/Globird users, show current period and price
+            current_period = tariff_data.get("current_period")
+            buy_price = tariff_data.get("buy_price")
+            if current_period and buy_price is not None:
+                return f"{current_period} ({buy_price}c/kWh)"
+            # Fallback to last sync time
             return tariff_data.get("last_sync", "Unknown")
         return "Not synced"
 
@@ -739,33 +745,81 @@ class TariffScheduleSensor(SensorEntity):
         if not tariff_data:
             return {}
 
-        attributes = {
-            "last_sync": tariff_data.get("last_sync"),
-            "period_count": len(tariff_data.get("buy_prices", {})),
-        }
-
-        # Add buy and sell prices as individual attributes for easy access
+        # Support both Amber format (buy_prices with PERIOD_HH_MM keys)
+        # and Tesla/Globird format (buy_rates with TOU period names)
         buy_prices = tariff_data.get("buy_prices", {})
         sell_prices = tariff_data.get("sell_prices", {})
+        buy_rates = tariff_data.get("buy_rates", {})
+        sell_rates = tariff_data.get("sell_rates", {})
+        tou_periods = tariff_data.get("tou_periods", {})
 
-        # Create a list format suitable for apexcharts-card visualization
-        # Format: list of {time: "HH:MM", buy: price, sell: price}
-        schedule_list = []
-        for period_key in sorted(buy_prices.keys()):
-            # Convert PERIOD_HH_MM to HH:MM
-            parts = period_key.replace("PERIOD_", "").split("_")
-            time_str = f"{parts[0]}:{parts[1]}"
-            schedule_list.append({
-                "time": time_str,
-                "buy": buy_prices.get(period_key, 0),
-                "sell": sell_prices.get(period_key, 0),
-            })
+        attributes = {
+            "last_sync": tariff_data.get("last_sync"),
+            "utility": tariff_data.get("utility"),
+            "plan_name": tariff_data.get("plan_name"),
+            "current_period": tariff_data.get("current_period"),
+            "current_season": tariff_data.get("current_season"),
+        }
 
-        attributes["schedule"] = schedule_list
+        # Amber format: PERIOD_HH_MM keys with 30-min granularity
+        if buy_prices:
+            attributes["period_count"] = len(buy_prices)
+            # Create a list format suitable for apexcharts-card visualization
+            schedule_list = []
+            for period_key in sorted(buy_prices.keys()):
+                # Convert PERIOD_HH_MM to HH:MM
+                parts = period_key.replace("PERIOD_", "").split("_")
+                time_str = f"{parts[0]}:{parts[1]}"
+                schedule_list.append({
+                    "time": time_str,
+                    "buy": buy_prices.get(period_key, 0),
+                    "sell": sell_prices.get(period_key, 0),
+                })
+            attributes["schedule"] = schedule_list
+            attributes["buy_prices"] = buy_prices
+            attributes["sell_prices"] = sell_prices
 
-        # Also add raw dicts for flexibility
-        attributes["buy_prices"] = buy_prices
-        attributes["sell_prices"] = sell_prices
+        # Tesla/Globird format: TOU period names (ON_PEAK, OFF_PEAK, etc.)
+        elif buy_rates:
+            attributes["period_count"] = len(buy_rates)
+
+            # Create TOU schedule list with period names and rates
+            tou_schedule = []
+            for period_name, rate in buy_rates.items():
+                # Convert rate from $/kWh to c/kWh if needed
+                buy_cents = rate * 100 if rate < 1 else rate
+                sell_rate = sell_rates.get(period_name, 0)
+                sell_cents = sell_rate * 100 if sell_rate < 1 else sell_rate
+
+                # Get time windows for this period
+                period_times = tou_periods.get(period_name, [])
+                time_windows = []
+                for window in period_times if isinstance(period_times, list) else []:
+                    from_hour = window.get("fromHour", 0)
+                    to_hour = window.get("toHour", 24)
+                    from_dow = window.get("fromDayOfWeek", 0)
+                    to_dow = window.get("toDayOfWeek", 6)
+                    time_windows.append({
+                        "from_hour": from_hour,
+                        "to_hour": to_hour,
+                        "from_day": from_dow,
+                        "to_day": to_dow,
+                    })
+
+                tou_schedule.append({
+                    "period": period_name,
+                    "buy": round(buy_cents, 2),
+                    "sell": round(sell_cents, 2),
+                    "windows": time_windows,
+                })
+
+            attributes["tou_schedule"] = tou_schedule
+            attributes["buy_rates"] = {k: round(v * 100 if v < 1 else v, 2) for k, v in buy_rates.items()}
+            attributes["sell_rates"] = {k: round(v * 100 if v < 1 else v, 2) for k, v in sell_rates.items()}
+
+            # Add current buy/sell prices in cents
+            attributes["buy_price"] = tariff_data.get("buy_price")
+            attributes["sell_price"] = tariff_data.get("sell_price")
 
         return attributes
 
