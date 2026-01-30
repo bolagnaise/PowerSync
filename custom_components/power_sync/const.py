@@ -534,6 +534,10 @@ SERVICE_RESTORE_INVERTER = "restore_inverter"
 DISCHARGE_DURATIONS = [15, 30, 45, 60, 75, 90, 105, 120]
 DEFAULT_DISCHARGE_DURATION = 30
 
+# Duration dropdown entity option keys (stored in ConfigEntry.options)
+CONF_FORCE_CHARGE_DURATION = "force_charge_duration"
+CONF_FORCE_DISCHARGE_DURATION = "force_discharge_duration"
+
 # AEMO Spike sensors
 SENSOR_TYPE_AEMO_PRICE = "aemo_price"
 SENSOR_TYPE_AEMO_SPIKE_STATUS = "aemo_spike_status"
