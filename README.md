@@ -200,7 +200,7 @@ The PowerSync mobile app connects to your Home Assistant instance to provide rem
 
 ### Troubleshooting
 
-- **Connection failed (Android):** Ensure your HA URL uses `http://` not `https://` for local connections, or enable cleartext traffic
+- **Connection failed:** Ensure your Home Assistant URL is correct and accessible from your phone
 - **Connection timeout:** Check that your phone can reach your HA instance (same network for local URLs)
 - **Invalid token:** Generate a new Long-Lived Access Token and try again
 
