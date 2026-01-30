@@ -229,14 +229,14 @@
           "openweathermap_api_key": "OpenWeatherMap API Key",
           "solcast_enabled": "Enable Solcast Forecasting",
           "solcast_api_key": "Solcast API Key",
-          "solcast_resource_id": "Solcast Resource ID"
+          "solcast_resource_id": "Solcast Resource ID(s)"
         },
         "data_description": {
           "weather_location": "City name or postcode for weather-based automations (e.g., Brisbane or 4000)",
           "openweathermap_api_key": "Free API key from openweathermap.org for weather triggers. Leave blank to disable.",
           "solcast_enabled": "Enable Solcast solar production forecasting for smarter battery management",
           "solcast_api_key": "Your Solcast API key from solcast.com (free for residential rooftop systems)",
-          "solcast_resource_id": "Your Solcast rooftop resource ID (found in your Solcast dashboard)"
+          "solcast_resource_id": "Your Solcast rooftop resource ID from your dashboard. For multiple arrays (e.g., east/west), enter IDs comma-separated (e.g., abc123,def456)"
         },
         "submit_button": "Next"
       },
@@ -469,14 +469,14 @@
           "openweathermap_api_key": "OpenWeatherMap API Key",
           "solcast_enabled": "Enable Solcast Forecasting",
           "solcast_api_key": "Solcast API Key",
-          "solcast_resource_id": "Solcast Resource ID"
+          "solcast_resource_id": "Solcast Resource ID(s)"
         },
         "data_description": {
           "weather_location": "City name or postcode for weather-based automations (e.g., Brisbane or 4000)",
           "openweathermap_api_key": "Free API key from openweathermap.org for weather triggers. Leave blank to disable.",
           "solcast_enabled": "Enable Solcast solar production forecasting for smarter battery management",
           "solcast_api_key": "Your Solcast API key from solcast.com (free for residential rooftop systems)",
-          "solcast_resource_id": "Your Solcast rooftop resource ID (found in your Solcast dashboard)"
+          "solcast_resource_id": "Your Solcast rooftop resource ID from your dashboard. For multiple arrays (e.g., east/west), enter IDs comma-separated (e.g., abc123,def456)"
         }
       },
       "ev_charging": {
