@@ -1,0 +1,92 @@
+blueprint:
+  name: "PowerSync: Battery health from capacity sensor"
+  description: >
+    Sync PowerSync battery health using a capacity sensor (e.g. from Powerwall integration).
+    Uses manufacturer spec as original capacity (Wh) and calculates degradation.
+  domain: automation
+  input:
+    capacity_sensor:
+      name: Capacity sensor
+      description: Sensor that reports current battery capacity (kWh or Wh).
+      selector:
+        entity:
+          domain: sensor
+    sensor_unit:
+      name: Capacity sensor unit
+      description: Select what unit the capacity sensor reports.
+      default: kwh
+      selector:
+        select:
+          options:
+            - label: kWh (will be converted to Wh)
+              value: kwh
+            - label: Wh (used as-is)
+              value: wh
+    original_capacity_wh:
+      name: Manufacturer original capacity (Wh)
+      description: >
+        Total manufacturer spec in Wh. Example: 1x Powerwall = 13500 Wh, 2x = 27000 Wh.
+      default: 13500
+      selector:
+        number:
+          min: 1000
+          max: 200000
+          step: 100
+          unit_of_measurement: Wh
+          mode: box
+    battery_count:
+      name: Battery count (optional)
+      description: Used for reporting only.
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 10
+          step: 1
+          mode: box
+    update_interval_hours:
+      name: Update interval (hours)
+      default: 6
+      selector:
+        number:
+          min: 1
+          max: 24
+          step: 1
+          mode: slider
+
+mode: single
+
+trigger:
+  - platform: homeassistant
+    event: start
+  - platform: time_pattern
+    hours: "/{{ (inputs.update_interval_hours | int(6)) }}"
+
+condition:
+  - condition: template
+    value_template: >
+      {{ states(inputs.capacity_sensor) not in ['unknown', 'unavailable', 'none', ''] }}
+
+action:
+  - variables:
+      original_wh: "{{ inputs.original_capacity_wh | float(0) }}"
+      raw_capacity: "{{ states(inputs.capacity_sensor) | float(0) }}"
+      current_wh: >
+        {% if inputs.sensor_unit == 'kwh' %}
+          {{ (raw_capacity * 1000) | round(0) }}
+        {% else %}
+          {{ raw_capacity | round(0) }}
+        {% endif %}
+      degradation_percent: >
+        {% if original_wh > 0 %}
+          {{ ((1 - (current_wh / original_wh)) * 100) | round(1) }}
+        {% else %}
+          0
+        {% endif %}
+  - service: power_sync.sync_battery_health
+    data:
+      original_capacity_wh: "{{ original_wh | round(0) }}"
+      current_capacity_wh: "{{ current_wh }}"
+      degradation_percent: "{{ degradation_percent }}"
+      battery_count: "{{ inputs.battery_count | int(1) }}"
+      scanned_at: "{{ now().isoformat() }}"
