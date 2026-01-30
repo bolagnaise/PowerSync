@@ -412,10 +412,11 @@ Control AC-coupled solar inverters directly during negative pricing periods. Thi
 | Brand | Connection | Models |
 |-------|------------|--------|
 | **Sungrow** | Modbus TCP | SG series (string), SH series (hybrid) |
-| **Fronius** | Modbus TCP | Primo, Symo, Gen24, Tauro, Eco |
+| **Fronius** | Modbus TCP | Primo, Symo, Gen24/Tauro, Eco |
 | **GoodWe** | Modbus TCP | ET, EH, BT, BH, ES, EM series (hybrid) |
-| **Huawei** | Modbus TCP | SUN2000 L1, M0, M1, M2 series |
+| **Huawei** | Modbus TCP | SUN2000 L1, M1, M2 series |
 | **Enphase** | HTTPS API | IQ Gateway, Envoy-S (microinverters) |
+| **Zeversolar** | HTTP API | TLC series, Zeversolair Mini/TL |
 
 ---
 
