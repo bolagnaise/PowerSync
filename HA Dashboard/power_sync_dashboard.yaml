@@ -56,63 +56,91 @@ views:
                   height: 140px;
                 }
       # Battery Control Buttons
-      # OPTIONAL: Create input_select helpers for variable duration via Settings > Devices > Helpers > Dropdown:
-      #    - Name: Force Charge Duration | Entity ID: input_select.force_charge_duration | Options: 15, 30, 45, 60, 90, 120
-      #    - Name: Force Discharge Duration | Entity ID: input_select.force_discharge_duration | Options: 15, 30, 45, 60, 90, 120
-      # If helpers are created, the buttons will use the selected duration. Otherwise defaults to 30 minutes.
-      - type: custom:mushroom-chips-card
-        alignment: center
-        chips:
-          # Force Charge Duration Selector (optional - only works if helper exists)
-          - type: template
+      - type: horizontal-stack
+        card_mod:
+          style: |
+            #root {
+              flex-wrap: wrap;
+              justify-content: center;
+              display: flex !important;
+            }
+            #root > * {
+              flex: 0 0 auto !important;
+              margin: 4px;
+              min-width: fit-content !important;
+            }
+        cards:
+          # Force Charge Duration Selector
+          - type: custom:button-card
+            entity: input_select.force_charge_duration
+            show_name: true
+            show_icon: true
             icon: mdi:timer-outline
-            icon_color: blue
-            content: "{{ states('input_select.force_charge_duration') | default('30', true) }} min"
-            tap_action:
-              action: more-info
-              entity: input_select.force_charge_duration
+            name: "[[[ return (states['input_select.force_charge_duration'] ? states['input_select.force_charge_duration'].state : '30') + ' min' ]]]"
+            styles:
+              card: [height: 36px, border-radius: 18px, padding: 0px 12px, background: "rgba(var(--rgb-blue-color, 33, 150, 243), 0.1)", width: auto]
+              grid: [grid-template-areas: '"i n"', grid-template-columns: min-content auto]
+              icon: [color: "var(--blue-color, #2196F3)", width: 20px]
+              name: [font-size: 12px, font-weight: 500, white-space: nowrap]
+            tap_action: {action: more-info}
+
           # Force Charge Button
-          - type: template
+          - type: custom:button-card
+            name: Force Charge
             icon: mdi:battery-charging
-            icon_color: blue
-            content: Force Charge
+            styles:
+              card: [height: 36px, border-radius: 18px, padding: 0px 12px, background: "rgba(var(--rgb-blue-color, 33, 150, 243), 0.1)", width: auto]
+              grid: [grid-template-areas: '"i n"', grid-template-columns: min-content auto]
+              icon: [color: "var(--blue-color, #2196F3)", width: 20px]
+              name: [font-size: 12px, font-weight: 500, white-space: nowrap]
             tap_action:
               action: call-service
-              service: power_sync.force_charge
-              data:
-                duration: "{{ states('input_select.force_charge_duration') | default('30', true) | int }}"
+              service: script.power_sync_force_charge
               confirmation:
-                text: "Force charge for {{ states('input_select.force_charge_duration') | default('30', true) }} minutes?"
-          # Force Discharge Duration Selector (optional - only works if helper exists)
-          - type: template
+                text: "[[[ return 'Force charge for ' + (states['input_select.force_charge_duration'] ? states['input_select.force_charge_duration'].state : '30') + ' minutes?' ]]]"
+
+          # Force Discharge Duration Selector
+          - type: custom:button-card
+            entity: input_select.force_discharge_duration
+            show_name: true
+            show_icon: true
             icon: mdi:timer-outline
-            icon_color: orange
-            content: "{{ states('input_select.force_discharge_duration') | default('30', true) }} min"
-            tap_action:
-              action: more-info
-              entity: input_select.force_discharge_duration
+            name: "[[[ return (states['input_select.force_discharge_duration'] ? states['input_select.force_discharge_duration'].state : '30') + ' min' ]]]"
+            styles:
+              card: [height: 36px, border-radius: 18px, padding: 0px 12px, background: "rgba(var(--rgb-orange-color, 255, 152, 0), 0.1)", width: auto]
+              grid: [grid-template-areas: '"i n"', grid-template-columns: min-content auto]
+              icon: [color: "var(--orange-color, #FF9800)", width: 20px]
+              name: [font-size: 12px, font-weight: 500, white-space: nowrap]
+            tap_action: {action: more-info}
+
           # Force Discharge Button
-          - type: template
+          - type: custom:button-card
+            name: Force Discharge
             icon: mdi:battery-arrow-down
-            icon_color: orange
-            content: Force Discharge
+            styles:
+              card: [height: 36px, border-radius: 18px, padding: 0px 12px, background: "rgba(var(--rgb-orange-color, 255, 152, 0), 0.1)", width: auto]
+              grid: [grid-template-areas: '"i n"', grid-template-columns: min-content auto]
+              icon: [color: "var(--orange-color, #FF9800)", width: 20px]
+              name: [font-size: 12px, font-weight: 500, white-space: nowrap]
             tap_action:
               action: call-service
-              service: power_sync.force_discharge
-              data:
-                duration: "{{ states('input_select.force_discharge_duration') | default('30', true) | int }}"
+              service: script.power_sync_force_discharge
               confirmation:
-                text: "Force discharge for {{ states('input_select.force_discharge_duration') | default('30', true) }} minutes?"
-          # Restore Normal
-          - type: template
+                text: "[[[ return 'Force discharge for ' + (states['input_select.force_discharge_duration'] ? states['input_select.force_discharge_duration'].state : '30') + ' minutes?' ]]]"
+
+          # Restore Normal Button
+          - type: custom:button-card
+            name: Restore
             icon: mdi:battery-sync
-            icon_color: green
-            content: Restore Normal
+            styles:
+              card: [height: 36px, border-radius: 18px, padding: 0px 12px, background: "rgba(var(--rgb-green-color, 76, 175, 80), 0.1)", width: auto]
+              grid: [grid-template-areas: '"i n"', grid-template-columns: min-content auto]
+              icon: [color: "var(--green-color, #4CAF50)", width: 20px]
+              name: [font-size: 12px, font-weight: 500, white-space: nowrap]
             tap_action:
               action: call-service
               service: power_sync.restore_normal
-              confirmation:
-                text: Restore normal battery operation?
+              confirmation: {text: "Restore normal battery operation?"}
       - type: custom:power-flow-card-plus
         entities:
           battery:
