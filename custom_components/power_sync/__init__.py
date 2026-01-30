@@ -10017,31 +10017,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             # Restore backup reserve if it was saved during force charge OR force discharge
             # For discharge: only restore if current SoC > saved reserve (to prevent grid imports)
-            saved_backup_reserve = (
-                force_discharge_state.get("saved_backup_reserve") or
-                force_charge_state.get("saved_backup_reserve")
-            )
+            # Note: Use explicit None check, not 'or', because 0% is a valid saved value
+            saved_backup_reserve = force_discharge_state.get("saved_backup_reserve")
+            if saved_backup_reserve is None:
+                saved_backup_reserve = force_charge_state.get("saved_backup_reserve")
             was_discharging = force_discharge_state.get("active")
 
             if saved_backup_reserve is None:
-                # Try to get current backup reserve from API to check if it's at extreme values
-                _LOGGER.warning("No saved backup reserve found - checking current value")
-                try:
-                    async with session.get(
-                        f"{api_base}/api/1/energy_sites/{site_id}/site_info",
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=30),
-                    ) as response:
-                        if response.status == 200:
-                            data = await response.json()
-                            current_reserve = data.get("response", {}).get("backup_reserve_percent")
-                            _LOGGER.info(f"Current backup reserve is {current_reserve}%")
-                            # If it's at 100% (force charge) or 0% (force discharge), restore to default 20%
-                            if current_reserve in (0, 100):
-                                saved_backup_reserve = 20
-                                _LOGGER.info(f"Backup reserve at {current_reserve}% from force mode - will restore to default 20%")
-                except Exception as e:
-                    _LOGGER.warning(f"Could not check current backup reserve: {e}")
+                # No saved value - this shouldn't happen normally, but handle gracefully
+                # DON'T assume 0% means "from force mode" - user may have intentionally set 0%
+                _LOGGER.warning("No saved backup reserve found - will not change current setting")
+                # Skip backup reserve restoration entirely rather than guessing
 
             if saved_backup_reserve is not None:
                 # For discharge restore: check if SoC > backup reserve to prevent imports
