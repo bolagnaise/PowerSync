@@ -205,7 +205,7 @@ views:
       - type: custom:apexcharts-card
         header:
           show: true
-          title: TOU Schedule Sent to Tesla
+          title: TOU Schedule Sent to Battery
           show_states: false
         graph_span: 24h
         span:
@@ -218,7 +218,7 @@ views:
               labels:
                 formatter: |
                   EVAL:function(val) {
-                    return (val * 100).toFixed(0) + '¢';
+                    return val.toFixed(0) + '¢';
                   }
         series:
           - entity: sensor.tariff_schedule
@@ -230,25 +230,67 @@ views:
             curve: stepline
             extend_to: end
             data_generator: >
-              const schedule = entity.attributes.schedule || [];
-
               const now = new Date();
+              const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+              const currentDow = now.getDay();
+              let data = [];
 
-              const today = new Date(now.getFullYear(), now.getMonth(),
-              now.getDate());
-
-              const data = schedule.map((entry) => {
-                const [hours, mins] = entry.time.split(':').map(Number);
-                const timestamp = new Date(today.getTime() + hours * 3600000 + mins * 60000);
-                return [timestamp.getTime(), entry.buy];
-              });
-
-              if (data.length > 0) {
-                const endOfDay = new Date(today.getTime() + 24 * 3600000 - 1);
-                data.push([endOfDay.getTime(), data[data.length - 1][1]]);
+              // Amber format: schedule with time-based entries
+              const schedule = entity.attributes.schedule || [];
+              if (schedule.length > 0) {
+                data = schedule.map((entry) => {
+                  const [hours, mins] = entry.time.split(':').map(Number);
+                  const timestamp = new Date(today.getTime() + hours * 3600000 + mins * 60000);
+                  return [timestamp.getTime(), entry.buy];
+                });
+                if (data.length > 0) {
+                  const endOfDay = new Date(today.getTime() + 24 * 3600000 - 1);
+                  data.push([endOfDay.getTime(), data[data.length - 1][1]]);
+                }
+                return data;
               }
 
-              return data;
+              // Tesla/Globird format: tou_schedule with periods and time windows
+              const touSchedule = entity.attributes.tou_schedule || [];
+              if (touSchedule.length > 0) {
+                const hourlyPrices = new Array(24).fill(null);
+                touSchedule.forEach((period) => {
+                  const windows = period.windows || [];
+                  windows.forEach((w) => {
+                    if (currentDow >= w.from_day && currentDow <= w.to_day) {
+                      const fromHour = w.from_hour || 0;
+                      const toHour = w.to_hour || 24;
+                      if (fromHour <= toHour) {
+                        for (let h = fromHour; h < toHour && h < 24; h++) {
+                          hourlyPrices[h] = period.buy;
+                        }
+                      } else {
+                        for (let h = fromHour; h < 24; h++) hourlyPrices[h] = period.buy;
+                        for (let h = 0; h < toHour; h++) hourlyPrices[h] = period.buy;
+                      }
+                    }
+                  });
+                });
+                const defaultPrice = entity.attributes.buy_price || touSchedule[0]?.buy || 0;
+                for (let h = 0; h < 24; h++) {
+                  if (hourlyPrices[h] === null) hourlyPrices[h] = defaultPrice;
+                  const timestamp = new Date(today.getTime() + h * 3600000);
+                  data.push([timestamp.getTime(), hourlyPrices[h]]);
+                }
+                const endOfDay = new Date(today.getTime() + 24 * 3600000 - 1);
+                data.push([endOfDay.getTime(), hourlyPrices[23]]);
+                return data;
+              }
+
+              // Fallback: use current buy_price as flat line
+              const buyPrice = entity.attributes.buy_price;
+              if (buyPrice !== undefined) {
+                return [
+                  [today.getTime(), buyPrice],
+                  [new Date(today.getTime() + 24 * 3600000 - 1).getTime(), buyPrice]
+                ];
+              }
+              return [];
           - entity: sensor.tariff_schedule
             name: Sell Price
             type: line
@@ -258,25 +300,67 @@ views:
             curve: stepline
             extend_to: end
             data_generator: >
-              const schedule = entity.attributes.schedule || [];
-
               const now = new Date();
+              const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+              const currentDow = now.getDay();
+              let data = [];
 
-              const today = new Date(now.getFullYear(), now.getMonth(),
-              now.getDate());
-
-              const data = schedule.map((entry) => {
-                const [hours, mins] = entry.time.split(':').map(Number);
-                const timestamp = new Date(today.getTime() + hours * 3600000 + mins * 60000);
-                return [timestamp.getTime(), entry.sell];
-              });
-
-              if (data.length > 0) {
-                const endOfDay = new Date(today.getTime() + 24 * 3600000 - 1);
-                data.push([endOfDay.getTime(), data[data.length - 1][1]]);
+              // Amber format: schedule with time-based entries
+              const schedule = entity.attributes.schedule || [];
+              if (schedule.length > 0) {
+                data = schedule.map((entry) => {
+                  const [hours, mins] = entry.time.split(':').map(Number);
+                  const timestamp = new Date(today.getTime() + hours * 3600000 + mins * 60000);
+                  return [timestamp.getTime(), entry.sell];
+                });
+                if (data.length > 0) {
+                  const endOfDay = new Date(today.getTime() + 24 * 3600000 - 1);
+                  data.push([endOfDay.getTime(), data[data.length - 1][1]]);
+                }
+                return data;
               }
 
-              return data;
+              // Tesla/Globird format: tou_schedule with periods and time windows
+              const touSchedule = entity.attributes.tou_schedule || [];
+              if (touSchedule.length > 0) {
+                const hourlyPrices = new Array(24).fill(null);
+                touSchedule.forEach((period) => {
+                  const windows = period.windows || [];
+                  windows.forEach((w) => {
+                    if (currentDow >= w.from_day && currentDow <= w.to_day) {
+                      const fromHour = w.from_hour || 0;
+                      const toHour = w.to_hour || 24;
+                      if (fromHour <= toHour) {
+                        for (let h = fromHour; h < toHour && h < 24; h++) {
+                          hourlyPrices[h] = period.sell;
+                        }
+                      } else {
+                        for (let h = fromHour; h < 24; h++) hourlyPrices[h] = period.sell;
+                        for (let h = 0; h < toHour; h++) hourlyPrices[h] = period.sell;
+                      }
+                    }
+                  });
+                });
+                const defaultPrice = entity.attributes.sell_price || touSchedule[0]?.sell || 0;
+                for (let h = 0; h < 24; h++) {
+                  if (hourlyPrices[h] === null) hourlyPrices[h] = defaultPrice;
+                  const timestamp = new Date(today.getTime() + h * 3600000);
+                  data.push([timestamp.getTime(), hourlyPrices[h]]);
+                }
+                const endOfDay = new Date(today.getTime() + 24 * 3600000 - 1);
+                data.push([endOfDay.getTime(), hourlyPrices[23]]);
+                return data;
+              }
+
+              // Fallback: use current sell_price as flat line
+              const sellPrice = entity.attributes.sell_price;
+              if (sellPrice !== undefined) {
+                return [
+                  [today.getTime(), sellPrice],
+                  [new Date(today.getTime() + 24 * 3600000 - 1).getTime(), sellPrice]
+                ];
+              }
+              return [];
         apex_config:
           chart:
             height: 200
@@ -292,11 +376,10 @@ views:
               formatter: |
                 EVAL:function(value) {
                   if (value === null || value === undefined) return '';
-                  const cents = value * 100;
-                  if (Math.abs(cents) >= 1000) {
-                    return '$' + value.toFixed(2);
+                  if (Math.abs(value) >= 100) {
+                    return '$' + (value / 100).toFixed(2);
                   }
-                  return cents.toFixed(0) + '¢';
+                  return value.toFixed(1) + '¢';
                 }
       # Solar Curtailment Status Cards - Side by Side
       - type: horizontal-stack
