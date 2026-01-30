@@ -128,8 +128,10 @@ from .const import (
     DEFAULT_FORECAST_DISCREPANCY_THRESHOLD,
     # Price spike alert configuration
     CONF_PRICE_SPIKE_ALERT,
-    CONF_PRICE_SPIKE_THRESHOLD,
-    DEFAULT_PRICE_SPIKE_THRESHOLD,
+    CONF_PRICE_SPIKE_IMPORT_THRESHOLD,
+    CONF_PRICE_SPIKE_EXPORT_THRESHOLD,
+    DEFAULT_PRICE_SPIKE_IMPORT_THRESHOLD,
+    DEFAULT_PRICE_SPIKE_EXPORT_THRESHOLD,
     # Alpha: Force tariff mode toggle
     CONF_FORCE_TARIFF_MODE_TOGGLE,
     # AC-Coupled Inverter Curtailment configuration
@@ -2103,9 +2105,13 @@ class ProviderConfigView(HomeAssistantView):
                         CONF_PRICE_SPIKE_ALERT,
                         entry.data.get(CONF_PRICE_SPIKE_ALERT, False)
                     ),
-                    "price_spike_threshold": entry.options.get(
-                        CONF_PRICE_SPIKE_THRESHOLD,
-                        entry.data.get(CONF_PRICE_SPIKE_THRESHOLD, DEFAULT_PRICE_SPIKE_THRESHOLD)
+                    "price_spike_import_threshold": entry.options.get(
+                        CONF_PRICE_SPIKE_IMPORT_THRESHOLD,
+                        entry.data.get(CONF_PRICE_SPIKE_IMPORT_THRESHOLD, DEFAULT_PRICE_SPIKE_IMPORT_THRESHOLD)
+                    ),
+                    "price_spike_export_threshold": entry.options.get(
+                        CONF_PRICE_SPIKE_EXPORT_THRESHOLD,
+                        entry.data.get(CONF_PRICE_SPIKE_EXPORT_THRESHOLD, DEFAULT_PRICE_SPIKE_EXPORT_THRESHOLD)
                     ),
                     # Export Boost settings
                     "export_boost_enabled": entry.options.get(
@@ -2328,7 +2334,8 @@ class ProviderConfigView(HomeAssistantView):
                 "forecast_discrepancy_alert": CONF_FORECAST_DISCREPANCY_ALERT,
                 "forecast_discrepancy_threshold": CONF_FORECAST_DISCREPANCY_THRESHOLD,
                 "price_spike_alert": CONF_PRICE_SPIKE_ALERT,
-                "price_spike_threshold": CONF_PRICE_SPIKE_THRESHOLD,
+                "price_spike_import_threshold": CONF_PRICE_SPIKE_IMPORT_THRESHOLD,
+                "price_spike_export_threshold": CONF_PRICE_SPIKE_EXPORT_THRESHOLD,
                 "export_boost_enabled": CONF_EXPORT_BOOST_ENABLED,
                 "export_price_offset": CONF_EXPORT_PRICE_OFFSET,
                 "export_min_price": CONF_EXPORT_MIN_PRICE,
@@ -7695,43 +7702,64 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             price_spike_alert_enabled and
             forecast_data
         ):
-            spike_threshold = entry.options.get(
-                CONF_PRICE_SPIKE_THRESHOLD,
-                entry.data.get(CONF_PRICE_SPIKE_THRESHOLD, DEFAULT_PRICE_SPIKE_THRESHOLD)
+            import_threshold = entry.options.get(
+                CONF_PRICE_SPIKE_IMPORT_THRESHOLD,
+                entry.data.get(CONF_PRICE_SPIKE_IMPORT_THRESHOLD, DEFAULT_PRICE_SPIKE_IMPORT_THRESHOLD)
+            )
+            export_threshold = entry.options.get(
+                CONF_PRICE_SPIKE_EXPORT_THRESHOLD,
+                entry.data.get(CONF_PRICE_SPIKE_EXPORT_THRESHOLD, DEFAULT_PRICE_SPIKE_EXPORT_THRESHOLD)
             )
             spike_result = detect_price_spikes(
                 forecast_data,
-                threshold=spike_threshold,
+                import_threshold=import_threshold,
+                export_threshold=export_threshold,
                 forecast_type=forecast_type
             )
 
-            if spike_result.get("has_spike"):
-                max_price = spike_result.get("max_price", 0)
-                spike_count = spike_result.get("spike_count", 0)
-                spike_details = spike_result.get("spike_details", [])
+            # Send notifications for import spikes
+            import_spikes = spike_result.get("import_spikes", {})
+            if import_spikes.get("has_spike"):
+                max_price = import_spikes.get("max_price", 0)
+                spike_count = import_spikes.get("count", 0)
+                spike_details = import_spikes.get("details", [])
 
-                _LOGGER.warning(
-                    "⚠️ Price spike detected: %d intervals exceed %.0fc/kWh threshold "
-                    "(max %.0fc/kWh = $%.2f/kWh)",
-                    spike_count, spike_threshold, max_price, max_price / 100
-                )
-
-                # Send mobile push notification
                 try:
                     from .automations.actions import _send_expo_push
-                    # Format spike times for notification
                     if spike_details:
                         first_spike = spike_details[0]
                         spike_time = first_spike.get("time", "").split("T")[1][:5] if "T" in first_spike.get("time", "") else ""
                         await _send_expo_push(
                             hass,
-                            "Price Spike Alert",
-                            f"Forecast shows {spike_count} intervals above ${spike_threshold/100:.0f}/kWh. "
-                            f"Max price: ${max_price/100:.2f}/kWh at {spike_time}. "
-                            f"Check your Amber app for details.",
+                            "Import Price Spike Alert",
+                            f"Forecast shows {spike_count} intervals above ${import_threshold/100:.0f}/kWh import. "
+                            f"Max: ${max_price/100:.2f}/kWh at {spike_time}. "
+                            f"Consider reducing grid usage during these periods.",
                         )
                 except Exception as notify_err:
-                    _LOGGER.debug(f"Could not send price spike notification: {notify_err}")
+                    _LOGGER.debug(f"Could not send import spike notification: {notify_err}")
+
+            # Send notifications for export spikes
+            export_spikes = spike_result.get("export_spikes", {})
+            if export_spikes.get("has_spike"):
+                max_price = export_spikes.get("max_price", 0)
+                spike_count = export_spikes.get("count", 0)
+                spike_details = export_spikes.get("details", [])
+
+                try:
+                    from .automations.actions import _send_expo_push
+                    if spike_details:
+                        first_spike = spike_details[0]
+                        spike_time = first_spike.get("time", "").split("T")[1][:5] if "T" in first_spike.get("time", "") else ""
+                        await _send_expo_push(
+                            hass,
+                            "Export Price Spike Alert",
+                            f"Forecast shows {spike_count} intervals above ${export_threshold/100:.2f}/kWh export. "
+                            f"Max: ${max_price/100:.2f}/kWh at {spike_time}. "
+                            f"Great time to export power to the grid!",
+                        )
+                except Exception as notify_err:
+                    _LOGGER.debug(f"Could not send export spike notification: {notify_err}")
 
         # Fetch Powerwall timezone from site_info
         # This ensures correct timezone handling for TOU schedule alignment

@@ -258,37 +258,40 @@ def compare_forecast_types(
 
 def detect_price_spikes(
     forecast_data: list[dict[str, Any]],
-    threshold: float = 100.0,
+    import_threshold: float = 100.0,
+    export_threshold: float = 50.0,
     forecast_type: str = "predicted",
 ) -> dict[str, Any]:
     """
-    Detect extreme price spikes in forecast data.
+    Detect extreme price spikes in forecast data for both import and export.
 
-    Analyzes forecast intervals to detect when prices exceed a threshold,
+    Analyzes forecast intervals to detect when prices exceed thresholds,
     which may indicate unrealistic forecasts or actual grid events.
 
     Args:
-        forecast_data: List of Amber price points (30-min or 5-min resolution)
-        threshold: Price threshold in c/kWh to flag as spike (default $1/kWh)
+        forecast_data: List of Amber/Octopus price points (30-min resolution)
+        import_threshold: Import price threshold in c/kWh (default $1/kWh)
+        export_threshold: Export price threshold in c/kWh (default $0.50/kWh)
         forecast_type: Which forecast to check ("predicted", "high", or "low")
 
     Returns:
         Dict with:
             - has_spike: bool - True if any interval exceeds threshold
-            - max_price: float - Highest price found (c/kWh)
-            - spike_count: int - Number of intervals exceeding threshold
-            - spike_details: list - List of {time, price} for spike intervals
+            - import_spikes: dict - Import spike details
+            - export_spikes: dict - Export spike details
     """
-    spikes = []
-    max_price = 0.0
+    import_spikes = []
+    export_spikes = []
+    max_import = 0.0
+    max_export = 0.0
 
     for point in forecast_data:
         interval_type = point.get("type", "")
         channel_type = point.get("channelType", "")
         advanced_price = point.get("advancedPrice")
 
-        # Only check ForecastInterval for general (import) channel
-        if interval_type != "ForecastInterval" or channel_type != "general":
+        # Only check ForecastInterval
+        if interval_type != "ForecastInterval":
             continue
 
         # Get the price based on forecast type
@@ -301,35 +304,71 @@ def detect_price_spikes(
         if price is None:
             continue
 
-        max_price = max(max_price, price)
+        nem_time = point.get("nemTime", "")
 
-        if price > threshold:
-            nem_time = point.get("nemTime", "")
-            spikes.append({
-                "time": nem_time,
-                "price": round(price, 2),
-            })
+        # Check import (general) channel
+        if channel_type == "general":
+            max_import = max(max_import, price)
+            if price > import_threshold:
+                import_spikes.append({
+                    "time": nem_time,
+                    "price": round(price, 2),
+                    "type": "import"
+                })
 
-    has_spike = len(spikes) > 0
+        # Check export (feedIn) channel
+        elif channel_type == "feedIn":
+            # Export prices are typically negative (you get paid)
+            # But high positive export prices are unusual
+            actual_export = abs(price)  # Handle both positive and negative
+            max_export = max(max_export, actual_export)
+            if actual_export > export_threshold:
+                export_spikes.append({
+                    "time": nem_time,
+                    "price": round(price, 2),
+                    "type": "export"
+                })
 
-    if has_spike:
+    has_import_spike = len(import_spikes) > 0
+    has_export_spike = len(export_spikes) > 0
+    has_spike = has_import_spike or has_export_spike
+
+    if has_import_spike:
         _LOGGER.warning(
-            "⚠️ Price spike detected: %d intervals exceed %.0fc/kWh threshold (max=%.0fc/kWh)",
-            len(spikes), threshold, max_price
+            "⚠️ Import price spike: %d intervals exceed %.0fc/kWh (max=%.0fc = $%.2f/kWh)",
+            len(import_spikes), import_threshold, max_import, max_import / 100
         )
-        for s in spikes[:5]:  # Log first 5 spikes
+        for s in import_spikes[:5]:
             _LOGGER.warning("   %s: %.1fc/kWh", s["time"], s["price"])
-    else:
+
+    if has_export_spike:
+        _LOGGER.warning(
+            "⚠️ Export price spike: %d intervals exceed %.0fc/kWh (max=%.0fc = $%.2f/kWh)",
+            len(export_spikes), export_threshold, max_export, max_export / 100
+        )
+        for s in export_spikes[:5]:
+            _LOGGER.warning("   %s: %.1fc/kWh", s["time"], s["price"])
+
+    if not has_spike:
         _LOGGER.debug(
-            "No price spikes: max=%.1fc/kWh (threshold=%.1fc/kWh)",
-            max_price, threshold
+            "No price spikes: max_import=%.1fc, max_export=%.1fc (thresholds: import=%.0fc, export=%.0fc)",
+            max_import, max_export, import_threshold, export_threshold
         )
 
     return {
         "has_spike": has_spike,
-        "max_price": round(max_price, 2),
-        "spike_count": len(spikes),
-        "spike_details": spikes[:10],  # Return up to 10 spike details
+        "import_spikes": {
+            "has_spike": has_import_spike,
+            "max_price": round(max_import, 2),
+            "count": len(import_spikes),
+            "details": import_spikes[:10],
+        },
+        "export_spikes": {
+            "has_spike": has_export_spike,
+            "max_price": round(max_export, 2),
+            "count": len(export_spikes),
+            "details": export_spikes[:10],
+        },
     }
 
 

@@ -610,10 +610,13 @@ DEFAULT_FORECAST_DISCREPANCY_THRESHOLD = 10.0  # c/kWh - alert if avg difference
 
 # Price Spike Alert configuration
 # Alerts when any forecast interval exceeds a price threshold (catches extreme prices)
-# This is separate from discrepancy - it catches when Amber predicts unrealistic prices
+# This is separate from discrepancy - it catches unrealistic predicted prices
+# Supports separate thresholds for import (buy) and export (sell) prices
 CONF_PRICE_SPIKE_ALERT = "price_spike_alert"
-CONF_PRICE_SPIKE_THRESHOLD = "price_spike_threshold"
-DEFAULT_PRICE_SPIKE_THRESHOLD = 100.0  # c/kWh - alert if any forecast > $1/kWh
+CONF_PRICE_SPIKE_IMPORT_THRESHOLD = "price_spike_import_threshold"
+CONF_PRICE_SPIKE_EXPORT_THRESHOLD = "price_spike_export_threshold"
+DEFAULT_PRICE_SPIKE_IMPORT_THRESHOLD = 100.0  # c/kWh - alert if import > $1/kWh
+DEFAULT_PRICE_SPIKE_EXPORT_THRESHOLD = 50.0  # c/kWh - alert if export > $0.50/kWh (negative = you get paid)
 
 # Alpha: Force tariff mode toggle
 # After uploading a tariff, briefly switch to self_consumption then back to autonomous
