@@ -209,6 +209,7 @@ def compare_forecast_types(
         })
 
     if not differences:
+        _LOGGER.debug("Forecast discrepancy check: No comparable intervals found (missing predicted/conservative data)")
         return {
             "has_discrepancy": False,
             "avg_difference": 0.0,
@@ -237,9 +238,13 @@ def compare_forecast_types(
                 d["time"], d["predicted"], d["conservative"], d["diff"]
             )
     else:
+        # Log the max prices seen even when no discrepancy
+        max_predicted = max((d["predicted"] for d in details), default=0)
+        max_conservative = max((d["conservative"] for d in details), default=0)
         _LOGGER.debug(
-            "Forecast types aligned: avg_diff=%.1fc/kWh, max=%.1fc/kWh",
-            avg_diff, max_diff
+            "Forecast types aligned: avg_diff=%.1fc/kWh, max_diff=%.1fc/kWh "
+            "(max_predicted=%.1fc, max_conservative=%.1fc, %d samples)",
+            avg_diff, max_diff, max_predicted, max_conservative, len(differences)
         )
 
     return {
@@ -248,6 +253,83 @@ def compare_forecast_types(
         "max_difference": round(max_diff, 2),
         "samples": len(differences),
         "details": top_details,
+    }
+
+
+def detect_price_spikes(
+    forecast_data: list[dict[str, Any]],
+    threshold: float = 100.0,
+    forecast_type: str = "predicted",
+) -> dict[str, Any]:
+    """
+    Detect extreme price spikes in forecast data.
+
+    Analyzes forecast intervals to detect when prices exceed a threshold,
+    which may indicate unrealistic forecasts or actual grid events.
+
+    Args:
+        forecast_data: List of Amber price points (30-min or 5-min resolution)
+        threshold: Price threshold in c/kWh to flag as spike (default $1/kWh)
+        forecast_type: Which forecast to check ("predicted", "high", or "low")
+
+    Returns:
+        Dict with:
+            - has_spike: bool - True if any interval exceeds threshold
+            - max_price: float - Highest price found (c/kWh)
+            - spike_count: int - Number of intervals exceeding threshold
+            - spike_details: list - List of {time, price} for spike intervals
+    """
+    spikes = []
+    max_price = 0.0
+
+    for point in forecast_data:
+        interval_type = point.get("type", "")
+        channel_type = point.get("channelType", "")
+        advanced_price = point.get("advancedPrice")
+
+        # Only check ForecastInterval for general (import) channel
+        if interval_type != "ForecastInterval" or channel_type != "general":
+            continue
+
+        # Get the price based on forecast type
+        price = None
+        if advanced_price and isinstance(advanced_price, dict):
+            price = advanced_price.get(forecast_type)
+        if price is None:
+            price = point.get("perKwh")
+
+        if price is None:
+            continue
+
+        max_price = max(max_price, price)
+
+        if price > threshold:
+            nem_time = point.get("nemTime", "")
+            spikes.append({
+                "time": nem_time,
+                "price": round(price, 2),
+            })
+
+    has_spike = len(spikes) > 0
+
+    if has_spike:
+        _LOGGER.warning(
+            "⚠️ Price spike detected: %d intervals exceed %.0fc/kWh threshold (max=%.0fc/kWh)",
+            len(spikes), threshold, max_price
+        )
+        for s in spikes[:5]:  # Log first 5 spikes
+            _LOGGER.warning("   %s: %.1fc/kWh", s["time"], s["price"])
+    else:
+        _LOGGER.debug(
+            "No price spikes: max=%.1fc/kWh (threshold=%.1fc/kWh)",
+            max_price, threshold
+        )
+
+    return {
+        "has_spike": has_spike,
+        "max_price": round(max_price, 2),
+        "spike_count": len(spikes),
+        "spike_details": spikes[:10],  # Return up to 10 spike details
     }
 
 

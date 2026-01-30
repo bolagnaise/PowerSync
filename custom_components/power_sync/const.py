@@ -608,6 +608,13 @@ CONF_FORECAST_DISCREPANCY_ALERT = "forecast_discrepancy_alert"
 CONF_FORECAST_DISCREPANCY_THRESHOLD = "forecast_discrepancy_threshold"
 DEFAULT_FORECAST_DISCREPANCY_THRESHOLD = 10.0  # c/kWh - alert if avg difference > 10c
 
+# Price Spike Alert configuration
+# Alerts when any forecast interval exceeds a price threshold (catches extreme prices)
+# This is separate from discrepancy - it catches when Amber predicts unrealistic prices
+CONF_PRICE_SPIKE_ALERT = "price_spike_alert"
+CONF_PRICE_SPIKE_THRESHOLD = "price_spike_threshold"
+DEFAULT_PRICE_SPIKE_THRESHOLD = 100.0  # c/kWh - alert if any forecast > $1/kWh
+
 # Alpha: Force tariff mode toggle
 # After uploading a tariff, briefly switch to self_consumption then back to autonomous
 # to force Powerwall to immediately recalculate behavior based on new prices

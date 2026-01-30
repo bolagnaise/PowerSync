@@ -126,6 +126,10 @@ from .const import (
     CONF_FORECAST_DISCREPANCY_ALERT,
     CONF_FORECAST_DISCREPANCY_THRESHOLD,
     DEFAULT_FORECAST_DISCREPANCY_THRESHOLD,
+    # Price spike alert configuration
+    CONF_PRICE_SPIKE_ALERT,
+    CONF_PRICE_SPIKE_THRESHOLD,
+    DEFAULT_PRICE_SPIKE_THRESHOLD,
     # Alpha: Force tariff mode toggle
     CONF_FORCE_TARIFF_MODE_TOGGLE,
     # AC-Coupled Inverter Curtailment configuration
@@ -2094,6 +2098,15 @@ class ProviderConfigView(HomeAssistantView):
                         CONF_FORECAST_DISCREPANCY_THRESHOLD,
                         entry.data.get(CONF_FORECAST_DISCREPANCY_THRESHOLD, DEFAULT_FORECAST_DISCREPANCY_THRESHOLD)
                     ),
+                    # Price Spike Alert settings
+                    "price_spike_alert": entry.options.get(
+                        CONF_PRICE_SPIKE_ALERT,
+                        entry.data.get(CONF_PRICE_SPIKE_ALERT, False)
+                    ),
+                    "price_spike_threshold": entry.options.get(
+                        CONF_PRICE_SPIKE_THRESHOLD,
+                        entry.data.get(CONF_PRICE_SPIKE_THRESHOLD, DEFAULT_PRICE_SPIKE_THRESHOLD)
+                    ),
                     # Export Boost settings
                     "export_boost_enabled": entry.options.get(
                         CONF_EXPORT_BOOST_ENABLED,
@@ -2314,6 +2327,8 @@ class ProviderConfigView(HomeAssistantView):
                 "settled_prices_only": CONF_SETTLED_PRICES_ONLY,
                 "forecast_discrepancy_alert": CONF_FORECAST_DISCREPANCY_ALERT,
                 "forecast_discrepancy_threshold": CONF_FORECAST_DISCREPANCY_THRESHOLD,
+                "price_spike_alert": CONF_PRICE_SPIKE_ALERT,
+                "price_spike_threshold": CONF_PRICE_SPIKE_THRESHOLD,
                 "export_boost_enabled": CONF_EXPORT_BOOST_ENABLED,
                 "export_price_offset": CONF_EXPORT_PRICE_OFFSET,
                 "export_min_price": CONF_EXPORT_MIN_PRICE,
@@ -7490,6 +7505,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             convert_amber_to_tesla_tariff,
             extract_most_recent_actual_interval,
             compare_forecast_types,
+            detect_price_spikes,
         )
 
         # Determine price source: AEMO API, Octopus, or Amber
@@ -7666,6 +7682,56 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                 except Exception as notify_err:
                     _LOGGER.debug(f"Could not send forecast discrepancy notification: {notify_err}")
+
+        # Check for price spikes (extreme prices in forecast)
+        # This catches cases where forecast predicts unrealistic prices
+        # Works for all providers with forecast data (Amber, Octopus, Flow Power, etc.)
+        price_spike_alert_enabled = entry.options.get(
+            CONF_PRICE_SPIKE_ALERT,
+            entry.data.get(CONF_PRICE_SPIKE_ALERT, False)
+        )
+        if (
+            sync_mode == 'initial_forecast' and
+            price_spike_alert_enabled and
+            forecast_data
+        ):
+            spike_threshold = entry.options.get(
+                CONF_PRICE_SPIKE_THRESHOLD,
+                entry.data.get(CONF_PRICE_SPIKE_THRESHOLD, DEFAULT_PRICE_SPIKE_THRESHOLD)
+            )
+            spike_result = detect_price_spikes(
+                forecast_data,
+                threshold=spike_threshold,
+                forecast_type=forecast_type
+            )
+
+            if spike_result.get("has_spike"):
+                max_price = spike_result.get("max_price", 0)
+                spike_count = spike_result.get("spike_count", 0)
+                spike_details = spike_result.get("spike_details", [])
+
+                _LOGGER.warning(
+                    "⚠️ Price spike detected: %d intervals exceed %.0fc/kWh threshold "
+                    "(max %.0fc/kWh = $%.2f/kWh)",
+                    spike_count, spike_threshold, max_price, max_price / 100
+                )
+
+                # Send mobile push notification
+                try:
+                    from .automations.actions import _send_expo_push
+                    # Format spike times for notification
+                    if spike_details:
+                        first_spike = spike_details[0]
+                        spike_time = first_spike.get("time", "").split("T")[1][:5] if "T" in first_spike.get("time", "") else ""
+                        await _send_expo_push(
+                            hass,
+                            "Price Spike Alert",
+                            f"Forecast shows {spike_count} intervals above ${spike_threshold/100:.0f}/kWh. "
+                            f"Max price: ${max_price/100:.2f}/kWh at {spike_time}. "
+                            f"Check your Amber app for details.",
+                        )
+                except Exception as notify_err:
+                    _LOGGER.debug(f"Could not send price spike notification: {notify_err}")
 
         # Fetch Powerwall timezone from site_info
         # This ensures correct timezone handling for TOU schedule alignment
