@@ -21,6 +21,8 @@
 
   **Android Beta:** [Join the testers group](https://groups.google.com/g/powersync-testers) first, then [opt-in to the beta](https://play.google.com/apps/testing/com.powersync.mobile)
 
+  📱 [Mobile App Setup Guide](#mobile-app-setup)
+
 </div>
 
 ## Disclaimer
@@ -163,6 +165,44 @@ Direct OAuth access to Tesla's Fleet API. Completely free but requires more setu
    - Follow the OAuth login flow
 2. PowerSync automatically detects your Tesla Fleet credentials
 3. Leave the Teslemetry field empty during PowerSync setup
+
+---
+
+## Mobile App Setup
+
+The PowerSync mobile app connects to your Home Assistant instance to provide remote monitoring and control of your battery system.
+
+### Requirements
+
+- PowerSync integration installed and configured in Home Assistant
+- Home Assistant accessible via URL (local or remote)
+- A Long-Lived Access Token from Home Assistant
+
+### Setup Steps
+
+1. **Get your Home Assistant URL**
+   - **Local:** `http://homeassistant.local:8123` or `http://<your-ip>:8123`
+   - **Remote:** Your Nabu Casa URL (`https://xxxxx.ui.nabu.casa`) or custom domain
+
+2. **Create a Long-Lived Access Token**
+   - Open Home Assistant web interface
+   - Click your profile (bottom left)
+   - Scroll down to **Long-Lived Access Tokens**
+   - Click **Create Token**
+   - Give it a name (e.g., "PowerSync Mobile")
+   - Copy the token immediately (it won't be shown again)
+
+3. **Connect the App**
+   - Open the PowerSync mobile app
+   - Enter your Home Assistant URL
+   - Paste your Long-Lived Access Token
+   - Tap **Connect**
+
+### Troubleshooting
+
+- **Connection failed (Android):** Ensure your HA URL uses `http://` not `https://` for local connections, or enable cleartext traffic
+- **Connection timeout:** Check that your phone can reach your HA instance (same network for local URLs)
+- **Invalid token:** Generate a new Long-Lived Access Token and try again
 
 ---
 
