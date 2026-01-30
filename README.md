@@ -422,26 +422,43 @@ Control AC-coupled solar inverters directly during negative pricing periods. Thi
 
 ## Available Services
 
-```yaml
-# Manually sync TOU schedule
-service: power_sync.sync_tou_schedule
+### Core Services
 
-# Refresh data from Amber and Tesla
-service: power_sync.sync_now
+| Service | Description | Parameters |
+|---------|-------------|------------|
+| `power_sync.sync_tou_schedule` | Manually sync TOU tariff to battery | None |
+| `power_sync.sync_now` | Refresh data from provider and battery | None |
 
-# Force charge for specified duration
-service: power_sync.force_charge
-data:
-  duration_minutes: 60
+### Battery Control
 
-# Force discharge for specified duration
-service: power_sync.force_discharge
-data:
-  duration_minutes: 60
+| Service | Description | Parameters |
+|---------|-------------|------------|
+| `power_sync.force_charge` | Force charge from grid | `duration_minutes` (required) |
+| `power_sync.force_discharge` | Force discharge to grid | `duration_minutes` (required) |
+| `power_sync.restore_normal` | Restore normal battery operation | None |
 
-# Restore normal operation
-service: power_sync.restore_normal
-```
+### Powerwall Settings (Tesla only)
+
+| Service | Description | Parameters |
+|---------|-------------|------------|
+| `power_sync.set_backup_reserve` | Set backup reserve percentage | `backup_reserve` (0-100) |
+| `power_sync.set_operation_mode` | Set operation mode | `mode` (autonomous, self_consumption, backup) |
+| `power_sync.set_grid_export` | Set grid export behaviour | `export` (everything, pv_only, never) |
+| `power_sync.set_grid_charging` | Enable/disable grid charging | `enabled` (true/false) |
+
+### AC Inverter Curtailment
+
+| Service | Description | Parameters |
+|---------|-------------|------------|
+| `power_sync.curtail_inverter` | Manually curtail AC inverter to zero export | None |
+| `power_sync.restore_inverter` | Restore AC inverter to normal operation | None |
+
+### Data Services
+
+| Service | Description | Parameters |
+|---------|-------------|------------|
+| `power_sync.get_calendar_history` | Get energy history (for mobile app) | `start_date`, `end_date` |
+| `power_sync.sync_battery_health` | Scan battery health from gateway | None |
 
 ---
 
