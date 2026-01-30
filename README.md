@@ -204,6 +204,27 @@ The PowerSync mobile app connects to your Home Assistant instance to provide rem
 - **Connection timeout:** Check that your phone can reach your HA instance (same network for local URLs)
 - **Invalid token:** Generate a new Long-Lived Access Token and try again
 
+### App Screenshots
+
+<p align="center">
+  <img src="docs/images/app-dashboard.png" alt="Dashboard" width="200"/>
+  <img src="docs/images/app-controls.png" alt="Controls" width="200"/>
+  <img src="docs/images/app-automations.png" alt="Automations" width="200"/>
+</p>
+<p align="center">
+  <img src="docs/images/app-solar.png" alt="Solar Energy" width="200"/>
+  <img src="docs/images/app-battery.png" alt="Battery Health" width="200"/>
+  <img src="docs/images/app-settings.png" alt="Settings" width="200"/>
+</p>
+
+**Features:**
+- **Dashboard** - Live pricing, power flow, and energy summary
+- **Controls** - Force charge/discharge, solar curtailment, backup reserve
+- **Automations** - Create and manage scheduled automations
+- **Solar** - Daily/monthly/yearly generation with forecast overlay
+- **Battery** - Health monitoring and BMS data (Tesla Powerwall)
+- **Settings** - Configure battery system, EV charging, and electricity provider
+
 ---
 
 ## Key Features Explained
