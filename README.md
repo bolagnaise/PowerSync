@@ -242,6 +242,10 @@ Full support for Sigenergy DC-coupled battery systems as an alternative to Tesla
 | **Cloud API** | Tariff sync to Sigenergy | ✅ Yes |
 | **Modbus TCP** | Real-time energy data + DC curtailment | ✅ Yes |
 
+> ⚠️ **Important:** Modbus TCP Server must be enabled on your Sigenergy inverter before PowerSync can connect. This setting is typically configured by your installer via the SigenStor app or installer portal. If you're getting "Connection refused" errors, contact your installer to enable "Modbus TCP Server" on the inverter.
+>
+> **Device ID Note:** If you have an AC Charger installed, it uses Device ID 1 by default. The inverter must be set to a higher ID (e.g., 2). Confirm your Device ID configuration with your installer.
+
 ### Getting Sigenergy Cloud API Credentials
 
 **What You Need:**
