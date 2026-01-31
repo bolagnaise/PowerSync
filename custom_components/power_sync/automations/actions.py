@@ -235,12 +235,16 @@ async def _wake_tesla_ev(
 
         # Try multiple entity patterns to verify wake status
         # Different Tesla integrations use different entity naming conventions
+        # Order matters - more specific patterns first to avoid matching wrong entities
         status_patterns = [
-            (r"binary_sensor\..*_asleep$", "binary", "off"),  # asleep=off means awake
-            (r"binary_sensor\..*asleep$", "binary", "off"),   # Without underscore
-            (r"sensor\..*_state$", "state", "online"),        # state=online
-            (r"sensor\..*_status$", "state", "online"),       # status=online
-            (r"sensor\..*state$", "state", "online"),         # Without underscore
+            # Teslemetry uses binary_sensor.*_status (on=online, off=offline)
+            (r"binary_sensor\..*_status$", "binary", "on"),
+            # Other integrations use binary_sensor.*_asleep (off=awake)
+            (r"binary_sensor\..*_asleep$", "binary", "off"),
+            (r"binary_sensor\..*asleep$", "binary", "off"),
+            # Fallback: sensor.*_vehicle_state (avoid shift_state which is drive gear)
+            (r"sensor\..*_vehicle_state$", "state", "online"),
+            (r"sensor\..*vehicle_state$", "state", "online"),
         ]
 
         status_entity = None
@@ -260,8 +264,8 @@ async def _wake_tesla_ev(
             _LOGGER.warning(
                 "Could not find Tesla status/asleep sensor. "
                 "Will send wake command but cannot verify wake completion. "
-                "Tried patterns: binary_sensor.*_asleep, binary_sensor.*asleep, "
-                "sensor.*_state, sensor.*_status, sensor.*state"
+                "Tried patterns: binary_sensor.*_status, binary_sensor.*_asleep, "
+                "sensor.*_vehicle_state"
             )
 
         def _is_awake() -> bool:
