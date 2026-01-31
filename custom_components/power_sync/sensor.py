@@ -142,14 +142,25 @@ def _get_export_price(data):
         Positive = earning money per kWh exported
         Negative = paying money per kWh exported
     """
-    if not data or not data.get("current"):
+    if not data:
+        _LOGGER.debug("_get_export_price: No data available")
         return None
-    for price in data.get("current", []):
+    if not data.get("current"):
+        _LOGGER.debug("_get_export_price: No 'current' key in data")
+        return None
+    current_prices = data.get("current", [])
+    channel_types = [p.get("channelType") for p in current_prices]
+    _LOGGER.debug("_get_export_price: Found %d entries with channels: %s", len(current_prices), channel_types)
+    for price in current_prices:
         if price.get("channelType") == "feedIn":
+            raw_price = price.get("perKwh", 0)
             # Negate to convert from Amber feedIn to export earnings
             # Amber feedIn +10 (paying) → sensor -0.10 (negative earnings)
             # Amber feedIn -10 (earning) → sensor +0.10 (positive earnings)
-            return -price.get("perKwh", 0) / 100
+            converted_price = -raw_price / 100
+            _LOGGER.debug("_get_export_price: Found feedIn price: %s c/kWh -> %s $/kWh", raw_price, converted_price)
+            return converted_price
+    _LOGGER.debug("_get_export_price: No 'feedIn' channel found in current prices")
     return None
 
 

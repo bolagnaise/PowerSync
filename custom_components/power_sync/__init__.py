@@ -7385,6 +7385,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             feedin_prices = [p for p in forecast_data if p.get("channelType") == "feedIn"]
 
             # Debug: Log sample data structure for each channel to diagnose price extraction
+            # Also log all unique channel types to identify missing feedIn
+            all_channels = set(p.get("channelType") for p in forecast_data if p.get("channelType"))
+            _LOGGER.debug(f"Amber forecast contains {len(forecast_data)} entries with channels: {all_channels}")
+
             if general_prices:
                 sample_general = general_prices[0]
                 _LOGGER.debug(f"Sample general interval: type={sample_general.get('type')}, "
@@ -7395,6 +7399,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.debug(f"Sample feedIn interval: type={sample_feedin.get('type')}, "
                              f"perKwh={sample_feedin.get('perKwh')}, "
                              f"advancedPrice={sample_feedin.get('advancedPrice')}")
+            else:
+                _LOGGER.warning(
+                    "No feedIn (export) prices found in Amber forecast data. "
+                    "Export prices will default to 0. Check if your Amber account has feed-in tariff enabled."
+                )
 
             buy_prices = convert_amber_prices_to_sigenergy(
                 general_prices, price_type="buy", forecast_type=forecast_type,
