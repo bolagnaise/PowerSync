@@ -61,6 +61,56 @@ TESLA_EV_INTEGRATIONS = TESLA_INTEGRATIONS
 # Global lock to prevent concurrent wake/charging attempts
 _ev_wake_lock: Dict[str, bool] = {}  # vehicle_id -> is_waking
 
+# API credit exhaustion tracking - prevents retry loops when Teslemetry credits are depleted
+_api_credit_exhausted: Dict[str, datetime] = {}  # "teslemetry" -> exhaustion_timestamp
+API_CREDIT_COOLDOWN_MINUTES = 15  # Wait before retrying after credit exhaustion
+
+# Error messages that indicate API credit/payment issues
+API_CREDIT_ERROR_PATTERNS = [
+    "payment is required",
+    "insufficient command credits",
+    "insufficient credits",
+    "payment required",
+    "credits exhausted",
+]
+
+
+def _is_api_credit_error(error_message: str) -> bool:
+    """Check if an error message indicates API credit exhaustion."""
+    error_lower = str(error_message).lower()
+    return any(pattern in error_lower for pattern in API_CREDIT_ERROR_PATTERNS)
+
+
+def _mark_api_credits_exhausted(api_name: str = "teslemetry") -> None:
+    """Mark that API credits are exhausted, triggering cooldown."""
+    _api_credit_exhausted[api_name] = datetime.now()
+    _LOGGER.warning(
+        f"🚫 {api_name.title()} API credits exhausted. "
+        f"Commands will be blocked for {API_CREDIT_COOLDOWN_MINUTES} minutes. "
+        f"Please top up your API credits."
+    )
+
+
+def _is_api_credit_available(api_name: str = "teslemetry") -> bool:
+    """Check if API credits are available (not in cooldown period)."""
+    if api_name not in _api_credit_exhausted:
+        return True
+
+    exhausted_at = _api_credit_exhausted[api_name]
+    cooldown_end = exhausted_at + timedelta(minutes=API_CREDIT_COOLDOWN_MINUTES)
+
+    if datetime.now() >= cooldown_end:
+        # Cooldown expired, clear the exhaustion flag
+        del _api_credit_exhausted[api_name]
+        _LOGGER.info(f"✅ {api_name.title()} API credit cooldown expired, retrying commands")
+        return True
+
+    remaining = (cooldown_end - datetime.now()).total_seconds() / 60
+    _LOGGER.debug(
+        f"🚫 {api_name.title()} API credits exhausted, {remaining:.1f} minutes remaining in cooldown"
+    )
+    return False
+
 
 def _is_sigenergy(config_entry: ConfigEntry) -> bool:
     """Check if this is a Sigenergy system."""
@@ -201,6 +251,11 @@ async def _wake_tesla_ev(
     """
     import asyncio
 
+    # Check if API credits are exhausted (cooldown period active)
+    if not _is_api_credit_available("teslemetry"):
+        _LOGGER.warning("Skipping Tesla wake - API credits exhausted, in cooldown period")
+        return False
+
     # Generate a lock key (use VIN if available, otherwise generic)
     lock_key = vehicle_vin or "default"
 
@@ -297,6 +352,13 @@ async def _wake_tesla_ev(
                 )
             except Exception as e:
                 _LOGGER.warning(f"Wake command attempt {attempt} failed: {e}")
+
+                # Check if this is a credit/payment error - if so, stop retrying
+                if _is_api_credit_error(str(e)):
+                    _mark_api_credits_exhausted("teslemetry")
+                    _LOGGER.error(f"Failed to wake Tesla EV - API credits exhausted")
+                    return False
+
                 if attempt == max_retries:
                     _LOGGER.error(f"Failed to wake Tesla EV after {max_retries} attempts")
                     # Still return True to attempt the charging command anyway
@@ -1241,7 +1303,16 @@ async def _action_start_ev_charging(
             return False
 
         try:
-            await _wake_tesla_ev(hass, vehicle_vin)
+            # Check API credits before attempting
+            if not _is_api_credit_available("teslemetry"):
+                _LOGGER.warning("Skipping EV charging start - API credits exhausted, in cooldown period")
+                return False
+
+            wake_success = await _wake_tesla_ev(hass, vehicle_vin)
+            if not wake_success:
+                _LOGGER.warning("Wake failed (possibly due to API credits), skipping charge command")
+                return False
+
             await hass.services.async_call(
                 "switch",
                 "turn_on",
@@ -1252,6 +1323,11 @@ async def _action_start_ev_charging(
             charging_started = True
         except Exception as e:
             _LOGGER.error(f"Failed to start EV charging: {e}")
+
+            # Check if this is a credit/payment error
+            if _is_api_credit_error(str(e)):
+                _mark_api_credits_exhausted("teslemetry")
+
             return False
 
     if not charging_started:
@@ -1333,6 +1409,11 @@ async def _action_stop_ev_charging(
 
     # Use Fleet API
     if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+        # Check API credits before attempting
+        if not _is_api_credit_available("teslemetry"):
+            _LOGGER.warning("Skipping EV charging stop - API credits exhausted, in cooldown period")
+            return False
+
         # Tesla Fleet uses switch.X_charge, not button.X_charge_stop
         charge_switch_entity = await _get_tesla_ev_entity(
             hass,
@@ -1345,7 +1426,11 @@ async def _action_stop_ev_charging(
             return False
 
         try:
-            await _wake_tesla_ev(hass, vehicle_vin)
+            wake_success = await _wake_tesla_ev(hass, vehicle_vin)
+            if not wake_success:
+                _LOGGER.warning("Wake failed (possibly due to API credits), skipping stop charge command")
+                return False
+
             await hass.services.async_call(
                 "switch",
                 "turn_off",
@@ -1356,6 +1441,11 @@ async def _action_stop_ev_charging(
             return True
         except Exception as e:
             _LOGGER.error(f"Failed to stop EV charging: {e}")
+
+            # Check if this is a credit/payment error
+            if _is_api_credit_error(str(e)):
+                _mark_api_credits_exhausted("teslemetry")
+
             return False
 
     return False
@@ -1392,6 +1482,11 @@ async def _action_set_ev_charge_limit(
 
     # Use Fleet API
     if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+        # Check API credits before attempting
+        if not _is_api_credit_available("teslemetry"):
+            _LOGGER.debug("Skipping set EV charge limit - API credits exhausted, in cooldown period")
+            return False
+
         charge_limit_entity = await _get_tesla_ev_entity(
             hass,
             r"number\..*charge_limit$",
@@ -1403,7 +1498,11 @@ async def _action_set_ev_charge_limit(
             return False
 
         try:
-            await _wake_tesla_ev(hass, vehicle_vin)
+            wake_success = await _wake_tesla_ev(hass, vehicle_vin)
+            if not wake_success:
+                _LOGGER.debug("Wake failed (possibly due to API credits), skipping set charge limit command")
+                return False
+
             await hass.services.async_call(
                 "number",
                 "set_value",
@@ -1414,6 +1513,11 @@ async def _action_set_ev_charge_limit(
             return True
         except Exception as e:
             _LOGGER.error(f"Failed to set EV charge limit: {e}")
+
+            # Check if this is a credit/payment error
+            if _is_api_credit_error(str(e)):
+                _mark_api_credits_exhausted("teslemetry")
+
             return False
 
     return False
@@ -1453,6 +1557,11 @@ async def _action_set_ev_charging_amps(
 
     # Use Fleet API
     if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+        # Check API credits before attempting
+        if not _is_api_credit_available("teslemetry"):
+            _LOGGER.debug("Skipping set EV charging amps - API credits exhausted, in cooldown period")
+            return False
+
         # Tesla Fleet uses charge_current, some versions use charging_amps
         charging_amps_entity = await _get_tesla_ev_entity(
             hass,
@@ -1465,7 +1574,11 @@ async def _action_set_ev_charging_amps(
             return False
 
         try:
-            await _wake_tesla_ev(hass, vehicle_vin)
+            wake_success = await _wake_tesla_ev(hass, vehicle_vin)
+            if not wake_success:
+                _LOGGER.debug("Wake failed (possibly due to API credits), skipping set amps command")
+                return False
+
             await hass.services.async_call(
                 "number",
                 "set_value",
@@ -1476,6 +1589,11 @@ async def _action_set_ev_charging_amps(
             return True
         except Exception as e:
             _LOGGER.error(f"Failed to set EV charging amps: {e}")
+
+            # Check if this is a credit/payment error
+            if _is_api_credit_error(str(e)):
+                _mark_api_credits_exhausted("teslemetry")
+
             return False
 
     return False
