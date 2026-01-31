@@ -3527,7 +3527,16 @@ class PriceLevelChargingExecutor:
         return defaults
 
     async def _get_ev_soc(self) -> Optional[int]:
-        """Get EV's current state of charge."""
+        """Get EV's current state of charge from HA entities.
+
+        Searches for battery level sensors from various Tesla integrations:
+        - Teslemetry (sensor.*_battery_level)
+        - Tesla Custom Integration
+        - Tesla BLE
+        """
+        from homeassistant.helpers import entity_registry as er, device_registry as dr
+
+        # Method 1: Check tesla_vehicles in entry_data (legacy)
         entry_data = self.hass.data.get(self._domain, {}).get(self.config_entry.entry_id, {})
         tesla_vehicles = entry_data.get("tesla_vehicles", [])
 
@@ -3536,6 +3545,51 @@ class PriceLevelChargingExecutor:
             if battery_level is not None:
                 return int(battery_level)
 
+        # Method 2: Search HA entity registry for EV battery sensors
+        try:
+            entity_reg = er.async_get(self.hass)
+            device_reg = dr.async_get(self.hass)
+
+            # Find Tesla devices
+            tesla_device_ids = set()
+            for device in device_reg.devices.values():
+                # Check various Tesla integration identifiers
+                for identifier in device.identifiers:
+                    domain, _ = identifier
+                    if domain in ("tesla", "tesla_custom", "teslemetry", "tesla_ble", "tessie"):
+                        tesla_device_ids.add(device.id)
+                        break
+
+            # Search for battery level sensors
+            for entity in entity_reg.entities.values():
+                if entity.device_id not in tesla_device_ids:
+                    continue
+
+                entity_id = entity.entity_id
+                entity_id_lower = entity_id.lower()
+
+                # Match battery level sensors
+                if entity_id.startswith("sensor.") and any(
+                    x in entity_id_lower for x in ["battery_level", "charge_level", "battery"]
+                ):
+                    # Skip power sensors
+                    if "power" in entity_id_lower or "range" in entity_id_lower:
+                        continue
+
+                    state = self.hass.states.get(entity_id)
+                    if state and state.state not in ("unavailable", "unknown", "None", None):
+                        try:
+                            level = float(state.state)
+                            if 0 <= level <= 100:
+                                _LOGGER.debug(f"Found EV battery level from {entity_id}: {level}%")
+                                return int(level)
+                        except (ValueError, TypeError):
+                            continue
+
+        except Exception as e:
+            _LOGGER.debug(f"Error searching for EV battery sensor: {e}")
+
+        _LOGGER.warning("Could not find EV battery level from any source")
         return None
 
     async def _start_charging(self, mode: str, reason: str) -> bool:
