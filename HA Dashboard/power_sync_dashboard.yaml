@@ -350,14 +350,21 @@ views:
             stroke_width: 2
             curve: stepline
             extend_to: end
-            data_generator: |
+            data_generator: >
               const now = new Date();
-              const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+              const today = new Date(now.getFullYear(), now.getMonth(),
+              now.getDate());
+
               const currentDow = now.getDay();
+
               let data = [];
 
+
               // Amber format: schedule with time-based entries
+
               const schedule = entity?.attributes?.schedule || [];
+
               if (schedule.length > 0) {
                 data = schedule.map((entry) => {
                   const [hours, mins] = String(entry.time).split(':').map(Number);
@@ -371,8 +378,12 @@ views:
                 return data;
               }
 
-              // Tesla/Globird format: tou_schedule with periods and time windows
+
+              // Tesla/Globird format: tou_schedule with periods and time
+              windows
+
               const touSchedule = entity?.attributes?.tou_schedule || [];
+
               if (touSchedule.length > 0) {
                 const hourlyPrices = new Array(24).fill(null);
                 touSchedule.forEach((period) => {
@@ -403,16 +414,19 @@ views:
                 return data;
               }
 
+
               // Fallback: use current buy_price as flat line
+
               const buyPrice = entity?.attributes?.buy_price;
+
               if (buyPrice !== undefined) {
                 return [
                   [today.getTime(), buyPrice],
                   [new Date(today.getTime() + 24 * 3600000 - 1).getTime(), buyPrice]
                 ];
               }
-              return [];
 
+              return [];
           - entity: sensor.tariff_schedule
             name: Sell Price
             type: line
@@ -421,14 +435,21 @@ views:
             stroke_width: 2
             curve: stepline
             extend_to: end
-            data_generator: |
+            data_generator: >
               const now = new Date();
-              const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+              const today = new Date(now.getFullYear(), now.getMonth(),
+              now.getDate());
+
               const currentDow = now.getDay();
+
               let data = [];
 
+
               // Amber format: schedule with time-based entries
+
               const schedule = entity?.attributes?.schedule || [];
+
               if (schedule.length > 0) {
                 data = schedule.map((entry) => {
                   const [hours, mins] = String(entry.time).split(':').map(Number);
@@ -442,8 +463,12 @@ views:
                 return data;
               }
 
-              // Tesla/Globird format: tou_schedule with periods and time windows
+
+              // Tesla/Globird format: tou_schedule with periods and time
+              windows
+
               const touSchedule = entity?.attributes?.tou_schedule || [];
+
               if (touSchedule.length > 0) {
                 const hourlyPrices = new Array(24).fill(null);
                 touSchedule.forEach((period) => {
@@ -474,14 +499,18 @@ views:
                 return data;
               }
 
+
               // Fallback: use current sell_price as flat line
+
               const sellPrice = entity?.attributes?.sell_price;
+
               if (sellPrice !== undefined) {
                 return [
                   [today.getTime(), sellPrice],
                   [new Date(today.getTime() + 24 * 3600000 - 1).getTime(), sellPrice]
                 ];
               }
+
               return [];
         apex_config:
           chart:
@@ -494,7 +523,7 @@ views:
           tooltip:
             x:
               format: HH:mm
-            y:
+            'y':
               formatter: |
                 EVAL:function(value) {
                   if (value === null || value === undefined) return '';
@@ -505,20 +534,19 @@ views:
                 }
       - type: horizontal-stack
         cards:
-          # DC Solar Curtailment (Tesla Powerwall)
           - type: custom:button-card
             entity: sensor.dc_solar_curtailment
             name: DC Solar (Tesla)
             show_icon: true
             show_name: true
             show_label: true
-            label: >-
+            label: |-
               [[[
                 const state = states['sensor.dc_solar_curtailment']?.state;
                 if (state === 'Active') return 'CURTAILED - Export blocked';
                 return 'Normal - Export allowed';
               ]]]
-            icon: >-
+            icon: |-
               [[[
                 const state = states['sensor.dc_solar_curtailment']?.state;
                 return state === 'Active'
@@ -529,7 +557,7 @@ views:
               card:
                 - border-radius: 16px
                 - padding: 12px
-                - background: >-
+                - background: |-
                     [[[
                       const state = states['sensor.dc_solar_curtailment']?.state;
                       return state === 'Active'
@@ -544,7 +572,7 @@ views:
                 - align-items: center
               icon:
                 - width: 28px
-                - color: >-
+                - color: |-
                     [[[
                       const state = states['sensor.dc_solar_curtailment']?.state;
                       return state === 'Active' ? 'var(--red-color)' : 'var(--green-color)';
@@ -565,7 +593,7 @@ views:
             show_icon: true
             show_name: true
             show_label: true
-            label: >-
+            label: |-
               [[[
                 const stateObj = states['sensor.inverter_status'];
                 const raw = (stateObj?.state ?? 'unknown').toLowerCase();
@@ -588,7 +616,7 @@ views:
                 if (power) return `${title} - ${power}%`;
                 return title;
               ]]]
-            icon: >-
+            icon: |-
               [[[
                 const raw = (states['sensor.inverter_status']?.state ?? 'unknown').toLowerCase();
                 const powerW = Number(states['sensor.inverter_status']?.attributes?.power_output_w ?? 0);
@@ -603,7 +631,7 @@ views:
               card:
                 - border-radius: 16px
                 - padding: 12px
-                - background: >-
+                - background: |-
                     [[[
                       const stateObj = states['sensor.inverter_status'];
                       const raw = (stateObj?.state ?? 'unknown').toLowerCase();
@@ -627,7 +655,7 @@ views:
                 - align-items: center
               icon:
                 - width: 28px
-                - color: >-
+                - color: |-
                     [[[
                       const raw = (states['sensor.inverter_status']?.state ?? 'unknown').toLowerCase();
                       const powerW = Number(states['sensor.inverter_status']?.attributes?.power_output_w ?? 0);
@@ -690,10 +718,21 @@ views:
               name: Load Follow
               icon: mdi:home-lightning-bolt
               styles:
-                card: [height: 40px, border-radius: 18px, padding: 0px 12px, background: "rgba(var(--rgb-orange-color, 255, 152, 0), 0.12)"]
-                grid: [grid-template-areas: '"i n"', grid-template-columns: min-content auto]
-                icon: [color: "var(--orange-color, #FF9800)", width: 20px]
-                name: [font-size: 12px, font-weight: 600, white-space: nowrap]
+                card:
+                  - height: 40px
+                  - border-radius: 18px
+                  - padding: 0px 12px
+                  - background: rgba(var(--rgb-orange-color, 255, 152, 0), 0.12)
+                grid:
+                  - grid-template-areas: '"i n"'
+                  - grid-template-columns: min-content auto
+                icon:
+                  - color: 'var(--orange-color, #FF9800)'
+                  - width: 20px
+                name:
+                  - font-size: 12px
+                  - font-weight: 600
+                  - white-space: nowrap
               tap_action:
                 action: call-service
                 service: power_sync.curtail_inverter
@@ -701,15 +740,25 @@ views:
                   mode: load_following
                 confirmation:
                   text: Limit inverter to home load only?
-
             - type: custom:button-card
               name: Shutdown
               icon: mdi:power-plug-off
               styles:
-                card: [height: 40px, border-radius: 18px, padding: 0px 12px, background: "rgba(var(--rgb-red-color, 244, 67, 54), 0.12)"]
-                grid: [grid-template-areas: '"i n"', grid-template-columns: min-content auto]
-                icon: [color: "var(--red-color, #F44336)", width: 20px]
-                name: [font-size: 12px, font-weight: 600, white-space: nowrap]
+                card:
+                  - height: 40px
+                  - border-radius: 18px
+                  - padding: 0px 12px
+                  - background: rgba(var(--rgb-red-color, 244, 67, 54), 0.12)
+                grid:
+                  - grid-template-areas: '"i n"'
+                  - grid-template-columns: min-content auto
+                icon:
+                  - color: 'var(--red-color, #F44336)'
+                  - width: 20px
+                name:
+                  - font-size: 12px
+                  - font-weight: 600
+                  - white-space: nowrap
               tap_action:
                 action: call-service
                 service: power_sync.curtail_inverter
@@ -717,15 +766,25 @@ views:
                   mode: shutdown
                 confirmation:
                   text: Fully shut down inverter (0% output)?
-
             - type: custom:button-card
               name: Restore
               icon: mdi:power-plug
               styles:
-                card: [height: 40px, border-radius: 18px, padding: 0px 12px, background: "rgba(var(--rgb-green-color, 76, 175, 80), 0.12)"]
-                grid: [grid-template-areas: '"i n"', grid-template-columns: min-content auto]
-                icon: [color: "var(--green-color, #4CAF50)", width: 20px]
-                name: [font-size: 12px, font-weight: 600, white-space: nowrap]
+                card:
+                  - height: 40px
+                  - border-radius: 18px
+                  - padding: 0px 12px
+                  - background: rgba(var(--rgb-green-color, 76, 175, 80), 0.12)
+                grid:
+                  - grid-template-areas: '"i n"'
+                  - grid-template-columns: min-content auto
+                icon:
+                  - color: 'var(--green-color, #4CAF50)'
+                  - width: 20px
+                name:
+                  - font-size: 12px
+                  - font-weight: 600
+                  - white-space: nowrap
               tap_action:
                 action: call-service
                 service: power_sync.restore_inverter
@@ -742,7 +801,7 @@ views:
                 - height: 36px
                 - border-radius: 12px
                 - padding: 0px 12px
-                - background: "rgba(var(--rgb-primary-color, 3, 169, 244), 0.10)"
+                - background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.10)
               name:
                 - justify-self: start
                 - font-weight: 800
@@ -758,7 +817,7 @@ views:
                 show_icon: false
                 show_name: true
                 show_state: true
-                state_display: >-
+                state_display: |-
                   [[[
                     const v = states['sensor.battery_health']?.state;
                     if (!v || ['unknown','unavailable','none'].includes(String(v).toLowerCase())) return '';
@@ -771,7 +830,7 @@ views:
                     - height: 90px
                     - border-radius: 12px
                     - padding: 10px
-                    - display: >-
+                    - display: |-
                         [[[
                           const v = states['sensor.battery_health']?.state;
                           if (!v || ['unknown','unavailable','none'].includes(String(v).toLowerCase())) return 'none';
@@ -785,15 +844,13 @@ views:
                     - font-size: 22px
                     - font-weight: 800
                     - margin-top: 6px
-
-              # Battery 1
               - type: custom:button-card
                 entity: sensor.battery_health
                 name: Battery 1
                 show_icon: false
                 show_name: true
                 show_state: true
-                state_display: >-
+                state_display: |-
                   [[[
                     const v = states['sensor.battery_health']?.attributes?.battery_1_health_percent;
                     if (v === undefined || v === null) return '';
@@ -806,7 +863,7 @@ views:
                     - height: 90px
                     - border-radius: 12px
                     - padding: 10px
-                    - display: >-
+                    - display: |-
                         [[[
                           const v = states['sensor.battery_health']?.attributes?.battery_1_health_percent;
                           if (v === undefined || v === null) return 'none';
@@ -820,15 +877,13 @@ views:
                     - font-size: 22px
                     - font-weight: 800
                     - margin-top: 6px
-
-              # Battery 2
               - type: custom:button-card
                 entity: sensor.battery_health
                 name: Battery 2
                 show_icon: false
                 show_name: true
                 show_state: true
-                state_display: >-
+                state_display: |-
                   [[[
                     const v = states['sensor.battery_health']?.attributes?.battery_2_health_percent;
                     if (v === undefined || v === null) return '';
@@ -841,7 +896,7 @@ views:
                     - height: 90px
                     - border-radius: 12px
                     - padding: 10px
-                    - display: >-
+                    - display: |-
                         [[[
                           const v = states['sensor.battery_health']?.attributes?.battery_2_health_percent;
                           if (v === undefined || v === null) return 'none';
@@ -855,15 +910,13 @@ views:
                     - font-size: 22px
                     - font-weight: 800
                     - margin-top: 6px
-
-              # Battery 3
               - type: custom:button-card
                 entity: sensor.battery_health
                 name: Battery 3
                 show_icon: false
                 show_name: true
                 show_state: true
-                state_display: >-
+                state_display: |-
                   [[[
                     const v = states['sensor.battery_health']?.attributes?.battery_3_health_percent;
                     if (v === undefined || v === null) return '';
@@ -876,7 +929,7 @@ views:
                     - height: 90px
                     - border-radius: 12px
                     - padding: 10px
-                    - display: >-
+                    - display: |-
                         [[[
                           const v = states['sensor.battery_health']?.attributes?.battery_3_health_percent;
                           if (v === undefined || v === null) return 'none';
@@ -894,22 +947,23 @@ views:
             content: >
               {% set original = state_attr('sensor.battery_health',
               'original_capacity_kwh') %}
-    
+
               {% set current = state_attr('sensor.battery_health',
               'current_capacity_kwh') %}
-    
+
               {% set scan = state_attr('sensor.battery_health', 'last_scan') %}
-    
+
               {%- if states('sensor.battery_health') not in ['unavailable',
               'unknown'] %}
-    
-              **Capacity:** {{ current }} / {{ original }} kWh | **Last scan:** {{
-              scan[:10] if scan else 'N/A' }}
-    
+
+              **Capacity:** {{ current }} / {{ original }} kWh | **Last scan:**
+              {{ scan[:10] if scan else 'N/A' }}
+
               {%- else %}
-    
-              Scan from the PowerSync Mobile app while connected to Powerwall WiFi.
-    
+
+              Scan from the PowerSync Mobile app while connected to Powerwall
+              WiFi.
+
               {%- endif %}
       - type: custom:apexcharts-card
         header:
