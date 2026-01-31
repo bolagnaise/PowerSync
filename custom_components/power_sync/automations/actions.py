@@ -58,6 +58,9 @@ _LOGGER = logging.getLogger(__name__)
 from ..const import TESLA_INTEGRATIONS
 TESLA_EV_INTEGRATIONS = TESLA_INTEGRATIONS
 
+# Global lock to prevent concurrent wake/charging attempts
+_ev_wake_lock: Dict[str, bool] = {}  # vehicle_id -> is_waking
+
 
 def _is_sigenergy(config_entry: ConfigEntry) -> bool:
     """Check if this is a Sigenergy system."""
@@ -198,92 +201,138 @@ async def _wake_tesla_ev(
     """
     import asyncio
 
-    # Find the wake up button entity
-    wake_entity = await _get_tesla_ev_entity(
-        hass,
-        r"button\..*wake(_up)?$",
-        vehicle_vin
-    )
+    # Generate a lock key (use VIN if available, otherwise generic)
+    lock_key = vehicle_vin or "default"
 
-    if not wake_entity:
-        _LOGGER.warning("Could not find Tesla wake button entity")
-        return False
+    # Check if wake is already in progress for this vehicle
+    if _ev_wake_lock.get(lock_key, False):
+        _LOGGER.info(f"Wake already in progress for Tesla EV (key={lock_key}), waiting for it to complete")
+        # Wait up to wait_timeout for the other wake to complete
+        wait_start = asyncio.get_event_loop().time()
+        while _ev_wake_lock.get(lock_key, False):
+            if (asyncio.get_event_loop().time() - wait_start) > wait_timeout:
+                _LOGGER.warning(f"Timed out waiting for existing wake to complete")
+                return True  # Proceed anyway
+            await asyncio.sleep(2)
+        _LOGGER.info(f"Previous wake completed, proceeding")
+        return True
 
-    # Try to find asleep/status sensor to verify wake
-    # Teslemetry uses binary_sensor.*_asleep or sensor.*_state
-    asleep_entity = await _get_tesla_ev_entity(
-        hass,
-        r"binary_sensor\..*_asleep$",
-        vehicle_vin
-    )
-    state_entity = await _get_tesla_ev_entity(
-        hass,
-        r"sensor\..*_state$",
-        vehicle_vin
-    )
+    # Acquire lock
+    _ev_wake_lock[lock_key] = True
+    _LOGGER.debug(f"Acquired wake lock for Tesla EV (key={lock_key})")
 
-    # Check if already awake
-    if asleep_entity:
-        asleep_state = hass.states.get(asleep_entity)
-        if asleep_state and asleep_state.state == "off":
-            _LOGGER.debug("Tesla EV is already awake (asleep sensor = off)")
-            return True
-    if state_entity:
-        state_val = hass.states.get(state_entity)
-        if state_val and state_val.state.lower() == "online":
-            _LOGGER.debug("Tesla EV is already online")
-            return True
+    try:
+        # Find the wake up button entity
+        wake_entity = await _get_tesla_ev_entity(
+            hass,
+            r"button\..*wake(_up)?$",
+            vehicle_vin
+        )
 
-    # Send wake command with retries
-    for attempt in range(1, max_retries + 1):
-        try:
-            _LOGGER.info(f"Sending wake command to Tesla EV (attempt {attempt}/{max_retries}): {wake_entity}")
-            await hass.services.async_call(
-                "button",
-                "press",
-                {"entity_id": wake_entity},
-                blocking=True,
+        if not wake_entity:
+            _LOGGER.warning("Could not find Tesla wake button entity")
+            return False
+
+        # Try multiple entity patterns to verify wake status
+        # Different Tesla integrations use different entity naming conventions
+        status_patterns = [
+            (r"binary_sensor\..*_asleep$", "binary", "off"),  # asleep=off means awake
+            (r"binary_sensor\..*asleep$", "binary", "off"),   # Without underscore
+            (r"sensor\..*_state$", "state", "online"),        # state=online
+            (r"sensor\..*_status$", "state", "online"),       # status=online
+            (r"sensor\..*state$", "state", "online"),         # Without underscore
+        ]
+
+        status_entity = None
+        status_type = None
+        awake_value = None
+
+        for pattern, stype, awake_val in status_patterns:
+            entity = await _get_tesla_ev_entity(hass, pattern, vehicle_vin)
+            if entity:
+                status_entity = entity
+                status_type = stype
+                awake_value = awake_val
+                _LOGGER.info(f"Found Tesla status entity: {entity} (type={stype}, awake_value={awake_val})")
+                break
+
+        if not status_entity:
+            _LOGGER.warning(
+                "Could not find Tesla status/asleep sensor. "
+                "Will send wake command but cannot verify wake completion. "
+                "Tried patterns: binary_sensor.*_asleep, binary_sensor.*asleep, "
+                "sensor.*_state, sensor.*_status, sensor.*state"
             )
-        except Exception as e:
-            _LOGGER.warning(f"Wake command attempt {attempt} failed: {e}")
-            if attempt == max_retries:
-                _LOGGER.error(f"Failed to wake Tesla EV after {max_retries} attempts")
-                # Still return True to attempt the charging command anyway
-                return True
-            await asyncio.sleep(5)
-            continue
 
-        # Wait for car to wake up (poll every 3 seconds)
-        start_time = asyncio.get_event_loop().time()
-        poll_interval = 3
-        wake_timeout_per_attempt = wait_timeout // max_retries
+        def _is_awake() -> bool:
+            """Check if the vehicle is currently awake."""
+            if not status_entity:
+                return False
+            state = hass.states.get(status_entity)
+            if not state:
+                return False
+            if status_type == "binary":
+                return state.state == awake_value
+            else:
+                return state.state.lower() == awake_value.lower()
 
-        while (asyncio.get_event_loop().time() - start_time) < wake_timeout_per_attempt:
-            await asyncio.sleep(poll_interval)
-            elapsed = int(asyncio.get_event_loop().time() - start_time)
+        # Check if already awake
+        if _is_awake():
+            _LOGGER.debug(f"Tesla EV is already awake ({status_entity})")
+            return True
 
-            # Check asleep sensor
-            if asleep_entity:
-                asleep_state = hass.states.get(asleep_entity)
-                if asleep_state and asleep_state.state == "off":
-                    _LOGGER.info(f"Tesla EV is now awake after {elapsed}s (asleep sensor = off)")
+        # Send wake command with retries
+        for attempt in range(1, max_retries + 1):
+            try:
+                _LOGGER.info(f"Sending wake command to Tesla EV (attempt {attempt}/{max_retries}): {wake_entity}")
+                await hass.services.async_call(
+                    "button",
+                    "press",
+                    {"entity_id": wake_entity},
+                    blocking=True,
+                )
+            except Exception as e:
+                _LOGGER.warning(f"Wake command attempt {attempt} failed: {e}")
+                if attempt == max_retries:
+                    _LOGGER.error(f"Failed to wake Tesla EV after {max_retries} attempts")
+                    # Still return True to attempt the charging command anyway
+                    return True
+                await asyncio.sleep(5)
+                continue
+
+            # If we don't have a status sensor, just wait a fixed time
+            if not status_entity:
+                _LOGGER.info(f"No status sensor available, waiting {wait_timeout // max_retries}s before proceeding")
+                await asyncio.sleep(wait_timeout // max_retries)
+                if attempt == max_retries:
+                    return True
+                continue
+
+            # Wait for car to wake up (poll every 3 seconds)
+            start_time = asyncio.get_event_loop().time()
+            poll_interval = 3
+            wake_timeout_per_attempt = wait_timeout // max_retries
+
+            while (asyncio.get_event_loop().time() - start_time) < wake_timeout_per_attempt:
+                await asyncio.sleep(poll_interval)
+                elapsed = int(asyncio.get_event_loop().time() - start_time)
+
+                if _is_awake():
+                    _LOGGER.info(f"Tesla EV is now awake after {elapsed}s ({status_entity})")
                     await asyncio.sleep(2)  # Extra buffer for readiness
                     return True
 
-            # Check state sensor
-            if state_entity:
-                state_val = hass.states.get(state_entity)
-                if state_val and state_val.state.lower() == "online":
-                    _LOGGER.info(f"Tesla EV is now online after {elapsed}s")
-                    await asyncio.sleep(2)  # Extra buffer for readiness
-                    return True
+                _LOGGER.debug(f"Waiting for Tesla EV to wake... {elapsed}s elapsed")
 
-            _LOGGER.debug(f"Waiting for Tesla EV to wake... {elapsed}s elapsed")
+            _LOGGER.info(f"Wake attempt {attempt} timed out after {wake_timeout_per_attempt}s, will retry...")
 
-        _LOGGER.info(f"Wake attempt {attempt} timed out after {wake_timeout_per_attempt}s, will retry...")
+        _LOGGER.warning(f"Tesla EV wake timed out after {wait_timeout}s total, attempting command anyway")
+        return True
 
-    _LOGGER.warning(f"Tesla EV wake timed out after {wait_timeout}s total, attempting command anyway")
-    return True
+    finally:
+        # Always release the lock
+        _ev_wake_lock[lock_key] = False
+        _LOGGER.debug(f"Released wake lock for Tesla EV (key={lock_key})")
 
 
 def _get_ev_config(config_entry: ConfigEntry) -> dict:
