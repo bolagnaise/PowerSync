@@ -752,145 +752,144 @@ views:
             columns: 4
             square: false
             cards:
-                  # Overall
-                  - type: custom:button-card
-                    entity: sensor.battery_health
-                    name: Overall
-                    show_icon: false
-                    show_name: true
-                    show_state: true
-                    state_display: >-
-                      [[[
-                        const v = states['sensor.battery_health']?.state;
-                        if (!v || ['unknown','unavailable','none'].includes(String(v).toLowerCase())) return '';
-                        const n = Number(v);
-                        if (!Number.isFinite(n)) return '';
-                        return `${n.toFixed(1)} %`;
-                      ]]]
-                    styles:
-                      card:
-                        - height: 90px
-                        - border-radius: 12px
-                        - padding: 10px
-                        - display: >-
-                            [[[
-                              const v = states['sensor.battery_health']?.state;
-                              if (!v || ['unknown','unavailable','none'].includes(String(v).toLowerCase())) return 'none';
-                              const n = Number(v);
-                              return Number.isFinite(n) ? 'block' : 'none';
-                            ]]]
-                      name:
-                        - font-weight: 700
-                        - font-size: 13px
-                      state:
-                        - font-size: 22px
-                        - font-weight: 800
-                        - margin-top: 6px
-                  
-                  # Battery 1
-                  - type: custom:button-card
-                    entity: sensor.battery_health
-                    name: Battery 1
-                    show_icon: false
-                    show_name: true
-                    show_state: true
-                    state_display: >-
-                      [[[
-                        const v = states['sensor.battery_health']?.attributes?.battery_1_health_percent;
-                        if (v === undefined || v === null) return '';
-                        const n = Number(v);
-                        if (!Number.isFinite(n)) return '';
-                        return `${n.toFixed(1)} %`;
-                      ]]]
-                    styles:
-                      card:
-                        - height: 90px
-                        - border-radius: 12px
-                        - padding: 10px
-                        - display: >-
-                            [[[
-                              const v = states['sensor.battery_health']?.attributes?.battery_1_health_percent;
-                              if (v === undefined || v === null) return 'none';
-                              const n = Number(v);
-                              return Number.isFinite(n) ? 'block' : 'none';
-                            ]]]
-                      name:
-                        - font-weight: 700
-                        - font-size: 13px
-                      state:
-                        - font-size: 22px
-                        - font-weight: 800
-                        - margin-top: 6px
-                  
-                  # Battery 2
-                  - type: custom:button-card
-                    entity: sensor.battery_health
-                    name: Battery 2
-                    show_icon: false
-                    show_name: true
-                    show_state: true
-                    state_display: >-
-                      [[[
-                        const v = states['sensor.battery_health']?.attributes?.battery_2_health_percent;
-                        if (v === undefined || v === null) return '';
-                        const n = Number(v);
-                        if (!Number.isFinite(n)) return '';
-                        return `${n.toFixed(1)} %`;
-                      ]]]
-                    styles:
-                      card:
-                        - height: 90px
-                        - border-radius: 12px
-                        - padding: 10px
-                        - display: >-
-                            [[[
-                              const v = states['sensor.battery_health']?.attributes?.battery_2_health_percent;
-                              if (v === undefined || v === null) return 'none';
-                              const n = Number(v);
-                              return Number.isFinite(n) ? 'block' : 'none';
-                            ]]]
-                      name:
-                        - font-weight: 700
-                        - font-size: 13px
-                      state:
-                        - font-size: 22px
-                        - font-weight: 800
-                        - margin-top: 6px
-                  
-                  # Battery 3
-                  - type: custom:button-card
-                    entity: sensor.battery_health
-                    name: Battery 3
-                    show_icon: false
-                    show_name: true
-                    show_state: true
-                    state_display: >-
-                      [[[
-                        const v = states['sensor.battery_health']?.attributes?.battery_3_health_percent;
-                        if (v === undefined || v === null) return '';
-                        const n = Number(v);
-                        if (!Number.isFinite(n)) return '';
-                        return `${n.toFixed(1)} %`;
-                      ]]]
-                    styles:
-                      card:
-                        - height: 90px
-                        - border-radius: 12px
-                        - padding: 10px
-                        - display: >-
-                            [[[
-                              const v = states['sensor.battery_health']?.attributes?.battery_3_health_percent;
-                              if (v === undefined || v === null) return 'none';
-                              const n = Number(v);
-                              return Number.isFinite(n) ? 'block' : 'none';
-                            ]]]
-                      name:
-                        - font-weight: 700
-                        - font-size: 13px
-                      state:
-                        - font-size: 22px
-                        - font-weight: 800
-                        - margin-top: 6px
+              - type: custom:button-card
+                entity: sensor.battery_health
+                name: Overall
+                show_icon: false
+                show_name: true
+                show_state: true
+                state_display: >-
+                  [[[
+                    const v = states['sensor.battery_health']?.state;
+                    if (!v || ['unknown','unavailable','none'].includes(String(v).toLowerCase())) return '';
+                    const n = Number(v);
+                    if (!Number.isFinite(n)) return '';
+                    return `${n.toFixed(1)} %`;
+                  ]]]
+                styles:
+                  card:
+                    - height: 90px
+                    - border-radius: 12px
+                    - padding: 10px
+                    - display: >-
+                        [[[
+                          const v = states['sensor.battery_health']?.state;
+                          if (!v || ['unknown','unavailable','none'].includes(String(v).toLowerCase())) return 'none';
+                          const n = Number(v);
+                          return Number.isFinite(n) ? 'block' : 'none';
+                        ]]]
+                  name:
+                    - font-weight: 700
+                    - font-size: 13px
+                  state:
+                    - font-size: 22px
+                    - font-weight: 800
+                    - margin-top: 6px
+
+              # Battery 1
+              - type: custom:button-card
+                entity: sensor.battery_health
+                name: Battery 1
+                show_icon: false
+                show_name: true
+                show_state: true
+                state_display: >-
+                  [[[
+                    const v = states['sensor.battery_health']?.attributes?.battery_1_health_percent;
+                    if (v === undefined || v === null) return '';
+                    const n = Number(v);
+                    if (!Number.isFinite(n)) return '';
+                    return `${n.toFixed(1)} %`;
+                  ]]]
+                styles:
+                  card:
+                    - height: 90px
+                    - border-radius: 12px
+                    - padding: 10px
+                    - display: >-
+                        [[[
+                          const v = states['sensor.battery_health']?.attributes?.battery_1_health_percent;
+                          if (v === undefined || v === null) return 'none';
+                          const n = Number(v);
+                          return Number.isFinite(n) ? 'block' : 'none';
+                        ]]]
+                  name:
+                    - font-weight: 700
+                    - font-size: 13px
+                  state:
+                    - font-size: 22px
+                    - font-weight: 800
+                    - margin-top: 6px
+
+              # Battery 2
+              - type: custom:button-card
+                entity: sensor.battery_health
+                name: Battery 2
+                show_icon: false
+                show_name: true
+                show_state: true
+                state_display: >-
+                  [[[
+                    const v = states['sensor.battery_health']?.attributes?.battery_2_health_percent;
+                    if (v === undefined || v === null) return '';
+                    const n = Number(v);
+                    if (!Number.isFinite(n)) return '';
+                    return `${n.toFixed(1)} %`;
+                  ]]]
+                styles:
+                  card:
+                    - height: 90px
+                    - border-radius: 12px
+                    - padding: 10px
+                    - display: >-
+                        [[[
+                          const v = states['sensor.battery_health']?.attributes?.battery_2_health_percent;
+                          if (v === undefined || v === null) return 'none';
+                          const n = Number(v);
+                          return Number.isFinite(n) ? 'block' : 'none';
+                        ]]]
+                  name:
+                    - font-weight: 700
+                    - font-size: 13px
+                  state:
+                    - font-size: 22px
+                    - font-weight: 800
+                    - margin-top: 6px
+
+              # Battery 3
+              - type: custom:button-card
+                entity: sensor.battery_health
+                name: Battery 3
+                show_icon: false
+                show_name: true
+                show_state: true
+                state_display: >-
+                  [[[
+                    const v = states['sensor.battery_health']?.attributes?.battery_3_health_percent;
+                    if (v === undefined || v === null) return '';
+                    const n = Number(v);
+                    if (!Number.isFinite(n)) return '';
+                    return `${n.toFixed(1)} %`;
+                  ]]]
+                styles:
+                  card:
+                    - height: 90px
+                    - border-radius: 12px
+                    - padding: 10px
+                    - display: >-
+                        [[[
+                          const v = states['sensor.battery_health']?.attributes?.battery_3_health_percent;
+                          if (v === undefined || v === null) return 'none';
+                          const n = Number(v);
+                          return Number.isFinite(n) ? 'block' : 'none';
+                        ]]]
+                  name:
+                    - font-weight: 700
+                    - font-size: 13px
+                  state:
+                    - font-size: 22px
+                    - font-weight: 800
+                    - margin-top: 6px
           - type: markdown
             content: >
               {% set original = state_attr('sensor.battery_health',
