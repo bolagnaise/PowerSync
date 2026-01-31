@@ -191,6 +191,8 @@ from .const import (
     TESLA_BLE_NUMBER_CHARGING_AMPS,
     TESLA_BLE_NUMBER_CHARGING_LIMIT,
     TESLA_BLE_BUTTON_WAKE_UP,
+    # Tesla integrations for device discovery
+    TESLA_INTEGRATIONS,
 )
 from .inverters import get_inverter_controller
 from .coordinator import (
@@ -3496,8 +3498,7 @@ class EVStatusView(HomeAssistantView):
     name = "api:power_sync:ev:status"
     requires_auth = True
 
-    # Supported Tesla integrations in HA
-    TESLA_INTEGRATIONS = ["tesla_fleet", "teslemetry"]
+    # Use imported TESLA_INTEGRATIONS from const.py
 
     def __init__(self, hass: HomeAssistant):
         """Initialize the view."""
@@ -3548,7 +3549,7 @@ class EVStatusView(HomeAssistantView):
             fleet_api_available = False
 
             if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
-                for integration in self.TESLA_INTEGRATIONS:
+                for integration in TESLA_INTEGRATIONS:
                     if integration in self._hass.config_entries.async_domains():
                         entries = self._hass.config_entries.async_entries(integration)
                         if entries:
@@ -3571,7 +3572,7 @@ class EVStatusView(HomeAssistantView):
 
                 for device in device_registry.devices.values():
                     for identifier in device.identifiers:
-                        if identifier[0] in self.TESLA_INTEGRATIONS:
+                        if identifier[0] in TESLA_INTEGRATIONS:
                             potential_vin = identifier[1]
                             if len(str(potential_vin)) == 17 and not str(potential_vin).isdigit():
                                 vehicle_count += 1
@@ -3611,8 +3612,7 @@ class EVVehiclesView(HomeAssistantView):
     name = "api:power_sync:ev:vehicles"
     requires_auth = True
 
-    # Supported Tesla integrations in HA
-    TESLA_INTEGRATIONS = ["tesla_fleet", "teslemetry"]
+    # Use imported TESLA_INTEGRATIONS from const.py
 
     def __init__(self, hass: HomeAssistant):
         """Initialize the view."""
@@ -3717,7 +3717,7 @@ class EVVehiclesView(HomeAssistantView):
             tesla_entries = []
 
             if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
-                for integration in self.TESLA_INTEGRATIONS:
+                for integration in TESLA_INTEGRATIONS:
                     if integration in self._hass.config_entries.async_domains():
                         entries = self._hass.config_entries.async_entries(integration)
                         if entries:
@@ -3737,7 +3737,7 @@ class EVVehiclesView(HomeAssistantView):
                         vin = None
 
                         for identifier in device.identifiers:
-                            if identifier[0] in self.TESLA_INTEGRATIONS:
+                            if identifier[0] in TESLA_INTEGRATIONS:
                                 potential_vin = str(identifier[1])
                                 if len(potential_vin) == 17 and not potential_vin.isdigit():
                                     is_tesla_vehicle = True
@@ -3967,8 +3967,7 @@ class EVVehicleCommandView(HomeAssistantView):
     name = "api:power_sync:ev:vehicles:command"
     requires_auth = True
 
-    # Supported Tesla integrations
-    TESLA_INTEGRATIONS = ["tesla_fleet", "teslemetry"]
+    # Use imported TESLA_INTEGRATIONS from const.py
 
     def __init__(self, hass: HomeAssistant):
         """Initialize the view."""
@@ -3997,7 +3996,7 @@ class EVVehicleCommandView(HomeAssistantView):
                     continue
                 domain = identifier[0]
                 identifier_value = str(identifier[1])
-                if domain in self.TESLA_INTEGRATIONS:
+                if domain in TESLA_INTEGRATIONS:
                     # Check if this looks like a VIN (17 chars, not all digits)
                     if len(identifier_value) == 17 and not identifier_value.isdigit():
                         vehicle_num += 1
@@ -4025,7 +4024,7 @@ class EVVehicleCommandView(HomeAssistantView):
                     continue
                 domain = identifier[0]
                 identifier_value = str(identifier[1])
-                if domain in self.TESLA_INTEGRATIONS:
+                if domain in TESLA_INTEGRATIONS:
                     if len(identifier_value) == 17 and not identifier_value.isdigit():
                         _LOGGER.debug(f"Found Tesla device: {device.name} with VIN {identifier_value}, looking for VIN {vehicle_vin}")
                         if vehicle_vin is None or identifier_value == vehicle_vin:
@@ -5003,7 +5002,7 @@ class ChargingScheduleView(HomeAssistantView):
         entity_registry = er.async_get(self._hass)
         device_registry = dr.async_get(self._hass)
 
-        tesla_integrations = ["tesla_fleet", "teslemetry"]
+        tesla_integrations = TESLA_INTEGRATIONS
 
         for device in device_registry.devices.values():
             is_tesla_device = False

@@ -55,7 +55,8 @@ from ..const import (
 _LOGGER = logging.getLogger(__name__)
 
 # Tesla integrations supported for EV control via Fleet API
-TESLA_EV_INTEGRATIONS = ["tesla_fleet", "teslemetry"]
+from ..const import TESLA_INTEGRATIONS
+TESLA_EV_INTEGRATIONS = TESLA_INTEGRATIONS
 
 
 def _is_sigenergy(config_entry: ConfigEntry) -> bool:

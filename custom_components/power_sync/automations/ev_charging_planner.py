@@ -18,6 +18,8 @@ from enum import Enum
 
 import aiohttp
 
+from ..const import TESLA_INTEGRATIONS
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -150,7 +152,7 @@ async def get_ev_location(hass: "HomeAssistant", config_entry: "ConfigEntry") ->
     entity_registry = er.async_get(hass)
     device_registry = dr.async_get(hass)
 
-    tesla_integrations = ["tesla_fleet", "teslemetry"]
+    tesla_integrations = TESLA_INTEGRATIONS
 
     for device in device_registry.devices.values():
         if location != "unknown":
@@ -222,7 +224,7 @@ async def is_ev_plugged_in(hass: "HomeAssistant", config_entry: "ConfigEntry") -
     entity_registry = er.async_get(hass)
     device_registry = dr.async_get(hass)
 
-    tesla_integrations = ["tesla_fleet", "teslemetry"]
+    tesla_integrations = TESLA_INTEGRATIONS
 
     for device in device_registry.devices.values():
         is_tesla_vehicle = False
@@ -2297,7 +2299,7 @@ class AutoScheduleExecutor:
             entity_registry = er.async_get(self.hass)
             device_registry = dr.async_get(self.hass)
 
-            tesla_integrations = ["tesla_fleet", "teslemetry"]
+            tesla_integrations = TESLA_INTEGRATIONS
 
             for device in device_registry.devices.values():
                 if live_soc is not None:
@@ -2409,7 +2411,7 @@ class AutoScheduleExecutor:
         entity_registry = er.async_get(self.hass)
         device_registry = dr.async_get(self.hass)
 
-        tesla_integrations = ["tesla_fleet", "teslemetry"]
+        tesla_integrations = TESLA_INTEGRATIONS
 
         for device in device_registry.devices.values():
             if location != "unknown":
@@ -2497,7 +2499,7 @@ class AutoScheduleExecutor:
         entity_registry = er.async_get(self.hass)
         device_registry = dr.async_get(self.hass)
 
-        tesla_integrations = ["tesla_fleet", "teslemetry"]
+        tesla_integrations = TESLA_INTEGRATIONS
 
         for device in device_registry.devices.values():
             is_tesla_device = False
@@ -3556,7 +3558,7 @@ class PriceLevelChargingExecutor:
                 # Check various Tesla integration identifiers
                 for identifier in device.identifiers:
                     domain, _ = identifier
-                    if domain in ("tesla", "tesla_custom", "teslemetry", "tesla_ble", "tessie"):
+                    if domain in TESLA_INTEGRATIONS or domain == "tesla_ble":
                         tesla_device_ids.add(device.id)
                         break
 

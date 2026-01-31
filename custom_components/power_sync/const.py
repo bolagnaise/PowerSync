@@ -91,6 +91,16 @@ CONF_TESLA_API_PROVIDER = "tesla_api_provider"
 TESLA_PROVIDER_TESLEMETRY = "teslemetry"
 TESLA_PROVIDER_FLEET_API = "fleet_api"
 
+# All supported Tesla/EV integrations (for device/entity discovery)
+# These are the HA integration domain names used in device identifiers
+TESLA_INTEGRATIONS = [
+    "tesla_fleet",    # Official Tesla Fleet API integration
+    "teslemetry",     # Teslemetry integration
+    "tessie",         # Tessie integration
+    "tesla_custom",   # Tesla Custom Integration
+    "tesla",          # Older Tesla integration
+]
+
 # Fleet API configuration (direct Tesla API)
 CONF_FLEET_API_ACCESS_TOKEN = "fleet_api_access_token"
 CONF_FLEET_API_REFRESH_TOKEN = "fleet_api_refresh_token"
