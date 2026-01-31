@@ -20,7 +20,7 @@ The dashboard includes:
 
 Install these from HACS (Frontend) before setting up the dashboard:
 
-1. **[mushroom](https://github.com/piitaya/lovelace-mushroom)** - For the force discharge control chips
+1. **[button-card](https://github.com/custom-cards/button-card)** - For the force discharge control chips
 2. **[card-mod](https://github.com/thomasloven/lovelace-card-mod)** - For compact gauge styling
 3. **[power-flow-card-plus](https://github.com/flixlix/power-flow-card-plus)** - For the real-time energy flow visualization
 4. **[apexcharts-card](https://github.com/RomRider/apexcharts-card)** - For all the price and energy charts
