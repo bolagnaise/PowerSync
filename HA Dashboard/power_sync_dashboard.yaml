@@ -61,13 +61,13 @@ views:
             columns: 4
             cards:
               - type: custom:button-card
-                entity: select.force_charge_duration
+                entity: select.power_sync_force_charge_duration
                 show_name: true
                 show_icon: true
                 icon: mdi:timer-outline
                 name: |-
-                  [[[ return (states['select.force_charge_duration']
-                    ? states['select.force_charge_duration'].state
+                  [[[ return (states['select.power_sync_force_charge_duration']
+                    ? states['select.power_sync_force_charge_duration'].state 
                     : '30') + ' min' ]]]
                 styles:
                   card:
@@ -123,23 +123,23 @@ views:
                   service: power_sync.force_charge
                   data:
                     duration: |-
-                      [[[ return (states['select.force_charge_duration']
-                        ? states['select.force_charge_duration'].state
+                      [[[ return (states['select.power_sync_force_charge_duration']
+                        ? states['select.power_sync_force_charge_duration'].state
                         : '30'); ]]]
                   confirmation:
                     text: >-
                       [[[ return 'Force charge for ' +
-                      (states['select.force_charge_duration']
-                        ? states['select.force_charge_duration'].state
+                      (states['select.power_sync_force_charge_duration']
+                        ? states['select.power_sync_force_charge_duration'].state
                         : '30') + ' minutes?' ]]]
               - type: custom:button-card
-                entity: select.force_discharge_duration
+                entity: select.power_sync_force_discharge_duration
                 show_name: true
                 show_icon: true
                 icon: mdi:timer-outline
                 name: |-
-                  [[[ return (states['select.force_discharge_duration']
-                    ? states['select.force_discharge_duration'].state
+                  [[[ return (states['select.power_sync_force_discharge_duration']
+                    ? states['select.power_sync_force_discharge_duration'].state
                     : '30') + ' min' ]]]
                 styles:
                   card:
@@ -350,7 +350,7 @@ views:
             stroke_width: 2
             curve: stepline
             extend_to: end
-            data_generator: >
+            data_generator: |
               const now = new Date();
 
               const today = new Date(now.getFullYear(), now.getMonth(),
@@ -435,7 +435,7 @@ views:
             stroke_width: 2
             curve: stepline
             extend_to: end
-            data_generator: >
+            data_generator: |
               const now = new Date();
 
               const today = new Date(now.getFullYear(), now.getMonth(),

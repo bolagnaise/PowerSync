@@ -3,6 +3,7 @@ from __future__ import annotations
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -33,17 +34,46 @@ async def async_setup_entry(
     if changed:
         hass.config_entries.async_update_entry(entry, options=options)
 
+    # Prefer integration-prefixed entity_ids, and migrate older un-prefixed ones.
+    # We only rename entities that belong to THIS config entry (via unique_id),
+    # and we never overwrite an existing entity_id.
+    ent_reg = er.async_get(hass)
+    desired_object_ids = {
+        CONF_FORCE_CHARGE_DURATION: "power_sync_force_charge_duration",
+        CONF_FORCE_DISCHARGE_DURATION: "power_sync_force_discharge_duration",
+    }
+    legacy_entity_ids = {
+        CONF_FORCE_CHARGE_DURATION: "select.force_charge_duration",
+        CONF_FORCE_DISCHARGE_DURATION: "select.force_discharge_duration",
+    }
+
+    for key, object_id in desired_object_ids.items():
+        unique_id = f"{entry.entry_id}_{key}"
+        current_entity_id = ent_reg.async_get_entity_id("select", entry.domain, unique_id)
+        if current_entity_id is None:
+            continue
+
+        desired_entity_id = f"select.{object_id}"
+        legacy_entity_id = legacy_entity_ids[key]
+
+        # Only migrate the specific legacy ids -> desired ids.
+        if current_entity_id == legacy_entity_id and current_entity_id != desired_entity_id:
+            if ent_reg.async_get(desired_entity_id) is None:
+                ent_reg.async_update_entity(current_entity_id, new_entity_id=desired_entity_id)
+
     async_add_entities(
         [
             PowerSyncDurationSelect(
                 entry=entry,
                 key=CONF_FORCE_CHARGE_DURATION,
                 name="Force Charge Duration",
+                suggested_object_id=desired_object_ids[CONF_FORCE_CHARGE_DURATION],
             ),
             PowerSyncDurationSelect(
                 entry=entry,
                 key=CONF_FORCE_DISCHARGE_DURATION,
                 name="Force Discharge Duration",
+                suggested_object_id=desired_object_ids[CONF_FORCE_DISCHARGE_DURATION],
             ),
         ]
     )
@@ -56,11 +86,14 @@ class PowerSyncDurationSelect(SelectEntity):
     _attr_icon = "mdi:clock-outline"
     _attr_has_entity_name = True
 
-    def __init__(self, entry: ConfigEntry, key: str, name: str) -> None:
+    def __init__(self, entry: ConfigEntry, key: str, name: str, suggested_object_id: str) -> None:
         self._entry = entry
         self._key = key
         self._attr_name = name
         self._attr_unique_id = f"{entry.entry_id}_{key}"
+
+        # Controls the default entity_id Home Assistant generates for new installs
+        self._attr_suggested_object_id = suggested_object_id
 
         # SelectEntity options must be strings
         self._attr_options = [str(x) for x in DISCHARGE_DURATIONS]
