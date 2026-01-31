@@ -117,13 +117,19 @@ class ChargingPlan:
 # Module-level helper functions for EV state detection
 # ============================================================================
 
-async def get_ev_location(hass: "HomeAssistant", config_entry: "ConfigEntry") -> str:
+async def get_ev_location(
+    hass: "HomeAssistant",
+    config_entry: "ConfigEntry",
+    vehicle_vin: Optional[str] = None
+) -> str:
     """
     Get EV location from Home Assistant entities.
 
     Args:
         hass: Home Assistant instance
         config_entry: Config entry
+        vehicle_vin: Optional VIN to check specific vehicle. If None, returns
+                     location of first vehicle found (backward compatible).
 
     Returns:
         Location string: "home", "work", "not_home", or "unknown"
@@ -138,15 +144,17 @@ async def get_ev_location(hass: "HomeAssistant", config_entry: "ConfigEntry") ->
     location = "unknown"
 
     # Method 1: Tesla BLE - if available, vehicle is nearby (assume "home")
-    config = dict(config_entry.options) if config_entry else {}
-    ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
-    ble_charger_entity = f"switch.{ble_prefix}_charger"
-    ble_state = hass.states.get(ble_charger_entity)
+    # Note: BLE doesn't provide VIN filtering, so only use for non-VIN-specific queries
+    if vehicle_vin is None:
+        config = dict(config_entry.options) if config_entry else {}
+        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+        ble_charger_entity = f"switch.{ble_prefix}_charger"
+        ble_state = hass.states.get(ble_charger_entity)
 
-    if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
-        location = "home"
-        _LOGGER.debug(f"Tesla BLE detected, assuming location=home")
-        return location
+        if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
+            location = "home"
+            _LOGGER.debug(f"Tesla BLE detected, assuming location=home")
+            return location
 
     # Method 2: Check Tesla Fleet/Teslemetry device_tracker entities
     entity_registry = er.async_get(hass)
@@ -159,14 +167,20 @@ async def get_ev_location(hass: "HomeAssistant", config_entry: "ConfigEntry") ->
             break
 
         is_tesla_vehicle = False
+        device_vin: Optional[str] = None
         for identifier in device.identifiers:
             if len(identifier) >= 2 and identifier[0] in tesla_integrations:
                 id_str = str(identifier[1])
                 if len(id_str) == 17 and not id_str.isdigit():
                     is_tesla_vehicle = True
+                    device_vin = id_str
                     break
 
         if not is_tesla_vehicle:
+            continue
+
+        # If specific VIN requested, skip other vehicles
+        if vehicle_vin is not None and device_vin != vehicle_vin:
             continue
 
         for entity in entity_registry.entities.values():
@@ -180,26 +194,72 @@ async def get_ev_location(hass: "HomeAssistant", config_entry: "ConfigEntry") ->
                 state = hass.states.get(entity_id)
                 if state and state.state not in ("unavailable", "unknown", "None", None):
                     location = state.state.lower()
-                    _LOGGER.debug(f"Found EV location from {entity_id}: {location}")
+                    _LOGGER.debug(f"Found EV location from {entity_id} (VIN: {device_vin}): {location}")
                     break
 
             elif entity_id.startswith("binary_sensor.") and "located_at_home" in entity_id_lower:
                 state = hass.states.get(entity_id)
                 if state and state.state == "on":
                     location = "home"
-                    _LOGGER.debug(f"Found EV at home from {entity_id}")
+                    _LOGGER.debug(f"Found EV at home from {entity_id} (VIN: {device_vin})")
                     break
 
     return location
 
 
-async def is_ev_plugged_in(hass: "HomeAssistant", config_entry: "ConfigEntry") -> bool:
+async def discover_all_tesla_vehicles(
+    hass: "HomeAssistant",
+    config_entry: "ConfigEntry"
+) -> List[Dict[str, Any]]:
+    """
+    Discover all Tesla vehicles registered in Home Assistant.
+
+    Searches the device registry for devices from known Tesla integrations
+    and returns a list of all discovered vehicles with their VINs.
+
+    Args:
+        hass: Home Assistant instance
+        config_entry: Config entry
+
+    Returns:
+        List of dicts: [{"vin": str, "name": str, "device_id": str}, ...]
+    """
+    from homeassistant.helpers import device_registry as dr
+
+    device_registry = dr.async_get(hass)
+    vehicles: List[Dict[str, Any]] = []
+
+    for device in device_registry.devices.values():
+        for identifier in device.identifiers:
+            if len(identifier) >= 2 and identifier[0] in TESLA_INTEGRATIONS:
+                id_str = str(identifier[1])
+                # VIN is 17 characters and not all digits (distinguish from other IDs)
+                if len(id_str) == 17 and not id_str.isdigit():
+                    vehicles.append({
+                        "vin": id_str,
+                        "name": device.name or device.name_by_user or id_str,
+                        "device_id": device.id,
+                    })
+                    _LOGGER.debug(f"Discovered Tesla vehicle: {device.name} (VIN: {id_str})")
+                    break
+
+    _LOGGER.debug(f"Discovered {len(vehicles)} Tesla vehicle(s)")
+    return vehicles
+
+
+async def is_ev_plugged_in(
+    hass: "HomeAssistant",
+    config_entry: "ConfigEntry",
+    vehicle_vin: Optional[str] = None
+) -> bool:
     """
     Check if EV is plugged in from Home Assistant entities.
 
     Args:
         hass: Home Assistant instance
         config_entry: Config entry
+        vehicle_vin: Optional VIN to check specific vehicle. If None, returns
+                     True if any vehicle is plugged in (backward compatible).
 
     Returns:
         True if plugged in, False otherwise
@@ -211,14 +271,16 @@ async def is_ev_plugged_in(hass: "HomeAssistant", config_entry: "ConfigEntry") -
     )
     from homeassistant.helpers import entity_registry as er, device_registry as dr
 
-    # Method 1: Tesla BLE
-    config = dict(config_entry.options) if config_entry else {}
-    ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
-    ble_charger_entity = f"switch.{ble_prefix}_charger"
-    ble_state = hass.states.get(ble_charger_entity)
+    # Method 1: Tesla BLE (only applies if no specific VIN or BLE matches)
+    # Note: BLE doesn't provide VIN filtering, so only use for non-VIN-specific queries
+    if vehicle_vin is None:
+        config = dict(config_entry.options) if config_entry else {}
+        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+        ble_charger_entity = f"switch.{ble_prefix}_charger"
+        ble_state = hass.states.get(ble_charger_entity)
 
-    if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
-        return True
+        if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
+            return True
 
     # Method 2: Check Tesla Fleet/Teslemetry entities
     entity_registry = er.async_get(hass)
@@ -228,14 +290,20 @@ async def is_ev_plugged_in(hass: "HomeAssistant", config_entry: "ConfigEntry") -
 
     for device in device_registry.devices.values():
         is_tesla_vehicle = False
+        device_vin: Optional[str] = None
         for identifier in device.identifiers:
             if len(identifier) >= 2 and identifier[0] in tesla_integrations:
                 id_str = str(identifier[1])
                 if len(id_str) == 17 and not id_str.isdigit():
                     is_tesla_vehicle = True
+                    device_vin = id_str
                     break
 
         if not is_tesla_vehicle:
+            continue
+
+        # If specific VIN requested, skip other vehicles
+        if vehicle_vin is not None and device_vin != vehicle_vin:
             continue
 
         for entity in entity_registry.entities.values():
@@ -249,14 +317,14 @@ async def is_ev_plugged_in(hass: "HomeAssistant", config_entry: "ConfigEntry") -
                 state = hass.states.get(entity_id)
                 if state:
                     is_plugged = state.state == "on"
-                    _LOGGER.debug(f"Found plugged in state from {entity_id}: {is_plugged}")
+                    _LOGGER.debug(f"Found plugged in state from {entity_id} (VIN: {device_vin}): {is_plugged}")
                     return is_plugged
 
             elif entity_id.startswith("sensor.") and "_charging" in entity_id_lower and "charging_" not in entity_id_lower:
                 state = hass.states.get(entity_id)
                 if state and state.state not in ("unavailable", "unknown", "None", None):
                     if state.state.lower() in ("charging", "complete", "stopped"):
-                        _LOGGER.debug(f"EV plugged in (charging state: {state.state})")
+                        _LOGGER.debug(f"EV plugged in (charging state: {state.state}, VIN: {device_vin})")
                         return True
 
     return False
@@ -3501,7 +3569,8 @@ class PriceLevelChargingExecutor:
         self.hass = hass
         self.config_entry = config_entry
         self._domain = DOMAIN
-        self._state = PriceLevelChargingState()
+        self._state = PriceLevelChargingState()  # Legacy single-vehicle state
+        self._vehicle_states: Dict[str, PriceLevelChargingState] = {}  # Per-VIN state tracking
 
     def _get_settings(self) -> dict:
         """Get price-level charging settings from store."""
@@ -3528,13 +3597,17 @@ class PriceLevelChargingExecutor:
 
         return defaults
 
-    async def _get_ev_soc(self) -> Optional[int]:
+    async def _get_ev_soc(self, vehicle_vin: Optional[str] = None) -> Optional[int]:
         """Get EV's current state of charge from HA entities.
 
         Searches for battery level sensors from various Tesla integrations:
         - Teslemetry (sensor.*_battery_level)
         - Tesla Custom Integration
         - Tesla BLE
+
+        Args:
+            vehicle_vin: Optional VIN to check specific vehicle. If None, returns
+                         SoC of first vehicle found (backward compatible).
         """
         from homeassistant.helpers import entity_registry as er, device_registry as dr
 
@@ -3543,28 +3616,48 @@ class PriceLevelChargingExecutor:
         tesla_vehicles = entry_data.get("tesla_vehicles", [])
 
         for vehicle in tesla_vehicles:
-            battery_level = vehicle.get("battery_level")
-            if battery_level is not None:
-                return int(battery_level)
+            # If VIN specified, only return matching vehicle's battery level
+            if vehicle_vin is not None:
+                if vehicle.get("vin") == vehicle_vin:
+                    battery_level = vehicle.get("battery_level")
+                    if battery_level is not None:
+                        return int(battery_level)
+            else:
+                battery_level = vehicle.get("battery_level")
+                if battery_level is not None:
+                    return int(battery_level)
 
         # Method 2: Search HA entity registry for EV battery sensors
         try:
             entity_reg = er.async_get(self.hass)
             device_reg = dr.async_get(self.hass)
 
-            # Find Tesla devices
-            tesla_device_ids = set()
+            # Find Tesla devices (with VIN mapping)
+            tesla_device_map: Dict[str, str] = {}  # device_id -> VIN
             for device in device_reg.devices.values():
                 # Check various Tesla integration identifiers
                 for identifier in device.identifiers:
-                    domain, _ = identifier
-                    if domain in TESLA_INTEGRATIONS or domain == "tesla_ble":
-                        tesla_device_ids.add(device.id)
-                        break
+                    if len(identifier) >= 2:
+                        domain = identifier[0]
+                        id_str = str(identifier[1])
+                        if domain in TESLA_INTEGRATIONS or domain == "tesla_ble":
+                            # Check if identifier is a VIN (17 chars, not all digits)
+                            if len(id_str) == 17 and not id_str.isdigit():
+                                tesla_device_map[device.id] = id_str
+                            else:
+                                # Non-VIN identifier, use device.id as fallback
+                                if device.id not in tesla_device_map:
+                                    tesla_device_map[device.id] = ""
+                            break
 
             # Search for battery level sensors
             for entity in entity_reg.entities.values():
-                if entity.device_id not in tesla_device_ids:
+                if entity.device_id not in tesla_device_map:
+                    continue
+
+                # If specific VIN requested, skip other vehicles
+                device_vin = tesla_device_map.get(entity.device_id, "")
+                if vehicle_vin is not None and device_vin and device_vin != vehicle_vin:
                     continue
 
                 entity_id = entity.entity_id
@@ -3583,7 +3676,7 @@ class PriceLevelChargingExecutor:
                         try:
                             level = float(state.state)
                             if 0 <= level <= 100:
-                                _LOGGER.debug(f"Found EV battery level from {entity_id}: {level}%")
+                                _LOGGER.debug(f"Found EV battery level from {entity_id} (VIN: {device_vin}): {level}%")
                                 return int(level)
                         except (ValueError, TypeError):
                             continue
@@ -3591,15 +3684,32 @@ class PriceLevelChargingExecutor:
         except Exception as e:
             _LOGGER.debug(f"Error searching for EV battery sensor: {e}")
 
-        _LOGGER.warning("Could not find EV battery level from any source")
+        _LOGGER.warning(f"Could not find EV battery level from any source (VIN: {vehicle_vin})")
         return None
 
-    async def _start_charging(self, mode: str, reason: str) -> bool:
-        """Start EV charging."""
+    def _get_or_create_vehicle_state(self, vehicle_vin: str) -> PriceLevelChargingState:
+        """Get or create per-vehicle charging state."""
+        if vehicle_vin not in self._vehicle_states:
+            self._vehicle_states[vehicle_vin] = PriceLevelChargingState()
+        return self._vehicle_states[vehicle_vin]
+
+    async def _start_charging(
+        self,
+        mode: str,
+        reason: str,
+        vehicle_vin: Optional[str] = None
+    ) -> bool:
+        """Start EV charging.
+
+        Args:
+            mode: Charging mode (e.g., "price_level_recovery")
+            reason: Reason for starting charging
+            vehicle_vin: Optional VIN for specific vehicle. If None, uses default.
+        """
         from .actions import _action_start_ev_charging_dynamic
 
         params = {
-            "vehicle_vin": None,  # Use default vehicle
+            "vehicle_vin": vehicle_vin,
             "dynamic_mode": "battery_target",
             "min_charge_amps": 5,
             "max_charge_amps": 32,
@@ -3613,11 +3723,20 @@ class PriceLevelChargingExecutor:
             )
 
             if success:
-                self._state.is_charging = True
-                self._state.charging_mode = mode
-                self._state.last_decision = "started"
-                self._state.last_decision_reason = reason
-                _LOGGER.info(f"Price-level charging: Started ({mode}) - {reason}")
+                # Update per-vehicle state if VIN provided, otherwise legacy state
+                if vehicle_vin:
+                    state = self._get_or_create_vehicle_state(vehicle_vin)
+                    state.is_charging = True
+                    state.charging_mode = mode
+                    state.last_decision = "started"
+                    state.last_decision_reason = reason
+                    _LOGGER.info(f"Price-level charging: Started ({mode}) for VIN {vehicle_vin} - {reason}")
+                else:
+                    self._state.is_charging = True
+                    self._state.charging_mode = mode
+                    self._state.last_decision = "started"
+                    self._state.last_decision_reason = reason
+                    _LOGGER.info(f"Price-level charging: Started ({mode}) - {reason}")
                 # Note: Notifications are sent by _action_start_ev_charging_dynamic
                 return True
             else:
@@ -3628,19 +3747,34 @@ class PriceLevelChargingExecutor:
             _LOGGER.error(f"Price-level charging: Error starting: {e}")
             return False
 
-    async def _stop_charging(self, reason: str) -> bool:
-        """Stop EV charging."""
+    async def _stop_charging(self, reason: str, vehicle_vin: Optional[str] = None) -> bool:
+        """Stop EV charging.
+
+        Args:
+            reason: Reason for stopping charging
+            vehicle_vin: Optional VIN for specific vehicle. If None, uses default.
+        """
         from .actions import _action_stop_ev_charging_dynamic
 
-        params = {"vehicle_id": None}
+        params = {"vehicle_id": vehicle_vin}
 
         try:
             await _action_stop_ev_charging_dynamic(self.hass, self.config_entry, params)
-            self._state.is_charging = False
-            self._state.charging_mode = ""
-            self._state.last_decision = "stopped"
-            self._state.last_decision_reason = reason
-            _LOGGER.info(f"Price-level charging: Stopped - {reason}")
+
+            # Update per-vehicle state if VIN provided, otherwise legacy state
+            if vehicle_vin:
+                state = self._get_or_create_vehicle_state(vehicle_vin)
+                state.is_charging = False
+                state.charging_mode = ""
+                state.last_decision = "stopped"
+                state.last_decision_reason = reason
+                _LOGGER.info(f"Price-level charging: Stopped for VIN {vehicle_vin} - {reason}")
+            else:
+                self._state.is_charging = False
+                self._state.charging_mode = ""
+                self._state.last_decision = "stopped"
+                self._state.last_decision_reason = reason
+                _LOGGER.info(f"Price-level charging: Stopped - {reason}")
             # Note: Notifications are sent by _action_stop_ev_charging_dynamic
             return True
 
@@ -3744,6 +3878,140 @@ class PriceLevelChargingExecutor:
             self._state.last_decision = "charging" if self._state.is_charging else "waiting"
             self._state.last_decision_reason = reason
 
+    async def get_charging_decision_for_vehicle(
+        self,
+        vehicle_vin: str,
+        current_price_cents: Optional[float]
+    ) -> Tuple[bool, str, str]:
+        """
+        Make charging decision for a specific vehicle.
+
+        Args:
+            vehicle_vin: VIN of the vehicle to evaluate
+            current_price_cents: Current electricity price in cents
+
+        Returns:
+            Tuple of (should_charge, reason, mode)
+            mode is "price_level_recovery" or "price_level_opportunity"
+        """
+        settings = self._get_settings()
+        vehicle_state = self._get_or_create_vehicle_state(vehicle_vin)
+
+        _LOGGER.debug(
+            f"Price-level charging decision for VIN {vehicle_vin}: enabled={settings.get('enabled')}, "
+            f"price={current_price_cents}c"
+        )
+
+        # Check if enabled
+        if not settings.get("enabled", False):
+            vehicle_state.last_decision = "disabled"
+            vehicle_state.last_decision_reason = "Price-level charging is disabled"
+            return False, "Price-level charging is disabled", ""
+
+        # Check if vehicle is at home
+        location = await get_ev_location(self.hass, self.config_entry, vehicle_vin)
+        if location not in ("home", "unknown"):
+            vehicle_state.last_decision = "away"
+            vehicle_state.last_decision_reason = f"Vehicle not at home (location: {location})"
+            return False, f"Vehicle not at home ({location})", ""
+
+        # Check if vehicle is plugged in
+        plugged_in = await is_ev_plugged_in(self.hass, self.config_entry, vehicle_vin)
+        if not plugged_in:
+            vehicle_state.last_decision = "unplugged"
+            vehicle_state.last_decision_reason = "Vehicle not plugged in"
+            return False, "Vehicle not plugged in", ""
+
+        # Get current EV SoC
+        ev_soc = await self._get_ev_soc(vehicle_vin)
+        if ev_soc is None:
+            vehicle_state.last_decision = "waiting"
+            vehicle_state.last_decision_reason = "Could not get EV state of charge"
+            return False, "Could not get EV state of charge", ""
+
+        # Get price
+        if current_price_cents is None:
+            vehicle_state.last_decision = "waiting"
+            vehicle_state.last_decision_reason = "No price data available"
+            return False, "No price data available", ""
+
+        recovery_soc = settings.get("recovery_soc", 40)
+        recovery_price = settings.get("recovery_price_cents", 30)
+        opportunity_price = settings.get("opportunity_price_cents", 10)
+
+        # Recovery mode: Below recovery_soc, charge if price is low enough
+        if ev_soc < recovery_soc:
+            if current_price_cents <= recovery_price:
+                reason = f"Recovery: EV {ev_soc}% < {recovery_soc}%, price {current_price_cents:.1f}c <= {recovery_price}c"
+                vehicle_state.last_decision = "wants_charge"
+                vehicle_state.last_decision_reason = reason
+                return True, reason, "price_level_recovery"
+            else:
+                reason = f"Recovery: EV {ev_soc}% < {recovery_soc}%, but price {current_price_cents:.1f}c > {recovery_price}c"
+                vehicle_state.last_decision = "waiting"
+                vehicle_state.last_decision_reason = reason
+                return False, reason, ""
+
+        # Opportunity mode: Above recovery_soc, only charge if price is very low
+        else:
+            if current_price_cents <= opportunity_price:
+                reason = f"Opportunity: EV {ev_soc}%, price {current_price_cents:.1f}c <= {opportunity_price}c"
+                vehicle_state.last_decision = "wants_charge"
+                vehicle_state.last_decision_reason = reason
+                return True, reason, "price_level_opportunity"
+            else:
+                reason = f"EV {ev_soc}% >= {recovery_soc}%, price {current_price_cents:.1f}c > {opportunity_price}c"
+                vehicle_state.last_decision = "waiting"
+                vehicle_state.last_decision_reason = reason
+                return False, reason, ""
+
+    async def evaluate_all_vehicles(
+        self,
+        current_price_cents: Optional[float]
+    ) -> Dict[str, Tuple[bool, str, str]]:
+        """
+        Evaluate charging decisions for all discovered vehicles.
+
+        Args:
+            current_price_cents: Current electricity price in cents
+
+        Returns:
+            Dict mapping VIN to (should_charge, reason, mode) tuple
+        """
+        vehicles = await discover_all_tesla_vehicles(self.hass, self.config_entry)
+        results: Dict[str, Tuple[bool, str, str]] = {}
+
+        if not vehicles:
+            _LOGGER.debug("No Tesla vehicles discovered for multi-vehicle evaluation")
+            return results
+
+        for vehicle in vehicles:
+            vin = vehicle["vin"]
+            name = vehicle.get("name", vin)
+
+            # Get charging decision for this vehicle
+            decision = await self.get_charging_decision_for_vehicle(vin, current_price_cents)
+            results[vin] = decision
+
+            should_charge, reason, mode = decision
+            vehicle_state = self._get_or_create_vehicle_state(vin)
+
+            _LOGGER.debug(
+                f"Multi-vehicle decision for {name} ({vin}): "
+                f"should_charge={should_charge}, reason={reason}"
+            )
+
+            # Take action per vehicle
+            if should_charge and not vehicle_state.is_charging:
+                await self._start_charging(mode, reason, vehicle_vin=vin)
+            elif not should_charge and vehicle_state.is_charging:
+                await self._stop_charging(reason, vehicle_vin=vin)
+            else:
+                vehicle_state.last_decision = "charging" if vehicle_state.is_charging else "waiting"
+                vehicle_state.last_decision_reason = reason
+
+        return results
+
     def update_charging_state(self, is_charging: bool, mode: str = "", reason: str = "") -> None:
         """Update internal state when coordinator controls charging."""
         self._state.is_charging = is_charging
@@ -3752,9 +4020,35 @@ class PriceLevelChargingExecutor:
         if reason:
             self._state.last_decision_reason = reason
 
+    def update_vehicle_charging_state(
+        self,
+        vehicle_vin: str,
+        is_charging: bool,
+        mode: str = "",
+        reason: str = ""
+    ) -> None:
+        """Update per-vehicle state when coordinator controls charging."""
+        state = self._get_or_create_vehicle_state(vehicle_vin)
+        state.is_charging = is_charging
+        state.charging_mode = mode if is_charging else ""
+        state.last_decision = "charging" if is_charging else "waiting"
+        if reason:
+            state.last_decision_reason = reason
+
     def get_state(self) -> dict:
         """Get current state for API."""
         settings = self._get_settings()
+
+        # Build per-vehicle state info
+        vehicle_states = {}
+        for vin, state in self._vehicle_states.items():
+            vehicle_states[vin] = {
+                "is_charging": state.is_charging,
+                "charging_mode": state.charging_mode,
+                "last_decision": state.last_decision,
+                "last_decision_reason": state.last_decision_reason,
+            }
+
         return {
             "enabled": settings.get("enabled", False),
             "is_charging": self._state.is_charging,
@@ -3762,6 +4056,7 @@ class PriceLevelChargingExecutor:
             "last_decision": self._state.last_decision,
             "last_decision_reason": self._state.last_decision_reason,
             "settings": settings,
+            "vehicle_states": vehicle_states,  # Per-vehicle state tracking
         }
 
 
@@ -4114,26 +4409,39 @@ class EVChargingModeCoordinator:
         Evaluate all charging modes and coordinate start/stop.
 
         Uses OR logic: if ANY enabled mode wants to charge, charge.
+        For Price-Level charging, evaluates all discovered vehicles independently.
         """
         _LOGGER.debug(
             f"EV Coordinator evaluating: price={current_price_cents}c, "
             f"currently_charging={self._is_charging}"
         )
-        decisions: List[ChargingModeDecision] = []
 
-        # Get decision from Price-Level charging
+        # Get price-level executor for multi-vehicle evaluation
         price_level_exec = get_price_level_executor()
-        if price_level_exec:
-            wants_charge, reason, source = await price_level_exec.get_charging_decision(current_price_cents)
-            decisions.append(ChargingModeDecision(
-                mode_name="Price-Level",
-                wants_charge=wants_charge,
-                reason=reason,
-                source=source,
-            ))
-
-        # Get decision from Scheduled charging
         scheduled_exec = get_scheduled_charging_executor()
+
+        # Multi-vehicle evaluation for Price-Level charging
+        # This handles per-vehicle start/stop directly
+        if price_level_exec:
+            vehicle_results = await price_level_exec.evaluate_all_vehicles(current_price_cents)
+
+            # Log per-vehicle decisions
+            for vin, (should_charge, reason, mode) in vehicle_results.items():
+                _LOGGER.debug(
+                    f"EV Coordinator: Vehicle {vin} - should_charge={should_charge}, "
+                    f"mode={mode}, reason={reason}"
+                )
+
+            # Track if any vehicle is charging for coordinator state
+            any_price_level_charging = any(
+                should_charge for should_charge, _, _ in vehicle_results.values()
+            )
+        else:
+            any_price_level_charging = False
+            vehicle_results = {}
+
+        # Scheduled charging (legacy single-vehicle behavior)
+        decisions: List[ChargingModeDecision] = []
         if scheduled_exec:
             wants_charge, reason, source = await scheduled_exec.get_charging_decision(current_price_cents)
             decisions.append(ChargingModeDecision(
@@ -4146,7 +4454,7 @@ class EVChargingModeCoordinator:
         # Note: Smart Schedule (AutoScheduleExecutor) is handled separately
         # because it has per-vehicle settings and manages backup reserve
 
-        # Log all decisions
+        # Log scheduled charging decision
         for d in decisions:
             _LOGGER.debug(
                 f"EV Coordinator decision: {d.mode_name} wants_charge={d.wants_charge}, "
@@ -4154,38 +4462,53 @@ class EVChargingModeCoordinator:
             )
 
         # Combine decisions using OR logic
+        # Price-level is handled per-vehicle above, so only check scheduled here
         modes_wanting_charge = [d for d in decisions if d.wants_charge]
+
+        # Also include price-level in active modes if any vehicle is charging
+        if any_price_level_charging:
+            if not any(d.mode_name == "Price-Level" for d in modes_wanting_charge):
+                # Add a synthetic decision for tracking
+                modes_wanting_charge.append(ChargingModeDecision(
+                    mode_name="Price-Level",
+                    wants_charge=True,
+                    reason="Per-vehicle charging active",
+                    source="price_level_multi_vehicle",
+                ))
 
         if modes_wanting_charge:
             # At least one mode wants to charge
             active_modes = [d.mode_name for d in modes_wanting_charge]
             combined_reason = " | ".join([d.reason for d in modes_wanting_charge])
 
-            if not self._is_charging:
+            # For scheduled charging (single vehicle), start if not already charging
+            scheduled_wanting = [d for d in decisions if d.wants_charge]
+            if scheduled_wanting and not self._is_charging:
                 await self._start_charging(active_modes, combined_reason)
 
             # Update executor states
             for d in decisions:
-                if d.mode_name == "Price-Level" and price_level_exec:
-                    price_level_exec.update_charging_state(True, d.source, combined_reason)
-                elif d.mode_name == "Scheduled" and scheduled_exec:
+                if d.mode_name == "Scheduled" and scheduled_exec:
                     scheduled_exec.update_charging_state(True, combined_reason)
 
             self._active_modes = active_modes
             self._last_reason = combined_reason
+            self._is_charging = True  # Track overall state
 
         else:
             # No mode wants to charge
-            if self._is_charging:
+            if self._is_charging and not any_price_level_charging:
                 reasons = [d.reason for d in decisions if d.reason]
                 combined_reason = " | ".join(reasons) if reasons else "No mode wants to charge"
                 await self._stop_charging(combined_reason)
 
             # Update executor states
-            if price_level_exec:
-                price_level_exec.update_charging_state(False)
             if scheduled_exec:
                 scheduled_exec.update_charging_state(False)
+
+            if not any_price_level_charging:
+                self._is_charging = False
+                self._active_modes = []
 
     def get_state(self) -> dict:
         """Get coordinator state for API."""
