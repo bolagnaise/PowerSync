@@ -3516,7 +3516,13 @@ class PriceLevelChargingExecutor:
         if store:
             stored_data = getattr(store, '_data', {}) or {}
             settings = stored_data.get("price_level_charging", {})
+            _LOGGER.debug(
+                f"Price-level settings from store: {settings}, "
+                f"store._data keys: {list(stored_data.keys())}"
+            )
             defaults.update(settings)
+        else:
+            _LOGGER.warning("Price-level charging: automation_store not found in entry_data")
 
         return defaults
 
@@ -3595,6 +3601,13 @@ class PriceLevelChargingExecutor:
             mode is "price_level_recovery" or "price_level_opportunity"
         """
         settings = self._get_settings()
+
+        _LOGGER.debug(
+            f"Price-level charging decision: enabled={settings.get('enabled')}, "
+            f"price={current_price_cents}c, recovery_soc={settings.get('recovery_soc')}, "
+            f"recovery_price={settings.get('recovery_price_cents')}c, "
+            f"opportunity_price={settings.get('opportunity_price_cents')}c"
+        )
 
         # Check if enabled
         if not settings.get("enabled", False):
@@ -4046,6 +4059,10 @@ class EVChargingModeCoordinator:
 
         Uses OR logic: if ANY enabled mode wants to charge, charge.
         """
+        _LOGGER.debug(
+            f"EV Coordinator evaluating: price={current_price_cents}c, "
+            f"currently_charging={self._is_charging}"
+        )
         decisions: List[ChargingModeDecision] = []
 
         # Get decision from Price-Level charging
@@ -4072,6 +4089,13 @@ class EVChargingModeCoordinator:
 
         # Note: Smart Schedule (AutoScheduleExecutor) is handled separately
         # because it has per-vehicle settings and manages backup reserve
+
+        # Log all decisions
+        for d in decisions:
+            _LOGGER.debug(
+                f"EV Coordinator decision: {d.mode_name} wants_charge={d.wants_charge}, "
+                f"reason={d.reason}"
+            )
 
         # Combine decisions using OR logic
         modes_wanting_charge = [d for d in decisions if d.wants_charge]

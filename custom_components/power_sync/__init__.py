@@ -5947,7 +5947,12 @@ class PriceLevelChargingSettingsView(HomeAssistantView):
             store._data = stored_data
             await store.async_save()
 
-            _LOGGER.info(f"Price-level charging settings updated: enabled={settings.get('enabled')}")
+            _LOGGER.info(
+                f"💰 Price-level charging settings updated: enabled={settings.get('enabled')}, "
+                f"recovery_soc={settings.get('recovery_soc')}%, "
+                f"recovery_price={settings.get('recovery_price_cents')}c, "
+                f"opportunity_price={settings.get('opportunity_price_cents')}c"
+            )
 
             return web.json_response({
                 "success": True,
