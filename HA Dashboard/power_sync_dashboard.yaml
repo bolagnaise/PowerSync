@@ -57,8 +57,8 @@ views:
                 }
       # Battery Control Buttons
       # OPTIONAL: Create input_select helpers for variable duration via Settings > Devices > Helpers > Dropdown:
-      #    - Name: Force Charge Duration | Entity ID: input_select.force_charge_duration | Options: 15, 30, 45, 60, 90, 120
-      #    - Name: Force Discharge Duration | Entity ID: input_select.force_discharge_duration | Options: 15, 30, 45, 60, 90, 120
+      #    - Name: Force Charge Duration | Entity ID: input_select.force_charge_duration | Options: 15, 30, 45, 60, 90, 120, 150, 180, 210, 240
+      #    - Name: Force Discharge Duration | Entity ID: input_select.force_discharge_duration | Options: 15, 30, 45, 60, 90, 120, 150, 180, 210, 240
       # If helpers are created, the buttons will use the selected duration. Otherwise defaults to 30 minutes.
       - type: custom:mushroom-chips-card
         alignment: center

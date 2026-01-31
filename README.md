@@ -485,8 +485,8 @@ The Force Charge and Force Discharge controls require `input_select` helpers:
 
 1. Go to **Settings → Devices & Services → Helpers**
 2. Click **+ Create Helper → Dropdown**
-3. Create `force_charge_duration` with options: `15`, `30`, `45`, `60`, `90`, `120`
-4. Create `force_discharge_duration` with options: `15`, `30`, `45`, `60`, `90`, `120`
+3. Create `force_charge_duration` with options: `15`, `30`, `45`, `60`, `90`, `120`, `150`, `180`, `210`, `240`
+4. Create `force_discharge_duration` with options: `15`, `30`, `45`, `60`, `90`, `120`, `150`, `180`, `210`, `240`
 
 ---
 
