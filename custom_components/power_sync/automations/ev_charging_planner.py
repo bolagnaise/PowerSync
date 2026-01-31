@@ -2761,9 +2761,11 @@ class AutoScheduleExecutor:
         # - Single phase: 5A × 230V = 1.15kW
         # - Three phase: 5A × 230V × 3 = 3.45kW
         if should_charge and source == "solar_surplus":
-            # Get solar surplus config to check min_battery_soc
+            # Get solar surplus config to check min_battery_soc and parallel charging settings
             solar_config = await self._get_solar_surplus_config()
             min_battery_for_ev = solar_config.get("min_battery_soc", 80)
+            allow_parallel = solar_config.get("allow_parallel_charging", False)
+            max_battery_charge_kw = solar_config.get("max_battery_charge_rate_kw", 5.0)
 
             # Get home power settings for phases
             home_power = await self._get_home_power_settings()
@@ -2771,12 +2773,45 @@ class AutoScheduleExecutor:
 
             # Check if battery needs priority (battery below threshold)
             if battery_soc < min_battery_for_ev:
-                should_charge = False
-                reason = f"Battery {battery_soc:.0f}% < {min_battery_for_ev}% (charging battery first)"
-                _LOGGER.info(
-                    f"Auto-schedule: Solar surplus blocked - battery at {battery_soc:.0f}% "
-                    f"needs to reach {min_battery_for_ev}% before EV charging"
-                )
+                # Check if parallel charging is available
+                parallel_available = allow_parallel and current_surplus_kw > max_battery_charge_kw
+
+                if parallel_available:
+                    # Parallel charging: surplus exceeds battery's max charge rate
+                    # Calculate available surplus for EV (after reserving max for battery)
+                    ev_surplus_kw = current_surplus_kw - max_battery_charge_kw
+                    min_charge_amps = 5  # Tesla minimum
+                    voltage = 230  # Australia standard
+                    min_surplus = (min_charge_amps * voltage * phases) / 1000
+
+                    if ev_surplus_kw >= min_surplus:
+                        reason = (
+                            f"Parallel charging: surplus {current_surplus_kw:.1f}kW > "
+                            f"battery max {max_battery_charge_kw}kW, EV gets {ev_surplus_kw:.1f}kW"
+                        )
+                        _LOGGER.info(
+                            f"Auto-schedule: Parallel charging enabled - battery at {battery_soc:.0f}%, "
+                            f"surplus {current_surplus_kw:.1f}kW > battery max {max_battery_charge_kw}kW"
+                        )
+                    else:
+                        should_charge = False
+                        reason = (
+                            f"Parallel surplus {ev_surplus_kw:.1f}kW < min {min_surplus:.1f}kW "
+                            f"(total {current_surplus_kw:.1f}kW - battery {max_battery_charge_kw}kW)"
+                        )
+                else:
+                    should_charge = False
+                    if allow_parallel:
+                        reason = (
+                            f"Battery {battery_soc:.0f}% < {min_battery_for_ev}%, "
+                            f"surplus {current_surplus_kw:.1f}kW <= battery max {max_battery_charge_kw}kW"
+                        )
+                    else:
+                        reason = f"Battery {battery_soc:.0f}% < {min_battery_for_ev}% (charging battery first)"
+                    _LOGGER.info(
+                        f"Auto-schedule: Solar surplus blocked - battery at {battery_soc:.0f}% "
+                        f"needs to reach {min_battery_for_ev}% before EV charging"
+                    )
             else:
                 # Battery is above threshold, check surplus requirement
                 # Calculate min surplus from home power settings

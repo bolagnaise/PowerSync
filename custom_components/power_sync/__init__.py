@@ -4736,6 +4736,8 @@ class SolarSurplusConfigView(HomeAssistantView):
                 "stop_delay_minutes": 5,
                 "dual_vehicle_strategy": "priority_first",
                 "min_battery_soc": 80,  # Battery must reach this % before EV surplus charging
+                "allow_parallel_charging": False,  # Charge EV while battery is charging if surplus exceeds max rate
+                "max_battery_charge_rate_kw": 5.0,  # Max battery charge rate (5=single PW, 10=dual, 15=triple)
             }
 
             if not store:
@@ -4791,6 +4793,10 @@ class SolarSurplusConfigView(HomeAssistantView):
                     updated_config["dual_vehicle_strategy"] = "priority_first"
             if "min_battery_soc" in updated_config:
                 updated_config["min_battery_soc"] = max(0, min(100, int(updated_config["min_battery_soc"])))
+            if "allow_parallel_charging" in updated_config:
+                updated_config["allow_parallel_charging"] = bool(updated_config["allow_parallel_charging"])
+            if "max_battery_charge_rate_kw" in updated_config:
+                updated_config["max_battery_charge_rate_kw"] = max(1, min(30, float(updated_config["max_battery_charge_rate_kw"])))
 
             # Save updated config (update key in existing _data, don't overwrite)
             if hasattr(store, '_data') and hasattr(store, 'async_save'):
