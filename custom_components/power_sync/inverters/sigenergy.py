@@ -121,7 +121,10 @@ class SigenergyController(InverterController):
         self._lock = asyncio.Lock()
         self._original_pv_limit: Optional[int] = None  # Store original limit for restore
         self._use_inverter_registers: Optional[bool] = None  # None=unknown, True=inverter, False=plant
-        self._inverter_slave_id = self.DEFAULT_INVERTER_SLAVE_ID  # Slave ID for inverter-level registers
+        # For AC Charger setups: AC Charger is slave 1, inverter is slave 2
+        # Use user-configured slave_id for inverter registers instead of hardcoded default
+        # This allows users with AC Chargers to specify slave 2 and have it work correctly
+        self._inverter_slave_id = slave_id if slave_id != self.DEFAULT_SLAVE_ID else self.DEFAULT_INVERTER_SLAVE_ID
 
     async def connect(self) -> bool:
         """Connect to the Sigenergy system via Modbus TCP."""
@@ -139,7 +142,10 @@ class SigenergyController(InverterController):
                 connected = await self._client.connect()
                 if connected:
                     self._connected = True
-                    _LOGGER.info(f"Connected to Sigenergy system at {self.host}:{self.port}")
+                    _LOGGER.info(
+                        f"Connected to Sigenergy system at {self.host}:{self.port} "
+                        f"(plant slave={self.slave_id}, inverter slave={self._inverter_slave_id})"
+                    )
                 else:
                     _LOGGER.error(f"Failed to connect to Sigenergy at {self.host}:{self.port}")
 
