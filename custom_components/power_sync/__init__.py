@@ -8,6 +8,10 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
+# Module-level state for alert cooldowns (keyed by entry_id)
+_last_discrepancy_alert: dict[str, datetime] = {}
+DISCREPANCY_ALERT_COOLDOWN = timedelta(minutes=30)
+
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform, CONF_ACCESS_TOKEN, CONF_TOKEN
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
@@ -4736,6 +4740,8 @@ class SolarSurplusConfigView(HomeAssistantView):
                 "stop_delay_minutes": 5,
                 "dual_vehicle_strategy": "priority_first",
                 "min_battery_soc": 80,  # Battery must reach this % before EV surplus charging
+                "allow_parallel_charging": False,  # Charge EV while battery is charging if surplus exceeds max rate
+                "max_battery_charge_rate_kw": 5.0,  # Max battery charge rate (5=single PW, 10=dual, 15=triple)
             }
 
             if not store:
@@ -4791,6 +4797,10 @@ class SolarSurplusConfigView(HomeAssistantView):
                     updated_config["dual_vehicle_strategy"] = "priority_first"
             if "min_battery_soc" in updated_config:
                 updated_config["min_battery_soc"] = max(0, min(100, int(updated_config["min_battery_soc"])))
+            if "allow_parallel_charging" in updated_config:
+                updated_config["allow_parallel_charging"] = bool(updated_config["allow_parallel_charging"])
+            if "max_battery_charge_rate_kw" in updated_config:
+                updated_config["max_battery_charge_rate_kw"] = max(1, min(30, float(updated_config["max_battery_charge_rate_kw"])))
 
             # Save updated config (update key in existing _data, don't overwrite)
             if hasattr(store, '_data') and hasattr(store, 'async_save'):
@@ -7379,6 +7389,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             feedin_prices = [p for p in forecast_data if p.get("channelType") == "feedIn"]
 
             # Debug: Log sample data structure for each channel to diagnose price extraction
+            # Also log all unique channel types to identify missing feedIn
+            all_channels = set(p.get("channelType") for p in forecast_data if p.get("channelType"))
+            _LOGGER.debug(f"Amber forecast contains {len(forecast_data)} entries with channels: {all_channels}")
+
             if general_prices:
                 sample_general = general_prices[0]
                 _LOGGER.debug(f"Sample general interval: type={sample_general.get('type')}, "
@@ -7389,6 +7403,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.debug(f"Sample feedIn interval: type={sample_feedin.get('type')}, "
                              f"perKwh={sample_feedin.get('perKwh')}, "
                              f"advancedPrice={sample_feedin.get('advancedPrice')}")
+            else:
+                _LOGGER.warning(
+                    "No feedIn (export) prices found in Amber forecast data. "
+                    "Export prices will default to 0. Check if your Amber account has feed-in tariff enabled."
+                )
 
             buy_prices = convert_amber_prices_to_sigenergy(
                 general_prices, price_type="buy", forecast_type=forecast_type,
@@ -7706,35 +7725,96 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         _LOGGER.info(f"Using forecast type: {forecast_type}")
 
-        # Check for forecast discrepancy (Amber only, on initial forecast sync)
+        # Check for forecast discrepancy (Amber only, runs on every sync with cooldown)
         # Compares predicted vs conservative/low to detect unreliable forecasts
+        # Also compares forecast vs actual settled prices when available
         forecast_discrepancy_alert_enabled = entry.options.get(
             CONF_FORECAST_DISCREPANCY_ALERT,
             entry.data.get(CONF_FORECAST_DISCREPANCY_ALERT, False)
         )
         if (
-            sync_mode == 'initial_forecast' and
             not use_aemo_sensor and
             not use_octopus and  # Octopus doesn't have multiple forecast types
             forecast_discrepancy_alert_enabled and
             forecast_data
         ):
+            # Check cooldown - only alert once per 30 minutes
+            entry_id = entry.entry_id
+            now = datetime.now()
+            last_alert = _last_discrepancy_alert.get(entry_id)
+            cooldown_passed = last_alert is None or (now - last_alert) > DISCREPANCY_ALERT_COOLDOWN
+
             discrepancy_threshold = entry.options.get(
                 CONF_FORECAST_DISCREPANCY_THRESHOLD,
                 entry.data.get(CONF_FORECAST_DISCREPANCY_THRESHOLD, DEFAULT_FORECAST_DISCREPANCY_THRESHOLD)
             )
-            discrepancy_result = compare_forecast_types(forecast_data, threshold=discrepancy_threshold)
 
-            if discrepancy_result.get("has_discrepancy"):
+            # Check if user is already on conservative forecast
+            is_on_conservative = forecast_type in ("high", "conservative")
+
+            # Check 1: Compare predicted vs conservative forecasts (skip if already on conservative)
+            has_forecast_discrepancy = False
+            discrepancy_result = {"avg_difference": 0, "max_difference": 0, "samples": 0}
+            if not is_on_conservative:
+                discrepancy_result = compare_forecast_types(forecast_data, threshold=discrepancy_threshold)
+                has_forecast_discrepancy = discrepancy_result.get("has_discrepancy", False)
+
+            # Check 2: Compare current forecast vs actual settled price (always runs)
+            actual_vs_forecast_diff = None
+            actual_price = None
+            current_forecast = None
+            try:
+                from .tariff_converter import get_actual_prices
+                actual_prices = get_actual_prices(forecast_data)
+                if actual_prices and actual_prices.get("general"):
+                    actual_general = actual_prices["general"]
+                    actual_price = actual_general.get("perKwh", 0)
+
+                    # Find current forecast price for comparison
+                    for point in forecast_data:
+                        if point.get("type") == "CurrentInterval" and point.get("channelType") == "general":
+                            current_forecast = point.get("perKwh", 0)
+                            break
+
+                    if current_forecast is not None and actual_price is not None:
+                        actual_vs_forecast_diff = abs(current_forecast - actual_price)
+                        if actual_vs_forecast_diff > discrepancy_threshold:
+                            _LOGGER.warning(
+                                "⚠️ Forecast vs Actual discrepancy: forecast=%.1fc, actual=%.1fc, diff=%.1fc",
+                                current_forecast, actual_price, actual_vs_forecast_diff
+                            )
+            except Exception as actual_err:
+                _LOGGER.debug(f"Could not compare forecast vs actual: {actual_err}")
+
+            # Determine if we should alert
+            has_actual_discrepancy = actual_vs_forecast_diff is not None and actual_vs_forecast_diff > discrepancy_threshold
+
+            if (has_forecast_discrepancy or has_actual_discrepancy) and cooldown_passed:
                 avg_diff = discrepancy_result.get("avg_difference", 0)
                 max_diff = discrepancy_result.get("max_difference", 0)
-                samples = discrepancy_result.get("samples", 0)
+
+                # Build alert message
+                alert_parts = []
+                if has_forecast_discrepancy:
+                    alert_parts.append(f"predicted vs conservative differ by avg {avg_diff:.0f}c/kWh (max {max_diff:.0f}c)")
+                if has_actual_discrepancy:
+                    alert_parts.append(f"current forecast ({current_forecast:.0f}c) differs from actual ({actual_price:.0f}c) by {actual_vs_forecast_diff:.0f}c/kWh")
+
+                alert_message = " AND ".join(alert_parts)
+
+                # Tailor advice based on current forecast type
+                if is_on_conservative:
+                    advice = "Amber forecasts are unreliable - prices are volatile."
+                else:
+                    advice = "Consider switching to 'conservative' forecast type."
 
                 _LOGGER.warning(
-                    "⚠️ Amber forecast discrepancy: predicted vs conservative differ by avg %.1fc/kWh "
-                    "(max %.1fc, %d samples). Consider switching to 'conservative' forecast type.",
-                    avg_diff, max_diff, samples
+                    "⚠️ Amber forecast discrepancy: %s. %s",
+                    alert_message, advice
                 )
+
+                # Update cooldown timestamp
+                _last_discrepancy_alert[entry_id] = now
 
                 # Send mobile push notification
                 try:
@@ -7742,8 +7822,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await _send_expo_push(
                         hass,
                         "Forecast Discrepancy Alert",
-                        f"Amber predicted vs conservative prices differ by avg {avg_diff:.0f}c/kWh (max {max_diff:.0f}c). "
-                        f"The predicted forecast may be unreliable. Consider switching to conservative.",
+                        f"Amber {alert_message}. {advice}",
                     )
                 except Exception as notify_err:
                     _LOGGER.debug(f"Could not send forecast discrepancy notification: {notify_err}")

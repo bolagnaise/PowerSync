@@ -15,7 +15,7 @@ force_discharge:
   fields:
     duration:
       name: Duration
-      description: Duration in minutes (15, 30, 45, 60, 75, 90, 105, or 120)
+      description: Duration in minutes (15 minutes to 4 hours)
       required: false
       default: 30
       example: 60
@@ -38,6 +38,14 @@ force_discharge:
               value: "105"
             - label: "2 hours"
               value: "120"
+            - label: "2 hours 30 min"
+              value: "150"
+            - label: "3 hours"
+              value: "180"
+            - label: "3 hours 30 min"
+              value: "210"
+            - label: "4 hours"
+              value: "240"
 
 force_charge:
   name: Force Charge
@@ -45,7 +53,7 @@ force_charge:
   fields:
     duration:
       name: Duration
-      description: Duration in minutes (15, 30, 45, 60, 75, 90, 105, or 120)
+      description: Duration in minutes (15 minutes to 4 hours)
       required: false
       default: 30
       example: 60
@@ -68,6 +76,14 @@ force_charge:
               value: "105"
             - label: "2 hours"
               value: "120"
+            - label: "2 hours 30 min"
+              value: "150"
+            - label: "3 hours"
+              value: "180"
+            - label: "3 hours 30 min"
+              value: "210"
+            - label: "4 hours"
+              value: "240"
 
 restore_normal:
   name: Restore Normal

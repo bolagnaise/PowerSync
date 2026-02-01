@@ -114,11 +114,21 @@ class PowerSyncSensorEntityDescription(SensorEntityDescription):
 
 def _get_import_price(data):
     """Extract import (general) price from Amber data."""
-    if not data or not data.get("current"):
+    if not data:
+        _LOGGER.debug("_get_import_price: No data available")
         return None
-    for price in data.get("current", []):
+    if not data.get("current"):
+        _LOGGER.debug("_get_import_price: No 'current' key in data. Keys: %s", list(data.keys()) if isinstance(data, dict) else "not a dict")
+        return None
+    current_prices = data.get("current", [])
+    _LOGGER.debug("_get_import_price: Found %d current price entries", len(current_prices))
+    for price in current_prices:
         if price.get("channelType") == "general":
-            return price.get("perKwh", 0) / 100
+            raw_price = price.get("perKwh", 0)
+            converted_price = raw_price / 100
+            _LOGGER.debug("_get_import_price: Found general price: %s c/kWh -> %s $/kWh", raw_price, converted_price)
+            return converted_price
+    _LOGGER.debug("_get_import_price: No 'general' channel found in current prices")
     return None
 
 
@@ -132,14 +142,25 @@ def _get_export_price(data):
         Positive = earning money per kWh exported
         Negative = paying money per kWh exported
     """
-    if not data or not data.get("current"):
+    if not data:
+        _LOGGER.debug("_get_export_price: No data available")
         return None
-    for price in data.get("current", []):
+    if not data.get("current"):
+        _LOGGER.debug("_get_export_price: No 'current' key in data")
+        return None
+    current_prices = data.get("current", [])
+    channel_types = [p.get("channelType") for p in current_prices]
+    _LOGGER.debug("_get_export_price: Found %d entries with channels: %s", len(current_prices), channel_types)
+    for price in current_prices:
         if price.get("channelType") == "feedIn":
+            raw_price = price.get("perKwh", 0)
             # Negate to convert from Amber feedIn to export earnings
             # Amber feedIn +10 (paying) → sensor -0.10 (negative earnings)
             # Amber feedIn -10 (earning) → sensor +0.10 (positive earnings)
-            return -price.get("perKwh", 0) / 100
+            converted_price = -raw_price / 100
+            _LOGGER.debug("_get_export_price: Found feedIn price: %s c/kWh -> %s $/kWh", raw_price, converted_price)
+            return converted_price
+    _LOGGER.debug("_get_export_price: No 'feedIn' channel found in current prices")
     return None
 
 
@@ -371,6 +392,7 @@ async def async_setup_entry(
 
     # Add price sensors (only if Amber mode - requires amber_coordinator)
     if amber_coordinator:
+        _LOGGER.info("Adding Amber price sensors (import and export)")
         for description in PRICE_SENSORS:
             entities.append(
                 AmberPriceSensor(
@@ -379,6 +401,8 @@ async def async_setup_entry(
                     entry=entry,
                 )
             )
+    else:
+        _LOGGER.debug("No amber_coordinator - skipping price sensors")
 
     # Add energy sensors - use Tesla or Sigenergy coordinator depending on battery system
     # Both coordinators return data with same field names (solar_power, grid_power, etc.)
@@ -519,12 +543,15 @@ class AmberPriceSensor(CoordinatorEntity, SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_has_entity_name = True
+        _LOGGER.debug("AmberPriceSensor initialized: %s (unique_id=%s)", description.key, self._attr_unique_id)
 
     @property
     def native_value(self) -> Any:
         """Return the state of the sensor."""
         if self.entity_description.value_fn:
-            return self.entity_description.value_fn(self.coordinator.data)
+            value = self.entity_description.value_fn(self.coordinator.data)
+            _LOGGER.debug("AmberPriceSensor %s native_value: %s", self.entity_description.key, value)
+            return value
         return None
 
     @property
