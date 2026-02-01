@@ -2446,6 +2446,11 @@ async def _dynamic_ev_update(
     # e.g., 5.0 means we want 5kW going INTO the battery
     target_battery_charge_kw = params.get("target_battery_charge_kw", 5.0)
     max_grid_import_kw = params.get("max_grid_import_kw", 12.5)
+
+    # No grid import mode: prevent ALL grid imports by dynamically adjusting EV charge rate
+    no_grid_import = params.get("no_grid_import", False)
+    grid_import_tolerance_kw = params.get("grid_import_tolerance_kw", 0.1)  # 100W buffer
+
     min_amps = params.get("min_charge_amps", 5)
     max_amps = params.get("max_charge_amps", 32)
     voltage = params.get("voltage", 240)
@@ -2477,9 +2482,15 @@ async def _dynamic_ev_update(
     grid_headroom_kw = max_grid_import_kw - grid_power_kw
 
     # Available power for EV adjustment:
+    # - In no_grid_import mode: purely based on current grid state to prevent any imports
     # - If battery has surplus (deficit > 0.1), use that surplus
     # - Otherwise, use grid headroom
-    if battery_deficit_kw > 0.1:
+    if no_grid_import:
+        # In no-grid-import mode, available power is purely based on current grid state
+        # grid_power_kw: positive = importing (bad), negative = exporting (good)
+        # We want to adjust EV to keep grid at or below tolerance
+        available_power_kw = -(grid_power_kw + grid_import_tolerance_kw)
+    elif battery_deficit_kw > 0.1:
         available_power_kw = battery_deficit_kw
     else:
         available_power_kw = grid_headroom_kw
@@ -2495,11 +2506,21 @@ async def _dynamic_ev_update(
     if new_amps < min_amps:
         new_amps = 0
 
+    # In no_grid_import mode, respond immediately to grid imports (don't wait for 1A threshold)
+    if no_grid_import and grid_power_kw > grid_import_tolerance_kw:
+        # We're importing - reduce aggressively
+        if new_amps < current_amps:
+            _LOGGER.info(f"⚡ No-grid-import: Grid importing {grid_power_kw:.2f}kW, reducing to {new_amps}A")
+            success = await _action_set_ev_charging_amps(hass, config_entry, {"amps": new_amps})
+            if success:
+                state["current_amps"] = new_amps
+            return
+
     _LOGGER.debug(
         f"Dynamic EV: battery={battery_power_kw:.1f}kW (target={target_battery_power_kw:.1f}kW), "
         f"deficit={battery_deficit_kw:.1f}kW, grid={grid_power_kw:.1f}kW (max={max_grid_import_kw:.1f}kW), "
         f"headroom={grid_headroom_kw:.1f}kW, available={available_power_kw:.1f}kW, "
-        f"current={current_amps}A, target={new_amps}A"
+        f"current={current_amps}A, target={new_amps}A, no_grid_import={no_grid_import}"
     )
 
     # Only update if change is >= 1 amp (avoid constant micro-adjustments)
@@ -2575,6 +2596,9 @@ async def _action_start_ev_charging_dynamic(
     Parameters (battery_target mode):
         target_battery_charge_kw: Target battery charge rate in kW (default 5.0)
         max_grid_import_kw: Max grid import allowed (default 12.5)
+        no_grid_import: If True, prevent ALL grid imports by dynamically adjusting
+            EV charge rate. Useful for overnight Powerwall-to-EV charging. (default False)
+        grid_import_tolerance_kw: Small buffer to prevent oscillation (default 0.1 = 100W)
 
     Parameters (solar_surplus mode):
         household_buffer_kw: Buffer to keep from surplus (default 0.5)
@@ -2643,14 +2667,18 @@ async def _action_start_ev_charging_dynamic(
             "target_battery_charge_kw",
             params.get("max_battery_discharge_kw", 5.0)  # Fallback for old param name
         )
+        no_grid_import = params.get("no_grid_import", False)
         mode_params = {
             "target_battery_charge_kw": target_battery_charge_kw,
             "max_grid_import_kw": params.get("max_grid_import_kw", 12.5),
+            "no_grid_import": no_grid_import,
+            "grid_import_tolerance_kw": params.get("grid_import_tolerance_kw", 0.1),
         }
         start_amps = params.get("start_amps", max_charge_amps)
+        no_grid_info = ", no_grid_import=enabled" if no_grid_import else ""
         _LOGGER.info(
             f"⚡ Starting dynamic EV charging: target_battery_charge={target_battery_charge_kw}kW, "
-            f"max_grid_import={mode_params['max_grid_import_kw']}kW, amps={min_charge_amps}-{max_charge_amps}A"
+            f"max_grid_import={mode_params['max_grid_import_kw']}kW, amps={min_charge_amps}-{max_charge_amps}A{no_grid_info}"
         )
 
     # Get time window from context (passed from automation trigger)

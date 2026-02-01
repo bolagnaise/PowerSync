@@ -1988,6 +1988,7 @@ class AutoScheduleSettings:
     # Constraints
     min_battery_soc: int = 80  # Home battery can discharge to this level for EV charging
     max_grid_price_cents: float = 25.0  # Don't charge from grid above this price
+    no_grid_import: bool = False  # Prevent grid imports during EV charging
 
     # Charger settings
     charger_type: str = "tesla"  # tesla, ocpp, generic
@@ -2022,6 +2023,7 @@ class AutoScheduleSettings:
             "priority": self.priority.value,
             "min_battery_soc": self.min_battery_soc,
             "max_grid_price_cents": self.max_grid_price_cents,
+            "no_grid_import": self.no_grid_import,
             "charger_type": self.charger_type,
             "min_charge_amps": self.min_charge_amps,
             "max_charge_amps": self.max_charge_amps,
@@ -2052,6 +2054,7 @@ class AutoScheduleSettings:
             priority=priority,
             min_battery_soc=data.get("min_battery_soc", 80),
             max_grid_price_cents=data.get("max_grid_price_cents", 25.0),
+            no_grid_import=data.get("no_grid_import", False),
             charger_type=data.get("charger_type", "tesla"),
             min_charge_amps=data.get("min_charge_amps", 5),
             max_charge_amps=data.get("max_charge_amps", 32),
@@ -3487,6 +3490,7 @@ class AutoScheduleExecutor:
             "charger_switch_entity": settings.charger_switch_entity,
             "charger_amps_entity": settings.charger_amps_entity,
             "ocpp_charger_id": settings.ocpp_charger_id,
+            "no_grid_import": settings.no_grid_import,
         }
 
         try:
@@ -3617,6 +3621,7 @@ class PriceLevelChargingExecutor:
             "recovery_soc": 40,
             "recovery_price_cents": 30,
             "opportunity_price_cents": 10,
+            "no_grid_import": False,
         }
 
         if store:
@@ -3750,6 +3755,7 @@ class PriceLevelChargingExecutor:
             "max_charge_amps": 32,
             "voltage": 240,
             "charger_type": "tesla",
+            "no_grid_import": self._get_settings().get("no_grid_import", False),
         }
 
         try:
