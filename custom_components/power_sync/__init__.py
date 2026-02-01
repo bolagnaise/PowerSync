@@ -8,6 +8,10 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
+# Module-level state for alert cooldowns (keyed by entry_id)
+_last_discrepancy_alert: dict[str, datetime] = {}
+DISCREPANCY_ALERT_COOLDOWN = timedelta(minutes=30)
+
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform, CONF_ACCESS_TOKEN, CONF_TOKEN
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
@@ -7721,35 +7725,84 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         _LOGGER.info(f"Using forecast type: {forecast_type}")
 
-        # Check for forecast discrepancy (Amber only, on initial forecast sync)
+        # Check for forecast discrepancy (Amber only, runs on every sync with cooldown)
         # Compares predicted vs conservative/low to detect unreliable forecasts
+        # Also compares forecast vs actual settled prices when available
         forecast_discrepancy_alert_enabled = entry.options.get(
             CONF_FORECAST_DISCREPANCY_ALERT,
             entry.data.get(CONF_FORECAST_DISCREPANCY_ALERT, False)
         )
         if (
-            sync_mode == 'initial_forecast' and
             not use_aemo_sensor and
             not use_octopus and  # Octopus doesn't have multiple forecast types
             forecast_discrepancy_alert_enabled and
             forecast_data
         ):
+            # Check cooldown - only alert once per 30 minutes
+            entry_id = entry.entry_id
+            now = datetime.now()
+            last_alert = _last_discrepancy_alert.get(entry_id)
+            cooldown_passed = last_alert is None or (now - last_alert) > DISCREPANCY_ALERT_COOLDOWN
+
             discrepancy_threshold = entry.options.get(
                 CONF_FORECAST_DISCREPANCY_THRESHOLD,
                 entry.data.get(CONF_FORECAST_DISCREPANCY_THRESHOLD, DEFAULT_FORECAST_DISCREPANCY_THRESHOLD)
             )
+
+            # Check 1: Compare predicted vs conservative forecasts
             discrepancy_result = compare_forecast_types(forecast_data, threshold=discrepancy_threshold)
 
-            if discrepancy_result.get("has_discrepancy"):
+            # Check 2: Compare current forecast vs actual settled price (if available)
+            actual_vs_forecast_diff = None
+            try:
+                from .tariff_converter import get_actual_prices
+                actual_prices = get_actual_prices(forecast_data)
+                if actual_prices and actual_prices.get("general"):
+                    actual_general = actual_prices["general"]
+                    actual_price = actual_general.get("perKwh", 0)
+
+                    # Find current forecast price for comparison
+                    current_forecast = None
+                    for point in forecast_data:
+                        if point.get("type") == "CurrentInterval" and point.get("channelType") == "general":
+                            current_forecast = point.get("perKwh", 0)
+                            break
+
+                    if current_forecast is not None and actual_price is not None:
+                        actual_vs_forecast_diff = abs(current_forecast - actual_price)
+                        if actual_vs_forecast_diff > discrepancy_threshold:
+                            _LOGGER.warning(
+                                "⚠️ Forecast vs Actual discrepancy: forecast=%.1fc, actual=%.1fc, diff=%.1fc",
+                                current_forecast, actual_price, actual_vs_forecast_diff
+                            )
+            except Exception as actual_err:
+                _LOGGER.debug(f"Could not compare forecast vs actual: {actual_err}")
+
+            # Determine if we should alert
+            has_forecast_discrepancy = discrepancy_result.get("has_discrepancy", False)
+            has_actual_discrepancy = actual_vs_forecast_diff is not None and actual_vs_forecast_diff > discrepancy_threshold
+
+            if (has_forecast_discrepancy or has_actual_discrepancy) and cooldown_passed:
                 avg_diff = discrepancy_result.get("avg_difference", 0)
                 max_diff = discrepancy_result.get("max_difference", 0)
                 samples = discrepancy_result.get("samples", 0)
 
+                # Build alert message
+                alert_parts = []
+                if has_forecast_discrepancy:
+                    alert_parts.append(f"predicted vs conservative differ by avg {avg_diff:.0f}c/kWh (max {max_diff:.0f}c)")
+                if has_actual_discrepancy:
+                    alert_parts.append(f"current forecast differs from actual by {actual_vs_forecast_diff:.0f}c/kWh")
+
+                alert_message = " AND ".join(alert_parts)
+
                 _LOGGER.warning(
-                    "⚠️ Amber forecast discrepancy: predicted vs conservative differ by avg %.1fc/kWh "
-                    "(max %.1fc, %d samples). Consider switching to 'conservative' forecast type.",
-                    avg_diff, max_diff, samples
+                    "⚠️ Amber forecast discrepancy: %s. Consider switching to 'conservative' forecast type.",
+                    alert_message
                 )
+
+                # Update cooldown timestamp
+                _last_discrepancy_alert[entry_id] = now
 
                 # Send mobile push notification
                 try:
@@ -7757,8 +7810,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await _send_expo_push(
                         hass,
                         "Forecast Discrepancy Alert",
-                        f"Amber predicted vs conservative prices differ by avg {avg_diff:.0f}c/kWh (max {max_diff:.0f}c). "
-                        f"The predicted forecast may be unreliable. Consider switching to conservative.",
+                        f"Amber {alert_message}. The predicted forecast may be unreliable. Consider switching to conservative.",
                     )
                 except Exception as notify_err:
                     _LOGGER.debug(f"Could not send forecast discrepancy notification: {notify_err}")
