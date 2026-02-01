@@ -467,7 +467,7 @@ Control AC-coupled solar inverters directly during negative pricing periods. Thi
 A pre-built Lovelace dashboard is included for visualizing all PowerSync data.
 
 **Required HACS Frontend Cards:**
-- `mushroom` - Compact chips for controls
+- `button-card` - Compact chips for controls
 - `card-mod` - Custom card styling
 - `power-flow-card-plus` - Real-time energy flow visualization
 - `apexcharts-card` - Advanced charting for price/energy history
