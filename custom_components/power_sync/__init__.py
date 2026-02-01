@@ -7749,11 +7749,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 entry.data.get(CONF_FORECAST_DISCREPANCY_THRESHOLD, DEFAULT_FORECAST_DISCREPANCY_THRESHOLD)
             )
 
-            # Check 1: Compare predicted vs conservative forecasts
-            discrepancy_result = compare_forecast_types(forecast_data, threshold=discrepancy_threshold)
+            # Check if user is already on conservative forecast
+            is_on_conservative = forecast_type in ("high", "conservative")
 
-            # Check 2: Compare current forecast vs actual settled price (if available)
+            # Check 1: Compare predicted vs conservative forecasts (skip if already on conservative)
+            has_forecast_discrepancy = False
+            discrepancy_result = {"avg_difference": 0, "max_difference": 0, "samples": 0}
+            if not is_on_conservative:
+                discrepancy_result = compare_forecast_types(forecast_data, threshold=discrepancy_threshold)
+                has_forecast_discrepancy = discrepancy_result.get("has_discrepancy", False)
+
+            # Check 2: Compare current forecast vs actual settled price (always runs)
             actual_vs_forecast_diff = None
+            actual_price = None
+            current_forecast = None
             try:
                 from .tariff_converter import get_actual_prices
                 actual_prices = get_actual_prices(forecast_data)
@@ -7762,7 +7771,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     actual_price = actual_general.get("perKwh", 0)
 
                     # Find current forecast price for comparison
-                    current_forecast = None
                     for point in forecast_data:
                         if point.get("type") == "CurrentInterval" and point.get("channelType") == "general":
                             current_forecast = point.get("perKwh", 0)
@@ -7779,26 +7787,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.debug(f"Could not compare forecast vs actual: {actual_err}")
 
             # Determine if we should alert
-            has_forecast_discrepancy = discrepancy_result.get("has_discrepancy", False)
             has_actual_discrepancy = actual_vs_forecast_diff is not None and actual_vs_forecast_diff > discrepancy_threshold
 
             if (has_forecast_discrepancy or has_actual_discrepancy) and cooldown_passed:
                 avg_diff = discrepancy_result.get("avg_difference", 0)
                 max_diff = discrepancy_result.get("max_difference", 0)
-                samples = discrepancy_result.get("samples", 0)
 
                 # Build alert message
                 alert_parts = []
                 if has_forecast_discrepancy:
                     alert_parts.append(f"predicted vs conservative differ by avg {avg_diff:.0f}c/kWh (max {max_diff:.0f}c)")
                 if has_actual_discrepancy:
-                    alert_parts.append(f"current forecast differs from actual by {actual_vs_forecast_diff:.0f}c/kWh")
+                    alert_parts.append(f"current forecast ({current_forecast:.0f}c) differs from actual ({actual_price:.0f}c) by {actual_vs_forecast_diff:.0f}c/kWh")
 
                 alert_message = " AND ".join(alert_parts)
 
+                # Tailor advice based on current forecast type
+                if is_on_conservative:
+                    advice = "Amber forecasts are unreliable - prices are volatile."
+                else:
+                    advice = "Consider switching to 'conservative' forecast type."
+
                 _LOGGER.warning(
-                    "⚠️ Amber forecast discrepancy: %s. Consider switching to 'conservative' forecast type.",
-                    alert_message
+                    "⚠️ Amber forecast discrepancy: %s. %s",
+                    alert_message, advice
                 )
 
                 # Update cooldown timestamp
@@ -7810,7 +7822,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await _send_expo_push(
                         hass,
                         "Forecast Discrepancy Alert",
-                        f"Amber {alert_message}. The predicted forecast may be unreliable. Consider switching to conservative.",
+                        f"Amber {alert_message}. {advice}",
                     )
                 except Exception as notify_err:
                     _LOGGER.debug(f"Could not send forecast discrepancy notification: {notify_err}")
