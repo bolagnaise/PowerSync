@@ -80,11 +80,56 @@ DEFAULT_OCPP_PORT = 9000
 CONF_BATTERY_SYSTEM = "battery_system"
 BATTERY_SYSTEM_TESLA = "tesla"
 BATTERY_SYSTEM_SIGENERGY = "sigenergy"
+BATTERY_SYSTEM_SUNGROW = "sungrow"
 
 BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_TESLA: "Tesla Powerwall",
     BATTERY_SYSTEM_SIGENERGY: "Sigenergy",
+    BATTERY_SYSTEM_SUNGROW: "Sungrow SH-series",
 }
+
+# Sungrow SH-series Battery System Configuration (Modbus TCP)
+# Hybrid inverters with integrated battery control
+CONF_SUNGROW_HOST = "sungrow_host"
+CONF_SUNGROW_PORT = "sungrow_port"
+CONF_SUNGROW_SLAVE_ID = "sungrow_slave_id"
+DEFAULT_SUNGROW_PORT = 502
+DEFAULT_SUNGROW_SLAVE_ID = 1
+
+# Sungrow Modbus Register Addresses (Battery Control)
+# Reference: https://github.com/mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant
+# Read Registers (Input/Holding)
+SUNGROW_REG_BATTERY_VOLTAGE = 13018      # 0.1V scale
+SUNGROW_REG_BATTERY_CURRENT = 13019      # 0.1A scale (signed)
+SUNGROW_REG_BATTERY_POWER = 13020        # 1W (signed)
+SUNGROW_REG_BATTERY_SOC = 13021          # 0.1% scale
+SUNGROW_REG_BATTERY_SOH = 13022          # 0.1% scale
+SUNGROW_REG_BATTERY_TEMP = 13023         # 0.1°C scale
+SUNGROW_REG_LOAD_POWER = 13006           # 1W (32-bit signed)
+SUNGROW_REG_EXPORT_POWER = 13008         # 1W (32-bit signed)
+SUNGROW_REG_TOTAL_ACTIVE_POWER = 13032   # 1W
+
+# Control Registers (Holding - write)
+SUNGROW_REG_EMS_MODE = 13050             # 0=Self-consumption, 2=Forced, 3=External EMS
+SUNGROW_REG_CHARGE_CMD = 13051           # 0xAA=Charge, 0xBB=Discharge, 0xCC=Stop
+SUNGROW_REG_MAX_SOC = 13058              # 0.1% scale
+SUNGROW_REG_MIN_SOC = 13059              # 0.1% scale (backup reserve)
+SUNGROW_REG_MAX_DISCHARGE_CURRENT = 13066  # 0.001A scale (milliamps)
+SUNGROW_REG_MAX_CHARGE_CURRENT = 13067   # 0.001A scale (milliamps)
+SUNGROW_REG_EXPORT_LIMIT = 13074         # 1W
+SUNGROW_REG_EXPORT_LIMIT_ENABLED = 13087 # 0=Disabled, 1=Enabled
+SUNGROW_REG_BACKUP_RESERVE = 13100       # 0.1% scale
+
+# Sungrow Command Values
+SUNGROW_CMD_CHARGE = 0xAA
+SUNGROW_CMD_DISCHARGE = 0xBB
+SUNGROW_CMD_STOP = 0xCC
+SUNGROW_EMS_SELF_CONSUMPTION = 0
+SUNGROW_EMS_FORCED = 2
+SUNGROW_EMS_EXTERNAL = 3
+
+# Sungrow Battery Voltage (for current/power calculations)
+SUNGROW_BATTERY_VOLTAGE_DEFAULT = 48  # Typical LFP battery pack voltage
 
 # Tesla API Provider selection
 CONF_TESLA_API_PROVIDER = "tesla_api_provider"
@@ -149,10 +194,15 @@ CONF_DEMAND_ARTIFICIAL_PRICE = "demand_artificial_price_enabled"
 CONF_DAILY_SUPPLY_CHARGE = "daily_supply_charge"
 CONF_MONTHLY_SUPPLY_CHARGE = "monthly_supply_charge"
 
-# AEMO Spike Detection configuration
+# AEMO Spike Detection configuration (Tesla)
 CONF_AEMO_SPIKE_ENABLED = "aemo_spike_enabled"
 CONF_AEMO_REGION = "aemo_region"
 CONF_AEMO_SPIKE_THRESHOLD = "aemo_spike_threshold"
+
+# Sungrow AEMO Spike Detection configuration
+# Hard-coded threshold for Globird VPP events ($3000/MWh = $3/kWh)
+CONF_SUNGROW_AEMO_SPIKE_ENABLED = "sungrow_aemo_spike_enabled"
+SUNGROW_AEMO_SPIKE_THRESHOLD = 3000.0  # $3000/MWh - Globird's VPP trigger price
 
 # AEMO region options (NEM regions)
 AEMO_REGIONS = {
@@ -860,8 +910,16 @@ DEFAULT_INVERTER_SLAVE_ID = 1
 SENSOR_TYPE_INVERTER_STATUS = "inverter_status"
 
 
-def get_models_for_brand(brand: str) -> dict[str, str]:
-    """Get model options for a specific AC-coupled inverter brand."""
+def get_models_for_brand(brand: str, battery_system: str = None) -> dict[str, str]:
+    """Get model options for a specific AC-coupled inverter brand.
+
+    Args:
+        brand: Inverter brand name
+        battery_system: Current battery system type (to filter out conflicts)
+
+    Returns:
+        Dictionary of model_id: model_name pairs
+    """
     brand_models = {
         "sungrow": SUNGROW_MODELS,
         "fronius": FRONIUS_MODELS,
@@ -870,7 +928,15 @@ def get_models_for_brand(brand: str) -> dict[str, str]:
         "enphase": ENPHASE_MODELS,
         "zeversolar": ZEVERSOLAR_MODELS,
     }
-    return brand_models.get(brand.lower(), SUNGROW_MODELS)
+
+    models = brand_models.get(brand.lower(), SUNGROW_MODELS)
+
+    # If battery system is Sungrow and AC inverter is also Sungrow,
+    # only show SG-series (string inverters), not SH-series (hybrid with battery)
+    if brand.lower() == "sungrow" and battery_system == BATTERY_SYSTEM_SUNGROW:
+        return SUNGROW_SG_MODELS
+
+    return models
 
 
 def get_brand_defaults(brand: str) -> dict[str, int]:

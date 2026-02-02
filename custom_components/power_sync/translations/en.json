@@ -37,11 +37,11 @@
           "flow_power_base_rate": "Base Rate (c/kWh)",
           "pea_custom_value": "Custom PEA Override (c/kWh, leave empty for auto)",
           "auto_sync_enabled": "Enable automatic TOU schedule syncing",
-          "battery_curtailment_enabled": "Enable Battery Export Curtailment"
+          "battery_curtailment_enabled": "Enable DC Solar Curtailment (stop export at negative prices)"
         },
         "data_description": {
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices",
-          "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. This is the MAIN toggle - must be enabled for curtailment to work."
+          "battery_curtailment_enabled": "Automatically stop battery exports and DC solar production when feed-in prices go negative to avoid paying to export"
         },
         "submit_button": "Next"
       },
@@ -59,6 +59,8 @@
         "data": {
           "spike_protection_enabled": "Enable Spike Protection",
           "settled_prices_only": "Settled Prices Only (skip forecast sync)",
+          "forecast_discrepancy_alert": "Forecast Discrepancy Alert",
+          "forecast_discrepancy_threshold": "Discrepancy Threshold (c/kWh)",
           "force_tariff_mode_toggle": "Force Mode Toggle (faster PW response)",
           "export_boost_enabled": "Enable Export Price Boost",
           "export_price_offset": "Offset to Add (c/kWh)",
@@ -74,6 +76,8 @@
         "data_description": {
           "spike_protection_enabled": "When Amber detects a price spike, artificially inflate buy prices to prevent your battery from charging from grid",
           "settled_prices_only": "Skip forecast sync at :00 and only sync when actual prices arrive at :35/:60",
+          "forecast_discrepancy_alert": "Send mobile notification when predicted forecast differs significantly from conservative forecast (indicates forecast may be unreliable)",
+          "forecast_discrepancy_threshold": "Average price difference threshold to trigger alert. Default 10c/kWh means alert when predicted vs conservative differ by more than 10c on average",
           "force_tariff_mode_toggle": "After uploading a new tariff, briefly toggle operation mode to force immediate recalculation (Tesla only)",
           "export_boost_enabled": "Artificially increase sell prices during configured hours to encourage battery export during high-value periods",
           "export_price_offset": "Amount to ADD to the actual Amber export price. Example: Amber=18c + Offset=5c → Tesla sees 23c",
@@ -91,6 +95,19 @@
           "aemo_spike_enabled": "Enable AEMO Spike Detection",
           "aemo_region": "NEM Region",
           "aemo_spike_threshold": "Spike Threshold ($/MWh)"
+        },
+        "submit_button": "Next"
+      },
+      "octopus": {
+        "title": "Octopus Energy UK Configuration",
+        "description": "Configure your Octopus Energy tariff. Select your product and GSP region.\n\n**Agile Octopus**: Dynamic half-hourly pricing based on wholesale rates.\n**Octopus Go**: EV tariff with cheap overnight rates (00:30-05:30).\n**Octopus Flux**: Solar/battery optimized export tariff.\n**Tracker**: Daily price tracking based on wholesale rates.\n\nFind your GSP region on your Octopus bill or at {octopus_url}",
+        "data": {
+          "octopus_product": "Octopus Product",
+          "octopus_region": "GSP Region"
+        },
+        "data_description": {
+          "octopus_product": "Select your Octopus tariff product",
+          "octopus_region": "Your Grid Supply Point region - check your Octopus bill for your GSP code (single letter A-P)"
         },
         "submit_button": "Next"
       },
@@ -122,19 +139,39 @@
       },
       "battery_system": {
         "title": "Select Battery System",
-        "description": "Choose your battery storage system:\n\n**Tesla Powerwall**: Connect via Fleet API or Teslemetry.\n\n**Sigenergy**: Connect via Sigenergy Cloud API.",
+        "description": "Choose your battery storage system:\n\n**Tesla Powerwall**: Connect via Fleet API or Teslemetry.\n\n**Sigenergy**: Connect via Sigenergy Cloud API.\n\n**Sungrow SH-series**: Connect via Modbus TCP.",
         "data": {
           "battery_system": "Battery System"
         },
         "submit_button": "Next"
       },
+      "sungrow": {
+        "title": "Sungrow Modbus Connection",
+        "description": "Configure the Modbus TCP connection to your Sungrow SH-series hybrid inverter.\n\nEnter the local IP address of your Sungrow inverter or WiNet-S dongle.",
+        "data": {
+          "sungrow_host": "Sungrow IP Address",
+          "sungrow_port": "Modbus Port",
+          "sungrow_slave_id": "Modbus Slave ID"
+        },
+        "data_description": {
+          "sungrow_host": "Local IP address of your Sungrow inverter (e.g., 192.168.1.100)",
+          "sungrow_port": "Modbus TCP port (default: 502)",
+          "sungrow_slave_id": "Modbus slave ID (default: 1)"
+        },
+        "submit_button": "Next"
+      },
       "sigenergy_credentials": {
         "title": "Sigenergy Credentials",
-        "description": "Enter your Sigenergy Cloud API credentials.\n\n**How to get credentials:**\n1. Open browser dev tools (F12)\n2. Go to Network tab\n3. Login to web-aus.sigencloud.com\n4. Find 'token' request and copy from Payload:\n   - username → Email\n   - password → Encrypted Password\n   - userDeviceId → Device ID",
+        "description": "Enter your Sigenergy Cloud API credentials.\n\n**Password:** Enter your Sigenergy account password.\n\n**Device ID:** To find this:\n1. Open browser dev tools (F12)\n2. Go to Network tab\n3. Login to web-aus.sigencloud.com\n4. Find 'token' request → userDeviceId",
         "data": {
           "sigenergy_username": "Sigenergy Email",
-          "sigenergy_pass_enc": "Encrypted Password",
-          "sigenergy_device_id": "Device ID (13 digits)"
+          "sigenergy_password": "Password",
+          "sigenergy_device_id": "Device ID (13 digits)",
+          "sigenergy_pass_enc": "Encrypted Password (Advanced)"
+        },
+        "data_description": {
+          "sigenergy_password": "Your Sigenergy account password",
+          "sigenergy_pass_enc": "Leave blank unless you have a pre-encoded password"
         },
         "submit_button": "Validate"
       },
@@ -146,18 +183,28 @@
         },
         "submit_button": "Next"
       },
-      "sigenergy_dc_curtailment": {
-        "title": "Sigenergy DC Solar Curtailment",
-        "description": "Configure DC solar curtailment for your Sigenergy system.\n\nWhen enabled, PowerSync can limit DC solar production during negative prices by setting the PV power limit via Modbus TCP.\n\n**Note:** This is for DC solar connected directly to your Sigenergy system. AC-coupled inverters from other brands can be configured separately.",
+      "sigenergy_modbus": {
+        "title": "Sigenergy Modbus Connection",
+        "description": "Configure the Modbus TCP connection to your Sigenergy system.\n\n**Required for energy data:** PowerSync reads real-time solar, battery, and grid power data from your Sigenergy system via Modbus.\n\nEnter the local IP address of your Sigenergy inverter.",
         "data": {
-          "sigenergy_dc_curtailment_enabled": "Enable DC Solar Curtailment",
           "sigenergy_modbus_host": "Sigenergy IP Address",
           "sigenergy_modbus_port": "Modbus Port",
           "sigenergy_modbus_slave_id": "Modbus Slave ID"
         },
         "data_description": {
-          "sigenergy_dc_curtailment_enabled": "Allow PowerSync to control DC solar production via Modbus",
-          "sigenergy_modbus_host": "Local IP address of your Sigenergy system"
+          "sigenergy_modbus_host": "Local IP address of your Sigenergy inverter (e.g., 192.168.1.100)",
+          "sigenergy_modbus_slave_id": "Leave at 247 (default). PowerSync auto-detects the correct registers and slave ID."
+        },
+        "submit_button": "Next"
+      },
+      "sigenergy_dc_curtailment": {
+        "title": "Sigenergy DC Solar Curtailment",
+        "description": "Configure DC solar curtailment for your Sigenergy system.\n\nWhen enabled, PowerSync can limit DC solar production during negative prices by setting the PV power limit via Modbus.\n\n**Note:** This is for DC solar connected directly to your Sigenergy system. AC-coupled inverters from other brands can be configured separately.",
+        "data": {
+          "sigenergy_dc_curtailment_enabled": "Enable DC Solar Curtailment"
+        },
+        "data_description": {
+          "sigenergy_dc_curtailment_enabled": "Allow PowerSync to control DC solar production during negative prices"
         },
         "submit_button": "Finish"
       },
@@ -185,12 +232,12 @@
           "amber_site_id": "Amber Site (if you have multiple)",
           "auto_sync_enabled": "Enable automatic TOU schedule syncing",
           "amber_forecast_type": "Amber Forecast Type",
-          "battery_curtailment_enabled": "Enable Battery Export Curtailment"
+          "battery_curtailment_enabled": "Enable DC Solar Curtailment (stop export at negative prices)"
         },
         "data_description": {
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices",
           "amber_forecast_type": "Which Amber price forecast to use: Predicted (balanced), Low/Aggressive (assumes cheaper prices), High/Conservative (assumes higher prices)",
-          "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. This is the MAIN toggle - must be enabled for curtailment to work."
+          "battery_curtailment_enabled": "Automatically stop battery exports and DC solar production when feed-in prices go negative to avoid paying to export"
         },
         "submit_button": "Submit"
       },
@@ -221,44 +268,6 @@
         },
         "submit_button": "Next"
       },
-      "weather_setup": {
-        "title": "Weather",
-        "description": "Configure weather-based automations and solar production forecasting.\n\nWeather data enables cloud cover triggers for curtailment decisions. Solcast provides accurate solar production forecasts.",
-        "data": {
-          "weather_location": "Weather Location",
-          "openweathermap_api_key": "OpenWeatherMap API Key",
-          "solcast_enabled": "Enable Solcast Forecasting",
-          "solcast_api_key": "Solcast API Key",
-          "solcast_resource_id": "Solcast Resource ID(s)"
-        },
-        "data_description": {
-          "weather_location": "City name or postcode for weather-based automations (e.g., Brisbane or 4000)",
-          "openweathermap_api_key": "Free API key from openweathermap.org for weather triggers. Leave blank to disable.",
-          "solcast_enabled": "Enable Solcast solar production forecasting for weather automations and solar forecasting",
-          "solcast_api_key": "Your Solcast API key from solcast.com (free for residential rooftop systems)",
-          "solcast_resource_id": "Your Solcast rooftop resource ID from your dashboard. For multiple arrays (e.g., east/west), enter IDs comma-separated (e.g., abc123,def456)"
-        },
-        "submit_button": "Next"
-      },
-      "ev_charging_setup": {
-        "title": "EV Charging",
-        "description": "Configure EV charging integration and OCPP charger support.\n\nEV charging allows PowerSync to manage your Tesla vehicle charging based on electricity prices. OCPP enables control of compatible EV chargers.",
-        "data": {
-          "ev_charging_enabled": "Enable EV Charging",
-          "ev_provider": "EV Provider",
-          "tesla_ble_entity_prefix": "Tesla BLE Entity Prefix",
-          "ocpp_enabled": "Enable OCPP Server",
-          "ocpp_port": "OCPP Port"
-        },
-        "data_description": {
-          "ev_charging_enabled": "Enable price-based EV charging management for your Tesla vehicle",
-          "ev_provider": "How to communicate with your Tesla: Fleet API (cloud), Tesla BLE (local Bluetooth), or both",
-          "tesla_ble_entity_prefix": "Entity prefix for Tesla BLE integration (e.g., 'tesla_ble' for sensor.tesla_ble_battery)",
-          "ocpp_enabled": "Start an OCPP 1.6 server to control compatible EV chargers",
-          "ocpp_port": "Port for the OCPP WebSocket server (default: 9000)"
-        },
-        "submit_button": "Finish"
-      },
       "inverter_brand_setup": {
         "title": "AC-Coupled Inverter Setup",
         "description": "Select your solar inverter brand for direct curtailment control.\n\nThis allows PowerSync to shut down your AC-coupled solar inverter when feed-in prices are negative.",
@@ -279,8 +288,8 @@
           "enphase_username": "Enlighten Email",
           "enphase_password": "Enlighten Password",
           "enphase_serial": "Envoy Serial (Optional)",
-          "enphase_normal_profile": "Normal Grid Profile (Optional)",
-          "enphase_zero_export_profile": "Zero Export Grid Profile (Optional)",
+          "enphase_normal_profile": "Normal Grid Profile Name",
+          "enphase_zero_export_profile": "Zero Export Grid Profile Name",
           "enphase_is_installer": "Installer Account",
           "inverter_restore_soc": "Restore SOC Threshold (%)",
           "fronius_load_following": "Enable Load Following Mode"
@@ -293,9 +302,9 @@
           "enphase_username": "Your Enlighten account email for automatic JWT token refresh (recommended)",
           "enphase_password": "Your Enlighten account password",
           "enphase_serial": "Leave blank to auto-detect from IQ Gateway",
-          "enphase_normal_profile": "Only needed if DPEL doesn't work on your gateway. Grid profile for normal export. Leave blank if you already have a zero export profile set.",
-          "enphase_zero_export_profile": "Only needed if DPEL doesn't work on your gateway. Grid profile for zero export. Leave blank if you already have a zero export profile set.",
-          "enphase_is_installer": "Only needed for grid profile switching fallback. Enable if your Enlighten account has installer/DIY access.",
+          "enphase_normal_profile": "Full name of your normal grid profile (for fallback when DPEL/DER unavailable). Example: 'AS/NZS 4777.2:2020 Australia A'",
+          "enphase_zero_export_profile": "Full name of a zero-export grid profile if available (for fallback curtailment)",
+          "enphase_is_installer": "Enable if using an installer Enlighten account. Required for grid profile switching access.",
           "inverter_restore_soc": "Restore inverter when battery drops below this %. Ensures battery stays topped up before evening peak. Default: 98%",
           "fronius_load_following": "Enable if you DON'T have a 0W export limit configured by your installer. Uses calculated power limits based on home load and auto-detected inverter capacity. Leave OFF if you have the 0W export profile (most users)."
         },
@@ -314,7 +323,10 @@
       "invalid_device_id": "Device ID must be exactly 13 digits.",
       "no_stations": "No Sigenergy stations found for this account.",
       "no_station_selected": "Please select a Sigenergy station.",
-      "modbus_host_required": "IP address is required when DC curtailment is enabled.",
+      "modbus_host_required": "Sigenergy IP address is required for energy data.",
+      "sungrow_host_required": "Sungrow IP address is required for Modbus connection.",
+      "sungrow_modbus_conflict": "The AC inverter and Sungrow battery have the same IP, port, and slave ID. Use a different slave ID for the AC inverter.",
+      "no_prices": "No Octopus prices found for this tariff and region. Check your product and GSP region are correct.",
       "unknown": "An unexpected error occurred. Please try again."
     },
     "abort": {
@@ -343,7 +355,8 @@
           "sigenergy_modbus_slave_id": "Modbus Slave ID",
           "sigenergy_dc_curtailment_enabled": "Enable DC Solar Curtailment",
           "sigenergy_username": "Sigenergy Cloud Email",
-          "sigenergy_pass_enc": "Encrypted Password",
+          "sigenergy_password": "Password",
+          "sigenergy_pass_enc": "Encrypted Password (Advanced)",
           "sigenergy_device_id": "Device ID",
           "sigenergy_station_id": "Station ID"
         },
@@ -351,9 +364,25 @@
           "sigenergy_modbus_host": "Local IP address of your Sigenergy inverter (e.g., 192.168.1.100)",
           "sigenergy_dc_curtailment_enabled": "Allow PowerSync to limit DC solar production during negative prices",
           "sigenergy_username": "Your Sigenergy Cloud account email address",
-          "sigenergy_pass_enc": "Encrypted password from browser dev tools (leave blank to keep existing)",
+          "sigenergy_password": "Your Sigenergy account password (leave blank to keep existing)",
+          "sigenergy_pass_enc": "Pre-encoded password - leave blank unless you know what this is",
           "sigenergy_device_id": "13-digit device identifier from browser dev tools",
           "sigenergy_station_id": "Your Sigenergy station ID (numeric)"
+        }
+      },
+      "init_sungrow": {
+        "title": "PowerSync Settings",
+        "description": "Configure your electricity provider and Sungrow Modbus connection settings.\n\n**Modbus connection is required** to read real-time energy data and control battery settings.",
+        "data": {
+          "electricity_provider": "Electricity Provider",
+          "sungrow_host": "Sungrow IP Address",
+          "sungrow_port": "Modbus Port",
+          "sungrow_slave_id": "Modbus Slave ID"
+        },
+        "data_description": {
+          "sungrow_host": "Local IP address of your Sungrow inverter or WiNet-S dongle (e.g., 192.168.1.100)",
+          "sungrow_port": "Modbus TCP port (default: 502)",
+          "sungrow_slave_id": "Modbus slave ID (default: 1)"
         }
       },
       "teslemetry_token": {
@@ -369,9 +398,11 @@
         "data": {
           "auto_sync_enabled": "Enable automatic TOU schedule syncing",
           "amber_forecast_type": "Amber Forecast Type",
-          "battery_curtailment_enabled": "Enable Battery Export Curtailment",
+          "battery_curtailment_enabled": "Enable DC Solar Curtailment (stop export at negative prices)",
           "spike_protection_enabled": "Enable Spike Protection (prevent grid charging during spikes)",
           "settled_prices_only": "Settled Prices Only (skip forecast sync)",
+          "forecast_discrepancy_alert": "Forecast Discrepancy Alert",
+          "forecast_discrepancy_threshold": "Discrepancy Threshold (c/kWh)",
           "force_tariff_mode_toggle": "Force Mode Toggle (ALPHA) - faster PW response",
           "export_boost_enabled": "Enable Export Price Boost",
           "export_price_offset": "Offset to Add (c/kWh)",
@@ -393,7 +424,7 @@
           "demand_artificial_price_enabled": "Artificial Price Increase (ALPHA)",
           "daily_supply_charge": "Daily Supply Charge ($)",
           "monthly_supply_charge": "Monthly Supply Charge ($)",
-          "ac_inverter_curtailment_enabled": "Enable AC-Coupled Inverter Shutdown",
+          "ac_inverter_curtailment_enabled": "Enable AC-Coupled Inverter Curtailment",
           "inverter_brand": "Inverter Brand",
           "inverter_model": "Inverter Model",
           "inverter_host": "Inverter IP Address",
@@ -403,10 +434,12 @@
         "data_description": {
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices",
           "amber_forecast_type": "Which Amber price forecast to use: Predicted (balanced), Low/Aggressive (assumes cheaper prices), High/Conservative (assumes higher prices)",
-          "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. Sets Tesla to self-consumption mode or Sigenergy export limit to 0. This is the MAIN toggle - must be enabled for curtailment to work.",
+          "battery_curtailment_enabled": "Automatically stop battery exports and DC solar production when feed-in prices go negative to avoid paying to export",
           "spike_protection_enabled": "When Amber detects a price spike, artificially inflate buy prices to prevent your battery from charging from grid (stops arbitrage behavior)",
-          "ac_inverter_curtailment_enabled": "Shutdown AC-coupled solar inverter (Fronius, Sungrow, GoodWe, Enphase, etc.) when feed-in price is negative. Use this if your solar bypasses the battery and exports directly to grid. Requires inverter IP configuration.",
+          "ac_inverter_curtailment_enabled": "Shutdown AC-coupled solar inverter when feed-in price is negative (stops solar export that bypasses your battery)",
           "settled_prices_only": "Skip the initial forecast sync at :00 and only sync when actual/settled prices arrive at :35/:60 seconds. Use this if forecast prices differ significantly from settled prices.",
+          "forecast_discrepancy_alert": "Send mobile notification when predicted forecast differs significantly from conservative forecast. Useful when using 'predicted' forecast type to detect unreliable forecasts.",
+          "forecast_discrepancy_threshold": "Average price difference threshold to trigger alert. Default 10c/kWh means alert when predicted vs conservative differ by more than 10c on average across forecast periods.",
           "force_tariff_mode_toggle": "After uploading a new tariff, briefly toggle operation mode to force immediate recalculation of battery behavior (Tesla only, ~5 second interruption)",
           "export_boost_enabled": "Artificially increase sell prices during configured hours to encourage battery export during high-value periods",
           "export_price_offset": "Amount to ADD to the actual Amber export price. Example: Amber=18c + Offset=5c → Tesla sees 23c",
@@ -430,7 +463,7 @@
           "flow_power_base_rate": "Base Rate (c/kWh)",
           "pea_custom_value": "Custom PEA Override (c/kWh, leave empty for auto)",
           "auto_sync_enabled": "Enable automatic TOU schedule syncing",
-          "battery_curtailment_enabled": "Enable Battery Export Curtailment",
+          "battery_curtailment_enabled": "Enable DC Solar Curtailment (stop export at negative prices)",
           "demand_charge_enabled": "Enable Demand Charge Tracking",
           "demand_charge_rate": "Demand Charge Rate ($/kW)",
           "demand_charge_start_time": "Peak Period Start Time (HH:MM)",
@@ -443,58 +476,8 @@
         },
         "data_description": {
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices",
-          "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. Sets Tesla to self-consumption mode or Sigenergy export limit to 0. This is the MAIN toggle - must be enabled for curtailment to work.",
+          "battery_curtailment_enabled": "Automatically stop battery exports and DC solar production when feed-in prices go negative to avoid paying to export",
           "demand_charge_enabled": "Track your peak grid draw during demand charge periods and calculate monthly capacity fees based on your highest 30-minute average"
-        }
-      },
-      "curtailment_options": {
-        "title": "Curtailment Settings",
-        "description": "Configure automatic curtailment during negative feed-in tariff (FIT) prices.\n\nWhen feed-in prices go negative, you PAY to export power. These settings prevent that by stopping battery export and optionally shutting down solar production.",
-        "data": {
-          "battery_curtailment_enabled": "Enable Battery Export Curtailment",
-          "ac_inverter_curtailment_enabled": "Enable AC-Coupled Inverter Shutdown",
-          "sigenergy_dc_curtailment_enabled": "Enable DC Solar Curtailment (Sigenergy)"
-        },
-        "data_description": {
-          "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. Sets Tesla to self-consumption mode or Sigenergy export limit to 0. This is the MAIN toggle - must be enabled for curtailment to work.",
-          "ac_inverter_curtailment_enabled": "Shutdown AC-coupled solar inverter (Fronius, Sungrow, GoodWe, Enphase, etc.) when feed-in price is negative. Use this if your solar bypasses the battery and exports directly to grid. Requires inverter IP configuration in next step.",
-          "sigenergy_dc_curtailment_enabled": "Limit DC solar production via Sigenergy Modbus when feed-in price is negative. Only applies to Sigenergy systems with DC-coupled solar."
-        }
-      },
-      "weather_options": {
-        "title": "Weather",
-        "description": "Configure weather-based automations and solar production forecasting.\n\nWeather data enables cloud cover triggers for curtailment decisions. Solcast provides accurate solar production forecasts.",
-        "data": {
-          "weather_location": "Weather Location",
-          "openweathermap_api_key": "OpenWeatherMap API Key",
-          "solcast_enabled": "Enable Solcast Forecasting",
-          "solcast_api_key": "Solcast API Key",
-          "solcast_resource_id": "Solcast Resource ID(s)"
-        },
-        "data_description": {
-          "weather_location": "City name or postcode for weather-based automations (e.g., Brisbane or 4000)",
-          "openweathermap_api_key": "Free API key from openweathermap.org for weather triggers. Leave blank to disable.",
-          "solcast_enabled": "Enable Solcast solar production forecasting for weather automations and solar forecasting",
-          "solcast_api_key": "Your Solcast API key from solcast.com (free for residential rooftop systems)",
-          "solcast_resource_id": "Your Solcast rooftop resource ID from your dashboard. For multiple arrays (e.g., east/west), enter IDs comma-separated (e.g., abc123,def456)"
-        }
-      },
-      "ev_charging": {
-        "title": "EV Charging",
-        "description": "Configure EV charging integration and OCPP charger support.\n\nEV charging allows PowerSync to manage your Tesla vehicle charging based on electricity prices. OCPP enables control of compatible EV chargers.",
-        "data": {
-          "ev_charging_enabled": "Enable EV Charging",
-          "ev_provider": "EV Provider",
-          "tesla_ble_entity_prefix": "Tesla BLE Entity Prefix",
-          "ocpp_enabled": "Enable OCPP Server",
-          "ocpp_port": "OCPP Port"
-        },
-        "data_description": {
-          "ev_charging_enabled": "Enable price-based EV charging management for your Tesla vehicle",
-          "ev_provider": "How to communicate with your Tesla: Fleet API (cloud), Tesla BLE (local Bluetooth), or both",
-          "tesla_ble_entity_prefix": "Entity prefix for Tesla BLE integration (e.g., 'tesla_ble' for sensor.tesla_ble_battery)",
-          "ocpp_enabled": "Start an OCPP 1.6 server to control compatible EV chargers",
-          "ocpp_port": "Port for the OCPP WebSocket server (default: 9000)"
         }
       },
       "globird_options": {
@@ -507,6 +490,22 @@
         },
         "data_description": {
           "configure_custom_tariff": "Enable to configure your TOU rates for EV charging price decisions"
+        }
+      },
+      "octopus_options": {
+        "title": "Octopus Energy UK Options",
+        "description": "Configure your Octopus Energy tariff settings.\n\n**Product**: Select your Octopus tariff product.\n**GSP Region**: Your Grid Supply Point region (A-P).\n\nFind your GSP region on your Octopus bill or at {octopus_url}",
+        "data": {
+          "octopus_product": "Octopus Product",
+          "octopus_region": "GSP Region",
+          "auto_sync_enabled": "Enable automatic TOU schedule syncing",
+          "battery_curtailment_enabled": "Enable Battery Export Curtailment (stop export at negative prices)"
+        },
+        "data_description": {
+          "octopus_product": "Select your Octopus tariff product",
+          "octopus_region": "Your Grid Supply Point region - check your Octopus bill for your GSP code (single letter A-P)",
+          "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices",
+          "battery_curtailment_enabled": "Stop battery from exporting when prices are negative to avoid paying to export"
         }
       },
       "custom_tariff_options": {
@@ -551,8 +550,8 @@
           "enphase_username": "Enlighten Email",
           "enphase_password": "Enlighten Password",
           "enphase_serial": "Envoy Serial (Optional)",
-          "enphase_normal_profile": "Normal Grid Profile (Optional)",
-          "enphase_zero_export_profile": "Zero Export Grid Profile (Optional)",
+          "enphase_normal_profile": "Normal Grid Profile Name",
+          "enphase_zero_export_profile": "Zero Export Grid Profile Name",
           "enphase_is_installer": "Installer Account",
           "inverter_restore_soc": "Restore SOC Threshold (%)",
           "fronius_load_following": "Enable Load Following Mode"
@@ -565,11 +564,51 @@
           "enphase_username": "Your Enlighten account email for automatic JWT token refresh (recommended)",
           "enphase_password": "Your Enlighten account password",
           "enphase_serial": "Leave blank to auto-detect from IQ Gateway",
-          "enphase_normal_profile": "Only needed if DPEL doesn't work on your gateway. Grid profile for normal export. Leave blank if you already have a zero export profile set.",
-          "enphase_zero_export_profile": "Only needed if DPEL doesn't work on your gateway. Grid profile for zero export. Leave blank if you already have a zero export profile set.",
-          "enphase_is_installer": "Only needed for grid profile switching fallback. Enable if your Enlighten account has installer/DIY access.",
+          "enphase_normal_profile": "Full name of your normal grid profile (for fallback when DPEL/DER unavailable). Example: 'AS/NZS 4777.2:2020 Australia A'",
+          "enphase_zero_export_profile": "Full name of a zero-export grid profile if available (for fallback curtailment)",
+          "enphase_is_installer": "Enable if using an installer Enlighten account. Required for grid profile switching access.",
           "inverter_restore_soc": "Restore inverter when battery drops below this %. Ensures battery stays topped up before evening peak. Default: 98%",
           "fronius_load_following": "Enable if you DON'T have a 0W export limit configured by your installer. Uses calculated power limits based on home load and auto-detected inverter capacity. Leave OFF if you have the 0W export profile (most users)."
+        }
+      },
+      "curtailment_options": {
+        "title": "Curtailment & Automations Settings",
+        "description": "Configure automatic curtailment during negative feed-in tariff (FIT) prices, and optionally enable weather-based automations.\n\nWhen feed-in prices go negative, you PAY to export power. These settings prevent that by stopping battery export and optionally shutting down solar production.",
+        "data": {
+          "battery_curtailment_enabled": "Enable Battery Export Curtailment",
+          "ac_ac_inverter_curtailment_enabled": "Enable AC-Coupled Inverter Shutdown",
+          "sigenergy_dc_curtailment_enabled": "Enable DC Solar Curtailment (Sigenergy)",
+          "openweathermap_api_key": "OpenWeatherMap API Key (Optional)"
+        },
+        "data_description": {
+          "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. Sets Tesla to self-consumption mode or Sigenergy export limit to 0. This is the MAIN toggle - must be enabled for curtailment to work.",
+          "ac_ac_inverter_curtailment_enabled": "Shutdown AC-coupled solar inverter (Fronius, Sungrow, GoodWe, Enphase, etc.) when feed-in price is negative. Use this if your solar bypasses the battery and exports directly to grid. Requires inverter IP configuration in next step.",
+          "sigenergy_dc_curtailment_enabled": "Limit DC solar production via Sigenergy Modbus when feed-in price is negative. Only applies to Sigenergy systems with DC-coupled solar.",
+          "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny/cloudy triggers). Leave blank to disable weather triggers."
+        }
+      },
+      "ev_ocpp_options": {
+        "title": "EV Charging, OCPP & Solar Forecast",
+        "description": "Configure EV charging, OCPP charger management, and solar production forecasting.\n\n**Solcast:** Get solar production forecasts from Solcast (free hobbyist tier: 10 API calls/day).\n\n**EV Charging:** Control Tesla vehicles via Fleet API/Teslemetry or Tesla BLE (ESPHome).\n\n**OCPP:** Connect OCPP 1.6-compliant chargers.",
+        "data": {
+          "solcast_enabled": "Enable Solcast Solar Forecast",
+          "solcast_api_key": "Solcast API Key",
+          "solcast_resource_id": "Solcast Resource ID(s)",
+          "ev_charging_enabled": "Enable EV Charging Control",
+          "ev_provider": "EV Control Provider",
+          "tesla_ble_entity_prefix": "Tesla BLE Entity Prefix",
+          "ocpp_enabled": "Enable OCPP Central System",
+          "ocpp_port": "OCPP WebSocket Port"
+        },
+        "data_description": {
+          "solcast_enabled": "Enable solar production forecasting using Solcast API. Shows expected daily solar production for today and tomorrow.",
+          "solcast_api_key": "Your Solcast API key from toolkit.solcast.com.au. Free hobbyist accounts get 10 API calls/day (plenty with 3-hour caching).",
+          "solcast_resource_id": "Your rooftop site Resource ID(s) from Solcast. For split arrays (e.g., east/west facing panels), create separate sites in Solcast and enter multiple IDs separated by commas. Example: abc123,def456. Forecasts will be combined automatically.",
+          "ev_charging_enabled": "Allow automations to control Tesla vehicle charging (start/stop, set charge limits, set amps).",
+          "ev_provider": "Choose how to control your Tesla: **Fleet API/Teslemetry** uses cloud API (requires HA Tesla Fleet or Teslemetry integration), **Tesla BLE** uses local Bluetooth via ESPHome (requires esphome-tesla-ble), **Both** uses BLE for control with Fleet API fallback.",
+          "tesla_ble_entity_prefix": "Entity prefix for Tesla BLE entities (default: tesla_ble). Must match the ESPHome device name. Example: if your entities are sensor.my_tesla_charge_level, enter 'my_tesla'.",
+          "ocpp_enabled": "Run an OCPP 1.6J WebSocket server for connecting OCPP-compliant EV chargers. Chargers connect to ws://server:port/{charger_id}",
+          "ocpp_port": "Port for OCPP WebSocket server (default: 9000). Chargers will connect to this port."
         }
       }
     }
@@ -626,6 +665,15 @@
       },
       "inverter_status": {
         "name": "Inverter Status"
+      },
+      "solcast_today_forecast": {
+        "name": "Solar Forecast Today"
+      },
+      "solcast_tomorrow_forecast": {
+        "name": "Solar Forecast Tomorrow"
+      },
+      "solcast_current_estimate": {
+        "name": "Solar Current Estimate"
       }
     },
     "switch": {

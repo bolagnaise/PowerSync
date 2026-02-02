@@ -139,9 +139,24 @@
       },
       "battery_system": {
         "title": "Select Battery System",
-        "description": "Choose your battery storage system:\n\n**Tesla Powerwall**: Connect via Fleet API or Teslemetry.\n\n**Sigenergy**: Connect via Sigenergy Cloud API.",
+        "description": "Choose your battery storage system:\n\n**Tesla Powerwall**: Connect via Fleet API or Teslemetry.\n\n**Sigenergy**: Connect via Sigenergy Cloud API.\n\n**Sungrow SH-series**: Connect via Modbus TCP.",
         "data": {
           "battery_system": "Battery System"
+        },
+        "submit_button": "Next"
+      },
+      "sungrow": {
+        "title": "Sungrow Modbus Connection",
+        "description": "Configure the Modbus TCP connection to your Sungrow SH-series hybrid inverter.\n\nEnter the local IP address of your Sungrow inverter or WiNet-S dongle.",
+        "data": {
+          "sungrow_host": "Sungrow IP Address",
+          "sungrow_port": "Modbus Port",
+          "sungrow_slave_id": "Modbus Slave ID"
+        },
+        "data_description": {
+          "sungrow_host": "Local IP address of your Sungrow inverter (e.g., 192.168.1.100)",
+          "sungrow_port": "Modbus TCP port (default: 502)",
+          "sungrow_slave_id": "Modbus slave ID (default: 1)"
         },
         "submit_button": "Next"
       },
@@ -309,6 +324,8 @@
       "no_stations": "No Sigenergy stations found for this account.",
       "no_station_selected": "Please select a Sigenergy station.",
       "modbus_host_required": "Sigenergy IP address is required for energy data.",
+      "sungrow_host_required": "Sungrow IP address is required for Modbus connection.",
+      "sungrow_modbus_conflict": "The AC inverter and Sungrow battery have the same IP, port, and slave ID. Use a different slave ID for the AC inverter.",
       "no_prices": "No Octopus prices found for this tariff and region. Check your product and GSP region are correct.",
       "unknown": "An unexpected error occurred. Please try again."
     },
@@ -351,6 +368,21 @@
           "sigenergy_pass_enc": "Pre-encoded password - leave blank unless you know what this is",
           "sigenergy_device_id": "13-digit device identifier from browser dev tools",
           "sigenergy_station_id": "Your Sigenergy station ID (numeric)"
+        }
+      },
+      "init_sungrow": {
+        "title": "PowerSync Settings",
+        "description": "Configure your electricity provider and Sungrow Modbus connection settings.\n\n**Modbus connection is required** to read real-time energy data and control battery settings.",
+        "data": {
+          "electricity_provider": "Electricity Provider",
+          "sungrow_host": "Sungrow IP Address",
+          "sungrow_port": "Modbus Port",
+          "sungrow_slave_id": "Modbus Slave ID"
+        },
+        "data_description": {
+          "sungrow_host": "Local IP address of your Sungrow inverter or WiNet-S dongle (e.g., 192.168.1.100)",
+          "sungrow_port": "Modbus TCP port (default: 502)",
+          "sungrow_slave_id": "Modbus slave ID (default: 1)"
         }
       },
       "teslemetry_token": {

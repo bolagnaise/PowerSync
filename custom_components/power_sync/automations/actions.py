@@ -2450,6 +2450,7 @@ async def _dynamic_ev_update(
     # No grid import mode: prevent ALL grid imports by dynamically adjusting EV charge rate
     no_grid_import = params.get("no_grid_import", False)
     grid_import_tolerance_kw = params.get("grid_import_tolerance_kw", 0.1)  # 100W buffer
+    max_inverter_kw = params.get("max_inverter_kw", 10.0)  # PW3=10kW, PW2=5kW per unit
 
     min_amps = params.get("min_charge_amps", 5)
     max_amps = params.get("max_charge_amps", 32)
@@ -2482,14 +2483,26 @@ async def _dynamic_ev_update(
     grid_headroom_kw = max_grid_import_kw - grid_power_kw
 
     # Available power for EV adjustment:
-    # - In no_grid_import mode: purely based on current grid state to prevent any imports
+    # - In no_grid_import mode: limit to inverter capacity and prevent grid imports
     # - If battery has surplus (deficit > 0.1), use that surplus
     # - Otherwise, use grid headroom
     if no_grid_import:
-        # In no-grid-import mode, available power is purely based on current grid state
+        # Calculate home load (excluding EV) from power balance
+        # When battery is discharging: home_load = battery_discharge + grid_import - ev_load
+        home_load_kw = battery_power_kw + grid_power_kw - current_ev_power_kw
+
+        # Max power available from inverter for EV = inverter_capacity - home_load
+        # This is proactive: we know the limit before hitting it
+        inverter_headroom_kw = max_inverter_kw - max(0, home_load_kw)
+
+        # Reactive adjustment based on current grid state
         # grid_power_kw: positive = importing (bad), negative = exporting (good)
-        # We want to adjust EV to keep grid at or below tolerance
-        available_power_kw = -(grid_power_kw + grid_import_tolerance_kw)
+        grid_reactive_kw = -(grid_power_kw + grid_import_tolerance_kw)
+
+        # Use the more conservative of the two approaches
+        # - inverter_headroom: proactive limit based on known capacity
+        # - grid_reactive: reactive adjustment based on actual grid flow
+        available_power_kw = min(inverter_headroom_kw, grid_reactive_kw + current_ev_power_kw) - current_ev_power_kw
     elif battery_deficit_kw > 0.1:
         available_power_kw = battery_deficit_kw
     else:
@@ -2510,7 +2523,10 @@ async def _dynamic_ev_update(
     if no_grid_import and grid_power_kw > grid_import_tolerance_kw:
         # We're importing - reduce aggressively
         if new_amps < current_amps:
-            _LOGGER.info(f"⚡ No-grid-import: Grid importing {grid_power_kw:.2f}kW, reducing to {new_amps}A")
+            _LOGGER.info(
+                f"⚡ No-grid-import: Grid importing {grid_power_kw:.2f}kW (inverter_max={max_inverter_kw}kW), "
+                f"reducing to {new_amps}A"
+            )
             success = await _action_set_ev_charging_amps(hass, config_entry, {"amps": new_amps})
             if success:
                 state["current_amps"] = new_amps
@@ -2599,6 +2615,9 @@ async def _action_start_ev_charging_dynamic(
         no_grid_import: If True, prevent ALL grid imports by dynamically adjusting
             EV charge rate. Useful for overnight Powerwall-to-EV charging. (default False)
         grid_import_tolerance_kw: Small buffer to prevent oscillation (default 0.1 = 100W)
+        max_inverter_kw: Maximum inverter output capacity in kW (default 10.0 = single PW3).
+            PW2: 5kW per unit, PW3: 10kW per unit. Used with no_grid_import to proactively
+            limit EV charging based on available inverter headroom.
 
     Parameters (solar_surplus mode):
         household_buffer_kw: Buffer to keep from surplus (default 0.5)
@@ -2673,9 +2692,10 @@ async def _action_start_ev_charging_dynamic(
             "max_grid_import_kw": params.get("max_grid_import_kw", 12.5),
             "no_grid_import": no_grid_import,
             "grid_import_tolerance_kw": params.get("grid_import_tolerance_kw", 0.1),
+            "max_inverter_kw": params.get("max_inverter_kw", 10.0),
         }
         start_amps = params.get("start_amps", max_charge_amps)
-        no_grid_info = ", no_grid_import=enabled" if no_grid_import else ""
+        no_grid_info = f", no_grid_import=enabled (inverter={mode_params['max_inverter_kw']}kW)" if no_grid_import else ""
         _LOGGER.info(
             f"⚡ Starting dynamic EV charging: target_battery_charge={target_battery_charge_kw}kW, "
             f"max_grid_import={mode_params['max_grid_import_kw']}kW, amps={min_charge_amps}-{max_charge_amps}A{no_grid_info}"

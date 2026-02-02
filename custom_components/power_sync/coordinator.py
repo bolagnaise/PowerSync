@@ -1142,6 +1142,186 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
         await self._controller.disconnect()
 
 
+class SungrowEnergyCoordinator(DataUpdateCoordinator):
+    """Coordinator to fetch Sungrow SH-series battery system data via Modbus.
+
+    Polls the Sungrow hybrid inverter via Modbus TCP to get real-time
+    power data (solar, battery, grid, load), battery SOC/SOH, and control settings.
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        host: str,
+        port: int = 502,
+        slave_id: int = 1,
+    ) -> None:
+        """Initialize the coordinator.
+
+        Args:
+            hass: HomeAssistant instance
+            host: IP address of Sungrow inverter
+            port: Modbus TCP port (default: 502)
+            slave_id: Modbus slave ID (default: 1)
+        """
+        from .inverters.sungrow_sh import SungrowSHController
+
+        self.host = host
+        self.port = port
+        self.slave_id = slave_id
+        self._controller = SungrowSHController(host, port, slave_id)
+
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_sungrow_energy",
+            update_interval=UPDATE_INTERVAL_ENERGY,
+        )
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Fetch data from Sungrow system via Modbus."""
+        try:
+            data = await self._controller.get_battery_data()
+
+            # Map Sungrow data to standard format
+            battery_power_w = data.get("battery_power", 0)  # Signed: positive = discharging
+            export_power_w = data.get("export_power", 0)  # Signed: positive = exporting
+            load_power_w = data.get("load_power", 0)
+
+            # Convert to kW for consistency with other coordinators
+            battery_kw = battery_power_w / 1000
+            grid_kw = -export_power_w / 1000  # Invert: positive = importing, negative = exporting
+            load_kw = load_power_w / 1000
+
+            # Estimate solar from energy balance: Solar = Load + Export - Battery_Discharge
+            # If battery charging (negative power), Solar = Load + Export + Battery_Charge
+            solar_kw = load_kw - grid_kw - battery_kw
+
+            energy_data = {
+                "solar_power": max(0, solar_kw),  # kW, clamp to 0 if calculated negative
+                "grid_power": grid_kw,  # kW, positive = importing, negative = exporting
+                "battery_power": battery_kw,  # kW, positive = discharging, negative = charging
+                "load_power": load_kw,  # kW
+                "battery_level": data.get("battery_soc", 0),  # %
+                "last_update": dt_util.utcnow(),
+                # Sungrow-specific data
+                "battery_soh": data.get("battery_soh"),  # % State of Health
+                "battery_voltage": data.get("battery_voltage"),
+                "battery_current": data.get("battery_current"),
+                "battery_temp": data.get("battery_temp"),
+                "ems_mode": data.get("ems_mode"),
+                "ems_mode_name": data.get("ems_mode_name"),
+                "charge_cmd": data.get("charge_cmd"),
+                "min_soc": data.get("min_soc"),
+                "max_soc": data.get("max_soc"),
+                "backup_reserve": data.get("backup_reserve"),
+                "charge_rate_limit_kw": data.get("charge_rate_limit_kw"),
+                "discharge_rate_limit_kw": data.get("discharge_rate_limit_kw"),
+                "export_limit_w": data.get("export_limit_w"),
+                "export_limit_enabled": data.get("export_limit_enabled"),
+            }
+
+            _LOGGER.debug(
+                "Sungrow data: solar=%.2f kW, grid=%.2f kW, battery=%.2f kW (%.0f%%), load=%.2f kW",
+                energy_data["solar_power"],
+                energy_data["grid_power"],
+                energy_data["battery_power"],
+                energy_data["battery_level"],
+                energy_data["load_power"],
+            )
+
+            return energy_data
+
+        except Exception as err:
+            raise UpdateFailed(f"Error fetching Sungrow energy data: {err}") from err
+
+    # Battery control methods - delegate to controller
+    async def force_charge(self, duration_minutes: int = 30) -> bool:
+        """Set Sungrow to forced charge mode.
+
+        Args:
+            duration_minutes: Duration in minutes (not used by Sungrow - charge until manually stopped)
+
+        Returns:
+            True if successful
+        """
+        async with self._controller:
+            return await self._controller.force_charge()
+
+    async def force_discharge(self, duration_minutes: int = 30) -> bool:
+        """Set Sungrow to forced discharge mode.
+
+        Args:
+            duration_minutes: Duration in minutes (not used by Sungrow - discharge until manually stopped)
+
+        Returns:
+            True if successful
+        """
+        async with self._controller:
+            return await self._controller.force_discharge()
+
+    async def restore_normal(self) -> bool:
+        """Restore Sungrow to self-consumption mode.
+
+        Returns:
+            True if successful
+        """
+        async with self._controller:
+            return await self._controller.restore_normal()
+
+    async def set_backup_reserve(self, percent: int) -> bool:
+        """Set backup reserve percentage.
+
+        Args:
+            percent: Backup reserve SOC percentage (0-100)
+
+        Returns:
+            True if successful
+        """
+        async with self._controller:
+            return await self._controller.set_backup_reserve(percent)
+
+    async def set_charge_rate_limit(self, kw: float) -> bool:
+        """Set maximum charge rate in kW.
+
+        Args:
+            kw: Maximum charge rate in kW
+
+        Returns:
+            True if successful
+        """
+        async with self._controller:
+            return await self._controller.set_charge_rate_limit(kw)
+
+    async def set_discharge_rate_limit(self, kw: float) -> bool:
+        """Set maximum discharge rate in kW.
+
+        Args:
+            kw: Maximum discharge rate in kW
+
+        Returns:
+            True if successful
+        """
+        async with self._controller:
+            return await self._controller.set_discharge_rate_limit(kw)
+
+    async def set_export_limit(self, watts: int | None) -> bool:
+        """Set export power limit in watts.
+
+        Args:
+            watts: Export limit in watts, or None to disable
+
+        Returns:
+            True if successful
+        """
+        async with self._controller:
+            return await self._controller.set_export_limit(watts)
+
+    async def async_shutdown(self) -> None:
+        """Disconnect from Sungrow system on shutdown."""
+        await self._controller.disconnect()
+
+
 class SolcastForecastCoordinator(DataUpdateCoordinator):
     """Coordinator to fetch Solcast solar production forecasts.
 

@@ -43,7 +43,14 @@ from .const import (
     CONF_BATTERY_SYSTEM,
     BATTERY_SYSTEM_TESLA,
     BATTERY_SYSTEM_SIGENERGY,
+    BATTERY_SYSTEM_SUNGROW,
     BATTERY_SYSTEMS,
+    # Sungrow battery system configuration
+    CONF_SUNGROW_HOST,
+    CONF_SUNGROW_PORT,
+    CONF_SUNGROW_SLAVE_ID,
+    DEFAULT_SUNGROW_PORT,
+    DEFAULT_SUNGROW_SLAVE_ID,
     # Sigenergy configuration
     CONF_SIGENERGY_USERNAME,
     CONF_SIGENERGY_PASSWORD,
@@ -362,6 +369,33 @@ async def validate_sigenergy_credentials(
         return {"success": False, "error": "unknown"}
 
 
+async def test_sungrow_connection(
+    hass: HomeAssistant,
+    host: str,
+    port: int = 502,
+    slave_id: int = 1,
+) -> dict[str, Any]:
+    """Test Sungrow Modbus connection by reading battery SOC."""
+    from .inverters.sungrow_sh import SungrowSHController
+
+    try:
+        controller = SungrowSHController(host=host, port=port, slave_id=slave_id)
+        async with controller:
+            # Try to read battery SOC as a connection test
+            data = await controller.get_battery_data()
+            if data and "battery_soc" in data:
+                return {
+                    "success": True,
+                    "battery_soc": data.get("battery_soc"),
+                    "battery_soh": data.get("battery_soh"),
+                }
+            else:
+                return {"success": False, "error": "cannot_connect"}
+    except Exception as err:
+        _LOGGER.error("Sungrow connection test failed: %s", err)
+        return {"success": False, "error": "cannot_connect"}
+
+
 class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for PowerSync."""
 
@@ -381,6 +415,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._selected_battery_system: str = BATTERY_SYSTEM_TESLA
         self._sigenergy_data: dict[str, Any] = {}
         self._sigenergy_stations: list[dict[str, Any]] = []
+        self._sungrow_data: dict[str, Any] = {}  # Sungrow Modbus configuration
         self._aemo_only_mode: bool = False  # True if using AEMO spike only (no Amber)
         self._aemo_data: dict[str, Any] = {}
         self._flow_power_data: dict[str, Any] = {}
@@ -473,6 +508,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # Route based on battery system selection
                 if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
                     return await self.async_step_sigenergy_credentials()
+                elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
+                    return await self.async_step_sungrow()
                 else:
                     return await self.async_step_tesla_provider()
             else:
@@ -591,6 +628,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # Route based on battery system selection
                 if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
                     return await self.async_step_sigenergy_credentials()
+                elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
+                    return await self.async_step_sungrow()
                 else:
                     return await self.async_step_tesla_provider()
 
@@ -649,7 +688,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> FlowResult:
         """Handle Amber-specific settings (export boost, spike protection, etc.) during initial setup."""
         # Check if Tesla is selected (force mode toggle only applies to Tesla)
-        is_tesla = self._selected_battery_system != BATTERY_SYSTEM_SIGENERGY
+        is_tesla = self._selected_battery_system == BATTERY_SYSTEM_TESLA
 
         if user_input is not None:
             # Store Amber settings in _amber_data
@@ -692,6 +731,23 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     }
                     _LOGGER.info(f"Auto-selected Amber site for Sigenergy: {amber_site_id}")
                 return await self.async_step_sigenergy_credentials()
+            elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
+                # Auto-select Amber site for Sungrow (they don't go through Tesla site selection)
+                if self._amber_sites:
+                    # Prefer active site, fall back to first site
+                    active_sites = [s for s in self._amber_sites if s.get("status") == "active"]
+                    if active_sites:
+                        amber_site_id = active_sites[0]["id"]
+                    else:
+                        amber_site_id = self._amber_sites[0]["id"]
+                    # Store in _site_data for consistency with Tesla flow
+                    self._site_data = {
+                        CONF_AMBER_SITE_ID: amber_site_id,
+                        CONF_AUTO_SYNC_ENABLED: True,
+                        CONF_AMBER_FORECAST_TYPE: "predicted",
+                    }
+                    _LOGGER.info(f"Auto-selected Amber site for Sungrow: {amber_site_id}")
+                return await self.async_step_sungrow()
             else:
                 return await self.async_step_tesla_provider()
 
@@ -758,6 +814,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={
                 "tesla_desc": "Tesla Powerwall with Fleet API or Teslemetry",
                 "sigenergy_desc": "Sigenergy via Cloud API + optional Modbus curtailment",
+                "sungrow_desc": "Sungrow SH-series hybrid inverters via Modbus TCP",
             },
         )
 
@@ -966,6 +1023,83 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data=final_data,
         )
 
+    async def async_step_sungrow(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure Sungrow Modbus TCP connection."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            host = user_input.get(CONF_SUNGROW_HOST, "").strip()
+            port = user_input.get(CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT)
+            slave_id = user_input.get(CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID)
+
+            if not host:
+                errors["base"] = "sungrow_host_required"
+            else:
+                # Test Modbus connection
+                test_result = await test_sungrow_connection(self.hass, host, port, slave_id)
+
+                if test_result["success"]:
+                    # Store Sungrow configuration
+                    self._sungrow_data = {
+                        CONF_SUNGROW_HOST: host,
+                        CONF_SUNGROW_PORT: port,
+                        CONF_SUNGROW_SLAVE_ID: slave_id,
+                    }
+                    _LOGGER.info(
+                        "Sungrow Modbus connection successful: host=%s, SOC=%.1f%%, SOH=%.1f%%",
+                        host,
+                        test_result.get("battery_soc", 0),
+                        test_result.get("battery_soh", 0),
+                    )
+                    return await self.async_step_finish_sungrow()
+                else:
+                    errors["base"] = "cannot_connect"
+
+        return self.async_show_form(
+            step_id="sungrow",
+            data_schema=vol.Schema({
+                vol.Required(CONF_SUNGROW_HOST): str,
+                vol.Optional(CONF_SUNGROW_PORT, default=DEFAULT_SUNGROW_PORT): int,
+                vol.Optional(CONF_SUNGROW_SLAVE_ID, default=DEFAULT_SUNGROW_SLAVE_ID): int,
+            }),
+            errors=errors,
+        )
+
+    async def async_step_finish_sungrow(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Finish Sungrow setup and create config entry."""
+        # Build final data for Sungrow
+        final_data = {
+            CONF_BATTERY_SYSTEM: BATTERY_SYSTEM_SUNGROW,
+            CONF_AUTO_SYNC_ENABLED: True,
+            **self._amber_data,
+            **self._site_data,  # Include Amber site ID for NEM region auto-detection
+            **self._flow_power_data,
+            **self._octopus_data,  # Include Octopus Energy UK configuration
+            **self._sungrow_data,
+            **self._aemo_data,  # Include AEMO configuration
+        }
+
+        # Add electricity provider if set
+        if self._selected_electricity_provider:
+            final_data[CONF_ELECTRICITY_PROVIDER] = self._selected_electricity_provider
+
+        # Include custom tariff data if configured (will be moved to automation_store on setup)
+        if self._custom_tariff_data:
+            final_data["initial_custom_tariff"] = self._custom_tariff_data
+
+        # Generate title based on host
+        host = self._sungrow_data.get(CONF_SUNGROW_HOST, "Unknown")
+        title = f"PowerSync - Sungrow ({host})"
+
+        return self.async_create_entry(
+            title=title,
+            data=final_data,
+        )
+
     async def async_step_tesla_provider(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -1111,6 +1245,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     # Route based on battery system selection
                     if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
                         return await self.async_step_sigenergy_credentials()
+                    elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
+                        return await self.async_step_sungrow()
                     else:
                         return await self.async_step_tesla_provider()
             else:
@@ -1124,6 +1260,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     # Amber mode without AEMO: route based on battery system
                     if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
                         return await self.async_step_sigenergy_credentials()
+                    elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
+                        return await self.async_step_sungrow()
                     else:
                         return await self.async_step_tesla_provider()
 
@@ -1278,6 +1416,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # Route to battery-specific setup
             if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
                 return await self.async_step_sigenergy_credentials()
+            elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
+                return await self.async_step_sungrow()
             else:
                 return await self.async_step_tesla_provider()
 
@@ -1461,8 +1601,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Handle curtailment configuration during initial setup."""
-        # Only show for Tesla battery system (Sigenergy has its own DC curtailment step)
-        if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
+        # Only show for Tesla battery system (Sigenergy/Sungrow have their own setup)
+        if self._selected_battery_system in (BATTERY_SYSTEM_SIGENERGY, BATTERY_SYSTEM_SUNGROW):
             return await self.async_step_weather_setup()
 
         if user_input is not None:
@@ -1561,52 +1701,77 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Handle inverter configuration during initial setup."""
+        errors = {}
+
         if user_input is not None:
             # Store inverter configuration
             inverter_brand = getattr(self, '_inverter_brand', "sungrow")
-            self._inverter_data = {
-                CONF_INVERTER_BRAND: inverter_brand,
-                CONF_INVERTER_MODEL: user_input.get(CONF_INVERTER_MODEL),
-                CONF_INVERTER_HOST: user_input.get(CONF_INVERTER_HOST, ""),
-                CONF_INVERTER_PORT: user_input.get(CONF_INVERTER_PORT, DEFAULT_INVERTER_PORT),
-            }
+            inverter_host = user_input.get(CONF_INVERTER_HOST, "")
+            inverter_port = user_input.get(CONF_INVERTER_PORT, DEFAULT_INVERTER_PORT)
+            inverter_slave_id = user_input.get(CONF_INVERTER_SLAVE_ID, DEFAULT_INVERTER_SLAVE_ID)
 
-            # Only include slave ID for Modbus brands (not Enphase/Zeversolar which use HTTP)
-            if inverter_brand not in ("enphase", "zeversolar"):
-                self._inverter_data[CONF_INVERTER_SLAVE_ID] = user_input.get(
-                    CONF_INVERTER_SLAVE_ID, DEFAULT_INVERTER_SLAVE_ID
+            # Validate: if battery is Sungrow and AC inverter is also Sungrow,
+            # check for IP/port/slave_id conflicts
+            if (
+                self._selected_battery_system == BATTERY_SYSTEM_SUNGROW
+                and inverter_brand == "sungrow"
+                and self._sungrow_data
+            ):
+                sungrow_host = self._sungrow_data.get(CONF_SUNGROW_HOST, "")
+                sungrow_port = self._sungrow_data.get(CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT)
+                sungrow_slave_id = self._sungrow_data.get(CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID)
+
+                # Same host, port, AND slave ID = conflict
+                if (
+                    inverter_host == sungrow_host
+                    and inverter_port == sungrow_port
+                    and inverter_slave_id == sungrow_slave_id
+                ):
+                    errors["base"] = "sungrow_modbus_conflict"
+
+            if not errors:
+                self._inverter_data = {
+                    CONF_INVERTER_BRAND: inverter_brand,
+                    CONF_INVERTER_MODEL: user_input.get(CONF_INVERTER_MODEL),
+                    CONF_INVERTER_HOST: inverter_host,
+                    CONF_INVERTER_PORT: inverter_port,
+                }
+
+                # Only include slave ID for Modbus brands (not Enphase/Zeversolar which use HTTP)
+                if inverter_brand not in ("enphase", "zeversolar"):
+                    self._inverter_data[CONF_INVERTER_SLAVE_ID] = inverter_slave_id
+                else:
+                    self._inverter_data[CONF_INVERTER_SLAVE_ID] = 1
+
+                # Include JWT token, Enlighten credentials, and grid profiles for Enphase
+                if inverter_brand == "enphase":
+                    self._inverter_data[CONF_INVERTER_TOKEN] = user_input.get(CONF_INVERTER_TOKEN, "")
+                    self._inverter_data[CONF_ENPHASE_USERNAME] = user_input.get(CONF_ENPHASE_USERNAME, "")
+                    self._inverter_data[CONF_ENPHASE_PASSWORD] = user_input.get(CONF_ENPHASE_PASSWORD, "")
+                    self._inverter_data[CONF_ENPHASE_SERIAL] = user_input.get(CONF_ENPHASE_SERIAL, "")
+                    # Grid profile names for profile switching fallback
+                    self._inverter_data[CONF_ENPHASE_NORMAL_PROFILE] = user_input.get(CONF_ENPHASE_NORMAL_PROFILE, "")
+                    self._inverter_data[CONF_ENPHASE_ZERO_EXPORT_PROFILE] = user_input.get(CONF_ENPHASE_ZERO_EXPORT_PROFILE, "")
+                    # Installer mode for grid profile access
+                    self._inverter_data[CONF_ENPHASE_IS_INSTALLER] = user_input.get(CONF_ENPHASE_IS_INSTALLER, False)
+
+                # Fronius-specific: load following mode
+                if inverter_brand == "fronius":
+                    self._inverter_data[CONF_FRONIUS_LOAD_FOLLOWING] = user_input.get(
+                        CONF_FRONIUS_LOAD_FOLLOWING, False
+                    )
+
+                # Restore SOC threshold
+                self._inverter_data[CONF_INVERTER_RESTORE_SOC] = user_input.get(
+                    CONF_INVERTER_RESTORE_SOC, DEFAULT_INVERTER_RESTORE_SOC
                 )
-            else:
-                self._inverter_data[CONF_INVERTER_SLAVE_ID] = 1
 
-            # Include JWT token, Enlighten credentials, and grid profiles for Enphase
-            if inverter_brand == "enphase":
-                self._inverter_data[CONF_INVERTER_TOKEN] = user_input.get(CONF_INVERTER_TOKEN, "")
-                self._inverter_data[CONF_ENPHASE_USERNAME] = user_input.get(CONF_ENPHASE_USERNAME, "")
-                self._inverter_data[CONF_ENPHASE_PASSWORD] = user_input.get(CONF_ENPHASE_PASSWORD, "")
-                self._inverter_data[CONF_ENPHASE_SERIAL] = user_input.get(CONF_ENPHASE_SERIAL, "")
-                # Grid profile names for profile switching fallback
-                self._inverter_data[CONF_ENPHASE_NORMAL_PROFILE] = user_input.get(CONF_ENPHASE_NORMAL_PROFILE, "")
-                self._inverter_data[CONF_ENPHASE_ZERO_EXPORT_PROFILE] = user_input.get(CONF_ENPHASE_ZERO_EXPORT_PROFILE, "")
-                # Installer mode for grid profile access
-                self._inverter_data[CONF_ENPHASE_IS_INSTALLER] = user_input.get(CONF_ENPHASE_IS_INSTALLER, False)
-
-            # Fronius-specific: load following mode
-            if inverter_brand == "fronius":
-                self._inverter_data[CONF_FRONIUS_LOAD_FOLLOWING] = user_input.get(
-                    CONF_FRONIUS_LOAD_FOLLOWING, False
-                )
-
-            # Restore SOC threshold
-            self._inverter_data[CONF_INVERTER_RESTORE_SOC] = user_input.get(
-                CONF_INVERTER_RESTORE_SOC, DEFAULT_INVERTER_RESTORE_SOC
-            )
-
-            return await self.async_step_demand_charges()
+                return await self.async_step_demand_charges()
 
         # Get brand-specific models and defaults
+        # Pass battery system to filter out conflicting models (e.g., SH-series when battery is Sungrow)
         brand = getattr(self, '_inverter_brand', "sungrow")
-        models = get_models_for_brand(brand)
+        models = get_models_for_brand(brand, self._selected_battery_system)
         defaults = get_brand_defaults(brand)
 
         # Build brand-specific schema
@@ -1657,6 +1822,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="inverter_config_setup",
             data_schema=vol.Schema(schema_dict),
+            errors=errors,
             description_placeholders={
                 "brand": brand.title(),
             },
@@ -1875,10 +2041,11 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         """Step 1: Select electricity provider and battery-specific settings."""
         # Detect battery system type
         battery_system = self.config_entry.data.get(CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA)
-        is_sigenergy = battery_system == BATTERY_SYSTEM_SIGENERGY
 
-        if is_sigenergy:
+        if battery_system == BATTERY_SYSTEM_SIGENERGY:
             return await self.async_step_init_sigenergy(user_input)
+        elif battery_system == BATTERY_SYSTEM_SUNGROW:
+            return await self.async_step_init_sungrow(user_input)
         else:
             return await self.async_step_init_tesla(user_input)
 
@@ -2080,6 +2247,75 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             errors=errors,
         )
 
+    async def async_step_init_sungrow(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step 1 for Sungrow users: Configure Modbus connection settings."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            # Validate Modbus host
+            modbus_host = user_input.get(CONF_SUNGROW_HOST, "").strip()
+            if not modbus_host:
+                errors["base"] = "sungrow_host_required"
+            else:
+                # Store provider and Sungrow settings
+                self._provider = user_input.get(CONF_ELECTRICITY_PROVIDER, "amber")
+
+                # Update config entry data with Sungrow Modbus settings
+                new_data = dict(self.config_entry.data)
+                new_data[CONF_SUNGROW_HOST] = modbus_host
+                new_data[CONF_SUNGROW_PORT] = user_input.get(
+                    CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT
+                )
+                new_data[CONF_SUNGROW_SLAVE_ID] = user_input.get(
+                    CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID
+                )
+
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data=new_data
+                )
+
+                # Route to provider-specific step
+                if self._provider == "amber":
+                    return await self.async_step_amber_options()
+                elif self._provider == "flow_power":
+                    return await self.async_step_flow_power_options()
+                elif self._provider in ("globird", "aemo_vpp"):
+                    return await self.async_step_globird_options()
+                elif self._provider == "octopus":
+                    return await self.async_step_octopus_options()
+
+        current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
+        current_host = self._get_option(CONF_SUNGROW_HOST, "")
+        current_port = self._get_option(CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT)
+        current_slave_id = self._get_option(CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID)
+
+        return self.async_show_form(
+            step_id="init_sungrow",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_ELECTRICITY_PROVIDER,
+                        default=current_provider,
+                    ): vol.In(ELECTRICITY_PROVIDERS),
+                    vol.Required(
+                        CONF_SUNGROW_HOST,
+                        default=current_host,
+                    ): str,
+                    vol.Optional(
+                        CONF_SUNGROW_PORT,
+                        default=current_port,
+                    ): int,
+                    vol.Optional(
+                        CONF_SUNGROW_SLAVE_ID,
+                        default=current_slave_id,
+                    ): int,
+                }
+            ),
+            errors=errors,
+        )
+
     async def async_step_teslemetry_token(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -2139,7 +2375,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         """Step 2a: Amber Electric specific options."""
         # Check if Tesla is selected (force mode toggle only applies to Tesla)
         battery_system = self.config_entry.data.get(CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA)
-        is_tesla = battery_system != BATTERY_SYSTEM_SIGENERGY
+        is_tesla = battery_system == BATTERY_SYSTEM_TESLA
 
         if user_input is not None:
             # Store amber options temporarily
@@ -2287,6 +2523,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         """Dedicated step for Solar Curtailment configuration."""
         battery_system = self.config_entry.data.get(CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA)
         is_sigenergy = battery_system == BATTERY_SYSTEM_SIGENERGY
+        is_sungrow = battery_system == BATTERY_SYSTEM_SUNGROW
 
         if user_input is not None:
             # Check if solar curtailment is being disabled
@@ -2310,6 +2547,9 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     self.config_entry, data=new_data
                 )
                 # Route to weather options
+                return await self.async_step_weather_options()
+            elif is_sungrow:
+                # Sungrow doesn't have separate curtailment config - go straight to weather
                 return await self.async_step_weather_options()
             else:
                 # Tesla - check if AC inverter curtailment needs configuration
@@ -2337,6 +2577,9 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_SIGENERGY_DC_CURTAILMENT_ENABLED,
                 default=self.config_entry.data.get(CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False),
             )] = bool
+        elif is_sungrow:
+            # Sungrow doesn't need additional curtailment options - battery controls built-in
+            pass
         else:
             # Tesla AC inverter curtailment option
             schema_dict[vol.Optional(
@@ -2428,56 +2671,79 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Step for configuring inverter-specific settings."""
+        errors = {}
+
         if user_input is not None:
-            # Combine amber options, curtailment options, and inverter config
-            final_data = {**getattr(self, '_amber_options', {})}
-            final_data.update(getattr(self, '_curtailment_options', {}))
-            # Get brand from instance variable or existing config
+            # Get brand and configuration values
             inverter_brand = getattr(self, '_inverter_brand', None) or self._get_option(CONF_INVERTER_BRAND, "sungrow")
-            final_data[CONF_INVERTER_BRAND] = inverter_brand
-            final_data[CONF_INVERTER_MODEL] = user_input.get(CONF_INVERTER_MODEL)
-            final_data[CONF_INVERTER_HOST] = user_input.get(CONF_INVERTER_HOST, "")
-            final_data[CONF_INVERTER_PORT] = user_input.get(CONF_INVERTER_PORT, DEFAULT_INVERTER_PORT)
+            inverter_host = user_input.get(CONF_INVERTER_HOST, "")
+            inverter_port = user_input.get(CONF_INVERTER_PORT, DEFAULT_INVERTER_PORT)
+            inverter_slave_id = user_input.get(CONF_INVERTER_SLAVE_ID, DEFAULT_INVERTER_SLAVE_ID)
 
-            # Only include slave ID for Modbus brands (not Enphase/Zeversolar which use HTTP)
-            if inverter_brand not in ("enphase", "zeversolar"):
-                final_data[CONF_INVERTER_SLAVE_ID] = user_input.get(
-                    CONF_INVERTER_SLAVE_ID, DEFAULT_INVERTER_SLAVE_ID
+            # Validate: if battery is Sungrow and AC inverter is also Sungrow,
+            # check for IP/port/slave_id conflicts
+            battery_system = self.config_entry.data.get(CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA)
+            if battery_system == BATTERY_SYSTEM_SUNGROW and inverter_brand == "sungrow":
+                sungrow_host = self.config_entry.data.get(CONF_SUNGROW_HOST, "")
+                sungrow_port = self.config_entry.data.get(CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT)
+                sungrow_slave_id = self.config_entry.data.get(CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID)
+
+                # Same host, port, AND slave ID = conflict
+                if (
+                    inverter_host == sungrow_host
+                    and inverter_port == sungrow_port
+                    and inverter_slave_id == sungrow_slave_id
+                ):
+                    errors["base"] = "sungrow_modbus_conflict"
+
+            if not errors:
+                # Combine amber options, curtailment options, and inverter config
+                final_data = {**getattr(self, '_amber_options', {})}
+                final_data.update(getattr(self, '_curtailment_options', {}))
+                final_data[CONF_INVERTER_BRAND] = inverter_brand
+                final_data[CONF_INVERTER_MODEL] = user_input.get(CONF_INVERTER_MODEL)
+                final_data[CONF_INVERTER_HOST] = inverter_host
+                final_data[CONF_INVERTER_PORT] = inverter_port
+
+                # Only include slave ID for Modbus brands (not Enphase/Zeversolar which use HTTP)
+                if inverter_brand not in ("enphase", "zeversolar"):
+                    final_data[CONF_INVERTER_SLAVE_ID] = inverter_slave_id
+                else:
+                    final_data[CONF_INVERTER_SLAVE_ID] = 1  # Default for HTTP-based inverters
+
+                # Include JWT token, Enlighten credentials, and grid profiles for Enphase (firmware 7.x+)
+                if inverter_brand == "enphase":
+                    final_data[CONF_INVERTER_TOKEN] = user_input.get(CONF_INVERTER_TOKEN, "")
+                    final_data[CONF_ENPHASE_USERNAME] = user_input.get(CONF_ENPHASE_USERNAME, "")
+                    final_data[CONF_ENPHASE_PASSWORD] = user_input.get(CONF_ENPHASE_PASSWORD, "")
+                    final_data[CONF_ENPHASE_SERIAL] = user_input.get(CONF_ENPHASE_SERIAL, "")
+                    # Grid profile names for profile switching fallback
+                    final_data[CONF_ENPHASE_NORMAL_PROFILE] = user_input.get(CONF_ENPHASE_NORMAL_PROFILE, "")
+                    final_data[CONF_ENPHASE_ZERO_EXPORT_PROFILE] = user_input.get(CONF_ENPHASE_ZERO_EXPORT_PROFILE, "")
+                    # Installer mode for grid profile access
+                    final_data[CONF_ENPHASE_IS_INSTALLER] = user_input.get(CONF_ENPHASE_IS_INSTALLER, False)
+
+                # Fronius-specific: load following mode (for users without 0W export profile)
+                if inverter_brand == "fronius":
+                    final_data[CONF_FRONIUS_LOAD_FOLLOWING] = user_input.get(
+                        CONF_FRONIUS_LOAD_FOLLOWING, False
+                    )
+
+                # Restore SOC threshold for AC inverter curtailment
+                final_data[CONF_INVERTER_RESTORE_SOC] = user_input.get(
+                    CONF_INVERTER_RESTORE_SOC, DEFAULT_INVERTER_RESTORE_SOC
                 )
-            else:
-                final_data[CONF_INVERTER_SLAVE_ID] = 1  # Default for HTTP-based inverters
 
-            # Include JWT token, Enlighten credentials, and grid profiles for Enphase (firmware 7.x+)
-            if inverter_brand == "enphase":
-                final_data[CONF_INVERTER_TOKEN] = user_input.get(CONF_INVERTER_TOKEN, "")
-                final_data[CONF_ENPHASE_USERNAME] = user_input.get(CONF_ENPHASE_USERNAME, "")
-                final_data[CONF_ENPHASE_PASSWORD] = user_input.get(CONF_ENPHASE_PASSWORD, "")
-                final_data[CONF_ENPHASE_SERIAL] = user_input.get(CONF_ENPHASE_SERIAL, "")
-                # Grid profile names for profile switching fallback
-                final_data[CONF_ENPHASE_NORMAL_PROFILE] = user_input.get(CONF_ENPHASE_NORMAL_PROFILE, "")
-                final_data[CONF_ENPHASE_ZERO_EXPORT_PROFILE] = user_input.get(CONF_ENPHASE_ZERO_EXPORT_PROFILE, "")
-                # Installer mode for grid profile access
-                final_data[CONF_ENPHASE_IS_INSTALLER] = user_input.get(CONF_ENPHASE_IS_INSTALLER, False)
-
-            # Fronius-specific: load following mode (for users without 0W export profile)
-            if inverter_brand == "fronius":
-                final_data[CONF_FRONIUS_LOAD_FOLLOWING] = user_input.get(
-                    CONF_FRONIUS_LOAD_FOLLOWING, False
-                )
-
-            # Restore SOC threshold for AC inverter curtailment
-            final_data[CONF_INVERTER_RESTORE_SOC] = user_input.get(
-                CONF_INVERTER_RESTORE_SOC, DEFAULT_INVERTER_RESTORE_SOC
-            )
-
-            # Store inverter config and route to weather options
-            self._inverter_options = final_data
-            return await self.async_step_weather_options()
+                # Store inverter config and route to weather options
+                self._inverter_options = final_data
+                return await self.async_step_weather_options()
 
         # Get brand-specific models and defaults
         # Fall back to existing config if _inverter_brand not set (options flow)
         brand = getattr(self, '_inverter_brand', None) or self._get_option(CONF_INVERTER_BRAND, "sungrow")
-        models = get_models_for_brand(brand)
+        # Pass battery system to filter out conflicting models (e.g., SH-series when battery is Sungrow)
+        battery_system = self.config_entry.data.get(CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA)
+        models = get_models_for_brand(brand, battery_system)
         defaults = get_brand_defaults(brand)
 
         # Get current values from existing config (for editing)
@@ -2579,6 +2845,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="inverter_config",
             data_schema=vol.Schema(schema_dict),
+            errors=errors,
             description_placeholders={
                 "brand": INVERTER_BRANDS.get(brand, brand),
             },
