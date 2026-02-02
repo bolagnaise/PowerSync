@@ -1424,7 +1424,7 @@ async def _action_start_ev_charging(
                 _LOGGER.info(f"⏰ Time window ended, stopping EV charging")
                 await _action_stop_ev_charging(hass, config_entry, params)
                 # Send notification that charging stopped
-                await _send_expo_push(hass, "PowerSync", "EV charging stopped - time window ended")
+                await _send_expo_push(hass, "EV Charging", "Stopped - time window ended")
                 # Clean up the scheduled stop entry
                 if entry_id in _ev_scheduled_stop:
                     del _ev_scheduled_stop[entry_id]
@@ -2256,8 +2256,8 @@ async def _dynamic_ev_update_surplus(
                             vehicle_name = vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id
                         await _send_expo_push(
                             hass,
-                            "EV Charging Paused",
-                            f"{vehicle_name}: Battery at {battery_soc:.0f}% (below {pause_soc}%)"
+                            "EV Charging",
+                            f"{vehicle_name} paused - battery low ({battery_soc:.0f}%)"
                         )
                     except Exception as e:
                         _LOGGER.debug(f"Could not send pause notification: {e}")
@@ -2294,11 +2294,10 @@ async def _dynamic_ev_update_surplus(
                             vehicle_name = _get_vehicle_name_from_vin(hass, vehicle_id)
                         if not vehicle_name:
                             vehicle_name = vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id
-                        mode_info = " (parallel)" if state.get("parallel_charging_mode") else ""
                         await _send_expo_push(
                             hass,
-                            "EV Charging Resumed",
-                            f"{vehicle_name}: Charging resumed{mode_info}"
+                            "EV Charging",
+                            f"{vehicle_name} resumed"
                         )
                     except Exception as e:
                         _LOGGER.debug(f"Could not send resume notification: {e}")
@@ -2376,8 +2375,8 @@ async def _dynamic_ev_update_surplus(
                             vehicle_name = vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id
                         await _send_expo_push(
                             hass,
-                            "Solar EV Charging Started",
-                            f"{vehicle_name}: {surplus_kw:.1f}kW surplus available"
+                            "EV Charging",
+                            f"{vehicle_name} started - {surplus_kw:.1f}kW solar"
                         )
                     except Exception as e:
                         _LOGGER.debug(f"Could not send solar start notification: {e}")
@@ -2536,7 +2535,7 @@ async def _dynamic_ev_update(
                 _LOGGER.info("⏰ Dynamic EV: Outside time window, stopping charging")
                 await _action_stop_ev_charging_dynamic(hass, config_entry, {"stop_charging": True})
                 # Send notification that charging stopped
-                await _send_expo_push(hass, "PowerSync", "EV charging stopped - time window ended")
+                await _send_expo_push(hass, "EV Charging", "Stopped - time window ended")
                 return
 
     # target_battery_charge_kw: How much we want the battery to charge (positive = charging into battery)
@@ -2911,8 +2910,8 @@ async def _action_start_ev_charging_dynamic(
                 vehicle_name = vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id
             await _send_expo_push(
                 hass,
-                "EV Charging Started",
-                f"{vehicle_name}: {mode_label} mode activated"
+                "EV Charging",
+                f"{vehicle_name} started"
             )
         except Exception as e:
             _LOGGER.debug(f"Could not send start notification: {e}")
@@ -2989,11 +2988,11 @@ async def _action_stop_ev_charging_dynamic(
                         vehicle_name = _get_vehicle_name_from_vin(hass, vid)
                     if not vehicle_name:
                         vehicle_name = vid[:8] if len(vid) > 8 else vid
-                    reason = params.get("stop_reason", "manually stopped")
+                    reason = params.get("stop_reason", "stopped")
                     await _send_expo_push(
                         hass,
-                        "EV Charging Stopped",
-                        f"{vehicle_name}: {reason}"
+                        "EV Charging",
+                        f"{vehicle_name} {reason}"
                     )
                 except Exception as e:
                     _LOGGER.debug(f"Could not send stop notification: {e}")
