@@ -21,11 +21,11 @@ COPY requirements.txt .
 RUN pip3 install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY optimizer/ ./optimizer/
+COPY optimiser/ ./optimiser/
 COPY run.sh .
 
 # Make run script executable
 RUN chmod a+x run.sh
 
-# Run the optimizer server
+# Run the optimiser server
 CMD [ "/app/run.sh" ]

@@ -17,7 +17,7 @@ export DEFAULT_COST_FUNCTION="${DEFAULT_COST_FUNCTION}"
 export SUPERVISOR_TOKEN="${SUPERVISOR_TOKEN}"
 export HA_URL="http://supervisor/core"
 
-bashio::log.info "Starting PowerSync Optimizer..."
+bashio::log.info "Starting PowerSync Optimiser..."
 bashio::log.info "Log level: ${LOG_LEVEL}"
 bashio::log.info "Optimization interval: ${OPTIMIZATION_INTERVAL} minutes"
 bashio::log.info "Horizon: ${HORIZON_HOURS} hours"
@@ -25,4 +25,4 @@ bashio::log.info "Default cost function: ${DEFAULT_COST_FUNCTION}"
 
 # Start the Flask server
 cd /app
-exec python3 -m optimizer.server
+exec python3 -m optimiser.server

@@ -1,0 +1,1 @@
+"""PowerSync Optimiser Add-on."""

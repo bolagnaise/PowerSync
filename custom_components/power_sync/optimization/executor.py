@@ -17,7 +17,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.util import dt as dt_util
 
-from .engine import BatteryOptimizer, OptimizationConfig, OptimizationResult, CostFunction
+from .engine import BatteryOptimiser, OptimizationConfig, OptimizationResult, CostFunction
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ class ScheduleExecutor:
     def __init__(
         self,
         hass: HomeAssistant,
-        optimizer: BatteryOptimizer,
+        optimiser: BatteryOptimiser,
         battery_controller: Any,  # Battery-specific controller (Tesla/Sigenergy/Sungrow)
         interval_minutes: int = 30,
     ):
@@ -67,12 +67,12 @@ class ScheduleExecutor:
 
         Args:
             hass: Home Assistant instance
-            optimizer: BatteryOptimizer instance
+            optimiser: BatteryOptimiser instance
             battery_controller: Controller for battery system commands
             interval_minutes: Execution interval in minutes
         """
         self.hass = hass
-        self.optimizer = optimizer
+        self.optimiser = optimiser
         self.battery_controller = battery_controller
         self.interval_minutes = interval_minutes
 
@@ -230,7 +230,7 @@ class ScheduleExecutor:
             config.cost_function = self._cost_function
 
             # Run optimization
-            result = self.optimizer.optimize(
+            result = self.optimiser.optimize(
                 prices_import=import_prices,
                 prices_export=export_prices,
                 solar_forecast=solar,

@@ -2,7 +2,7 @@
 EV charging integration for battery optimization.
 
 Extends the optimization problem to include EV charging as a controllable load.
-The optimizer can schedule EV charging during optimal price periods while
+The optimiser can schedule EV charging during optimal price periods while
 respecting:
 - EV battery capacity and current SOC
 - Charger power limits
@@ -128,16 +128,16 @@ class EVChargingSchedule:
         }
 
 
-class EVOptimizer:
+class EVOptimiser:
     """
-    EV charging optimizer.
+    EV charging optimiser.
 
-    Can be used standalone or integrated with the main battery optimizer.
+    Can be used standalone or integrated with the main battery optimiser.
     Schedules EV charging to minimize cost while meeting departure constraints.
     """
 
     def __init__(self, interval_minutes: int = 30):
-        """Initialize the EV optimizer."""
+        """Initialize the EV optimiser."""
         self.interval_minutes = interval_minutes
         self._solver_available = self._check_solver()
 
@@ -410,7 +410,7 @@ class EVOptimizer:
 
 
 def integrate_ev_with_home_battery(
-    home_optimizer,
+    home_optimiser,
     ev_configs: list[EVConfig],
     prices_import: list[float],
     prices_export: list[float],
@@ -423,10 +423,10 @@ def integrate_ev_with_home_battery(
     Joint optimization of home battery and EV charging.
 
     This is a higher-level function that coordinates the home battery
-    optimizer with EV charging to find a globally optimal solution.
+    optimiser with EV charging to find a globally optimal solution.
 
     Args:
-        home_optimizer: BatteryOptimizer instance
+        home_optimiser: BatteryOptimiser instance
         ev_configs: List of EV configurations
         prices_import: Import prices
         prices_export: Export prices
@@ -439,7 +439,7 @@ def integrate_ev_with_home_battery(
         Tuple of (home_battery_result, list of ev_schedules)
     """
     n_intervals = len(prices_import)
-    dt_hours = home_optimizer.config.interval_minutes / 60.0
+    dt_hours = home_optimiser.config.interval_minutes / 60.0
 
     # Strategy: Iterative optimization
     # 1. First optimize home battery without EVs
@@ -448,10 +448,10 @@ def integrate_ev_with_home_battery(
     # 4. Re-optimize home battery with EV loads
     # 5. Iterate until convergence
 
-    ev_optimizer = EVOptimizer(home_optimizer.config.interval_minutes)
+    ev_optimiser = EVOptimiser(home_optimiser.config.interval_minutes)
 
     # Step 1: Initial home battery optimization
-    home_result = home_optimizer.optimize(
+    home_result = home_optimiser.optimize(
         prices_import=prices_import,
         prices_export=prices_export,
         solar_forecast=solar_forecast,
@@ -479,7 +479,7 @@ def integrate_ev_with_home_battery(
         sorted_evs = sorted(ev_configs, key=lambda e: e.priority.value)
 
         for ev in sorted_evs:
-            ev_schedule = ev_optimizer.optimize_single_ev(
+            ev_schedule = ev_optimiser.optimize_single_ev(
                 ev_config=ev,
                 prices_import=prices_import,
                 solar_surplus=surplus,
@@ -502,7 +502,7 @@ def integrate_ev_with_home_battery(
 
         combined_load = [load_forecast[t] + total_ev_load[t] for t in range(n_intervals)]
 
-        home_result = home_optimizer.optimize(
+        home_result = home_optimiser.optimize(
             prices_import=prices_import,
             prices_export=prices_export,
             solar_forecast=solar_forecast,

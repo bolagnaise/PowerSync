@@ -22,28 +22,28 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from .engine import BatteryOptimizer, OptimizationConfig, OptimizationResult, CostFunction
+from .engine import BatteryOptimiser, OptimizationConfig, OptimizationResult, CostFunction
 from .executor import ScheduleExecutor, ExecutionStatus, BatteryAction
 from .load_estimator import LoadEstimator, SolcastForecaster
 
 # Enhanced modules
 from .ml_load_forecaster import MLLoadEstimator, WeatherAdjustedForecaster, WeatherFeatures
 from .ev_integration import (
-    EVOptimizer,
+    EVOptimiser,
     EVConfig,
     EVChargingSchedule,
     EVChargingPriority,
     integrate_ev_with_home_battery,
 )
 from .multi_battery import (
-    MultiBatteryOptimizer,
+    MultiBatteryOptimiser,
     MultiBatteryResult,
     BatteryConfig,
     BatterySystemType,
 )
 from .grid_services import (
     GridServicesManager,
-    VPPAwareOptimizer,
+    VPPAwareOptimiser,
     VPPConfig,
     VPPProgram,
     GridEvent,
@@ -80,7 +80,7 @@ UPDATE_INTERVAL = timedelta(minutes=5)
 VPP_CHECK_INTERVAL = timedelta(minutes=1)
 
 # Add-on API configuration
-ADDON_SLUG = "powersync_optimizer"
+ADDON_SLUG = "powersync_optimiser"
 ADDON_API_URL = f"http://{ADDON_SLUG}:5000"
 
 
@@ -154,7 +154,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._enable_vpp = enable_vpp
 
         # Core optimization components
-        self._optimizer = BatteryOptimizer()
+        self._optimiser = BatteryOptimiser()
         self._executor: ScheduleExecutor | None = None
         self._load_estimator: LoadEstimator | None = None
         self._solar_forecaster: SolcastForecaster | None = None
@@ -162,10 +162,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Enhanced components
         self._ml_load_estimator: MLLoadEstimator | None = None
         self._weather_forecaster: WeatherAdjustedForecaster | None = None
-        self._ev_optimizer: EVOptimizer | None = None
-        self._multi_battery_optimizer: MultiBatteryOptimizer | None = None
+        self._ev_optimiser: EVOptimiser | None = None
+        self._multi_battery_optimiser: MultiBatteryOptimiser | None = None
         self._grid_services: GridServicesManager | None = None
-        self._vpp_aware_optimizer: VPPAwareOptimizer | None = None
+        self._vpp_aware_optimiser: VPPAwareOptimiser | None = None
 
         # Configuration
         self._enabled = False
@@ -204,10 +204,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return self._enabled
 
     @property
-    def optimizer_available(self) -> bool:
-        """Check if the LP optimizer is available (local or add-on)."""
-        # Local optimizer has priority info, but add-on is preferred
-        return self._optimizer.is_available or self._addon_available
+    def optimiser_available(self) -> bool:
+        """Check if the LP optimiser is available (local or add-on)."""
+        # Local optimiser has priority info, but add-on is preferred
+        return self._optimiser.is_available or self._addon_available
 
     def _check_addon_sync(self) -> bool:
         """Synchronous check if add-on was available on last check."""
@@ -274,19 +274,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             interval_minutes=self._config.interval_minutes,
         )
 
-        # Initialize EV optimizer
+        # Initialize EV optimiser
         if self._enable_ev:
-            self._ev_optimizer = EVOptimizer(
+            self._ev_optimiser = EVOptimiser(
                 interval_minutes=self._config.interval_minutes
             )
             await self._discover_ev_configs()
             _LOGGER.info(f"EV integration enabled with {len(self._ev_configs)} vehicles")
 
-        # Initialize multi-battery optimizer
+        # Initialize multi-battery optimiser
         if self._enable_multi_battery:
             await self._discover_battery_configs()
             if len(self._battery_configs) > 1:
-                self._multi_battery_optimizer = MultiBatteryOptimizer(
+                self._multi_battery_optimiser = MultiBatteryOptimiser(
                     batteries=self._battery_configs,
                     interval_minutes=self._config.interval_minutes,
                     horizon_hours=self._config.horizon_hours,
@@ -303,9 +303,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self._vpp_config,
                     self.battery_controller,
                 )
-                # Set up VPP-aware optimizer
-                self._vpp_aware_optimizer = VPPAwareOptimizer(
-                    self._optimizer,
+                # Set up VPP-aware optimiser
+                self._vpp_aware_optimiser = VPPAwareOptimiser(
+                    self._optimiser,
                     self._grid_services,
                     self._vpp_config,
                 )
@@ -314,7 +314,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Initialize executor
         self._executor = ScheduleExecutor(
             self.hass,
-            self._optimizer,
+            self._optimiser,
             self.battery_controller,
             interval_minutes=self._config.interval_minutes,
         )
@@ -332,8 +332,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         _LOGGER.info(
             f"Optimization coordinator setup complete. "
-            f"Local optimizer: {self._optimizer.is_available}, "
-            f"Add-on optimizer: {self._addon_available}, "
+            f"Local optimiser: {self._optimiser.is_available}, "
+            f"Add-on optimiser: {self._addon_available}, "
             f"ML: {self._enable_ml_forecasting}, "
             f"Weather: {self._enable_weather}, "
             f"EV: {self._enable_ev}, "
@@ -553,7 +553,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as e:
             _LOGGER.debug(f"Error fetching provider price config: {e}")
 
-    async def _call_addon_optimizer(
+    async def _call_addon_optimiser(
         self,
         prices_import: list[float],
         prices_export: list[float],
@@ -561,7 +561,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         load_forecast: list[float],
         battery_state: tuple[float, float],
     ) -> OptimizationResult | None:
-        """Call the PowerSync Optimizer add-on for optimization."""
+        """Call the PowerSync Optimiser add-on for optimization."""
         import aiohttp
 
         initial_soc, capacity = battery_state
@@ -645,11 +645,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug(f"Add-on not available: {e}")
             return None
         except Exception as e:
-            _LOGGER.error(f"Error calling add-on optimizer: {e}")
+            _LOGGER.error(f"Error calling add-on optimiser: {e}")
             return None
 
     async def _is_addon_available(self) -> bool:
-        """Check if the optimizer add-on is available."""
+        """Check if the optimiser add-on is available."""
         import aiohttp
 
         try:
@@ -660,7 +660,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ) as response:
                     if response.status == 200:
                         data = await response.json()
-                        return data.get("optimizer_available", False)
+                        return data.get("optimiser_available", False)
         except Exception:
             pass
         return False
@@ -741,8 +741,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._executor:
             self._executor.set_cost_function(cost_function)
 
-        if self._multi_battery_optimizer:
-            self._multi_battery_optimizer.cost_function = cost_function
+        if self._multi_battery_optimiser:
+            self._multi_battery_optimiser.cost_function = cost_function
 
         _LOGGER.info(f"Cost function set to: {cost_function.value}")
 
@@ -758,7 +758,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def force_reoptimize(self) -> OptimizationResult | None:
         """Force immediate re-optimization with all enhancements.
 
-        Tries the PowerSync Optimizer add-on first (has cvxpy/numpy),
+        Tries the PowerSync Optimiser add-on first (has cvxpy/numpy),
         falls back to local optimization if add-on unavailable.
         """
         _LOGGER.info("Forcing re-optimization with enhanced features")
@@ -779,8 +779,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         initial_soc, capacity = battery_state
         start_time = dt_util.now()
 
-        # Try add-on optimizer first (has full cvxpy/numpy support)
-        addon_result = await self._call_addon_optimizer(
+        # Try add-on optimiser first (has full cvxpy/numpy support)
+        addon_result = await self._call_addon_optimiser(
             import_prices, export_prices, solar, load, battery_state
         )
         if addon_result:
@@ -802,9 +802,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             anticipated_events = await self._grid_services.check_grid_conditions()
 
         # Run optimization based on configuration (local fallback)
-        if self._multi_battery_optimizer and len(self._battery_configs) > 1:
+        if self._multi_battery_optimiser and len(self._battery_configs) > 1:
             # Multi-battery optimization
-            self._multi_battery_result = self._multi_battery_optimizer.optimize(
+            self._multi_battery_result = self._multi_battery_optimiser.optimize(
                 prices_import=import_prices,
                 prices_export=export_prices,
                 solar_forecast=solar,
@@ -820,7 +820,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         elif self._enable_ev and self._ev_configs:
             # Joint home battery + EV optimization
             self._current_schedule, self._ev_schedules = integrate_ev_with_home_battery(
-                home_optimizer=self._optimizer,
+                home_optimiser=self._optimiser,
                 ev_configs=self._ev_configs,
                 prices_import=import_prices,
                 prices_export=export_prices,
@@ -830,9 +830,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 start_time=start_time,
             )
 
-        elif self._vpp_aware_optimizer and anticipated_events:
+        elif self._vpp_aware_optimiser and anticipated_events:
             # VPP-aware optimization
-            self._current_schedule = await self._vpp_aware_optimizer.optimize_with_vpp(
+            self._current_schedule = await self._vpp_aware_optimiser.optimize_with_vpp(
                 prices_import=import_prices,
                 prices_export=export_prices,
                 solar_forecast=solar,
@@ -844,7 +844,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         else:
             # Standard optimization
-            self._current_schedule = self._optimizer.optimize(
+            self._current_schedule = self._optimiser.optimize(
                 prices_import=import_prices,
                 prices_export=export_prices,
                 solar_forecast=solar,
@@ -919,7 +919,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Build data for mobile app
         data = {
             "enabled": self._enabled,
-            "optimizer_available": self._optimizer.is_available,
+            "optimiser_available": self._optimiser.is_available,
             "cost_function": self._cost_function.value,
             "status": executor_status.get("status", "disabled"),
             "optimization_status": executor_status.get("optimization_status", "not_run"),
@@ -1147,7 +1147,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return {
             "success": True,
             "enabled": self._enabled,
-            "optimizer_available": self._optimizer.is_available,
+            "optimiser_available": self._optimiser.is_available,
             "cost_function": self._cost_function.value,
             "config": {
                 "battery_capacity_wh": self._config.battery_capacity_wh,
@@ -1233,15 +1233,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def add_battery_config(self, battery_config: BatteryConfig) -> None:
         """Add a battery configuration."""
         self._battery_configs.append(battery_config)
-        if self._multi_battery_optimizer:
-            self._multi_battery_optimizer.add_battery(battery_config)
+        if self._multi_battery_optimiser:
+            self._multi_battery_optimiser.add_battery(battery_config)
         _LOGGER.info(f"Added battery config: {battery_config.name}")
 
     def remove_battery_config(self, battery_id: str) -> None:
         """Remove a battery configuration."""
         self._battery_configs = [b for b in self._battery_configs if b.battery_id != battery_id]
-        if self._multi_battery_optimizer:
-            self._multi_battery_optimizer.remove_battery(battery_id)
+        if self._multi_battery_optimiser:
+            self._multi_battery_optimiser.remove_battery(battery_id)
         _LOGGER.info(f"Removed battery config: {battery_id}")
 
     def get_battery_configs(self) -> list[BatteryConfig]:

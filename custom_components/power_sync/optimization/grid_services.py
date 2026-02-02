@@ -534,11 +534,11 @@ class GridServicesManager:
         }
 
 
-class VPPAwareOptimizer:
+class VPPAwareOptimiser:
     """
-    Battery optimizer that considers VPP events in scheduling.
+    Battery optimiser that considers VPP events in scheduling.
 
-    Extends the base optimizer to:
+    Extends the base optimiser to:
     1. Reserve capacity for anticipated VPP events
     2. Adjust schedules when events occur
     3. Maximize both energy arbitrage and VPP revenue
@@ -546,19 +546,19 @@ class VPPAwareOptimizer:
 
     def __init__(
         self,
-        base_optimizer,
+        base_optimiser,
         grid_services: GridServicesManager,
         vpp_config: VPPConfig,
     ):
         """
-        Initialize VPP-aware optimizer.
+        Initialize VPP-aware optimiser.
 
         Args:
-            base_optimizer: Base BatteryOptimizer or MultiBatteryOptimizer
+            base_optimiser: Base BatteryOptimiser or MultiBatteryOptimiser
             grid_services: Grid services manager
             vpp_config: VPP configuration
         """
-        self.optimizer = base_optimizer
+        self.optimiser = base_optimiser
         self.grid_services = grid_services
         self.config = vpp_config
 
@@ -591,7 +591,7 @@ class VPPAwareOptimizer:
         modified_export = list(prices_export)
 
         if anticipated_events:
-            interval_minutes = self.optimizer.config.interval_minutes
+            interval_minutes = self.optimiser.config.interval_minutes
 
             for event in anticipated_events:
                 if event.event_type == GridEventType.PRICE_SPIKE:
@@ -602,16 +602,16 @@ class VPPAwareOptimizer:
                             modified_export[i] += self.config.vpp_export_bonus
 
         # Adjust backup reserve if VPP events expected
-        original_reserve = self.optimizer.config.backup_reserve
+        original_reserve = self.optimiser.config.backup_reserve
         if anticipated_events:
             # Ensure we have capacity for VPP response
-            self.optimizer.config.backup_reserve = max(
+            self.optimiser.config.backup_reserve = max(
                 original_reserve,
                 self.config.min_reserve_soc,
             )
 
         # Run optimization
-        result = self.optimizer.optimize(
+        result = self.optimiser.optimize(
             prices_import=prices_import,
             prices_export=modified_export,
             solar_forecast=solar_forecast,
@@ -621,7 +621,7 @@ class VPPAwareOptimizer:
         )
 
         # Restore original reserve
-        self.optimizer.config.backup_reserve = original_reserve
+        self.optimiser.config.backup_reserve = original_reserve
 
         return result
 

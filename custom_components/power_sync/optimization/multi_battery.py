@@ -8,7 +8,7 @@ such as:
 - Sigenergy + Sungrow
 - Any combination of supported battery systems
 
-The optimizer coordinates charging/discharging across all batteries
+The optimiser coordinates charging/discharging across all batteries
 to achieve global cost minimization.
 """
 from __future__ import annotations
@@ -129,9 +129,9 @@ class MultiBatteryResult:
         }
 
 
-class MultiBatteryOptimizer:
+class MultiBatteryOptimiser:
     """
-    Optimizer for multiple battery systems.
+    Optimiser for multiple battery systems.
 
     Uses CVXPY to solve a joint optimization problem that coordinates
     charging and discharging across all batteries to minimize total cost.
@@ -145,7 +145,7 @@ class MultiBatteryOptimizer:
         cost_function: CostFunction = CostFunction.COST_MINIMIZATION,
     ):
         """
-        Initialize the multi-battery optimizer.
+        Initialize the multi-battery optimiser.
 
         Args:
             batteries: List of battery configurations
@@ -551,11 +551,11 @@ class MultiBatteryOptimizer:
         )
 
     def add_battery(self, battery: BatteryConfig) -> None:
-        """Add a battery to the optimizer."""
+        """Add a battery to the optimiser."""
         self.batteries[battery.battery_id] = battery
 
     def remove_battery(self, battery_id: str) -> None:
-        """Remove a battery from the optimizer."""
+        """Remove a battery from the optimiser."""
         if battery_id in self.batteries:
             del self.batteries[battery_id]
 

@@ -149,16 +149,16 @@ class OptimizationResult:
         }
 
 
-class BatteryOptimizer:
+class BatteryOptimiser:
     """
-    Linear Programming optimizer for battery scheduling.
+    Linear Programming optimiser for battery scheduling.
 
     Uses CVXPY with HiGHS solver to find the optimal charge/discharge schedule
     that minimizes electricity costs while respecting battery constraints.
     """
 
     def __init__(self, config: OptimizationConfig | None = None):
-        """Initialize the optimizer with configuration."""
+        """Initialize the optimiser with configuration."""
         self.config = config or OptimizationConfig()
         self._solver_available = self._check_solver()
 

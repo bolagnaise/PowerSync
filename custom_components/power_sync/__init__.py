@@ -12433,7 +12433,7 @@ class OptimizationView(HomeAssistantView):
             return web.json_response({
                 "success": True,
                 "enabled": False,
-                "optimizer_available": False,
+                "optimiser_available": False,
                 "status": "not_configured",
                 "message": "Smart Optimization is not enabled. Enable it in settings."
             })
@@ -12507,7 +12507,7 @@ class OptimizationSettingsView(HomeAssistantView):
         return web.json_response({
             "success": True,
             "enabled": opt_coordinator.enabled,
-            "optimizer_available": opt_coordinator.optimizer_available,
+            "optimiser_available": opt_coordinator.optimiser_available,
             "cost_function": opt_coordinator._cost_function.value,
             "config": {
                 "battery_capacity_wh": opt_coordinator._config.battery_capacity_wh,

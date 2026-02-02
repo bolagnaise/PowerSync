@@ -1,5 +1,5 @@
 """Optimization package for PowerSync ML-based battery scheduling."""
-from .engine import BatteryOptimizer, OptimizationResult, OptimizationConfig, CostFunction
+from .engine import BatteryOptimiser, OptimizationResult, OptimizationConfig, CostFunction
 from .load_estimator import LoadEstimator, SolcastForecaster
 from .executor import ScheduleExecutor
 from .coordinator import OptimizationCoordinator
@@ -12,21 +12,21 @@ from .ml_load_forecaster import (
     LoadFeatures,
 )
 from .ev_integration import (
-    EVOptimizer,
+    EVOptimiser,
     EVConfig,
     EVChargingSchedule,
     EVChargingPriority,
     integrate_ev_with_home_battery,
 )
 from .multi_battery import (
-    MultiBatteryOptimizer,
+    MultiBatteryOptimiser,
     MultiBatteryResult,
     BatteryConfig,
     BatterySystemType,
 )
 from .grid_services import (
     GridServicesManager,
-    VPPAwareOptimizer,
+    VPPAwareOptimiser,
     VPPConfig,
     VPPProgram,
     GridEvent,
@@ -36,7 +36,7 @@ from .grid_services import (
 
 __all__ = [
     # Core optimization
-    "BatteryOptimizer",
+    "BatteryOptimiser",
     "OptimizationResult",
     "OptimizationConfig",
     "CostFunction",
@@ -50,19 +50,19 @@ __all__ = [
     "WeatherFeatures",
     "LoadFeatures",
     # EV Integration
-    "EVOptimizer",
+    "EVOptimiser",
     "EVConfig",
     "EVChargingSchedule",
     "EVChargingPriority",
     "integrate_ev_with_home_battery",
     # Multi-battery
-    "MultiBatteryOptimizer",
+    "MultiBatteryOptimiser",
     "MultiBatteryResult",
     "BatteryConfig",
     "BatterySystemType",
     # Grid Services / VPP
     "GridServicesManager",
-    "VPPAwareOptimizer",
+    "VPPAwareOptimiser",
     "VPPConfig",
     "VPPProgram",
     "GridEvent",

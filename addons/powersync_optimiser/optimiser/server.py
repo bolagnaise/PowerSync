@@ -1,5 +1,5 @@
 """
-PowerSync Optimizer HTTP API Server.
+PowerSync Optimiser HTTP API Server.
 
 Provides REST API endpoints for the PowerSync integration to request
 battery optimization schedules.
@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
-from .engine import BatteryOptimizer, OptimizationConfig, CostFunction
+from .engine import BatteryOptimiser, OptimizationConfig, CostFunction
 
 # Configure logging
 log_level = os.environ.get("LOG_LEVEL", "info").upper()
@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-# Global optimizer instance
-optimizer = BatteryOptimizer()
+# Global optimiser instance
+optimiser = BatteryOptimiser()
 
 # Configuration from environment
 OPTIMIZATION_INTERVAL = int(os.environ.get("OPTIMIZATION_INTERVAL", 30))
@@ -38,17 +38,17 @@ def health():
     """Health check endpoint."""
     return jsonify({
         "status": "healthy",
-        "optimizer_available": optimizer.is_available,
+        "optimiser_available": optimiser.is_available,
         "version": "1.0.0",
     })
 
 
 @app.route("/status", methods=["GET"])
 def status():
-    """Get optimizer status and configuration."""
+    """Get optimiser status and configuration."""
     return jsonify({
         "success": True,
-        "optimizer_available": optimizer.is_available,
+        "optimiser_available": optimiser.is_available,
         "config": {
             "optimization_interval": OPTIMIZATION_INTERVAL,
             "horizon_hours": HORIZON_HOURS,
@@ -86,10 +86,10 @@ def optimize():
         }
     }
     """
-    if not optimizer.is_available:
+    if not optimiser.is_available:
         return jsonify({
             "success": False,
-            "error": "Optimizer not available (missing cvxpy/numpy)",
+            "error": "Optimiser not available (missing cvxpy/numpy)",
         }), 503
 
     try:
@@ -160,7 +160,7 @@ def optimize():
 
         # Run optimization
         logger.info(f"Running optimization: {len(prices_import)} intervals, SOC={current_soc:.1%}")
-        result = optimizer.optimize(
+        result = optimiser.optimize(
             prices_import=prices_import[:n_intervals],
             prices_export=prices_export[:n_intervals],
             solar_forecast=solar_forecast[:n_intervals],
@@ -312,6 +312,6 @@ def optimize_multi_battery():
 
 
 if __name__ == "__main__":
-    logger.info("Starting PowerSync Optimizer server...")
-    logger.info(f"Optimizer available: {optimizer.is_available}")
+    logger.info("Starting PowerSync Optimiser server...")
+    logger.info(f"Optimiser available: {optimiser.is_available}")
     app.run(host="0.0.0.0", port=5000, debug=False)
