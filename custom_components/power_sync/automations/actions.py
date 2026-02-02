@@ -61,6 +61,56 @@ TESLA_EV_INTEGRATIONS = TESLA_INTEGRATIONS
 # Global lock to prevent concurrent wake/charging attempts
 _ev_wake_lock: Dict[str, bool] = {}  # vehicle_id -> is_waking
 
+# API credit exhaustion tracking - prevents retry loops when Teslemetry credits are depleted
+_api_credit_exhausted: Dict[str, datetime] = {}  # "teslemetry" -> exhaustion_timestamp
+API_CREDIT_COOLDOWN_MINUTES = 15  # Wait before retrying after credit exhaustion
+
+# Error messages that indicate API credit/payment issues
+API_CREDIT_ERROR_PATTERNS = [
+    "payment is required",
+    "insufficient command credits",
+    "insufficient credits",
+    "payment required",
+    "credits exhausted",
+]
+
+
+def _is_api_credit_error(error_message: str) -> bool:
+    """Check if an error message indicates API credit exhaustion."""
+    error_lower = str(error_message).lower()
+    return any(pattern in error_lower for pattern in API_CREDIT_ERROR_PATTERNS)
+
+
+def _mark_api_credits_exhausted(api_name: str = "teslemetry") -> None:
+    """Mark that API credits are exhausted, triggering cooldown."""
+    _api_credit_exhausted[api_name] = datetime.now()
+    _LOGGER.warning(
+        f"🚫 {api_name.title()} API credits exhausted. "
+        f"Commands will be blocked for {API_CREDIT_COOLDOWN_MINUTES} minutes. "
+        f"Please top up your API credits."
+    )
+
+
+def _is_api_credit_available(api_name: str = "teslemetry") -> bool:
+    """Check if API credits are available (not in cooldown period)."""
+    if api_name not in _api_credit_exhausted:
+        return True
+
+    exhausted_at = _api_credit_exhausted[api_name]
+    cooldown_end = exhausted_at + timedelta(minutes=API_CREDIT_COOLDOWN_MINUTES)
+
+    if datetime.now() >= cooldown_end:
+        # Cooldown expired, clear the exhaustion flag
+        del _api_credit_exhausted[api_name]
+        _LOGGER.info(f"✅ {api_name.title()} API credit cooldown expired, retrying commands")
+        return True
+
+    remaining = (cooldown_end - datetime.now()).total_seconds() / 60
+    _LOGGER.debug(
+        f"🚫 {api_name.title()} API credits exhausted, {remaining:.1f} minutes remaining in cooldown"
+    )
+    return False
+
 
 def _is_sigenergy(config_entry: ConfigEntry) -> bool:
     """Check if this is a Sigenergy system."""
@@ -201,6 +251,11 @@ async def _wake_tesla_ev(
     """
     import asyncio
 
+    # Check if API credits are exhausted (cooldown period active)
+    if not _is_api_credit_available("teslemetry"):
+        _LOGGER.warning("Skipping Tesla wake - API credits exhausted, in cooldown period")
+        return False
+
     # Generate a lock key (use VIN if available, otherwise generic)
     lock_key = vehicle_vin or "default"
 
@@ -235,12 +290,16 @@ async def _wake_tesla_ev(
 
         # Try multiple entity patterns to verify wake status
         # Different Tesla integrations use different entity naming conventions
+        # Order matters - more specific patterns first to avoid matching wrong entities
         status_patterns = [
-            (r"binary_sensor\..*_asleep$", "binary", "off"),  # asleep=off means awake
-            (r"binary_sensor\..*asleep$", "binary", "off"),   # Without underscore
-            (r"sensor\..*_state$", "state", "online"),        # state=online
-            (r"sensor\..*_status$", "state", "online"),       # status=online
-            (r"sensor\..*state$", "state", "online"),         # Without underscore
+            # Teslemetry uses binary_sensor.*_status (on=online, off=offline)
+            (r"binary_sensor\..*_status$", "binary", "on"),
+            # Other integrations use binary_sensor.*_asleep (off=awake)
+            (r"binary_sensor\..*_asleep$", "binary", "off"),
+            (r"binary_sensor\..*asleep$", "binary", "off"),
+            # Fallback: sensor.*_vehicle_state (avoid shift_state which is drive gear)
+            (r"sensor\..*_vehicle_state$", "state", "online"),
+            (r"sensor\..*vehicle_state$", "state", "online"),
         ]
 
         status_entity = None
@@ -260,8 +319,8 @@ async def _wake_tesla_ev(
             _LOGGER.warning(
                 "Could not find Tesla status/asleep sensor. "
                 "Will send wake command but cannot verify wake completion. "
-                "Tried patterns: binary_sensor.*_asleep, binary_sensor.*asleep, "
-                "sensor.*_state, sensor.*_status, sensor.*state"
+                "Tried patterns: binary_sensor.*_status, binary_sensor.*_asleep, "
+                "sensor.*_vehicle_state"
             )
 
         def _is_awake() -> bool:
@@ -293,6 +352,13 @@ async def _wake_tesla_ev(
                 )
             except Exception as e:
                 _LOGGER.warning(f"Wake command attempt {attempt} failed: {e}")
+
+                # Check if this is a credit/payment error - if so, stop retrying
+                if _is_api_credit_error(str(e)):
+                    _mark_api_credits_exhausted("teslemetry")
+                    _LOGGER.error(f"Failed to wake Tesla EV - API credits exhausted")
+                    return False
+
                 if attempt == max_retries:
                     _LOGGER.error(f"Failed to wake Tesla EV after {max_retries} attempts")
                     # Still return True to attempt the charging command anyway
@@ -1237,7 +1303,16 @@ async def _action_start_ev_charging(
             return False
 
         try:
-            await _wake_tesla_ev(hass, vehicle_vin)
+            # Check API credits before attempting
+            if not _is_api_credit_available("teslemetry"):
+                _LOGGER.warning("Skipping EV charging start - API credits exhausted, in cooldown period")
+                return False
+
+            wake_success = await _wake_tesla_ev(hass, vehicle_vin)
+            if not wake_success:
+                _LOGGER.warning("Wake failed (possibly due to API credits), skipping charge command")
+                return False
+
             await hass.services.async_call(
                 "switch",
                 "turn_on",
@@ -1248,6 +1323,11 @@ async def _action_start_ev_charging(
             charging_started = True
         except Exception as e:
             _LOGGER.error(f"Failed to start EV charging: {e}")
+
+            # Check if this is a credit/payment error
+            if _is_api_credit_error(str(e)):
+                _mark_api_credits_exhausted("teslemetry")
+
             return False
 
     if not charging_started:
@@ -1329,6 +1409,11 @@ async def _action_stop_ev_charging(
 
     # Use Fleet API
     if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+        # Check API credits before attempting
+        if not _is_api_credit_available("teslemetry"):
+            _LOGGER.warning("Skipping EV charging stop - API credits exhausted, in cooldown period")
+            return False
+
         # Tesla Fleet uses switch.X_charge, not button.X_charge_stop
         charge_switch_entity = await _get_tesla_ev_entity(
             hass,
@@ -1341,7 +1426,11 @@ async def _action_stop_ev_charging(
             return False
 
         try:
-            await _wake_tesla_ev(hass, vehicle_vin)
+            wake_success = await _wake_tesla_ev(hass, vehicle_vin)
+            if not wake_success:
+                _LOGGER.warning("Wake failed (possibly due to API credits), skipping stop charge command")
+                return False
+
             await hass.services.async_call(
                 "switch",
                 "turn_off",
@@ -1352,6 +1441,11 @@ async def _action_stop_ev_charging(
             return True
         except Exception as e:
             _LOGGER.error(f"Failed to stop EV charging: {e}")
+
+            # Check if this is a credit/payment error
+            if _is_api_credit_error(str(e)):
+                _mark_api_credits_exhausted("teslemetry")
+
             return False
 
     return False
@@ -1388,6 +1482,11 @@ async def _action_set_ev_charge_limit(
 
     # Use Fleet API
     if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+        # Check API credits before attempting
+        if not _is_api_credit_available("teslemetry"):
+            _LOGGER.debug("Skipping set EV charge limit - API credits exhausted, in cooldown period")
+            return False
+
         charge_limit_entity = await _get_tesla_ev_entity(
             hass,
             r"number\..*charge_limit$",
@@ -1399,7 +1498,11 @@ async def _action_set_ev_charge_limit(
             return False
 
         try:
-            await _wake_tesla_ev(hass, vehicle_vin)
+            wake_success = await _wake_tesla_ev(hass, vehicle_vin)
+            if not wake_success:
+                _LOGGER.debug("Wake failed (possibly due to API credits), skipping set charge limit command")
+                return False
+
             await hass.services.async_call(
                 "number",
                 "set_value",
@@ -1410,6 +1513,11 @@ async def _action_set_ev_charge_limit(
             return True
         except Exception as e:
             _LOGGER.error(f"Failed to set EV charge limit: {e}")
+
+            # Check if this is a credit/payment error
+            if _is_api_credit_error(str(e)):
+                _mark_api_credits_exhausted("teslemetry")
+
             return False
 
     return False
@@ -1449,6 +1557,11 @@ async def _action_set_ev_charging_amps(
 
     # Use Fleet API
     if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+        # Check API credits before attempting
+        if not _is_api_credit_available("teslemetry"):
+            _LOGGER.debug("Skipping set EV charging amps - API credits exhausted, in cooldown period")
+            return False
+
         # Tesla Fleet uses charge_current, some versions use charging_amps
         charging_amps_entity = await _get_tesla_ev_entity(
             hass,
@@ -1461,7 +1574,11 @@ async def _action_set_ev_charging_amps(
             return False
 
         try:
-            await _wake_tesla_ev(hass, vehicle_vin)
+            wake_success = await _wake_tesla_ev(hass, vehicle_vin)
+            if not wake_success:
+                _LOGGER.debug("Wake failed (possibly due to API credits), skipping set amps command")
+                return False
+
             await hass.services.async_call(
                 "number",
                 "set_value",
@@ -1472,6 +1589,11 @@ async def _action_set_ev_charging_amps(
             return True
         except Exception as e:
             _LOGGER.error(f"Failed to set EV charging amps: {e}")
+
+            # Check if this is a credit/payment error
+            if _is_api_credit_error(str(e)):
+                _mark_api_credits_exhausted("teslemetry")
+
             return False
 
     return False
@@ -1958,68 +2080,16 @@ async def _dynamic_ev_update_surplus(
     min_soc = params.get("min_battery_soc", 80)
     pause_soc = params.get("pause_below_soc", 70)
 
-    # Don't start charging until battery reaches min_soc
-    if not state.get("charging_started"):
-        if battery_soc < min_soc:
-            state["paused"] = True
-            state["paused_reason"] = f"Waiting for battery to reach {min_soc}% (currently {battery_soc:.0f}%)"
-            _LOGGER.debug(f"Solar surplus EV: {state['paused_reason']}")
-            return
-        else:
-            state["paused"] = False
-            state["paused_reason"] = None
+    # Parallel charging parameters
+    allow_parallel = params.get("allow_parallel_charging", False)
+    max_battery_charge_kw = params.get("max_battery_charge_rate_kw", 5.0)
 
-    # Pause if battery drops below pause threshold
-    if state.get("charging_started") and battery_soc < pause_soc:
-        if not state.get("paused"):
-            state["paused"] = True
-            state["paused_reason"] = f"Battery dropped to {battery_soc:.0f}% (pause threshold: {pause_soc}%)"
-            _LOGGER.info(f"⚡ Solar surplus EV: Pausing - {state['paused_reason']}")
-            await _set_vehicle_amps(hass, config_entry, vehicle_id, 0, params)
-            state["current_amps"] = 0
-
-            # Send pause notification
-            notify_on_error = params.get("notify_on_error", True)
-            if notify_on_error:
-                try:
-                    vehicle_name = params.get("vehicle_name", vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id)
-                    await _send_expo_push(
-                        hass,
-                        "EV Charging Paused",
-                        f"{vehicle_name}: Battery at {battery_soc:.0f}% (below {pause_soc}%)"
-                    )
-                except Exception as e:
-                    _LOGGER.debug(f"Could not send pause notification: {e}")
-        return
-
-    # Resume if battery recovered
-    if state.get("paused") and battery_soc >= min_soc:
-        was_paused = state.get("paused")
-        state["paused"] = False
-        state["paused_reason"] = None
-        _LOGGER.info(f"⚡ Solar surplus EV: Resuming - battery at {battery_soc:.0f}%")
-
-        # Send resume notification
-        if was_paused:
-            notify_on_start = params.get("notify_on_start", True)
-            if notify_on_start:
-                try:
-                    vehicle_name = params.get("vehicle_name", vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id)
-                    await _send_expo_push(
-                        hass,
-                        "EV Charging Resumed",
-                        f"{vehicle_name}: Battery recovered to {battery_soc:.0f}%"
-                    )
-                except Exception as e:
-                    _LOGGER.debug(f"Could not send resume notification: {e}")
-
+    # For parallel charging check, we need to calculate surplus early
     # Calculate current EV power for THIS vehicle
     voltage = params.get("voltage", 240)
     current_amps = state.get("current_amps", 0)
-    current_ev_kw = (current_amps * voltage) / 1000
 
-    # Calculate TOTAL EV power from ALL active vehicles (important for 2+ car scenarios)
-    # This ensures surplus calculation accounts for all EVs' consumption
+    # Calculate TOTAL EV power from ALL active vehicles
     total_ev_power_kw = 0.0
     all_vehicles = _dynamic_ev_state.get(entry_id, {})
     for vid, v_state in all_vehicles.items():
@@ -2028,8 +2098,133 @@ async def _dynamic_ev_update_surplus(
             v_voltage = v_state.get("params", {}).get("voltage", 240)
             total_ev_power_kw += (v_amps * v_voltage) / 1000
 
-    # Calculate available surplus using TOTAL EV power (so we know true surplus if no EVs were charging)
-    surplus_kw = _calculate_solar_surplus(live_status, total_ev_power_kw, params)
+    # Calculate raw surplus (before any parallel charging adjustments)
+    raw_surplus_kw = _calculate_solar_surplus(live_status, total_ev_power_kw, params)
+
+    # Check if parallel charging is possible (surplus exceeds what battery can absorb)
+    parallel_charging_available = (
+        allow_parallel and
+        battery_soc < min_soc and
+        raw_surplus_kw > max_battery_charge_kw
+    )
+
+    # Don't start charging until battery reaches min_soc (unless parallel charging is available)
+    if not state.get("charging_started"):
+        if battery_soc < min_soc:
+            if parallel_charging_available:
+                # Parallel charging: solar exceeds battery's max charge rate
+                state["paused"] = False
+                state["paused_reason"] = None
+                state["parallel_charging_mode"] = True
+                _LOGGER.info(
+                    f"⚡ Solar surplus EV: Parallel charging enabled - surplus {raw_surplus_kw:.1f}kW > "
+                    f"battery max {max_battery_charge_kw}kW (battery at {battery_soc:.0f}%)"
+                )
+            else:
+                state["paused"] = True
+                if allow_parallel:
+                    state["paused_reason"] = (
+                        f"Waiting for battery to reach {min_soc}% or surplus > {max_battery_charge_kw}kW "
+                        f"(currently {battery_soc:.0f}%, surplus {raw_surplus_kw:.1f}kW)"
+                    )
+                else:
+                    state["paused_reason"] = f"Waiting for battery to reach {min_soc}% (currently {battery_soc:.0f}%)"
+                _LOGGER.debug(f"Solar surplus EV: {state['paused_reason']}")
+                return
+        else:
+            state["paused"] = False
+            state["paused_reason"] = None
+            state["parallel_charging_mode"] = False
+
+    # Pause if battery drops below pause threshold (only in normal mode, not parallel)
+    if state.get("charging_started") and battery_soc < pause_soc:
+        # In parallel mode, we pause if surplus drops below battery max charge rate
+        if state.get("parallel_charging_mode"):
+            if raw_surplus_kw <= max_battery_charge_kw:
+                if not state.get("paused"):
+                    state["paused"] = True
+                    state["paused_reason"] = (
+                        f"Parallel charging paused - surplus {raw_surplus_kw:.1f}kW <= "
+                        f"battery max {max_battery_charge_kw}kW"
+                    )
+                    _LOGGER.info(f"⚡ Solar surplus EV: {state['paused_reason']}")
+                    await _set_vehicle_amps(hass, config_entry, vehicle_id, 0, params)
+                    state["current_amps"] = 0
+                return
+        else:
+            # Normal mode: pause below pause_soc threshold
+            if not state.get("paused"):
+                state["paused"] = True
+                state["paused_reason"] = f"Battery dropped to {battery_soc:.0f}% (pause threshold: {pause_soc}%)"
+                _LOGGER.info(f"⚡ Solar surplus EV: Pausing - {state['paused_reason']}")
+                await _set_vehicle_amps(hass, config_entry, vehicle_id, 0, params)
+                state["current_amps"] = 0
+
+                # Send pause notification
+                notify_on_error = params.get("notify_on_error", True)
+                if notify_on_error:
+                    try:
+                        vehicle_name = params.get("vehicle_name", vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id)
+                        await _send_expo_push(
+                            hass,
+                            "EV Charging Paused",
+                            f"{vehicle_name}: Battery at {battery_soc:.0f}% (below {pause_soc}%)"
+                        )
+                    except Exception as e:
+                        _LOGGER.debug(f"Could not send pause notification: {e}")
+            return
+
+    # Resume logic
+    if state.get("paused"):
+        can_resume = False
+        if battery_soc >= min_soc:
+            # Battery recovered - switch to normal mode
+            can_resume = True
+            state["parallel_charging_mode"] = False
+            _LOGGER.info(f"⚡ Solar surplus EV: Resuming - battery at {battery_soc:.0f}%")
+        elif state.get("parallel_charging_mode") and raw_surplus_kw > max_battery_charge_kw:
+            # Parallel mode: surplus recovered
+            can_resume = True
+            _LOGGER.info(
+                f"⚡ Solar surplus EV: Resuming parallel charging - surplus {raw_surplus_kw:.1f}kW > "
+                f"battery max {max_battery_charge_kw}kW"
+            )
+
+        if can_resume:
+            was_paused = state.get("paused")
+            state["paused"] = False
+            state["paused_reason"] = None
+
+            # Send resume notification
+            if was_paused:
+                notify_on_start = params.get("notify_on_start", True)
+                if notify_on_start:
+                    try:
+                        vehicle_name = params.get("vehicle_name", vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id)
+                        mode_info = " (parallel)" if state.get("parallel_charging_mode") else ""
+                        await _send_expo_push(
+                            hass,
+                            "EV Charging Resumed",
+                            f"{vehicle_name}: Charging resumed{mode_info}"
+                        )
+                    except Exception as e:
+                        _LOGGER.debug(f"Could not send resume notification: {e}")
+
+    # Calculate current EV power for THIS vehicle (for logging)
+    current_ev_kw = (current_amps * voltage) / 1000
+
+    # Determine available surplus for EV
+    # In parallel charging mode, reserve max_battery_charge_kw for the battery
+    if state.get("parallel_charging_mode") and battery_soc < min_soc:
+        # Parallel mode: only use surplus beyond what battery can absorb
+        surplus_kw = max(0, raw_surplus_kw - max_battery_charge_kw)
+        _LOGGER.debug(
+            f"Solar surplus EV (parallel mode): raw_surplus={raw_surplus_kw:.2f}kW, "
+            f"battery_reserve={max_battery_charge_kw}kW, available_for_ev={surplus_kw:.2f}kW"
+        )
+    else:
+        # Normal mode: use full surplus
+        surplus_kw = raw_surplus_kw
 
     # Apply dual vehicle distribution strategy
     strategy = params.get("dual_vehicle_strategy", "priority_first")
@@ -2389,6 +2584,11 @@ async def _action_start_ev_charging_dynamic(
         sustained_surplus_minutes: Wait time before starting (default 2)
         stop_delay_minutes: Wait time before stopping (default 5)
         dual_vehicle_strategy: "even", "priority_first", "priority_only" (default priority_first)
+        allow_parallel_charging: Allow EV charging while battery is still charging if surplus
+            exceeds max_battery_charge_rate_kw (default False)
+        max_battery_charge_rate_kw: Maximum charge rate of your battery system in kW (default 5.0).
+            Single PW2/PW3 = 5kW, dual = 10kW, triple = 15kW. When allow_parallel_charging is
+            enabled, EV charging starts when solar exceeds this rate, even if battery isn't full.
 
     Common parameters:
         dynamic_mode: "battery_target" or "solar_surplus" (default battery_target)
@@ -2426,11 +2626,16 @@ async def _action_start_ev_charging_dynamic(
             "sustained_surplus_minutes": params.get("sustained_surplus_minutes", 2),
             "stop_delay_minutes": params.get("stop_delay_minutes", 5),
             "dual_vehicle_strategy": params.get("dual_vehicle_strategy", "priority_first"),
+            "allow_parallel_charging": params.get("allow_parallel_charging", False),
+            "max_battery_charge_rate_kw": params.get("max_battery_charge_rate_kw", 5.0),
         }
         start_amps = 0  # Don't start immediately in solar surplus mode
+        parallel_info = ""
+        if mode_params["allow_parallel_charging"]:
+            parallel_info = f", parallel_charging=enabled (battery_max={mode_params['max_battery_charge_rate_kw']}kW)"
         _LOGGER.info(
             f"⚡ Starting solar surplus EV charging: buffer={mode_params['household_buffer_kw']}kW, "
-            f"min_soc={mode_params['min_battery_soc']}%, amps={min_charge_amps}-{max_charge_amps}A"
+            f"min_soc={mode_params['min_battery_soc']}%, amps={min_charge_amps}-{max_charge_amps}A{parallel_info}"
         )
     else:
         # Battery target mode (existing behavior)
