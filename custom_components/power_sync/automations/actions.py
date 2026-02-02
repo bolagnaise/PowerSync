@@ -1774,7 +1774,7 @@ def get_price_recommendation(
         export_price_cents: Current export price (feed-in tariff) in cents/kWh
         surplus_kw: Current solar surplus in kW
         battery_soc: Current battery SoC (0-100)
-        min_battery_soc: Minimum battery SoC before EV charging (default 80)
+        min_battery_soc: Home battery must be at least this % before EV charging (default 80)
         prefer_export_threshold_cents: Export price above which to prefer selling (default 15c)
 
     Returns:
@@ -2718,8 +2718,8 @@ async def _action_start_ev_charging_dynamic(
     Parameters (solar_surplus mode):
         household_buffer_kw: Buffer to keep from surplus (default 0.5)
         surplus_calculation: Method - "grid_based" or "direct" (default grid_based)
-        min_battery_soc: Don't start until battery reaches this % (default 80)
-        pause_below_soc: Pause if battery drops below this % (default 70)
+        min_battery_soc: Don't start/continue until home battery >= this % (default 80)
+        pause_below_soc: Pause EV charging if home battery drops below this % (default 70)
         sustained_surplus_minutes: Wait time before starting (default 2)
         stop_delay_minutes: Wait time before stopping (default 5)
         dual_vehicle_strategy: "even", "priority_first", "priority_only" (default priority_first)

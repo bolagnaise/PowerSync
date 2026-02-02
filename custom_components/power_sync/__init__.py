@@ -5361,8 +5361,8 @@ class VehicleChargingConfigView(HomeAssistantView):
                     "voltage": data.get("voltage", 240),
                     "solar_charging_enabled": data.get("solar_charging_enabled", False),
                     "priority": data.get("priority", 1),
-                    "min_battery_soc": data.get("min_battery_soc", 80),
-                    "pause_below_soc": data.get("pause_below_soc", 70),
+                    "home_battery_minimum": data.get("home_battery_minimum", 80),
+                    "pause_if_battery_below": data.get("pause_if_battery_below", 70),
                 }
                 vehicle_configs.append(new_config)
 
@@ -5415,7 +5415,7 @@ class SolarSurplusConfigView(HomeAssistantView):
                 "sustained_surplus_minutes": 2,
                 "stop_delay_minutes": 5,
                 "dual_vehicle_strategy": "priority_first",
-                "min_battery_soc": 80,  # Battery must reach this % before EV surplus charging
+                "home_battery_minimum": 80,  # Home battery must reach this % before EV surplus charging
                 "allow_parallel_charging": False,  # Charge EV while battery is charging if surplus exceeds max rate
                 "max_battery_charge_rate_kw": 5.0,  # Max battery charge rate (5=single PW, 10=dual, 15=triple)
             }
@@ -5471,8 +5471,8 @@ class SolarSurplusConfigView(HomeAssistantView):
             if "dual_vehicle_strategy" in updated_config:
                 if updated_config["dual_vehicle_strategy"] not in ("even", "priority_first", "priority_only"):
                     updated_config["dual_vehicle_strategy"] = "priority_first"
-            if "min_battery_soc" in updated_config:
-                updated_config["min_battery_soc"] = max(0, min(100, int(updated_config["min_battery_soc"])))
+            if "home_battery_minimum" in updated_config:
+                updated_config["home_battery_minimum"] = max(0, min(100, int(updated_config["home_battery_minimum"])))
             if "allow_parallel_charging" in updated_config:
                 updated_config["allow_parallel_charging"] = bool(updated_config["allow_parallel_charging"])
             if "max_battery_charge_rate_kw" in updated_config:
@@ -6250,11 +6250,11 @@ class PriceRecommendationView(HomeAssistantView):
                     export_price_cents = price_data.get("export_price_cents", export_price_cents)
                     price_source = "price_data"
 
-            # Get min battery SoC from config if available
-            min_battery_soc = 80
+            # Get home battery minimum from config if available
+            home_battery_minimum = 80
             solar_config = entry_data.get("solar_surplus_config", {})
             if solar_config:
-                min_battery_soc = solar_config.get("min_battery_soc", 80)
+                home_battery_minimum = solar_config.get("home_battery_minimum", 80)
 
             # Get recommendation
             recommendation = get_price_recommendation(
@@ -6262,7 +6262,7 @@ class PriceRecommendationView(HomeAssistantView):
                 export_price_cents=export_price_cents,
                 surplus_kw=surplus_kw,
                 battery_soc=battery_soc,
-                min_battery_soc=min_battery_soc,
+                min_battery_soc=home_battery_minimum,
             )
 
             # Build response with tariff info if available
@@ -6476,7 +6476,8 @@ class AutoScheduleStatusView(HomeAssistantView):
                     "priority": vehicle_settings.priority.value,
                     "target_soc": vehicle_settings.target_soc,
                     "departure_time": vehicle_settings.departure_time,
-                    "min_battery_soc": vehicle_settings.min_battery_soc,
+                    "home_battery_minimum": vehicle_settings.home_battery_minimum,
+                    "home_battery_reserve": vehicle_settings.home_battery_reserve,
                 }
 
             return web.json_response({
@@ -6585,7 +6586,7 @@ class PriceLevelChargingSettingsView(HomeAssistantView):
                 "recovery_price_cents": 30,
                 "opportunity_price_cents": 10,
                 "no_grid_import": False,
-                "min_home_battery_soc": 20,
+                "home_battery_minimum": 20,
             }
 
             if store:
@@ -6624,11 +6625,11 @@ class PriceLevelChargingSettingsView(HomeAssistantView):
                 "recovery_price_cents": 30,
                 "opportunity_price_cents": 10,
                 "no_grid_import": False,
-                "min_home_battery_soc": 20,
+                "home_battery_minimum": 20,
             })
 
             # Update with provided values
-            for key in ["enabled", "recovery_soc", "recovery_price_cents", "opportunity_price_cents", "no_grid_import", "min_home_battery_soc"]:
+            for key in ["enabled", "recovery_soc", "recovery_price_cents", "opportunity_price_cents", "no_grid_import", "home_battery_minimum"]:
                 if key in data:
                     settings[key] = data[key]
 
@@ -6642,7 +6643,7 @@ class PriceLevelChargingSettingsView(HomeAssistantView):
                 f"recovery_price={settings.get('recovery_price_cents')}c, "
                 f"opportunity_price={settings.get('opportunity_price_cents')}c, "
                 f"no_grid_import={settings.get('no_grid_import')}, "
-                f"min_home_battery_soc={settings.get('min_home_battery_soc')}%"
+                f"home_battery_minimum={settings.get('home_battery_minimum')}%"
             )
 
             return web.json_response({

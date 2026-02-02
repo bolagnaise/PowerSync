@@ -1985,8 +1985,9 @@ class AutoScheduleSettings:
     # Priority mode
     priority: ChargingPriority = ChargingPriority.COST_OPTIMIZED
 
-    # Constraints
-    min_battery_soc: int = 80  # Home battery can discharge to this level for EV charging
+    # Battery constraints (new unified naming)
+    home_battery_minimum: int = 20  # Don't START EV charging unless home battery >= this %
+    home_battery_reserve: int = 20  # Set Powerwall backup reserve to this % during charging
     max_grid_price_cents: float = 25.0  # Don't charge from grid above this price
     no_grid_import: bool = False  # Prevent grid imports during EV charging
 
@@ -2021,7 +2022,8 @@ class AutoScheduleSettings:
             "departure_time": self.departure_time,
             "departure_days": self.departure_days,
             "priority": self.priority.value,
-            "min_battery_soc": self.min_battery_soc,
+            "home_battery_minimum": self.home_battery_minimum,
+            "home_battery_reserve": self.home_battery_reserve,
             "max_grid_price_cents": self.max_grid_price_cents,
             "no_grid_import": self.no_grid_import,
             "charger_type": self.charger_type,
@@ -2044,6 +2046,11 @@ class AutoScheduleSettings:
         except ValueError:
             priority = ChargingPriority.COST_OPTIMIZED
 
+        # Backward compatibility: map old min_battery_soc to new names
+        old_min_battery = data.get("min_battery_soc", 20)
+        home_battery_minimum = data.get("home_battery_minimum", old_min_battery if old_min_battery <= 30 else 20)
+        home_battery_reserve = data.get("home_battery_reserve", old_min_battery)
+
         return cls(
             enabled=data.get("enabled", False),
             vehicle_id=data.get("vehicle_id", "_default"),
@@ -2052,7 +2059,8 @@ class AutoScheduleSettings:
             departure_time=data.get("departure_time"),
             departure_days=data.get("departure_days", [0, 1, 2, 3, 4]),
             priority=priority,
-            min_battery_soc=data.get("min_battery_soc", 80),
+            home_battery_minimum=home_battery_minimum,
+            home_battery_reserve=home_battery_reserve,
             max_grid_price_cents=data.get("max_grid_price_cents", 25.0),
             no_grid_import=data.get("no_grid_import", False),
             charger_type=data.get("charger_type", "tesla"),
@@ -2743,7 +2751,7 @@ class AutoScheduleExecutor:
             current_surplus_kw=current_surplus_kw,
             current_price_cents=current_price_cents,
             battery_soc=battery_soc,
-            min_battery_soc=settings.min_battery_soc,
+            min_battery_soc=settings.home_battery_minimum,
             is_time_critical=is_time_critical,
         )
 
@@ -2764,9 +2772,9 @@ class AutoScheduleExecutor:
         # - Single phase: 5A × 230V = 1.15kW
         # - Three phase: 5A × 230V × 3 = 3.45kW
         if should_charge and source == "solar_surplus":
-            # Get solar surplus config to check min_battery_soc and parallel charging settings
+            # Get solar surplus config to check home_battery_minimum and parallel charging settings
             solar_config = await self._get_solar_surplus_config()
-            min_battery_for_ev = solar_config.get("min_battery_soc", 80)
+            min_battery_for_ev = solar_config.get("home_battery_minimum", 80)
             allow_parallel = solar_config.get("allow_parallel_charging", False)
             max_battery_charge_kw = solar_config.get("max_battery_charge_rate_kw", 5.0)
 
@@ -3025,11 +3033,11 @@ class AutoScheduleExecutor:
                 "household_buffer_kw": 0.5,
                 "sustained_surplus_minutes": 2,
                 "stop_delay_minutes": 5,
-                "min_battery_soc": 80,
+                "home_battery_minimum": 80,
             }
         except Exception as e:
             _LOGGER.debug(f"Failed to get solar surplus config: {e}")
-            return {"min_battery_soc": 80}
+            return {"home_battery_minimum": 80}
 
     async def _get_home_power_settings(self) -> dict:
         """Get home power settings from storage.
@@ -3455,11 +3463,11 @@ class AutoScheduleExecutor:
             current_reserve = await self._get_current_backup_reserve()
             if current_reserve is not None:
                 state.original_backup_reserve = current_reserve
-                # Set backup reserve to min_battery_soc to allow discharge to that level
-                if await self._set_backup_reserve(settings.min_battery_soc):
+                # Set backup reserve to home_battery_reserve to allow discharge to that level
+                if await self._set_backup_reserve(settings.home_battery_reserve):
                     state.backup_reserve_modified = True
                     _LOGGER.info(
-                        f"Auto-schedule: Set backup reserve from {current_reserve}% to {settings.min_battery_soc}% "
+                        f"Auto-schedule: Set backup reserve from {current_reserve}% to {settings.home_battery_reserve}% "
                         f"to allow battery discharge for EV charging"
                     )
 
@@ -3485,8 +3493,8 @@ class AutoScheduleExecutor:
             "max_charge_amps": settings.max_charge_amps,
             "voltage": settings.voltage,
             "charger_type": settings.charger_type,
-            "min_battery_soc": settings.min_battery_soc,
-            "pause_below_soc": settings.min_battery_soc - 10,
+            "min_battery_soc": settings.home_battery_reserve,
+            "pause_below_soc": settings.home_battery_reserve - 10,
             "charger_switch_entity": settings.charger_switch_entity,
             "charger_amps_entity": settings.charger_amps_entity,
             "ocpp_charger_id": settings.ocpp_charger_id,
@@ -3622,7 +3630,7 @@ class PriceLevelChargingExecutor:
             "recovery_price_cents": 30,
             "opportunity_price_cents": 10,
             "no_grid_import": False,
-            "min_home_battery_soc": 20,  # Don't charge EV if home battery below this %
+            "home_battery_minimum": 20,  # Don't charge EV if home battery below this %
         }
 
         if store:
@@ -3897,7 +3905,7 @@ class PriceLevelChargingExecutor:
             return False, "Vehicle not plugged in", ""
 
         # Check minimum home battery SOC
-        min_home_battery = settings.get("min_home_battery_soc", 20)
+        min_home_battery = settings.get("home_battery_minimum", 20)
         if min_home_battery > 0:
             home_battery_soc = await self._get_home_battery_soc()
             if home_battery_soc is not None and home_battery_soc < min_home_battery:
@@ -4010,7 +4018,7 @@ class PriceLevelChargingExecutor:
             return False, "Vehicle not plugged in", ""
 
         # Check minimum home battery SOC
-        min_home_battery = settings.get("min_home_battery_soc", 20)
+        min_home_battery = settings.get("home_battery_minimum", 20)
         if min_home_battery > 0:
             home_battery_soc = await self._get_home_battery_soc()
             if home_battery_soc is not None and home_battery_soc < min_home_battery:
