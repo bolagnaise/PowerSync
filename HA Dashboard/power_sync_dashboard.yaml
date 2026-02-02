@@ -195,14 +195,14 @@ views:
                   service: power_sync.force_discharge
                   data:
                     duration: |-
-                      [[[ return (states['select.force_discharge_duration']
-                        ? states['select.force_discharge_duration'].state
+                      [[[ return (states['select.power_sync_force_discharge_duration']
+                        ? states['select.power_sync_force_discharge_duration'].state
                         : '30'); ]]]
                   confirmation:
                     text: >-
                       [[[ return 'Force discharge for ' +
-                      (states['select.force_discharge_duration']
-                        ? states['select.force_discharge_duration'].state
+                      (states['select.power_sync_force_discharge_duration']
+                        ? states['select.power_sync_force_discharge_duration'].state
                         : '30') + ' minutes?' ]]]
           - square: false
             type: grid
@@ -377,11 +377,6 @@ views:
                 }
                 return data;
               }
-
-
-              // Tesla/Globird format: tou_schedule with periods and time
-              windows
-
               const touSchedule = entity?.attributes?.tou_schedule || [];
 
               if (touSchedule.length > 0) {
@@ -462,11 +457,6 @@ views:
                 }
                 return data;
               }
-
-
-              // Tesla/Globird format: tou_schedule with periods and time
-              windows
-
               const touSchedule = entity?.attributes?.tou_schedule || [];
 
               if (touSchedule.length > 0) {
