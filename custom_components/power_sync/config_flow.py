@@ -200,6 +200,12 @@ from .const import (
     COST_FUNCTION_SELF_USE,
     OPTIMIZATION_COST_FUNCTIONS,
     DEFAULT_OPTIMIZATION_BACKUP_RESERVE,
+    # Optimization provider selection
+    CONF_OPTIMIZATION_PROVIDER,
+    OPT_PROVIDER_NATIVE,
+    OPT_PROVIDER_POWERSYNC,
+    OPTIMIZATION_PROVIDERS,
+    OPTIMIZATION_PROVIDER_NATIVE_NAMES,
 )
 
 # Combined network tariff key for config flow
@@ -436,6 +442,9 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._octopus_data: dict[str, Any] = {}  # Octopus Energy UK configuration
         self._selected_electricity_provider: str = "amber"
         self._custom_tariff_data: dict[str, Any] = {}  # Custom tariff for non-Amber users
+        # Optimization provider selection (for Tesla/Sigenergy)
+        self._optimization_provider: str = OPT_PROVIDER_NATIVE
+        self._ml_options: dict[str, Any] = {}  # ML optimization options
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -816,9 +825,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self._selected_battery_system = user_input.get(CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA)
 
-            # Both battery systems need electricity provider setup next
-            # Provider selection handles Amber/Flow Power/Globird config
-            return await self.async_step_provider_selection()
+            # All battery systems can choose between native optimization and PowerSync ML
+            return await self.async_step_optimization_provider()
 
         return self.async_show_form(
             step_id="battery_system",
@@ -830,6 +838,73 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "sigenergy_desc": "Sigenergy via Cloud API + optional Modbus curtailment",
                 "sungrow_desc": "Sungrow SH-series hybrid inverters via Modbus TCP",
             },
+        )
+
+    async def async_step_optimization_provider(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Let user choose optimization provider - native battery or PowerSync ML."""
+        if user_input is not None:
+            provider = user_input.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
+            self._optimization_provider = provider
+
+            if provider == OPT_PROVIDER_POWERSYNC:
+                # User wants PowerSync ML - show ML options
+                return await self.async_step_ml_options()
+            else:
+                # User wants native battery optimization - proceed to electricity provider
+                return await self.async_step_provider_selection()
+
+        # Get the native optimization name based on battery system
+        native_name = OPTIMIZATION_PROVIDER_NATIVE_NAMES.get(
+            self._selected_battery_system, "Battery"
+        )
+
+        # Build dynamic provider options with battery-specific naming
+        providers = {
+            OPT_PROVIDER_NATIVE: f"{native_name} built-in optimization",
+            OPT_PROVIDER_POWERSYNC: "PowerSync ML Optimization (recommended)",
+        }
+
+        return self.async_show_form(
+            step_id="optimization_provider",
+            data_schema=vol.Schema({
+                vol.Required(CONF_OPTIMIZATION_PROVIDER, default=OPT_PROVIDER_POWERSYNC): vol.In(providers),
+            }),
+            description_placeholders={
+                "battery_name": native_name,
+            },
+        )
+
+    async def async_step_ml_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure ML optimization options - cost function and backup reserve."""
+        if user_input is not None:
+            self._ml_options = {
+                CONF_OPTIMIZATION_COST_FUNCTION: user_input.get(
+                    CONF_OPTIMIZATION_COST_FUNCTION, COST_FUNCTION_COST
+                ),
+                CONF_OPTIMIZATION_BACKUP_RESERVE: user_input.get(
+                    CONF_OPTIMIZATION_BACKUP_RESERVE, DEFAULT_OPTIMIZATION_BACKUP_RESERVE
+                ),
+            }
+            # Proceed to electricity provider selection
+            return await self.async_step_provider_selection()
+
+        return self.async_show_form(
+            step_id="ml_options",
+            data_schema=vol.Schema({
+                vol.Required(
+                    CONF_OPTIMIZATION_COST_FUNCTION,
+                    default=COST_FUNCTION_COST
+                ): vol.In(OPTIMIZATION_COST_FUNCTIONS),
+                vol.Required(
+                    CONF_OPTIMIZATION_BACKUP_RESERVE,
+                    default=int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100)
+                ): vol.All(vol.Coerce(int), vol.Range(min=0, max=100)),
+            }),
+            description_placeholders={},
         )
 
     async def async_step_sigenergy_credentials(
@@ -1028,6 +1103,11 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if self._custom_tariff_data:
             final_data["initial_custom_tariff"] = self._custom_tariff_data
 
+        # Include optimization provider selection
+        final_data[CONF_OPTIMIZATION_PROVIDER] = self._optimization_provider
+        if self._optimization_provider == OPT_PROVIDER_POWERSYNC and self._ml_options:
+            final_data.update(self._ml_options)
+
         # Generate title based on station ID
         station_id = self._sigenergy_data.get(CONF_SIGENERGY_STATION_ID, "Unknown")
         title = f"PowerSync - Sigenergy ({station_id})"
@@ -1104,6 +1184,11 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Include custom tariff data if configured (will be moved to automation_store on setup)
         if self._custom_tariff_data:
             final_data["initial_custom_tariff"] = self._custom_tariff_data
+
+        # Include optimization provider selection
+        final_data[CONF_OPTIMIZATION_PROVIDER] = self._optimization_provider
+        if self._optimization_provider == OPT_PROVIDER_POWERSYNC and self._ml_options:
+            final_data.update(self._ml_options)
 
         # Generate title based on host
         host = self._sungrow_data.get(CONF_SUNGROW_HOST, "Unknown")
@@ -1927,6 +2012,11 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # Include custom tariff data if configured (will be moved to automation_store on setup)
             if self._custom_tariff_data:
                 data["initial_custom_tariff"] = self._custom_tariff_data
+
+            # Include optimization provider selection (for Tesla)
+            data[CONF_OPTIMIZATION_PROVIDER] = self._optimization_provider
+            if self._optimization_provider == OPT_PROVIDER_POWERSYNC and self._ml_options:
+                data.update(self._ml_options)
 
             # Add EV settings
             data[CONF_EV_CHARGING_ENABLED] = user_input.get(CONF_EV_CHARGING_ENABLED, False)

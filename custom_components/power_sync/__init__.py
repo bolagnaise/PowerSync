@@ -3967,7 +3967,7 @@ class PushTokenRegisterView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         """Handle POST request - register push token."""
-        _LOGGER.info("📱 Push token registration request received")
+        _LOGGER.info("📱 PUSH REGISTER: Request received from mobile app")
 
         try:
             data = await request.json()
@@ -3975,7 +3975,11 @@ class PushTokenRegisterView(HomeAssistantView):
             platform = data.get("platform", "unknown")
             device_name = data.get("device_name", "Unknown device")
 
+            _LOGGER.info(f"📱 PUSH REGISTER: platform={platform}, device={device_name}")
+            _LOGGER.info(f"📱 PUSH REGISTER: token={push_token[:60] if push_token else 'None'}...")
+
             if not push_token:
+                _LOGGER.error("📱 PUSH REGISTER: No push_token in request body")
                 return web.json_response(
                     {"success": False, "error": "push_token is required"},
                     status=400
@@ -3996,28 +4000,98 @@ class PushTokenRegisterView(HomeAssistantView):
             }
 
             # Also persist to AutomationStore for survival across restarts
-            # Find any config entry to get the automation store
+            persisted = False
             for entry_id, entry_data in self._hass.data.get(DOMAIN, {}).items():
                 if isinstance(entry_data, dict) and "automation_store" in entry_data:
                     store = entry_data["automation_store"]
                     store.register_push_token(push_token, platform, device_name)
                     await store.async_save()
-                    _LOGGER.info(f"✅ Push token persisted to storage for {device_name} ({platform})")
+                    persisted = True
+                    _LOGGER.info(f"📱 PUSH REGISTER: Token persisted to storage for {device_name} ({platform})")
                     break
+
+            if not persisted:
+                _LOGGER.warning("📱 PUSH REGISTER: Could not persist token - no automation_store found")
 
             # Log token type for debugging
             token_type = "Expo" if push_token.startswith("ExponentPushToken") else "Unknown/FCM"
-            _LOGGER.info(f"✅ Push token registered for {device_name} ({platform}) - Token type: {token_type}")
+            _LOGGER.info(f"📱 PUSH REGISTER: ✅ Success - {device_name} ({platform}) - Token type: {token_type}")
+
             if not push_token.startswith("ExponentPushToken"):
-                _LOGGER.warning(f"⚠️ Token does not start with 'ExponentPushToken' - notifications may not work! Token prefix: {push_token[:20]}...")
+                _LOGGER.warning(f"📱 PUSH REGISTER: ⚠️ Token does not start with 'ExponentPushToken' - notifications may not work!")
+
+            # Log current registered tokens count
+            token_count = len(self._hass.data[DOMAIN].get("push_tokens", {}))
+            _LOGGER.info(f"📱 PUSH REGISTER: Total registered tokens now: {token_count}")
+
             return web.json_response({"success": True})
 
         except Exception as e:
-            _LOGGER.error(f"Error registering push token: {e}", exc_info=True)
+            _LOGGER.error(f"📱 PUSH REGISTER: Error - {e}", exc_info=True)
             return web.json_response(
                 {"success": False, "error": str(e)},
                 status=500
             )
+
+
+class PushTestView(HomeAssistantView):
+    """HTTP view to send a test push notification."""
+
+    url = "/api/power_sync/push/test"
+    name = "api:power_sync:push_test"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Handle POST request - send test notification."""
+        from .automations.actions import _send_expo_push
+
+        _LOGGER.info("📱 PUSH TEST: Test notification requested")
+
+        # List currently registered tokens
+        push_tokens = self._hass.data.get(DOMAIN, {}).get("push_tokens", {})
+        _LOGGER.info(f"📱 PUSH TEST: Currently registered tokens: {len(push_tokens)}")
+        for token_key, token_data in push_tokens.items():
+            _LOGGER.info(f"📱 PUSH TEST:   - {token_data.get('device_name')} ({token_data.get('platform')}) registered at {token_data.get('registered_at')}")
+
+        if not push_tokens:
+            return web.json_response({
+                "success": False,
+                "error": "No push tokens registered",
+                "registered_tokens": 0
+            })
+
+        try:
+            # Send test notification
+            await _send_expo_push(
+                self._hass,
+                "PowerSync Test",
+                f"Test notification sent at {datetime.now().strftime('%H:%M:%S')}"
+            )
+
+            return web.json_response({
+                "success": True,
+                "message": "Test notification sent - check HA logs for Expo API response",
+                "registered_tokens": len(push_tokens),
+                "tokens": [
+                    {
+                        "device": t.get("device_name"),
+                        "platform": t.get("platform"),
+                        "registered_at": t.get("registered_at"),
+                    }
+                    for t in push_tokens.values()
+                ]
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"📱 PUSH TEST: Error - {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
 
 
 class CurrentWeatherView(HomeAssistantView):
@@ -11536,7 +11610,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Register HTTP endpoint for push token registration
     hass.http.register_view(PushTokenRegisterView(hass))
-    _LOGGER.info("📱 Push token registration endpoint registered at /api/power_sync/push/register")
+    hass.http.register_view(PushTestView(hass))
+    _LOGGER.info("📱 Push notification endpoints registered at /api/power_sync/push/register and /api/power_sync/push/test")
 
     # Register HTTP endpoint for current weather (for mobile app dashboard)
     hass.http.register_view(CurrentWeatherView(hass))

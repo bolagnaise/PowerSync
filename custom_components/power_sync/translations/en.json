@@ -145,6 +145,27 @@
         },
         "submit_button": "Next"
       },
+      "optimization_provider": {
+        "title": "Choose Optimization Provider",
+        "description": "Your {battery_name} has built-in battery scheduling. Choose how PowerSync should manage your battery:\n\n**{battery_name} built-in**: Use your battery's native Time-of-Use scheduling.\n\n**PowerSync ML**: Use advanced ML optimization with Linear Programming to minimize costs, maximize profit, or maximize self-consumption.",
+        "data": {
+          "optimization_provider": "Optimization Provider"
+        },
+        "submit_button": "Next"
+      },
+      "ml_options": {
+        "title": "ML Optimization Settings",
+        "description": "Configure PowerSync ML optimization settings.\n\n**Cost Function**: What should the optimizer prioritize?\n- *Cost Minimization*: Minimize your electricity bill\n- *Profit Maximization*: Maximize earnings from grid trading\n- *Self-Consumption*: Maximize use of your solar generation\n\n**Backup Reserve**: Minimum battery charge to maintain for backup power.",
+        "data": {
+          "optimization_cost_function": "Optimization Objective",
+          "optimization_backup_reserve": "Backup Reserve (%)"
+        },
+        "data_description": {
+          "optimization_cost_function": "Choose what the optimizer should prioritize",
+          "optimization_backup_reserve": "Minimum battery charge level to maintain (20% recommended)"
+        },
+        "submit_button": "Next"
+      },
       "sungrow": {
         "title": "Sungrow Modbus Connection",
         "description": "Configure the Modbus TCP connection to your Sungrow SH-series hybrid inverter.\n\nEnter the local IP address of your Sungrow inverter or WiNet-S dongle.",

@@ -971,6 +971,23 @@ BATTERY_MANAGEMENT_MODES = {
     BATTERY_MODE_SMART_OPT: "Smart Optimization (ML-optimized scheduling)",
 }
 
+# Optimization provider selection
+CONF_OPTIMIZATION_PROVIDER = "optimization_provider"
+OPT_PROVIDER_NATIVE = "native"           # Use battery's built-in optimization
+OPT_PROVIDER_POWERSYNC = "powersync_ml"  # Use PowerSync ML optimization
+
+# Map battery system to native optimization name
+OPTIMIZATION_PROVIDER_NATIVE_NAMES = {
+    BATTERY_SYSTEM_TESLA: "Tesla Powerwall",
+    BATTERY_SYSTEM_SIGENERGY: "Sigenergy",
+    BATTERY_SYSTEM_SUNGROW: "Sungrow",
+}
+
+OPTIMIZATION_PROVIDERS = {
+    OPT_PROVIDER_NATIVE: "Use battery's built-in optimization",
+    OPT_PROVIDER_POWERSYNC: "PowerSync ML Optimization (recommended)",
+}
+
 # Optimization configuration keys
 CONF_OPTIMIZATION_ENABLED = "optimization_enabled"
 CONF_OPTIMIZATION_COST_FUNCTION = "optimization_cost_function"
