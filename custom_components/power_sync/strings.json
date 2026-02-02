@@ -155,14 +155,14 @@
       },
       "ml_options": {
         "title": "ML Optimization Settings",
-        "description": "Configure PowerSync ML optimization settings.\n\n**Cost Function**: What should the optimizer prioritize?\n- *Cost Minimization*: Minimize your electricity bill\n- *Profit Maximization*: Maximize earnings from grid trading\n- *Self-Consumption*: Maximize use of your solar generation\n\n**Backup Reserve**: Minimum battery charge to maintain for backup power.",
+        "description": "Configure how the optimizer manages your battery.",
         "data": {
           "optimization_cost_function": "Optimization Objective",
           "optimization_backup_reserve": "Backup Reserve (%)"
         },
         "data_description": {
-          "optimization_cost_function": "Choose what the optimizer should prioritize",
-          "optimization_backup_reserve": "Minimum battery charge level to maintain (20% recommended)"
+          "optimization_cost_function": "Cost = lowest bill, Profit = best for Amber/VPP traders, Self-Consumption = maximize solar usage",
+          "optimization_backup_reserve": "Minimum battery level to keep for backup power (0-100%, 20% recommended)"
         },
         "submit_button": "Next"
       },
