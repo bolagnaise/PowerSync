@@ -313,7 +313,7 @@ Suppress battery exports during configured hours (typically overnight) unless th
 
 ## Sigenergy Battery System Support
 
-Full support for Sigenergy DC-coupled battery systems as an alternative to Tesla Powerwall.
+Full support for Sigenergy hybrid inverters with integrated battery storage.
 
 **Features:**
 - **Tariff Sync via Cloud API** - Uploads Amber pricing to Sigenergy Cloud using the same 30-minute TOU format
