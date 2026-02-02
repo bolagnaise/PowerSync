@@ -3,7 +3,7 @@
 
   # PowerSync
 
-  A Home Assistant integration for intelligent battery energy management in **Australia** and the **UK**. Supports **Tesla Powerwall** and **Sigenergy** battery systems. Automatically sync with dynamic electricity pricing from **Amber Electric**, **Flow Power** (AU), or **Octopus Energy** (UK), and capitalize on wholesale price spikes to maximize your battery's earning potential.
+  A Home Assistant integration for intelligent battery energy management in **Australia** and the **UK**. Supports **Tesla Powerwall**, **Sigenergy**, and **Sungrow SH-series** battery systems. Automatically sync with dynamic electricity pricing from **Amber Electric**, **Flow Power** (AU), or **Octopus Energy** (UK), and capitalize on wholesale price spikes to maximize your battery's earning potential.
 
   <a href="https://paypal.me/benboller" target="_blank"><img src="https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png" alt="Buy Me A Coffee" style="height: 41px !important;width: 174px !important;box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;-webkit-box-shadow: 0px 3px 2px 0px rgba(190, 190, 190, 0.5) !important;" ></a>
 
@@ -27,28 +27,33 @@
 
 ## Disclaimer
 
-This is an unofficial integration and is not affiliated with or endorsed by Tesla, Inc., Sigenergy, Amber Electric, or Octopus Energy. Use at your own risk. The developers are not responsible for any damages or issues that may arise from the use of this software.
+This is an unofficial integration and is not affiliated with or endorsed by Tesla, Inc., Sigenergy, Sungrow, Amber Electric, or Octopus Energy. Use at your own risk. The developers are not responsible for any damages or issues that may arise from the use of this software.
 
 ## Features
 
 ### Supported Battery Systems
 
-| Feature | Tesla Powerwall | Sigenergy |
-|---------|:---------------:|:---------:|
-| Automatic TOU Tariff Sync | ✅ | ✅ |
-| Spike Protection | ✅ | ✅ |
-| Export Price Boost | ✅ | ✅ |
-| Chip Mode | ✅ | ✅ |
-| DC Solar Curtailment | ✅ Export rules | ✅ Modbus TCP |
-| AC-Coupled Inverter Curtailment | ✅ | ✅ |
-| AEMO Spike Detection | ✅ | ➖ Native via Globird |
-| Force Mode Toggle | ✅ | ➖ N/A |
-| **Automations** | ✅ | ✅ |
-| **EV Charging Controls** | ✅ Tesla Fleet | ➖ N/A |
+| Feature | Tesla Powerwall | Sigenergy | Sungrow SH-series |
+|---------|:---------------:|:---------:|:-----------------:|
+| Automatic TOU Tariff Sync | ✅ | ✅ | ➖ N/A |
+| Spike Protection | ✅ | ✅ | ➖ N/A |
+| Export Price Boost | ✅ | ✅ | ➖ N/A |
+| Chip Mode | ✅ | ✅ | ➖ N/A |
+| DC Solar Curtailment | ✅ Export rules | ✅ Modbus TCP | ➖ N/A |
+| AC-Coupled Inverter Curtailment | ✅ | ✅ | ✅ |
+| AEMO Spike Detection | ✅ | ➖ Native via Globird | ✅ Auto-discharge |
+| Force Charge/Discharge | ✅ | ➖ N/A | ✅ Modbus TCP |
+| Charge/Discharge Rate Limits | ➖ N/A | ➖ N/A | ✅ Modbus TCP |
+| Backup Reserve Control | ✅ | ➖ N/A | ✅ Modbus TCP |
+| Export Limit Control | ➖ N/A | ➖ N/A | ✅ Modbus TCP |
+| Battery SOH Monitoring | ✅ | ➖ N/A | ✅ Modbus TCP |
+| **Automations** | ✅ | ✅ | ✅ |
+| **EV Charging Controls** | ✅ Tesla Fleet | ➖ N/A | ➖ N/A |
 
 **Connection Methods:**
 - **Tesla Powerwall** - Fleet API or Teslemetry proxy
 - **Sigenergy** - Sigenergy Cloud API for tariff sync + Modbus TCP for real-time energy data
+- **Sungrow SH-series** - Modbus TCP for battery control and monitoring (no cloud API required)
 
 ### Supported Electricity Providers
 
@@ -86,7 +91,7 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 - **For Flow Power users (AU):** Uses AEMO wholesale pricing (or Amber API if you have one)
 - **For Globird/AEMO VPP users (AU):** No API token required (uses AEMO spike detection)
 - **For Octopus Energy users (UK):** No API token required (uses public Octopus API)
-- Tesla or Sigenergy battery system with API access (see [Tesla API Options](#tesla-api-options) below)
+- Tesla, Sigenergy, or Sungrow battery system with API access (see [Tesla API Options](#tesla-api-options) or [Sungrow Setup](#sungrow-battery-system-support) below)
 
 ### Installation Steps
 
@@ -111,8 +116,11 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
      - **Australia:** Amber, Flow Power, Globird, AEMO VPP
      - **UK:** Octopus Energy
    - Enter API tokens if required (Amber needs token; Octopus doesn't)
-   - Select your **battery system** (Tesla Powerwall or Sigenergy)
-   - Enter battery API credentials (Teslemetry key, Tesla Fleet, or Sigenergy Cloud)
+   - Select your **battery system** (Tesla Powerwall, Sigenergy, or Sungrow SH-series)
+   - Enter battery API credentials:
+     - **Tesla:** Teslemetry key or Tesla Fleet
+     - **Sigenergy:** Sigenergy Cloud credentials
+     - **Sungrow:** Modbus TCP IP address, port, and slave ID
    - Configure additional options as needed
 
 4. **Verify Setup**
@@ -222,17 +230,18 @@ The PowerSync mobile app connects to your Home Assistant instance to provide rem
 - **Controls** - Force charge/discharge, solar curtailment, backup reserve
 - **Automations** - Create and manage scheduled automations
 - **Solar** - Daily/monthly/yearly generation with forecast overlay
-- **Battery** - Health monitoring and BMS data (Tesla Powerwall)
+- **Battery** - Health monitoring and BMS data (Tesla Powerwall, Sungrow SH-series)
 - **Settings** - Configure battery system, EV charging, and electricity provider
 
 ---
 
 ## Key Features Explained
 
-### AEMO Spike Detection (Tesla only)
+### AEMO Spike Detection (Tesla & Sungrow)
 
-This option is primarily intended for Tesla Powerwall users with VPPs that offer AEMO Spike exports (Globird, AGL, Engie) but don't natively support Tesla batteries. Sigenergy users on Globird don't need this feature as Globird natively supports Sigenergy for spike exports.
+This feature enables automatic battery discharge during AEMO wholesale price spikes, allowing you to participate in VPP programs (Globird, AGL, Engie) even if they don't natively support your battery system.
 
+**Tesla Powerwall:**
 When prices exceed your configured threshold (e.g., $300/MWh), the system:
 - Saves your current tariff configuration
 - Saves your current Powerwall operation mode
@@ -240,6 +249,16 @@ When prices exceed your configured threshold (e.g., $300/MWh), the system:
 - Uploads a spike tariff with very high sell rates to encourage battery export
 - Restores your original operation mode when spike ends
 - Restores your normal tariff when prices return to normal
+
+**Sungrow SH-series:**
+For Globird VPP users, automatic discharge at the $3000/MWh spike threshold:
+- Detects when AEMO price reaches $3000/MWh (Globird's VPP trigger)
+- Automatically switches battery to forced discharge mode via Modbus
+- Sends push notification when spike starts
+- Restores normal operation when spike ends
+- Sends push notification when spike ends
+
+> **Note:** Sigenergy users on Globird don't need this feature as Globird natively supports Sigenergy for spike exports.
 
 **Monitoring Frequency:** Checks AEMO prices every 1 minute.
 
@@ -358,6 +377,74 @@ Full support for Sigenergy DC-coupled battery systems as an alternative to Tesla
 
 ---
 
+## Sungrow Battery System Support
+
+Full support for Sungrow SH-series hybrid inverters with integrated battery storage.
+
+**Features:**
+- **Direct Modbus Control** - No cloud API required, all control via local Modbus TCP
+- **Force Charge/Discharge** - Manually or automatically control battery modes
+- **Rate Limiting** - Set maximum charge and discharge rates (kW)
+- **Export Limit Control** - Limit grid export power
+- **Backup Reserve** - Configure minimum SOC for backup power
+- **Battery Health Monitoring** - Read State of Health (SOH) directly from BMS
+- **AEMO Spike Auto-Discharge** - Automatic VPP participation for Globird users
+
+**Supported Models:**
+| Series | Type | Battery Control |
+|--------|------|-----------------|
+| **SH-series** | Hybrid Inverter | ✅ Full support |
+| **SG-series** | String Inverter | ❌ No battery (AC curtailment only) |
+
+> **Note:** Only SH-series hybrid inverters have integrated battery control. SG-series string inverters can be used for AC-coupled solar curtailment but don't have battery control capabilities.
+
+**Connection Requirements:**
+| Connection | Purpose | Required |
+|------------|---------|----------|
+| **Modbus TCP** | Battery control + monitoring | ✅ Yes |
+| **Cloud API** | Not required | ❌ No |
+
+**Modbus Registers Used:**
+| Register | Function |
+|----------|----------|
+| 13021 | Battery SOC (0.1%) |
+| 13022 | Battery SOH (0.1%) |
+| 13050 | EMS Mode (0=Self-consumption, 2=Forced) |
+| 13051 | Charge Command (0xAA=Charge, 0xBB=Discharge, 0xCC=Stop) |
+| 13059 | Minimum SOC / Backup Reserve (0.1%) |
+| 13066 | Max Discharge Current (0.001A) |
+| 13067 | Max Charge Current (0.001A) |
+| 13074 | Export Power Limit (W) |
+
+### Sungrow Configuration
+
+1. Install PowerSync via HACS
+2. Add the integration: Settings → Devices & Services → Add Integration → PowerSync
+3. Select **Sungrow SH-series** as your battery system
+4. Enter your inverter's **Modbus TCP IP address** (find this in your inverter's network settings or router)
+5. Enter the **Modbus port** (default: 502)
+6. Enter the **Slave ID** (default: 1, may vary by installation)
+7. Select your electricity provider and configure pricing options
+
+> **Tip:** If you also have a separate AC-coupled solar inverter (including Sungrow SG-series), you can configure it in the AC Inverter Curtailment section. PowerSync will validate that your Sungrow battery and AC inverter don't use the same Modbus slave ID.
+
+### Using Sungrow with Globird VPP
+
+Globird's VPP program pays premium rates during AEMO price spikes (≥$3000/MWh). PowerSync can automatically participate:
+
+1. Enable **AEMO Spike Auto-Discharge** in the mobile app Controls screen
+2. Select your **NEM region** (NSW1, VIC1, QLD1, SA1, TAS1)
+3. When AEMO prices hit $3000/MWh:
+   - PowerSync automatically forces battery discharge
+   - You receive a push notification
+4. When the spike ends:
+   - Battery returns to normal operation
+   - You receive a push notification
+
+> **Note:** Ensure your Globird account is set up for VPP participation to receive spike export payments.
+
+---
+
 ## Octopus Energy UK Support
 
 Full support for UK users with **Octopus Energy** dynamic tariffs.
@@ -445,6 +532,18 @@ Control AC-coupled solar inverters directly during negative pricing periods. Thi
 | `power_sync.set_operation_mode` | Set operation mode | `mode` (autonomous, self_consumption, backup) |
 | `power_sync.set_grid_export` | Set grid export behaviour | `export` (everything, pv_only, never) |
 | `power_sync.set_grid_charging` | Enable/disable grid charging | `enabled` (true/false) |
+
+### Sungrow Battery Control
+
+| Service | Description | Parameters |
+|---------|-------------|------------|
+| `power_sync.sungrow_force_charge` | Force charge from grid | `duration_minutes` (optional) |
+| `power_sync.sungrow_force_discharge` | Force discharge to grid | `duration_minutes` (optional) |
+| `power_sync.sungrow_restore_normal` | Restore self-consumption mode | None |
+| `power_sync.sungrow_set_backup_reserve` | Set backup reserve percentage | `percent` (0-100) |
+| `power_sync.sungrow_set_charge_rate` | Set max charge rate | `kw` (kilowatts) |
+| `power_sync.sungrow_set_discharge_rate` | Set max discharge rate | `kw` (kilowatts) |
+| `power_sync.sungrow_set_export_limit` | Set grid export limit | `watts` (0 to disable) |
 
 ### AC Inverter Curtailment
 
