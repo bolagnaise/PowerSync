@@ -950,3 +950,68 @@ def get_brand_defaults(brand: str) -> dict[str, int]:
         "zeversolar": {"port": 80, "slave_id": 1},
     }
     return defaults.get(brand.lower(), {"port": 502, "slave_id": 1})
+
+
+# ============================================================
+# Smart Optimization Configuration
+# ML-based battery scheduling using Linear Programming
+# ============================================================
+
+# Battery management mode selection
+CONF_BATTERY_MANAGEMENT_MODE = "battery_management_mode"
+
+# Management modes
+BATTERY_MODE_MANUAL = "manual"        # Use automations for control
+BATTERY_MODE_TOU_SYNC = "tou_sync"    # Sync prices to battery, let battery decide
+BATTERY_MODE_SMART_OPT = "smart_optimization"  # ML-optimized scheduling
+
+BATTERY_MANAGEMENT_MODES = {
+    BATTERY_MODE_MANUAL: "Manual (use automations)",
+    BATTERY_MODE_TOU_SYNC: "TOU Sync (sync prices to battery)",
+    BATTERY_MODE_SMART_OPT: "Smart Optimization (ML-optimized scheduling)",
+}
+
+# Optimization configuration keys
+CONF_OPTIMIZATION_ENABLED = "optimization_enabled"
+CONF_OPTIMIZATION_COST_FUNCTION = "optimization_cost_function"
+CONF_OPTIMIZATION_BACKUP_RESERVE = "optimization_backup_reserve"
+CONF_OPTIMIZATION_INTERVAL = "optimization_interval"
+CONF_OPTIMIZATION_HORIZON = "optimization_horizon"
+
+# Optimization cost functions
+COST_FUNCTION_COST = "cost"            # Minimize total electricity cost
+COST_FUNCTION_PROFIT = "profit"        # Maximize profit from grid trading
+COST_FUNCTION_SELF_USE = "self_consumption"  # Maximize solar self-consumption
+
+OPTIMIZATION_COST_FUNCTIONS = {
+    COST_FUNCTION_COST: "Cost Minimization",
+    COST_FUNCTION_PROFIT: "Profit Maximization",
+    COST_FUNCTION_SELF_USE: "Self-Consumption",
+}
+
+# Default optimization settings
+DEFAULT_OPTIMIZATION_INTERVAL = 30     # Re-optimize every 30 minutes
+DEFAULT_OPTIMIZATION_HORIZON = 48      # 48-hour forecast horizon
+DEFAULT_OPTIMIZATION_BACKUP_RESERVE = 0.20  # 20% minimum SOC
+
+# Battery capacity defaults by system (Wh)
+BATTERY_CAPACITY_DEFAULTS = {
+    BATTERY_SYSTEM_TESLA: 13500,     # Powerwall 2: 13.5 kWh
+    BATTERY_SYSTEM_SIGENERGY: 10000,  # Varies, default 10 kWh
+    BATTERY_SYSTEM_SUNGROW: 10000,    # Varies, default 10 kWh
+}
+
+# Max charge/discharge power defaults by system (W)
+BATTERY_POWER_DEFAULTS = {
+    BATTERY_SYSTEM_TESLA: 5000,       # Powerwall 2: 5 kW continuous
+    BATTERY_SYSTEM_SIGENERGY: 5000,   # Varies
+    BATTERY_SYSTEM_SUNGROW: 5000,     # Varies
+}
+
+# Optimization service
+SERVICE_OPTIMIZATION_REFRESH = "optimization_refresh"
+
+# Optimization sensor types
+SENSOR_TYPE_OPTIMIZATION_STATUS = "optimization_status"
+SENSOR_TYPE_OPTIMIZATION_SAVINGS = "optimization_savings"
+SENSOR_TYPE_OPTIMIZATION_NEXT_ACTION = "optimization_next_action"

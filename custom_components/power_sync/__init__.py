@@ -12395,12 +12395,155 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     _LOGGER.info("🤖 Automation services registered")
 
+    # Register HTTP endpoint for Smart Optimization (ML-based battery scheduling)
+    hass.http.register_view(OptimizationView(hass))
+    hass.http.register_view(OptimizationSettingsView(hass))
+    _LOGGER.info("🧠 Optimization HTTP endpoints registered at /api/power_sync/optimization")
+
     _LOGGER.info("=" * 60)
     _LOGGER.info("PowerSync integration setup complete!")
     _LOGGER.info("Domain '%s' registered successfully", DOMAIN)
     _LOGGER.info("Mobile app should now detect the integration")
     _LOGGER.info("=" * 60)
     return True
+
+
+class OptimizationView(HomeAssistantView):
+    """HTTP view to get optimization schedule and status."""
+
+    url = "/api/power_sync/optimization"
+    name = "api:power_sync:optimization"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request for optimization status."""
+        # Find the optimization coordinator
+        opt_coordinator = None
+        for entry_id, data in self._hass.data.get(DOMAIN, {}).items():
+            if isinstance(data, dict) and "optimization_coordinator" in data:
+                opt_coordinator = data["optimization_coordinator"]
+                break
+
+        if not opt_coordinator:
+            # Optimization not enabled - return disabled status
+            return web.json_response({
+                "success": True,
+                "enabled": False,
+                "optimizer_available": False,
+                "status": "not_configured",
+                "message": "Smart Optimization is not enabled. Enable it in settings."
+            })
+
+        return web.json_response(opt_coordinator.get_api_data())
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Handle POST request to force re-optimization."""
+        # Find the optimization coordinator
+        opt_coordinator = None
+        for entry_id, data in self._hass.data.get(DOMAIN, {}).items():
+            if isinstance(data, dict) and "optimization_coordinator" in data:
+                opt_coordinator = data["optimization_coordinator"]
+                break
+
+        if not opt_coordinator:
+            return web.json_response({
+                "success": False,
+                "error": "Optimization not configured"
+            }, status=400)
+
+        try:
+            result = await opt_coordinator.force_reoptimize()
+            if result and result.success:
+                return web.json_response({
+                    "success": True,
+                    "message": "Re-optimization triggered",
+                    "schedule": result.to_dict() if hasattr(result, 'to_dict') else None
+                })
+            else:
+                return web.json_response({
+                    "success": False,
+                    "error": result.status if result else "Unknown error"
+                }, status=500)
+        except Exception as e:
+            _LOGGER.error(f"Error in force re-optimization: {e}")
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+
+class OptimizationSettingsView(HomeAssistantView):
+    """HTTP view to get/set optimization settings."""
+
+    url = "/api/power_sync/optimization/settings"
+    name = "api:power_sync:optimization:settings"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request for optimization settings."""
+        # Find the optimization coordinator
+        opt_coordinator = None
+        for entry_id, data in self._hass.data.get(DOMAIN, {}).items():
+            if isinstance(data, dict) and "optimization_coordinator" in data:
+                opt_coordinator = data["optimization_coordinator"]
+                break
+
+        if not opt_coordinator:
+            return web.json_response({
+                "success": True,
+                "enabled": False,
+                "cost_function": "cost",
+                "backup_reserve": 0.2,
+            })
+
+        return web.json_response({
+            "success": True,
+            "enabled": opt_coordinator.enabled,
+            "optimizer_available": opt_coordinator.optimizer_available,
+            "cost_function": opt_coordinator._cost_function.value,
+            "config": {
+                "battery_capacity_wh": opt_coordinator._config.battery_capacity_wh,
+                "max_charge_w": opt_coordinator._config.max_charge_w,
+                "max_discharge_w": opt_coordinator._config.max_discharge_w,
+                "backup_reserve": opt_coordinator._config.backup_reserve,
+                "interval_minutes": opt_coordinator._config.interval_minutes,
+                "horizon_hours": opt_coordinator._config.horizon_hours,
+            }
+        })
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Handle POST request to update optimization settings."""
+        # Find the optimization coordinator
+        opt_coordinator = None
+        for entry_id, data in self._hass.data.get(DOMAIN, {}).items():
+            if isinstance(data, dict) and "optimization_coordinator" in data:
+                opt_coordinator = data["optimization_coordinator"]
+                break
+
+        if not opt_coordinator:
+            return web.json_response({
+                "success": False,
+                "error": "Optimization not configured"
+            }, status=400)
+
+        try:
+            settings = await request.json()
+            result = await opt_coordinator.set_settings(settings)
+            return web.json_response(result)
+        except Exception as e:
+            _LOGGER.error(f"Error updating optimization settings: {e}")
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -12448,6 +12591,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if automation_cancel := entry_data.get("automation_cancel"):
         automation_cancel()
         _LOGGER.debug("Cancelled automation evaluation timer")
+
+    # Stop optimization coordinator if it exists
+    if opt_coordinator := entry_data.get("optimization_coordinator"):
+        try:
+            await opt_coordinator.disable()
+            _LOGGER.info("🧠 Optimization coordinator stopped")
+        except Exception as e:
+            _LOGGER.error(f"Error stopping optimization coordinator: {e}")
 
     # Stop WebSocket client if it exists
     if ws_client := entry_data.get("ws_client"):

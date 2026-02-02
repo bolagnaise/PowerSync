@@ -309,6 +309,21 @@
           "fronius_load_following": "Enable if you DON'T have a 0W export limit configured by your installer. Uses calculated power limits based on home load and auto-detected inverter capacity. Leave OFF if you have the 0W export profile (most users)."
         },
         "submit_button": "Next"
+      },
+      "battery_management_mode": {
+        "title": "Battery Management Mode",
+        "description": "Choose how PowerSync should manage your battery:\n\n**Manual**: Use PowerSync automations to control charge/discharge.\n\n**TOU Sync**: Sync prices to battery, let battery's built-in scheduler decide.\n\n**Smart Optimization**: ML-optimized scheduling using Linear Programming to minimize costs or maximize profit.",
+        "data": {
+          "battery_management_mode": "Battery Management Mode",
+          "optimization_cost_function": "Optimization Objective",
+          "optimization_backup_reserve": "Backup Reserve (%)"
+        },
+        "data_description": {
+          "battery_management_mode": "Select how PowerSync should manage your battery system",
+          "optimization_cost_function": "Choose what to optimize for: minimize cost, maximize profit, or maximize self-consumption",
+          "optimization_backup_reserve": "Minimum battery charge level to maintain (20% recommended for backup)"
+        },
+        "submit_button": "Next"
       }
     },
     "error": {
