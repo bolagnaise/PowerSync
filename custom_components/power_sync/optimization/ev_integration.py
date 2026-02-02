@@ -19,7 +19,13 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 
-import numpy as np
+# Optional dependency
+try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+except ImportError:
+    np = None  # type: ignore
+    NUMPY_AVAILABLE = False
 
 _LOGGER = logging.getLogger(__name__)
 

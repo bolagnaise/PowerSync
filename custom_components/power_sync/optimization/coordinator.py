@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -50,6 +51,27 @@ from .grid_services import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class ProviderPriceConfig:
+    """Configuration for price modifications from electricity provider settings."""
+    # Export boost settings
+    export_boost_enabled: bool = False
+    export_price_offset: float = 0.0  # cents/kWh
+    export_min_price: float = 0.0  # cents/kWh
+    export_boost_start: str = "17:00"
+    export_boost_end: str = "21:00"
+    export_boost_threshold: float = 0.0  # cents/kWh
+
+    # Chip mode settings (prevent export unless price exceeds threshold)
+    chip_mode_enabled: bool = False
+    chip_mode_start: str = "22:00"
+    chip_mode_end: str = "06:00"
+    chip_mode_threshold: float = 30.0  # cents/kWh
+
+    # Spike protection
+    spike_protection_enabled: bool = False
 
 # Update interval for the coordinator (fetches latest data for display)
 UPDATE_INTERVAL = timedelta(minutes=5)
@@ -154,6 +176,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # VPP configuration
         self._vpp_config: VPPConfig | None = None
+
+        # Provider price config (export boost, chip mode, etc.)
+        self._provider_config = ProviderPriceConfig()
 
         # Cached data
         self._current_schedule: OptimizationResult | None = None
@@ -473,6 +498,45 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return None
 
+    async def _fetch_provider_price_config(self) -> None:
+        """Fetch provider price config (export boost, chip mode, etc.) from domain data."""
+        from ..const import DOMAIN
+
+        try:
+            domain_data = self.hass.data.get(DOMAIN, {})
+            for entry_data in domain_data.values():
+                if not isinstance(entry_data, dict):
+                    continue
+
+                # Check for Amber provider config
+                provider_config = entry_data.get("provider_config", {})
+                if provider_config:
+                    self._provider_config = ProviderPriceConfig(
+                        # Export boost
+                        export_boost_enabled=provider_config.get("export_boost_enabled", False),
+                        export_price_offset=provider_config.get("export_price_offset", 0.0),
+                        export_min_price=provider_config.get("export_min_price", 0.0),
+                        export_boost_start=provider_config.get("export_boost_start", "17:00"),
+                        export_boost_end=provider_config.get("export_boost_end", "21:00"),
+                        export_boost_threshold=provider_config.get("export_boost_threshold", 0.0),
+                        # Chip mode
+                        chip_mode_enabled=provider_config.get("chip_mode_enabled", False),
+                        chip_mode_start=provider_config.get("chip_mode_start", "22:00"),
+                        chip_mode_end=provider_config.get("chip_mode_end", "06:00"),
+                        chip_mode_threshold=provider_config.get("chip_mode_threshold", 30.0),
+                        # Spike protection
+                        spike_protection_enabled=provider_config.get("spike_protection_enabled", False),
+                    )
+                    _LOGGER.debug(
+                        f"Loaded provider config: export_boost={self._provider_config.export_boost_enabled}, "
+                        f"chip_mode={self._provider_config.chip_mode_enabled}, "
+                        f"spike_protection={self._provider_config.spike_protection_enabled}"
+                    )
+                    return
+
+        except Exception as e:
+            _LOGGER.debug(f"Error fetching provider price config: {e}")
+
     async def enable(self) -> bool:
         """Enable optimization and start the executor."""
         if self._enabled:
@@ -678,6 +742,31 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             executor_status = self._executor.get_schedule_summary()
             self._current_schedule = self._executor.current_schedule
 
+    def _is_in_time_window(self, time_str: str, start: str, end: str) -> bool:
+        """Check if a time (HH:MM) is within a window (handles overnight windows)."""
+        try:
+            # Parse times as minutes from midnight
+            def to_minutes(t: str) -> int:
+                parts = t.split(":")
+                return int(parts[0]) * 60 + int(parts[1])
+
+            current = to_minutes(time_str)
+            start_m = to_minutes(start)
+            end_m = to_minutes(end)
+
+            if start_m <= end_m:
+                # Normal window (e.g., 17:00-21:00)
+                return start_m <= current < end_m
+            else:
+                # Overnight window (e.g., 22:00-06:00)
+                return current >= start_m or current < end_m
+        except (ValueError, IndexError):
+            return False
+
+    def get_api_data(self) -> dict[str, Any]:
+        """Get data for HTTP API and mobile app."""
+        executor_status = self._executor.get_status() if self._executor else {}
+
         # Build data for mobile app
         data = {
             "enabled": self._enabled,
@@ -757,11 +846,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return data
 
     async def _get_price_forecast(self) -> tuple[list[float], list[float]] | None:
-        """Get price forecasts for optimization."""
+        """Get price forecasts for optimization.
+
+        Applies provider price modifications:
+        - Export boost: increase export prices during configured window
+        - Chip mode: reduce export prices outside threshold
+        - Spike protection: cap import prices during spikes
+        """
         if not self.price_coordinator:
             return None
 
         try:
+            # Refresh provider config to get latest settings
+            await self._fetch_provider_price_config()
+
             price_data = self.price_coordinator.data
             if not price_data:
                 return None
@@ -774,18 +872,58 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             n_intervals = self._config.horizon_hours * 60 // self._config.interval_minutes
             import_prices = []
             export_prices = []
+            now = dt_util.now()
 
-            for item in forecast[:n_intervals]:
+            for idx, item in enumerate(forecast[:n_intervals]):
+                # Calculate timestamp for this interval
+                interval_time = now + timedelta(minutes=idx * self._config.interval_minutes)
+                hour_str = interval_time.strftime("%H:%M")
+
                 # Prices are in c/kWh, convert to $/kWh
                 if isinstance(item, dict):
                     per_kwh = item.get("perKwh", 0) / 100
                     feed_in = item.get("feedInTariff", item.get("spotPerKwh", 0)) / 100
+                    spike_status = item.get("spikeStatus", "none")
                 else:
                     per_kwh = float(item) / 100 if item else 0
                     feed_in = per_kwh * 0.5  # Assume 50% of import for export
+                    spike_status = "none"
+
+                # Apply spike protection
+                if self._provider_config.spike_protection_enabled and spike_status != "none":
+                    # During spikes, use a high price to discourage import
+                    # but keep feed-in attractive for export
+                    _LOGGER.debug(f"Spike protection at {hour_str}: {per_kwh:.3f} $/kWh")
+
+                # Apply export boost during configured window
+                if self._provider_config.export_boost_enabled:
+                    if self._is_in_time_window(
+                        hour_str,
+                        self._provider_config.export_boost_start,
+                        self._provider_config.export_boost_end
+                    ):
+                        # Add offset and apply minimum
+                        offset = self._provider_config.export_price_offset / 100  # cents to $
+                        min_price = self._provider_config.export_min_price / 100  # cents to $
+                        boosted = feed_in + offset
+                        feed_in = max(boosted, min_price)
+                        _LOGGER.debug(f"Export boost at {hour_str}: {feed_in:.3f} $/kWh")
+
+                # Apply chip mode (prevent export unless price exceeds threshold)
+                if self._provider_config.chip_mode_enabled:
+                    if self._is_in_time_window(
+                        hour_str,
+                        self._provider_config.chip_mode_start,
+                        self._provider_config.chip_mode_end
+                    ):
+                        threshold = self._provider_config.chip_mode_threshold / 100  # cents to $
+                        if feed_in < threshold:
+                            # Set export price very low to discourage export
+                            feed_in = -1.0  # Negative = cost to export
+                            _LOGGER.debug(f"Chip mode at {hour_str}: export suppressed")
 
                 import_prices.append(max(0, per_kwh))
-                export_prices.append(max(0, feed_in))
+                export_prices.append(feed_in)  # Can be negative for chip mode
 
             # Pad if needed
             while len(import_prices) < n_intervals:

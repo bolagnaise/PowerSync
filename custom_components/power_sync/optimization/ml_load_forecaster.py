@@ -19,7 +19,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
-import numpy as np
+# Optional dependency
+try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+except ImportError:
+    np = None  # type: ignore
+    NUMPY_AVAILABLE = False
 
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util

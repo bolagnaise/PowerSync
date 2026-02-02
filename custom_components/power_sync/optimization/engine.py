@@ -12,7 +12,13 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 
-import numpy as np
+# Optional dependency - optimization won't work without it
+try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+except ImportError:
+    np = None  # type: ignore
+    NUMPY_AVAILABLE = False
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -157,7 +163,11 @@ class BatteryOptimizer:
         self._solver_available = self._check_solver()
 
     def _check_solver(self) -> bool:
-        """Check if CVXPY and HiGHS solver are available."""
+        """Check if CVXPY, numpy, and HiGHS solver are available."""
+        if not NUMPY_AVAILABLE:
+            _LOGGER.warning("NumPy not installed - optimization disabled")
+            return False
+
         try:
             import cvxpy as cp
             # Check if HiGHS is available
@@ -169,7 +179,7 @@ class BatteryOptimizer:
             _LOGGER.warning(f"HiGHS not available, using fallback. Available: {available}")
             return len(available) > 0
         except ImportError:
-            _LOGGER.error("CVXPY not installed - optimization disabled")
+            _LOGGER.warning("CVXPY not installed - optimization disabled")
             return False
 
     @property
