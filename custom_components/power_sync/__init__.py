@@ -6585,6 +6585,7 @@ class PriceLevelChargingSettingsView(HomeAssistantView):
                 "recovery_price_cents": 30,
                 "opportunity_price_cents": 10,
                 "no_grid_import": False,
+                "min_home_battery_soc": 20,
             }
 
             if store:
@@ -6623,10 +6624,11 @@ class PriceLevelChargingSettingsView(HomeAssistantView):
                 "recovery_price_cents": 30,
                 "opportunity_price_cents": 10,
                 "no_grid_import": False,
+                "min_home_battery_soc": 20,
             })
 
             # Update with provided values
-            for key in ["enabled", "recovery_soc", "recovery_price_cents", "opportunity_price_cents", "no_grid_import"]:
+            for key in ["enabled", "recovery_soc", "recovery_price_cents", "opportunity_price_cents", "no_grid_import", "min_home_battery_soc"]:
                 if key in data:
                     settings[key] = data[key]
 
@@ -6639,7 +6641,8 @@ class PriceLevelChargingSettingsView(HomeAssistantView):
                 f"recovery_soc={settings.get('recovery_soc')}%, "
                 f"recovery_price={settings.get('recovery_price_cents')}c, "
                 f"opportunity_price={settings.get('opportunity_price_cents')}c, "
-                f"no_grid_import={settings.get('no_grid_import')}"
+                f"no_grid_import={settings.get('no_grid_import')}, "
+                f"min_home_battery_soc={settings.get('min_home_battery_soc')}%"
             )
 
             return web.json_response({

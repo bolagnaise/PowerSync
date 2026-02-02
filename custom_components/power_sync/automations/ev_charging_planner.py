@@ -3622,6 +3622,7 @@ class PriceLevelChargingExecutor:
             "recovery_price_cents": 30,
             "opportunity_price_cents": 10,
             "no_grid_import": False,
+            "min_home_battery_soc": 20,  # Don't charge EV if home battery below this %
         }
 
         if store:
@@ -3895,9 +3896,8 @@ class PriceLevelChargingExecutor:
             self._state.last_decision_reason = "Vehicle not plugged in"
             return False, "Vehicle not plugged in", ""
 
-        # Check minimum home battery SOC (use solar surplus config's min_battery_soc)
-        solar_config = await self._get_solar_surplus_config()
-        min_home_battery = solar_config.get("min_battery_soc", 0)
+        # Check minimum home battery SOC
+        min_home_battery = settings.get("min_home_battery_soc", 20)
         if min_home_battery > 0:
             home_battery_soc = await self._get_home_battery_soc()
             if home_battery_soc is not None and home_battery_soc < min_home_battery:
@@ -4009,9 +4009,8 @@ class PriceLevelChargingExecutor:
             vehicle_state.last_decision_reason = "Vehicle not plugged in"
             return False, "Vehicle not plugged in", ""
 
-        # Check minimum home battery SOC (use solar surplus config's min_battery_soc)
-        solar_config = await self._get_solar_surplus_config()
-        min_home_battery = solar_config.get("min_battery_soc", 0)
+        # Check minimum home battery SOC
+        min_home_battery = settings.get("min_home_battery_soc", 20)
         if min_home_battery > 0:
             home_battery_soc = await self._get_home_battery_soc()
             if home_battery_soc is not None and home_battery_soc < min_home_battery:
