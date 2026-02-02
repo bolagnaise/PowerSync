@@ -375,17 +375,28 @@
     "step": {
       "init": {
         "title": "PowerSync Settings",
-        "description": "Configure your electricity provider and Tesla API connection.",
+        "description": "Configure your electricity provider, Tesla API connection, and optimization settings.",
         "data": {
           "electricity_provider": "Electricity Provider",
-          "tesla_api_provider": "Tesla API Provider"
+          "tesla_api_provider": "Tesla API Provider",
+          "optimization_provider": "Optimization Provider",
+          "optimization_cost_function": "Optimization Objective",
+          "optimization_backup_reserve": "Backup Reserve (%)"
+        },
+        "data_description": {
+          "optimization_provider": "Choose between Tesla's built-in optimization or PowerSync ML",
+          "optimization_cost_function": "What to optimize for (only applies to PowerSync ML)",
+          "optimization_backup_reserve": "Minimum battery charge level to maintain (only applies to PowerSync ML)"
         }
       },
       "init_sigenergy": {
         "title": "PowerSync Settings",
-        "description": "Configure your electricity provider, Sigenergy Modbus connection, and Cloud API credentials.\n\n**Modbus connection is required** to read real-time energy data.\n**Cloud API credentials are required** to sync Amber prices to your Sigenergy system.",
+        "description": "Configure your electricity provider, optimization settings, Sigenergy Modbus connection, and Cloud API credentials.\n\n**Modbus connection is required** to read real-time energy data.\n**Cloud API credentials are required** to sync Amber prices to your Sigenergy system.",
         "data": {
           "electricity_provider": "Electricity Provider",
+          "optimization_provider": "Optimization Provider",
+          "optimization_cost_function": "Optimization Objective",
+          "optimization_backup_reserve": "Backup Reserve (%)",
           "sigenergy_modbus_host": "Sigenergy IP Address",
           "sigenergy_modbus_port": "Modbus Port",
           "sigenergy_modbus_slave_id": "Modbus Slave ID",
@@ -408,14 +419,20 @@
       },
       "init_sungrow": {
         "title": "PowerSync Settings",
-        "description": "Configure your electricity provider and Sungrow Modbus connection settings.\n\n**Modbus connection is required** to read real-time energy data and control battery settings.",
+        "description": "Configure your electricity provider, optimization settings, and Sungrow Modbus connection.\n\n**Modbus connection is required** to read real-time energy data and control battery settings.",
         "data": {
           "electricity_provider": "Electricity Provider",
+          "optimization_provider": "Optimization Provider",
+          "optimization_cost_function": "Optimization Objective",
+          "optimization_backup_reserve": "Backup Reserve (%)",
           "sungrow_host": "Sungrow IP Address",
           "sungrow_port": "Modbus Port",
           "sungrow_slave_id": "Modbus Slave ID"
         },
         "data_description": {
+          "optimization_provider": "Choose between Sungrow's built-in scheduling or PowerSync ML",
+          "optimization_cost_function": "What to optimize for (only applies to PowerSync ML)",
+          "optimization_backup_reserve": "Minimum battery charge level to maintain (only applies to PowerSync ML)",
           "sungrow_host": "Local IP address of your Sungrow inverter or WiNet-S dongle (e.g., 192.168.1.100)",
           "sungrow_port": "Modbus TCP port (default: 502)",
           "sungrow_slave_id": "Modbus slave ID (default: 1)"

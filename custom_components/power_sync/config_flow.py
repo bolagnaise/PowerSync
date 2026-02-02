@@ -2156,11 +2156,12 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init_tesla(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step 1 for Tesla users: Select electricity provider and Tesla API provider."""
+        """Step 1 for Tesla users: Select electricity provider, Tesla API provider, and optimization provider."""
         if user_input is not None:
             # Store provider selections
             self._provider = user_input.get(CONF_ELECTRICITY_PROVIDER, "amber")
             self._tesla_provider = user_input.get(CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_TESLEMETRY)
+            optimization_provider = user_input.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
 
             # Check if switching to Teslemetry and need token
             current_tesla_provider = self.config_entry.data.get(CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_TESLEMETRY)
@@ -2172,13 +2173,22 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 # Need to get Teslemetry token
                 return await self.async_step_teslemetry_token()
 
-            # Update config entry data with new Tesla provider
+            # Update config entry data with new Tesla provider and optimization provider
+            new_data = dict(self.config_entry.data)
             if self._tesla_provider != current_tesla_provider:
-                new_data = dict(self.config_entry.data)
                 new_data[CONF_TESLA_API_PROVIDER] = self._tesla_provider
-                self.hass.config_entries.async_update_entry(
-                    self.config_entry, data=new_data
+            new_data[CONF_OPTIMIZATION_PROVIDER] = optimization_provider
+            # If PowerSync ML, store ML options
+            if optimization_provider == OPT_PROVIDER_POWERSYNC:
+                new_data[CONF_OPTIMIZATION_COST_FUNCTION] = user_input.get(
+                    CONF_OPTIMIZATION_COST_FUNCTION, COST_FUNCTION_COST
                 )
+                new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = user_input.get(
+                    CONF_OPTIMIZATION_BACKUP_RESERVE, int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100)
+                ) / 100.0  # Convert from % to decimal
+            self.hass.config_entries.async_update_entry(
+                self.config_entry, data=new_data
+            )
 
             # Route to provider-specific step
             if self._provider == "amber":
@@ -2192,11 +2202,20 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
 
         current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
         current_tesla_provider = self.config_entry.data.get(CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_TESLEMETRY)
+        current_opt_provider = self.config_entry.data.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
+        current_cost_function = self.config_entry.data.get(CONF_OPTIMIZATION_COST_FUNCTION, COST_FUNCTION_COST)
+        current_backup_reserve = self.config_entry.data.get(CONF_OPTIMIZATION_BACKUP_RESERVE, DEFAULT_OPTIMIZATION_BACKUP_RESERVE)
 
         # Build Tesla provider choices
         tesla_providers = {
             TESLA_PROVIDER_FLEET_API: "Tesla Fleet API (Free - requires Tesla Fleet integration)",
             TESLA_PROVIDER_TESLEMETRY: "Teslemetry (~$4/month - easier setup)",
+        }
+
+        # Build optimization provider choices
+        opt_providers = {
+            OPT_PROVIDER_NATIVE: "Tesla Powerwall built-in optimization",
+            OPT_PROVIDER_POWERSYNC: "PowerSync ML Optimization (recommended)",
         }
 
         return self.async_show_form(
@@ -2211,6 +2230,18 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_TESLA_API_PROVIDER,
                         default=current_tesla_provider,
                     ): vol.In(tesla_providers),
+                    vol.Required(
+                        CONF_OPTIMIZATION_PROVIDER,
+                        default=current_opt_provider,
+                    ): vol.In(opt_providers),
+                    vol.Optional(
+                        CONF_OPTIMIZATION_COST_FUNCTION,
+                        default=current_cost_function,
+                    ): vol.In(OPTIMIZATION_COST_FUNCTIONS),
+                    vol.Optional(
+                        CONF_OPTIMIZATION_BACKUP_RESERVE,
+                        default=int(current_backup_reserve * 100) if current_backup_reserve < 1 else int(current_backup_reserve),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=0, max=100)),
                 }
             ),
         )
@@ -2272,6 +2303,17 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 if sigen_station_id:
                     new_data[CONF_SIGENERGY_STATION_ID] = sigen_station_id
 
+                # Optimization provider settings
+                optimization_provider = user_input.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
+                new_data[CONF_OPTIMIZATION_PROVIDER] = optimization_provider
+                if optimization_provider == OPT_PROVIDER_POWERSYNC:
+                    new_data[CONF_OPTIMIZATION_COST_FUNCTION] = user_input.get(
+                        CONF_OPTIMIZATION_COST_FUNCTION, COST_FUNCTION_COST
+                    )
+                    new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = user_input.get(
+                        CONF_OPTIMIZATION_BACKUP_RESERVE, int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100)
+                    ) / 100.0
+
                 self.hass.config_entries.async_update_entry(
                     self.config_entry, data=new_data
                 )
@@ -2291,12 +2333,21 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         current_modbus_port = self._get_option(CONF_SIGENERGY_MODBUS_PORT, DEFAULT_SIGENERGY_MODBUS_PORT)
         current_modbus_slave_id = self._get_option(CONF_SIGENERGY_MODBUS_SLAVE_ID, DEFAULT_SIGENERGY_MODBUS_SLAVE_ID)
         current_dc_curtailment = self._get_option(CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False)
+        current_opt_provider = self.config_entry.data.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
+        current_cost_function = self.config_entry.data.get(CONF_OPTIMIZATION_COST_FUNCTION, COST_FUNCTION_COST)
+        current_backup_reserve = self.config_entry.data.get(CONF_OPTIMIZATION_BACKUP_RESERVE, DEFAULT_OPTIMIZATION_BACKUP_RESERVE)
 
         # Get current Sigenergy Cloud credentials (for display, show empty if not set)
         current_sigen_username = self.config_entry.data.get(CONF_SIGENERGY_USERNAME, "")
         current_sigen_device_id = self.config_entry.data.get(CONF_SIGENERGY_DEVICE_ID, "")
         current_sigen_station_id = self.config_entry.data.get(CONF_SIGENERGY_STATION_ID, "")
         # Don't show current password for security - user must re-enter if changing
+
+        # Build optimization provider choices
+        opt_providers = {
+            OPT_PROVIDER_NATIVE: "Sigenergy built-in optimization",
+            OPT_PROVIDER_POWERSYNC: "PowerSync ML Optimization (recommended)",
+        }
 
         return self.async_show_form(
             step_id="init_sigenergy",
@@ -2306,6 +2357,18 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_ELECTRICITY_PROVIDER,
                         default=current_provider,
                     ): vol.In(ELECTRICITY_PROVIDERS),
+                    vol.Required(
+                        CONF_OPTIMIZATION_PROVIDER,
+                        default=current_opt_provider,
+                    ): vol.In(opt_providers),
+                    vol.Optional(
+                        CONF_OPTIMIZATION_COST_FUNCTION,
+                        default=current_cost_function,
+                    ): vol.In(OPTIMIZATION_COST_FUNCTIONS),
+                    vol.Optional(
+                        CONF_OPTIMIZATION_BACKUP_RESERVE,
+                        default=int(current_backup_reserve * 100) if current_backup_reserve < 1 else int(current_backup_reserve),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=0, max=100)),
                     vol.Required(
                         CONF_SIGENERGY_MODBUS_HOST,
                         default=current_modbus_host,
@@ -2376,6 +2439,17 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID
                 )
 
+                # Optimization provider settings
+                optimization_provider = user_input.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
+                new_data[CONF_OPTIMIZATION_PROVIDER] = optimization_provider
+                if optimization_provider == OPT_PROVIDER_POWERSYNC:
+                    new_data[CONF_OPTIMIZATION_COST_FUNCTION] = user_input.get(
+                        CONF_OPTIMIZATION_COST_FUNCTION, COST_FUNCTION_COST
+                    )
+                    new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = user_input.get(
+                        CONF_OPTIMIZATION_BACKUP_RESERVE, int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100)
+                    ) / 100.0
+
                 self.hass.config_entries.async_update_entry(
                     self.config_entry, data=new_data
                 )
@@ -2394,6 +2468,15 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         current_host = self._get_option(CONF_SUNGROW_HOST, "")
         current_port = self._get_option(CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT)
         current_slave_id = self._get_option(CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID)
+        current_opt_provider = self.config_entry.data.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
+        current_cost_function = self.config_entry.data.get(CONF_OPTIMIZATION_COST_FUNCTION, COST_FUNCTION_COST)
+        current_backup_reserve = self.config_entry.data.get(CONF_OPTIMIZATION_BACKUP_RESERVE, DEFAULT_OPTIMIZATION_BACKUP_RESERVE)
+
+        # Build optimization provider choices
+        opt_providers = {
+            OPT_PROVIDER_NATIVE: "Sungrow built-in optimization",
+            OPT_PROVIDER_POWERSYNC: "PowerSync ML Optimization (recommended)",
+        }
 
         return self.async_show_form(
             step_id="init_sungrow",
@@ -2403,6 +2486,18 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_ELECTRICITY_PROVIDER,
                         default=current_provider,
                     ): vol.In(ELECTRICITY_PROVIDERS),
+                    vol.Required(
+                        CONF_OPTIMIZATION_PROVIDER,
+                        default=current_opt_provider,
+                    ): vol.In(opt_providers),
+                    vol.Optional(
+                        CONF_OPTIMIZATION_COST_FUNCTION,
+                        default=current_cost_function,
+                    ): vol.In(OPTIMIZATION_COST_FUNCTIONS),
+                    vol.Optional(
+                        CONF_OPTIMIZATION_BACKUP_RESERVE,
+                        default=int(current_backup_reserve * 100) if current_backup_reserve < 1 else int(current_backup_reserve),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=0, max=100)),
                     vol.Required(
                         CONF_SUNGROW_HOST,
                         default=current_host,
