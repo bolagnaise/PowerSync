@@ -1,0 +1,12 @@
+# Web framework
+flask>=3.0.0
+flask-cors>=4.0.0
+
+# Optimization libraries
+numpy>=1.24.0
+cvxpy>=1.4.0
+highspy>=1.5.0
+
+# Utilities
+python-dateutil>=2.8.0
+requests>=2.31.0

@@ -79,6 +79,10 @@ UPDATE_INTERVAL = timedelta(minutes=5)
 # VPP check interval
 VPP_CHECK_INTERVAL = timedelta(minutes=1)
 
+# Add-on API configuration
+ADDON_SLUG = "powersync_optimizer"
+ADDON_API_URL = f"http://{ADDON_SLUG}:5000"
+
 
 class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """
@@ -191,6 +195,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # VPP monitoring task
         self._vpp_monitor_task: asyncio.Task | None = None
 
+        # Add-on availability cache
+        self._addon_available: bool = False
+
     @property
     def enabled(self) -> bool:
         """Check if optimization is enabled."""
@@ -198,8 +205,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @property
     def optimizer_available(self) -> bool:
-        """Check if the LP optimizer is available."""
-        return self._optimizer.is_available
+        """Check if the LP optimizer is available (local or add-on)."""
+        # Local optimizer has priority info, but add-on is preferred
+        return self._optimizer.is_available or self._addon_available
+
+    def _check_addon_sync(self) -> bool:
+        """Synchronous check if add-on was available on last check."""
+        return getattr(self, "_addon_available", False)
 
     @property
     def current_schedule(self) -> OptimizationResult | None:
@@ -315,9 +327,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             get_battery_state=self._get_battery_state,
         )
 
+        # Check add-on availability
+        self._addon_available = await self._is_addon_available()
+
         _LOGGER.info(
             f"Optimization coordinator setup complete. "
-            f"Optimizer available: {self._optimizer.is_available}, "
+            f"Local optimizer: {self._optimizer.is_available}, "
+            f"Add-on optimizer: {self._addon_available}, "
             f"ML: {self._enable_ml_forecasting}, "
             f"Weather: {self._enable_weather}, "
             f"EV: {self._enable_ev}, "
@@ -537,6 +553,118 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as e:
             _LOGGER.debug(f"Error fetching provider price config: {e}")
 
+    async def _call_addon_optimizer(
+        self,
+        prices_import: list[float],
+        prices_export: list[float],
+        solar_forecast: list[float],
+        load_forecast: list[float],
+        battery_state: tuple[float, float],
+    ) -> OptimizationResult | None:
+        """Call the PowerSync Optimizer add-on for optimization."""
+        import aiohttp
+
+        initial_soc, capacity = battery_state
+
+        # Build request payload
+        payload = {
+            "prices_import": prices_import,
+            "prices_export": prices_export,
+            "solar_forecast": solar_forecast,
+            "load_forecast": load_forecast,
+            "battery": {
+                "current_soc": initial_soc,
+                "capacity_wh": capacity,
+                "max_charge_w": self._config.max_charge_w,
+                "max_discharge_w": self._config.max_discharge_w,
+                "efficiency": self._config.charge_efficiency,
+                "backup_reserve": self._config.backup_reserve,
+            },
+            "cost_function": self._cost_function.value,
+            "interval_minutes": self._config.interval_minutes,
+            "provider_config": {
+                "export_boost_enabled": self._provider_config.export_boost_enabled,
+                "export_price_offset": self._provider_config.export_price_offset,
+                "export_min_price": self._provider_config.export_min_price,
+                "export_boost_start": self._provider_config.export_boost_start,
+                "export_boost_end": self._provider_config.export_boost_end,
+                "chip_mode_enabled": self._provider_config.chip_mode_enabled,
+                "chip_mode_start": self._provider_config.chip_mode_start,
+                "chip_mode_end": self._provider_config.chip_mode_end,
+                "chip_mode_threshold": self._provider_config.chip_mode_threshold,
+            },
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{ADDON_API_URL}/optimize",
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as response:
+                    if response.status != 200:
+                        _LOGGER.warning(f"Add-on returned status {response.status}")
+                        return None
+
+                    data = await response.json()
+                    if not data.get("success"):
+                        _LOGGER.warning(f"Add-on optimization failed: {data.get('error')}")
+                        return None
+
+                    # Convert response to OptimizationResult
+                    schedule = data.get("schedule", {})
+                    summary = data.get("summary", {})
+
+                    # Parse timestamps
+                    timestamps = []
+                    for ts in schedule.get("timestamps", []):
+                        try:
+                            timestamps.append(datetime.fromisoformat(ts))
+                        except (ValueError, TypeError):
+                            timestamps.append(dt_util.now())
+
+                    return OptimizationResult(
+                        success=True,
+                        status=data.get("status", "optimal"),
+                        charge_schedule_w=schedule.get("charge_w", []),
+                        discharge_schedule_w=schedule.get("discharge_w", []),
+                        grid_import_w=schedule.get("grid_import_w", []),
+                        grid_export_w=schedule.get("grid_export_w", []),
+                        soc_trajectory=schedule.get("soc_trajectory", []),
+                        timestamps=timestamps,
+                        total_cost=summary.get("total_cost", 0),
+                        total_import_kwh=summary.get("total_import_kwh", 0),
+                        total_export_kwh=summary.get("total_export_kwh", 0),
+                        total_charge_kwh=summary.get("total_charge_kwh", 0),
+                        total_discharge_kwh=summary.get("total_discharge_kwh", 0),
+                        average_import_price=summary.get("average_import_price", 0),
+                        average_export_price=summary.get("average_export_price", 0),
+                    )
+
+        except aiohttp.ClientError as e:
+            _LOGGER.debug(f"Add-on not available: {e}")
+            return None
+        except Exception as e:
+            _LOGGER.error(f"Error calling add-on optimizer: {e}")
+            return None
+
+    async def _is_addon_available(self) -> bool:
+        """Check if the optimizer add-on is available."""
+        import aiohttp
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{ADDON_API_URL}/health",
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return data.get("optimizer_available", False)
+        except Exception:
+            pass
+        return False
+
     async def enable(self) -> bool:
         """Enable optimization and start the executor."""
         if self._enabled:
@@ -628,7 +756,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._executor.set_config(self._config)
 
     async def force_reoptimize(self) -> OptimizationResult | None:
-        """Force immediate re-optimization with all enhancements."""
+        """Force immediate re-optimization with all enhancements.
+
+        Tries the PowerSync Optimizer add-on first (has cvxpy/numpy),
+        falls back to local optimization if add-on unavailable.
+        """
         _LOGGER.info("Forcing re-optimization with enhanced features")
 
         # Get all forecasts
@@ -647,12 +779,29 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         initial_soc, capacity = battery_state
         start_time = dt_util.now()
 
+        # Try add-on optimizer first (has full cvxpy/numpy support)
+        addon_result = await self._call_addon_optimizer(
+            import_prices, export_prices, solar, load, battery_state
+        )
+        if addon_result:
+            _LOGGER.info("Optimization completed via add-on")
+            self._current_schedule = addon_result
+            self._last_optimization_time = dt_util.now()
+
+            # Update executor with new schedule
+            if self._executor:
+                self._executor.set_schedule(addon_result)
+
+            return addon_result
+
+        _LOGGER.debug("Add-on not available, trying local optimization")
+
         # Check for VPP events to consider
         anticipated_events = []
         if self._grid_services:
             anticipated_events = await self._grid_services.check_grid_conditions()
 
-        # Run optimization based on configuration
+        # Run optimization based on configuration (local fallback)
         if self._multi_battery_optimizer and len(self._battery_configs) > 1:
             # Multi-battery optimization
             self._multi_battery_result = self._multi_battery_optimizer.optimize(

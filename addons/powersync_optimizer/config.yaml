@@ -1,0 +1,32 @@
+name: "PowerSync Optimizer"
+description: "ML-based battery optimization engine for PowerSync"
+version: "1.0.0"
+slug: "powersync_optimizer"
+url: "https://github.com/bolagnaise/PowerSync"
+arch:
+  - amd64
+  - aarch64
+  - armv7
+startup: "application"
+boot: "auto"
+homeassistant_api: true
+hassio_api: true
+auth_api: true
+ingress: true
+ingress_port: 5000
+panel_icon: "mdi:battery-charging"
+panel_title: "PowerSync Optimizer"
+ports:
+  5000/tcp: null
+ports_description:
+  5000/tcp: "Optimizer API"
+options:
+  log_level: "info"
+  optimization_interval: 30
+  horizon_hours: 48
+  default_cost_function: "cost"
+schema:
+  log_level: "list(debug|info|warning|error)"
+  optimization_interval: "int(15,120)"
+  horizon_hours: "int(24,72)"
+  default_cost_function: "list(cost|profit|self_consumption)"
