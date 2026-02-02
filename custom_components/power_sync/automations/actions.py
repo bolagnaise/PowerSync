@@ -1617,6 +1617,19 @@ async def _action_set_ev_charging_amps(
             return False
 
         try:
+            # Check entity's actual min/max limits and clamp accordingly
+            entity_state = hass.states.get(charging_amps_entity)
+            if entity_state:
+                entity_min = entity_state.attributes.get("min", 5)
+                entity_max = entity_state.attributes.get("max", 32)
+                original_amps = amps
+                amps = max(entity_min, min(entity_max, amps))
+                if amps != original_amps:
+                    _LOGGER.info(
+                        f"Clamped charging amps from {original_amps}A to {amps}A "
+                        f"(entity range: {entity_min}-{entity_max}A)"
+                    )
+
             wake_success = await _wake_tesla_ev(hass, vehicle_vin)
             if not wake_success:
                 _LOGGER.debug("Wake failed (possibly due to API credits), skipping set amps command")
