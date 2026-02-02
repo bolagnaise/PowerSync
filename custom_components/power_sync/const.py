@@ -985,7 +985,7 @@ OPTIMIZATION_PROVIDER_NATIVE_NAMES = {
 
 OPTIMIZATION_PROVIDERS = {
     OPT_PROVIDER_NATIVE: "Use battery's built-in optimization",
-    OPT_PROVIDER_POWERSYNC: "PowerSync ML Optimization (recommended)",
+    OPT_PROVIDER_POWERSYNC: "PowerSync ML Optimization (alpha)",
 }
 
 # Optimization configuration keys

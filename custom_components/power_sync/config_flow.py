@@ -863,7 +863,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Build dynamic provider options with battery-specific naming
         providers = {
             OPT_PROVIDER_NATIVE: f"{native_name} built-in optimization",
-            OPT_PROVIDER_POWERSYNC: "PowerSync ML Optimization (recommended)",
+            OPT_PROVIDER_POWERSYNC: "PowerSync ML Optimization (alpha)",
         }
 
         return self.async_show_form(
@@ -2215,7 +2215,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         # Build optimization provider choices
         opt_providers = {
             OPT_PROVIDER_NATIVE: "Tesla Powerwall built-in optimization",
-            OPT_PROVIDER_POWERSYNC: "PowerSync ML Optimization (recommended)",
+            OPT_PROVIDER_POWERSYNC: "PowerSync ML Optimization (alpha)",
         }
 
         return self.async_show_form(
@@ -2346,7 +2346,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         # Build optimization provider choices
         opt_providers = {
             OPT_PROVIDER_NATIVE: "Sigenergy built-in optimization",
-            OPT_PROVIDER_POWERSYNC: "PowerSync ML Optimization (recommended)",
+            OPT_PROVIDER_POWERSYNC: "PowerSync ML Optimization (alpha)",
         }
 
         return self.async_show_form(
@@ -2475,7 +2475,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         # Build optimization provider choices
         opt_providers = {
             OPT_PROVIDER_NATIVE: "Sungrow built-in optimization",
-            OPT_PROVIDER_POWERSYNC: "PowerSync ML Optimization (recommended)",
+            OPT_PROVIDER_POWERSYNC: "PowerSync ML Optimization (alpha)",
         }
 
         return self.async_show_form(
