@@ -228,6 +228,35 @@ async def _get_tesla_ev_entity(
     return None
 
 
+def _get_vehicle_name_from_vin(hass: HomeAssistant, vehicle_vin: str) -> str:
+    """
+    Look up the friendly name of a Tesla vehicle from its VIN.
+
+    Args:
+        hass: Home Assistant instance
+        vehicle_vin: The vehicle's VIN
+
+    Returns:
+        The vehicle's friendly name (e.g., "TESSY") or a truncated VIN if not found
+    """
+    device_registry = dr.async_get(hass)
+
+    for device in device_registry.devices.values():
+        for identifier in device.identifiers:
+            if len(identifier) < 2:
+                continue
+            domain = identifier[0]
+            identifier_value = identifier[1]
+            if domain in TESLA_EV_INTEGRATIONS:
+                id_str = str(identifier_value)
+                # VIN is 17 chars, not all numeric
+                if len(id_str) == 17 and not id_str.isdigit() and id_str == vehicle_vin:
+                    return device.name or vehicle_vin[:8]
+
+    # Fallback to truncated VIN
+    return vehicle_vin[:8] if len(vehicle_vin) > 8 else vehicle_vin
+
+
 async def _wake_tesla_ev(
     hass: HomeAssistant,
     vehicle_vin: Optional[str] = None,
@@ -2220,7 +2249,11 @@ async def _dynamic_ev_update_surplus(
                 notify_on_error = params.get("notify_on_error", True)
                 if notify_on_error:
                     try:
-                        vehicle_name = params.get("vehicle_name", vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id)
+                        vehicle_name = params.get("vehicle_name")
+                        if not vehicle_name and vehicle_id:
+                            vehicle_name = _get_vehicle_name_from_vin(hass, vehicle_id)
+                        if not vehicle_name:
+                            vehicle_name = vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id
                         await _send_expo_push(
                             hass,
                             "EV Charging Paused",
@@ -2256,7 +2289,11 @@ async def _dynamic_ev_update_surplus(
                 notify_on_start = params.get("notify_on_start", True)
                 if notify_on_start:
                     try:
-                        vehicle_name = params.get("vehicle_name", vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id)
+                        vehicle_name = params.get("vehicle_name")
+                        if not vehicle_name and vehicle_id:
+                            vehicle_name = _get_vehicle_name_from_vin(hass, vehicle_id)
+                        if not vehicle_name:
+                            vehicle_name = vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id
                         mode_info = " (parallel)" if state.get("parallel_charging_mode") else ""
                         await _send_expo_push(
                             hass,
@@ -2332,7 +2369,11 @@ async def _dynamic_ev_update_surplus(
                 notify_on_start = params.get("notify_on_start", True)
                 if notify_on_start:
                     try:
-                        vehicle_name = params.get("vehicle_name", vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id)
+                        vehicle_name = params.get("vehicle_name")
+                        if not vehicle_name and vehicle_id:
+                            vehicle_name = _get_vehicle_name_from_vin(hass, vehicle_id)
+                        if not vehicle_name:
+                            vehicle_name = vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id
                         await _send_expo_push(
                             hass,
                             "Solar EV Charging Started",
@@ -2862,7 +2903,12 @@ async def _action_start_ev_charging_dynamic(
     notify_on_start = params.get("notify_on_start", True)
     if notify_on_start:
         try:
-            vehicle_name = params.get("vehicle_name", vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id)
+            # Look up vehicle name from VIN, fallback to param or truncated VIN
+            vehicle_name = params.get("vehicle_name")
+            if not vehicle_name and vehicle_id:
+                vehicle_name = _get_vehicle_name_from_vin(hass, vehicle_id)
+            if not vehicle_name:
+                vehicle_name = vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id
             await _send_expo_push(
                 hass,
                 "EV Charging Started",
@@ -2937,7 +2983,12 @@ async def _action_stop_ev_charging_dynamic(
             notify_on_complete = state.get("params", {}).get("notify_on_complete", True)
             if notify_on_complete:
                 try:
-                    vehicle_name = state.get("params", {}).get("vehicle_name", vid[:8] if len(vid) > 8 else vid)
+                    # Look up vehicle name from VIN, fallback to param or truncated VIN
+                    vehicle_name = state.get("params", {}).get("vehicle_name")
+                    if not vehicle_name and vid:
+                        vehicle_name = _get_vehicle_name_from_vin(hass, vid)
+                    if not vehicle_name:
+                        vehicle_name = vid[:8] if len(vid) > 8 else vid
                     reason = params.get("stop_reason", "manually stopped")
                     await _send_expo_push(
                         hass,
