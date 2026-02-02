@@ -3637,6 +3637,41 @@ class PriceLevelChargingExecutor:
 
         return defaults
 
+    async def _get_home_battery_soc(self) -> Optional[float]:
+        """Get home battery (Powerwall/Sigenergy/Sungrow) state of charge.
+
+        Returns the battery percentage from the Tesla coordinator or other sources.
+        """
+        # Try to get from Tesla coordinator
+        entry_data = self.hass.data.get(self._domain, {}).get(self.config_entry.entry_id, {})
+        tesla_coordinator = entry_data.get("tesla_coordinator")
+
+        if tesla_coordinator and tesla_coordinator.data:
+            battery_level = tesla_coordinator.data.get("battery_level")
+            if battery_level is not None:
+                return float(battery_level)
+
+        # Fallback: Try to find battery level from common entity patterns
+        entity_patterns = [
+            "sensor.powerwall_charge",
+            "sensor.powerwall_battery_remaining",
+            "sensor.sigenergy_battery_soc",
+            "sensor.sungrow_battery_soc",
+        ]
+
+        for pattern in entity_patterns:
+            # Check for entities matching the pattern
+            for entity_id in self.hass.states.async_entity_ids("sensor"):
+                if pattern.replace("*", "") in entity_id.lower() or entity_id == pattern:
+                    state = self.hass.states.get(entity_id)
+                    if state and state.state not in ("unknown", "unavailable"):
+                        try:
+                            return float(state.state)
+                        except (ValueError, TypeError):
+                            continue
+
+        return None
+
     async def _get_ev_soc(self, vehicle_vin: Optional[str] = None) -> Optional[int]:
         """Get EV's current state of charge from HA entities.
 
@@ -3860,6 +3895,17 @@ class PriceLevelChargingExecutor:
             self._state.last_decision_reason = "Vehicle not plugged in"
             return False, "Vehicle not plugged in", ""
 
+        # Check minimum home battery SOC (use solar surplus config's min_battery_soc)
+        solar_config = await self._get_solar_surplus_config()
+        min_home_battery = solar_config.get("min_battery_soc", 0)
+        if min_home_battery > 0:
+            home_battery_soc = await self._get_home_battery_soc()
+            if home_battery_soc is not None and home_battery_soc < min_home_battery:
+                reason = f"Home battery {home_battery_soc:.0f}% < {min_home_battery}% minimum"
+                self._state.last_decision = "waiting"
+                self._state.last_decision_reason = reason
+                return False, reason, ""
+
         # Get current EV SoC
         ev_soc = await self._get_ev_soc()
         if ev_soc is None:
@@ -3962,6 +4008,17 @@ class PriceLevelChargingExecutor:
             vehicle_state.last_decision = "unplugged"
             vehicle_state.last_decision_reason = "Vehicle not plugged in"
             return False, "Vehicle not plugged in", ""
+
+        # Check minimum home battery SOC (use solar surplus config's min_battery_soc)
+        solar_config = await self._get_solar_surplus_config()
+        min_home_battery = solar_config.get("min_battery_soc", 0)
+        if min_home_battery > 0:
+            home_battery_soc = await self._get_home_battery_soc()
+            if home_battery_soc is not None and home_battery_soc < min_home_battery:
+                reason = f"Home battery {home_battery_soc:.0f}% < {min_home_battery}% minimum"
+                vehicle_state.last_decision = "waiting"
+                vehicle_state.last_decision_reason = reason
+                return False, reason, ""
 
         # Get current EV SoC
         ev_soc = await self._get_ev_soc(vehicle_vin)
