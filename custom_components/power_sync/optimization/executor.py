@@ -274,6 +274,9 @@ class ScheduleExecutor:
         action = BatteryAction(action_data["action"])
         power_w = action_data["power_w"]
 
+        # Track previous action to know if we need to restore
+        previous_action = self._status.current_action
+
         self._status.current_action = action
         self._status.current_power_w = power_w
         self._status.last_execution = dt_util.now()
@@ -284,7 +287,12 @@ class ScheduleExecutor:
             elif action == BatteryAction.DISCHARGE:
                 await self._command_discharge(power_w)
             else:
-                await self._restore_normal_operation()
+                # Only restore if we were previously charging or discharging
+                # This avoids unnecessary restore calls on startup when action is idle
+                if previous_action in (BatteryAction.CHARGE, BatteryAction.DISCHARGE):
+                    await self._restore_normal_operation()
+                else:
+                    _LOGGER.debug("Action is idle, no restore needed (wasn't charging/discharging)")
 
         except Exception as e:
             _LOGGER.error(f"Failed to execute action {action.value}: {e}")

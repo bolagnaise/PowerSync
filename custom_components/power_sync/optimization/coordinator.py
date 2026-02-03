@@ -1039,8 +1039,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Build data for mobile app
         data = {
+            "success": True,
             "enabled": self._enabled,
-            "optimiser_available": self._optimiser.is_available,
+            "optimizer_available": self._optimiser.is_available,
             "cost_function": self._cost_function.value,
             "status": executor_status.get("status", "disabled"),
             "optimization_status": executor_status.get("optimization_status", "not_run"),
