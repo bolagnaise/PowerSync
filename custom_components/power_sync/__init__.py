@@ -12593,13 +12593,19 @@ class OptimizationView(HomeAssistantView):
                     "message": "Re-optimization triggered",
                     "schedule": result.to_dict() if hasattr(result, 'to_dict') else None
                 })
-            else:
+            elif result:
                 return web.json_response({
                     "success": False,
-                    "error": result.status if result else "Unknown error"
+                    "error": f"Optimization failed: {result.status}"
                 }, status=500)
+            else:
+                # result is None - missing forecast data
+                return web.json_response({
+                    "success": False,
+                    "error": "Missing forecast data. Ensure price data (Amber/Octopus) and Solcast solar forecast are configured."
+                }, status=400)
         except Exception as e:
-            _LOGGER.error(f"Error in force re-optimization: {e}")
+            _LOGGER.error(f"Error in force re-optimization: {e}", exc_info=True)
             return web.json_response({
                 "success": False,
                 "error": str(e)

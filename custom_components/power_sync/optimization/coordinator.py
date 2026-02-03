@@ -79,9 +79,14 @@ UPDATE_INTERVAL = timedelta(minutes=5)
 # VPP check interval
 VPP_CHECK_INTERVAL = timedelta(minutes=1)
 
-# Add-on API configuration
-ADDON_SLUG = "powersync_optimiser"
-ADDON_API_URL = f"http://{ADDON_SLUG}:5000"
+# Add-on API configuration - try multiple possible hostnames
+ADDON_URLS = [
+    "http://powersync_optimiser:5000",      # Standard slug
+    "http://powersync-optimiser:5000",      # Hyphenated slug
+    "http://local_powersync_optimiser:5000", # Local add-on slug
+    "http://local-powersync-optimiser:5000", # Local add-on hyphenated
+    "http://addon_powersync_optimiser:5000", # Alternative prefix
+]
 
 
 class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -197,6 +202,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Add-on availability cache
         self._addon_available: bool = False
+        self._addon_url: str | None = None
 
     @property
     def enabled(self) -> bool:
@@ -595,10 +601,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             },
         }
 
+        # Use discovered add-on URL or try all known URLs
+        addon_url = self._addon_url or ADDON_URLS[0]
+
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    f"{ADDON_API_URL}/optimize",
+                    f"{addon_url}/optimize",
                     json=payload,
                     timeout=aiohttp.ClientTimeout(total=60),
                 ) as response:
@@ -652,17 +661,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Check if the optimiser add-on is available."""
         import aiohttp
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{ADDON_API_URL}/health",
-                    timeout=aiohttp.ClientTimeout(total=5),
-                ) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        return data.get("optimiser_available", False)
-        except Exception:
-            pass
+        # Try each possible URL
+        for url in ADDON_URLS:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        f"{url}/health",
+                        timeout=aiohttp.ClientTimeout(total=3),
+                    ) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            if data.get("optimiser_available", False):
+                                # Store the working URL for future use
+                                self._addon_url = url
+                                _LOGGER.info(f"Found PowerSync Optimiser add-on at {url}")
+                                return True
+            except aiohttp.ClientError as e:
+                _LOGGER.debug(f"Add-on not at {url}: {e}")
+            except Exception as e:
+                _LOGGER.debug(f"Error checking add-on at {url}: {e}")
+
+        _LOGGER.debug("PowerSync Optimiser add-on not found at any known URL")
         return False
 
     async def enable(self) -> bool:
@@ -768,6 +787,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         solar = await self._get_solar_forecast()
         load = await self._get_load_forecast()
         battery_state = await self._get_battery_state()
+
+        # Log what we got for debugging
+        _LOGGER.debug(f"Forecast data - prices: {bool(prices)}, solar: {bool(solar)}, load: {bool(load)}")
+        if not prices:
+            _LOGGER.warning(f"No price data - price_coordinator exists: {bool(self.price_coordinator)}")
+        if not solar:
+            _LOGGER.warning(f"No solar data - solar_forecaster exists: {bool(self._solar_forecaster)}")
+        if not load:
+            _LOGGER.warning(f"No load data - load_estimator exists: {bool(self._load_estimator)}")
 
         if not prices or not solar or not load:
             _LOGGER.warning("Missing forecast data for optimization")
