@@ -3037,7 +3037,7 @@ class TariffPriceView(HomeAssistantView):
         self._hass = hass
 
     async def get(self, request: web.Request) -> web.Response:
-        """Handle GET request for current tariff-based prices."""
+        """Handle GET request for current electricity prices."""
         _LOGGER.info("💰 Tariff price HTTP request")
 
         # Find the power_sync entry
@@ -3055,6 +3055,92 @@ class TariffPriceView(HomeAssistantView):
             )
 
         try:
+            # Get electricity provider to determine price source
+            electricity_provider = entry.options.get(
+                CONF_ELECTRICITY_PROVIDER,
+                entry.data.get(CONF_ELECTRICITY_PROVIDER, "globird")
+            )
+
+            # Dynamic pricing providers - fetch real-time prices from their API
+            # These are NOT affected by ML fake tariffs since they don't use Tesla tariff
+            dynamic_providers = ("amber", "flow_power", "aemo_vpp")
+            if electricity_provider in dynamic_providers:
+                entry_data = self._hass.data.get(DOMAIN, {}).get(entry_id, {})
+
+                # Try price coordinator first (most up-to-date)
+                price_coordinator = entry_data.get("price_coordinator")
+                if price_coordinator and price_coordinator.data:
+                    price_data = price_coordinator.data
+                    import_price_cents = price_data.get("import_cents", 0)
+                    export_price_cents = price_data.get("export_cents", 0)
+                    spike_status = price_data.get("spike_status")
+
+                    result = {
+                        "success": True,
+                        "import": {
+                            "perKwh": import_price_cents,
+                            "channelType": "general",
+                            "type": "CurrentInterval",
+                            "duration": 5 if electricity_provider == "amber" else 30,
+                            "spikeStatus": spike_status,
+                            "source": electricity_provider,
+                        },
+                        "feedIn": {
+                            "perKwh": -export_price_cents,
+                            "channelType": "feedIn",
+                            "type": "CurrentInterval",
+                            "duration": 5 if electricity_provider == "amber" else 30,
+                            "spikeStatus": None,
+                            "source": electricity_provider,
+                        },
+                        "provider": electricity_provider,
+                    }
+
+                    _LOGGER.info(
+                        f"✅ Price response ({electricity_provider}): import={import_price_cents:.1f}c, export={export_price_cents:.1f}c"
+                    )
+                    return web.json_response(result)
+
+                # Fallback to stored amber_prices
+                amber_prices = entry_data.get("amber_prices", {})
+                if amber_prices:
+                    import_price_cents = amber_prices.get("import_cents", 0)
+                    export_price_cents = amber_prices.get("export_cents", 0)
+
+                    result = {
+                        "success": True,
+                        "import": {
+                            "perKwh": import_price_cents,
+                            "channelType": "general",
+                            "type": "CurrentInterval",
+                            "duration": 5,
+                            "spikeStatus": None,
+                            "source": f"{electricity_provider}_stored",
+                        },
+                        "feedIn": {
+                            "perKwh": -export_price_cents,
+                            "channelType": "feedIn",
+                            "type": "CurrentInterval",
+                            "duration": 5,
+                            "spikeStatus": None,
+                            "source": f"{electricity_provider}_stored",
+                        },
+                        "provider": electricity_provider,
+                    }
+
+                    _LOGGER.info(
+                        f"✅ Price response ({electricity_provider} stored): import={import_price_cents:.1f}c, export={export_price_cents:.1f}c"
+                    )
+                    return web.json_response(result)
+
+                # No dynamic price data available
+                _LOGGER.warning(f"No price data available for {electricity_provider}")
+                return web.json_response({
+                    "success": False,
+                    "error": f"No price data available for {electricity_provider}. Check API connection."
+                }, status=404)
+
+            # Static TOU providers (GloBird, etc.) - use Tesla tariff
             # Check if ML optimizer has uploaded a fake tariff (force charge/discharge active)
             # If so, use the SAVED real tariff instead of fetching the fake one from Tesla
             force_charge_state = self._hass.data.get(DOMAIN, {}).get(entry_id, {}).get("force_charge_state", {})
