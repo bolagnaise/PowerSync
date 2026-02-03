@@ -1174,6 +1174,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         load = await self._get_load_forecast()
         battery_state = await self._get_battery_state()
 
+        # Fetch actual backup reserve from battery system (Tesla, Sigenergy, Sungrow)
+        await self._get_backup_reserve()
+        _LOGGER.debug(f"Using backup reserve: {self._config.backup_reserve:.0%}")
+
         if not prices:
             _LOGGER.warning(f"No price data - price_coordinator exists: {bool(self.price_coordinator)}")
         if not solar:
@@ -1678,6 +1682,63 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Fall back to config default
         _LOGGER.debug(f"Using default battery capacity: {self._config.battery_capacity_wh/1000:.1f} kWh")
         return self._config.battery_capacity_wh
+
+    async def _get_backup_reserve(self) -> float:
+        """
+        Get actual backup reserve percentage from the battery system.
+
+        Priority:
+        1. Tesla site_info backup_reserve_percent
+        2. Sigenergy controller get_backup_soc()
+        3. Sungrow coordinator backup_reserve
+        4. Fall back to config value
+        """
+        from ..const import DOMAIN, CONF_SIGENERGY_STATION_ID, CONF_SUNGROW_HOST
+
+        try:
+            domain_data = self.hass.data.get(DOMAIN, {})
+            for entry_id, entry_data in domain_data.items():
+                if not isinstance(entry_data, dict):
+                    continue
+
+                # Tesla: Get from site_info
+                if hasattr(self.energy_coordinator, 'async_get_site_info'):
+                    site_info = await self.energy_coordinator.async_get_site_info()
+                    if site_info and "backup_reserve_percent" in site_info:
+                        reserve_percent = site_info.get("backup_reserve_percent", 20)
+                        reserve = reserve_percent / 100.0  # Convert to 0-1
+                        _LOGGER.debug(f"🔋 Fetched Tesla backup reserve: {reserve_percent}%")
+                        self._config.backup_reserve = reserve
+                        return reserve
+
+                # Sigenergy: Get from coordinator data
+                sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
+                if sigenergy_coordinator and sigenergy_coordinator.data:
+                    coord_data = sigenergy_coordinator.data
+                    if "backup_reserve" in coord_data:
+                        reserve_percent = coord_data.get("backup_reserve", 20)
+                        reserve = reserve_percent / 100.0
+                        _LOGGER.debug(f"🔋 Fetched Sigenergy backup reserve: {reserve_percent}%")
+                        self._config.backup_reserve = reserve
+                        return reserve
+
+                # Sungrow: Get from coordinator data
+                sungrow_coordinator = entry_data.get("sungrow_coordinator")
+                if sungrow_coordinator and sungrow_coordinator.data:
+                    coord_data = sungrow_coordinator.data
+                    if "backup_reserve" in coord_data:
+                        reserve_percent = coord_data.get("backup_reserve", 20)
+                        reserve = reserve_percent / 100.0
+                        _LOGGER.debug(f"🔋 Fetched Sungrow backup reserve: {reserve_percent}%")
+                        self._config.backup_reserve = reserve
+                        return reserve
+
+        except Exception as e:
+            _LOGGER.warning(f"Error fetching backup reserve: {e}")
+
+        # Fall back to config default
+        _LOGGER.debug(f"Using default backup reserve: {self._config.backup_reserve:.0%}")
+        return self._config.backup_reserve
 
     async def _detect_battery_power_limits(self) -> None:
         """
