@@ -12731,14 +12731,17 @@ class OptimizationSettingsView(HomeAssistantView):
             self._hass.config_entries.async_update_entry(config_entry, data=new_data)
             _LOGGER.info(f"🔧 ML optimization settings updated via API: {changes}")
 
-            # If we enabled/disabled ML optimization, reload the integration to apply
+            # If we enabled/disabled ML optimization, reload the integration in background
             if "enabled" in settings:
-                _LOGGER.info("🔄 Reloading integration to apply ML optimization changes")
-                await self._hass.config_entries.async_reload(config_entry.entry_id)
+                _LOGGER.info("🔄 Scheduling integration reload to apply ML optimization changes")
+                # Fire and forget - don't await, return immediately to avoid timeout
+                self._hass.async_create_task(
+                    self._hass.config_entries.async_reload(config_entry.entry_id)
+                )
                 return web.json_response({
                     "success": True,
                     "changes": changes,
-                    "message": "Settings saved and integration reloaded."
+                    "message": "Settings saved. Integration reloading in background..."
                 })
 
             return web.json_response({
