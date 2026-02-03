@@ -81,6 +81,128 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 
 ---
 
+## Smart Optimization (ML-Based Battery Scheduling)
+
+PowerSync includes an advanced ML-based optimization engine that calculates the optimal battery charge/discharge schedule based on electricity prices, solar forecasts, and load patterns.
+
+### How It Works
+
+The optimizer uses **linear programming** (LP) to solve a cost minimization problem over a 48-hour horizon:
+
+```
+Minimize: Σ (import_price[t] × grid_import[t] - export_price[t] × grid_export[t])
+
+Subject to:
+  - Power balance constraints (solar + grid + battery = load)
+  - Battery SOC limits (0% to 100%)
+  - Charge/discharge rate limits
+  - Backup reserve constraints
+```
+
+The result is a 48-hour schedule telling your battery exactly when to charge, discharge, or idle to minimize your electricity costs (or maximize profit/self-consumption).
+
+### Features
+
+| Feature | Description |
+|---------|-------------|
+| **48-Hour Optimization** | Plans battery actions for the next 48 hours |
+| **MPC Approach** | Re-optimizes every 30 minutes with updated data |
+| **Multiple Objectives** | Cost minimization, profit maximization, or self-consumption |
+| **Solar Integration** | Uses Solcast forecast data for solar predictions |
+| **Load Forecasting** | ML-based load prediction from historical patterns |
+| **Price Integration** | Works with Amber, Octopus, Flow Power, and AEMO pricing |
+
+### Installing the PowerSync Optimiser Add-on
+
+The optimizer requires mathematical libraries (cvxpy, numpy) that are too large to bundle with the Home Assistant integration. Instead, install the **PowerSync Optimiser** add-on which provides the optimization engine.
+
+**Installation Steps:**
+
+1. **Add the Repository**
+   - Go to **Settings → Add-ons → Add-on Store**
+   - Click the **⋮** menu (top right) → **Repositories**
+   - Add: `https://github.com/bolagnaise/powersync-addons`
+   - Click **Add**
+
+2. **Install the Add-on**
+   - Find **PowerSync Optimiser** in the add-on store
+   - Click **Install**
+   - Wait for installation to complete (may take a few minutes)
+
+3. **Start the Add-on**
+   - Click **Start**
+   - Optionally enable **Start on boot** and **Watchdog**
+
+4. **Verify Connection**
+   - The add-on runs on port 5001 by default
+   - PowerSync automatically detects and connects to the add-on
+   - Check Home Assistant logs for: `"Add-on optimiser available at..."`
+
+**Add-on Configuration:**
+
+```yaml
+port: 5001  # Change if port conflicts with other add-ons (e.g., EMHASS)
+log_level: info
+```
+
+> **Note:** If you're also running EMHASS, change the port to avoid conflicts. PowerSync will try ports 5001, 5000, and 5002 in order.
+
+### Enabling Smart Optimization
+
+1. **In Home Assistant:**
+   - Go to **Settings → Devices & Services → PowerSync**
+   - Click **Configure**
+   - Enable **Smart Optimization (ML-based scheduling)**
+
+2. **In the Mobile App:**
+   - Go to **Controls** screen
+   - Find the **Smart Optimization** card
+   - Toggle **Enable** to turn on optimization
+   - Select your preferred **Cost Function**:
+     - **Cost Minimization** - Lowest electricity bill (default)
+     - **Profit Maximization** - Best for high export rates (Amber, Octopus Flux)
+     - **Self-Consumption** - Maximum solar self-use
+
+3. **View the Schedule:**
+   - Tap **View Full Schedule** to see the 48-hour optimization plan
+   - Charts show SOC trajectory and charge/discharge power
+   - Summary shows predicted daily cost and savings vs baseline
+
+### Understanding the Schedule
+
+The optimization screen shows:
+
+| Section | Description |
+|---------|-------------|
+| **Status** | Whether optimization is active and the current mode |
+| **Current/Next Action** | What the battery is doing now and what's coming next |
+| **Predicted Cost** | Estimated electricity cost for the day |
+| **Savings** | How much you're saving vs no optimization |
+| **48-Hour Chart** | Visual timeline of SOC and power |
+| **Upcoming Actions** | List of scheduled charge/discharge periods |
+
+### Troubleshooting
+
+**"Optimizer engine not installed"**
+- Install the PowerSync Optimiser add-on (see above)
+- Check the add-on is running: **Settings → Add-ons → PowerSync Optimiser**
+
+**"Missing forecast data"**
+- Ensure you have price data (Amber/Octopus configured)
+- Check Solcast integration is set up for solar forecasts
+- The optimizer needs price, solar, and load data to run
+
+**Schedule not updating**
+- Optimization runs every 30 minutes automatically
+- Tap **Refresh Now** to force immediate re-optimization
+- Check logs for errors: `custom_components.power_sync.optimization`
+
+**Incorrect cost predictions during force charge/discharge**
+- This is expected - force modes use fake tariff rates
+- Costs will recalculate correctly when force mode ends
+
+---
+
 ## Installation
 
 ### Prerequisites
