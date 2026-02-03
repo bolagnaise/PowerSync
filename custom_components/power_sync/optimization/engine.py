@@ -53,7 +53,7 @@ class OptimizationConfig:
     # Optimization settings
     cost_function: CostFunction = CostFunction.COST_MINIMIZATION
     interval_minutes: int = 5             # Time interval in minutes
-    horizon_hours: int = 48               # Optimization horizon in hours
+    horizon_hours: int = 24               # Optimization horizon in hours
 
     # Degradation penalty (optional)
     cycle_cost: float = 0.0               # Cost per kWh cycled (for battery wear)
