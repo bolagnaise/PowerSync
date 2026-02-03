@@ -14,7 +14,7 @@ from enum import Enum
 from typing import Any, Callable
 
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_track_time_change, async_track_time_interval
 from homeassistant.util import dt as dt_util
 
 from .engine import BatteryOptimiser, OptimizationConfig, OptimizationResult, CostFunction
@@ -183,12 +183,22 @@ class ScheduleExecutor:
         # Schedule periodic execution only for static/TOU pricing
         # For dynamic pricing (Amber/AEMO), optimization is triggered by price updates
         if use_periodic_timer:
-            self._cancel_timer = async_track_time_interval(
+            # Calculate minute values aligned to interval_minutes boundaries
+            # For 5-minute interval: [0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55]
+            aligned_minutes = list(range(0, 60, self.interval_minutes))
+
+            # Use async_track_time_change to fire at specific minutes aligned to clock
+            # This ensures ticks happen at :00, :05, :10, etc. instead of arbitrary times
+            self._cancel_timer = async_track_time_change(
                 self.hass,
                 self._tick,
-                timedelta(minutes=self.interval_minutes),
+                minute=aligned_minutes,
+                second=0,  # Fire at :00 seconds
             )
-            _LOGGER.info(f"Schedule executor started (interval: {self.interval_minutes}min)")
+            _LOGGER.info(
+                f"Schedule executor started (interval: {self.interval_minutes}min, "
+                f"aligned to minutes: {aligned_minutes})"
+            )
         else:
             _LOGGER.info("Schedule executor started (price-triggered mode - no periodic timer)")
 
@@ -343,6 +353,10 @@ class ScheduleExecutor:
         self._status.current_power_w = power_w
         self._status.last_execution = dt_util.now()
 
+        # Determine if previous action was a "forced" mode that modified tariff
+        forced_modes = (BatteryAction.CHARGE, BatteryAction.EXPORT)
+        was_in_forced_mode = previous_action in forced_modes
+
         try:
             if action == BatteryAction.CHARGE:
                 await self._command_charge(power_w)
@@ -350,18 +364,21 @@ class ScheduleExecutor:
                 # EXPORT: Force battery to export to grid using high sell tariff
                 await self._command_discharge(power_w)
             elif action in (BatteryAction.DISCHARGE, BatteryAction.CONSUME):
-                # CONSUME/DISCHARGE: Battery should power home load
-                # Don't force export - just ensure self-consumption mode
-                # The battery will naturally offset load without grid export
-                await self._command_consume(power_w)
-            else:
-                # Only restore if we were previously charging or discharging
-                # This avoids unnecessary restore calls on startup when action is idle
-                discharge_actions = (BatteryAction.CHARGE, BatteryAction.DISCHARGE, BatteryAction.CONSUME, BatteryAction.EXPORT)
-                if previous_action in discharge_actions:
+                # CONSUME/DISCHARGE: Battery should power home load naturally
+                # Only restore if we were in a forced mode (charge/export)
+                # Otherwise battery is already in self-consumption mode
+                if was_in_forced_mode:
+                    _LOGGER.info("Transitioning from forced mode to consume - restoring normal operation")
                     await self._restore_normal_operation()
                 else:
-                    _LOGGER.debug("Action is idle, no restore needed (wasn't charging/discharging)")
+                    _LOGGER.debug(f"Consume action: battery already in self-consumption mode (prev={previous_action.value})")
+            else:
+                # IDLE: Only restore if we were in a forced mode
+                if was_in_forced_mode:
+                    _LOGGER.info("Transitioning from forced mode to idle - restoring normal operation")
+                    await self._restore_normal_operation()
+                else:
+                    _LOGGER.debug(f"Action is idle, no restore needed (prev={previous_action.value})")
 
         except Exception as e:
             _LOGGER.error(f"Failed to execute action {action.value}: {e}")
@@ -393,27 +410,6 @@ class ScheduleExecutor:
             )
         else:
             _LOGGER.warning("Battery controller does not support force_discharge")
-
-    async def _command_consume(self, power_w: float) -> None:
-        """
-        Command battery to power home load (consume).
-
-        Unlike export, consume doesn't need a special tariff.
-        Just ensure we're in self-consumption mode with low backup reserve
-        so the battery will naturally offset home load.
-        """
-        _LOGGER.info(f"Commanding consume (battery→home) at {power_w:.0f}W")
-
-        if hasattr(self.battery_controller, "ensure_self_consumption"):
-            # Best option: dedicated self-consumption method
-            await self.battery_controller.ensure_self_consumption()
-        elif hasattr(self.battery_controller, "restore_normal"):
-            # Fallback: restore normal operation (usually self-consumption)
-            _LOGGER.debug("Using restore_normal for consume action")
-            await self.battery_controller.restore_normal()
-        else:
-            # Last resort: do nothing, battery should naturally power load
-            _LOGGER.debug("No consume method available, battery should naturally offset load")
 
     async def _restore_normal_operation(self) -> None:
         """Restore battery to normal autonomous operation."""
