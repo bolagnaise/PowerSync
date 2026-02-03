@@ -12629,6 +12629,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         from .aemo_client import AEMOAPIClient
                         from homeassistant.helpers.aiohttp_client import async_get_clientsession
                         from homeassistant.util import dt as dt_util
+                        from homeassistant.core import ServiceCall
 
                         session = async_get_clientsession(hass)
                         client = AEMOAPIClient(session)
@@ -12652,9 +12653,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 region_price, aemo_region
                             )
                             try:
-                                # Use the force discharge handler (30 min default for VPP events)
-                                result = await handle_force_discharge(30)
-                                if result.get("success"):
+                                # Use the force discharge service (30 min for VPP events)
+                                # Create a ServiceCall to invoke the handler
+                                discharge_call = ServiceCall(
+                                    DOMAIN,
+                                    SERVICE_FORCE_DISCHARGE,
+                                    {"duration": 30},
+                                )
+                                await handle_force_discharge(discharge_call)
+
+                                # Check if discharge was activated
+                                if force_discharge_state.get("active"):
                                     vpp_spike_state["in_spike_mode"] = True
                                     vpp_spike_state["spike_start_time"] = dt_util.utcnow()
                                     _LOGGER.warning(
@@ -12672,7 +12681,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                     except Exception as notify_err:
                                         _LOGGER.debug(f"VPP: Could not send spike notification: {notify_err}")
                                 else:
-                                    _LOGGER.error("VPP: Failed to start force discharge: %s", result.get("error"))
+                                    _LOGGER.error("VPP: Force discharge did not activate")
                             except Exception as e:
                                 _LOGGER.error("VPP: Error starting force discharge: %s", e)
 
@@ -12683,7 +12692,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 region_price
                             )
                             try:
-                                result = await handle_restore_normal()
+                                # Create a ServiceCall for restore normal
+                                restore_call = ServiceCall(
+                                    DOMAIN,
+                                    SERVICE_RESTORE_NORMAL,
+                                    {},
+                                )
+                                await handle_restore_normal(restore_call)
+
                                 vpp_spike_state["in_spike_mode"] = False
                                 spike_duration = None
                                 if vpp_spike_state["spike_start_time"]:
