@@ -12564,6 +12564,8 @@ class OptimizationView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         """Handle GET request for optimization status."""
+        _LOGGER.info("🧠 Optimization status GET request")
+
         # Find the optimization coordinator
         opt_coordinator = None
         for entry_id, data in self._hass.data.get(DOMAIN, {}).items():
@@ -12573,15 +12575,21 @@ class OptimizationView(HomeAssistantView):
 
         if not opt_coordinator:
             # Optimization not enabled - return disabled status
+            _LOGGER.info("🧠 Optimization not configured")
             return web.json_response({
                 "success": True,
                 "enabled": False,
-                "optimiser_available": False,
+                "optimizer_available": False,
                 "status": "not_configured",
                 "message": "Smart Optimization is not enabled. Enable it in settings."
             })
 
-        return web.json_response(opt_coordinator.get_api_data())
+        api_data = opt_coordinator.get_api_data()
+        _LOGGER.info(f"🧠 Optimization GET response: enabled={api_data.get('enabled')}, "
+                     f"predicted_cost=${api_data.get('predicted_cost', 0):.2f}, "
+                     f"savings=${api_data.get('predicted_savings', 0):.2f}, "
+                     f"has_schedule={api_data.get('schedule') is not None}")
+        return web.json_response(api_data)
 
     async def post(self, request: web.Request) -> web.Response:
         """Handle POST request to force re-optimization."""
