@@ -35,7 +35,7 @@ class LoadEstimator:
         self,
         hass: HomeAssistant,
         load_entity_id: str | None = None,
-        interval_minutes: int = 30,
+        interval_minutes: int = 5,
     ):
         """
         Initialize the load estimator.
@@ -304,7 +304,7 @@ class SolcastForecaster:
         self,
         hass: HomeAssistant,
         solcast_entity: str | None = None,
-        interval_minutes: int = 30,
+        interval_minutes: int = 5,
     ):
         """
         Initialize Solcast forecaster.

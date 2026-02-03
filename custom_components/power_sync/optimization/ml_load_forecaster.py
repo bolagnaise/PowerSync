@@ -123,7 +123,7 @@ class MLLoadEstimator:
         self,
         hass: HomeAssistant,
         load_entity_id: str | None = None,
-        interval_minutes: int = 30,
+        interval_minutes: int = 5,
         weather_entity_id: str | None = None,
         use_prophet: bool = False,
     ):

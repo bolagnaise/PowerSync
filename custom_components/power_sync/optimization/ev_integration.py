@@ -152,7 +152,7 @@ class EVChargingSchedule:
                 if len(self.timestamps) > 1:
                     interval_duration = self.timestamps[1] - self.timestamps[0]
                 else:
-                    interval_duration = timedelta(minutes=30)
+                    interval_duration = timedelta(minutes=5)
                 interval_end = ts + interval_duration
 
             if ts <= check_time < interval_end:
@@ -197,7 +197,7 @@ class EVChargingSchedule:
             if len(self.timestamps) > 1:
                 interval_duration = self.timestamps[1] - self.timestamps[0]
             else:
-                interval_duration = timedelta(minutes=30)
+                interval_duration = timedelta(minutes=5)
             window_end = self.timestamps[-1] + interval_duration
             avg_power = sum(window_powers) / len(window_powers)
             return window_start, window_end, avg_power
@@ -213,7 +213,7 @@ class EVOptimiser:
     Schedules EV charging to minimize cost while meeting departure constraints.
     """
 
-    def __init__(self, interval_minutes: int = 30):
+    def __init__(self, interval_minutes: int = 5):
         """Initialize the EV optimiser."""
         self.interval_minutes = interval_minutes
         self._solver_available = self._check_solver()

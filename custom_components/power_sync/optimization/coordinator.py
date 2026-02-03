@@ -475,7 +475,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         - Only re-optimize if prices actually changed
 
         For static/TOU pricing (GloBird, standard tariffs):
-        - Keep the standard 30-minute optimization interval
+        - Keep the standard 5-minute optimization interval
         """
         if not self.price_coordinator:
             _LOGGER.debug("No price coordinator - using standard optimization interval")
@@ -506,7 +506,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             _LOGGER.info(
                 f"📊 Static/TOU pricing detected ({coordinator_name}) - "
-                f"using standard 30-minute optimization interval"
+                f"using standard 5-minute optimization interval"
             )
 
     def _on_price_update(self) -> None:

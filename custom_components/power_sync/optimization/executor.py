@@ -48,7 +48,7 @@ class ScheduleExecutor:
     Executes the optimized battery schedule.
 
     Uses MPC (Model Predictive Control) approach:
-    1. Re-optimize every interval (default: 30 minutes)
+    1. Re-optimize every interval (default: 5 minutes)
     2. Execute only the immediate action
     3. Adapt to changes in prices, solar, load, and battery state
 
@@ -60,7 +60,7 @@ class ScheduleExecutor:
         hass: HomeAssistant,
         optimiser: BatteryOptimiser,
         battery_controller: Any,  # Battery-specific controller (Tesla/Sigenergy/Sungrow)
-        interval_minutes: int = 30,
+        interval_minutes: int = 5,
     ):
         """
         Initialize the schedule executor.

@@ -52,7 +52,7 @@ class OptimizationConfig:
 
     # Optimization settings
     cost_function: CostFunction = CostFunction.COST_MINIMIZATION
-    interval_minutes: int = 30            # Time interval in minutes
+    interval_minutes: int = 5             # Time interval in minutes
     horizon_hours: int = 48               # Optimization horizon in hours
 
     # Degradation penalty (optional)

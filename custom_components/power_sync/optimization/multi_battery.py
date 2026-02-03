@@ -140,7 +140,7 @@ class MultiBatteryOptimiser:
     def __init__(
         self,
         batteries: list[BatteryConfig],
-        interval_minutes: int = 30,
+        interval_minutes: int = 5,
         horizon_hours: int = 48,
         cost_function: CostFunction = CostFunction.COST_MINIMIZATION,
     ):
