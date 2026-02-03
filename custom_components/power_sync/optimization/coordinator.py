@@ -2033,6 +2033,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             try:
                 self.set_cost_function(settings["cost_function"])
                 response["changes"].append(f"cost_function: {settings['cost_function']}")
+                # Persist cost function to config entry
+                if self._entry:
+                    from ..const import CONF_OPTIMIZATION_COST_FUNCTION
+                    new_data = dict(self._entry.data)
+                    new_data[CONF_OPTIMIZATION_COST_FUNCTION] = settings["cost_function"]
+                    self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+                    _LOGGER.info(f"🔧 Persisted cost_function: {settings['cost_function']}")
             except ValueError as e:
                 response["success"] = False
                 response["error"] = f"Invalid cost function: {e}"
@@ -2100,6 +2107,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if config_updates:
             self.update_config(**config_updates)
             response["changes"].append(f"config: {list(config_updates.keys())}")
+            # Persist interval_minutes to config entry
+            if "interval_minutes" in config_updates and self._entry:
+                from ..const import CONF_OPTIMIZATION_INTERVAL
+                new_data = dict(self._entry.data)
+                new_data[CONF_OPTIMIZATION_INTERVAL] = config_updates["interval_minutes"]
+                self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+                _LOGGER.info(f"🔧 Persisted interval_minutes: {config_updates['interval_minutes']}")
 
         return response
 
