@@ -1292,6 +1292,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Get data for HTTP API and mobile app."""
         executor_status = self._executor.get_schedule_summary() if self._executor else {}
 
+        # Sync schedule from executor if we don't have one locally
+        if self._executor and self._executor.current_schedule:
+            self._current_schedule = self._executor.current_schedule
+
         # Check if optimization engine is available (local cvxpy or add-on)
         engine_available = self._optimiser.is_available or self._addon_available
 
