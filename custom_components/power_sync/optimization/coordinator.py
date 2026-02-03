@@ -33,6 +33,7 @@ from .ev_integration import (
     EVConfig,
     EVChargingSchedule,
     EVChargingPriority,
+    EVChargerType,
     integrate_ev_with_home_battery,
 )
 from .multi_battery import (
@@ -326,6 +327,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             await self._discover_ev_configs()
             _LOGGER.info(f"EV integration enabled with {len(self._ev_configs)} vehicles")
 
+            # Sync EV integration to auto_schedule_executor
+            # This enables ML-based scheduling for EV charging
+            self._sync_ev_integration_to_auto_scheduler(True)
+
         # Initialize multi-battery optimiser
         if self._enable_multi_battery:
             await self._discover_battery_configs()
@@ -374,6 +379,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Check add-on availability
         self._addon_available = await self._is_addon_available()
 
+        # Auto-detect battery capacity and power limits from Tesla API
+        if self.battery_system == "tesla":
+            await self._detect_battery_power_limits()
+
         _LOGGER.info(
             f"Optimization coordinator setup complete. "
             f"Local optimiser: {self._optimiser.is_available}, "
@@ -382,7 +391,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             f"Weather: {self._enable_weather}, "
             f"EV: {self._enable_ev}, "
             f"Multi-battery: {self._enable_multi_battery}, "
-            f"VPP: {self._enable_vpp}"
+            f"VPP: {self._enable_vpp}, "
+            f"Battery: {self._config.battery_capacity_wh/1000:.1f}kWh @ {self._config.max_charge_w/1000:.1f}kW"
         )
         return True
 
@@ -446,34 +456,133 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return None
 
     async def _discover_ev_configs(self) -> None:
-        """Discover EV configurations from Home Assistant."""
+        """
+        Discover EV configurations from Home Assistant Tesla integrations.
+
+        Integrates with the existing EV charging planner to get:
+        - Vehicle VINs and names from device registry
+        - SOC from Tesla integration entities
+        - Charging settings from auto-schedule executor
+        """
         from ..const import DOMAIN
+        from ..automations.ev_charging_planner import (
+            discover_all_tesla_vehicles,
+            get_ev_battery_level,
+            is_ev_plugged_in,
+            get_auto_schedule_executor,
+        )
 
         self._ev_configs = []
 
         try:
-            domain_data = self.hass.data.get(DOMAIN, {})
-            for entry_data in domain_data.values():
-                if not isinstance(entry_data, dict):
-                    continue
+            # Get config entry for this integration
+            config_entry = None
+            for entry in self.hass.config_entries.async_entries(DOMAIN):
+                if entry.entry_id == self.entry_id:
+                    config_entry = entry
+                    break
 
-                # Check for EV charging data
-                ev_data = entry_data.get("ev_vehicles", [])
-                for vehicle in ev_data:
+            if not config_entry:
+                _LOGGER.debug("No config entry found for EV discovery")
+                return
+
+            # Discover Tesla vehicles from device registry
+            vehicles = await discover_all_tesla_vehicles(self.hass, config_entry)
+            _LOGGER.debug(f"Discovered {len(vehicles)} Tesla vehicles for ML optimization")
+
+            # Get auto-schedule executor for charging settings
+            auto_executor = await get_auto_schedule_executor(self.hass, config_entry)
+
+            for vehicle in vehicles:
+                vin = vehicle.get("vin", "")
+                name = vehicle.get("name", "Tesla")
+
+                # Get current SOC from Tesla integration
+                try:
+                    soc = await get_ev_battery_level(self.hass, config_entry, vehicle_vin=vin)
+                    if soc is None:
+                        soc = 50  # Default if can't read
+                except Exception:
+                    soc = 50
+
+                # Get charging settings from auto-schedule executor if available
+                target_soc = 80
+                max_charge_kw = 11.5  # Default for Tesla Wall Connector
+                allow_grid_charging = True
+                solar_only = False
+
+                if auto_executor:
+                    try:
+                        settings = auto_executor.get_settings(vin)
+                        target_soc = settings.target_soc
+                    except Exception:
+                        pass
+
+                # Check if vehicle is plugged in
+                try:
+                    plugged_in = await is_ev_plugged_in(self.hass, config_entry, vehicle_vin=vin)
+                except Exception:
+                    plugged_in = False
+
+                # Only include plugged-in vehicles in optimization
+                if plugged_in:
                     ev_config = EVConfig(
-                        vehicle_id=vehicle.get("id", ""),
-                        name=vehicle.get("name", "EV"),
-                        battery_capacity_kwh=vehicle.get("battery_capacity_kwh", 75),
-                        current_soc=vehicle.get("soc", 50) / 100,
-                        target_soc=vehicle.get("target_soc", 80) / 100,
-                        max_charge_kw=vehicle.get("max_charge_kw", 7.4),
-                        allow_grid_charging=vehicle.get("allow_grid_charging", True),
-                        solar_only=vehicle.get("solar_only", False),
+                        vehicle_id=vin,
+                        name=name,
+                        battery_capacity_kwh=self._get_tesla_battery_capacity(name),
+                        current_soc=soc / 100,  # Convert to 0-1
+                        target_soc=target_soc / 100,  # Convert to 0-1
+                        max_charge_kw=max_charge_kw,
+                        allow_grid_charging=allow_grid_charging,
+                        solar_only=solar_only,
+                        charger_type=EVChargerType.TESLA_WALL_CONNECTOR,
                     )
                     self._ev_configs.append(ev_config)
+                    _LOGGER.info(f"🚗 Added EV to ML optimization: {name} (SOC: {soc}%, target: {target_soc}%)")
+                else:
+                    _LOGGER.debug(f"Vehicle {name} not plugged in, skipping ML optimization")
 
+        except ImportError as e:
+            _LOGGER.debug(f"EV charging planner not available: {e}")
         except Exception as e:
-            _LOGGER.debug(f"Error discovering EV configs: {e}")
+            _LOGGER.warning(f"Error discovering EV configs: {e}")
+
+    def _get_tesla_battery_capacity(self, vehicle_name: str) -> float:
+        """
+        Estimate Tesla battery capacity from vehicle name.
+
+        Returns capacity in kWh.
+        """
+        name_lower = vehicle_name.lower()
+
+        # Model S/X Long Range
+        if "model s" in name_lower or "model x" in name_lower:
+            if "plaid" in name_lower:
+                return 100.0
+            return 100.0  # Long Range default
+
+        # Model 3
+        if "model 3" in name_lower:
+            if "long range" in name_lower or "lr" in name_lower:
+                return 82.0
+            if "performance" in name_lower:
+                return 82.0
+            return 60.0  # Standard Range
+
+        # Model Y
+        if "model y" in name_lower:
+            if "long range" in name_lower or "lr" in name_lower:
+                return 82.0
+            if "performance" in name_lower:
+                return 82.0
+            return 60.0  # Standard Range
+
+        # Cybertruck
+        if "cybertruck" in name_lower:
+            return 123.0  # Cyberbeast
+
+        # Default for unknown
+        return 75.0
 
     async def _discover_battery_configs(self) -> None:
         """Discover battery configurations for multi-battery setup."""
@@ -958,25 +1067,37 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         initial_soc, capacity = battery_state
         start_time = dt_util.now()
 
-        # Try add-on optimiser first (has full cvxpy/numpy support)
-        addon_result = await self._call_addon_optimiser(
-            import_prices, export_prices, solar, load, battery_state
-        )
-        if addon_result:
-            _LOGGER.info(f"Optimization completed via add-on: success={addon_result.success}, "
-                         f"total_cost=${addon_result.total_cost:.2f}, savings=${addon_result.savings:.2f}, "
-                         f"schedule_len={len(addon_result.charge_schedule_w)}")
-            self._current_schedule = addon_result
-            self._last_optimization_time = dt_util.now()
+        # Refresh EV configs before optimization (vehicles may have been plugged/unplugged)
+        ev_plugged_in = False
+        if self._enable_ev:
+            await self._discover_ev_configs()
+            if self._ev_configs:
+                ev_plugged_in = True
+                _LOGGER.info(f"🚗 ML optimization includes {len(self._ev_configs)} plugged-in EVs")
 
-            # Update executor with new schedule
-            if self._executor:
-                self._executor._current_schedule = addon_result
-                _LOGGER.debug(f"Updated executor._current_schedule: {addon_result is not None}")
+        # Use add-on for home-battery-only optimization
+        # Use local optimization when EVs are plugged in (add-on doesn't support EV yet)
+        if not ev_plugged_in:
+            addon_result = await self._call_addon_optimiser(
+                import_prices, export_prices, solar, load, battery_state
+            )
+            if addon_result:
+                _LOGGER.info(f"Optimization completed via add-on: success={addon_result.success}, "
+                             f"total_cost=${addon_result.total_cost:.2f}, savings=${addon_result.savings:.2f}, "
+                             f"schedule_len={len(addon_result.charge_schedule_w)}")
+                self._current_schedule = addon_result
+                self._last_optimization_time = dt_util.now()
 
-            return addon_result
+                # Update executor with new schedule
+                if self._executor:
+                    self._executor._current_schedule = addon_result
+                    _LOGGER.debug(f"Updated executor._current_schedule: {addon_result is not None}")
 
-        _LOGGER.debug("Add-on not available, trying local optimization")
+                return addon_result
+
+            _LOGGER.debug("Add-on not available, trying local optimization")
+        else:
+            _LOGGER.info("🚗 Using local optimization for joint home battery + EV scheduling")
 
         # Check for VPP events to consider
         anticipated_events = []
@@ -1071,8 +1192,48 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._executor:
             self._current_schedule = self._executor.current_schedule
 
+        # Continuously learn battery power limits from observed rates
+        await self._observe_battery_power()
+
         # Return the API data for coordinator.data
         return self.get_api_data()
+
+    async def _observe_battery_power(self) -> None:
+        """Observe battery power to learn actual charge/discharge limits."""
+        try:
+            if not self.energy_coordinator or not self.energy_coordinator.data:
+                return
+
+            battery_power_kw = self.energy_coordinator.data.get("battery_power", 0)
+            battery_power_w = abs(battery_power_kw * 1000)  # Convert to W
+
+            # Initialize tracking if needed
+            if not hasattr(self, '_observed_max_charge_w'):
+                self._observed_max_charge_w = 0.0
+            if not hasattr(self, '_observed_max_discharge_w'):
+                self._observed_max_discharge_w = 0.0
+
+            # Track max observed power
+            if battery_power_kw < 0:  # Charging (negative = power into battery)
+                if battery_power_w > self._observed_max_charge_w:
+                    old_max = self._observed_max_charge_w
+                    self._observed_max_charge_w = battery_power_w
+                    # Update config if significantly higher (>500W more)
+                    if battery_power_w > self._config.max_charge_w and (battery_power_w - old_max) > 500:
+                        self._config.max_charge_w = battery_power_w * 1.05  # 5% headroom
+                        _LOGGER.info(f"🔋 Learned new max charge rate: {self._config.max_charge_w/1000:.1f} kW (observed {battery_power_w/1000:.1f} kW)")
+
+            elif battery_power_kw > 0:  # Discharging
+                if battery_power_w > self._observed_max_discharge_w:
+                    old_max = self._observed_max_discharge_w
+                    self._observed_max_discharge_w = battery_power_w
+                    # Update config if significantly higher
+                    if battery_power_w > self._config.max_discharge_w and (battery_power_w - old_max) > 500:
+                        self._config.max_discharge_w = battery_power_w * 1.05
+                        _LOGGER.info(f"🔋 Learned new max discharge rate: {self._config.max_discharge_w/1000:.1f} kW (observed {battery_power_w/1000:.1f} kW)")
+
+        except Exception as e:
+            _LOGGER.debug(f"Error observing battery power: {e}")
 
     def _is_in_time_window(self, time_str: str, start: str, end: str) -> bool:
         """Check if a time (HH:MM) is within a window (handles overnight windows)."""
@@ -1315,8 +1476,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 data = self.energy_coordinator.data
                 soc = data.get("battery_level", 50) / 100  # Convert to 0-1
 
-                # Get capacity from config or default
-                capacity = self._config.battery_capacity_wh
+                # Try to get actual battery capacity from Tesla site_info
+                capacity = await self._get_battery_capacity()
 
                 return soc, capacity
 
@@ -1324,6 +1485,162 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.error(f"Error getting battery state: {e}")
 
         return 0.5, 13500  # Default
+
+    async def _get_battery_capacity(self) -> float:
+        """
+        Get actual battery capacity from Tesla site_info or calculate from battery count.
+
+        Priority:
+        1. total_pack_energy from site_info (most accurate)
+        2. nameplate_energy from site_info components
+        3. Calculate from battery_count × 13.5 kWh per Powerwall
+        4. Fall back to stored battery health data
+        5. Default to config value
+        """
+        # Use cached value if available (capacity doesn't change often)
+        if hasattr(self, '_detected_capacity_wh') and self._detected_capacity_wh:
+            return self._detected_capacity_wh
+
+        DEFAULT_POWERWALL_CAPACITY_WH = 13500  # 13.5 kWh per Powerwall 2
+
+        try:
+            # Try to get site_info from energy coordinator
+            if hasattr(self.energy_coordinator, 'async_get_site_info'):
+                site_info = await self.energy_coordinator.async_get_site_info()
+                if site_info:
+                    # Check for total_pack_energy (Wh) - most accurate
+                    if site_info.get("total_pack_energy"):
+                        capacity = float(site_info.get("total_pack_energy"))
+                        _LOGGER.info(f"🔋 Auto-detected battery capacity from total_pack_energy: {capacity/1000:.1f} kWh")
+                        self._detected_capacity_wh = capacity
+                        self._config.battery_capacity_wh = capacity
+                        return capacity
+
+                    # Check components for nameplate_energy (sometimes in kWh)
+                    components = site_info.get("components", {})
+                    if components.get("nameplate_energy"):
+                        # nameplate_energy is usually in kWh
+                        capacity_kwh = float(components.get("nameplate_energy"))
+                        capacity = capacity_kwh * 1000  # Convert to Wh
+                        _LOGGER.info(f"🔋 Auto-detected battery capacity from nameplate_energy: {capacity/1000:.1f} kWh")
+                        self._detected_capacity_wh = capacity
+                        self._config.battery_capacity_wh = capacity
+                        return capacity
+
+                    # Check for battery_count and calculate
+                    battery_count = components.get("battery_count") or site_info.get("battery_count")
+                    if battery_count and int(battery_count) > 0:
+                        capacity = int(battery_count) * DEFAULT_POWERWALL_CAPACITY_WH
+                        _LOGGER.info(f"🔋 Calculated battery capacity from {battery_count} Powerwalls: {capacity/1000:.1f} kWh")
+                        self._detected_capacity_wh = capacity
+                        self._config.battery_capacity_wh = capacity
+                        return capacity
+
+            # Try to get from stored battery health data (from TEDAPI scan)
+            domain_data = self.hass.data.get("power_sync", {}).get(self.entry_id, {})
+            battery_health = domain_data.get("battery_health")
+            if battery_health:
+                original_capacity = battery_health.get("original_capacity_wh")
+                battery_count = battery_health.get("battery_count", 1)
+                if original_capacity and original_capacity > 0:
+                    _LOGGER.info(f"🔋 Using battery capacity from health data: {original_capacity/1000:.1f} kWh ({battery_count} units)")
+                    self._detected_capacity_wh = original_capacity
+                    self._config.battery_capacity_wh = original_capacity
+                    return original_capacity
+
+        except Exception as e:
+            _LOGGER.warning(f"Error detecting battery capacity: {e}")
+
+        # Fall back to config default
+        _LOGGER.debug(f"Using default battery capacity: {self._config.battery_capacity_wh/1000:.1f} kWh")
+        return self._config.battery_capacity_wh
+
+    async def _detect_battery_power_limits(self) -> None:
+        """
+        Auto-detect max charge/discharge power from observed battery power rates.
+
+        This method:
+        1. First tries to use observed max power from energy coordinator
+        2. Falls back to calculating from battery capacity and system defaults
+        3. Works for all battery types (Tesla, Sigenergy, Sungrow)
+
+        Battery power convention:
+        - Negative = charging (power into battery)
+        - Positive = discharging (power out of battery)
+        """
+        # Initialize observed power tracking if not exists
+        if not hasattr(self, '_observed_max_charge_w'):
+            self._observed_max_charge_w = 0.0
+        if not hasattr(self, '_observed_max_discharge_w'):
+            self._observed_max_discharge_w = 0.0
+
+        # Try to get current battery power and update observations
+        try:
+            if self.energy_coordinator and self.energy_coordinator.data:
+                battery_power_kw = self.energy_coordinator.data.get("battery_power", 0)
+                battery_power_w = abs(battery_power_kw * 1000)  # Convert to W
+
+                if battery_power_kw < 0:  # Charging (negative = power into battery)
+                    if battery_power_w > self._observed_max_charge_w:
+                        self._observed_max_charge_w = battery_power_w
+                        _LOGGER.debug(f"🔋 New max observed charge rate: {battery_power_w/1000:.2f} kW")
+                elif battery_power_kw > 0:  # Discharging
+                    if battery_power_w > self._observed_max_discharge_w:
+                        self._observed_max_discharge_w = battery_power_w
+                        _LOGGER.debug(f"🔋 New max observed discharge rate: {battery_power_w/1000:.2f} kW")
+        except Exception as e:
+            _LOGGER.debug(f"Could not read battery power for limit detection: {e}")
+
+        # Use observed values if we have meaningful data (>1kW suggests real operation)
+        MIN_MEANINGFUL_POWER = 1000  # 1 kW - ignore very small values
+
+        if self._observed_max_charge_w > MIN_MEANINGFUL_POWER:
+            # Add 10% headroom to observed max (battery may not have been at full rate)
+            observed_charge = self._observed_max_charge_w * 1.1
+            if observed_charge > self._config.max_charge_w:
+                _LOGGER.info(f"🔋 Updated max charge rate from observed: {observed_charge/1000:.1f} kW")
+                self._config.max_charge_w = observed_charge
+
+        if self._observed_max_discharge_w > MIN_MEANINGFUL_POWER:
+            observed_discharge = self._observed_max_discharge_w * 1.1
+            if observed_discharge > self._config.max_discharge_w:
+                _LOGGER.info(f"🔋 Updated max discharge rate from observed: {observed_discharge/1000:.1f} kW")
+                self._config.max_discharge_w = observed_discharge
+
+        # If no observed data yet, fall back to capacity-based estimation
+        if self._config.max_charge_w == 5000 and self._observed_max_charge_w < MIN_MEANINGFUL_POWER:
+            await self._estimate_power_from_capacity()
+
+    async def _estimate_power_from_capacity(self) -> None:
+        """Estimate power limits from battery capacity when no observed data available."""
+        # Default power per unit by manufacturer
+        POWER_DEFAULTS = {
+            "tesla": 5000,      # 5 kW per Powerwall 2
+            "sigenergy": 5000,  # Varies, typically 5 kW
+            "sungrow": 5000,    # Varies, typically 5 kW
+        }
+        CAPACITY_DEFAULTS = {
+            "tesla": 13500,     # 13.5 kWh per Powerwall 2
+            "sigenergy": 10000, # Varies
+            "sungrow": 10000,   # Varies
+        }
+
+        default_power = POWER_DEFAULTS.get(self.battery_system, 5000)
+        default_capacity = CAPACITY_DEFAULTS.get(self.battery_system, 13500)
+
+        # Get actual capacity
+        capacity = await self._get_battery_capacity()
+
+        # Estimate number of units
+        estimated_units = max(1, round(capacity / default_capacity))
+
+        # Calculate power limits
+        max_power = estimated_units * default_power
+
+        if max_power != self._config.max_charge_w:
+            _LOGGER.info(f"🔋 Estimated battery power from capacity: {max_power/1000:.1f} kW ({estimated_units} units)")
+            self._config.max_charge_w = max_power
+            self._config.max_discharge_w = max_power
 
     def get_api_data(self) -> dict[str, Any]:
         """Get data for HTTP API and mobile app."""
@@ -1410,6 +1727,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             data["predicted_savings"] = self._current_schedule.savings
 
         # Add EV data if available
+        if self._ev_configs:
+            data["ev_vehicles"] = [
+                {
+                    "vehicle_id": ev.vehicle_id,
+                    "name": ev.name,
+                    "current_soc": round(ev.current_soc * 100, 1),
+                    "target_soc": round(ev.target_soc * 100, 1),
+                    "battery_capacity_kwh": ev.battery_capacity_kwh,
+                    "max_charge_kw": ev.max_charge_kw,
+                }
+                for ev in self._ev_configs
+            ]
         if self._ev_schedules:
             data["ev_schedules"] = [s.to_dict() for s in self._ev_schedules]
 
@@ -1475,6 +1804,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     setattr(self, attr_name, settings[feature])
                     response["changes"].append(f"{feature}: {settings[feature]}")
 
+                    # When EV integration is toggled, sync to auto_schedule_executor
+                    if feature == "ev_integration":
+                        self._sync_ev_integration_to_auto_scheduler(settings[feature])
+
         # Handle config updates
         config_keys = [
             "battery_capacity_wh", "max_charge_w", "max_discharge_w",
@@ -1486,6 +1819,31 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             response["changes"].append(f"config: {list(config_updates.keys())}")
 
         return response
+
+    def _sync_ev_integration_to_auto_scheduler(self, enabled: bool) -> None:
+        """
+        Sync EV integration setting to the auto_schedule_executor.
+
+        When EV integration is enabled in ML optimization, the auto_schedule_executor
+        should use ML-generated schedules instead of its own planning logic.
+        """
+        try:
+            from ..const import DOMAIN
+            from ..automations.ev_charging_planner import get_auto_schedule_executor
+
+            # Get the auto_schedule_executor
+            auto_executor = get_auto_schedule_executor()
+            if auto_executor:
+                auto_executor.set_use_ml_optimization(enabled)
+                _LOGGER.info(
+                    f"🔗 Synced EV integration to auto_schedule_executor: "
+                    f"ML optimization {'enabled' if enabled else 'disabled'}"
+                )
+            else:
+                _LOGGER.debug("Auto-schedule executor not available for EV integration sync")
+
+        except Exception as e:
+            _LOGGER.warning(f"Failed to sync EV integration to auto_scheduler: {e}")
 
     # EV Configuration Methods
 

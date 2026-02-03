@@ -2161,6 +2161,55 @@ class AutoScheduleExecutor:
         # Plan regeneration interval (regenerate every 5 minutes to match Amber/AEMO pricing)
         self._plan_update_interval = timedelta(minutes=5)
 
+        # ML optimization integration
+        self._use_ml_optimization = False  # Set via settings
+
+    def _get_ml_ev_schedule(self, vehicle_id: str):
+        """
+        Get the ML optimization schedule for a vehicle if available.
+
+        Returns:
+            EVChargingSchedule or None if ML optimization is not enabled/available
+        """
+        if not self._use_ml_optimization:
+            return None
+
+        try:
+            from ..const import DOMAIN
+
+            # Get the optimization coordinator
+            domain_data = self.hass.data.get(DOMAIN, {})
+            entry_data = domain_data.get(self.config_entry.entry_id, {})
+            opt_coordinator = entry_data.get("optimization_coordinator")
+
+            if not opt_coordinator:
+                return None
+
+            # Check if EV integration is enabled in ML optimization
+            if not getattr(opt_coordinator, '_enable_ev', False):
+                return None
+
+            # Get EV schedules from the optimization coordinator
+            ev_schedules = getattr(opt_coordinator, '_ev_schedules', [])
+            if not ev_schedules:
+                return None
+
+            # Find schedule for this vehicle
+            for schedule in ev_schedules:
+                if schedule.vehicle_id == vehicle_id and schedule.success:
+                    return schedule
+
+            return None
+
+        except Exception as e:
+            _LOGGER.debug(f"Error getting ML EV schedule: {e}")
+            return None
+
+    def set_use_ml_optimization(self, enabled: bool) -> None:
+        """Enable or disable ML optimization for EV charging decisions."""
+        self._use_ml_optimization = enabled
+        _LOGGER.info(f"ML optimization for EV charging: {'enabled' if enabled else 'disabled'}")
+
     async def load_settings(self, store) -> None:
         """Load settings from storage."""
         self._store = store  # Store reference for saving cached SoC later
@@ -2712,6 +2761,53 @@ class AutoScheduleExecutor:
                 state.last_decision = "complete"
                 state.last_decision_reason = f"EV at {ev_soc}% (target: {settings.target_soc}%)"
                 return
+
+        # =====================================================================
+        # ML OPTIMIZATION INTEGRATION
+        # When ML optimization is enabled, use its schedule instead of the
+        # built-in charging planner. ML optimization considers home battery,
+        # solar, prices, and EV charging jointly for whole-home optimization.
+        # =====================================================================
+        ml_schedule = self._get_ml_ev_schedule(vehicle_id)
+        if ml_schedule is not None:
+            should_charge, power_w = ml_schedule.should_charge_at(now)
+
+            # Get next charging window for status display
+            next_start, next_end, next_power = ml_schedule.get_next_charging_window(now)
+
+            if should_charge:
+                reason = f"ML optimization: charge at {power_w/1000:.1f}kW"
+                source = "ml_optimized"
+
+                if not state.is_charging:
+                    await self._start_charging(vehicle_id, settings, state, source)
+                    state.last_decision = "started"
+                    state.last_decision_reason = reason
+                    _LOGGER.info(f"🤖 ML EV Charging: Starting charge for {vehicle_id} at {power_w/1000:.1f}kW")
+                else:
+                    state.last_decision = "charging"
+                    state.last_decision_reason = reason
+            else:
+                if next_start:
+                    reason = f"ML optimization: next window {next_start.strftime('%H:%M')} - {next_end.strftime('%H:%M')}"
+                else:
+                    reason = "ML optimization: no charging scheduled"
+
+                if state.is_charging:
+                    await self._stop_charging(vehicle_id, settings, state, restore_backup_reserve=True)
+                    state.last_decision = "stopped"
+                    state.last_decision_reason = reason
+                    _LOGGER.info(f"🤖 ML EV Charging: Stopping charge for {vehicle_id} - {reason}")
+                else:
+                    state.last_decision = "waiting"
+                    state.last_decision_reason = reason
+
+            # Skip the normal planning logic when using ML optimization
+            return
+
+        # =====================================================================
+        # STANDARD CHARGING PLANNER (when ML optimization not available)
+        # =====================================================================
 
         # Check if we need to regenerate the plan
         if (

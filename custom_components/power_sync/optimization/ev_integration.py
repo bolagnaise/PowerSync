@@ -127,6 +127,83 @@ class EVChargingSchedule:
             },
         }
 
+    def should_charge_at(self, check_time: datetime, min_power_w: float = 100.0) -> tuple[bool, float]:
+        """
+        Check if charging should occur at the given time.
+
+        Args:
+            check_time: The time to check
+            min_power_w: Minimum power threshold to consider as "charging"
+
+        Returns:
+            Tuple of (should_charge, power_w)
+        """
+        if not self.success or not self.timestamps or not self.charge_power_w:
+            return False, 0.0
+
+        # Find the interval that contains check_time
+        for i, ts in enumerate(self.timestamps):
+            # Check if check_time falls within this interval
+            # Intervals are typically 30 minutes
+            if i + 1 < len(self.timestamps):
+                interval_end = self.timestamps[i + 1]
+            else:
+                # Last interval - assume same duration as previous
+                if len(self.timestamps) > 1:
+                    interval_duration = self.timestamps[1] - self.timestamps[0]
+                else:
+                    interval_duration = timedelta(minutes=30)
+                interval_end = ts + interval_duration
+
+            if ts <= check_time < interval_end:
+                power_w = self.charge_power_w[i]
+                should_charge = power_w >= min_power_w
+                return should_charge, power_w
+
+        return False, 0.0
+
+    def get_next_charging_window(self, after_time: datetime, min_power_w: float = 100.0) -> tuple[datetime | None, datetime | None, float]:
+        """
+        Get the next charging window after the given time.
+
+        Returns:
+            Tuple of (start_time, end_time, avg_power_w) or (None, None, 0) if no window found
+        """
+        if not self.success or not self.timestamps or not self.charge_power_w:
+            return None, None, 0.0
+
+        window_start = None
+        window_powers = []
+
+        for i, ts in enumerate(self.timestamps):
+            if ts < after_time:
+                continue
+
+            power_w = self.charge_power_w[i]
+            is_charging = power_w >= min_power_w
+
+            if is_charging and window_start is None:
+                window_start = ts
+                window_powers = [power_w]
+            elif is_charging and window_start is not None:
+                window_powers.append(power_w)
+            elif not is_charging and window_start is not None:
+                # End of window found
+                avg_power = sum(window_powers) / len(window_powers) if window_powers else 0
+                return window_start, ts, avg_power
+
+        # If window extends to end of schedule
+        if window_start is not None and window_powers:
+            if len(self.timestamps) > 1:
+                interval_duration = self.timestamps[1] - self.timestamps[0]
+            else:
+                interval_duration = timedelta(minutes=30)
+            window_end = self.timestamps[-1] + interval_duration
+            avg_power = sum(window_powers) / len(window_powers)
+            return window_start, window_end, avg_power
+
+        return None, None, 0.0
+
 
 class EVOptimiser:
     """

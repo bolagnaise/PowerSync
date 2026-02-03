@@ -561,6 +561,21 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             else:
                 _LOGGER.warning("No installation_time_zone in site_info response")
 
+            # Log battery capacity info for debugging
+            _LOGGER.debug(f"Site info keys: {list(site_info.keys())}")
+            components = site_info.get("components", {})
+            if components:
+                _LOGGER.debug(f"Site info components keys: {list(components.keys())}")
+                # Log battery-related fields
+                battery_fields = {k: v for k, v in site_info.items()
+                                 if 'battery' in k.lower() or 'pack' in k.lower() or 'energy' in k.lower() or 'power' in k.lower()}
+                if battery_fields:
+                    _LOGGER.debug(f"Site info battery fields: {battery_fields}")
+                component_battery = {k: v for k, v in components.items()
+                                    if 'battery' in k.lower() or 'nameplate' in k.lower()}
+                if component_battery:
+                    _LOGGER.debug(f"Components battery fields: {component_battery}")
+
             # Cache the result
             self._site_info_cache = site_info
 
