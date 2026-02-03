@@ -10127,13 +10127,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Get current time to determine discharge window
         now = dt_util.now()
         current_period_index = (now.hour * 2) + (1 if now.minute >= 30 else 0)
+        minutes_into_period = now.minute % 30
 
         # Calculate how many 30-min periods the discharge covers
-        discharge_periods = (duration_minutes + 29) // 30  # Round up
-        discharge_start = current_period_index
-        discharge_end = (current_period_index + discharge_periods) % 48
+        # We need to account for the time already elapsed in the current period
+        # If we're 18 minutes into a period, we only have 12 minutes left of useful discharge time
+        remaining_in_current = 30 - minutes_into_period
 
-        _LOGGER.info(f"Discharge window: periods {discharge_start} to {discharge_end} (current time: {now.hour:02d}:{now.minute:02d})")
+        # Total periods needed: current period + enough future periods to cover duration
+        # We always include current period even if partially elapsed (Tesla will respond)
+        # Then add enough additional periods to cover the remaining time
+        remaining_duration = max(0, duration_minutes - remaining_in_current)
+        additional_periods = (remaining_duration + 29) // 30  # Round up
+        total_periods = 1 + additional_periods  # Current + additional
+
+        discharge_start = current_period_index
+        discharge_end = (current_period_index + total_periods) % 48
+
+        _LOGGER.info(f"Discharge window: periods {discharge_start} to {discharge_end} ({total_periods} periods), "
+                     f"current time: {now.hour:02d}:{now.minute:02d}, {remaining_in_current}min left in current period")
 
         for i in range(48):
             hour = i // 2
@@ -10531,13 +10543,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Get current time to determine charge window
         now = dt_util.now()
         current_period_index = (now.hour * 2) + (1 if now.minute >= 30 else 0)
+        minutes_into_period = now.minute % 30
 
         # Calculate how many 30-min periods the charge covers
-        charge_periods = (duration_minutes + 29) // 30  # Round up
-        charge_start = current_period_index
-        charge_end = (current_period_index + charge_periods) % 48
+        # We need to account for the time already elapsed in the current period
+        remaining_in_current = 30 - minutes_into_period
 
-        _LOGGER.info(f"Charge window: periods {charge_start} to {charge_end} (current time: {now.hour:02d}:{now.minute:02d})")
+        # Total periods needed: current period + enough future periods to cover duration
+        # We always include current period even if partially elapsed (Tesla will respond)
+        remaining_duration = max(0, duration_minutes - remaining_in_current)
+        additional_periods = (remaining_duration + 29) // 30  # Round up
+        total_periods = 1 + additional_periods  # Current + additional
+
+        charge_start = current_period_index
+        charge_end = (current_period_index + total_periods) % 48
+
+        _LOGGER.info(f"Charge window: periods {charge_start} to {charge_end} ({total_periods} periods), "
+                     f"current time: {now.hour:02d}:{now.minute:02d}, {remaining_in_current}min left in current period")
 
         for i in range(48):
             hour = i // 2
