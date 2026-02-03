@@ -1190,7 +1190,7 @@ class PriceForecaster:
         # Check periods in priority order to handle overlaps correctly
         # SUPER_OFF_PEAK must be checked before OFF_PEAK since OFF_PEAK may include hours
         # that overlap with SUPER_OFF_PEAK
-        period_priority = ["SUPER_OFF_PEAK", "PEAK", "SHOULDER", "OFF_PEAK"]
+        period_priority = ["SUPER_OFF_PEAK", "ON_PEAK", "PEAK", "PARTIAL_PEAK", "SHOULDER", "OFF_PEAK"]
         for period_name in period_priority:
             if period_name not in tou_periods:
                 continue
