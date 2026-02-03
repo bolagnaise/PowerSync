@@ -217,6 +217,7 @@ from .const import (
     CONF_OPTIMIZATION_ML_FORECASTING,
     CONF_OPTIMIZATION_WEATHER_INTEGRATION,
     CONF_OPTIMIZATION_COST_FUNCTION,
+    CONF_OPTIMIZATION_INTERVAL,
 )
 from .inverters import get_inverter_controller
 from .optimization.coordinator import OptimizationCoordinator
@@ -12553,6 +12554,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             enable_ml_forecasting = entry.data.get(CONF_OPTIMIZATION_ML_FORECASTING, True)
             enable_weather_integration = entry.data.get(CONF_OPTIMIZATION_WEATHER_INTEGRATION, False)
             saved_cost_function = entry.data.get(CONF_OPTIMIZATION_COST_FUNCTION, "self_consumption")
+            saved_interval_minutes = entry.data.get(CONF_OPTIMIZATION_INTERVAL, 5)
 
             optimization_coordinator = OptimizationCoordinator(
                 hass=hass,
@@ -12575,9 +12577,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await optimization_coordinator.async_setup()
             await optimization_coordinator.async_config_entry_first_refresh()
 
-            # Set cost function from saved settings (default to self_consumption)
+            # Set cost function and interval from saved settings
             optimization_coordinator.set_cost_function(saved_cost_function)
-            _LOGGER.info(f"🧠 ML Optimization cost function: {saved_cost_function}")
+            optimization_coordinator.update_config(interval_minutes=saved_interval_minutes)
+            _LOGGER.info(f"🧠 ML Optimization cost function: {saved_cost_function}, interval: {saved_interval_minutes}min")
 
             # Enable the optimizer
             await optimization_coordinator.enable()
