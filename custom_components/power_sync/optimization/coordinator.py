@@ -2230,6 +2230,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await self.disable()
                 response["changes"].append("disabled")
 
+            # Persist enabled state to config entry so it survives restarts
+            if self._entry:
+                from ..const import CONF_OPTIMIZATION_ENABLED
+                new_options = dict(self._entry.options)
+                new_options[CONF_OPTIMIZATION_ENABLED] = enabled
+                self.hass.config_entries.async_update_entry(self._entry, options=new_options)
+                _LOGGER.info(f"🔧 Persisted optimization enabled: {enabled}")
+
         # Handle cost function
         if "cost_function" in settings:
             try:

@@ -209,6 +209,7 @@ from .const import (
     TESLA_INTEGRATIONS,
     # ML Optimization configuration
     CONF_OPTIMIZATION_PROVIDER,
+    CONF_OPTIMIZATION_ENABLED,
     OPT_PROVIDER_NATIVE,
     OPT_PROVIDER_POWERSYNC,
     CONF_OPTIMIZATION_EV_INTEGRATION,
@@ -7550,10 +7551,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Initialize AEMO Spike Manager if enabled (for Globird/AEMO VPP users)
     # Skip if ML optimization is enabled - ML VPP handles spike detection instead
     aemo_spike_manager = None
-    ml_optimization_enabled = entry.options.get(
-        CONF_OPTIMIZATION_PROVIDER,
-        entry.data.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
-    ) == OPT_PROVIDER_POWERSYNC
+    ml_optimization_enabled = (
+        entry.options.get(
+            CONF_OPTIMIZATION_PROVIDER,
+            entry.data.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
+        ) == OPT_PROVIDER_POWERSYNC
+        and entry.options.get(CONF_OPTIMIZATION_ENABLED, True)  # Also check user's toggle
+    )
 
     if aemo_spike_enabled and ml_optimization_enabled:
         _LOGGER.info("⚡ AEMO spike detection disabled - ML VPP handles spike response instead")
@@ -12914,9 +12918,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_OPTIMIZATION_PROVIDER,
         entry.data.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
     )
+    # Check if user has disabled optimization via the app (persisted toggle)
+    # Default to True if not set (backward compatibility - don't break existing setups)
+    optimization_enabled = entry.options.get(CONF_OPTIMIZATION_ENABLED, True)
     optimization_coordinator = None
 
-    if optimization_provider == OPT_PROVIDER_POWERSYNC:
+    if optimization_provider == OPT_PROVIDER_POWERSYNC and optimization_enabled:
         _LOGGER.info("🧠 ML Optimization enabled - initializing OptimizationCoordinator")
         try:
             from .optimization.battery_controller import BatteryControllerWrapper
@@ -13144,7 +13151,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.error(f"Failed to initialize ML Optimization coordinator: {e}", exc_info=True)
             _LOGGER.warning("Continuing without ML optimization - battery will use native optimization")
     else:
-        _LOGGER.info("🔋 Using battery's native optimization (ML optimization disabled)")
+        if optimization_provider == OPT_PROVIDER_POWERSYNC and not optimization_enabled:
+            _LOGGER.info("🧠 ML Optimization is configured but DISABLED by user toggle")
+        else:
+            _LOGGER.info("🔋 Using battery's native optimization (ML optimization not configured)")
 
     # Register HTTP endpoint for Smart Optimization (ML-based battery scheduling)
     hass.http.register_view(OptimizationView(hass))
