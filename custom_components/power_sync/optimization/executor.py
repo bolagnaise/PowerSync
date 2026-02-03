@@ -274,6 +274,8 @@ class ScheduleExecutor:
         action = BatteryAction(action_data["action"])
         power_w = action_data["power_w"]
 
+        _LOGGER.info(f"🔋 Executing interval {index}: action={action.value}, power={power_w:.0f}W, soc={action_data.get('soc', 'N/A')}")
+
         # Track previous action to know if we need to restore
         previous_action = self._status.current_action
 
