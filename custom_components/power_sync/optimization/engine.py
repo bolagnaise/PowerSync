@@ -165,7 +165,7 @@ class BatteryOptimiser:
     def _check_solver(self) -> bool:
         """Check if CVXPY, numpy, and HiGHS solver are available."""
         if not NUMPY_AVAILABLE:
-            _LOGGER.warning("NumPy not installed - optimization disabled")
+            _LOGGER.info("NumPy not installed locally - will use PowerSync Optimiser add-on if available")
             return False
 
         try:
@@ -179,7 +179,7 @@ class BatteryOptimiser:
             _LOGGER.warning(f"HiGHS not available, using fallback. Available: {available}")
             return len(available) > 0
         except ImportError:
-            _LOGGER.warning("CVXPY not installed - optimization disabled")
+            _LOGGER.info("CVXPY not installed locally - will use PowerSync Optimiser add-on if available")
             return False
 
     @property

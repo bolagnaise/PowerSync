@@ -79,14 +79,20 @@ UPDATE_INTERVAL = timedelta(minutes=5)
 # VPP check interval
 VPP_CHECK_INTERVAL = timedelta(minutes=1)
 
-# Add-on API configuration - try multiple possible hostnames
-ADDON_URLS = [
-    "http://powersync_optimiser:5000",      # Standard slug
-    "http://powersync-optimiser:5000",      # Hyphenated slug
-    "http://local_powersync_optimiser:5000", # Local add-on slug
-    "http://local-powersync-optimiser:5000", # Local add-on hyphenated
-    "http://addon_powersync_optimiser:5000", # Alternative prefix
+# Add-on API configuration - try multiple possible hostnames and ports
+# Port 5001 used to avoid conflict with EMHASS (which uses 5000)
+ADDON_PORTS = [5001, 5000, 5002]  # Try these ports in order
+ADDON_HOSTNAMES = [
+    "powersync_optimiser",       # Standard slug
+    "powersync-optimiser",       # Hyphenated slug
+    "local_powersync_optimiser", # Local add-on slug
+    "local-powersync-optimiser", # Local add-on hyphenated
+    "addon_powersync_optimiser", # Alternative prefix
 ]
+# Build full URL list from hostnames and ports
+ADDON_URLS = [f"http://{host}:{port}" for host in ADDON_HOSTNAMES for port in ADDON_PORTS]
+# Supervisor API for add-on discovery
+SUPERVISOR_API = "http://supervisor/addons"
 
 
 class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -663,27 +669,114 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _is_addon_available(self) -> bool:
         """Check if the optimiser add-on is available."""
         import aiohttp
+        import os
 
-        # Try each possible URL
-        for url in ADDON_URLS:
+        # First, try to discover via Supervisor API (HAOS only)
+        supervisor_token = os.environ.get("SUPERVISOR_TOKEN")
+        if supervisor_token:
+            _LOGGER.debug("Found SUPERVISOR_TOKEN, querying Supervisor API for add-ons")
             try:
                 async with aiohttp.ClientSession() as session:
+                    headers = {"Authorization": f"Bearer {supervisor_token}"}
                     async with session.get(
-                        f"{url}/health",
-                        timeout=aiohttp.ClientTimeout(total=3),
+                        "http://supervisor/addons",
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=5),
                     ) as response:
                         if response.status == 200:
                             data = await response.json()
-                            if data.get("optimiser_available", False):
-                                # Store the working URL for future use
-                                self._addon_url = url
-                                _LOGGER.info(f"Found PowerSync Optimiser add-on at {url}")
-                                return True
-            except aiohttp.ClientError:
-                pass  # Expected when add-on not at this URL
-            except Exception:
-                pass
+                            addons = data.get("data", {}).get("addons", [])
+                            _LOGGER.debug(f"Found {len(addons)} add-ons in Supervisor")
+                            for addon in addons:
+                                # Look for PowerSync Optimiser add-on
+                                name = addon.get("name", "").lower()
+                                slug = addon.get("slug", "")
+                                state = addon.get("state", "unknown")
+                                _LOGGER.debug(f"Checking add-on: {name} (slug={slug}, state={state})")
+                                if "powersync" in name and "optimi" in name:
+                                    # Found it! Try to connect on different ports
+                                    _LOGGER.info(f"🔋 Discovered PowerSync Optimiser add-on: {slug} (state={state})")
+                                    if state != "started":
+                                        _LOGGER.warning(f"Add-on {slug} is not started (state={state})")
+                                        continue
 
+                                    # Try to get the add-on's IP from its info endpoint
+                                    addon_ip = None
+                                    try:
+                                        async with session.get(
+                                            f"http://supervisor/addons/{slug}/info",
+                                            headers=headers,
+                                            timeout=aiohttp.ClientTimeout(total=3),
+                                        ) as info_response:
+                                            if info_response.status == 200:
+                                                info_data = await info_response.json()
+                                                addon_ip = info_data.get("data", {}).get("ip_address")
+                                                _LOGGER.debug(f"Add-on {slug} has IP: {addon_ip}")
+                                    except Exception as e:
+                                        _LOGGER.debug(f"Failed to get add-on info: {e}")
+
+                                    # Build list of URLs to try (slug hostname, IP, etc.)
+                                    urls_to_try = []
+                                    for port in ADDON_PORTS:
+                                        urls_to_try.append(f"http://{slug}:{port}")
+                                        if addon_ip:
+                                            urls_to_try.append(f"http://{addon_ip}:{port}")
+
+                                    for addon_url in urls_to_try:
+                                        if await self._check_addon_health(addon_url):
+                                            self._addon_url = addon_url
+                                            _LOGGER.info(f"✓ PowerSync Optimiser add-on connected at {addon_url}")
+                                            return True
+                                    _LOGGER.warning(f"Add-on {slug} found but health check failed on URLs: {urls_to_try[:4]}...")
+                        else:
+                            _LOGGER.debug(f"Supervisor API returned status {response.status}")
+            except Exception as e:
+                _LOGGER.debug(f"Supervisor API discovery failed: {e}")
+
+        # Fallback: try each possible URL
+        _LOGGER.debug(f"Trying fallback URLs: {ADDON_URLS[:3]}...")
+        for url in ADDON_URLS:
+            if await self._check_addon_health(url):
+                self._addon_url = url
+                _LOGGER.info(f"Found PowerSync Optimiser add-on at {url}")
+                return True
+
+        _LOGGER.warning(
+            "PowerSync Optimiser add-on not found. "
+            "Install it from the add-on store to enable ML optimization, "
+            "or install cvxpy locally (pip install cvxpy highspy)"
+        )
+        return False
+
+    async def _check_addon_health(self, url: str) -> bool:
+        """Check if add-on is responding at the given URL."""
+        import aiohttp
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Try the /health endpoint first
+                async with session.get(
+                    f"{url}/health",
+                    timeout=aiohttp.ClientTimeout(total=3),
+                ) as response:
+                    if response.status == 200:
+                        try:
+                            data = await response.json()
+                            # Accept if optimiser_available is True, or if it's a valid response
+                            if data.get("optimiser_available", False):
+                                return True
+                            # Also accept if status is "ok" or "healthy"
+                            if data.get("status") in ("ok", "healthy"):
+                                _LOGGER.debug(f"Add-on at {url} responded with status={data.get('status')}")
+                                return True
+                        except Exception:
+                            # If we got 200 but can't parse JSON, still consider it available
+                            _LOGGER.debug(f"Add-on at {url} returned 200 but non-JSON response")
+                            return True
+        except aiohttp.ClientError as e:
+            _LOGGER.debug(f"Health check failed for {url}: {e}")
+        except Exception as e:
+            _LOGGER.debug(f"Unexpected error checking {url}: {e}")
         return False
 
     async def enable(self) -> bool:
