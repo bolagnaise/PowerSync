@@ -1938,7 +1938,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "baseline_cost": self._current_schedule.baseline_cost,
                 "savings": self._current_schedule.savings,
             }
-            data["next_actions"] = self._current_schedule.get_next_actions(5)
+            next_actions = self._current_schedule.get_next_actions(5)
+            data["next_actions"] = next_actions
+            # Override next_action from schedule to ensure consistency with next_actions list
+            if len(next_actions) > 1:
+                data["next_action"] = next_actions[1].get("action", "idle")
+                data["next_action_time"] = next_actions[1].get("timestamp")
+            elif len(next_actions) > 0:
+                data["next_action"] = next_actions[0].get("action", "idle")
+                data["next_action_time"] = next_actions[0].get("timestamp")
             # Also set predicted cost/savings from schedule directly
             data["predicted_cost"] = self._current_schedule.total_cost
             data["predicted_savings"] = self._current_schedule.savings
