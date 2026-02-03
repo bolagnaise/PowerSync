@@ -68,6 +68,7 @@ class BatteryControllerWrapper:
             # Create a mock service call with the duration
             from homeassistant.core import Context
             call = ServiceCall(
+                hass=self.hass,
                 domain="power_sync",
                 service="force_charge",
                 data={"duration": duration_minutes},
@@ -100,6 +101,7 @@ class BatteryControllerWrapper:
 
             from homeassistant.core import Context
             call = ServiceCall(
+                hass=self.hass,
                 domain="power_sync",
                 service="force_discharge",
                 data={"duration": duration_minutes},
@@ -128,6 +130,7 @@ class BatteryControllerWrapper:
 
             from homeassistant.core import Context
             call = ServiceCall(
+                hass=self.hass,
                 domain="power_sync",
                 service="restore_normal",
                 data={},
