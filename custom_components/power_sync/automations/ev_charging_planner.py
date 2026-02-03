@@ -2164,6 +2164,10 @@ class AutoScheduleExecutor:
         # ML optimization integration
         self._use_ml_optimization = False  # Set via settings
 
+        # Variable charge rate tracking (per vehicle)
+        self._current_charge_amps: Dict[str, int] = {}  # {vehicle_id: current_amps}
+        self._charge_rate_change_threshold = 2  # Only change rate if diff >= 2 amps
+
     def _get_ml_ev_schedule(self, vehicle_id: str):
         """
         Get the ML optimization schedule for a vehicle if available.
@@ -2209,6 +2213,99 @@ class AutoScheduleExecutor:
         """Enable or disable ML optimization for EV charging decisions."""
         self._use_ml_optimization = enabled
         _LOGGER.info(f"ML optimization for EV charging: {'enabled' if enabled else 'disabled'}")
+
+    def _power_to_amps(self, power_w: float, voltage: int = 230, phases: int = 1) -> int:
+        """
+        Convert power in watts to charging amps.
+
+        Args:
+            power_w: Power in watts
+            voltage: Voltage (default 230V for Australia)
+            phases: Number of phases (1 or 3)
+
+        Returns:
+            Charging amps (clamped to 5-32A range)
+        """
+        if power_w <= 0:
+            return 0
+
+        # P = V * I * phases (for AC charging)
+        amps = power_w / (voltage * phases)
+
+        # Clamp to valid Tesla charging range (5A minimum, 32A typical max for home chargers)
+        # Below 5A Tesla refuses to charge
+        amps = max(5, min(32, int(amps)))
+
+        return amps
+
+    async def _set_vehicle_charge_rate(
+        self,
+        vehicle_id: str,
+        power_w: float,
+        settings: "AutoScheduleSettings",
+    ) -> bool:
+        """
+        Set the charging rate for a vehicle based on target power.
+
+        Supports:
+        - Tesla Fleet API
+        - Tesla BLE
+        - Teslemetry
+
+        Args:
+            vehicle_id: Vehicle identifier (VIN)
+            power_w: Target charging power in watts
+            settings: Vehicle's auto-schedule settings
+
+        Returns:
+            True if charge rate was set successfully
+        """
+        from .actions import _action_set_ev_charging_amps
+
+        # Get home power settings for voltage/phases
+        home_config = await self._get_home_power_settings()
+        phases = 1 if home_config.get("phase_type") == "single" else 3
+        voltage = 230  # Australia standard
+
+        # Convert power to amps
+        target_amps = self._power_to_amps(power_w, voltage, phases)
+
+        if target_amps == 0:
+            return False
+
+        # Check if rate change is significant enough
+        current_amps = self._current_charge_amps.get(vehicle_id, 0)
+        if abs(target_amps - current_amps) < self._charge_rate_change_threshold:
+            _LOGGER.debug(
+                f"Charge rate change too small ({current_amps}A → {target_amps}A), skipping"
+            )
+            return True  # Not an error, just no change needed
+
+        # Set the charge rate
+        params = {
+            "vehicle_vin": vehicle_id,
+            "amps": target_amps,
+        }
+
+        try:
+            success = await _action_set_ev_charging_amps(
+                self.hass, self.config_entry, params
+            )
+
+            if success:
+                self._current_charge_amps[vehicle_id] = target_amps
+                _LOGGER.info(
+                    f"⚡ Variable charge rate: Set {vehicle_id} to {target_amps}A "
+                    f"({power_w/1000:.1f}kW @ {voltage}V/{phases}ph)"
+                )
+                return True
+            else:
+                _LOGGER.warning(f"Failed to set charge rate for {vehicle_id}")
+                return False
+
+        except Exception as e:
+            _LOGGER.error(f"Error setting charge rate for {vehicle_id}: {e}")
+            return False
 
     async def load_settings(self, store) -> None:
         """Load settings from storage."""
@@ -2767,6 +2864,10 @@ class AutoScheduleExecutor:
         # When ML optimization is enabled, use its schedule instead of the
         # built-in charging planner. ML optimization considers home battery,
         # solar, prices, and EV charging jointly for whole-home optimization.
+        #
+        # VARIABLE CHARGE RATE: The optimizer outputs target power (kW) per
+        # interval. We convert this to amps and set the charge rate dynamically
+        # to match solar surplus, minimize costs, or maximize self-consumption.
         # =====================================================================
         ml_schedule = self._get_ml_ev_schedule(vehicle_id)
         if ml_schedule is not None:
@@ -2775,18 +2876,26 @@ class AutoScheduleExecutor:
             # Get next charging window for status display
             next_start, next_end, next_power = ml_schedule.get_next_charging_window(now)
 
+            # Calculate target amps for logging
+            target_amps = self._power_to_amps(power_w) if power_w > 0 else 0
+
             if should_charge:
-                reason = f"ML optimization: charge at {power_w/1000:.1f}kW"
+                reason = f"ML optimization: charge at {power_w/1000:.1f}kW ({target_amps}A)"
                 source = "ml_optimized"
 
                 if not state.is_charging:
+                    # Start charging
                     await self._start_charging(vehicle_id, settings, state, source)
                     state.last_decision = "started"
                     state.last_decision_reason = reason
-                    _LOGGER.info(f"🤖 ML EV Charging: Starting charge for {vehicle_id} at {power_w/1000:.1f}kW")
-                else:
-                    state.last_decision = "charging"
-                    state.last_decision_reason = reason
+                    _LOGGER.info(f"🤖 ML EV Charging: Starting charge for {vehicle_id} at {power_w/1000:.1f}kW ({target_amps}A)")
+
+                # Set variable charge rate (whether just started or already charging)
+                # This allows ramping the charge rate based on solar/prices
+                await self._set_vehicle_charge_rate(vehicle_id, power_w, settings)
+                state.last_decision = "charging"
+                state.last_decision_reason = reason
+
             else:
                 if next_start:
                     reason = f"ML optimization: next window {next_start.strftime('%H:%M')} - {next_end.strftime('%H:%M')}"
@@ -2797,6 +2906,8 @@ class AutoScheduleExecutor:
                     await self._stop_charging(vehicle_id, settings, state, restore_backup_reserve=True)
                     state.last_decision = "stopped"
                     state.last_decision_reason = reason
+                    # Clear tracked charge rate
+                    self._current_charge_amps.pop(vehicle_id, None)
                     _LOGGER.info(f"🤖 ML EV Charging: Stopping charge for {vehicle_id} - {reason}")
                 else:
                     state.last_decision = "waiting"
