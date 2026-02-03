@@ -12495,6 +12495,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 battery_controller = tesla_coordinator
                 energy_coordinator = tesla_coordinator
 
+            # Get tariff schedule for TOU-based pricing (Globird, etc.)
+            tariff_schedule = hass.data[DOMAIN][entry.entry_id].get("tariff_schedule")
+
             optimization_coordinator = OptimizationCoordinator(
                 hass=hass,
                 entry_id=entry.entry_id,
@@ -12502,6 +12505,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 battery_controller=battery_controller,
                 price_coordinator=amber_coordinator or octopus_coordinator or aemo_sensor_coordinator,
                 energy_coordinator=energy_coordinator,
+                tariff_schedule=tariff_schedule,  # For Globird/TOU-based pricing
                 enable_ml_forecasting=True,
                 enable_weather_integration=False,  # Can be enabled later
                 enable_ev_integration=False,

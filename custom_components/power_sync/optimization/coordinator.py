@@ -114,6 +114,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         battery_controller: Any,
         price_coordinator: Any | None = None,
         energy_coordinator: Any | None = None,
+        tariff_schedule: dict | None = None,  # For Globird/TOU-based pricing
         # Enhanced options
         enable_ml_forecasting: bool = True,
         enable_weather_integration: bool = True,
@@ -129,8 +130,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             entry_id: Config entry ID
             battery_system: Type of battery system
             battery_controller: Controller for battery commands
-            price_coordinator: Coordinator providing price data
+            price_coordinator: Coordinator providing price data (Amber/Octopus)
             energy_coordinator: Coordinator providing energy data
+            tariff_schedule: Tariff schedule dict for TOU-based pricing (Globird)
             enable_ml_forecasting: Use ML-based load forecasting
             enable_weather_integration: Include weather in forecasts
             enable_ev_integration: Include EV charging in optimization
@@ -150,6 +152,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.battery_controller = battery_controller
         self.price_coordinator = price_coordinator
         self.energy_coordinator = energy_coordinator
+        self._tariff_schedule = tariff_schedule  # For Globird/TOU-based pricing
 
         # Feature flags
         self._enable_ml_forecasting = enable_ml_forecasting
@@ -1029,8 +1032,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         - Export boost: increase export prices during configured window
         - Chip mode: reduce export prices outside threshold
         - Spike protection: cap import prices during spikes
+
+        Falls back to tariff schedule (TOU periods) if no price coordinator.
         """
+        # Try tariff schedule first if no price coordinator (Globird, etc.)
+        if not self.price_coordinator and self._tariff_schedule:
+            return self._get_prices_from_tariff_schedule()
+
         if not self.price_coordinator:
+            _LOGGER.debug("No price coordinator and no tariff schedule available")
             return None
 
         try:
@@ -1111,6 +1121,86 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         except Exception as e:
             _LOGGER.error(f"Error getting price forecast: {e}")
+            return None
+
+    def _get_prices_from_tariff_schedule(self) -> tuple[list[float], list[float]] | None:
+        """Generate price forecast from TOU tariff schedule (for Globird, etc.).
+
+        Uses the Tesla tariff schedule's TOU periods to generate a 48-hour
+        price forecast based on time-of-use rates.
+        """
+        if not self._tariff_schedule:
+            return None
+
+        try:
+            tou_periods = self._tariff_schedule.get("tou_periods", {})
+            buy_rates = self._tariff_schedule.get("buy_rates", {})
+            sell_rates = self._tariff_schedule.get("sell_rates", {})
+
+            # If no TOU data, use flat rates
+            if not tou_periods or not buy_rates:
+                flat_buy = self._tariff_schedule.get("buy_price", 25.0) / 100  # cents to $/kWh
+                flat_sell = self._tariff_schedule.get("sell_price", 8.0) / 100
+                n_intervals = self._config.horizon_hours * 60 // self._config.interval_minutes
+                _LOGGER.debug(f"Using flat tariff rates: buy=${flat_buy:.3f}, sell=${flat_sell:.3f}")
+                return [flat_buy] * n_intervals, [flat_sell] * n_intervals
+
+            n_intervals = self._config.horizon_hours * 60 // self._config.interval_minutes
+            import_prices = []
+            export_prices = []
+            now = dt_util.now()
+
+            for idx in range(n_intervals):
+                interval_time = now + timedelta(minutes=idx * self._config.interval_minutes)
+                current_hour = interval_time.hour
+                current_dow = interval_time.weekday()  # Python: 0=Monday
+
+                # Find the TOU period for this interval
+                current_period = None
+                for period_name, period_data in tou_periods.items():
+                    periods_list = period_data if isinstance(period_data, list) else []
+                    for period in periods_list:
+                        from_dow = period.get("fromDayOfWeek", 0)
+                        to_dow = period.get("toDayOfWeek", 6)
+                        from_hour = period.get("fromHour", 0)
+                        to_hour = period.get("toHour", 24)
+
+                        # Tesla format: 0=Sunday, Python: 0=Monday
+                        tesla_dow = (current_dow + 1) % 7
+                        if from_dow <= tesla_dow <= to_dow:
+                            # Handle overnight periods
+                            if from_hour <= to_hour:
+                                if from_hour <= current_hour < to_hour:
+                                    current_period = period_name
+                                    break
+                            else:
+                                if current_hour >= from_hour or current_hour < to_hour:
+                                    current_period = period_name
+                                    break
+                    if current_period:
+                        break
+
+                if not current_period:
+                    current_period = "OFF_PEAK"
+
+                # Get rates for this period (rates may be in $/kWh or cents)
+                buy_rate = buy_rates.get(current_period, buy_rates.get("ALL", buy_rates.get("OFF_PEAK", 0.25)))
+                sell_rate = sell_rates.get(current_period, sell_rates.get("ALL", 0.08))
+
+                # Convert to $/kWh if rates appear to be in cents (> 1.0)
+                if buy_rate > 1.0:
+                    buy_rate = buy_rate / 100
+                if sell_rate > 1.0:
+                    sell_rate = sell_rate / 100
+
+                import_prices.append(buy_rate)
+                export_prices.append(sell_rate)
+
+            _LOGGER.debug(f"Generated {n_intervals} price intervals from tariff schedule")
+            return import_prices, export_prices
+
+        except Exception as e:
+            _LOGGER.error(f"Error getting prices from tariff schedule: {e}")
             return None
 
     async def _get_solar_forecast(self) -> list[float] | None:
