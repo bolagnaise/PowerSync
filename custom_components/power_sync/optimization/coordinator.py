@@ -1030,11 +1030,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Update coordinator data for display."""
-        # Get executor status
-        executor_status = {}
+        # Sync current_schedule from executor if available
         if self._executor:
-            executor_status = self._executor.get_schedule_summary()
             self._current_schedule = self._executor.current_schedule
+
+        # Return the API data for coordinator.data
+        return self.get_api_data()
 
     def _is_in_time_window(self, time_str: str, start: str, end: str) -> bool:
         """Check if a time (HH:MM) is within a window (handles overnight windows)."""
@@ -1056,92 +1057,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return current >= start_m or current < end_m
         except (ValueError, IndexError):
             return False
-
-    def get_api_data(self) -> dict[str, Any]:
-        """Get data for HTTP API and mobile app."""
-        executor_status = self._executor.get_schedule_summary() if self._executor else {}
-        _LOGGER.debug(f"get_api_data: _current_schedule={self._current_schedule is not None}, "
-                      f"success={self._current_schedule.success if self._current_schedule else 'N/A'}, "
-                      f"executor_status={executor_status}")
-
-        # Build data for mobile app
-        data = {
-            "success": True,
-            "enabled": self._enabled,
-            "optimizer_available": self._optimiser.is_available,
-            "cost_function": self._cost_function.value,
-            "status": executor_status.get("status", "disabled"),
-            "optimization_status": executor_status.get("optimization_status", "not_run"),
-            "current_action": executor_status.get("current_action", "idle"),
-            "current_power_w": executor_status.get("current_power_w", 0),
-            "next_action": executor_status.get("next_action", "idle"),
-            "next_action_time": executor_status.get("next_action_time"),
-            "last_optimization": executor_status.get("last_optimization"),
-            "predicted_cost": executor_status.get("predicted_cost", 0),
-            "predicted_savings": executor_status.get("predicted_savings", 0),
-            # Enhanced feature flags
-            "features": {
-                "ml_forecasting": self._enable_ml_forecasting,
-                "weather_integration": self._enable_weather,
-                "ev_integration": self._enable_ev,
-                "multi_battery": self._enable_multi_battery,
-                "vpp_enabled": self._enable_vpp,
-            },
-        }
-
-        # Add schedule data if available
-        if self._current_schedule and self._current_schedule.success:
-            data["schedule"] = {
-                "timestamps": [t.isoformat() for t in self._current_schedule.timestamps],
-                "charge_w": self._current_schedule.charge_schedule_w,
-                "discharge_w": self._current_schedule.discharge_schedule_w,
-                "soc": self._current_schedule.soc_trajectory,
-                "grid_import_w": self._current_schedule.grid_import_w,
-                "grid_export_w": self._current_schedule.grid_export_w,
-            }
-            data["summary"] = {
-                "total_cost": self._current_schedule.total_cost,
-                "total_import_kwh": self._current_schedule.total_import_kwh,
-                "total_export_kwh": self._current_schedule.total_export_kwh,
-                "total_charge_kwh": self._current_schedule.total_charge_kwh,
-                "total_discharge_kwh": self._current_schedule.total_discharge_kwh,
-                "baseline_cost": self._current_schedule.baseline_cost,
-                "savings": self._current_schedule.savings,
-            }
-            data["next_actions"] = self._current_schedule.get_next_actions(5)
-
-        # Add EV data if available
-        if self._ev_schedules:
-            data["ev_schedules"] = [s.to_dict() for s in self._ev_schedules]
-
-        # Add multi-battery data if available
-        if self._multi_battery_result and self._multi_battery_result.success:
-            data["multi_battery"] = {
-                "batteries": self._multi_battery_result.battery_metrics,
-                "total_savings": self._multi_battery_result.savings,
-            }
-
-        # Add VPP data if available
-        if self._grid_services:
-            data["vpp"] = {
-                "active_events": len(self._active_vpp_events),
-                "events": [
-                    {
-                        "id": e.event_id,
-                        "type": e.event_type.value,
-                        "severity": e.severity,
-                        "current_price": e.current_price,
-                    }
-                    for e in self._active_vpp_events
-                ],
-                "stats": self._grid_services.get_vpp_stats(days=30),
-            }
-
-        # Add ML load estimator stats
-        if self._ml_load_estimator:
-            data["ml_stats"] = self._ml_load_estimator.get_model_stats()
-
-        return data
 
     async def _get_price_forecast(self) -> tuple[list[float], list[float]] | None:
         """Get price forecasts for optimization.
@@ -1374,8 +1289,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return 0.5, 13500  # Default
 
     def get_api_data(self) -> dict[str, Any]:
-        """Get data for HTTP API response."""
-        base_data = self.data or {}
+        """Get data for HTTP API and mobile app."""
+        executor_status = self._executor.get_schedule_summary() if self._executor else {}
 
         # Check if optimization engine is available (local cvxpy or add-on)
         engine_available = self._optimiser.is_available or self._addon_available
@@ -1389,13 +1304,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             status_message = "Optimizer engine not installed. Install the PowerSync Optimiser add-on or cvxpy package."
 
-        return {
+        _LOGGER.debug(f"get_api_data: _current_schedule={self._current_schedule is not None}, "
+                      f"success={self._current_schedule.success if self._current_schedule else 'N/A'}, "
+                      f"executor_status keys={list(executor_status.keys())}")
+
+        # Build data for mobile app
+        data = {
             "success": True,
             "enabled": self._enabled,
-            "optimizer_available": True,  # Always true when coordinator exists (ML enabled)
-            "engine_available": engine_available,  # Whether optimizer engine is ready
+            "optimizer_available": self._optimiser.is_available or self._addon_available,
+            "engine_available": engine_available,
             "status_message": status_message,
             "cost_function": self._cost_function.value,
+            "status": executor_status.get("status", "disabled"),
+            "optimization_status": executor_status.get("optimization_status", "not_run"),
+            "current_action": executor_status.get("current_action", "idle"),
+            "current_power_w": executor_status.get("current_power_w", 0),
+            "next_action": executor_status.get("next_action", "idle"),
+            "next_action_time": executor_status.get("next_action_time"),
+            "last_optimization": executor_status.get("last_optimization"),
+            "predicted_cost": executor_status.get("predicted_cost", 0),
+            "predicted_savings": executor_status.get("predicted_savings", 0),
             "config": {
                 "battery_capacity_wh": self._config.battery_capacity_wh,
                 "max_charge_w": self._config.max_charge_w,
@@ -1411,8 +1340,66 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "multi_battery": self._enable_multi_battery,
                 "vpp_enabled": self._enable_vpp,
             },
-            **base_data,
         }
+
+        # Add schedule data if available
+        if self._current_schedule and self._current_schedule.success:
+            _LOGGER.debug(f"Adding schedule to API response: {len(self._current_schedule.timestamps)} intervals, "
+                          f"cost=${self._current_schedule.total_cost:.2f}, savings=${self._current_schedule.savings:.2f}")
+            data["schedule"] = {
+                "timestamps": [t.isoformat() for t in self._current_schedule.timestamps],
+                "charge_w": self._current_schedule.charge_schedule_w,
+                "discharge_w": self._current_schedule.discharge_schedule_w,
+                "soc": self._current_schedule.soc_trajectory,
+                "grid_import_w": self._current_schedule.grid_import_w,
+                "grid_export_w": self._current_schedule.grid_export_w,
+            }
+            data["summary"] = {
+                "total_cost": self._current_schedule.total_cost,
+                "total_import_kwh": self._current_schedule.total_import_kwh,
+                "total_export_kwh": self._current_schedule.total_export_kwh,
+                "total_charge_kwh": self._current_schedule.total_charge_kwh,
+                "total_discharge_kwh": self._current_schedule.total_discharge_kwh,
+                "baseline_cost": self._current_schedule.baseline_cost,
+                "savings": self._current_schedule.savings,
+            }
+            data["next_actions"] = self._current_schedule.get_next_actions(5)
+            # Also set predicted cost/savings from schedule directly
+            data["predicted_cost"] = self._current_schedule.total_cost
+            data["predicted_savings"] = self._current_schedule.savings
+
+        # Add EV data if available
+        if self._ev_schedules:
+            data["ev_schedules"] = [s.to_dict() for s in self._ev_schedules]
+
+        # Add multi-battery data if available
+        if self._multi_battery_result and self._multi_battery_result.success:
+            data["multi_battery"] = {
+                "batteries": self._multi_battery_result.battery_metrics,
+                "total_savings": self._multi_battery_result.savings,
+            }
+
+        # Add VPP data if available
+        if self._grid_services:
+            data["vpp"] = {
+                "active_events": len(self._active_vpp_events),
+                "events": [
+                    {
+                        "id": e.event_id,
+                        "type": e.event_type.value,
+                        "severity": e.severity,
+                        "current_price": e.current_price,
+                    }
+                    for e in self._active_vpp_events
+                ],
+                "stats": self._grid_services.get_vpp_stats(days=30),
+            }
+
+        # Add ML load estimator stats
+        if self._ml_load_estimator:
+            data["ml_stats"] = self._ml_load_estimator.get_model_stats()
+
+        return data
 
     async def set_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
         """Update optimization settings from API."""
