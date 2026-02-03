@@ -217,6 +217,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._addon_available: bool = False
         self._addon_url: str | None = None
 
+        # Dynamic pricing / price-triggered optimization
+        self._is_dynamic_pricing = False  # True for Amber, AEMO, Octopus Agile
+        self._price_listener_unsub: Callable | None = None
+        self._last_command_time: datetime | None = None
+        self._command_throttle_seconds = 300  # 5 minutes between battery commands
+        self._last_price_hash: str | None = None  # Detect actual price changes
+
     @property
     def enabled(self) -> bool:
         """Check if optimization is enabled."""
@@ -383,6 +390,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self.battery_system == "tesla":
             await self._detect_battery_power_limits()
 
+        # Set up price-triggered optimization for dynamic pricing providers
+        await self._setup_price_listener()
+
         _LOGGER.info(
             f"Optimization coordinator setup complete. "
             f"Local optimiser: {self._optimiser.is_available}, "
@@ -392,6 +402,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             f"EV: {self._enable_ev}, "
             f"Multi-battery: {self._enable_multi_battery}, "
             f"VPP: {self._enable_vpp}, "
+            f"Dynamic pricing: {self._is_dynamic_pricing}, "
             f"Battery: {self._config.battery_capacity_wh/1000:.1f}kWh @ {self._config.max_charge_w/1000:.1f}kW"
         )
         return True
@@ -454,6 +465,111 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception:
             pass
         return None
+
+    async def _setup_price_listener(self) -> None:
+        """
+        Set up price-triggered optimization for dynamic pricing providers.
+
+        For dynamic pricing (Amber, AEMO, Octopus Agile):
+        - Optimize on every price update (every 5 minutes for Amber)
+        - Only re-optimize if prices actually changed
+
+        For static/TOU pricing (GloBird, standard tariffs):
+        - Keep the standard 30-minute optimization interval
+        """
+        if not self.price_coordinator:
+            _LOGGER.debug("No price coordinator - using standard optimization interval")
+            return
+
+        # Detect dynamic pricing providers by coordinator type
+        coordinator_name = type(self.price_coordinator).__name__
+        dynamic_providers = ["AmberPriceCoordinator", "AEMOPriceCoordinator"]
+
+        # Octopus is dynamic only for Agile/Flux tariffs
+        if coordinator_name == "OctopusPriceCoordinator":
+            # Check if it's an Agile or Flux tariff (dynamic pricing)
+            product_code = getattr(self.price_coordinator, "product_code", "")
+            if "AGILE" in product_code.upper() or "FLUX" in product_code.upper():
+                dynamic_providers.append("OctopusPriceCoordinator")
+
+        self._is_dynamic_pricing = coordinator_name in dynamic_providers
+
+        if self._is_dynamic_pricing:
+            # Subscribe to price coordinator updates
+            self._price_listener_unsub = self.price_coordinator.async_add_listener(
+                self._on_price_update
+            )
+            _LOGGER.info(
+                f"⚡ Dynamic pricing detected ({coordinator_name}) - "
+                f"will optimize on every price update"
+            )
+        else:
+            _LOGGER.info(
+                f"📊 Static/TOU pricing detected ({coordinator_name}) - "
+                f"using standard 30-minute optimization interval"
+            )
+
+    def _on_price_update(self) -> None:
+        """
+        Callback when price coordinator updates.
+
+        For dynamic pricing, this triggers re-optimization if:
+        - Prices have actually changed (not just a refresh)
+        - Enough time has passed since last command (throttle)
+        """
+        if not self._enabled or not self._is_dynamic_pricing:
+            return
+
+        # Create hash of current prices to detect actual changes
+        try:
+            if self.price_coordinator and self.price_coordinator.data:
+                current_data = self.price_coordinator.data
+                # Hash the current and next few price periods
+                current = current_data.get("current", {})
+                price_hash = f"{current.get('per_kwh', 0):.4f}"
+
+                if price_hash == self._last_price_hash:
+                    _LOGGER.debug("Price unchanged, skipping re-optimization")
+                    return
+
+                self._last_price_hash = price_hash
+        except Exception as e:
+            _LOGGER.debug(f"Could not hash prices: {e}")
+
+        # Schedule the async optimization
+        self.hass.async_create_task(self._price_triggered_optimization())
+
+    async def _price_triggered_optimization(self) -> None:
+        """Run optimization triggered by price update with command throttling."""
+        now = dt_util.now()
+
+        # Check command throttle (minimum 5 minutes between battery commands)
+        if self._last_command_time:
+            elapsed = (now - self._last_command_time).total_seconds()
+            if elapsed < self._command_throttle_seconds:
+                _LOGGER.debug(
+                    f"Command throttle active - {self._command_throttle_seconds - elapsed:.0f}s remaining"
+                )
+                return
+
+        _LOGGER.info("⚡ Price update detected - running optimization")
+
+        try:
+            # Run optimization
+            result = await self.force_reoptimize()
+
+            if result and result.success:
+                self._last_command_time = now
+                _LOGGER.info(
+                    f"⚡ Price-triggered optimization complete: "
+                    f"action={result.get_action_at_index(0).get('action', 'idle')}, "
+                    f"cost=${result.total_cost:.2f}"
+                )
+            else:
+                _LOGGER.warning("Price-triggered optimization failed or returned no result")
+
+        except Exception as e:
+            _LOGGER.error(f"Error in price-triggered optimization: {e}")
 
     async def _discover_ev_configs(self) -> None:
         """
@@ -970,6 +1086,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._vpp_monitor_task:
             self._vpp_monitor_task.cancel()
             self._vpp_monitor_task = None
+
+        # Unsubscribe from price updates
+        if self._price_listener_unsub:
+            self._price_listener_unsub()
+            self._price_listener_unsub = None
 
         if self._executor:
             await self._executor.stop()
