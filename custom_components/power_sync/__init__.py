@@ -3055,7 +3055,60 @@ class TariffPriceView(HomeAssistantView):
             )
 
         try:
-            # Always fetch fresh tariff data to get current TOU period
+            # Check if ML optimizer has uploaded a fake tariff (force charge/discharge active)
+            # If so, use the SAVED real tariff instead of fetching the fake one from Tesla
+            force_charge_state = self._hass.data.get(DOMAIN, {}).get(entry_id, {}).get("force_charge_state", {})
+            force_discharge_state = self._hass.data.get(DOMAIN, {}).get(entry_id, {}).get("force_discharge_state", {})
+
+            saved_tariff = None
+            force_mode_active = False
+            if force_charge_state.get("active") and force_charge_state.get("saved_tariff"):
+                saved_tariff = force_charge_state["saved_tariff"]
+                force_mode_active = True
+                _LOGGER.info("Force charge active - using saved real tariff instead of fake ML tariff")
+            elif force_discharge_state.get("active") and force_discharge_state.get("saved_tariff"):
+                saved_tariff = force_discharge_state["saved_tariff"]
+                force_mode_active = True
+                _LOGGER.info("Force discharge active - using saved real tariff instead of fake ML tariff")
+
+            if saved_tariff:
+                # Use saved tariff to calculate current prices
+                tariff_data = self._calculate_prices_from_saved_tariff(saved_tariff)
+                if tariff_data:
+                    buy_price_cents = tariff_data.get("buy_price", 0)
+                    sell_price_cents = tariff_data.get("sell_price", 0)
+                    current_period = tariff_data.get("current_period", "UNKNOWN")
+
+                    result = {
+                        "success": True,
+                        "import": {
+                            "perKwh": buy_price_cents,
+                            "channelType": "general",
+                            "type": "TariffInterval",
+                            "duration": 30,
+                            "spikeStatus": None,
+                            "source": "saved_tariff",
+                        },
+                        "feedIn": {
+                            "perKwh": -sell_price_cents,
+                            "channelType": "feedIn",
+                            "type": "TariffInterval",
+                            "duration": 30,
+                            "spikeStatus": None,
+                            "source": "saved_tariff",
+                        },
+                        "current_period": current_period,
+                        "utility": tariff_data.get("utility"),
+                        "plan_name": tariff_data.get("plan_name"),
+                        "force_mode_active": force_mode_active,
+                    }
+
+                    _LOGGER.info(
+                        f"✅ Tariff price response (from saved): period={current_period}, buy={buy_price_cents:.1f}c, sell={sell_price_cents:.1f}c"
+                    )
+                    return web.json_response(result)
+
+            # No force mode or no saved tariff - fetch from Tesla API
             _LOGGER.info("Fetching tariff from Tesla API")
             tariff_data = await self._fetch_tesla_tariff(entry)
 
@@ -3114,6 +3167,113 @@ class TariffPriceView(HomeAssistantView):
         Delegates to the standalone fetch_tesla_tariff_schedule function.
         """
         return await fetch_tesla_tariff_schedule(self._hass, entry)
+
+    def _calculate_prices_from_saved_tariff(self, saved_tariff: dict) -> dict | None:
+        """Calculate current prices from a saved tariff structure.
+
+        The saved tariff is the original user tariff before ML optimizer uploaded a fake one.
+        We need to determine the current TOU period and return the appropriate rates.
+        """
+        try:
+            from datetime import datetime as dt
+            from zoneinfo import ZoneInfo
+
+            # Get current time in the tariff's timezone
+            tz_name = saved_tariff.get("installation_time_zone", "Australia/Sydney")
+            try:
+                tz = ZoneInfo(tz_name)
+            except Exception:
+                tz = ZoneInfo("Australia/Sydney")
+            now = dt.now(tz)
+            current_hour = now.hour
+            current_month = now.month
+            current_weekday = now.weekday()  # 0=Monday, 6=Sunday
+
+            # Extract tariff structure
+            utility = saved_tariff.get("utility", "")
+            plan_name = saved_tariff.get("name", "")
+
+            # Get energy charges (contains buy/sell rates by period)
+            energy_charges = saved_tariff.get("energy_charges", {})
+            seasons = energy_charges.get("seasons", {})
+            tou_periods = energy_charges.get("tou_periods", {})
+
+            # Determine current season
+            current_season = None
+            for season_name, season_data in seasons.items():
+                from_month = season_data.get("fromMonth", 1)
+                to_month = season_data.get("toMonth", 12)
+
+                # Handle wrap-around (e.g., Nov-Feb)
+                if from_month <= to_month:
+                    if from_month <= current_month <= to_month:
+                        current_season = season_name
+                        break
+                else:
+                    if current_month >= from_month or current_month <= to_month:
+                        current_season = season_name
+                        break
+
+            if not current_season and seasons:
+                current_season = list(seasons.keys())[0]
+
+            # Determine current TOU period based on time and day
+            current_period = None
+            for period_name, period_data in tou_periods.items():
+                periods = period_data.get("periods", {})
+                if current_season and current_season in periods:
+                    time_ranges = periods[current_season]
+                    for time_range in time_ranges:
+                        from_weekday = time_range.get("fromDayOfWeek", 0)
+                        to_weekday = time_range.get("toDayOfWeek", 6)
+                        from_hour = time_range.get("fromHour", 0)
+                        to_hour = time_range.get("toHour", 24)
+
+                        # Check if current time falls in this period
+                        weekday_match = from_weekday <= current_weekday <= to_weekday
+                        hour_match = from_hour <= current_hour < to_hour
+
+                        if weekday_match and hour_match:
+                            current_period = period_name
+                            break
+                if current_period:
+                    break
+
+            if not current_period and tou_periods:
+                current_period = list(tou_periods.keys())[0]
+
+            # Get buy/sell rates for current period and season
+            buy_rate = 0.0
+            sell_rate = 0.0
+
+            season_data = seasons.get(current_season, {})
+            tou_rates = season_data.get("tou_periods", {})
+
+            if current_period and current_period in tou_rates:
+                period_rates = tou_rates[current_period]
+                buy_rate = period_rates.get("buy", 0.0)  # $/kWh
+                sell_rate = period_rates.get("sell", 0.0)  # $/kWh
+
+            # Convert to cents
+            buy_price_cents = buy_rate * 100
+            sell_price_cents = sell_rate * 100
+
+            _LOGGER.debug(
+                f"Calculated prices from saved tariff: period={current_period}, "
+                f"buy={buy_price_cents:.1f}c, sell={sell_price_cents:.1f}c"
+            )
+
+            return {
+                "buy_price": buy_price_cents,
+                "sell_price": sell_price_cents,
+                "current_period": current_period or "UNKNOWN",
+                "utility": utility,
+                "plan_name": plan_name,
+            }
+
+        except Exception as e:
+            _LOGGER.error(f"Error calculating prices from saved tariff: {e}", exc_info=True)
+            return None
 
 
 async def fetch_tesla_tariff_schedule(hass: HomeAssistant, entry: ConfigEntry) -> dict | None:
@@ -9789,6 +9949,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "expires_at": None,
         "cancel_expiry_timer": None,
     }
+
+    # Store force states in hass.data so TariffPriceView can access them
+    # This allows the endpoint to return real tariff instead of fake ML tariff
+    hass.data[DOMAIN][entry.entry_id]["force_charge_state"] = force_charge_state
+    hass.data[DOMAIN][entry.entry_id]["force_discharge_state"] = force_discharge_state
 
     # Helper function to persist force mode state to storage
     async def persist_force_mode_state() -> None:
