@@ -920,13 +920,31 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     charge_w = schedule.get("charge_w", [])
                     discharge_w = schedule.get("discharge_w", [])
 
-                    # Log first few intervals to debug action selection
+                    # Log first few intervals and find first non-idle action
+                    first_charge_idx = None
+                    first_discharge_idx = None
+                    for i in range(len(charge_w)):
+                        if charge_w[i] > 10 and first_charge_idx is None:
+                            first_charge_idx = i
+                        if discharge_w[i] > 10 and first_discharge_idx is None:
+                            first_discharge_idx = i
+                        if first_charge_idx and first_discharge_idx:
+                            break
+
                     for i in range(min(4, len(charge_w))):
                         ts = timestamps[i].strftime("%H:%M") if i < len(timestamps) else "?"
                         c = charge_w[i] if i < len(charge_w) else 0
                         d = discharge_w[i] if i < len(discharge_w) else 0
                         action = "charge" if c > 10 else ("discharge" if d > 10 else "idle")
                         _LOGGER.info(f"📊 Schedule[{i}] {ts}: {action} (charge={c:.0f}W, discharge={d:.0f}W)")
+
+                    # Log when first charge/discharge happens
+                    if first_charge_idx is not None:
+                        ts = timestamps[first_charge_idx].strftime("%H:%M %a") if first_charge_idx < len(timestamps) else "?"
+                        _LOGGER.info(f"📊 First CHARGE at interval {first_charge_idx} ({ts}): {charge_w[first_charge_idx]:.0f}W")
+                    if first_discharge_idx is not None:
+                        ts = timestamps[first_discharge_idx].strftime("%H:%M %a") if first_discharge_idx < len(timestamps) else "?"
+                        _LOGGER.info(f"📊 First DISCHARGE at interval {first_discharge_idx} ({ts}): {discharge_w[first_discharge_idx]:.0f}W")
 
                     return OptimizationResult(
                         success=True,
