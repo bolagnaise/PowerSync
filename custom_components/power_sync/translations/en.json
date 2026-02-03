@@ -262,6 +262,25 @@
         },
         "submit_button": "Submit"
       },
+      "weather_setup": {
+        "title": "Weather & Solar Forecast (Optional)",
+        "description": "Configure weather-based automations and solar production forecasting.\n\n**Already using Solcast HA integration?** PowerSync will automatically detect and use your existing Solcast sensors - no API key needed! Just enable Solcast below and leave the API fields blank.\n\n**New to Solcast?** Get a free API key from toolkit.solcast.com.au (10 API calls/day on hobbyist tier).",
+        "data": {
+          "weather_location": "Weather Location (City, Country)",
+          "openweathermap_api_key": "OpenWeatherMap API Key",
+          "solcast_enabled": "Enable Solcast Solar Forecast",
+          "solcast_api_key": "Solcast API Key (optional if using Solcast HA integration)",
+          "solcast_resource_id": "Solcast Resource ID(s) (optional if using Solcast HA integration)"
+        },
+        "data_description": {
+          "weather_location": "City and country for weather-based automation triggers (e.g., 'Melbourne, Australia'). Leave blank to disable weather triggers.",
+          "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny/cloudy triggers). Leave blank to disable weather triggers.",
+          "solcast_enabled": "Enable solar production forecasting. If the Solcast HA integration is installed, PowerSync will automatically read from its sensors (no API calls). Otherwise, enter your API key below.",
+          "solcast_api_key": "Your Solcast API key from toolkit.solcast.com.au. **Leave blank if you have the Solcast HA integration installed** - PowerSync will use its sensors automatically.",
+          "solcast_resource_id": "Your rooftop site Resource ID(s). For split arrays, enter comma-separated IDs (e.g., abc123,def456). **Leave blank if using Solcast HA integration.**"
+        },
+        "submit_button": "Next"
+      },
       "demand_charges": {
         "title": "Demand Charge Configuration (Optional)",
         "description": "Configure demand charge tracking for electricity plans with capacity-based fees. Demand charges are applied during peak periods based on your maximum power draw. Leave 'Enable Demand Charge Tracking' unchecked to skip this step.",
@@ -642,11 +661,11 @@
       },
       "ev_ocpp_options": {
         "title": "EV Charging, OCPP & Solar Forecast",
-        "description": "Configure EV charging, OCPP charger management, and solar production forecasting.\n\n**Solcast:** Get solar production forecasts from Solcast (free hobbyist tier: 10 API calls/day).\n\n**EV Charging:** Control Tesla vehicles via Fleet API/Teslemetry or Tesla BLE (ESPHome).\n\n**OCPP:** Connect OCPP 1.6-compliant chargers.",
+        "description": "Configure EV charging, OCPP charger management, and solar production forecasting.\n\n**Solcast:** PowerSync auto-detects the Solcast HA integration - if installed, just enable Solcast and leave the API fields blank! Otherwise, get a free API key from toolkit.solcast.com.au (10 calls/day).\n\n**EV Charging:** Control Tesla vehicles via Fleet API/Teslemetry or Tesla BLE (ESPHome).\n\n**OCPP:** Connect OCPP 1.6-compliant chargers.",
         "data": {
           "solcast_enabled": "Enable Solcast Solar Forecast",
-          "solcast_api_key": "Solcast API Key",
-          "solcast_resource_id": "Solcast Resource ID(s)",
+          "solcast_api_key": "Solcast API Key (optional if using Solcast HA integration)",
+          "solcast_resource_id": "Solcast Resource ID(s) (optional if using Solcast HA integration)",
           "ev_charging_enabled": "Enable EV Charging Control",
           "ev_provider": "EV Control Provider",
           "tesla_ble_entity_prefix": "Tesla BLE Entity Prefix",
@@ -654,9 +673,9 @@
           "ocpp_port": "OCPP WebSocket Port"
         },
         "data_description": {
-          "solcast_enabled": "Enable solar production forecasting using Solcast API. Shows expected daily solar production for today and tomorrow.",
-          "solcast_api_key": "Your Solcast API key from toolkit.solcast.com.au. Free hobbyist accounts get 10 API calls/day (plenty with 3-hour caching).",
-          "solcast_resource_id": "Your rooftop site Resource ID(s) from Solcast. For split arrays (e.g., east/west facing panels), create separate sites in Solcast and enter multiple IDs separated by commas. Example: abc123,def456. Forecasts will be combined automatically.",
+          "solcast_enabled": "Enable solar production forecasting. If the Solcast HA integration is installed, PowerSync will automatically read from its sensors (no API calls needed). Otherwise, enter your API key below.",
+          "solcast_api_key": "Your Solcast API key from toolkit.solcast.com.au. **Leave blank if you have the Solcast HA integration installed** - PowerSync will use its sensors automatically, saving your API quota.",
+          "solcast_resource_id": "Your rooftop site Resource ID(s). For split arrays, enter comma-separated IDs (e.g., abc123,def456). **Leave blank if using Solcast HA integration.**",
           "ev_charging_enabled": "Allow automations to control Tesla vehicle charging (start/stop, set charge limits, set amps).",
           "ev_provider": "Choose how to control your Tesla: **Fleet API/Teslemetry** uses cloud API (requires HA Tesla Fleet or Teslemetry integration), **Tesla BLE** uses local Bluetooth via ESPHome (requires esphome-tesla-ble), **Both** uses BLE for control with Fleet API fallback.",
           "tesla_ble_entity_prefix": "Entity prefix for Tesla BLE entities (default: tesla_ble). Must match the ESPHome device name. Example: if your entities are sensor.my_tesla_charge_level, enter 'my_tesla'.",
