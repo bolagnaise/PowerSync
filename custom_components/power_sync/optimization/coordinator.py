@@ -911,7 +911,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # Update executor with new schedule
             if self._executor:
-                self._executor.set_schedule(addon_result)
+                self._executor._current_schedule = addon_result
 
             return addon_result
 
@@ -978,7 +978,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Update executor with new schedule
         if self._executor and self._current_schedule:
-            self._executor._current_result = self._current_schedule
+            self._executor._current_schedule = self._current_schedule
 
         return self._current_schedule
 
