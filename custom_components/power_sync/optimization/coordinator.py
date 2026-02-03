@@ -641,6 +641,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         except (ValueError, TypeError):
                             timestamps.append(dt_util.now())
 
+                    # Get costs and calculate savings if not provided
+                    total_cost = summary.get("total_cost", 0)
+                    baseline_cost = summary.get("baseline_cost", 0)
+                    savings = summary.get("savings", 0)
+
+                    # If add-on didn't calculate savings, estimate from baseline
+                    if savings == 0 and baseline_cost > 0:
+                        savings = baseline_cost - total_cost
+
+                    # If no baseline provided, estimate it (cost without optimization)
+                    # Baseline = importing all load at average price
+                    if baseline_cost == 0 and prices_import:
+                        avg_price = sum(prices_import) / len(prices_import)
+                        total_load = sum(load_forecast) * (self._config.interval_minutes / 60) / 1000  # kWh
+                        baseline_cost = avg_price * total_load
+                        savings = baseline_cost - total_cost
+
                     return OptimizationResult(
                         success=True,
                         status=data.get("status", "optimal"),
@@ -650,15 +667,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         grid_export_w=schedule.get("grid_export_w", []),
                         soc_trajectory=schedule.get("soc_trajectory", []),
                         timestamps=timestamps,
-                        total_cost=summary.get("total_cost", 0),
+                        total_cost=total_cost,
                         total_import_kwh=summary.get("total_import_kwh", 0),
                         total_export_kwh=summary.get("total_export_kwh", 0),
                         total_charge_kwh=summary.get("total_charge_kwh", 0),
                         total_discharge_kwh=summary.get("total_discharge_kwh", 0),
                         average_import_price=summary.get("average_import_price", 0),
                         average_export_price=summary.get("average_export_price", 0),
-                        baseline_cost=summary.get("baseline_cost", 0),
-                        savings=summary.get("savings", 0),
+                        baseline_cost=baseline_cost,
+                        savings=savings,
                     )
 
         except aiohttp.ClientError as e:
