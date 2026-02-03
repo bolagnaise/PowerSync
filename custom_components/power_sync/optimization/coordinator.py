@@ -657,6 +657,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         total_discharge_kwh=summary.get("total_discharge_kwh", 0),
                         average_import_price=summary.get("average_import_price", 0),
                         average_export_price=summary.get("average_export_price", 0),
+                        baseline_cost=summary.get("baseline_cost", 0),
+                        savings=summary.get("savings", 0),
                     )
 
         except aiohttp.ClientError as e:
