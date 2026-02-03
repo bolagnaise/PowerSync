@@ -216,6 +216,7 @@ from .const import (
     CONF_OPTIMIZATION_MULTI_BATTERY,
     CONF_OPTIMIZATION_ML_FORECASTING,
     CONF_OPTIMIZATION_WEATHER_INTEGRATION,
+    CONF_OPTIMIZATION_COST_FUNCTION,
 )
 from .inverters import get_inverter_controller
 from .optimization.coordinator import OptimizationCoordinator
@@ -12545,12 +12546,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return {"active": True, "type": "discharge", "expires_at": force_discharge_state.get("expires_at")}
                 return {"active": False}
 
-            # Load feature toggles from config entry (persisted from previous sessions)
+            # Load feature toggles and settings from config entry (persisted from previous sessions)
             enable_ev_integration = entry.data.get(CONF_OPTIMIZATION_EV_INTEGRATION, False)
             enable_vpp = entry.data.get(CONF_OPTIMIZATION_VPP_ENABLED, False)
             enable_multi_battery = entry.data.get(CONF_OPTIMIZATION_MULTI_BATTERY, False)
             enable_ml_forecasting = entry.data.get(CONF_OPTIMIZATION_ML_FORECASTING, True)
             enable_weather_integration = entry.data.get(CONF_OPTIMIZATION_WEATHER_INTEGRATION, False)
+            saved_cost_function = entry.data.get(CONF_OPTIMIZATION_COST_FUNCTION, "self_consumption")
 
             optimization_coordinator = OptimizationCoordinator(
                 hass=hass,
@@ -12572,6 +12574,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Set up the coordinator
             await optimization_coordinator.async_setup()
             await optimization_coordinator.async_config_entry_first_refresh()
+
+            # Set cost function from saved settings (default to self_consumption)
+            optimization_coordinator.set_cost_function(saved_cost_function)
+            _LOGGER.info(f"🧠 ML Optimization cost function: {saved_cost_function}")
 
             # Enable the optimizer
             await optimization_coordinator.enable()
