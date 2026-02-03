@@ -1013,7 +1013,7 @@ OPTIMIZATION_COST_FUNCTIONS = {
 
 # Default optimization settings
 DEFAULT_OPTIMIZATION_INTERVAL = 30     # Re-optimize every 30 minutes
-DEFAULT_OPTIMIZATION_HORIZON = 24      # 24-hour forecast horizon
+DEFAULT_OPTIMIZATION_HORIZON = 48      # 48-hour forecast horizon
 DEFAULT_OPTIMIZATION_BACKUP_RESERVE = 0.20  # 20% minimum SOC
 
 # Battery capacity defaults by system (Wh)
