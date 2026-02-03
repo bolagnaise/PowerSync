@@ -625,6 +625,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         return None
 
                     data = await response.json()
+                    _LOGGER.debug(f"Add-on response keys: {list(data.keys())}")
                     if not data.get("success"):
                         _LOGGER.warning(f"Add-on optimization failed: {data.get('error')}")
                         return None
@@ -632,6 +633,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     # Convert response to OptimizationResult
                     schedule = data.get("schedule", {})
                     summary = data.get("summary", {})
+                    _LOGGER.debug(f"Add-on schedule keys: {list(schedule.keys())}, summary keys: {list(summary.keys())}")
 
                     # Parse timestamps
                     timestamps = []
@@ -924,13 +926,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             import_prices, export_prices, solar, load, battery_state
         )
         if addon_result:
-            _LOGGER.info("Optimization completed via add-on")
+            _LOGGER.info(f"Optimization completed via add-on: success={addon_result.success}, "
+                         f"total_cost=${addon_result.total_cost:.2f}, savings=${addon_result.savings:.2f}, "
+                         f"schedule_len={len(addon_result.charge_schedule_w)}")
             self._current_schedule = addon_result
             self._last_optimization_time = dt_util.now()
 
             # Update executor with new schedule
             if self._executor:
                 self._executor._current_schedule = addon_result
+                _LOGGER.debug(f"Updated executor._current_schedule: {addon_result is not None}")
 
             return addon_result
 
@@ -1055,6 +1060,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def get_api_data(self) -> dict[str, Any]:
         """Get data for HTTP API and mobile app."""
         executor_status = self._executor.get_schedule_summary() if self._executor else {}
+        _LOGGER.debug(f"get_api_data: _current_schedule={self._current_schedule is not None}, "
+                      f"success={self._current_schedule.success if self._current_schedule else 'N/A'}, "
+                      f"executor_status={executor_status}")
 
         # Build data for mobile app
         data = {
