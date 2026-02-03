@@ -330,6 +330,92 @@ async def is_ev_plugged_in(
     return False
 
 
+async def get_ev_battery_level(
+    hass: "HomeAssistant",
+    config_entry: "ConfigEntry",
+    vehicle_vin: Optional[str] = None
+) -> Optional[float]:
+    """
+    Get EV battery level (SOC) from Home Assistant entities.
+
+    Args:
+        hass: Home Assistant instance
+        config_entry: Config entry
+        vehicle_vin: Optional VIN to check specific vehicle
+
+    Returns:
+        Battery level as percentage (0-100), or None if not found
+    """
+    from ..const import (
+        DOMAIN,
+        CONF_TESLA_BLE_ENTITY_PREFIX,
+        DEFAULT_TESLA_BLE_ENTITY_PREFIX,
+    )
+    from homeassistant.helpers import entity_registry as er, device_registry as dr
+
+    # Method 1: Tesla BLE (only for non-VIN-specific queries)
+    if vehicle_vin is None:
+        config = dict(config_entry.options) if config_entry else {}
+        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+        ble_battery_entity = f"sensor.{ble_prefix}_battery_level"
+        ble_state = hass.states.get(ble_battery_entity)
+
+        if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
+            try:
+                return float(ble_state.state)
+            except (ValueError, TypeError):
+                pass
+
+    # Method 2: Check Tesla Fleet/Teslemetry entities
+    entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
+
+    tesla_integrations = TESLA_INTEGRATIONS
+
+    for device in device_registry.devices.values():
+        is_tesla_vehicle = False
+        device_vin: Optional[str] = None
+        for identifier in device.identifiers:
+            if len(identifier) >= 2 and identifier[0] in tesla_integrations:
+                id_str = str(identifier[1])
+                if len(id_str) == 17 and not id_str.isdigit():
+                    is_tesla_vehicle = True
+                    device_vin = id_str
+                    break
+
+        if not is_tesla_vehicle:
+            continue
+
+        # If specific VIN requested, skip other vehicles
+        if vehicle_vin is not None and device_vin != vehicle_vin:
+            continue
+
+        for entity in entity_registry.entities.values():
+            if entity.device_id != device.id:
+                continue
+
+            entity_id = entity.entity_id
+            entity_id_lower = entity_id.lower()
+
+            # Look for battery level sensor
+            if entity_id.startswith("sensor.") and (
+                "battery_level" in entity_id_lower or
+                "battery" in entity_id_lower and "level" in entity_id_lower or
+                "state_of_charge" in entity_id_lower or
+                "_soc" in entity_id_lower
+            ):
+                state = hass.states.get(entity_id)
+                if state and state.state not in ("unavailable", "unknown", "None", None):
+                    try:
+                        battery_level = float(state.state)
+                        _LOGGER.debug(f"Found EV battery level from {entity_id} (VIN: {device_vin}): {battery_level}%")
+                        return battery_level
+                    except (ValueError, TypeError):
+                        continue
+
+    return None
+
+
 class LoadProfileEstimator:
     """Estimates household load based on historical patterns."""
 
