@@ -349,7 +349,18 @@ class SolcastForecaster:
     ) -> list[float] | None:
         """Get forecast from Solcast integration if available."""
         try:
-            # Check for Solcast data in hass.data
+            # First, try the Solcast Solar integration (solcast_solar domain)
+            # This is the preferred source as it's a dedicated integration
+            solcast_solar_data = self.hass.data.get("solcast_solar")
+            if solcast_solar_data:
+                forecast = self._extract_from_solcast_solar_integration(
+                    solcast_solar_data, start_time, n_intervals
+                )
+                if forecast:
+                    _LOGGER.debug("Using solar forecast from Solcast Solar integration")
+                    return forecast
+
+            # Fallback: Check for Solcast data in PowerSync's own coordinator
             from ..const import DOMAIN
 
             domain_data = self.hass.data.get(DOMAIN, {})
@@ -397,6 +408,112 @@ class SolcastForecaster:
         except Exception as e:
             _LOGGER.warning(f"Could not get Solcast forecast: {e}")
             return None
+
+    def _extract_from_solcast_solar_integration(
+        self,
+        solcast_data: Any,
+        start_time: datetime,
+        n_intervals: int,
+    ) -> list[float] | None:
+        """Extract forecast data from the Solcast Solar integration (solcast_solar domain).
+
+        The Solcast Solar integration stores data in various formats depending on version.
+        """
+        try:
+            # The integration may store a coordinator or direct data
+            # Try common data structures used by solcast_solar integration
+
+            # Check if it's a coordinator with data attribute
+            if hasattr(solcast_data, 'data') and solcast_data.data:
+                data = solcast_data.data
+            elif isinstance(solcast_data, dict):
+                data = solcast_data
+            else:
+                # Try to find coordinator in the data structure
+                for key, value in (solcast_data.items() if hasattr(solcast_data, 'items') else []):
+                    if hasattr(value, 'data') and value.data:
+                        data = value.data
+                        break
+                    if isinstance(value, dict) and ('forecasts' in value or 'detailedForecast' in value):
+                        data = value
+                        break
+                else:
+                    return None
+
+            # Try various forecast formats used by solcast_solar
+            # Format 1: detailedForecast (list of period dicts with pv_estimate)
+            detailed = data.get('detailedForecast') if isinstance(data, dict) else None
+            if detailed and isinstance(detailed, list) and len(detailed) > 0:
+                return self._parse_detailed_forecast(detailed, start_time, n_intervals)
+
+            # Format 2: forecasts (raw API response format)
+            forecasts = data.get('forecasts') if isinstance(data, dict) else None
+            if forecasts and isinstance(forecasts, list) and len(forecasts) > 0:
+                return self._parse_solcast_data(forecasts, start_time, n_intervals)
+
+            # Format 3: forecast_today / forecast_tomorrow
+            forecast_today = data.get('forecast_today', []) if isinstance(data, dict) else []
+            forecast_tomorrow = data.get('forecast_tomorrow', []) if isinstance(data, dict) else []
+            combined = forecast_today + forecast_tomorrow
+            if combined:
+                return self._parse_solcast_data(combined, start_time, n_intervals)
+
+            return None
+
+        except Exception as e:
+            _LOGGER.debug(f"Could not extract from Solcast Solar integration: {e}")
+            return None
+
+    def _parse_detailed_forecast(
+        self,
+        detailed: list[dict[str, Any]],
+        start_time: datetime,
+        n_intervals: int,
+    ) -> list[float]:
+        """Parse detailedForecast format from Solcast Solar integration."""
+        # Build a time-indexed lookup of power values
+        forecast_by_time: dict[datetime, float] = {}
+
+        for item in detailed:
+            try:
+                # Parse period_end timestamp
+                period_end_str = item.get('period_end')
+                if not period_end_str:
+                    continue
+
+                if isinstance(period_end_str, datetime):
+                    period_end = period_end_str
+                else:
+                    period_end = datetime.fromisoformat(period_end_str.replace('Z', '+00:00'))
+
+                # Get power estimate (could be pv_estimate, pv_estimate10, pv_estimate90)
+                pv_kw = item.get('pv_estimate', 0) or item.get('pv_estimate50', 0) or 0
+                forecast_by_time[period_end] = pv_kw * 1000  # Convert kW to W
+
+            except (KeyError, ValueError, TypeError) as e:
+                _LOGGER.debug(f"Error parsing forecast item: {e}")
+                continue
+
+        if not forecast_by_time:
+            return []
+
+        # Generate interval forecast
+        result = []
+        current_time = start_time
+        sorted_times = sorted(forecast_by_time.keys())
+
+        for _ in range(n_intervals):
+            # Find the closest forecast time
+            power_w = 0.0
+            for ft in sorted_times:
+                if ft >= current_time:
+                    power_w = forecast_by_time[ft]
+                    break
+
+            result.append(power_w)
+            current_time += timedelta(minutes=self.interval_minutes)
+
+        return result
 
     def _parse_hourly_forecast(
         self,

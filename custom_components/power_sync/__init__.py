@@ -7407,7 +7407,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.warning("AEMO price source selected but no region configured")
 
     # Initialize Solcast Solar Forecast Coordinator if enabled
+    # Skip if the Solcast Solar integration is already installed (avoid double-polling API)
     solcast_coordinator = None
+    solcast_integration_installed = "solcast_solar" in hass.config.components
+
     solcast_enabled = entry.options.get(
         CONF_SOLCAST_ENABLED,
         entry.data.get(CONF_SOLCAST_ENABLED, False)
@@ -7421,7 +7424,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.data.get(CONF_SOLCAST_RESOURCE_ID, "")
     )
 
-    if solcast_enabled and solcast_api_key and solcast_resource_id:
+    if solcast_integration_installed:
+        _LOGGER.info(
+            "Solcast Solar integration detected - using its data instead of PowerSync's own coordinator "
+            "(avoids double-polling API and exceeding rate limits)"
+        )
+    elif solcast_enabled and solcast_api_key and solcast_resource_id:
         from .coordinator import SolcastForecastCoordinator
 
         solcast_coordinator = SolcastForecastCoordinator(
