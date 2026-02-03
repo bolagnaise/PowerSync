@@ -12596,6 +12596,49 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.data[DOMAIN][entry.entry_id]["optimization_coordinator"] = optimization_coordinator
             _LOGGER.info("🧠 ML Optimization coordinator initialized and enabled")
 
+            # If VPP is enabled, set up AEMO price fetching for spike detection
+            # This is separate from the legacy AEMO spike detection - only fetches prices
+            # The ML optimizer's grid_services handles the response
+            if enable_vpp:
+                aemo_region = entry.options.get(
+                    CONF_AEMO_REGION,
+                    entry.data.get(CONF_AEMO_REGION, "QLD1")
+                )
+                _LOGGER.info(f"🔌 ML VPP enabled - setting up AEMO price monitoring for region {aemo_region}")
+
+                async def fetch_aemo_prices_for_vpp(now):
+                    """Fetch AEMO prices for ML VPP (no auto-response)."""
+                    try:
+                        from .aemo_client import AEMOAPIClient
+                        from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+                        session = async_get_clientsession(hass)
+                        client = AEMOAPIClient(session)
+                        prices = await client.get_current_prices()
+
+                        if prices:
+                            # Store prices for grid_services to access
+                            hass.data[DOMAIN][entry.entry_id]["aemo_prices"] = prices
+                            region_price = prices.get(aemo_region, {}).get("price", 0)
+                            if region_price >= 3000:  # $3/kWh spike
+                                _LOGGER.info(f"🔌 VPP: AEMO spike detected in {aemo_region}: ${region_price:.0f}/MWh - ML optimizer will handle")
+                            else:
+                                _LOGGER.debug(f"VPP: AEMO price {aemo_region}: ${region_price:.2f}/MWh")
+                    except Exception as e:
+                        _LOGGER.debug(f"VPP: Error fetching AEMO prices: {e}")
+
+                # Fetch every minute at :45 seconds (offset from other checks)
+                vpp_aemo_cancel = async_track_utc_time_change(
+                    hass,
+                    fetch_aemo_prices_for_vpp,
+                    second=45,
+                )
+                hass.data[DOMAIN][entry.entry_id]["vpp_aemo_cancel"] = vpp_aemo_cancel
+                _LOGGER.info(f"🔌 ML VPP AEMO price monitoring scheduled (region: {aemo_region})")
+
+                # Initial fetch
+                await fetch_aemo_prices_for_vpp(None)
+
         except Exception as e:
             _LOGGER.error(f"Failed to initialize ML Optimization coordinator: {e}", exc_info=True)
             _LOGGER.warning("Continuing without ML optimization - battery will use native optimization")
