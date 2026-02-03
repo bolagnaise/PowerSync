@@ -917,11 +917,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         baseline_cost = avg_price * total_load
                         savings = baseline_cost - total_cost
 
+                    charge_w = schedule.get("charge_w", [])
+                    discharge_w = schedule.get("discharge_w", [])
+
+                    # Log first few intervals to debug action selection
+                    for i in range(min(4, len(charge_w))):
+                        ts = timestamps[i].strftime("%H:%M") if i < len(timestamps) else "?"
+                        c = charge_w[i] if i < len(charge_w) else 0
+                        d = discharge_w[i] if i < len(discharge_w) else 0
+                        action = "charge" if c > 10 else ("discharge" if d > 10 else "idle")
+                        _LOGGER.info(f"📊 Schedule[{i}] {ts}: {action} (charge={c:.0f}W, discharge={d:.0f}W)")
+
                     return OptimizationResult(
                         success=True,
                         status=data.get("status", "optimal"),
-                        charge_schedule_w=schedule.get("charge_w", []),
-                        discharge_schedule_w=schedule.get("discharge_w", []),
+                        charge_schedule_w=charge_w,
+                        discharge_schedule_w=discharge_w,
                         grid_import_w=schedule.get("grid_import_w", []),
                         grid_export_w=schedule.get("grid_export_w", []),
                         soc_trajectory=schedule.get("soc_trajectory", []),
