@@ -12481,19 +12481,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if optimization_provider == OPT_PROVIDER_POWERSYNC:
         _LOGGER.info("🧠 ML Optimization enabled - initializing OptimizationCoordinator")
         try:
+            from .optimization.battery_controller import BatteryControllerWrapper
+
             # Determine battery system type
             if is_sigenergy:
                 battery_system = "sigenergy"
-                battery_controller = sigenergy_coordinator
                 energy_coordinator = sigenergy_coordinator
             elif is_sungrow:
                 battery_system = "sungrow"
-                battery_controller = sungrow_coordinator
                 energy_coordinator = sungrow_coordinator
             else:
                 battery_system = "tesla"
-                battery_controller = tesla_coordinator
                 energy_coordinator = tesla_coordinator
+
+            # Create battery controller wrapper that uses existing service handlers
+            # This provides force_charge/force_discharge/restore_normal for the optimizer
+            battery_controller = BatteryControllerWrapper(
+                hass=hass,
+                battery_system=battery_system,
+                force_charge_handler=handle_force_charge,
+                force_discharge_handler=handle_force_discharge,
+                restore_normal_handler=handle_restore_normal,
+            )
 
             # Get tariff schedule for TOU-based pricing (Globird, etc.)
             tariff_schedule = hass.data[DOMAIN][entry.entry_id].get("tariff_schedule")
