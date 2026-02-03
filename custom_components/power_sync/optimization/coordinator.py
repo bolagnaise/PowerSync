@@ -1513,7 +1513,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # Define period priority order - more specific/valuable periods first
             # SUPER_OFF_PEAK should be checked before OFF_PEAK to avoid overlap issues
-            period_priority = ["SUPER_OFF_PEAK", "PEAK", "SHOULDER", "OFF_PEAK"]
+            period_priority = ["SUPER_OFF_PEAK", "ON_PEAK", "PEAK", "PARTIAL_PEAK", "SHOULDER", "OFF_PEAK"]
 
             for idx in range(n_intervals):
                 interval_time = now + timedelta(minutes=idx * self._config.interval_minutes)
@@ -1550,10 +1550,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         break
 
                 if not current_period:
-                    current_period = "OFF_PEAK"
+                    # No period matched - use PARTIAL_PEAK as default (shoulder rate)
+                    # since this is typically the "everything else" rate
+                    current_period = "PARTIAL_PEAK" if "PARTIAL_PEAK" in buy_rates else "OFF_PEAK"
 
                 # Get rates for this period (rates may be in $/kWh or cents)
-                buy_rate = buy_rates.get(current_period, buy_rates.get("ALL", buy_rates.get("OFF_PEAK", 0.25)))
+                # Try current_period first, then common fallbacks
+                buy_rate = buy_rates.get(current_period)
+                if buy_rate is None:
+                    buy_rate = buy_rates.get("PARTIAL_PEAK", buy_rates.get("OFF_PEAK", buy_rates.get("ALL", 0.25)))
                 sell_rate = sell_rates.get(current_period, sell_rates.get("ALL", 0.08))
 
                 # Convert to $/kWh if rates appear to be in cents (> 1.0)
