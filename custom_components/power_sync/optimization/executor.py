@@ -208,7 +208,6 @@ class ScheduleExecutor:
             return
 
         now = now or dt_util.now()
-        _LOGGER.debug(f"Optimization tick at {now}")
 
         try:
             # Get current data

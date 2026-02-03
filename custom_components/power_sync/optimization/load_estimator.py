@@ -363,7 +363,6 @@ class SolcastForecaster:
                 if solcast_coordinator and solcast_coordinator.data:
                     coordinator_data = solcast_coordinator.data
                     if "forecasts" in coordinator_data:
-                        _LOGGER.debug("Found Solcast forecast from coordinator")
                         return self._parse_solcast_data(
                             coordinator_data["forecasts"],
                             start_time,
@@ -373,18 +372,16 @@ class SolcastForecaster:
                 # Fallback to solcast_forecast key
                 solcast_data = entry_data.get("solcast_forecast")
                 if solcast_data and "forecasts" in solcast_data:
-                    _LOGGER.debug("Found Solcast forecast from solcast_forecast key")
                     return self._parse_solcast_data(
                         solcast_data["forecasts"],
                         start_time,
                         n_intervals,
                     )
 
-            _LOGGER.debug("No Solcast forecast data found in any entry")
             return None
 
         except Exception as e:
-            _LOGGER.debug(f"Could not get Solcast forecast: {e}")
+            _LOGGER.warning(f"Could not get Solcast forecast: {e}")
             return None
 
     def _parse_solcast_data(

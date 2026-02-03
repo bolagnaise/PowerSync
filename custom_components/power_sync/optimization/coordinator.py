@@ -679,12 +679,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 self._addon_url = url
                                 _LOGGER.info(f"Found PowerSync Optimiser add-on at {url}")
                                 return True
-            except aiohttp.ClientError as e:
-                _LOGGER.debug(f"Add-on not at {url}: {e}")
-            except Exception as e:
-                _LOGGER.debug(f"Error checking add-on at {url}: {e}")
+            except aiohttp.ClientError:
+                pass  # Expected when add-on not at this URL
+            except Exception:
+                pass
 
-        _LOGGER.debug("PowerSync Optimiser add-on not found at any known URL")
         return False
 
     async def enable(self) -> bool:
@@ -791,8 +790,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         load = await self._get_load_forecast()
         battery_state = await self._get_battery_state()
 
-        # Log what we got for debugging
-        _LOGGER.debug(f"Forecast data - prices: {bool(prices)}, solar: {bool(solar)}, load: {bool(load)}")
         if not prices:
             _LOGGER.warning(f"No price data - price_coordinator exists: {bool(self.price_coordinator)}")
         if not solar:
@@ -1080,7 +1077,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if self._provider_config.spike_protection_enabled and spike_status != "none":
                     # During spikes, use a high price to discourage import
                     # but keep feed-in attractive for export
-                    _LOGGER.debug(f"Spike protection at {hour_str}: {per_kwh:.3f} $/kWh")
+                    pass  # Price adjustments logged at summary level
 
                 # Apply export boost during configured window
                 if self._provider_config.export_boost_enabled:
@@ -1094,7 +1091,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         min_price = self._provider_config.export_min_price / 100  # cents to $
                         boosted = feed_in + offset
                         feed_in = max(boosted, min_price)
-                        _LOGGER.debug(f"Export boost at {hour_str}: {feed_in:.3f} $/kWh")
 
                 # Apply chip mode (prevent export unless price exceeds threshold)
                 if self._provider_config.chip_mode_enabled:
@@ -1107,7 +1103,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         if feed_in < threshold:
                             # Set export price very low to discourage export
                             feed_in = -1.0  # Negative = cost to export
-                            _LOGGER.debug(f"Chip mode at {hour_str}: export suppressed")
 
                 import_prices.append(max(0, per_kwh))
                 export_prices.append(feed_in)  # Can be negative for chip mode
@@ -1196,7 +1191,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 import_prices.append(buy_rate)
                 export_prices.append(sell_rate)
 
-            _LOGGER.debug(f"Generated {n_intervals} price intervals from tariff schedule")
             return import_prices, export_prices
 
         except Exception as e:
