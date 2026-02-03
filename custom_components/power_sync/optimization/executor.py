@@ -26,7 +26,9 @@ class BatteryAction(Enum):
     """Battery control actions."""
     IDLE = "idle"
     CHARGE = "charge"
-    DISCHARGE = "discharge"
+    DISCHARGE = "discharge"  # Legacy - generic discharge
+    CONSUME = "consume"      # Battery → Home load (powering home)
+    EXPORT = "export"        # Battery → Grid (exporting to grid)
 
 
 @dataclass
@@ -322,7 +324,17 @@ class ScheduleExecutor:
         action = BatteryAction(action_data["action"])
         power_w = action_data["power_w"]
 
-        _LOGGER.info(f"🔋 Executing interval {index}: action={action.value}, power={power_w:.0f}W, soc={action_data.get('soc', 'N/A')}")
+        # Get detailed breakdown for logging
+        to_load_w = action_data.get("to_load_w", 0)
+        to_grid_w = action_data.get("to_grid_w", 0)
+
+        if action in (BatteryAction.CONSUME, BatteryAction.EXPORT):
+            _LOGGER.info(
+                f"🔋 Executing interval {index}: action={action.value}, power={power_w:.0f}W "
+                f"(→home: {to_load_w:.0f}W, →grid: {to_grid_w:.0f}W), soc={action_data.get('soc', 'N/A')}"
+            )
+        else:
+            _LOGGER.info(f"🔋 Executing interval {index}: action={action.value}, power={power_w:.0f}W, soc={action_data.get('soc', 'N/A')}")
 
         # Track previous action to know if we need to restore
         previous_action = self._status.current_action
@@ -334,12 +346,19 @@ class ScheduleExecutor:
         try:
             if action == BatteryAction.CHARGE:
                 await self._command_charge(power_w)
-            elif action == BatteryAction.DISCHARGE:
+            elif action == BatteryAction.EXPORT:
+                # EXPORT: Force battery to export to grid using high sell tariff
                 await self._command_discharge(power_w)
+            elif action in (BatteryAction.DISCHARGE, BatteryAction.CONSUME):
+                # CONSUME/DISCHARGE: Battery should power home load
+                # Don't force export - just ensure self-consumption mode
+                # The battery will naturally offset load without grid export
+                await self._command_consume(power_w)
             else:
                 # Only restore if we were previously charging or discharging
                 # This avoids unnecessary restore calls on startup when action is idle
-                if previous_action in (BatteryAction.CHARGE, BatteryAction.DISCHARGE):
+                discharge_actions = (BatteryAction.CHARGE, BatteryAction.DISCHARGE, BatteryAction.CONSUME, BatteryAction.EXPORT)
+                if previous_action in discharge_actions:
                     await self._restore_normal_operation()
                 else:
                     _LOGGER.debug("Action is idle, no restore needed (wasn't charging/discharging)")
@@ -363,8 +382,8 @@ class ScheduleExecutor:
             _LOGGER.warning("Battery controller does not support force_charge")
 
     async def _command_discharge(self, power_w: float) -> None:
-        """Command battery to discharge."""
-        _LOGGER.info(f"Commanding discharge at {power_w:.0f}W")
+        """Command battery to discharge/export to grid."""
+        _LOGGER.info(f"Commanding discharge/export at {power_w:.0f}W")
 
         if hasattr(self.battery_controller, "force_discharge"):
             duration_minutes = self.interval_minutes + 5
@@ -374,6 +393,27 @@ class ScheduleExecutor:
             )
         else:
             _LOGGER.warning("Battery controller does not support force_discharge")
+
+    async def _command_consume(self, power_w: float) -> None:
+        """
+        Command battery to power home load (consume).
+
+        Unlike export, consume doesn't need a special tariff.
+        Just ensure we're in self-consumption mode with low backup reserve
+        so the battery will naturally offset home load.
+        """
+        _LOGGER.info(f"Commanding consume (battery→home) at {power_w:.0f}W")
+
+        if hasattr(self.battery_controller, "ensure_self_consumption"):
+            # Best option: dedicated self-consumption method
+            await self.battery_controller.ensure_self_consumption()
+        elif hasattr(self.battery_controller, "restore_normal"):
+            # Fallback: restore normal operation (usually self-consumption)
+            _LOGGER.debug("Using restore_normal for consume action")
+            await self.battery_controller.restore_normal()
+        else:
+            # Last resort: do nothing, battery should naturally power load
+            _LOGGER.debug("No consume method available, battery should naturally offset load")
 
     async def _restore_normal_operation(self) -> None:
         """Restore battery to normal autonomous operation."""

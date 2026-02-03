@@ -935,41 +935,71 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                     charge_w = schedule.get("charge_w", [])
                     discharge_w = schedule.get("discharge_w", [])
+                    battery_consume_w = schedule.get("battery_consume_w", [])
+                    battery_export_w = schedule.get("battery_export_w", [])
 
                     # Log first few intervals and find first non-idle action
                     first_charge_idx = None
-                    first_discharge_idx = None
+                    first_consume_idx = None
+                    first_export_idx = None
                     for i in range(len(charge_w)):
                         if charge_w[i] > 10 and first_charge_idx is None:
                             first_charge_idx = i
-                        if discharge_w[i] > 10 and first_discharge_idx is None:
-                            first_discharge_idx = i
-                        if first_charge_idx and first_discharge_idx:
+                        consume = battery_consume_w[i] if i < len(battery_consume_w) else 0
+                        export = battery_export_w[i] if i < len(battery_export_w) else 0
+                        if consume > 10 and first_consume_idx is None:
+                            first_consume_idx = i
+                        if export > 10 and first_export_idx is None:
+                            first_export_idx = i
+                        if first_charge_idx and first_consume_idx and first_export_idx:
                             break
 
                     for i in range(min(4, len(charge_w))):
                         ts = timestamps[i].strftime("%H:%M") if i < len(timestamps) else "?"
                         c = charge_w[i] if i < len(charge_w) else 0
                         d = discharge_w[i] if i < len(discharge_w) else 0
-                        action = "charge" if c > 10 else ("discharge" if d > 10 else "idle")
-                        _LOGGER.info(f"📊 Schedule[{i}] {ts}: {action} (charge={c:.0f}W, discharge={d:.0f}W)")
+                        consume = battery_consume_w[i] if i < len(battery_consume_w) else 0
+                        export = battery_export_w[i] if i < len(battery_export_w) else 0
+                        if c > 10:
+                            action = "charge"
+                        elif consume > export and consume > 10:
+                            action = "consume"  # Battery powering home
+                        elif export > 10:
+                            action = "export"   # Battery exporting to grid
+                        elif d > 10:
+                            action = "discharge"  # Legacy fallback
+                        else:
+                            action = "idle"
+                        _LOGGER.info(f"📊 Schedule[{i}] {ts}: {action} (charge={c:.0f}W, consume={consume:.0f}W, export={export:.0f}W)")
 
-                    # Log when first charge/discharge happens
+                    # Log when first charge/consume/export happens
                     if first_charge_idx is not None:
                         ts = timestamps[first_charge_idx].strftime("%H:%M %a") if first_charge_idx < len(timestamps) else "?"
                         _LOGGER.info(f"📊 First CHARGE at interval {first_charge_idx} ({ts}): {charge_w[first_charge_idx]:.0f}W")
-                    if first_discharge_idx is not None:
-                        ts = timestamps[first_discharge_idx].strftime("%H:%M %a") if first_discharge_idx < len(timestamps) else "?"
-                        _LOGGER.info(f"📊 First DISCHARGE at interval {first_discharge_idx} ({ts}): {discharge_w[first_discharge_idx]:.0f}W")
+                    if first_consume_idx is not None:
+                        ts = timestamps[first_consume_idx].strftime("%H:%M %a") if first_consume_idx < len(timestamps) else "?"
+                        _LOGGER.info(f"📊 First CONSUME (battery→home) at interval {first_consume_idx} ({ts}): {battery_consume_w[first_consume_idx]:.0f}W")
+                    if first_export_idx is not None:
+                        ts = timestamps[first_export_idx].strftime("%H:%M %a") if first_export_idx < len(timestamps) else "?"
+                        _LOGGER.info(f"📊 First EXPORT (battery→grid) at interval {first_export_idx} ({ts}): {battery_export_w[first_export_idx]:.0f}W")
 
                     return OptimizationResult(
                         success=True,
                         status=data.get("status", "optimal"),
+                        # Legacy/aggregate fields
                         charge_schedule_w=charge_w,
                         discharge_schedule_w=discharge_w,
                         grid_import_w=schedule.get("grid_import_w", []),
                         grid_export_w=schedule.get("grid_export_w", []),
                         soc_trajectory=schedule.get("soc_trajectory", []),
+                        # New detailed power flow breakdown
+                        battery_consume_w=schedule.get("battery_consume_w", []),
+                        battery_export_w=schedule.get("battery_export_w", []),
+                        solar_to_load_w=schedule.get("solar_to_load_w", []),
+                        solar_to_battery_w=schedule.get("solar_to_battery_w", []),
+                        solar_to_grid_w=schedule.get("solar_to_grid_w", []),
+                        grid_to_load_w=schedule.get("grid_to_load_w", []),
+                        grid_to_battery_w=schedule.get("grid_to_battery_w", []),
                         timestamps=timestamps,
                         total_cost=total_cost,
                         total_import_kwh=summary.get("total_import_kwh", 0),
@@ -978,6 +1008,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         total_discharge_kwh=summary.get("total_discharge_kwh", 0),
                         average_import_price=summary.get("average_import_price", 0),
                         average_export_price=summary.get("average_export_price", 0),
+                        # New detailed metrics
+                        total_battery_consume_kwh=summary.get("total_battery_consume_kwh", 0),
+                        total_battery_export_kwh=summary.get("total_battery_export_kwh", 0),
+                        total_solar_consumed_kwh=summary.get("total_solar_consumed_kwh", 0),
+                        total_solar_exported_kwh=summary.get("total_solar_exported_kwh", 0),
                         baseline_cost=baseline_cost,
                         savings=savings,
                     )

@@ -137,3 +137,25 @@ class BatteryControllerWrapper:
         except Exception as e:
             _LOGGER.error(f"Restore normal failed: {e}", exc_info=True)
             return False
+
+    async def ensure_self_consumption(self) -> bool:
+        """
+        Ensure battery is in self-consumption mode.
+
+        This is used for CONSUME action (battery→home) where we want the
+        battery to naturally offset home load without forcing grid export.
+
+        For Tesla: Restore normal operation (self-consumption mode)
+        For others: Same as restore_normal
+
+        Returns:
+            True if command was sent successfully
+        """
+        try:
+            _LOGGER.info("🔋 ML Optimizer: Ensuring self-consumption mode (battery→home)")
+            # Self-consumption is the default restored mode
+            return await self.restore_normal()
+
+        except Exception as e:
+            _LOGGER.error(f"Ensure self-consumption failed: {e}", exc_info=True)
+            return False

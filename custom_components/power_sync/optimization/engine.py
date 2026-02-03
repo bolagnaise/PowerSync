@@ -65,12 +65,21 @@ class OptimizationResult:
     success: bool
     status: str
 
-    # Schedules (per interval)
-    charge_schedule_w: list[float] = field(default_factory=list)    # Watts to charge
-    discharge_schedule_w: list[float] = field(default_factory=list) # Watts to discharge
-    grid_import_w: list[float] = field(default_factory=list)        # Watts imported from grid
-    grid_export_w: list[float] = field(default_factory=list)        # Watts exported to grid
+    # Schedules (per interval) - legacy/aggregate fields
+    charge_schedule_w: list[float] = field(default_factory=list)    # Total charge power (W)
+    discharge_schedule_w: list[float] = field(default_factory=list) # Total discharge power (W)
+    grid_import_w: list[float] = field(default_factory=list)        # Total grid import (W)
+    grid_export_w: list[float] = field(default_factory=list)        # Total grid export (W)
     soc_trajectory: list[float] = field(default_factory=list)       # SOC at each interval (0-1)
+
+    # Detailed power flow breakdown (new)
+    battery_consume_w: list[float] = field(default_factory=list)    # Battery → Load (W)
+    battery_export_w: list[float] = field(default_factory=list)     # Battery → Grid (W)
+    solar_to_load_w: list[float] = field(default_factory=list)      # Solar → Load (W)
+    solar_to_battery_w: list[float] = field(default_factory=list)   # Solar → Battery (W)
+    solar_to_grid_w: list[float] = field(default_factory=list)      # Solar → Grid (W)
+    grid_to_load_w: list[float] = field(default_factory=list)       # Grid → Load (W)
+    grid_to_battery_w: list[float] = field(default_factory=list)    # Grid → Battery (W)
 
     # Timestamps for each interval
     timestamps: list[datetime] = field(default_factory=list)
@@ -83,6 +92,12 @@ class OptimizationResult:
     total_discharge_kwh: float = 0.0      # Total battery discharge (kWh)
     average_import_price: float = 0.0     # Average import price ($/kWh)
     average_export_price: float = 0.0     # Average export price ($/kWh)
+
+    # Detailed metrics (new)
+    total_battery_consume_kwh: float = 0.0  # Battery used to power home (kWh)
+    total_battery_export_kwh: float = 0.0   # Battery exported to grid (kWh)
+    total_solar_consumed_kwh: float = 0.0   # Solar used (load + battery) (kWh)
+    total_solar_exported_kwh: float = 0.0   # Solar exported to grid (kWh)
 
     # Comparison metrics
     baseline_cost: float = 0.0            # Cost without optimization
@@ -100,10 +115,20 @@ class OptimizationResult:
         charge_w = self.charge_schedule_w[index]
         discharge_w = self.discharge_schedule_w[index]
 
+        # Get detailed breakdown if available
+        consume_w = self.battery_consume_w[index] if index < len(self.battery_consume_w) else 0
+        export_w = self.battery_export_w[index] if index < len(self.battery_export_w) else 0
+
         if charge_w > 10:  # Small threshold to avoid floating point noise
             return {"action": "charge", "power_w": charge_w}
         elif discharge_w > 10:
-            return {"action": "discharge", "power_w": discharge_w}
+            # Determine if primarily consuming (powering home) or exporting (to grid)
+            if consume_w > export_w:
+                return {"action": "consume", "power_w": discharge_w, "to_load_w": consume_w, "to_grid_w": export_w}
+            elif export_w > 10:
+                return {"action": "export", "power_w": discharge_w, "to_load_w": consume_w, "to_grid_w": export_w}
+            else:
+                return {"action": "consume", "power_w": discharge_w, "to_load_w": consume_w, "to_grid_w": export_w}
         else:
             return {"action": "idle", "power_w": 0}
 
