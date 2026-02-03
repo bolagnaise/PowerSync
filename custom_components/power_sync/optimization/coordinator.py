@@ -1144,10 +1144,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Get data for HTTP API response."""
         base_data = self.data or {}
 
+        # Check if optimization engine is available (local cvxpy or add-on)
+        engine_available = self._optimiser.is_available or self._addon_available
+
+        # Determine status message based on engine availability
+        if engine_available:
+            if self._current_schedule and self._current_schedule.success:
+                status_message = "Schedule optimized"
+            else:
+                status_message = "Ready to optimize"
+        else:
+            status_message = "Optimizer engine not installed. Install the PowerSync Optimiser add-on or cvxpy package."
+
         return {
             "success": True,
             "enabled": self._enabled,
-            "optimiser_available": self._optimiser.is_available,
+            "optimizer_available": True,  # Always true when coordinator exists (ML enabled)
+            "engine_available": engine_available,  # Whether optimizer engine is ready
+            "status_message": status_message,
             "cost_function": self._cost_function.value,
             "config": {
                 "battery_capacity_wh": self._config.battery_capacity_wh,
