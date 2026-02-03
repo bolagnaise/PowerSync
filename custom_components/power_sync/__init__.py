@@ -7280,8 +7280,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("Demand charge coordinator initialized")
 
     # Initialize AEMO Spike Manager if enabled (for Globird/AEMO VPP users)
+    # Skip if ML optimization is enabled - ML VPP handles spike detection instead
     aemo_spike_manager = None
-    if aemo_spike_enabled:
+    ml_optimization_enabled = entry.options.get(
+        CONF_OPTIMIZATION_PROVIDER,
+        entry.data.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
+    ) == OPT_PROVIDER_POWERSYNC
+
+    if aemo_spike_enabled and ml_optimization_enabled:
+        _LOGGER.info("⚡ AEMO spike detection disabled - ML VPP handles spike response instead")
+    elif aemo_spike_enabled:
         aemo_region = entry.options.get(
             CONF_AEMO_REGION,
             entry.data.get(CONF_AEMO_REGION)
@@ -7311,6 +7319,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("AEMO spike detection enabled but no region configured")
 
     # Initialize Sungrow AEMO Spike Manager if enabled (for Globird VPP users with Sungrow)
+    # Skip if ML optimization is enabled - ML VPP handles spike detection instead
     sungrow_aemo_spike_manager = None
     if is_sungrow and sungrow_coordinator:
         sungrow_aemo_spike_enabled = entry.options.get(
@@ -7322,7 +7331,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_AEMO_REGION)
         )
 
-        if sungrow_aemo_spike_enabled and sungrow_aemo_region:
+        if sungrow_aemo_spike_enabled and ml_optimization_enabled:
+            _LOGGER.info("⚡ Sungrow AEMO spike detection disabled - ML VPP handles spike response instead")
+        elif sungrow_aemo_spike_enabled and sungrow_aemo_region:
             sungrow_aemo_spike_manager = SungrowAEMOSpikeManager(
                 hass=hass,
                 entry=entry,
