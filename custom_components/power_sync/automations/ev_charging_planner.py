@@ -1187,7 +1187,14 @@ class PriceForecaster:
         Returns:
             Period name (e.g., 'ON_PEAK', 'OFF_PEAK', 'SUPER_OFF_PEAK')
         """
-        for period_name, period_data in tou_periods.items():
+        # Check periods in priority order to handle overlaps correctly
+        # SUPER_OFF_PEAK must be checked before OFF_PEAK since OFF_PEAK may include hours
+        # that overlap with SUPER_OFF_PEAK
+        period_priority = ["SUPER_OFF_PEAK", "PEAK", "SHOULDER", "OFF_PEAK"]
+        for period_name in period_priority:
+            if period_name not in tou_periods:
+                continue
+            period_data = tou_periods[period_name]
             periods_list = period_data if isinstance(period_data, list) else []
             for period in periods_list:
                 from_dow = period.get("fromDayOfWeek", 0)

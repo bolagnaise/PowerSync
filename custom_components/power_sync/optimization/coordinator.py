@@ -1396,6 +1396,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         # Try tariff schedule first if no price coordinator (Globird, etc.)
         if not self.price_coordinator and self._tariff_schedule:
+            _LOGGER.info("📊 Using tariff_schedule for price forecast (no price_coordinator)")
             return self._get_prices_from_tariff_schedule()
 
         if not self.price_coordinator:
@@ -1494,6 +1495,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             buy_rates = self._tariff_schedule.get("buy_rates", {})
             sell_rates = self._tariff_schedule.get("sell_rates", {})
 
+            # Debug log the raw tariff data
+            _LOGGER.info(f"📊 TOU tariff data: tou_periods={list(tou_periods.keys())}, buy_rates={buy_rates}, sell_rates={sell_rates}")
+
             # If no TOU data, use flat rates
             if not tou_periods or not buy_rates:
                 flat_buy = self._tariff_schedule.get("buy_price", 25.0) / 100  # cents to $/kWh
@@ -1507,14 +1511,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             export_prices = []
             now = dt_util.now()
 
+            # Define period priority order - more specific/valuable periods first
+            # SUPER_OFF_PEAK should be checked before OFF_PEAK to avoid overlap issues
+            period_priority = ["SUPER_OFF_PEAK", "PEAK", "SHOULDER", "OFF_PEAK"]
+
             for idx in range(n_intervals):
                 interval_time = now + timedelta(minutes=idx * self._config.interval_minutes)
                 current_hour = interval_time.hour
                 current_dow = interval_time.weekday()  # Python: 0=Monday
 
                 # Find the TOU period for this interval
+                # Check periods in priority order to handle overlaps correctly
                 current_period = None
-                for period_name, period_data in tou_periods.items():
+                for period_name in period_priority:
+                    if period_name not in tou_periods:
+                        continue
+                    period_data = tou_periods[period_name]
                     periods_list = period_data if isinstance(period_data, list) else []
                     for period in periods_list:
                         from_dow = period.get("fromDayOfWeek", 0)
@@ -1552,6 +1564,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 import_prices.append(buy_rate)
                 export_prices.append(sell_rate)
+
+                # Debug log first 4 intervals to see period detection
+                if idx < 4:
+                    _LOGGER.info(f"📊 Interval {idx}: {interval_time.strftime('%H:%M %a')} -> period={current_period}, buy=${buy_rate:.3f}/kWh")
 
             return import_prices, export_prices
 

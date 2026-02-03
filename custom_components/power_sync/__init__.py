@@ -3204,9 +3204,16 @@ async def fetch_tesla_tariff_schedule(hass: HomeAssistant, entry: ConfigEntry) -
         _LOGGER.debug(f"Current season: {current_season}, hour: {current_hour}, dow: {current_dow}")
 
         # Find current TOU period
+        # Check periods in priority order to handle overlaps correctly
+        # SUPER_OFF_PEAK must be checked before OFF_PEAK since OFF_PEAK may include hours
+        # that overlap with SUPER_OFF_PEAK (e.g., OFF_PEAK 21:00-24:00 overlaps with SUPER_OFF_PEAK 23:00-07:00)
         tou_periods = seasons.get(current_season, {}).get("tou_periods", {})
+        period_priority = ["SUPER_OFF_PEAK", "PEAK", "SHOULDER", "OFF_PEAK"]
         current_period = None
-        for period_name, period_data in tou_periods.items():
+        for period_name in period_priority:
+            if period_name not in tou_periods:
+                continue
+            period_data = tou_periods[period_name]
             # Handle both list format and object format
             periods_list = period_data if isinstance(period_data, list) else []
             for period in periods_list:
@@ -3357,8 +3364,15 @@ def convert_custom_tariff_to_schedule(custom_tariff: dict) -> dict:
         tou_periods = seasons.get(current_season, {}).get("tou_periods", {})
 
         # Find current TOU period
+        # Check periods in priority order to handle overlaps correctly
+        # SUPER_OFF_PEAK must be checked before OFF_PEAK since OFF_PEAK may include hours
+        # that overlap with SUPER_OFF_PEAK
+        period_priority = ["SUPER_OFF_PEAK", "PEAK", "SHOULDER", "OFF_PEAK"]
         current_period = None
-        for period_name, period_data in tou_periods.items():
+        for period_name in period_priority:
+            if period_name not in tou_periods:
+                continue
+            period_data = tou_periods[period_name]
             periods_list = period_data if isinstance(period_data, list) else []
             for period in periods_list:
                 from_dow = period.get("fromDayOfWeek", 0)
@@ -3472,8 +3486,15 @@ def get_current_price_from_tariff_schedule(tariff_schedule: dict) -> tuple[float
             )
 
         # Find current TOU period
+        # Check periods in priority order to handle overlaps correctly
+        # SUPER_OFF_PEAK must be checked before OFF_PEAK since OFF_PEAK may include hours
+        # that overlap with SUPER_OFF_PEAK (e.g., OFF_PEAK 21:00-24:00 overlaps with SUPER_OFF_PEAK 23:00-07:00)
+        period_priority = ["SUPER_OFF_PEAK", "PEAK", "SHOULDER", "OFF_PEAK"]
         current_period = None
-        for period_name, period_data in tou_periods.items():
+        for period_name in period_priority:
+            if period_name not in tou_periods:
+                continue
+            period_data = tou_periods[period_name]
             periods_list = period_data if isinstance(period_data, list) else []
             for period in periods_list:
                 from_dow = period.get("fromDayOfWeek", 0)
