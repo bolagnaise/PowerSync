@@ -12592,25 +12592,75 @@ class OptimizationSettingsView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         """Handle POST request to update optimization settings."""
-        # Find the optimization coordinator
-        opt_coordinator = None
-        for entry_id, data in self._hass.data.get(DOMAIN, {}).items():
-            if isinstance(data, dict) and "optimization_coordinator" in data:
-                opt_coordinator = data["optimization_coordinator"]
-                break
-
-        if not opt_coordinator:
-            return web.json_response({
-                "success": False,
-                "error": "Optimization not configured"
-            }, status=400)
-
         try:
             settings = await request.json()
-            result = await opt_coordinator.set_settings(settings)
-            return web.json_response(result)
+            changes = []
+
+            # Find the optimization coordinator
+            opt_coordinator = None
+            config_entry = None
+            entry_id = None
+            for eid, data in self._hass.data.get(DOMAIN, {}).items():
+                if isinstance(data, dict):
+                    if "optimization_coordinator" in data:
+                        opt_coordinator = data["optimization_coordinator"]
+                    # Get the config entry for this domain
+                    for entry in self._hass.config_entries.async_entries(DOMAIN):
+                        if entry.entry_id == eid:
+                            config_entry = entry
+                            entry_id = eid
+                            break
+
+            # If coordinator exists, use it
+            if opt_coordinator:
+                result = await opt_coordinator.set_settings(settings)
+                return web.json_response(result)
+
+            # Otherwise, update config entry directly
+            if not config_entry:
+                return web.json_response({
+                    "success": False,
+                    "error": "PowerSync not configured"
+                }, status=400)
+
+            # Build updated data
+            new_data = dict(config_entry.data)
+
+            if "enabled" in settings:
+                from .const import CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_POWERSYNC, OPT_PROVIDER_NATIVE
+                if settings["enabled"]:
+                    new_data[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_POWERSYNC
+                    changes.append("Enabled ML optimization")
+                else:
+                    new_data[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_NATIVE
+                    changes.append("Disabled ML optimization")
+
+            if "cost_function" in settings:
+                from .const import CONF_OPTIMIZATION_COST_FUNCTION
+                new_data[CONF_OPTIMIZATION_COST_FUNCTION] = settings["cost_function"]
+                changes.append(f"Set cost function to {settings['cost_function']}")
+
+            if "backup_reserve" in settings:
+                from .const import CONF_OPTIMIZATION_BACKUP_RESERVE
+                # Convert from decimal to percentage if needed
+                reserve = settings["backup_reserve"]
+                if reserve <= 1:
+                    reserve = int(reserve * 100)
+                new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = reserve
+                changes.append(f"Set backup reserve to {reserve}%")
+
+            # Update the config entry
+            self._hass.config_entries.async_update_entry(config_entry, data=new_data)
+            _LOGGER.info(f"🔧 ML optimization settings updated via API: {changes}")
+
+            return web.json_response({
+                "success": True,
+                "changes": changes,
+                "message": "Settings saved. Reload integration to apply changes."
+            })
+
         except Exception as e:
-            _LOGGER.error(f"Error updating optimization settings: {e}")
+            _LOGGER.error(f"Error updating optimization settings: {e}", exc_info=True)
             return web.json_response({
                 "success": False,
                 "error": str(e)
