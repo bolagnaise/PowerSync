@@ -348,6 +348,16 @@ class BatteryOptimiser:
             power_out = load[t] + grid_export[t] + charge[t]
             constraints.append(power_in == power_out)
 
+        # Self-consumption mode: only charge from grid when electricity is free/negative
+        # Otherwise, battery should only charge from excess solar
+        if cfg.cost_function == CostFunction.SELF_CONSUMPTION:
+            for t in range(n_intervals):
+                if p_import[t] > 0:
+                    # Price is positive - charging must come from excess solar only
+                    excess_solar = cp.maximum(solar[t] - load[t], 0)
+                    constraints.append(charge[t] <= excess_solar)
+                # else: price <= 0, allow grid charging (it's free or they pay us!)
+
         # Objective function
         if cfg.cost_function == CostFunction.COST_MINIMIZATION:
             # Minimize: sum of (import_price * grid_import - export_price * grid_export)

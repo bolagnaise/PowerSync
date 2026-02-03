@@ -359,7 +359,32 @@ class ScheduleExecutor:
 
         try:
             if action == BatteryAction.CHARGE:
-                await self._command_charge(power_w)
+                # In self_consumption mode, only force-charge when electricity is free/negative
+                # Otherwise let battery charge naturally from excess solar
+                if self._cost_function == CostFunction.SELF_CONSUMPTION:
+                    # Check current import price
+                    current_price = await self._get_current_import_price()
+                    if current_price is not None and current_price <= 0:
+                        # Electricity is free or negative - charge is allowed
+                        _LOGGER.info(
+                            f"Self-consumption mode: allowing charge at {power_w:.0f}W "
+                            f"(price={current_price:.2f}c is free/negative)"
+                        )
+                        await self._command_charge(power_w)
+                    else:
+                        # Electricity costs money - don't force charge
+                        _LOGGER.info(
+                            f"Self-consumption mode: ignoring charge command (price={current_price}c > 0). "
+                            f"Letting battery charge naturally from solar."
+                        )
+                        # Update status to reflect actual action (idle, not charge)
+                        self._status.current_action = BatteryAction.IDLE
+                        self._status.current_power_w = 0
+                        # Treat as idle - set self-consumption mode if coming from forced mode
+                        if was_in_forced_mode:
+                            await self._set_self_consumption_mode()
+                else:
+                    await self._command_charge(power_w)
             elif action == BatteryAction.EXPORT:
                 # EXPORT: Force battery to export to grid using high sell tariff
                 await self._command_discharge(power_w)
@@ -444,6 +469,15 @@ class ScheduleExecutor:
                 return await self._get_prices_callback()
             except Exception as e:
                 _LOGGER.error(f"Error getting prices: {e}")
+        return None
+
+    async def _get_current_import_price(self) -> float | None:
+        """Get the current import price (first interval) in $/kWh."""
+        prices = await self._get_prices()
+        if prices and prices[0] and len(prices[0]) > 0:
+            # Return price in cents for easier reading in logs
+            # prices[0] is import prices in $/kWh, convert to c/kWh
+            return prices[0][0] * 100
         return None
 
     async def _get_solar(self) -> list[float] | None:
