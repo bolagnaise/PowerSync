@@ -65,21 +65,19 @@ class BatteryControllerWrapper:
         try:
             _LOGGER.info(f"🔋 ML Optimizer: Force charge {duration_minutes}min at {power_w}W")
 
-            # Create a mock service call with the duration
-            from homeassistant.core import Context
+            # Create a service call with the duration
+            # ServiceCall takes (domain, service, data) positional args
             call = ServiceCall(
-                hass=self.hass,
-                domain="power_sync",
-                service="force_charge",
-                data={"duration": duration_minutes},
-                context=Context(),
+                "power_sync",
+                "force_charge",
+                {"duration": duration_minutes},
             )
 
             await self._force_charge(call)
             return True
 
         except Exception as e:
-            _LOGGER.error(f"Force charge failed: {e}")
+            _LOGGER.error(f"Force charge failed: {e}", exc_info=True)
             return False
 
     async def force_discharge(self, duration_minutes: int = 60, power_w: float = 5000) -> bool:
@@ -99,20 +97,18 @@ class BatteryControllerWrapper:
         try:
             _LOGGER.info(f"🔋 ML Optimizer: Force discharge {duration_minutes}min at {power_w}W")
 
-            from homeassistant.core import Context
+            # ServiceCall takes (domain, service, data) positional args
             call = ServiceCall(
-                hass=self.hass,
-                domain="power_sync",
-                service="force_discharge",
-                data={"duration": duration_minutes},
-                context=Context(),
+                "power_sync",
+                "force_discharge",
+                {"duration": duration_minutes},
             )
 
             await self._force_discharge(call)
             return True
 
         except Exception as e:
-            _LOGGER.error(f"Force discharge failed: {e}")
+            _LOGGER.error(f"Force discharge failed: {e}", exc_info=True)
             return False
 
     async def restore_normal(self) -> bool:
@@ -128,18 +124,16 @@ class BatteryControllerWrapper:
         try:
             _LOGGER.info("🔋 ML Optimizer: Restoring normal operation")
 
-            from homeassistant.core import Context
+            # ServiceCall takes (domain, service, data) positional args
             call = ServiceCall(
-                hass=self.hass,
-                domain="power_sync",
-                service="restore_normal",
-                data={},
-                context=Context(),
+                "power_sync",
+                "restore_normal",
+                {},
             )
 
             await self._restore_normal(call)
             return True
 
         except Exception as e:
-            _LOGGER.error(f"Restore normal failed: {e}")
+            _LOGGER.error(f"Restore normal failed: {e}", exc_info=True)
             return False
