@@ -16,7 +16,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Callable
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
@@ -121,6 +121,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         price_coordinator: Any | None = None,
         energy_coordinator: Any | None = None,
         tariff_schedule: dict | None = None,  # For Globird/TOU-based pricing
+        force_state_getter: Callable[[], dict] | None = None,  # Get force charge/discharge state
         # Enhanced options
         enable_ml_forecasting: bool = True,
         enable_weather_integration: bool = True,
@@ -139,6 +140,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             price_coordinator: Coordinator providing price data (Amber/Octopus)
             energy_coordinator: Coordinator providing energy data
             tariff_schedule: Tariff schedule dict for TOU-based pricing (Globird)
+            force_state_getter: Callback to get force charge/discharge state
             enable_ml_forecasting: Use ML-based load forecasting
             enable_weather_integration: Include weather in forecasts
             enable_ev_integration: Include EV charging in optimization
@@ -159,6 +161,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.price_coordinator = price_coordinator
         self.energy_coordinator = energy_coordinator
         self._tariff_schedule = tariff_schedule  # For Globird/TOU-based pricing
+        self._force_state_getter = force_state_getter  # For checking if force charge/discharge is active
 
         # Feature flags
         self._enable_ml_forecasting = enable_ml_forecasting
@@ -247,6 +250,32 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def active_vpp_events(self) -> list[GridEvent]:
         """Get active VPP events."""
         return self._active_vpp_events
+
+    def _is_force_mode_active(self) -> bool:
+        """Check if force charge or discharge is currently active.
+
+        When force mode is active, the tariff contains fake rates that shouldn't
+        be used for optimization calculations.
+        """
+        if not self._force_state_getter:
+            return False
+        try:
+            state = self._force_state_getter()
+            return state.get("active", False)
+        except Exception:
+            return False
+
+    def _get_force_mode_type(self) -> str | None:
+        """Get the type of force mode if active (charge/discharge)."""
+        if not self._force_state_getter:
+            return None
+        try:
+            state = self._force_state_getter()
+            if state.get("active"):
+                return state.get("type")
+            return None
+        except Exception:
+            return None
 
     async def async_setup(self) -> bool:
         """Set up the optimization coordinator."""
@@ -896,6 +925,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Tries the PowerSync Optimiser add-on first (has cvxpy/numpy),
         falls back to local optimization if add-on unavailable.
         """
+        # Skip optimization if force charge/discharge is active
+        # The current tariff contains fake rates that would give incorrect results
+        force_mode = self._get_force_mode_type()
+        if force_mode:
+            _LOGGER.info(f"Skipping re-optimization - force {force_mode} is active (fake tariff in use)")
+            # Return current schedule unchanged
+            return self._current_schedule
+
         _LOGGER.info("Forcing re-optimization with enhanced features")
 
         # Get all forecasts

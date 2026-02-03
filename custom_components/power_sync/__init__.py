@@ -12529,6 +12529,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Get tariff schedule for TOU-based pricing (Globird, etc.)
             tariff_schedule = hass.data[DOMAIN][entry.entry_id].get("tariff_schedule")
 
+            # Create force state getter for optimization coordinator
+            # This allows the coordinator to skip optimization when force charge/discharge is active
+            # (the fake tariff rates would give incorrect cost calculations)
+            def get_force_state() -> dict:
+                """Get current force charge/discharge state."""
+                if force_charge_state.get("active"):
+                    return {"active": True, "type": "charge", "expires_at": force_charge_state.get("expires_at")}
+                if force_discharge_state.get("active"):
+                    return {"active": True, "type": "discharge", "expires_at": force_discharge_state.get("expires_at")}
+                return {"active": False}
+
             optimization_coordinator = OptimizationCoordinator(
                 hass=hass,
                 entry_id=entry.entry_id,
@@ -12537,6 +12548,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 price_coordinator=amber_coordinator or octopus_coordinator or aemo_sensor_coordinator,
                 energy_coordinator=energy_coordinator,
                 tariff_schedule=tariff_schedule,  # For Globird/TOU-based pricing
+                force_state_getter=get_force_state,  # For checking if force mode is active
                 enable_ml_forecasting=True,
                 enable_weather_integration=False,  # Can be enabled later
                 enable_ev_integration=False,
