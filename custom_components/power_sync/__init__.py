@@ -207,8 +207,13 @@ from .const import (
     TESLA_BLE_BUTTON_WAKE_UP,
     # Tesla integrations for device discovery
     TESLA_INTEGRATIONS,
+    # ML Optimization configuration
+    CONF_OPTIMIZATION_PROVIDER,
+    OPT_PROVIDER_NATIVE,
+    OPT_PROVIDER_POWERSYNC,
 )
 from .inverters import get_inverter_controller
+from .optimization.coordinator import OptimizationCoordinator
 from .coordinator import (
     AmberPriceCoordinator,
     TeslaEnergyCoordinator,
@@ -12466,6 +12471,60 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     _LOGGER.info("🤖 Automation services registered")
 
+    # Initialize ML Optimization Coordinator if enabled
+    optimization_provider = entry.options.get(
+        CONF_OPTIMIZATION_PROVIDER,
+        entry.data.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
+    )
+    optimization_coordinator = None
+
+    if optimization_provider == OPT_PROVIDER_POWERSYNC:
+        _LOGGER.info("🧠 ML Optimization enabled - initializing OptimizationCoordinator")
+        try:
+            # Determine battery system type
+            if is_sigenergy:
+                battery_system = "sigenergy"
+                battery_controller = sigenergy_coordinator
+                energy_coordinator = sigenergy_coordinator
+            elif is_sungrow:
+                battery_system = "sungrow"
+                battery_controller = sungrow_coordinator
+                energy_coordinator = sungrow_coordinator
+            else:
+                battery_system = "tesla"
+                battery_controller = tesla_coordinator
+                energy_coordinator = tesla_coordinator
+
+            optimization_coordinator = OptimizationCoordinator(
+                hass=hass,
+                entry_id=entry.entry_id,
+                battery_system=battery_system,
+                battery_controller=battery_controller,
+                price_coordinator=amber_coordinator or octopus_coordinator or aemo_sensor_coordinator,
+                energy_coordinator=energy_coordinator,
+                enable_ml_forecasting=True,
+                enable_weather_integration=False,  # Can be enabled later
+                enable_ev_integration=False,
+                enable_multi_battery=False,
+                enable_vpp=False,
+            )
+
+            # Set up the coordinator
+            await optimization_coordinator.async_setup()
+            await optimization_coordinator.async_config_entry_first_refresh()
+
+            # Enable the optimizer
+            await optimization_coordinator.enable()
+
+            hass.data[DOMAIN][entry.entry_id]["optimization_coordinator"] = optimization_coordinator
+            _LOGGER.info("🧠 ML Optimization coordinator initialized and enabled")
+
+        except Exception as e:
+            _LOGGER.error(f"Failed to initialize ML Optimization coordinator: {e}", exc_info=True)
+            _LOGGER.warning("Continuing without ML optimization - battery will use native optimization")
+    else:
+        _LOGGER.info("🔋 Using battery's native optimization (ML optimization disabled)")
+
     # Register HTTP endpoint for Smart Optimization (ML-based battery scheduling)
     hass.http.register_view(OptimizationView(hass))
     hass.http.register_view(OptimizationSettingsView(hass))
@@ -12653,10 +12712,20 @@ class OptimizationSettingsView(HomeAssistantView):
             self._hass.config_entries.async_update_entry(config_entry, data=new_data)
             _LOGGER.info(f"🔧 ML optimization settings updated via API: {changes}")
 
+            # If we enabled/disabled ML optimization, reload the integration to apply
+            if "enabled" in settings:
+                _LOGGER.info("🔄 Reloading integration to apply ML optimization changes")
+                await self._hass.config_entries.async_reload(config_entry.entry_id)
+                return web.json_response({
+                    "success": True,
+                    "changes": changes,
+                    "message": "Settings saved and integration reloaded."
+                })
+
             return web.json_response({
                 "success": True,
                 "changes": changes,
-                "message": "Settings saved. Reload integration to apply changes."
+                "message": "Settings saved."
             })
 
         except Exception as e:
