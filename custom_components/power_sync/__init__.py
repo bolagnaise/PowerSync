@@ -11042,6 +11042,115 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.error(f"Error in restore normal: {e}", exc_info=True)
 
+    async def handle_set_self_consumption(call: ServiceCall) -> None:
+        """Set battery to pure self-consumption mode (no TOU optimization).
+
+        Used by ML optimizer for CONSUME action - battery should naturally offset
+        home load without making autonomous charge/discharge decisions based on TOU.
+
+        Unlike restore_normal, this:
+        - Sets mode to self_consumption (not autonomous)
+        - Does NOT restore TOU tariff
+        - Does NOT send push notifications (optimizer-controlled)
+        """
+        _LOGGER.info("🔋 ML Optimizer: Setting pure self-consumption mode")
+
+        # Check if this is a Sigenergy system
+        is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
+        if is_sigenergy:
+            try:
+                from .inverters.sigenergy import SigenergyController
+                modbus_host = entry.options.get(
+                    CONF_SIGENERGY_MODBUS_HOST,
+                    entry.data.get(CONF_SIGENERGY_MODBUS_HOST)
+                )
+                if not modbus_host:
+                    _LOGGER.warning("Self-consumption: Sigenergy Modbus host not configured")
+                else:
+                    modbus_port = entry.options.get(
+                        CONF_SIGENERGY_MODBUS_PORT,
+                        entry.data.get(CONF_SIGENERGY_MODBUS_PORT, 502)
+                    )
+                    modbus_slave_id = entry.options.get(
+                        CONF_SIGENERGY_MODBUS_SLAVE_ID,
+                        entry.data.get(CONF_SIGENERGY_MODBUS_SLAVE_ID, 1)
+                    )
+
+                    controller = SigenergyController(
+                        host=modbus_host,
+                        port=modbus_port,
+                        slave_id=modbus_slave_id,
+                    )
+
+                    # Restore normal operation: allow both charge and discharge
+                    charge_result = await controller.set_charge_rate_limit(10.0)
+                    discharge_result = await controller.set_discharge_rate_limit(10.0)
+                    await controller.disconnect()
+
+                    if charge_result and discharge_result:
+                        _LOGGER.info("✅ Sigenergy self-consumption mode set")
+                    else:
+                        _LOGGER.warning(f"Sigenergy self-consumption partial: charge={charge_result}, discharge={discharge_result}")
+
+                # Clear forced states since we're now in normal self-consumption
+                force_discharge_state["active"] = False
+                force_charge_state["active"] = False
+
+                _LOGGER.info("✅ SIGENERGY SELF-CONSUMPTION MODE SET")
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error setting Sigenergy self-consumption: {e}", exc_info=True)
+                return
+
+        # Tesla Powerwall
+        try:
+            current_token, provider = get_tesla_api_token(hass, entry)
+
+            site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+            if not site_id or not current_token:
+                _LOGGER.error("Missing Tesla site ID or token for self-consumption mode")
+                return
+
+            session = async_get_clientsession(hass)
+            headers = {
+                "Authorization": f"Bearer {current_token}",
+                "Content-Type": "application/json",
+            }
+            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+            # Set to self_consumption mode (NOT autonomous)
+            # This ensures battery offsets home load without TOU-based decisions
+            async with session.post(
+                f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                headers=headers,
+                json={"default_real_mode": "self_consumption"},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status == 200:
+                    _LOGGER.info("✅ Tesla set to self_consumption mode (no TOU optimization)")
+                else:
+                    text = await response.text()
+                    _LOGGER.warning(f"Could not set self_consumption mode: {response.status} - {text}")
+
+            # Clear forced states
+            force_discharge_state["active"] = False
+            force_charge_state["active"] = False
+
+            # Dispatch events for UI (show as not in forced mode)
+            async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                "active": False,
+                "expires_at": None,
+                "duration": 0,
+            })
+            async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
+                "active": False,
+                "expires_at": None,
+                "duration": 0,
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error setting self-consumption mode: {e}", exc_info=True)
+
     # ======================================================================
     # POWERWALL SETTINGS SERVICES (for mobile app Controls)
     # ======================================================================
@@ -12580,6 +12689,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 force_charge_handler=handle_force_charge,
                 force_discharge_handler=handle_force_discharge,
                 restore_normal_handler=handle_restore_normal,
+                set_self_consumption_handler=handle_set_self_consumption,
             )
 
             # Get tariff schedule for TOU-based pricing (Globird, etc.)

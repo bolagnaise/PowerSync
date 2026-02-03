@@ -31,6 +31,7 @@ class BatteryControllerWrapper:
         force_charge_handler: Callable[[ServiceCall], Coroutine[Any, Any, None]],
         force_discharge_handler: Callable[[ServiceCall], Coroutine[Any, Any, None]],
         restore_normal_handler: Callable[[ServiceCall], Coroutine[Any, Any, None]],
+        set_self_consumption_handler: Callable[[ServiceCall], Coroutine[Any, Any, None]] | None = None,
     ):
         """
         Initialize the battery controller wrapper.
@@ -41,12 +42,14 @@ class BatteryControllerWrapper:
             force_charge_handler: Service handler for force charge
             force_discharge_handler: Service handler for force discharge
             restore_normal_handler: Service handler for restore normal
+            set_self_consumption_handler: Service handler for pure self-consumption mode
         """
         self.hass = hass
         self.battery_system = battery_system
         self._force_charge = force_charge_handler
         self._force_discharge = force_discharge_handler
         self._restore_normal = restore_normal_handler
+        self._set_self_consumption = set_self_consumption_handler
 
     async def force_charge(self, duration_minutes: int = 60, power_w: float = 5000) -> bool:
         """
@@ -138,24 +141,39 @@ class BatteryControllerWrapper:
             _LOGGER.error(f"Restore normal failed: {e}", exc_info=True)
             return False
 
-    async def ensure_self_consumption(self) -> bool:
+    async def set_self_consumption_mode(self) -> bool:
         """
-        Ensure battery is in self-consumption mode.
+        Set battery to pure self-consumption mode (no TOU optimization).
 
         This is used for CONSUME action (battery→home) where we want the
-        battery to naturally offset home load without forcing grid export.
+        battery to naturally offset home load WITHOUT making autonomous
+        charge/discharge decisions based on TOU rates.
 
-        For Tesla: Restore normal operation (self-consumption mode)
-        For others: Same as restore_normal
+        Unlike restore_normal, this:
+        - Sets mode to self_consumption (not autonomous)
+        - Does NOT restore TOU tariff
+        - Does NOT send push notifications
 
         Returns:
             True if command was sent successfully
         """
         try:
-            _LOGGER.info("🔋 ML Optimizer: Ensuring self-consumption mode (battery→home)")
-            # Self-consumption is the default restored mode
-            return await self.restore_normal()
+            _LOGGER.info("🔋 ML Optimizer: Setting pure self-consumption mode (battery→home, no TOU)")
+
+            if self._set_self_consumption:
+                # Use dedicated handler
+                call = ServiceCall(
+                    "power_sync",
+                    "set_self_consumption",
+                    {},
+                )
+                await self._set_self_consumption(call)
+                return True
+            else:
+                # Fallback to restore_normal if handler not available
+                _LOGGER.warning("No set_self_consumption handler, falling back to restore_normal")
+                return await self.restore_normal()
 
         except Exception as e:
-            _LOGGER.error(f"Ensure self-consumption failed: {e}", exc_info=True)
+            _LOGGER.error(f"Set self-consumption mode failed: {e}", exc_info=True)
             return False

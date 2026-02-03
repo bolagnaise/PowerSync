@@ -365,18 +365,18 @@ class ScheduleExecutor:
                 await self._command_discharge(power_w)
             elif action in (BatteryAction.DISCHARGE, BatteryAction.CONSUME):
                 # CONSUME/DISCHARGE: Battery should power home load naturally
-                # Only restore if we were in a forced mode (charge/export)
+                # Only set self-consumption if we were in a forced mode (charge/export)
                 # Otherwise battery is already in self-consumption mode
                 if was_in_forced_mode:
-                    _LOGGER.info("Transitioning from forced mode to consume - restoring normal operation")
-                    await self._restore_normal_operation()
+                    _LOGGER.info("Transitioning from forced mode to consume - setting self-consumption mode")
+                    await self._set_self_consumption_mode()
                 else:
                     _LOGGER.debug(f"Consume action: battery already in self-consumption mode (prev={previous_action.value})")
             else:
-                # IDLE: Only restore if we were in a forced mode
+                # IDLE: Only set self-consumption if we were in a forced mode
                 if was_in_forced_mode:
-                    _LOGGER.info("Transitioning from forced mode to idle - restoring normal operation")
-                    await self._restore_normal_operation()
+                    _LOGGER.info("Transitioning from forced mode to idle - setting self-consumption mode")
+                    await self._set_self_consumption_mode()
                 else:
                     _LOGGER.debug(f"Action is idle, no restore needed (prev={previous_action.value})")
 
@@ -411,9 +411,28 @@ class ScheduleExecutor:
         else:
             _LOGGER.warning("Battery controller does not support force_discharge")
 
+    async def _set_self_consumption_mode(self) -> None:
+        """Set battery to pure self-consumption mode (no TOU optimization).
+
+        Used during active optimization for CONSUME/IDLE actions.
+        Battery offsets home load naturally without TOU-based decisions.
+        """
+        _LOGGER.debug("Setting pure self-consumption mode (no TOU)")
+
+        if hasattr(self.battery_controller, "set_self_consumption_mode"):
+            await self.battery_controller.set_self_consumption_mode()
+        elif hasattr(self.battery_controller, "restore_normal"):
+            # Fallback for older controllers
+            _LOGGER.debug("No set_self_consumption_mode, falling back to restore_normal")
+            await self.battery_controller.restore_normal()
+
     async def _restore_normal_operation(self) -> None:
-        """Restore battery to normal autonomous operation."""
-        _LOGGER.debug("Restoring normal battery operation")
+        """Restore battery to normal autonomous TOU operation.
+
+        Used when ML optimization is stopped/disabled.
+        Returns battery to original TOU-based operation mode.
+        """
+        _LOGGER.debug("Restoring normal autonomous operation (with TOU)")
 
         if hasattr(self.battery_controller, "restore_normal"):
             await self.battery_controller.restore_normal()
