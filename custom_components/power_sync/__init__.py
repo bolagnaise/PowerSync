@@ -12607,48 +12607,131 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.data[DOMAIN][entry.entry_id]["optimization_coordinator"] = optimization_coordinator
             _LOGGER.info("🧠 ML Optimization coordinator initialized and enabled")
 
-            # If VPP is enabled, set up AEMO price fetching for spike detection
-            # This is separate from the legacy AEMO spike detection - only fetches prices
-            # The ML optimizer's grid_services handles the response
+            # If VPP is enabled, set up AEMO price fetching and spike response
+            # This handles Globird VPP spike detection - discharge at $3000/MWh
             if enable_vpp:
                 aemo_region = entry.options.get(
                     CONF_AEMO_REGION,
                     entry.data.get(CONF_AEMO_REGION, "QLD1")
                 )
-                _LOGGER.info(f"🔌 ML VPP enabled - setting up AEMO price monitoring for region {aemo_region}")
+                _LOGGER.info(f"🔌 ML VPP enabled - setting up AEMO spike response for region {aemo_region}")
 
-                async def fetch_aemo_prices_for_vpp(now):
-                    """Fetch AEMO prices for ML VPP (no auto-response)."""
+                # Track VPP spike state
+                vpp_spike_state = {
+                    "in_spike_mode": False,
+                    "spike_start_time": None,
+                    "last_price": None,
+                }
+
+                async def check_aemo_spike_for_vpp(now):
+                    """Check AEMO prices and respond to spikes (Globird VPP)."""
                     try:
                         from .aemo_client import AEMOAPIClient
                         from homeassistant.helpers.aiohttp_client import async_get_clientsession
+                        from homeassistant.util import dt as dt_util
 
                         session = async_get_clientsession(hass)
                         client = AEMOAPIClient(session)
                         prices = await client.get_current_prices()
 
-                        if prices:
-                            # Store prices for grid_services to access
-                            hass.data[DOMAIN][entry.entry_id]["aemo_prices"] = prices
-                            region_price = prices.get(aemo_region, {}).get("price", 0)
-                            if region_price >= 3000:  # $3/kWh spike
-                                _LOGGER.info(f"🔌 VPP: AEMO spike detected in {aemo_region}: ${region_price:.0f}/MWh - ML optimizer will handle")
-                            else:
-                                _LOGGER.debug(f"VPP: AEMO price {aemo_region}: ${region_price:.2f}/MWh")
-                    except Exception as e:
-                        _LOGGER.debug(f"VPP: Error fetching AEMO prices: {e}")
+                        if not prices:
+                            _LOGGER.debug("VPP: Could not fetch AEMO prices")
+                            return
 
-                # Fetch every minute at :45 seconds (offset from other checks)
+                        # Store prices for other components
+                        hass.data[DOMAIN][entry.entry_id]["aemo_prices"] = prices
+                        region_price = prices.get(aemo_region, {}).get("price", 0)
+                        vpp_spike_state["last_price"] = region_price
+
+                        is_spike = region_price >= 3000  # $3/kWh Globird threshold
+
+                        # SPIKE DETECTED - Enter spike mode and discharge
+                        if is_spike and not vpp_spike_state["in_spike_mode"]:
+                            _LOGGER.warning(
+                                "🔌 VPP SPIKE DETECTED: $%.0f/MWh >= $3000/MWh in %s - starting force discharge",
+                                region_price, aemo_region
+                            )
+                            try:
+                                # Use the force discharge handler (30 min default for VPP events)
+                                result = await handle_force_discharge(30)
+                                if result.get("success"):
+                                    vpp_spike_state["in_spike_mode"] = True
+                                    vpp_spike_state["spike_start_time"] = dt_util.utcnow()
+                                    _LOGGER.warning(
+                                        "🔌 VPP SPIKE MODE ACTIVE: Battery force discharging at $%.0f/MWh",
+                                        region_price
+                                    )
+                                    # Send push notification
+                                    try:
+                                        from .automations.actions import _send_expo_push
+                                        await _send_expo_push(
+                                            hass,
+                                            "VPP Spike",
+                                            f"${region_price:.0f}/MWh - discharging battery",
+                                        )
+                                    except Exception as notify_err:
+                                        _LOGGER.debug(f"VPP: Could not send spike notification: {notify_err}")
+                                else:
+                                    _LOGGER.error("VPP: Failed to start force discharge: %s", result.get("error"))
+                            except Exception as e:
+                                _LOGGER.error("VPP: Error starting force discharge: %s", e)
+
+                        # SPIKE ENDED - Exit spike mode and restore normal
+                        elif not is_spike and vpp_spike_state["in_spike_mode"]:
+                            _LOGGER.info(
+                                "🔌 VPP: Spike ended - $%.0f/MWh < $3000/MWh - restoring normal operation",
+                                region_price
+                            )
+                            try:
+                                result = await handle_restore_normal()
+                                vpp_spike_state["in_spike_mode"] = False
+                                spike_duration = None
+                                if vpp_spike_state["spike_start_time"]:
+                                    spike_duration = (dt_util.utcnow() - vpp_spike_state["spike_start_time"]).total_seconds() / 60
+                                vpp_spike_state["spike_start_time"] = None
+                                _LOGGER.info(
+                                    "🔌 VPP: Normal operation restored (spike duration: %.1f min)",
+                                    spike_duration or 0
+                                )
+                                # Send push notification
+                                try:
+                                    from .automations.actions import _send_expo_push
+                                    await _send_expo_push(
+                                        hass,
+                                        "VPP Spike Ended",
+                                        f"Price normalized to ${region_price:.0f}/MWh",
+                                    )
+                                except Exception as notify_err:
+                                    _LOGGER.debug(f"VPP: Could not send spike end notification: {notify_err}")
+                            except Exception as e:
+                                _LOGGER.error("VPP: Error restoring normal: %s", e)
+
+                        # Still in spike mode - log status
+                        elif is_spike and vpp_spike_state["in_spike_mode"]:
+                            _LOGGER.debug(
+                                "VPP: Still in spike mode - $%.0f/MWh (threshold: $3000/MWh)",
+                                region_price
+                            )
+                        else:
+                            _LOGGER.debug(f"VPP: AEMO price {aemo_region}: ${region_price:.2f}/MWh")
+
+                    except Exception as e:
+                        _LOGGER.debug(f"VPP: Error checking AEMO prices: {e}")
+
+                # Store spike state for status endpoint
+                hass.data[DOMAIN][entry.entry_id]["vpp_spike_state"] = vpp_spike_state
+
+                # Check every minute at :45 seconds (offset from other checks)
                 vpp_aemo_cancel = async_track_utc_time_change(
                     hass,
-                    fetch_aemo_prices_for_vpp,
+                    check_aemo_spike_for_vpp,
                     second=45,
                 )
                 hass.data[DOMAIN][entry.entry_id]["vpp_aemo_cancel"] = vpp_aemo_cancel
-                _LOGGER.info(f"🔌 ML VPP AEMO price monitoring scheduled (region: {aemo_region})")
+                _LOGGER.info(f"🔌 ML VPP AEMO spike response scheduled (region: {aemo_region}, threshold: $3000/MWh)")
 
-                # Initial fetch
-                await fetch_aemo_prices_for_vpp(None)
+                # Initial check
+                await check_aemo_spike_for_vpp(None)
 
         except Exception as e:
             _LOGGER.error(f"Failed to initialize ML Optimization coordinator: {e}", exc_info=True)
