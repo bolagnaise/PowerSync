@@ -227,6 +227,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._command_throttle_seconds = 300  # 5 minutes between battery commands
         self._last_price_hash: str | None = None  # Detect actual price changes
 
+        # VPP spike-triggered optimization tracking
+        self._last_vpp_optimization_time: datetime | None = None
+        self._last_vpp_event_id: str | None = None
+
+        # Export boost window tracking (triggers optimization on window entry/exit)
+        self._in_export_boost_window: bool | None = None  # None = not yet checked
+        self._in_chip_mode_window: bool | None = None  # Chip mode window tracking
+
     @property
     def enabled(self) -> bool:
         """Check if optimization is enabled."""
@@ -534,9 +542,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 price_hash = f"{current.get('per_kwh', 0):.4f}"
 
                 if price_hash == self._last_price_hash:
-                    _LOGGER.debug("Price unchanged, skipping re-optimization")
+                    _LOGGER.debug(f"Price unchanged ({price_hash}), skipping re-optimization")
                     return
 
+                _LOGGER.info(f"⚡ Price changed: {self._last_price_hash} → {price_hash}")
                 self._last_price_hash = price_hash
         except Exception as e:
             _LOGGER.debug(f"Could not hash prices: {e}")
@@ -565,10 +574,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             if result and result.success:
                 self._last_command_time = now
+
+                # Execute the immediate action (first interval) on the battery
+                if self._executor:
+                    await self._executor._execute_action(result, 0)
+
+                action = result.get_action_at_index(0).get('action', 'idle')
                 _LOGGER.info(
                     f"⚡ Price-triggered optimization complete: "
-                    f"action={result.get_action_at_index(0).get('action', 'idle')}, "
-                    f"cost=${result.total_cost:.2f}"
+                    f"action={action}, cost=${result.total_cost:.2f}"
                 )
             else:
                 _LOGGER.warning("Price-triggered optimization failed or returned no result")
@@ -1100,13 +1114,25 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._executor.set_config(self._config)
         self._executor.set_cost_function(self._cost_function)
 
-        success = await self._executor.start()
+        # For dynamic pricing (Amber/AEMO), don't use periodic timer - optimize on price updates
+        # For static/TOU pricing, use periodic 5-minute timer
+        use_periodic_timer = not self._is_dynamic_pricing
+        success = await self._executor.start(use_periodic_timer=use_periodic_timer)
         if success:
             self._enabled = True
-            _LOGGER.info("Optimization enabled")
+            _LOGGER.info(f"Optimization enabled (dynamic_pricing={self._is_dynamic_pricing})")
 
-            # Start VPP monitoring if enabled
-            if self._grid_services and self._vpp_config and self._vpp_config.enabled:
+            # Start monitoring for:
+            # 1. VPP events (price spikes, negative prices) - if VPP enabled
+            # 2. Price window transitions (export boost, chip mode) - for static/TOU pricing
+            should_monitor = (
+                (self._grid_services and self._vpp_config and self._vpp_config.enabled) or
+                (not self._is_dynamic_pricing and (
+                    self._provider_config.export_boost_enabled or
+                    self._provider_config.chip_mode_enabled
+                ))
+            )
+            if should_monitor:
                 await self._start_vpp_monitoring()
 
         return success
@@ -1133,7 +1159,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         _LOGGER.info("Optimization disabled")
 
     async def _start_vpp_monitoring(self) -> None:
-        """Start VPP event monitoring."""
+        """Start VPP event and price window monitoring."""
         if self._vpp_monitor_task:
             return
 
@@ -1141,14 +1167,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             while True:
                 try:
                     await asyncio.sleep(VPP_CHECK_INTERVAL.total_seconds())
+
+                    # Check for VPP events (price spikes, negative prices)
                     if self._grid_services:
                         events = await self._grid_services.check_grid_conditions()
                         self._active_vpp_events = events
 
-                        # Auto-respond to events
+                        # Handle events based on type
                         for event in events:
                             if self._vpp_config and self._vpp_config.auto_respond:
-                                await self._grid_services.respond_to_event(event)
+                                await self._handle_vpp_event(event)
+
+                    # Check for price window transitions (for static/TOU pricing)
+                    if not self._is_dynamic_pricing:
+                        await self._check_price_window_transitions()
 
                 except asyncio.CancelledError:
                     break
@@ -1156,7 +1188,140 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     _LOGGER.error(f"VPP monitoring error: {e}")
 
         self._vpp_monitor_task = asyncio.create_task(monitor_loop())
-        _LOGGER.info("VPP monitoring started")
+        _LOGGER.info("VPP/price window monitoring started")
+
+    async def _check_price_window_transitions(self) -> None:
+        """
+        Check if we've entered or exited price-affecting time windows.
+
+        Monitors:
+        - Export boost window (higher FIT rates)
+        - Chip mode window (suppress export unless price exceeds threshold)
+
+        Triggers re-optimization on transition to ensure the optimizer
+        immediately sees the new prices.
+        """
+        now = dt_util.now()
+        hour_str = now.strftime("%H:%M")
+        should_reoptimize = False
+        transition_reason = ""
+
+        # Check export boost window
+        if self._provider_config.export_boost_enabled:
+            currently_in_boost = self._is_in_time_window(
+                hour_str,
+                self._provider_config.export_boost_start,
+                self._provider_config.export_boost_end
+            )
+
+            # First check - just record state
+            if self._in_export_boost_window is None:
+                self._in_export_boost_window = currently_in_boost
+                _LOGGER.debug(f"Export boost window initial state: {currently_in_boost}")
+            elif currently_in_boost != self._in_export_boost_window:
+                self._in_export_boost_window = currently_in_boost
+                should_reoptimize = True
+                if currently_in_boost:
+                    transition_reason = f"📈 Entering export boost window ({self._provider_config.export_boost_start}-{self._provider_config.export_boost_end})"
+                else:
+                    transition_reason = "📉 Exiting export boost window"
+
+        # Check chip mode window
+        if self._provider_config.chip_mode_enabled:
+            currently_in_chip = self._is_in_time_window(
+                hour_str,
+                self._provider_config.chip_mode_start,
+                self._provider_config.chip_mode_end
+            )
+
+            # First check - just record state
+            if self._in_chip_mode_window is None:
+                self._in_chip_mode_window = currently_in_chip
+                _LOGGER.debug(f"Chip mode window initial state: {currently_in_chip}")
+            elif currently_in_chip != self._in_chip_mode_window:
+                self._in_chip_mode_window = currently_in_chip
+                should_reoptimize = True
+                if currently_in_chip:
+                    transition_reason = f"🔒 Entering chip mode window ({self._provider_config.chip_mode_start}-{self._provider_config.chip_mode_end})"
+                else:
+                    transition_reason = "🔓 Exiting chip mode window"
+
+        # Trigger re-optimization if any transition occurred
+        if should_reoptimize:
+            _LOGGER.info(f"{transition_reason} - triggering re-optimization")
+
+            result = await self.force_reoptimize()
+            if result and result.success:
+                # Execute the immediate action
+                if self._executor:
+                    await self._executor._execute_action(result, 0)
+
+                action = result.get_action_at_index(0).get('action', 'idle')
+                _LOGGER.info(
+                    f"Price window optimization complete: action={action}, "
+                    f"cost=${result.total_cost:.2f}"
+                )
+
+    async def _handle_vpp_event(self, event: GridEvent) -> None:
+        """
+        Handle a VPP event intelligently.
+
+        For price events (spikes, negative prices):
+        - Trigger re-optimization so the optimizer can determine optimal response
+        - The optimizer will see the current high/low prices and adjust accordingly
+
+        For other events (demand response, FCAS):
+        - Use direct response (these require immediate action)
+        """
+        # Price events should trigger re-optimization
+        price_event_types = {GridEventType.PRICE_SPIKE, GridEventType.NEGATIVE_PRICE}
+
+        if event.event_type in price_event_types:
+            # Check if we already optimized for this event (avoid spam during sustained spikes)
+            if self._last_vpp_event_id == event.event_id:
+                _LOGGER.debug(f"Already optimized for VPP event {event.event_id}, skipping")
+                return
+
+            # Check throttle (minimum 5 minutes between VPP-triggered optimizations)
+            now = dt_util.now()
+            if self._last_vpp_optimization_time:
+                elapsed = (now - self._last_vpp_optimization_time).total_seconds()
+                if elapsed < self._command_throttle_seconds:
+                    _LOGGER.debug(
+                        f"VPP optimization throttle active - {self._command_throttle_seconds - elapsed:.0f}s remaining"
+                    )
+                    return
+
+            # Trigger re-optimization with current prices
+            price_str = f"${event.current_price:.2f}/kWh" if event.current_price else "unknown"
+            _LOGGER.info(
+                f"⚡ VPP {event.event_type.value} detected (price: {price_str}) - "
+                f"triggering re-optimization"
+            )
+
+            result = await self.force_reoptimize()
+
+            if result and result.success:
+                self._last_vpp_optimization_time = now
+                self._last_vpp_event_id = event.event_id
+
+                # Execute the immediate action on the battery
+                if self._executor:
+                    await self._executor._execute_action(result, 0)
+
+                action = result.get_action_at_index(0).get('action', 'idle')
+                power_w = result.get_action_at_index(0).get('power_w', 0)
+                _LOGGER.info(
+                    f"⚡ VPP-triggered optimization complete: "
+                    f"action={action} @ {power_w:.0f}W, cost=${result.total_cost:.2f}"
+                )
+            else:
+                _LOGGER.warning("VPP-triggered optimization failed")
+
+        else:
+            # Non-price events (demand response, FCAS) - use direct response
+            if self._grid_services:
+                await self._grid_services.respond_to_event(event)
 
     def set_cost_function(self, cost_function: str | CostFunction) -> None:
         """Set the optimization cost function."""

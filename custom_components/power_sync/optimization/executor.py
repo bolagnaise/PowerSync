@@ -143,9 +143,13 @@ class ScheduleExecutor:
         if self._config:
             self._config.cost_function = cost_function
 
-    async def start(self) -> bool:
+    async def start(self, use_periodic_timer: bool = True) -> bool:
         """
         Start the schedule executor.
+
+        Args:
+            use_periodic_timer: If True, run optimization every interval_minutes.
+                               If False, optimization is triggered externally (e.g., by price updates).
 
         Returns:
             True if started successfully
@@ -174,14 +178,18 @@ class ScheduleExecutor:
         # Run initial optimization
         await self._tick()
 
-        # Schedule periodic execution
-        self._cancel_timer = async_track_time_interval(
-            self.hass,
-            self._tick,
-            timedelta(minutes=self.interval_minutes),
-        )
+        # Schedule periodic execution only for static/TOU pricing
+        # For dynamic pricing (Amber/AEMO), optimization is triggered by price updates
+        if use_periodic_timer:
+            self._cancel_timer = async_track_time_interval(
+                self.hass,
+                self._tick,
+                timedelta(minutes=self.interval_minutes),
+            )
+            _LOGGER.info(f"Schedule executor started (interval: {self.interval_minutes}min)")
+        else:
+            _LOGGER.info("Schedule executor started (price-triggered mode - no periodic timer)")
 
-        _LOGGER.info(f"Schedule executor started (interval: {self.interval_minutes}min)")
         return True
 
     async def stop(self) -> None:
@@ -210,10 +218,12 @@ class ScheduleExecutor:
         2. Re-run optimization with latest data
         3. Execute the immediate action
         """
-        if not self._enabled:
-            return
-
         now = now or dt_util.now()
+        _LOGGER.debug(f"Optimization tick fired at {now.strftime('%H:%M:%S')}")
+
+        if not self._enabled:
+            _LOGGER.debug("Executor not enabled, skipping tick")
+            return
 
         try:
             # If optimize callback is set (coordinator handles add-on vs local), use it
