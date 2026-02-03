@@ -121,7 +121,7 @@ The optimizer requires mathematical libraries (cvxpy, numpy) that are too large 
 1. **Add the Repository**
    - Go to **Settings → Add-ons → Add-on Store**
    - Click the **⋮** menu (top right) → **Repositories**
-   - Add: `https://github.com/bolagnaise/powersync-addons`
+   - Add: `https://github.com/bolagnaise/powersync-optimiser`
    - Click **Add**
 
 2. **Install the Add-on**
