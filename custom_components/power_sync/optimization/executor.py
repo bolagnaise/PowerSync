@@ -87,6 +87,9 @@ class ScheduleExecutor:
         self._get_load_callback: Callable | None = None
         self._get_battery_state_callback: Callable | None = None
 
+        # Callback for optimization (allows coordinator to handle add-on vs local)
+        self._optimize_callback: Callable | None = None
+
         # Configuration
         self._config: OptimizationConfig | None = None
         self._cost_function = CostFunction.COST_MINIMIZATION
@@ -112,6 +115,7 @@ class ScheduleExecutor:
         get_solar: Callable | None = None,
         get_load: Callable | None = None,
         get_battery_state: Callable | None = None,
+        optimize: Callable | None = None,
     ) -> None:
         """
         Set callbacks for getting current data.
@@ -121,11 +125,13 @@ class ScheduleExecutor:
             get_solar: Callback returning solar forecast list
             get_load: Callback returning load forecast list
             get_battery_state: Callback returning (soc, capacity_wh) tuple
+            optimize: Callback for running optimization (allows coordinator to use add-on)
         """
         self._get_prices_callback = get_prices
         self._get_solar_callback = get_solar
         self._get_load_callback = get_load
         self._get_battery_state_callback = get_battery_state
+        self._optimize_callback = optimize
 
     def set_config(self, config: OptimizationConfig) -> None:
         """Set optimization configuration."""
@@ -210,6 +216,38 @@ class ScheduleExecutor:
         now = now or dt_util.now()
 
         try:
+            # If optimize callback is set (coordinator handles add-on vs local), use it
+            if self._optimize_callback:
+                result = await self._optimize_callback()
+                if result:
+                    self._current_schedule = result
+                    self._status.last_optimization = now
+
+                    if not result.success:
+                        _LOGGER.warning(f"Optimization failed: {result.status}")
+                        self._status.optimization_status = f"failed: {result.status}"
+                        return
+
+                    self._status.optimization_status = "success"
+
+                    # Execute the immediate action (first interval)
+                    await self._execute_action(result, 0)
+
+                    # Update status with next action
+                    if len(result.charge_schedule_w) > 1:
+                        next_action = result.get_action_at_index(1)
+                        self._status.next_action = BatteryAction(next_action["action"])
+                        self._status.next_action_time = now + timedelta(minutes=self.interval_minutes)
+
+                    _LOGGER.info(
+                        f"Optimization complete (via callback): cost=${result.total_cost:.2f}, "
+                        f"savings=${result.savings:.2f}, action={self._status.current_action.value}"
+                    )
+                    return
+                else:
+                    _LOGGER.debug("Optimize callback returned None, falling back to local")
+
+            # Fallback: use local optimiser directly
             # Get current data
             prices = await self._get_prices()
             solar = await self._get_solar()
@@ -259,7 +297,7 @@ class ScheduleExecutor:
                 self._status.next_action_time = now + timedelta(minutes=self.interval_minutes)
 
             _LOGGER.info(
-                f"Optimization complete: cost=${result.total_cost:.2f}, "
+                f"Optimization complete (local): cost=${result.total_cost:.2f}, "
                 f"savings=${result.savings:.2f}, action={self._status.current_action.value}"
             )
 

@@ -379,11 +379,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
         # Set up data callbacks for executor
+        # The optimize callback allows the executor to use the add-on when available
         self._executor.set_data_callbacks(
             get_prices=self._get_price_forecast,
             get_solar=self._get_solar_forecast,
             get_load=self._get_load_forecast,
             get_battery_state=self._get_battery_state,
+            optimize=self.force_reoptimize,
         )
 
         # Check add-on availability
