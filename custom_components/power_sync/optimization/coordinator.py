@@ -1035,7 +1035,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def get_api_data(self) -> dict[str, Any]:
         """Get data for HTTP API and mobile app."""
-        executor_status = self._executor.get_status() if self._executor else {}
+        executor_status = self._executor.get_schedule_summary() if self._executor else {}
 
         # Build data for mobile app
         data = {
