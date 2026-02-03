@@ -211,6 +211,11 @@ from .const import (
     CONF_OPTIMIZATION_PROVIDER,
     OPT_PROVIDER_NATIVE,
     OPT_PROVIDER_POWERSYNC,
+    CONF_OPTIMIZATION_EV_INTEGRATION,
+    CONF_OPTIMIZATION_VPP_ENABLED,
+    CONF_OPTIMIZATION_MULTI_BATTERY,
+    CONF_OPTIMIZATION_ML_FORECASTING,
+    CONF_OPTIMIZATION_WEATHER_INTEGRATION,
 )
 from .inverters import get_inverter_controller
 from .optimization.coordinator import OptimizationCoordinator
@@ -12540,20 +12545,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return {"active": True, "type": "discharge", "expires_at": force_discharge_state.get("expires_at")}
                 return {"active": False}
 
+            # Load feature toggles from config entry (persisted from previous sessions)
+            enable_ev_integration = entry.data.get(CONF_OPTIMIZATION_EV_INTEGRATION, False)
+            enable_vpp = entry.data.get(CONF_OPTIMIZATION_VPP_ENABLED, False)
+            enable_multi_battery = entry.data.get(CONF_OPTIMIZATION_MULTI_BATTERY, False)
+            enable_ml_forecasting = entry.data.get(CONF_OPTIMIZATION_ML_FORECASTING, True)
+            enable_weather_integration = entry.data.get(CONF_OPTIMIZATION_WEATHER_INTEGRATION, False)
+
             optimization_coordinator = OptimizationCoordinator(
                 hass=hass,
                 entry_id=entry.entry_id,
+                entry=entry,  # Pass entry so coordinator can persist settings
                 battery_system=battery_system,
                 battery_controller=battery_controller,
                 price_coordinator=amber_coordinator or octopus_coordinator or aemo_sensor_coordinator,
                 energy_coordinator=energy_coordinator,
                 tariff_schedule=tariff_schedule,  # For Globird/TOU-based pricing
                 force_state_getter=get_force_state,  # For checking if force mode is active
-                enable_ml_forecasting=True,
-                enable_weather_integration=False,  # Can be enabled later
-                enable_ev_integration=False,
-                enable_multi_battery=False,
-                enable_vpp=False,
+                enable_ml_forecasting=enable_ml_forecasting,
+                enable_weather_integration=enable_weather_integration,
+                enable_ev_integration=enable_ev_integration,
+                enable_multi_battery=enable_multi_battery,
+                enable_vpp=enable_vpp,
             )
 
             # Set up the coordinator

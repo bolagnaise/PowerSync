@@ -994,6 +994,11 @@ CONF_OPTIMIZATION_COST_FUNCTION = "optimization_cost_function"
 CONF_OPTIMIZATION_BACKUP_RESERVE = "optimization_backup_reserve"
 CONF_OPTIMIZATION_INTERVAL = "optimization_interval"
 CONF_OPTIMIZATION_HORIZON = "optimization_horizon"
+CONF_OPTIMIZATION_EV_INTEGRATION = "optimization_ev_integration"
+CONF_OPTIMIZATION_VPP_ENABLED = "optimization_vpp_enabled"
+CONF_OPTIMIZATION_MULTI_BATTERY = "optimization_multi_battery"
+CONF_OPTIMIZATION_ML_FORECASTING = "optimization_ml_forecasting"
+CONF_OPTIMIZATION_WEATHER_INTEGRATION = "optimization_weather_integration"
 
 # Optimization cost functions
 COST_FUNCTION_COST = "cost"            # Minimize total electricity cost

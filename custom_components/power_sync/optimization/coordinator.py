@@ -123,6 +123,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         energy_coordinator: Any | None = None,
         tariff_schedule: dict | None = None,  # For Globird/TOU-based pricing
         force_state_getter: Callable[[], dict] | None = None,  # Get force charge/discharge state
+        entry: Any | None = None,  # Config entry for persisting settings
         # Enhanced options
         enable_ml_forecasting: bool = True,
         enable_weather_integration: bool = True,
@@ -142,6 +143,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             energy_coordinator: Coordinator providing energy data
             tariff_schedule: Tariff schedule dict for TOU-based pricing (Globird)
             force_state_getter: Callback to get force charge/discharge state
+            entry: ConfigEntry for persisting settings (used by set_settings)
             enable_ml_forecasting: Use ML-based load forecasting
             enable_weather_integration: Include weather in forecasts
             enable_ev_integration: Include EV charging in optimization
@@ -157,6 +159,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         self.hass = hass
         self.entry_id = entry_id
+        self._entry = entry  # ConfigEntry for persisting settings
         self.battery_system = battery_system
         self.battery_controller = battery_controller
         self.price_coordinator = price_coordinator
@@ -1917,17 +1920,57 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return response
 
         # Handle feature toggles
-        feature_toggles = ["ml_forecasting", "weather_integration", "ev_integration", "multi_battery", "vpp"]
-        for feature in feature_toggles:
-            if feature in settings:
-                attr_name = f"_enable_{feature.replace('_integration', '').replace('_', '_')}"
+        # Map API keys to internal attribute names and config entry keys
+        feature_map = {
+            # api_key: (attr_name, config_key)
+            "ml_forecasting": ("_enable_ml_forecasting", "CONF_OPTIMIZATION_ML_FORECASTING"),
+            "weather_integration": ("_enable_weather", "CONF_OPTIMIZATION_WEATHER_INTEGRATION"),
+            "ev_integration": ("_enable_ev", "CONF_OPTIMIZATION_EV_INTEGRATION"),
+            "multi_battery": ("_enable_multi_battery", "CONF_OPTIMIZATION_MULTI_BATTERY"),
+            "vpp": ("_enable_vpp", "CONF_OPTIMIZATION_VPP_ENABLED"),
+            "vpp_enabled": ("_enable_vpp", "CONF_OPTIMIZATION_VPP_ENABLED"),  # Alias
+        }
+
+        # Build config entry updates
+        config_entry_updates = {}
+
+        for api_key, (attr_name, config_const) in feature_map.items():
+            if api_key in settings:
+                value = settings[api_key]
                 if hasattr(self, attr_name):
-                    setattr(self, attr_name, settings[feature])
-                    response["changes"].append(f"{feature}: {settings[feature]}")
+                    setattr(self, attr_name, value)
+                    response["changes"].append(f"{api_key}: {value}")
+
+                    # Store in config entry updates
+                    from ..const import (
+                        CONF_OPTIMIZATION_EV_INTEGRATION,
+                        CONF_OPTIMIZATION_VPP_ENABLED,
+                        CONF_OPTIMIZATION_MULTI_BATTERY,
+                        CONF_OPTIMIZATION_ML_FORECASTING,
+                        CONF_OPTIMIZATION_WEATHER_INTEGRATION,
+                    )
+                    config_key_map = {
+                        "CONF_OPTIMIZATION_ML_FORECASTING": CONF_OPTIMIZATION_ML_FORECASTING,
+                        "CONF_OPTIMIZATION_WEATHER_INTEGRATION": CONF_OPTIMIZATION_WEATHER_INTEGRATION,
+                        "CONF_OPTIMIZATION_EV_INTEGRATION": CONF_OPTIMIZATION_EV_INTEGRATION,
+                        "CONF_OPTIMIZATION_MULTI_BATTERY": CONF_OPTIMIZATION_MULTI_BATTERY,
+                        "CONF_OPTIMIZATION_VPP_ENABLED": CONF_OPTIMIZATION_VPP_ENABLED,
+                    }
+                    config_entry_updates[config_key_map[config_const]] = value
 
                     # When EV integration is toggled, sync to auto_schedule_executor
-                    if feature == "ev_integration":
-                        self._sync_ev_integration_to_auto_scheduler(settings[feature])
+                    if api_key == "ev_integration":
+                        self._sync_ev_integration_to_auto_scheduler(value)
+
+        # Persist feature toggles to config entry so they survive restart
+        if config_entry_updates and self._entry:
+            try:
+                new_data = dict(self._entry.data)
+                new_data.update(config_entry_updates)
+                self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+                _LOGGER.info(f"🔧 Persisted ML optimization feature toggles: {list(config_entry_updates.keys())}")
+            except Exception as e:
+                _LOGGER.warning(f"Failed to persist feature toggles: {e}")
 
         # Handle config updates
         config_keys = [
