@@ -362,27 +362,73 @@ class SolcastForecaster:
                 solcast_coordinator = entry_data.get("solcast_coordinator")
                 if solcast_coordinator and solcast_coordinator.data:
                     coordinator_data = solcast_coordinator.data
-                    if "forecasts" in coordinator_data:
+
+                    # Check for raw forecast periods (preferred - full 48h data)
+                    forecasts = coordinator_data.get("forecasts")
+                    if forecasts and isinstance(forecasts, list) and len(forecasts) > 0:
                         return self._parse_solcast_data(
-                            coordinator_data["forecasts"],
+                            forecasts,
+                            start_time,
+                            n_intervals,
+                        )
+
+                    # Fallback to hourly_forecast (processed format from Solcast HA integration)
+                    hourly = coordinator_data.get("hourly_forecast")
+                    if hourly and isinstance(hourly, list) and len(hourly) > 0:
+                        return self._parse_hourly_forecast(
+                            hourly,
                             start_time,
                             n_intervals,
                         )
 
                 # Fallback to solcast_forecast key
                 solcast_data = entry_data.get("solcast_forecast")
-                if solcast_data and "forecasts" in solcast_data:
-                    return self._parse_solcast_data(
-                        solcast_data["forecasts"],
-                        start_time,
-                        n_intervals,
-                    )
+                if solcast_data:
+                    forecasts = solcast_data.get("forecasts")
+                    if forecasts and isinstance(forecasts, list) and len(forecasts) > 0:
+                        return self._parse_solcast_data(
+                            forecasts,
+                            start_time,
+                            n_intervals,
+                        )
 
             return None
 
         except Exception as e:
             _LOGGER.warning(f"Could not get Solcast forecast: {e}")
             return None
+
+    def _parse_hourly_forecast(
+        self,
+        hourly: list[dict[str, Any]],
+        start_time: datetime,
+        n_intervals: int,
+    ) -> list[float]:
+        """Parse hourly forecast format (from Solcast HA integration) into interval values.
+
+        This format has: time (HH:MM), hour (int), pv_estimate_kw (float)
+        """
+        # Build lookup by hour
+        forecast_by_hour: dict[int, float] = {}
+        for item in hourly:
+            try:
+                hour = item.get("hour", 0)
+                pv_kw = item.get("pv_estimate_kw", 0) or 0
+                forecast_by_hour[hour] = pv_kw * 1000  # Convert kW to W
+            except (KeyError, ValueError, TypeError):
+                continue
+
+        # Generate interval forecast
+        result = []
+        current_time = start_time
+
+        for _ in range(n_intervals):
+            hour = current_time.hour
+            # Use the hour's value, or 0 if not available (likely nighttime or future day)
+            result.append(forecast_by_hour.get(hour, 0.0))
+            current_time += timedelta(minutes=self.interval_minutes)
+
+        return result
 
     def _parse_solcast_data(
         self,

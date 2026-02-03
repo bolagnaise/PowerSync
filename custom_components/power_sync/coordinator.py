@@ -1341,7 +1341,8 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
     """Coordinator to fetch Solcast solar production forecasts.
 
     Fetches PV power forecasts from Solcast API and caches them locally.
-    Updates every 3 hours to stay within API limits (10 calls/day for hobbyist tier).
+    Dynamically adjusts update interval based on number of resource IDs to stay
+    within Solcast's 10 calls/day hobbyist tier limit.
 
     Supports multiple resource IDs for split arrays (e.g., east/west facing panels).
     Provide comma-separated resource IDs and forecasts will be combined by summing values.
@@ -1350,8 +1351,8 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
     # Solcast API base URL
     SOLCAST_API_URL = "https://api.solcast.com.au"
 
-    # Update interval - 3 hours to stay within 10 calls/day limit
-    UPDATE_INTERVAL = timedelta(hours=3)
+    # Solcast hobbyist tier: 10 API calls per day
+    DAILY_API_LIMIT = 10
 
     def __init__(
         self,
@@ -1379,12 +1380,44 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
         self._daily_forecast_kwh: float | None = None  # Full day's forecast
         self._daily_forecast_peak_kw: float | None = None  # Peak for the day
 
+        # Rate limiting tracking
+        self._rate_limited = False
+        self._last_rate_limit_time: datetime | None = None
+        self._api_calls_today = 0
+        self._api_calls_date: str | None = None
+
+        # Calculate update interval based on number of resources
+        # Each resource requires 1 API call per update
+        # With 10 calls/day limit: interval = 24 / (10 / n_resources) hours
+        n_resources = len(self._resource_ids)
+        calls_per_update = n_resources  # We skip estimated_actuals to save calls
+        max_updates_per_day = self.DAILY_API_LIMIT // calls_per_update
+        # Leave some buffer - aim for 80% of max to avoid hitting limit
+        safe_updates = max(1, int(max_updates_per_day * 0.8))
+        update_hours = max(3, 24 // safe_updates)  # Minimum 3 hours
+
+        self._update_interval = timedelta(hours=update_hours)
+
+        _LOGGER.info(
+            f"Solcast coordinator: {n_resources} resource(s), "
+            f"{calls_per_update} API call(s)/update, "
+            f"update interval: {update_hours}h ({safe_updates} updates/day)"
+        )
+
         super().__init__(
             hass,
             _LOGGER,
             name=f"{DOMAIN}_solcast_forecast",
-            update_interval=self.UPDATE_INTERVAL,
+            update_interval=self._update_interval,
         )
+
+    def _find_solcast_sensor(self, patterns: list[str]) -> Any | None:
+        """Find a Solcast sensor by trying multiple possible entity ID patterns."""
+        for pattern in patterns:
+            state = self.hass.states.get(pattern)
+            if state and state.state not in ("unavailable", "unknown", None, ""):
+                return state
+        return None
 
     async def _try_read_from_solcast_integration(self) -> dict[str, Any] | None:
         """Try to read forecast data from the Solcast HA integration.
@@ -1392,29 +1425,51 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
         If the Solcast integration is installed, we read from its sensors instead
         of making our own API calls. This avoids doubling API usage (10 calls/day limit).
 
-        Sensor entity IDs used:
-        - sensor.solcast_pv_forecast_forecast_today (kWh)
-        - sensor.solcast_pv_forecast_forecast_tomorrow (kWh)
-        - sensor.solcast_pv_forecast_forecast_remaining_today (kWh)
-        - sensor.solcast_pv_forecast_peak_forecast_today (W)
-        - sensor.solcast_pv_forecast_peak_forecast_tomorrow (W)
-        - sensor.solcast_pv_forecast_power_now (W)
+        Supports multiple naming conventions:
+        - sensor.solcast_pv_forecast_* (current Solcast integration)
+        - sensor.solcast_forecast_* (alternative naming)
+        - sensor.solcast_* (older versions)
 
         Returns:
             Forecast data dict if Solcast integration is available, None otherwise
         """
         try:
-            # Check for Solcast integration sensors - forecast_today is the key sensor
-            today_state = self.hass.states.get("sensor.solcast_pv_forecast_forecast_today")
-            if not today_state or today_state.state in ("unavailable", "unknown", None, ""):
+            # Try multiple possible sensor names for today's forecast
+            today_patterns = [
+                "sensor.solcast_pv_forecast_forecast_today",
+                "sensor.solcast_forecast_today",
+                "sensor.solcast_pv_forecast_today",
+            ]
+            today_state = self._find_solcast_sensor(today_patterns)
+            if not today_state:
                 return None
 
-            # Get all the sensor values
-            tomorrow_state = self.hass.states.get("sensor.solcast_pv_forecast_forecast_tomorrow")
-            remaining_state = self.hass.states.get("sensor.solcast_pv_forecast_forecast_remaining_today")
-            peak_today_state = self.hass.states.get("sensor.solcast_pv_forecast_peak_forecast_today")
-            peak_tomorrow_state = self.hass.states.get("sensor.solcast_pv_forecast_peak_forecast_tomorrow")
-            power_now_state = self.hass.states.get("sensor.solcast_pv_forecast_power_now")
+            # Get all the sensor values - try multiple naming patterns
+            tomorrow_state = self._find_solcast_sensor([
+                "sensor.solcast_pv_forecast_forecast_tomorrow",
+                "sensor.solcast_forecast_tomorrow",
+                "sensor.solcast_pv_forecast_tomorrow",
+            ])
+            remaining_state = self._find_solcast_sensor([
+                "sensor.solcast_pv_forecast_forecast_remaining_today",
+                "sensor.solcast_forecast_remaining_today",
+                "sensor.solcast_pv_forecast_remaining_today",
+            ])
+            peak_today_state = self._find_solcast_sensor([
+                "sensor.solcast_pv_forecast_peak_forecast_today",
+                "sensor.solcast_peak_forecast_today",
+                "sensor.solcast_pv_forecast_peak_today",
+            ])
+            peak_tomorrow_state = self._find_solcast_sensor([
+                "sensor.solcast_pv_forecast_peak_forecast_tomorrow",
+                "sensor.solcast_peak_forecast_tomorrow",
+                "sensor.solcast_pv_forecast_peak_tomorrow",
+            ])
+            power_now_state = self._find_solcast_sensor([
+                "sensor.solcast_pv_forecast_power_now",
+                "sensor.solcast_power_now",
+                "sensor.solcast_pv_forecast_now",
+            ])
 
             # Parse values - these are already in kWh
             today_forecast = float(today_state.state) if today_state.state else 0
@@ -1474,10 +1529,33 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                     except (ValueError, TypeError, KeyError):
                         continue
 
+            # Try to also get tomorrow's detailed forecast for optimizer (48h horizon)
+            # Check the tomorrow forecast sensor for detailed data
+            tomorrow_detailed = None
+            tomorrow_state_obj = self._find_solcast_sensor([
+                "sensor.solcast_pv_forecast_forecast_tomorrow",
+                "sensor.solcast_forecast_tomorrow",
+                "sensor.solcast_pv_forecast_tomorrow",
+            ])
+            if tomorrow_state_obj and tomorrow_state_obj.attributes:
+                tomorrow_detailed = (
+                    tomorrow_state_obj.attributes.get("detailedForecast") or
+                    tomorrow_state_obj.attributes.get("forecast_tomorrow") or
+                    tomorrow_state_obj.attributes.get("detailedHourly") or
+                    tomorrow_state_obj.attributes.get("forecasts")
+                )
+
+            # Combine today and tomorrow forecasts for optimizer
+            full_forecasts = []
+            if detailed_forecast and isinstance(detailed_forecast, list):
+                full_forecasts.extend(detailed_forecast)
+            if tomorrow_detailed and isinstance(tomorrow_detailed, list):
+                full_forecasts.extend(tomorrow_detailed)
+
             _LOGGER.info(
                 f"Solcast (from HA integration): Today={today_forecast:.1f}kWh, "
                 f"remaining={remaining:.1f}kWh, Tomorrow={tomorrow_forecast:.1f}kWh, "
-                f"hourly_points={len(hourly_forecast)}"
+                f"hourly_points={len(hourly_forecast)}, raw_periods={len(full_forecasts)}"
             )
 
             return {
@@ -1490,7 +1568,8 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                 "tomorrow_peak_kw": round(tomorrow_peak, 2) if tomorrow_peak else None,
                 "current_estimate_kw": round(current_estimate, 2) if current_estimate else None,
                 "hourly_forecast": hourly_forecast,  # For chart overlay
-                "forecast_periods": len(hourly_forecast),
+                "forecasts": full_forecasts if full_forecasts else None,  # Raw periods for optimizer
+                "forecast_periods": len(full_forecasts) if full_forecasts else len(hourly_forecast),
                 "last_update": dt_util.utcnow(),
                 "source": "solcast_integration",
             }
@@ -1519,7 +1598,13 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             if response.status == 401:
                 raise UpdateFailed("Solcast API authentication failed - check API key")
             if response.status == 429:
-                _LOGGER.warning(f"Solcast API rate limit for resource {resource_id[:8]}...")
+                self._rate_limited = True
+                self._last_rate_limit_time = dt_util.now()
+                _LOGGER.warning(
+                    f"Solcast API rate limit hit for resource {resource_id[:8]}... "
+                    f"(API calls today: {self._api_calls_today}/{self.DAILY_API_LIMIT}). "
+                    f"Will use cached data until tomorrow."
+                )
                 return None
             if response.status != 200:
                 _LOGGER.error(f"Solcast API error for resource {resource_id[:8]}: {response.status}")
@@ -1593,6 +1678,17 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
 
         return combined
 
+    def _track_api_call(self) -> None:
+        """Track API call for rate limit awareness."""
+        today_str = dt_util.now().strftime("%Y-%m-%d")
+        if self._api_calls_date != today_str:
+            # New day - reset counter
+            self._api_calls_date = today_str
+            self._api_calls_today = 0
+            self._rate_limited = False
+
+        self._api_calls_today += 1
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch forecast data from Solcast.
 
@@ -1601,6 +1697,11 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
         Solcast integration is not available.
 
         Supports multiple resource IDs - values are combined by summing.
+
+        IMPORTANT: We skip estimated_actuals API calls to conserve API budget.
+        The hobbyist tier only allows 10 calls/day, and with split arrays each
+        resource requires its own call. Estimated actuals are optional - we use
+        cached full-day forecasts instead.
         """
         # First, check if Solcast HA integration is installed and has data
         # This avoids doubling API calls if user has both integrations
@@ -1609,39 +1710,45 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Using data from Solcast HA integration (no API calls needed)")
             return solcast_data
 
+        # Check if we're rate limited
+        if self._rate_limited:
+            _LOGGER.warning(
+                f"Solcast API rate limited - using cached data. "
+                f"API calls today: {self._api_calls_today}/{self.DAILY_API_LIMIT}"
+            )
+            return self.data or {"available": False}
+
         # Solcast integration not available - make our own API calls
         try:
             async with asyncio.timeout(60):  # Longer timeout for multiple API calls
+                # Track that we're making API calls
+                n_resources = len(self._resource_ids)
+                _LOGGER.info(
+                    f"Fetching Solcast forecast for {n_resources} resource(s). "
+                    f"API calls today: {self._api_calls_today}/{self.DAILY_API_LIMIT}"
+                )
+
                 # Fetch forecasts from first resource
+                self._track_api_call()
                 forecasts = await self._fetch_forecast_for_resource(self._resource_ids[0])
                 if not forecasts:
                     _LOGGER.warning("No forecasts from Solcast API")
                     return self.data or {"available": False}
 
-                # Try to fetch estimated actuals (past production based on satellite data)
-                # This is optional - if it fails, we'll use cached full-day forecast
+                # NOTE: We intentionally skip estimated_actuals to save API calls
+                # With 10 calls/day limit and split arrays, we need to conserve budget
+                # The full-day forecast will be estimated from cached values instead
                 estimated_actuals = None
-                try:
-                    estimated_actuals = await self._fetch_estimated_actuals_for_resource(self._resource_ids[0])
-                except Exception as e:
-                    _LOGGER.debug(f"Could not fetch estimated_actuals: {e}")
 
                 # If multiple resources, fetch and combine
                 if len(self._resource_ids) > 1:
                     for resource_id in self._resource_ids[1:]:
+                        self._track_api_call()
                         additional_forecasts = await self._fetch_forecast_for_resource(resource_id)
                         if additional_forecasts:
                             forecasts = self._combine_forecasts(forecasts, additional_forecasts)
                         else:
                             _LOGGER.warning(f"Failed to fetch forecast from resource {resource_id[:8]}...")
-
-                        if estimated_actuals:
-                            try:
-                                additional_actuals = await self._fetch_estimated_actuals_for_resource(resource_id)
-                                if additional_actuals:
-                                    estimated_actuals = self._combine_forecasts(estimated_actuals, additional_actuals)
-                            except Exception:
-                                pass
 
                     _LOGGER.info(f"Combined data from {len(self._resource_ids)} Solcast sites")
 
@@ -1747,7 +1854,9 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                 "tomorrow_peak_kw": round(tomorrow_peak, 2),
                 "current_estimate_kw": round(current_estimate, 2) if current_estimate else None,
                 "forecast_periods": len(forecasts),
+                "forecasts": forecasts,  # Raw forecast periods for optimizer
                 "last_update": dt_util.utcnow(),
+                "source": "api",
             }
 
         except asyncio.TimeoutError as err:
