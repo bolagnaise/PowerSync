@@ -316,6 +316,25 @@ class BatteryOptimiser:
         solar = np.array(solar_forecast)    # W
         load = np.array(load_forecast)      # W
 
+        # Validate and clean input data
+        p_import = np.nan_to_num(p_import, nan=0.30, posinf=1.0, neginf=-0.10)
+        p_export = np.nan_to_num(p_export, nan=0.05, posinf=1.0, neginf=-0.10)
+        solar = np.nan_to_num(solar, nan=0.0, posinf=10000.0, neginf=0.0)
+        load = np.nan_to_num(load, nan=0.0, posinf=10000.0, neginf=0.0)
+        solar = np.maximum(solar, 0)
+        load = np.maximum(load, 0)
+
+        # CRITICAL: Validate initial_soc to prevent infeasible constraints
+        if np.isnan(initial_soc) or np.isinf(initial_soc):
+            _LOGGER.warning(f"Invalid initial_soc: {initial_soc}, using 0.5")
+            initial_soc = 0.5
+        initial_soc = float(np.clip(initial_soc, 0.0, 1.0))
+
+        # Ensure initial_soc doesn't exceed max_soc
+        if initial_soc > cfg.max_soc:
+            _LOGGER.warning(f"initial_soc ({initial_soc:.2%}) > max_soc ({cfg.max_soc:.2%}), clamping")
+            initial_soc = cfg.max_soc
+
         # Time interval in hours
         dt_hours = cfg.interval_minutes / 60.0
 
@@ -377,25 +396,34 @@ class BatteryOptimiser:
                     constraints.append(charge[t] <= excess_solar)
                 # else: price <= 0, allow grid charging (it's free or they pay us!)
 
+        # CRITICAL: Penalty for simultaneous charge and discharge
+        # This should never happen - wastes energy due to round-trip efficiency losses
+        # We penalize the minimum of charge and discharge to discourage both being non-zero
+        SIMULTANEOUS_PENALTY = 100.0  # $/kWh penalty
+        simultaneous_penalty = SIMULTANEOUS_PENALTY * cp.sum(
+            cp.minimum(charge, discharge)
+        ) * dt_hours / 1000
+
         # Objective function
         if cfg.cost_function == CostFunction.COST_MINIMIZATION:
             # Minimize: sum of (import_price * grid_import - export_price * grid_export)
             # Convert W to kWh: power * dt_hours / 1000
             import_cost = cp.sum(cp.multiply(p_import, grid_import)) * dt_hours / 1000
             export_revenue = cp.sum(cp.multiply(p_export, grid_export)) * dt_hours / 1000
-            objective = cp.Minimize(import_cost - export_revenue)
+            objective = cp.Minimize(import_cost - export_revenue + simultaneous_penalty)
 
         elif cfg.cost_function == CostFunction.PROFIT_MAXIMIZATION:
-            # Maximize: export revenue - import cost
+            # Maximize: export revenue - import cost (with penalty for simultaneous charge/discharge)
             import_cost = cp.sum(cp.multiply(p_import, grid_import)) * dt_hours / 1000
             export_revenue = cp.sum(cp.multiply(p_export, grid_export)) * dt_hours / 1000
-            objective = cp.Maximize(export_revenue - import_cost)
+            # For Maximize, we need to subtract the penalty (or add it to the negative of revenue)
+            objective = cp.Minimize(import_cost - export_revenue + simultaneous_penalty)
 
         else:  # SELF_CONSUMPTION
             # Minimize grid import (high weight) with small cost consideration
             import_penalty = cp.sum(grid_import) * 1000  # Heavy penalty on imports
             import_cost = cp.sum(cp.multiply(p_import, grid_import)) * dt_hours / 1000
-            objective = cp.Minimize(import_penalty + import_cost)
+            objective = cp.Minimize(import_penalty + import_cost + simultaneous_penalty)
 
         # Add cycle cost if specified
         if cfg.cycle_cost > 0:
@@ -421,9 +449,19 @@ class BatteryOptimiser:
 
         # Check solution status
         if problem.status not in [cp.OPTIMAL, cp.OPTIMAL_INACCURATE]:
+            _LOGGER.warning(f"Optimization failed with status: {problem.status}")
             return OptimizationResult(
                 success=False,
                 status=f"Solver status: {problem.status}",
+                solver_name=solver_name,
+            )
+
+        # Check for None values (solver didn't find solution)
+        if charge.value is None or discharge.value is None:
+            _LOGGER.error("Solver returned None values - optimization failed")
+            return OptimizationResult(
+                success=False,
+                status="Solver returned no solution",
                 solver_name=solver_name,
             )
 
@@ -433,6 +471,17 @@ class BatteryOptimiser:
         import_w = np.maximum(grid_import.value, 0).tolist()
         export_w = np.maximum(grid_export.value, 0).tolist()
         soc_values = np.clip(soc.value, 0, 1).tolist()
+
+        # SANITY CHECK: Detect impossible simultaneous charge and discharge
+        # If both happen at same interval, zero out the smaller one
+        for t in range(n_intervals):
+            if charge_w[t] > 10 and discharge_w[t] > 10:  # Both non-trivial
+                _LOGGER.warning(f"Interval {t}: Impossible state - charge={charge_w[t]:.0f}W AND discharge={discharge_w[t]:.0f}W. Correcting.")
+                # Keep the larger one, zero the smaller
+                if charge_w[t] > discharge_w[t]:
+                    discharge_w[t] = 0
+                else:
+                    charge_w[t] = 0
 
         # Generate timestamps
         timestamps = [
