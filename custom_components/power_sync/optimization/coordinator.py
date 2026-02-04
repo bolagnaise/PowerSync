@@ -626,7 +626,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug(f"Discovered {len(vehicles)} Tesla vehicles for ML optimization")
 
             # Get auto-schedule executor for charging settings
-            auto_executor = await get_auto_schedule_executor(self.hass, config_entry)
+            auto_executor = get_auto_schedule_executor()
 
             for vehicle in vehicles:
                 vin = vehicle.get("vin", "")
