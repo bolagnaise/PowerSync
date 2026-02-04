@@ -4,7 +4,6 @@ views:
     path: energy
     icon: mdi:lightning-bolt
     cards:
-      # Compact Gauges
       - type: horizontal-stack
         cards:
           - type: gauge
@@ -12,12 +11,12 @@ views:
             name: Import
             unit: $/kWh
             min: 0
-            max: 0.60
+            max: 0.6
             needle: true
             severity:
               green: 0
               yellow: 0.25
-              red: 0.40
+              red: 0.4
             card_mod:
               style: |
                 ha-card {
@@ -27,11 +26,11 @@ views:
             entity: sensor.current_export_price
             name: Export Earnings
             unit: $/kWh
-            min: -0.10
-            max: 0.30
+            min: -0.1
+            max: 0.3
             needle: true
             severity:
-              red: -0.10
+              red: -0.1
               yellow: 0
               green: 0.05
             card_mod:
@@ -55,64 +54,186 @@ views:
                 ha-card {
                   height: 140px;
                 }
-      # Battery Control Buttons
-      # OPTIONAL: Create input_select helpers for variable duration via Settings > Devices > Helpers > Dropdown:
-      #    - Name: Force Charge Duration | Entity ID: input_select.force_charge_duration | Options: 15, 30, 45, 60, 90, 120, 150, 180, 210, 240
-      #    - Name: Force Discharge Duration | Entity ID: input_select.force_discharge_duration | Options: 15, 30, 45, 60, 90, 120, 150, 180, 210, 240
-      # If helpers are created, the buttons will use the selected duration. Otherwise defaults to 30 minutes.
-      - type: custom:mushroom-chips-card
-        alignment: center
-        chips:
-          # Force Charge Duration Selector (optional - only works if helper exists)
-          - type: template
-            icon: mdi:timer-outline
-            icon_color: blue
-            content: "{{ states('input_select.force_charge_duration') | default('30', true) }} min"
-            tap_action:
-              action: more-info
-              entity: input_select.force_charge_duration
-          # Force Charge Button
-          - type: template
-            icon: mdi:battery-charging
-            icon_color: blue
-            content: Force Charge
-            tap_action:
-              action: call-service
-              service: power_sync.force_charge
-              data:
-                duration: "{{ states('input_select.force_charge_duration') | default('30', true) | int }}"
-              confirmation:
-                text: "Force charge for {{ states('input_select.force_charge_duration') | default('30', true) }} minutes?"
-          # Force Discharge Duration Selector (optional - only works if helper exists)
-          - type: template
-            icon: mdi:timer-outline
-            icon_color: orange
-            content: "{{ states('input_select.force_discharge_duration') | default('30', true) }} min"
-            tap_action:
-              action: more-info
-              entity: input_select.force_discharge_duration
-          # Force Discharge Button
-          - type: template
-            icon: mdi:battery-arrow-down
-            icon_color: orange
-            content: Force Discharge
-            tap_action:
-              action: call-service
-              service: power_sync.force_discharge
-              data:
-                duration: "{{ states('input_select.force_discharge_duration') | default('30', true) | int }}"
-              confirmation:
-                text: "Force discharge for {{ states('input_select.force_discharge_duration') | default('30', true) }} minutes?"
-          # Restore Normal
-          - type: template
-            icon: mdi:battery-sync
-            icon_color: green
-            content: Restore Normal
-            tap_action:
-              action: call-service
-              service: power_sync.restore_normal
-              confirmation:
-                text: Restore normal battery operation?
+      - type: vertical-stack
+        cards:
+          - square: false
+            type: grid
+            columns: 4
+            cards:
+              - type: custom:button-card
+                entity: select.power_sync_force_charge_duration
+                show_name: true
+                show_icon: true
+                icon: mdi:timer-outline
+                name: |-
+                  [[[ return (states['select.power_sync_force_charge_duration']
+                    ? states['select.power_sync_force_charge_duration'].state 
+                    : '30') + ' min' ]]]
+                styles:
+                  card:
+                    - height: 36px
+                    - border-radius: 18px
+                    - padding: 0px 12px
+                    - background: rgba(var(--rgb-blue-color, 33, 150, 243), 0.1)
+                  grid:
+                    - grid-template-areas: '"i n"'
+                    - grid-template-columns: 20px 1fr
+                    - align-items: center
+                    - padding: 2px 2px
+                  icon:
+                    - grid-area: i
+                    - justify-self: start
+                    - width: 24px
+                    - height: 24px
+                    - color: 'var(--green-color, #4CAF50)'
+                  name:
+                    - grid-area: 'n'
+                    - font-size: 14px
+                    - padding-left: 12px
+                    - font-weight: 600
+                tap_action:
+                  action: more-info
+              - type: custom:button-card
+                name: Charge
+                icon: mdi:battery-charging
+                styles:
+                  card:
+                    - height: 36px
+                    - border-radius: 18px
+                    - padding: 0px 12px
+                    - background: rgba(var(--rgb-blue-color, 33, 150, 243), 0.1)
+                  grid:
+                    - grid-template-areas: '"i n"'
+                    - grid-template-columns: 20px 1fr
+                    - align-items: center
+                    - padding: 2px 2px
+                  icon:
+                    - grid-area: i
+                    - justify-self: start
+                    - width: 24px
+                    - height: 24px
+                    - color: 'var(--green-color, #4CAF50)'
+                  name:
+                    - grid-area: 'n'
+                    - font-size: 14px
+                    - padding-left: 12px
+                    - font-weight: 600
+                tap_action:
+                  action: call-service
+                  service: power_sync.force_charge
+                  data:
+                    duration: |-
+                      [[[ return (states['select.power_sync_force_charge_duration']
+                        ? states['select.power_sync_force_charge_duration'].state
+                        : '30'); ]]]
+                  confirmation:
+                    text: >-
+                      [[[ return 'Force charge for ' +
+                      (states['select.power_sync_force_charge_duration']
+                        ? states['select.power_sync_force_charge_duration'].state
+                        : '30') + ' minutes?' ]]]
+              - type: custom:button-card
+                entity: select.power_sync_force_discharge_duration
+                show_name: true
+                show_icon: true
+                icon: mdi:timer-outline
+                name: |-
+                  [[[ return (states['select.power_sync_force_discharge_duration']
+                    ? states['select.power_sync_force_discharge_duration'].state
+                    : '30') + ' min' ]]]
+                styles:
+                  card:
+                    - height: 36px
+                    - border-radius: 18px
+                    - padding: 0px 12px
+                    - background: rgba(var(--rgb-orange-color, 255, 152, 0), 0.1)
+                  grid:
+                    - grid-template-areas: '"i n"'
+                    - grid-template-columns: 20px 1fr
+                    - align-items: center
+                    - padding: 2px 2px
+                  icon:
+                    - grid-area: i
+                    - justify-self: start
+                    - width: 24px
+                    - height: 24px
+                    - color: 'var(--green-color, #4CAF50)'
+                  name:
+                    - grid-area: 'n'
+                    - font-size: 14px
+                    - padding-left: 12px
+                    - font-weight: 600
+                tap_action:
+                  action: more-info
+              - type: custom:button-card
+                name: Discharge
+                icon: mdi:battery-arrow-down
+                styles:
+                  card:
+                    - height: 36px
+                    - border-radius: 18px
+                    - padding: 0px 12px
+                    - background: rgba(var(--rgb-orange-color, 255, 152, 0), 0.1)
+                  grid:
+                    - grid-template-areas: '"i n"'
+                    - grid-template-columns: 20px 1fr
+                    - align-items: center
+                    - padding: 2px 2px
+                  icon:
+                    - grid-area: i
+                    - justify-self: start
+                    - width: 24px
+                    - height: 24px
+                    - color: 'var(--green-color, #4CAF50)'
+                  name:
+                    - grid-area: 'n'
+                    - font-size: 12px
+                    - padding-left: 12px
+                    - font-weight: 600
+                tap_action:
+                  action: call-service
+                  service: power_sync.force_discharge
+                  data:
+                    duration: |-
+                      [[[ return (states['select.power_sync_force_discharge_duration']
+                        ? states['select.power_sync_force_discharge_duration'].state
+                        : '30'); ]]]
+                  confirmation:
+                    text: >-
+                      [[[ return 'Force discharge for ' +
+                      (states['select.power_sync_force_discharge_duration']
+                        ? states['select.power_sync_force_discharge_duration'].state
+                        : '30') + ' minutes?' ]]]
+          - square: false
+            type: grid
+            columns: 1
+            cards:
+              - type: custom:button-card
+                name: Restore
+                icon: mdi:battery-sync
+                styles:
+                  card:
+                    - height: 40px
+                    - border-radius: 18px
+                    - padding: 4px 12px
+                    - background: rgba(var(--rgb-green-color, 76, 175, 80), 0.1)
+                  grid:
+                    - grid-template-areas: '"i n"'
+                    - grid-template-columns: 24px 1fr
+                  icon:
+                    - grid-area: i
+                    - width: 24px
+                    - color: 'var(--green-color, #4CAF50)'
+                  name:
+                    - grid-area: 'n'
+                    - text-align: left
+                    - padding-left: 8px
+                    - font-weight: 600
+                tap_action:
+                  action: call-service
+                  service: power_sync.restore_normal
+                  confirmation:
+                    text: Restore normal battery operation?
       - type: custom:power-flow-card-plus
         entities:
           battery:
@@ -192,7 +313,7 @@ views:
           tooltip:
             x:
               format: HH:mm
-            y:
+            'y':
               formatter: |
                 EVAL:function(value) {
                   if (value === null || value === undefined) return '';
@@ -229,17 +350,24 @@ views:
             stroke_width: 2
             curve: stepline
             extend_to: end
-            data_generator: >
+            data_generator: |
               const now = new Date();
-              const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+              const today = new Date(now.getFullYear(), now.getMonth(),
+              now.getDate());
+
               const currentDow = now.getDay();
+
               let data = [];
 
+
               // Amber format: schedule with time-based entries
-              const schedule = entity.attributes.schedule || [];
+
+              const schedule = entity?.attributes?.schedule || [];
+
               if (schedule.length > 0) {
                 data = schedule.map((entry) => {
-                  const [hours, mins] = entry.time.split(':').map(Number);
+                  const [hours, mins] = String(entry.time).split(':').map(Number);
                   const timestamp = new Date(today.getTime() + hours * 3600000 + mins * 60000);
                   return [timestamp.getTime(), entry.buy];
                 });
@@ -249,9 +377,8 @@ views:
                 }
                 return data;
               }
+              const touSchedule = entity?.attributes?.tou_schedule || [];
 
-              // Tesla/Globird format: tou_schedule with periods and time windows
-              const touSchedule = entity.attributes.tou_schedule || [];
               if (touSchedule.length > 0) {
                 const hourlyPrices = new Array(24).fill(null);
                 touSchedule.forEach((period) => {
@@ -271,7 +398,7 @@ views:
                     }
                   });
                 });
-                const defaultPrice = entity.attributes.buy_price || touSchedule[0]?.buy || 0;
+                const defaultPrice = entity?.attributes?.buy_price || touSchedule[0]?.buy || 0;
                 for (let h = 0; h < 24; h++) {
                   if (hourlyPrices[h] === null) hourlyPrices[h] = defaultPrice;
                   const timestamp = new Date(today.getTime() + h * 3600000);
@@ -282,14 +409,18 @@ views:
                 return data;
               }
 
+
               // Fallback: use current buy_price as flat line
-              const buyPrice = entity.attributes.buy_price;
+
+              const buyPrice = entity?.attributes?.buy_price;
+
               if (buyPrice !== undefined) {
                 return [
                   [today.getTime(), buyPrice],
                   [new Date(today.getTime() + 24 * 3600000 - 1).getTime(), buyPrice]
                 ];
               }
+
               return [];
           - entity: sensor.tariff_schedule
             name: Sell Price
@@ -299,17 +430,24 @@ views:
             stroke_width: 2
             curve: stepline
             extend_to: end
-            data_generator: >
+            data_generator: |
               const now = new Date();
-              const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+              const today = new Date(now.getFullYear(), now.getMonth(),
+              now.getDate());
+
               const currentDow = now.getDay();
+
               let data = [];
 
+
               // Amber format: schedule with time-based entries
-              const schedule = entity.attributes.schedule || [];
+
+              const schedule = entity?.attributes?.schedule || [];
+
               if (schedule.length > 0) {
                 data = schedule.map((entry) => {
-                  const [hours, mins] = entry.time.split(':').map(Number);
+                  const [hours, mins] = String(entry.time).split(':').map(Number);
                   const timestamp = new Date(today.getTime() + hours * 3600000 + mins * 60000);
                   return [timestamp.getTime(), entry.sell];
                 });
@@ -319,9 +457,8 @@ views:
                 }
                 return data;
               }
+              const touSchedule = entity?.attributes?.tou_schedule || [];
 
-              // Tesla/Globird format: tou_schedule with periods and time windows
-              const touSchedule = entity.attributes.tou_schedule || [];
               if (touSchedule.length > 0) {
                 const hourlyPrices = new Array(24).fill(null);
                 touSchedule.forEach((period) => {
@@ -341,7 +478,7 @@ views:
                     }
                   });
                 });
-                const defaultPrice = entity.attributes.sell_price || touSchedule[0]?.sell || 0;
+                const defaultPrice = entity?.attributes?.sell_price || touSchedule[0]?.sell || 0;
                 for (let h = 0; h < 24; h++) {
                   if (hourlyPrices[h] === null) hourlyPrices[h] = defaultPrice;
                   const timestamp = new Date(today.getTime() + h * 3600000);
@@ -352,14 +489,18 @@ views:
                 return data;
               }
 
+
               // Fallback: use current sell_price as flat line
-              const sellPrice = entity.attributes.sell_price;
+
+              const sellPrice = entity?.attributes?.sell_price;
+
               if (sellPrice !== undefined) {
                 return [
                   [today.getTime(), sellPrice],
                   [new Date(today.getTime() + 24 * 3600000 - 1).getTime(), sellPrice]
                 ];
               }
+
               return [];
         apex_config:
           chart:
@@ -372,7 +513,7 @@ views:
           tooltip:
             x:
               format: HH:mm
-            y:
+            'y':
               formatter: |
                 EVAL:function(value) {
                   if (value === null || value === undefined) return '';
@@ -381,127 +522,152 @@ views:
                   }
                   return value.toFixed(1) + '¢';
                 }
-      # Solar Curtailment Status Cards - Side by Side
       - type: horizontal-stack
         cards:
-          # DC Solar Curtailment (Tesla Powerwall)
-          - type: custom:mushroom-template-card
+          - type: custom:button-card
             entity: sensor.dc_solar_curtailment
-            primary: DC Solar (Tesla)
-            secondary: >-
-              {% set state = states('sensor.dc_solar_curtailment') %}
-              {% if state == 'Active' %}
-              CURTAILED - Export blocked
-              {% else %}
-              Normal - Export allowed
-              {% endif %}
-            icon: >-
-              {% set state = states('sensor.dc_solar_curtailment') %}
-              {% if state == 'Active' %}
-              mdi:solar-power-variant-outline
-              {% else %}
-              mdi:solar-power-variant
-              {% endif %}
-            icon_color: >-
-              {% set state = states('sensor.dc_solar_curtailment') %}
-              {% if state == 'Active' %}
-              red
-              {% else %}
-              green
-              {% endif %}
-            badge_icon: >-
-              {% set state = states('sensor.dc_solar_curtailment') %}
-              {% if state == 'Active' %}
-              mdi:close-circle
-              {% endif %}
-            badge_color: red
+            name: DC Solar (Tesla)
+            show_icon: true
+            show_name: true
+            show_label: true
+            label: |-
+              [[[
+                const state = states['sensor.dc_solar_curtailment']?.state;
+                if (state === 'Active') return 'CURTAILED - Export blocked';
+                return 'Normal - Export allowed';
+              ]]]
+            icon: |-
+              [[[
+                const state = states['sensor.dc_solar_curtailment']?.state;
+                return state === 'Active'
+                  ? 'mdi:solar-power-variant-outline'
+                  : 'mdi:solar-power-variant';
+              ]]]
+            styles:
+              card:
+                - border-radius: 16px
+                - padding: 12px
+                - background: |-
+                    [[[
+                      const state = states['sensor.dc_solar_curtailment']?.state;
+                      return state === 'Active'
+                        ? 'linear-gradient(135deg, rgba(244, 67, 54, 0.15) 0%, rgba(244, 67, 54, 0.05) 100%)'
+                        : 'linear-gradient(135deg, rgba(76, 175, 80, 0.15) 0%, rgba(76, 175, 80, 0.05) 100%)';
+                    ]]]
+              grid:
+                - grid-template-areas: '"i n" "i l"'
+                - grid-template-columns: min-content 1fr
+                - column-gap: 10px
+                - row-gap: 2px
+                - align-items: center
+              icon:
+                - width: 28px
+                - color: |-
+                    [[[
+                      const state = states['sensor.dc_solar_curtailment']?.state;
+                      return state === 'Active' ? 'var(--red-color)' : 'var(--green-color)';
+                    ]]]
+              name:
+                - justify-self: start
+                - font-weight: 700
+                - font-size: 16px
+              label:
+                - justify-self: start
+                - opacity: 0.85
+                - font-size: 14px
             tap_action:
               action: more-info
-            card_mod:
-              style: |
-                ha-card {
-                  {% set state = states('sensor.dc_solar_curtailment') %}
-                  {% if state == 'Active' %}
-                  background: linear-gradient(135deg, rgba(244, 67, 54, 0.15) 0%, rgba(244, 67, 54, 0.05) 100%);
-                  {% else %}
-                  background: linear-gradient(135deg, rgba(76, 175, 80, 0.15) 0%, rgba(76, 175, 80, 0.05) 100%);
-                  {% endif %}
-                }
-          # AC-Coupled Inverter Status
-          # Sleep detection: night (sun below horizon) + low power (< 100W) = sleep mode
-          - type: custom:mushroom-template-card
+          - type: custom:button-card
             entity: sensor.inverter_status
-            primary: AC Inverter
-            secondary: >-
-              {% set raw_state = states('sensor.inverter_status') | lower %}
-              {% set power = state_attr('sensor.inverter_status', 'power_limit_percent') %}
-              {% set power_w = state_attr('sensor.inverter_status', 'power_output_w') | float(0) %}
-              {% set brand = state_attr('sensor.inverter_status', 'brand') %}
-              {% set running = state_attr('sensor.inverter_status', 'running_state') | default('') | lower %}
-              {% set is_night = states('sun.sun') == 'below_horizon' %}
-              {% set is_sleep = is_night and (power_w < 100 or running == 'stopped') and raw_state not in ['offline', 'error', 'unavailable', 'unknown'] %}
-              {% set state = 'sleep' if is_sleep else raw_state %}
-              {% if state == 'unavailable' or state == 'unknown' %}
-              Not configured
-              {% elif state == 'curtailed' %}
-              CURTAILED{% if power %} - {{ power }}%{% endif %}
-              {% elif state == 'sleep' %}
-              Sleep{% if power_w > 0 %} (PID recovery){% endif %}
-              {% elif state == 'offline' %}
-              Offline - Cannot reach
-              {% elif state == 'error' %}
-              Error - Check logs
-              {% elif state in ['online', 'running', 'normal'] %}
-              {{ brand | title if brand else 'Online' }}{% if power_w %} - {{ power_w | int }}W{% endif %}
-              {% else %}
-              {{ brand | title if brand else 'Normal' }}{% if power %} - {{ power }}%{% endif %}
-              {% endif %}
-            icon: >-
-              {% set raw_state = states('sensor.inverter_status') | lower %}
-              {% set power_w = state_attr('sensor.inverter_status', 'power_output_w') | float(0) %}
-              {% set running = state_attr('sensor.inverter_status', 'running_state') | default('') | lower %}
-              {% set is_night = states('sun.sun') == 'below_horizon' %}
-              {% set is_sleep = is_night and (power_w < 100 or running == 'stopped') and raw_state not in ['offline', 'error', 'unavailable', 'unknown'] %}
-              {% set state = 'sleep' if is_sleep else raw_state %}
-              {% if state == 'sleep' %}
-              mdi:moon-waning-crescent
-              {% elif state == 'error' %}
-              mdi:alert-octagon
-              {% else %}
-              mdi:solar-panel
-              {% endif %}
-            icon_color: >-
-              {% set raw_state = states('sensor.inverter_status') | lower %}
-              {% set power_w = state_attr('sensor.inverter_status', 'power_output_w') | float(0) %}
-              {% set running = state_attr('sensor.inverter_status', 'running_state') | default('') | lower %}
-              {% set is_night = states('sun.sun') == 'below_horizon' %}
-              {% set is_sleep = is_night and (power_w < 100 or running == 'stopped') and raw_state not in ['offline', 'error', 'unavailable', 'unknown'] %}
-              {% set state = 'sleep' if is_sleep else raw_state %}
-              {% if state == 'curtailed' %}
-              red
-              {% elif state == 'sleep' %}
-              blue-grey
-              {% elif state == 'offline' or state == 'error' %}
-              orange
-              {% elif state == 'unavailable' or state == 'unknown' %}
-              disabled
-              {% else %}
-              green
-              {% endif %}
-            badge_icon: >-
-              {% set state = states('sensor.inverter_status') | lower %}
-              {% if state == 'curtailed' %}
-              mdi:close-circle
-              {% elif state == 'offline' or state == 'error' %}
-              mdi:alert-circle
-              {% endif %}
-            badge_color: >-
-              {% set state = states('sensor.inverter_status') | lower %}
-              {% if state == 'curtailed' %}
-              red
-              {% elif state == 'offline' or state == 'error' %}
-              orange
-              {% endif %}
+            name: AC Inverter
+            show_icon: true
+            show_name: true
+            show_label: true
+            label: |-
+              [[[
+                const stateObj = states['sensor.inverter_status'];
+                const raw = (stateObj?.state ?? 'unknown').toLowerCase();
+                const power = stateObj?.attributes?.power_limit_percent;
+                const powerW = Number(stateObj?.attributes?.power_output_w ?? 0);
+                const brand = stateObj?.attributes?.brand;
+                const running = (stateObj?.attributes?.running_state ?? '').toLowerCase();
+                const isNight = states['sun.sun']?.state === 'below_horizon';
+                const isSleep = isNight && ((powerW < 100) || (running === 'stopped')) && !['offline','error','unavailable','unknown'].includes(raw);
+                const state = isSleep ? 'sleep' : raw;
+
+                if (state === 'unavailable' || state === 'unknown') return 'Not configured';
+                if (state === 'curtailed') return `CURTAILED${power ? ` - ${power}%` : ''}`;
+                if (state === 'sleep') return `Sleep${powerW > 0 ? ' (PID recovery)' : ''}`;
+                if (state === 'offline') return 'Offline - Cannot reach';
+                if (state === 'error') return 'Error - Check logs';
+
+                const title = brand ? (brand.charAt(0).toUpperCase() + brand.slice(1)) : 'Online';
+                if (powerW) return `${title} - ${Math.round(powerW)}W`;
+                if (power) return `${title} - ${power}%`;
+                return title;
+              ]]]
+            icon: |-
+              [[[
+                const raw = (states['sensor.inverter_status']?.state ?? 'unknown').toLowerCase();
+                const powerW = Number(states['sensor.inverter_status']?.attributes?.power_output_w ?? 0);
+                const running = (states['sensor.inverter_status']?.attributes?.running_state ?? '').toLowerCase();
+                const isNight = states['sun.sun']?.state === 'below_horizon';
+                const isSleep = isNight && ((powerW < 100) || (running === 'stopped')) && !['offline','error','unavailable','unknown'].includes(raw);
+                if (isSleep) return 'mdi:moon-waning-crescent';
+                if (raw === 'error') return 'mdi:alert-octagon';
+                return 'mdi:solar-panel';
+              ]]]
+            styles:
+              card:
+                - border-radius: 16px
+                - padding: 12px
+                - background: |-
+                    [[[
+                      const stateObj = states['sensor.inverter_status'];
+                      const raw = (stateObj?.state ?? 'unknown').toLowerCase();
+                      const powerW = Number(stateObj?.attributes?.power_output_w ?? 0);
+                      const running = (stateObj?.attributes?.running_state ?? '').toLowerCase();
+                      const isNight = states['sun.sun']?.state === 'below_horizon';
+                      const isSleep = isNight && ((powerW < 100) || (running === 'stopped')) && !['offline','error','unavailable','unknown'].includes(raw);
+                      const state = isSleep ? 'sleep' : raw;
+
+                      if (state === 'curtailed') return 'linear-gradient(135deg, rgba(244, 67, 54, 0.15) 0%, rgba(244, 67, 54, 0.05) 100%)';
+                      if (state === 'sleep') return 'linear-gradient(135deg, rgba(96, 125, 139, 0.15) 0%, rgba(96, 125, 139, 0.05) 100%)';
+                      if (state === 'offline' || state === 'error') return 'linear-gradient(135deg, rgba(255, 152, 0, 0.15) 0%, rgba(255, 152, 0, 0.05) 100%)';
+                      if (state === 'unavailable' || state === 'unknown') return 'linear-gradient(135deg, rgba(158, 158, 158, 0.10) 0%, rgba(158, 158, 158, 0.05) 100%)';
+                      return 'linear-gradient(135deg, rgba(76, 175, 80, 0.15) 0%, rgba(76, 175, 80, 0.05) 100%)';
+                    ]]]
+              grid:
+                - grid-template-areas: '"i n" "i l"'
+                - grid-template-columns: min-content 1fr
+                - column-gap: 10px
+                - row-gap: 2px
+                - align-items: center
+              icon:
+                - width: 28px
+                - color: |-
+                    [[[
+                      const raw = (states['sensor.inverter_status']?.state ?? 'unknown').toLowerCase();
+                      const powerW = Number(states['sensor.inverter_status']?.attributes?.power_output_w ?? 0);
+                      const running = (states['sensor.inverter_status']?.attributes?.running_state ?? '').toLowerCase();
+                      const isNight = states['sun.sun']?.state === 'below_horizon';
+                      const isSleep = isNight && ((powerW < 100) || (running === 'stopped')) && !['offline','error','unavailable','unknown'].includes(raw);
+                      const state = isSleep ? 'sleep' : raw;
+
+                      if (state === 'curtailed') return 'var(--red-color)';
+                      if (state === 'sleep') return 'var(--blue-grey-color)';
+                      if (state === 'offline' || state === 'error') return 'var(--orange-color)';
+                      if (state === 'unavailable' || state === 'unknown') return 'var(--disabled-text-color)';
+                      return 'var(--green-color)';
+                    ]]]
+              name:
+                - justify-self: start
+                - font-weight: 700
+                - font-size: 16px
+              label:
+                - justify-self: start
+                - opacity: 0.85
+                - font-size: 14px
             tap_action:
               action: more-info
             card_mod:
@@ -525,7 +691,6 @@ views:
                   background: linear-gradient(135deg, rgba(76, 175, 80, 0.15) 0%, rgba(76, 175, 80, 0.05) 100%);
                   {% endif %}
                 }
-      # AC Inverter Manual Control Buttons (only shown if inverter configured)
       - type: conditional
         conditions:
           - condition: state
@@ -535,14 +700,29 @@ views:
             entity: sensor.inverter_status
             state_not: unknown
         card:
-          type: custom:mushroom-chips-card
-          alignment: center
-          chips:
-            # Load-Following Curtail Button
-            - type: template
+          type: grid
+          columns: 3
+          square: false
+          cards:
+            - type: custom:button-card
+              name: Load Follow
               icon: mdi:home-lightning-bolt
-              icon_color: orange
-              content: Load Follow
+              styles:
+                card:
+                  - height: 40px
+                  - border-radius: 18px
+                  - padding: 0px 12px
+                  - background: rgba(var(--rgb-orange-color, 255, 152, 0), 0.12)
+                grid:
+                  - grid-template-areas: '"i n"'
+                  - grid-template-columns: min-content auto
+                icon:
+                  - color: 'var(--orange-color, #FF9800)'
+                  - width: 20px
+                name:
+                  - font-size: 12px
+                  - font-weight: 600
+                  - white-space: nowrap
               tap_action:
                 action: call-service
                 service: power_sync.curtail_inverter
@@ -550,11 +730,25 @@ views:
                   mode: load_following
                 confirmation:
                   text: Limit inverter to home load only?
-            # Full Shutdown Button
-            - type: template
+            - type: custom:button-card
+              name: Shutdown
               icon: mdi:power-plug-off
-              icon_color: red
-              content: Shutdown
+              styles:
+                card:
+                  - height: 40px
+                  - border-radius: 18px
+                  - padding: 0px 12px
+                  - background: rgba(var(--rgb-red-color, 244, 67, 54), 0.12)
+                grid:
+                  - grid-template-areas: '"i n"'
+                  - grid-template-columns: min-content auto
+                icon:
+                  - color: 'var(--red-color, #F44336)'
+                  - width: 20px
+                name:
+                  - font-size: 12px
+                  - font-weight: 600
+                  - white-space: nowrap
               tap_action:
                 action: call-service
                 service: power_sync.curtail_inverter
@@ -562,77 +756,205 @@ views:
                   mode: shutdown
                 confirmation:
                   text: Fully shut down inverter (0% output)?
-            # Restore Inverter Button
-            - type: template
+            - type: custom:button-card
+              name: Restore
               icon: mdi:power-plug
-              icon_color: green
-              content: Restore
+              styles:
+                card:
+                  - height: 40px
+                  - border-radius: 18px
+                  - padding: 0px 12px
+                  - background: rgba(var(--rgb-green-color, 76, 175, 80), 0.12)
+                grid:
+                  - grid-template-areas: '"i n"'
+                  - grid-template-columns: min-content auto
+                icon:
+                  - color: 'var(--green-color, #4CAF50)'
+                  - width: 20px
+                name:
+                  - font-size: 12px
+                  - font-weight: 600
+                  - white-space: nowrap
               tap_action:
                 action: call-service
                 service: power_sync.restore_inverter
                 confirmation:
                   text: Restore inverter to normal operation?
-      # Battery Health Gauges
-      - type: horizontal-stack
+      - type: vertical-stack
         cards:
-          - type: gauge
-            entity: sensor.battery_health
-            name: Overall
-            unit: '%'
-            min: 0
-            max: 115
-            needle: true
-            severity:
-              green: 95
-              yellow: 85
-              red: 0
-          - type: gauge
-            entity: sensor.battery_health
-            attribute: battery_1_health_percent
-            name: Battery 1
-            unit: '%'
-            min: 0
-            max: 115
-            needle: true
-            severity:
-              green: 95
-              yellow: 85
-              red: 0
-          - type: gauge
-            entity: sensor.battery_health
-            attribute: battery_2_health_percent
-            name: Battery 2
-            unit: '%'
-            min: 0
-            max: 115
-            needle: true
-            severity:
-              green: 95
-              yellow: 85
-              red: 0
-          - type: gauge
-            entity: sensor.battery_health
-            attribute: battery_3_health_percent
-            name: Battery 3
-            unit: '%'
-            min: 0
-            max: 115
-            needle: true
-            severity:
-              green: 95
-              yellow: 85
-              red: 0
-      # Battery Capacity Details
-      - type: markdown
-        content: |
-          {% set original = state_attr('sensor.battery_health', 'original_capacity_kwh') %}
-          {% set current = state_attr('sensor.battery_health', 'current_capacity_kwh') %}
-          {% set scan = state_attr('sensor.battery_health', 'last_scan') %}
-          {%- if states('sensor.battery_health') not in ['unavailable', 'unknown'] %}
-          **Capacity:** {{ current }} / {{ original }} kWh | **Last scan:** {{ scan[:10] if scan else 'N/A' }}
-          {%- else %}
-          Scan from the PowerSync Mobile app while connected to Powerwall WiFi.
-          {%- endif %}
+          - type: custom:button-card
+            name: Battery Health
+            show_icon: false
+            show_name: true
+            styles:
+              card:
+                - height: 36px
+                - border-radius: 12px
+                - padding: 0px 12px
+                - background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.10)
+              name:
+                - justify-self: start
+                - font-weight: 800
+                - font-size: 14px
+                - letter-spacing: 0.5px
+          - type: grid
+            columns: 4
+            square: false
+            cards:
+              - type: custom:button-card
+                entity: sensor.battery_health
+                name: Overall
+                show_icon: false
+                show_name: true
+                show_state: true
+                state_display: |-
+                  [[[
+                    const v = states['sensor.battery_health']?.state;
+                    if (!v || ['unknown','unavailable','none'].includes(String(v).toLowerCase())) return '';
+                    const n = Number(v);
+                    if (!Number.isFinite(n)) return '';
+                    return `${n.toFixed(1)} %`;
+                  ]]]
+                styles:
+                  card:
+                    - height: 90px
+                    - border-radius: 12px
+                    - padding: 10px
+                    - display: |-
+                        [[[
+                          const v = states['sensor.battery_health']?.state;
+                          if (!v || ['unknown','unavailable','none'].includes(String(v).toLowerCase())) return 'none';
+                          const n = Number(v);
+                          return Number.isFinite(n) ? 'block' : 'none';
+                        ]]]
+                  name:
+                    - font-weight: 700
+                    - font-size: 13px
+                  state:
+                    - font-size: 22px
+                    - font-weight: 800
+                    - margin-top: 6px
+              - type: custom:button-card
+                entity: sensor.battery_health
+                name: Battery 1
+                show_icon: false
+                show_name: true
+                show_state: true
+                state_display: |-
+                  [[[
+                    const v = states['sensor.battery_health']?.attributes?.battery_1_health_percent;
+                    if (v === undefined || v === null) return '';
+                    const n = Number(v);
+                    if (!Number.isFinite(n)) return '';
+                    return `${n.toFixed(1)} %`;
+                  ]]]
+                styles:
+                  card:
+                    - height: 90px
+                    - border-radius: 12px
+                    - padding: 10px
+                    - display: |-
+                        [[[
+                          const v = states['sensor.battery_health']?.attributes?.battery_1_health_percent;
+                          if (v === undefined || v === null) return 'none';
+                          const n = Number(v);
+                          return Number.isFinite(n) ? 'block' : 'none';
+                        ]]]
+                  name:
+                    - font-weight: 700
+                    - font-size: 13px
+                  state:
+                    - font-size: 22px
+                    - font-weight: 800
+                    - margin-top: 6px
+              - type: custom:button-card
+                entity: sensor.battery_health
+                name: Battery 2
+                show_icon: false
+                show_name: true
+                show_state: true
+                state_display: |-
+                  [[[
+                    const v = states['sensor.battery_health']?.attributes?.battery_2_health_percent;
+                    if (v === undefined || v === null) return '';
+                    const n = Number(v);
+                    if (!Number.isFinite(n)) return '';
+                    return `${n.toFixed(1)} %`;
+                  ]]]
+                styles:
+                  card:
+                    - height: 90px
+                    - border-radius: 12px
+                    - padding: 10px
+                    - display: |-
+                        [[[
+                          const v = states['sensor.battery_health']?.attributes?.battery_2_health_percent;
+                          if (v === undefined || v === null) return 'none';
+                          const n = Number(v);
+                          return Number.isFinite(n) ? 'block' : 'none';
+                        ]]]
+                  name:
+                    - font-weight: 700
+                    - font-size: 13px
+                  state:
+                    - font-size: 22px
+                    - font-weight: 800
+                    - margin-top: 6px
+              - type: custom:button-card
+                entity: sensor.battery_health
+                name: Battery 3
+                show_icon: false
+                show_name: true
+                show_state: true
+                state_display: |-
+                  [[[
+                    const v = states['sensor.battery_health']?.attributes?.battery_3_health_percent;
+                    if (v === undefined || v === null) return '';
+                    const n = Number(v);
+                    if (!Number.isFinite(n)) return '';
+                    return `${n.toFixed(1)} %`;
+                  ]]]
+                styles:
+                  card:
+                    - height: 90px
+                    - border-radius: 12px
+                    - padding: 10px
+                    - display: |-
+                        [[[
+                          const v = states['sensor.battery_health']?.attributes?.battery_3_health_percent;
+                          if (v === undefined || v === null) return 'none';
+                          const n = Number(v);
+                          return Number.isFinite(n) ? 'block' : 'none';
+                        ]]]
+                  name:
+                    - font-weight: 700
+                    - font-size: 13px
+                  state:
+                    - font-size: 22px
+                    - font-weight: 800
+                    - margin-top: 6px
+          - type: markdown
+            content: >
+              {% set original = state_attr('sensor.battery_health',
+              'original_capacity_kwh') %}
+
+              {% set current = state_attr('sensor.battery_health',
+              'current_capacity_kwh') %}
+
+              {% set scan = state_attr('sensor.battery_health', 'last_scan') %}
+
+              {%- if states('sensor.battery_health') not in ['unavailable',
+              'unknown'] %}
+
+              **Capacity:** {{ current }} / {{ original }} kWh | **Last scan:**
+              {{ scan[:10] if scan else 'N/A' }}
+
+              {%- else %}
+
+              Scan from the PowerSync Mobile app while connected to Powerwall
+              WiFi.
+
+              {%- endif %}
       - type: custom:apexcharts-card
         header:
           show: true

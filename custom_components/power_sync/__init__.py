@@ -457,7 +457,7 @@ logging.getLogger("custom_components.power_sync.inverters.sigenergy").setLevel(l
 logging.getLogger("custom_components.power_sync.websocket_client").setLevel(logging.DEBUG)
 logging.getLogger("custom_components.power_sync.tariff_converter").setLevel(logging.DEBUG)
 
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH]
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH, Platform.SELECT]
 
 # Storage version for persisting data across HA restarts
 STORAGE_VERSION = 1
