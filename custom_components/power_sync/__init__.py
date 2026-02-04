@@ -10115,10 +10115,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 await store.async_save(stored_data)
 
                 # Restore the saved tariff if we have one
-                if saved_tariff and battery_controller:
+                # Get battery_controller from hass.data (it's created later in setup)
+                stored_battery_controller = hass.data[DOMAIN][entry.entry_id].get("battery_controller")
+                if saved_tariff and stored_battery_controller:
                     _LOGGER.info("Restoring saved tariff after expired force mode...")
                     try:
-                        success = await battery_controller.upload_tariff(saved_tariff)
+                        success = await stored_battery_controller.upload_tariff(saved_tariff)
                         if success:
                             _LOGGER.info("✅ Restored saved tariff successfully after restart")
                         else:
@@ -10127,9 +10129,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _LOGGER.error(f"Error restoring saved tariff: {e}")
 
                 # Restore operation mode if we have one
-                if saved_operation_mode and battery_controller:
+                if saved_operation_mode and stored_battery_controller:
                     try:
-                        await battery_controller.set_operation_mode(saved_operation_mode)
+                        await stored_battery_controller.set_operation_mode(saved_operation_mode)
                         _LOGGER.info(f"Restored operation mode to {saved_operation_mode}")
                     except Exception as e:
                         _LOGGER.error(f"Error restoring operation mode: {e}")
