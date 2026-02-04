@@ -12965,13 +12965,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return {"active": False}
 
             # Load feature toggles and settings from config entry (persisted from previous sessions)
-            enable_ev_integration = entry.data.get(CONF_OPTIMIZATION_EV_INTEGRATION, False)
-            enable_vpp = entry.data.get(CONF_OPTIMIZATION_VPP_ENABLED, False)
-            enable_multi_battery = entry.data.get(CONF_OPTIMIZATION_MULTI_BATTERY, False)
-            enable_ml_forecasting = entry.data.get(CONF_OPTIMIZATION_ML_FORECASTING, True)
-            enable_weather_integration = entry.data.get(CONF_OPTIMIZATION_WEATHER_INTEGRATION, False)
-            saved_cost_function = entry.data.get(CONF_OPTIMIZATION_COST_FUNCTION, "self_consumption")
-            saved_interval_minutes = entry.data.get(CONF_OPTIMIZATION_INTERVAL, 5)
+            # Check options first (where set_settings saves), then fall back to data for defaults
+            enable_ev_integration = entry.options.get(CONF_OPTIMIZATION_EV_INTEGRATION, entry.data.get(CONF_OPTIMIZATION_EV_INTEGRATION, False))
+            enable_vpp = entry.options.get(CONF_OPTIMIZATION_VPP_ENABLED, entry.data.get(CONF_OPTIMIZATION_VPP_ENABLED, False))
+            enable_multi_battery = entry.options.get(CONF_OPTIMIZATION_MULTI_BATTERY, entry.data.get(CONF_OPTIMIZATION_MULTI_BATTERY, False))
+            enable_ml_forecasting = entry.options.get(CONF_OPTIMIZATION_ML_FORECASTING, entry.data.get(CONF_OPTIMIZATION_ML_FORECASTING, True))
+            enable_weather_integration = entry.options.get(CONF_OPTIMIZATION_WEATHER_INTEGRATION, entry.data.get(CONF_OPTIMIZATION_WEATHER_INTEGRATION, False))
+            saved_cost_function = entry.options.get(CONF_OPTIMIZATION_COST_FUNCTION, entry.data.get(CONF_OPTIMIZATION_COST_FUNCTION, "self_consumption"))
+            saved_interval_minutes = entry.options.get(CONF_OPTIMIZATION_INTERVAL, entry.data.get(CONF_OPTIMIZATION_INTERVAL, 5))
 
             optimization_coordinator = OptimizationCoordinator(
                 hass=hass,
