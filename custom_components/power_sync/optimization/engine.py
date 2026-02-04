@@ -133,9 +133,28 @@ class OptimizationResult:
             return {"action": "idle", "power_w": 0}
 
     def get_next_actions(self, count: int = 5) -> list[dict[str, Any]]:
-        """Get the next N actions from the schedule."""
+        """Get the next N actions from the schedule, starting from current time."""
+        from datetime import datetime, timezone
+
         actions = []
-        for i in range(min(count, len(self.charge_schedule_w))):
+        now = datetime.now(timezone.utc)
+
+        # Find the first index that is in the future (or current interval)
+        start_index = 0
+        for i, ts in enumerate(self.timestamps):
+            # Make timestamp timezone-aware if needed
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if ts >= now:
+                start_index = i
+                break
+            # If this is the last interval and it's still in the past,
+            # start from the beginning (schedule is stale)
+            if i == len(self.timestamps) - 1:
+                start_index = 0
+
+        # Collect actions from start_index
+        for i in range(start_index, min(start_index + count, len(self.charge_schedule_w))):
             action = self.get_action_at_index(i)
             action["timestamp"] = self.timestamps[i].isoformat() if i < len(self.timestamps) else None
             action["soc"] = self.soc_trajectory[i] if i < len(self.soc_trajectory) else None
