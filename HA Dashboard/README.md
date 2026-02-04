@@ -25,26 +25,15 @@ Install these from HACS (Frontend) before setting up the dashboard:
 3. **[power-flow-card-plus](https://github.com/flixlix/power-flow-card-plus)** - For the real-time energy flow visualization
 4. **[apexcharts-card](https://github.com/RomRider/apexcharts-card)** - For all the price and energy charts
 
-### Required Helper Entities
+### Duration Select Entities (Auto-Created)
 
-The battery control buttons require two `input_select` helpers for duration selection:
+The PowerSync integration automatically creates two select entities for duration selection:
+- `select.power_sync_force_charge_duration`
+- `select.power_sync_force_discharge_duration`
 
-**Helper 1: Force Discharge Duration**
-1. Go to **Settings → Devices & Services → Helpers**
-2. Click **+ Create Helper → Dropdown**
-3. Configure:
-   - Name: `Force Discharge Duration`
-   - Options: `15`, `30`, `45`, `60`, `90`, `120`
-4. Click **Create**
+**No manual setup required!** These entities are created when you install the integration and persist across restarts.
 
-**Helper 2: Force Charge Duration**
-1. Click **+ Create Helper → Dropdown** again
-2. Configure:
-   - Name: `Force Charge Duration`
-   - Options: `15`, `30`, `45`, `60`, `90`, `120`
-3. Click **Create**
-
-The entity IDs are automatically derived from the names (`input_select.force_discharge_duration` and `input_select.force_charge_duration`).
+> **Upgrading from older versions?** If you previously created manual `input_select` helpers, you can delete them. The dashboard now uses the auto-created `select.power_sync_*` entities instead.
 
 ## Installation
 
@@ -117,7 +106,7 @@ To change the price model:
 ### Cards showing "Custom element doesn't exist"
 
 This means a required HACS card isn't installed. Install the missing integration from HACS:
-- `custom:mushroom-chips-card` → Install mushroom
+- `custom:button-card` → Install button-card
 - `custom:apexcharts-card` → Install apexcharts-card
 - `custom:power-flow-card-plus` → Install power-flow-card-plus
 
@@ -127,9 +116,12 @@ Install the **card-mod** HACS integration for full styling support.
 
 ### Battery control buttons not working
 
-Ensure you've created both helper entities (see Requirements above):
-- `input_select.force_discharge_duration`
-- `input_select.force_charge_duration`
+1. Ensure the PowerSync integration is installed and configured
+2. Verify the auto-created select entities exist:
+   - `select.power_sync_force_charge_duration`
+   - `select.power_sync_force_discharge_duration`
+3. If entities are missing, restart Home Assistant
+4. Check Developer Tools → States to confirm entities are available
 
 ### Charts showing no data
 
