@@ -2079,6 +2079,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._config.max_charge_w == 5000 and self._observed_max_charge_w < MIN_MEANINGFUL_POWER:
             await self._estimate_power_from_capacity()
 
+    def _get_actual_battery_power_w(self) -> float:
+        """Get the actual current battery power in Watts (positive = charging)."""
+        try:
+            if self.energy_coordinator and self.energy_coordinator.data:
+                # battery_power is in kW, negative = charging, positive = discharging
+                battery_power_kw = self.energy_coordinator.data.get("battery_power", 0)
+                # Return absolute value in Watts (always positive for display)
+                return abs(battery_power_kw * 1000)
+        except Exception:
+            pass
+        return 0
+
     async def _estimate_power_from_capacity(self) -> None:
         """Estimate power limits from battery capacity when no observed data available."""
         # Default power per unit by manufacturer
@@ -2145,7 +2157,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "status": executor_status.get("status", "disabled"),
             "optimization_status": executor_status.get("optimization_status", "not_run"),
             "current_action": executor_status.get("current_action", "idle"),
-            "current_power_w": executor_status.get("current_power_w", 0),
+            # Use actual battery power from energy coordinator instead of commanded power
+            "current_power_w": self._get_actual_battery_power_w(),
             "next_action": executor_status.get("next_action", "idle"),
             "next_action_time": executor_status.get("next_action_time"),
             "last_optimization": executor_status.get("last_optimization"),
