@@ -2059,21 +2059,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as e:
             _LOGGER.debug(f"Could not read battery power for limit detection: {e}")
 
-        # Use observed values if we have meaningful data (>1kW suggests real operation)
+        # Use observed values directly - no headroom since we can only rely on what we've seen
+        # This ensures optimizer calculations match what the battery can actually deliver
         MIN_MEANINGFUL_POWER = 1000  # 1 kW - ignore very small values
 
         if self._observed_max_charge_w > MIN_MEANINGFUL_POWER:
-            # Add 10% headroom to observed max (battery may not have been at full rate)
-            observed_charge = self._observed_max_charge_w * 1.1
-            if observed_charge > self._config.max_charge_w:
-                _LOGGER.info(f"🔋 Updated max charge rate from observed: {observed_charge/1000:.1f} kW")
-                self._config.max_charge_w = observed_charge
+            # Use observed max directly - don't assume battery can do more than we've seen
+            if self._observed_max_charge_w != self._config.max_charge_w:
+                _LOGGER.info(f"🔋 Updated max charge rate from observed: {self._observed_max_charge_w/1000:.1f} kW")
+                self._config.max_charge_w = self._observed_max_charge_w
 
         if self._observed_max_discharge_w > MIN_MEANINGFUL_POWER:
-            observed_discharge = self._observed_max_discharge_w * 1.1
-            if observed_discharge > self._config.max_discharge_w:
-                _LOGGER.info(f"🔋 Updated max discharge rate from observed: {observed_discharge/1000:.1f} kW")
-                self._config.max_discharge_w = observed_discharge
+            # Use observed max directly
+            if self._observed_max_discharge_w != self._config.max_discharge_w:
+                _LOGGER.info(f"🔋 Updated max discharge rate from observed: {self._observed_max_discharge_w/1000:.1f} kW")
+                self._config.max_discharge_w = self._observed_max_discharge_w
 
         # If no observed data yet, fall back to capacity-based estimation
         if self._config.max_charge_w == 5000 and self._observed_max_charge_w < MIN_MEANINGFUL_POWER:
