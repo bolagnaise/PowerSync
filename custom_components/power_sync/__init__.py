@@ -1574,10 +1574,14 @@ class CalendarHistoryView(HomeAssistantView):
             )
 
         if not tesla_coordinator:
-            _LOGGER.error("Tesla coordinator not available for HTTP endpoint")
+            _LOGGER.debug("Calendar history requested but Tesla coordinator not available (non-Tesla system)")
             return web.json_response(
-                {"success": False, "error": "Tesla coordinator not available"},
-                status=503
+                {
+                    "success": False,
+                    "error": "Calendar history requires Tesla Powerwall",
+                    "reason": "tesla_not_configured"
+                },
+                status=200  # Return 200 with error in body so mobile app handles gracefully
             )
 
         # Fetch calendar history
