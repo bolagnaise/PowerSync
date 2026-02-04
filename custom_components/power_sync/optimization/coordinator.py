@@ -1742,6 +1742,37 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             export_prices = []
             now = dt_util.now()
 
+            # Check if buy_rates uses time keys (e.g., '10:30') or period names (e.g., 'OFF_PEAK')
+            sample_key = next(iter(buy_rates.keys()), "")
+            uses_time_keys = ":" in sample_key  # Time keys have format 'HH:MM'
+
+            if uses_time_keys:
+                # Time-based tariff format: rates keyed by 'HH:MM'
+                for idx in range(n_intervals):
+                    interval_time = now + timedelta(minutes=idx * self._config.interval_minutes)
+                    # Round down to nearest 30-min slot for lookup
+                    slot_minute = (interval_time.minute // 30) * 30
+                    time_key = f"{interval_time.hour:02d}:{slot_minute:02d}"
+
+                    buy_rate = buy_rates.get(time_key, 0.25)
+                    sell_rate = sell_rates.get(time_key, 0.08)
+
+                    # Convert to $/kWh if rates appear to be in cents (> 1.0)
+                    if buy_rate > 1.0:
+                        buy_rate = buy_rate / 100
+                    if sell_rate > 1.0:
+                        sell_rate = sell_rate / 100
+
+                    import_prices.append(buy_rate)
+                    export_prices.append(sell_rate)
+
+                    # Debug log first 4 intervals
+                    if idx < 4:
+                        _LOGGER.info(f"📊 Interval {idx}: {interval_time.strftime('%H:%M %a')} -> time_key={time_key}, buy=${buy_rate:.3f}/kWh")
+
+                return import_prices, export_prices
+
+            # Period-based tariff format (Tesla TOU format)
             # Define period priority order - more specific/valuable periods first
             # SUPER_OFF_PEAK should be checked before OFF_PEAK to avoid overlap issues
             period_priority = ["SUPER_OFF_PEAK", "ON_PEAK", "PEAK", "PARTIAL_PEAK", "SHOULDER", "OFF_PEAK"]
