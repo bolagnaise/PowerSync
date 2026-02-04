@@ -10101,16 +10101,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             now = dt_util.utcnow()
 
             if now >= expires_at:
-                # Force mode has expired - trigger restore
-                _LOGGER.info(f"⏰ Persisted force {mode} has expired (was {expires_at_str}), auto-restoring")
-                # Clear the persisted state first
+                # Force mode has expired during restart - restore saved tariff
+                _LOGGER.info(f"⏰ Persisted force {mode} has expired (was {expires_at_str}), restoring saved tariff")
+
+                # Get saved tariff before clearing state
+                saved_tariff = persisted_force_state.get("saved_tariff")
+                saved_operation_mode = persisted_force_state.get("saved_operation_mode")
+
+                # Clear the persisted state
                 store = hass.data[DOMAIN][entry.entry_id]["store"]
                 stored_data = await store.async_load() or {}
                 stored_data["force_mode_state"] = None
                 await store.async_save(stored_data)
-                # Don't call restore_normal here - the Tesla should already be in that mode
-                # Just ensure we sync TOU to get the correct pricing back
-                _LOGGER.info("Triggering TOU sync to restore correct pricing after expired force mode")
+
+                # Restore the saved tariff if we have one
+                if saved_tariff and battery_controller:
+                    _LOGGER.info("Restoring saved tariff after expired force mode...")
+                    try:
+                        success = await battery_controller.upload_tariff(saved_tariff)
+                        if success:
+                            _LOGGER.info("✅ Restored saved tariff successfully after restart")
+                        else:
+                            _LOGGER.error("Failed to restore saved tariff after restart")
+                    except Exception as e:
+                        _LOGGER.error(f"Error restoring saved tariff: {e}")
+
+                # Restore operation mode if we have one
+                if saved_operation_mode and battery_controller:
+                    try:
+                        await battery_controller.set_operation_mode(saved_operation_mode)
+                        _LOGGER.info(f"Restored operation mode to {saved_operation_mode}")
+                    except Exception as e:
+                        _LOGGER.error(f"Error restoring operation mode: {e}")
+
+                if not saved_tariff:
+                    _LOGGER.warning("No saved tariff to restore - triggering TOU sync as fallback")
+                    # For dynamic pricing users, sync will fetch fresh prices
             else:
                 # Force mode is still active - restore state and re-setup timer
                 remaining_seconds = (expires_at - now).total_seconds()
