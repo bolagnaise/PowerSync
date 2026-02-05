@@ -304,12 +304,17 @@ During solar surplus periods, the EV coordinator calculates:
 
 ### Supported EV Chargers
 
-| Charger Type | Control Method |
-|--------------|----------------|
-| **Tesla Wall Connector** | Tesla Fleet API |
-| **OCPP Chargers** | OCPP 1.6J protocol |
-| **Wallbox** | Wallbox API |
-| **Easee** | Easee API |
+EV charger support is **experimental** and depends on the HA integration for your charger exposing the right entities and services.
+
+| Charger Type | Control Method | Notes |
+|--------------|----------------|-------|
+| **Tesla Wall Connector** | Tesla BLE integration | Requires [Tesla BLE](https://github.com/tesla-local-control/tesla_ble_mqtt_docker) |
+| **OCPP Chargers** | OCPP HA integration | Via `ocpp.set_charge_rate` service |
+| **Wallbox** | Wallbox HA integration | Via `wallbox.set_charging_current` service |
+| **Easee** | Easee HA integration | Via `easee.set_charger_dynamic_limit` service |
+| **Generic** | Switch + Number entity | Any charger with on/off switch and amps control |
+
+> **Note:** EV charger integration is best-effort. If your charger's HA integration uses different service names or entity patterns, it may not work automatically. Please report issues on Discord.
 
 ### Configuration
 
