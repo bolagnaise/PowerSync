@@ -10214,13 +10214,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         context = call.context
         _LOGGER.info(f"🔋 Force discharge service called (context: user_id={context.user_id}, parent_id={context.parent_id})")
 
-        duration = call.data.get("duration", DEFAULT_DISCHARGE_DURATION)
-        # Convert to int if string (from HA service selector)
+        raw_duration = call.data.get("duration", DEFAULT_DISCHARGE_DURATION)
+        _LOGGER.debug(f"Force discharge raw duration from call.data: {raw_duration!r} (type: {type(raw_duration).__name__})")
+
+        # Convert to int if string (from HA service selector or button-card)
         try:
-            duration = int(duration)
+            duration = int(raw_duration)
         except (ValueError, TypeError):
+            _LOGGER.warning(f"Could not convert duration {raw_duration!r} to int, using default {DEFAULT_DISCHARGE_DURATION}")
             duration = DEFAULT_DISCHARGE_DURATION
         if duration not in DISCHARGE_DURATIONS:
+            _LOGGER.warning(f"Duration {duration} not in allowed values {DISCHARGE_DURATIONS}, using default {DEFAULT_DISCHARGE_DURATION}")
             duration = DEFAULT_DISCHARGE_DURATION
 
         _LOGGER.info(f"🔋 FORCE DISCHARGE: Activating for {duration} minutes")
@@ -10608,13 +10612,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         context = call.context
         _LOGGER.info(f"🔌 Force charge service called (context: user_id={context.user_id}, parent_id={context.parent_id})")
 
-        duration = call.data.get("duration", DEFAULT_DISCHARGE_DURATION)
-        # Convert to int if string (from HA service selector)
+        raw_duration = call.data.get("duration", DEFAULT_DISCHARGE_DURATION)
+        _LOGGER.debug(f"Force charge raw duration from call.data: {raw_duration!r} (type: {type(raw_duration).__name__})")
+
+        # Convert to int if string (from HA service selector or button-card)
         try:
-            duration = int(duration)
+            duration = int(raw_duration)
         except (ValueError, TypeError):
+            _LOGGER.warning(f"Could not convert duration {raw_duration!r} to int, using default {DEFAULT_DISCHARGE_DURATION}")
             duration = DEFAULT_DISCHARGE_DURATION
         if duration not in DISCHARGE_DURATIONS:
+            _LOGGER.warning(f"Duration {duration} not in allowed values {DISCHARGE_DURATIONS}, using default {DEFAULT_DISCHARGE_DURATION}")
             duration = DEFAULT_DISCHARGE_DURATION
 
         _LOGGER.info(f"🔌 FORCE CHARGE: Activating for {duration} minutes")
