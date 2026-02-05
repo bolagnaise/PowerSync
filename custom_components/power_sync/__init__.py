@@ -1552,14 +1552,21 @@ class CalendarHistoryView(HomeAssistantView):
         _LOGGER.info(f"📊 Calendar history HTTP request for period: {period}, end_date: {end_date}")
 
         # Find the power_sync entry and coordinator
+        # Check ALL entries, not just the first one (important during reload)
         tesla_coordinator = None
         is_sigenergy = False
+        is_sungrow = False
         for entry_id, data in self._hass.data.get(DOMAIN, {}).items():
             if isinstance(data, dict):
-                is_sigenergy = data.get("is_sigenergy", False)
-                if "tesla_coordinator" in data:
+                # Check battery system types
+                if data.get("is_sigenergy", False):
+                    is_sigenergy = True
+                if data.get("is_sungrow", False):
+                    is_sungrow = True
+                # Look for Tesla coordinator (this is the main data source for calendar history)
+                if "tesla_coordinator" in data and data["tesla_coordinator"] is not None:
                     tesla_coordinator = data["tesla_coordinator"]
-                break
+                    break  # Found it, no need to continue
 
         # Check if this is a Sigenergy setup - calendar history not available
         if is_sigenergy:
@@ -1574,15 +1581,28 @@ class CalendarHistoryView(HomeAssistantView):
             )
 
         if not tesla_coordinator:
-            _LOGGER.debug("Calendar history requested but Tesla coordinator not available (non-Tesla system)")
-            return web.json_response(
-                {
-                    "success": False,
-                    "error": "Calendar history requires Tesla Powerwall",
-                    "reason": "tesla_not_configured"
-                },
-                status=200  # Return 200 with error in body so mobile app handles gracefully
-            )
+            # Check if we have ANY power_sync entries - if yes, system might still be loading
+            has_entries = bool(self._hass.data.get(DOMAIN, {}))
+            if has_entries:
+                _LOGGER.debug("Calendar history requested but Tesla coordinator not ready yet (system loading)")
+                return web.json_response(
+                    {
+                        "success": False,
+                        "error": "System is still loading, please retry",
+                        "reason": "loading"
+                    },
+                    status=200  # Return 200 with error in body so mobile app handles gracefully
+                )
+            else:
+                _LOGGER.debug("Calendar history requested but Tesla coordinator not available (non-Tesla system)")
+                return web.json_response(
+                    {
+                        "success": False,
+                        "error": "Calendar history requires Tesla Powerwall",
+                        "reason": "tesla_not_configured"
+                    },
+                    status=200  # Return 200 with error in body so mobile app handles gracefully
+                )
 
         # Fetch calendar history
         try:
