@@ -830,7 +830,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self._selected_battery_system = user_input.get(CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA)
 
-            # All battery systems can choose between native optimization and PowerSync ML
+            # All battery systems can choose between native optimization and HAEO Smart Optimization
             return await self.async_step_optimization_provider()
 
         return self.async_show_form(
@@ -848,7 +848,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_optimization_provider(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Let user choose optimization provider - native battery or PowerSync Smart Optimization."""
+        """Let user choose optimization provider - native battery or HAEO Smart Optimization."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -873,14 +873,14 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._selected_battery_system, "Battery"
         )
 
-        # Check if external optimizer is available
+        # Check if HAEO is available
         optimizer_available = OPTIMIZER_DOMAIN in self.hass.config.components
-        optimizer_suffix = "" if optimizer_available else " (requires external optimizer)"
+        optimizer_suffix = "" if optimizer_available else " (requires HAEO via HACS)"
 
         # Build dynamic provider options with battery-specific naming
         providers = {
             OPT_PROVIDER_NATIVE: f"{native_name} built-in optimization",
-            OPT_PROVIDER_POWERSYNC: f"PowerSync Smart Optimization{optimizer_suffix}",
+            OPT_PROVIDER_POWERSYNC: f"HAEO Smart Optimization{optimizer_suffix}",
         }
 
         return self.async_show_form(
@@ -898,7 +898,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_ml_options(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Configure ML optimization options - cost function, backup reserve, VPP, and EV."""
+        """Configure HAEO optimization options - cost function, backup reserve, VPP, and EV."""
         if user_input is not None:
             self._ml_options = {
                 CONF_OPTIMIZATION_COST_FUNCTION: user_input.get(
@@ -2211,7 +2211,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             if self._tesla_provider != current_tesla_provider:
                 new_data[CONF_TESLA_API_PROVIDER] = self._tesla_provider
             new_data[CONF_OPTIMIZATION_PROVIDER] = optimization_provider
-            # If PowerSync ML, store ML options
+            # If HAEO Smart Optimization, store ML options
             if optimization_provider == OPT_PROVIDER_POWERSYNC:
                 new_data[CONF_OPTIMIZATION_COST_FUNCTION] = user_input.get(
                     CONF_OPTIMIZATION_COST_FUNCTION, COST_FUNCTION_COST
@@ -2256,7 +2256,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         # Build optimization provider choices
         opt_providers = {
             OPT_PROVIDER_NATIVE: "Tesla Powerwall built-in optimization",
-            OPT_PROVIDER_POWERSYNC: "PowerSync ML Optimization (alpha)",
+            OPT_PROVIDER_POWERSYNC: "HAEO Smart Optimization",
         }
 
         return self.async_show_form(
@@ -2403,7 +2403,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         # Build optimization provider choices
         opt_providers = {
             OPT_PROVIDER_NATIVE: "Sigenergy built-in optimization",
-            OPT_PROVIDER_POWERSYNC: "PowerSync ML Optimization (alpha)",
+            OPT_PROVIDER_POWERSYNC: "HAEO Smart Optimization",
         }
 
         return self.async_show_form(
@@ -2548,7 +2548,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         # Build optimization provider choices
         opt_providers = {
             OPT_PROVIDER_NATIVE: "Sungrow built-in optimization",
-            OPT_PROVIDER_POWERSYNC: "PowerSync ML Optimization (alpha)",
+            OPT_PROVIDER_POWERSYNC: "HAEO Smart Optimization",
         }
 
         return self.async_show_form(
