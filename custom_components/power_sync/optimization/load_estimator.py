@@ -1,9 +1,12 @@
 """
 Load estimation for battery optimization.
 
-Estimates household load forecast using historical data from Home Assistant.
-Since PowerSync doesn't have ML-based load forecasting, we use simple
-pattern-based estimation from recent history.
+Supports multiple forecast sources:
+1. HAFO (Home Assistant Forecaster) - ML-based forecasting from hafo.haeo.io
+2. Local pattern-based estimation from Home Assistant history
+
+HAFO provides superior forecasting by analyzing historical patterns with ML,
+but falls back to local estimation if HAFO is not installed.
 """
 from __future__ import annotations
 
@@ -15,20 +18,252 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
+from ..const import HAFO_DOMAIN, HAFO_LOAD_SENSOR_PREFIX
+
 _LOGGER = logging.getLogger(__name__)
+
+
+class HAFOForecaster:
+    """
+    HAFO (Home Assistant Forecaster) integration for load prediction.
+
+    HAFO is a Home Assistant integration that creates forecast sensors from
+    entity history using ML-based pattern recognition. It provides superior
+    load forecasting compared to simple historical averaging.
+
+    Reference: https://hafo.haeo.io/
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        load_entity_id: str | None = None,
+        interval_minutes: int = 5,
+    ):
+        """
+        Initialize HAFO forecaster.
+
+        Args:
+            hass: Home Assistant instance
+            load_entity_id: Source entity ID for load (HAFO creates forecast from this)
+            interval_minutes: Forecast interval in minutes
+        """
+        self.hass = hass
+        self.load_entity_id = load_entity_id
+        self.interval_minutes = interval_minutes
+        self._hafo_sensor_id: str | None = None
+
+    def is_available(self) -> bool:
+        """Check if HAFO integration is installed and configured."""
+        # Check if HAFO domain is loaded
+        if HAFO_DOMAIN not in self.hass.config.components:
+            return False
+
+        # Check if we have a HAFO forecast sensor for our load entity
+        if self.load_entity_id:
+            self._hafo_sensor_id = self._find_hafo_sensor()
+            return self._hafo_sensor_id is not None
+
+        return False
+
+    def _find_hafo_sensor(self) -> str | None:
+        """Find the HAFO forecast sensor for the load entity."""
+        if not self.load_entity_id:
+            return None
+
+        # HAFO creates sensors with naming pattern based on source entity
+        # Try common patterns
+        base_name = self.load_entity_id.replace("sensor.", "").replace(".", "_")
+
+        potential_sensors = [
+            f"{HAFO_LOAD_SENSOR_PREFIX}{base_name}_forecast",
+            f"{HAFO_LOAD_SENSOR_PREFIX}{base_name}",
+            f"sensor.{base_name}_forecast",
+            # Also check for PowerSync-specific HAFO sensor
+            f"{HAFO_LOAD_SENSOR_PREFIX}powersync_load_forecast",
+            f"{HAFO_LOAD_SENSOR_PREFIX}home_load_forecast",
+        ]
+
+        for sensor_id in potential_sensors:
+            state = self.hass.states.get(sensor_id)
+            if state and state.state not in ("unknown", "unavailable"):
+                _LOGGER.info(f"Found HAFO load forecast sensor: {sensor_id}")
+                return sensor_id
+
+        # Search all HAFO sensors
+        for state in self.hass.states.async_all():
+            if state.entity_id.startswith(HAFO_LOAD_SENSOR_PREFIX) and "load" in state.entity_id.lower():
+                _LOGGER.info(f"Found HAFO load sensor: {state.entity_id}")
+                return state.entity_id
+
+        return None
+
+    async def get_forecast(
+        self,
+        horizon_hours: int = 48,
+        start_time: datetime | None = None,
+    ) -> list[float] | None:
+        """
+        Get load forecast from HAFO sensor.
+
+        HAFO sensors store forecast data in the 'forecast' attribute as a list of
+        {"datetime": "ISO8601", "value": float} objects.
+
+        Args:
+            horizon_hours: Forecast horizon in hours
+            start_time: Start time for forecast (default: now)
+
+        Returns:
+            List of load values in Watts, or None if unavailable
+        """
+        if not self._hafo_sensor_id:
+            self._hafo_sensor_id = self._find_hafo_sensor()
+
+        if not self._hafo_sensor_id:
+            return None
+
+        if start_time is None:
+            start_time = dt_util.now()
+
+        n_intervals = horizon_hours * 60 // self.interval_minutes
+
+        try:
+            state = self.hass.states.get(self._hafo_sensor_id)
+            if not state or state.state in ("unknown", "unavailable"):
+                return None
+
+            # Get forecast attribute (standard Home Assistant forecast format)
+            forecast_data = state.attributes.get("forecast", [])
+
+            if not forecast_data:
+                # Try alternative attribute names
+                forecast_data = (
+                    state.attributes.get("forecasts", []) or
+                    state.attributes.get("predictions", []) or
+                    state.attributes.get("values", [])
+                )
+
+            if not forecast_data:
+                _LOGGER.debug(f"HAFO sensor {self._hafo_sensor_id} has no forecast data")
+                return None
+
+            return self._parse_hafo_forecast(forecast_data, start_time, n_intervals)
+
+        except Exception as e:
+            _LOGGER.warning(f"Error reading HAFO forecast: {e}")
+            return None
+
+    def _parse_hafo_forecast(
+        self,
+        forecast_data: list[dict[str, Any]],
+        start_time: datetime,
+        n_intervals: int,
+    ) -> list[float]:
+        """
+        Parse HAFO forecast data into interval values.
+
+        HAFO forecast format (standard HA forecast):
+        [
+            {"datetime": "2024-01-01T00:00:00+00:00", "native_value": 1500.0},
+            {"datetime": "2024-01-01T00:30:00+00:00", "native_value": 1450.0},
+            ...
+        ]
+
+        Or alternative format:
+        [
+            {"time": "2024-01-01T00:00:00", "value": 1500.0},
+            ...
+        ]
+        """
+        # Build time-indexed lookup
+        forecast_by_time: dict[datetime, float] = {}
+
+        for item in forecast_data:
+            try:
+                # Try different datetime field names
+                time_str = (
+                    item.get("datetime") or
+                    item.get("time") or
+                    item.get("timestamp") or
+                    item.get("period_end")
+                )
+
+                if not time_str:
+                    continue
+
+                if isinstance(time_str, datetime):
+                    item_time = time_str
+                else:
+                    item_time = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
+
+                # Try different value field names
+                value = (
+                    item.get("native_value") or
+                    item.get("value") or
+                    item.get("load") or
+                    item.get("power") or
+                    0.0
+                )
+
+                if value is not None:
+                    # Ensure value is in Watts
+                    value = float(value)
+                    # If value seems to be in kW (< 50), convert to W
+                    if 0 < value < 50:
+                        value *= 1000
+
+                    forecast_by_time[item_time] = value
+
+            except (ValueError, TypeError, KeyError) as e:
+                _LOGGER.debug(f"Error parsing HAFO forecast item: {e}")
+                continue
+
+        if not forecast_by_time:
+            _LOGGER.warning("HAFO forecast data could not be parsed")
+            return []
+
+        # Generate interval forecast
+        result = []
+        current_time = start_time
+        sorted_times = sorted(forecast_by_time.keys())
+
+        for _ in range(n_intervals):
+            # Find the closest forecast time
+            closest_time = None
+            min_diff = float('inf')
+
+            for ft in sorted_times:
+                diff = abs((ft - current_time).total_seconds())
+                if diff < min_diff:
+                    min_diff = diff
+                    closest_time = ft
+
+            if closest_time and min_diff < 3600:  # Within 1 hour
+                result.append(forecast_by_time[closest_time])
+            elif result:
+                # Use last known value
+                result.append(result[-1])
+            else:
+                # Default fallback
+                result.append(500.0)
+
+            current_time += timedelta(minutes=self.interval_minutes)
+
+        _LOGGER.debug(f"HAFO forecast: {len(result)} intervals, avg={sum(result)/len(result):.0f}W")
+        return result
 
 
 class LoadEstimator:
     """
-    Estimate household load forecast from historical data.
+    Estimate household load forecast from multiple sources.
 
-    Methods:
-    1. Historical average: Same time on recent days, smoothed
-    2. Day-of-week pattern: Average by time-of-day and day-of-week
-    3. Current extrapolation: Recent average extended forward
+    Priority order:
+    1. HAFO (Home Assistant Forecaster) - ML-based, most accurate
+    2. Historical pattern matching from Home Assistant recorder
+    3. Simple pattern-based fallback
 
-    The estimator queries Home Assistant recorder for historical load data
-    and generates a forecast for the optimization horizon.
+    The estimator queries HAFO first for ML-based forecasts, then falls back
+    to local pattern matching if HAFO is not available.
     """
 
     def __init__(
@@ -52,6 +287,17 @@ class LoadEstimator:
         self._cache_time: datetime | None = None
         self._cache_duration = timedelta(hours=1)
 
+        # Initialize HAFO forecaster
+        self._hafo = HAFOForecaster(hass, load_entity_id, interval_minutes)
+        self._hafo_available: bool | None = None
+
+    @property
+    def hafo_available(self) -> bool:
+        """Check if HAFO is available for load forecasting."""
+        if self._hafo_available is None:
+            self._hafo_available = self._hafo.is_available()
+        return self._hafo_available
+
     async def get_forecast(
         self,
         horizon_hours: int = 48,
@@ -59,6 +305,8 @@ class LoadEstimator:
     ) -> list[float]:
         """
         Generate load forecast in Watts for each interval.
+
+        Tries HAFO first (ML-based), then falls back to historical patterns.
 
         Args:
             horizon_hours: Forecast horizon in hours
@@ -72,15 +320,30 @@ class LoadEstimator:
 
         n_intervals = horizon_hours * 60 // self.interval_minutes
 
-        # Try to get historical pattern
+        # Try HAFO first (ML-based forecasting)
+        if self.hafo_available:
+            try:
+                hafo_forecast = await self._hafo.get_forecast(horizon_hours, start_time)
+                if hafo_forecast and len(hafo_forecast) >= n_intervals * 0.5:
+                    _LOGGER.debug("Using HAFO for load forecast")
+                    # Pad if needed
+                    while len(hafo_forecast) < n_intervals:
+                        hafo_forecast.append(hafo_forecast[-1] if hafo_forecast else 500.0)
+                    return hafo_forecast[:n_intervals]
+            except Exception as e:
+                _LOGGER.warning(f"HAFO forecast failed: {e}")
+
+        # Fallback to historical pattern
         try:
             history = await self._get_load_history(days=7)
             if history:
+                _LOGGER.debug("Using historical pattern for load forecast")
                 return self._forecast_from_history(history, start_time, n_intervals)
         except Exception as e:
             _LOGGER.warning(f"Failed to get load history: {e}")
 
-        # Fallback: use current load or default
+        # Final fallback: use current load or default
+        _LOGGER.debug("Using simple forecast fallback")
         current_load = self._get_current_load()
         return self._simple_forecast(current_load, start_time, n_intervals)
 

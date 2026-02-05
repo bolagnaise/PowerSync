@@ -1293,12 +1293,120 @@ class ChargingPlanner:
     # Charging efficiency (AC to DC)
     CHARGING_EFFICIENCY = 0.9
 
-    def __init__(self, hass, config_entry):
-        """Initialize the planner."""
+    def __init__(self, hass, config_entry, battery_schedule_getter=None, grid_capacity_kw: float = 7.4):
+        """Initialize the planner.
+
+        Args:
+            hass: Home Assistant instance
+            config_entry: Config entry for this integration
+            battery_schedule_getter: Optional callback to get battery optimization schedule.
+                                    Used to calculate available power for EV when battery
+                                    is also charging (dynamic power sharing).
+            grid_capacity_kw: Total grid import capacity in kW (default 7.4kW = 32A single phase)
+        """
         self.hass = hass
         self.config_entry = config_entry
         self.surplus_forecaster = SurplusForecaster(hass)
         self.price_forecaster = PriceForecaster(hass, config_entry)
+        self._get_battery_schedule = battery_schedule_getter
+        self._grid_capacity_kw = grid_capacity_kw
+
+    async def _get_battery_power_schedule(self, hours: int = 24) -> Dict[str, float]:
+        """Get battery power usage per hour from optimizer schedule.
+
+        Returns dict of {hour_iso: power_kw} for battery charging periods.
+        This allows EV to use remaining grid capacity during shared charging windows.
+        """
+        if not self._get_battery_schedule:
+            return {}
+
+        try:
+            schedule = self._get_battery_schedule()
+            if hasattr(schedule, '__await__'):
+                schedule = await schedule
+
+            if not schedule:
+                return {}
+
+            # Build hour -> power mapping
+            battery_power = {}
+
+            for action in schedule:
+                if isinstance(action, dict):
+                    ts_str = action.get("timestamp")
+                    action_type = action.get("action")
+                    power_w = action.get("power_w", 0)
+                else:
+                    ts_str = getattr(action, "timestamp", None)
+                    action_type = getattr(action, "action", None)
+                    power_w = getattr(action, "power_w", 0)
+
+                if not ts_str or action_type != "charge":
+                    continue
+
+                # Parse timestamp and round to hour
+                if isinstance(ts_str, str):
+                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                else:
+                    ts = ts_str
+
+                hour_key = ts.replace(minute=0, second=0, microsecond=0).isoformat()
+                power_kw = power_w / 1000 if power_w > 100 else power_w  # Handle W vs kW
+
+                # Take max power for each hour (conservative estimate)
+                if hour_key in battery_power:
+                    battery_power[hour_key] = max(battery_power[hour_key], power_kw)
+                else:
+                    battery_power[hour_key] = power_kw
+
+            return battery_power
+
+        except Exception as e:
+            _LOGGER.debug(f"Error getting battery schedule: {e}")
+            return {}
+
+    def _get_available_ev_power(
+        self,
+        hour: str,
+        charger_max_kw: float,
+        battery_power_schedule: Dict[str, float],
+        solar_surplus_kw: float = 0,
+    ) -> float:
+        """Calculate available power for EV charging at a given hour.
+
+        Dynamic power sharing: EV gets remaining capacity after battery.
+        During solar surplus, both can charge at full rate.
+
+        Args:
+            hour: Hour in ISO format
+            charger_max_kw: Maximum EV charger power
+            battery_power_schedule: Dict of hour -> battery charging power
+            solar_surplus_kw: Available solar surplus (can exceed grid capacity)
+
+        Returns:
+            Available power for EV in kW
+        """
+        battery_power = battery_power_schedule.get(hour, 0)
+
+        if solar_surplus_kw > 0:
+            # Solar surplus available - EV can use surplus + remaining grid
+            # Solar powers both battery and EV, only grid import is limited
+            grid_needed_by_battery = max(0, battery_power - solar_surplus_kw)
+            available_grid = self._grid_capacity_kw - grid_needed_by_battery
+            available_solar = max(0, solar_surplus_kw - battery_power)
+            total_available = available_grid + available_solar
+        else:
+            # No solar - share grid capacity with battery
+            total_available = self._grid_capacity_kw - battery_power
+
+        # Clamp to charger limits and minimum charging threshold
+        available = min(charger_max_kw, max(0, total_available))
+
+        # Minimum 1.4kW (6A) to actually charge
+        if available < 1.4:
+            return 0
+
+        return available
 
     async def plan_charging(
         self,
@@ -1361,30 +1469,44 @@ class ChargingPlanner:
         surplus_forecast = await self.surplus_forecaster.forecast_surplus(hours_available)
         price_forecast = await self.price_forecaster.get_price_forecast(hours_available)
 
+        # Get battery power schedule for dynamic power sharing
+        # EV uses remaining grid capacity when battery is also charging
+        # Both charge during cheap/solar periods - we just share the available power
+        battery_power_schedule = await self._get_battery_power_schedule(hours_available)
+        if battery_power_schedule:
+            _LOGGER.debug(
+                f"Battery charging in {len(battery_power_schedule)} hours - "
+                f"EV will share grid capacity (max {self._grid_capacity_kw}kW)"
+            )
+
         # Create plan based on priority
         if priority == ChargingPriority.SOLAR_ONLY:
             plan = await self._plan_solar_only(
                 vehicle_id, current_soc, target_soc, target_time,
                 energy_needed_kwh, charger_power_kw,
                 surplus_forecast,
+                battery_power_schedule=battery_power_schedule,
             )
         elif priority == ChargingPriority.SOLAR_PREFERRED:
             plan = await self._plan_solar_preferred(
                 vehicle_id, current_soc, target_soc, target_time,
                 energy_needed_kwh, charger_power_kw,
                 surplus_forecast, price_forecast,
+                battery_power_schedule=battery_power_schedule,
             )
         elif priority == ChargingPriority.COST_OPTIMIZED:
             plan = await self._plan_cost_optimized(
                 vehicle_id, current_soc, target_soc, target_time,
                 energy_needed_kwh, charger_power_kw,
                 surplus_forecast, price_forecast,
+                battery_power_schedule=battery_power_schedule,
             )
         else:  # TIME_CRITICAL
             plan = await self._plan_time_critical(
                 vehicle_id, current_soc, target_soc, target_time,
                 energy_needed_kwh, charger_power_kw,
                 surplus_forecast, price_forecast,
+                battery_power_schedule=battery_power_schedule,
             )
 
         return plan
@@ -1398,25 +1520,39 @@ class ChargingPlanner:
         energy_needed_kwh: float,
         charger_power_kw: float,
         surplus_forecast: List[SurplusForecast],
+        battery_power_schedule: Dict[str, float] = None,
     ) -> ChargingPlan:
-        """Plan charging using only solar surplus."""
+        """Plan charging using only solar surplus with dynamic power sharing."""
         windows = []
         energy_allocated = 0
         total_confidence = 0
+        battery_power_schedule = battery_power_schedule or {}
 
         for forecast in surplus_forecast:
             if energy_allocated >= energy_needed_kwh:
                 break
 
             if forecast.surplus_kw >= 1.0:  # Minimum 1kW to charge
-                # Calculate how much we can charge this hour
-                available_power = min(forecast.surplus_kw, charger_power_kw)
+                hour_dt = datetime.fromisoformat(forecast.hour)
+                hour_key = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
+
+                # Dynamic power sharing: calculate available power for EV
+                # Solar surplus can power both battery and EV simultaneously
+                available_power = self._get_available_ev_power(
+                    hour_key,
+                    charger_power_kw,
+                    battery_power_schedule,
+                    solar_surplus_kw=forecast.surplus_kw,
+                )
+
+                if available_power < 1.4:  # Minimum 6A to charge
+                    continue
+
                 energy_this_hour = available_power  # kWh (1 hour)
 
                 # Don't over-allocate
                 energy_this_hour = min(energy_this_hour, energy_needed_kwh - energy_allocated)
 
-                hour_dt = datetime.fromisoformat(forecast.hour)
                 end_dt = hour_dt + timedelta(hours=1)
 
                 windows.append(PlannedChargingWindow(
@@ -1463,13 +1599,15 @@ class ChargingPlanner:
         charger_power_kw: float,
         surplus_forecast: List[SurplusForecast],
         price_forecast: List[PriceForecast],
+        battery_power_schedule: Dict[str, float] = None,
     ) -> ChargingPlan:
-        """Plan charging preferring solar, falling back to offpeak grid."""
+        """Plan charging preferring solar, falling back to offpeak grid with dynamic power sharing."""
         windows = []
         solar_energy = 0
         grid_energy = 0
         total_cost = 0
         total_confidence = 0
+        battery_power_schedule = battery_power_schedule or {}
 
         # First pass: allocate solar
         for forecast in surplus_forecast:
@@ -1477,10 +1615,21 @@ class ChargingPlanner:
                 break
 
             if forecast.surplus_kw >= 1.0:
-                available_power = min(forecast.surplus_kw, charger_power_kw)
-                energy_this_hour = min(available_power, energy_needed_kwh - solar_energy - grid_energy)
-
                 hour_dt = datetime.fromisoformat(forecast.hour)
+                hour_key = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
+
+                # Dynamic power sharing with battery
+                available_power = self._get_available_ev_power(
+                    hour_key,
+                    charger_power_kw,
+                    battery_power_schedule,
+                    solar_surplus_kw=forecast.surplus_kw,
+                )
+
+                if available_power < 1.4:
+                    continue
+
+                energy_this_hour = min(available_power, energy_needed_kwh - solar_energy - grid_energy)
                 end_dt = hour_dt + timedelta(hours=1)
 
                 windows.append(PlannedChargingWindow(
@@ -1498,6 +1647,7 @@ class ChargingPlanner:
 
         # Second pass: fill with cheapest grid hours if needed
         # Sort by price (cheapest first) to prefer offpeak/cheap hours
+        # Cheap hours are when battery also charges - use dynamic power sharing
         remaining_energy = energy_needed_kwh - solar_energy
         if remaining_energy > 0 and price_forecast:
             # Sort all hours by price (cheapest first)
@@ -1514,9 +1664,21 @@ class ChargingPlanner:
                 if already_covered:
                     continue
 
-                energy_this_hour = min(charger_power_kw, remaining_energy - grid_energy)
-
                 hour_dt = datetime.fromisoformat(price_data.hour)
+                hour_key = hour_dt.replace(minute=0, second=0, microsecond=0).isoformat()
+
+                # Dynamic power sharing: cheap hours = battery charging too
+                available_power = self._get_available_ev_power(
+                    hour_key,
+                    charger_power_kw,
+                    battery_power_schedule,
+                    solar_surplus_kw=0,  # No solar during grid-only hours
+                )
+
+                if available_power < 1.4:
+                    continue  # Not enough capacity, try next hour
+
+                energy_this_hour = min(available_power, remaining_energy - grid_energy)
                 end_dt = hour_dt + timedelta(hours=1)
 
                 # Label source based on period type
@@ -1527,7 +1689,7 @@ class ChargingPlanner:
                     start_time=price_data.hour,
                     end_time=end_dt.isoformat(),
                     source=source,
-                    estimated_power_kw=charger_power_kw,
+                    estimated_power_kw=available_power,
                     estimated_energy_kwh=energy_this_hour,
                     price_cents_kwh=price_data.import_cents,
                     reason=reason,
@@ -1581,6 +1743,7 @@ class ChargingPlanner:
         charger_power_kw: float,
         surplus_forecast: List[SurplusForecast],
         price_forecast: List[PriceForecast],
+        battery_power_schedule: Dict[str, float] = None,
     ) -> ChargingPlan:
         """
         Plan charging to minimize cost while meeting departure deadline.
@@ -1590,12 +1753,15 @@ class ChargingPlanner:
         2. Sort by price (cheapest first), with solar surplus as free (0 cost)
         3. Select cheapest windows until energy requirement is met
         4. If deadline is tight, prioritize meeting deadline over cost
+        5. Dynamic power sharing: adjust EV amps based on battery charge rate
 
         Example scenarios:
         - Plugged in at 11am with 1c/kWh price -> charge immediately
         - Arrive home 6pm at 58c/kWh, depart 6am with 15-20c overnight -> wait for cheap overnight
+        - Battery charging at 5kW during cheap period -> EV charges at reduced rate
         """
         now = datetime.now()
+        battery_power_schedule = battery_power_schedule or {}
 
         # Convert target_time to naive local time for comparison
         # Price forecast hours are stored as naive local time strings
@@ -1810,14 +1976,18 @@ class ChargingPlanner:
         charger_power_kw: float,
         surplus_forecast: List[SurplusForecast],
         price_forecast: List[PriceForecast],
+        battery_power_schedule: Dict[str, float] = None,
     ) -> ChargingPlan:
         """Plan charging to meet deadline, minimizing cost as secondary goal."""
+        battery_power_schedule = battery_power_schedule or {}
+
         if not target_time:
             # No deadline, use cost-optimized
             return await self._plan_cost_optimized(
                 vehicle_id, current_soc, target_soc, target_time,
                 energy_needed_kwh, charger_power_kw,
                 surplus_forecast, price_forecast,
+                battery_power_schedule=battery_power_schedule,
             )
 
         # Calculate minimum hours needed

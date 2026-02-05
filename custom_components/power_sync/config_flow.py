@@ -208,6 +208,9 @@ from .const import (
     OPT_PROVIDER_POWERSYNC,
     OPTIMIZATION_PROVIDERS,
     OPTIMIZATION_PROVIDER_NATIVE_NAMES,
+    # External Optimizer integration
+    OPTIMIZER_DOMAIN,
+    OPTIMIZER_INSTALL_URL,
 )
 
 # Combined network tariff key for config flow
@@ -845,14 +848,22 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_optimization_provider(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Let user choose optimization provider - native battery or PowerSync ML."""
+        """Let user choose optimization provider - native battery or PowerSync Smart Optimization."""
+        errors: dict[str, str] = {}
+
         if user_input is not None:
             provider = user_input.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
             self._optimization_provider = provider
 
             if provider == OPT_PROVIDER_POWERSYNC:
-                # User wants PowerSync ML - show ML options
-                return await self.async_step_ml_options()
+                # Check if external optimizer is installed
+                optimizer_installed = OPTIMIZER_DOMAIN in self.hass.config.components
+                if not optimizer_installed:
+                    # Show optimizer required error
+                    errors["base"] = "optimizer_not_installed"
+                else:
+                    # User wants PowerSync optimization - show options
+                    return await self.async_step_ml_options()
             else:
                 # User wants native battery optimization - proceed to electricity provider
                 return await self.async_step_provider_selection()
@@ -862,10 +873,14 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._selected_battery_system, "Battery"
         )
 
+        # Check if external optimizer is available
+        optimizer_available = OPTIMIZER_DOMAIN in self.hass.config.components
+        optimizer_suffix = "" if optimizer_available else " (requires external optimizer)"
+
         # Build dynamic provider options with battery-specific naming
         providers = {
             OPT_PROVIDER_NATIVE: f"{native_name} built-in optimization",
-            OPT_PROVIDER_POWERSYNC: "PowerSync ML Optimization (alpha)",
+            OPT_PROVIDER_POWERSYNC: f"PowerSync Smart Optimization{optimizer_suffix}",
         }
 
         return self.async_show_form(
@@ -873,8 +888,10 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema({
                 vol.Required(CONF_OPTIMIZATION_PROVIDER, default=OPT_PROVIDER_POWERSYNC): vol.In(providers),
             }),
+            errors=errors,
             description_placeholders={
                 "battery_name": native_name,
+                "optimizer_url": OPTIMIZER_INSTALL_URL,
             },
         )
 

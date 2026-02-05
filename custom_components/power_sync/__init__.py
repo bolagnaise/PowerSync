@@ -10404,7 +10404,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _LOGGER.warning("Could not switch operation mode: %s", response.status)
 
             # Step 4: Create and upload discharge tariff (high export rates)
-            discharge_tariff = _create_discharge_tariff(duration)
+            discharge_tariff, actual_expiry = _create_discharge_tariff(duration)
             success = await send_tariff_to_tesla(
                 hass,
                 site_id,
@@ -10415,8 +10415,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             if success:
                 force_discharge_state["active"] = True
-                force_discharge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
-                _LOGGER.info(f"✅ FORCE DISCHARGE ACTIVE: Tariff uploaded for {duration} min")
+                # Use the actual expiry time aligned to tariff window boundary
+                # This ensures the timer doesn't fire before the tariff window ends
+                force_discharge_state["expires_at"] = actual_expiry.astimezone(dt_util.UTC)
+                actual_duration = int((actual_expiry - dt_util.now()).total_seconds() / 60)
+                _LOGGER.info(f"✅ FORCE DISCHARGE ACTIVE: Tariff uploaded, expires at {actual_expiry.strftime('%H:%M')} ({actual_duration} min)")
 
                 # Dispatch event for switch entity
                 async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
@@ -10450,10 +10453,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.error(f"Error in force discharge: {e}", exc_info=True)
 
-    def _create_discharge_tariff(duration_minutes: int) -> dict:
+    def _create_discharge_tariff(duration_minutes: int) -> tuple[dict, datetime]:
         """Create a Tesla tariff optimized for exporting (force discharge).
 
         Uses the standard Tesla tariff structure.
+
+        Returns:
+            Tuple of (tariff_dict, actual_expiry_datetime)
+            The expiry datetime is aligned to the end of the tariff window,
+            ensuring the timer doesn't fire before the tariff window ends.
         """
         from homeassistant.util import dt as dt_util
 
@@ -10491,8 +10499,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         discharge_start = current_period_index
         discharge_end = (current_period_index + total_periods) % 48
 
+        # Calculate actual expiry time aligned to tariff window end
+        # This ensures the timer doesn't fire before the tariff window ends
+        end_period_hour = (discharge_end // 2) % 24
+        end_period_minute = 30 if discharge_end % 2 else 0
+        actual_expiry = now.replace(hour=end_period_hour, minute=end_period_minute, second=0, microsecond=0)
+
+        # Handle midnight wrap-around
+        if actual_expiry <= now:
+            actual_expiry += timedelta(days=1)
+
+        actual_duration = int((actual_expiry - now).total_seconds() / 60)
         _LOGGER.info(f"Discharge window: periods {discharge_start} to {discharge_end} ({total_periods} periods), "
-                     f"current time: {now.hour:02d}:{now.minute:02d}, {remaining_in_current}min left in current period")
+                     f"current time: {now.hour:02d}:{now.minute:02d}, "
+                     f"actual duration: {actual_duration}min (aligned to period boundary)")
 
         for i in range(48):
             hour = i // 2
@@ -10600,9 +10620,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             }
         }
 
-        _LOGGER.info(f"Created discharge tariff: buy=${buy_rate}/kWh, sell=${sell_rate_discharge}/kWh for {total_periods} periods")
+        _LOGGER.info(f"Created discharge tariff: buy=${buy_rate}/kWh, sell=${sell_rate_discharge}/kWh for {total_periods} periods, "
+                     f"expires at {actual_expiry.strftime('%H:%M')}")
 
-        return tariff
+        return tariff, actual_expiry
 
     async def handle_force_charge(call: ServiceCall) -> None:
         """Force charge mode - switches to autonomous with free import tariff."""
@@ -10823,7 +10844,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.warning("Could not set backup reserve: %s", response.status)
 
             # Step 4: Create and upload charge tariff (free import, no export incentive)
-            charge_tariff = _create_charge_tariff(duration)
+            charge_tariff, actual_expiry = _create_charge_tariff(duration)
             success = await send_tariff_to_tesla(
                 hass,
                 site_id,
@@ -10834,8 +10855,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             if success:
                 force_charge_state["active"] = True
-                force_charge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
-                _LOGGER.info(f"✅ FORCE CHARGE ACTIVE: Tariff uploaded for {duration} min")
+                # Use actual_expiry aligned to tariff window end, not duration from now
+                force_charge_state["expires_at"] = actual_expiry.astimezone(dt_util.UTC)
+                _LOGGER.info(f"✅ FORCE CHARGE ACTIVE: Tariff uploaded for {duration} min, expires at {actual_expiry.strftime('%H:%M')}")
 
                 # Dispatch event for UI
                 async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
@@ -10869,10 +10891,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.error(f"Error in force charge: {e}", exc_info=True)
 
-    def _create_charge_tariff(duration_minutes: int) -> dict:
+    def _create_charge_tariff(duration_minutes: int) -> tuple[dict, datetime]:
         """Create a Tesla tariff optimized for charging from grid (force charge).
 
         Uses the standard Tesla tariff structure.
+
+        Returns:
+            Tuple of (tariff_dict, actual_expiry_datetime)
+            The expiry datetime is aligned to the end of the tariff window,
+            ensuring the timer doesn't fire before the tariff window ends.
         """
         from homeassistant.util import dt as dt_util
 
@@ -10909,8 +10936,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         charge_start = current_period_index
         charge_end = (current_period_index + total_periods) % 48
 
+        # Calculate actual expiry time aligned to tariff window end
+        # This ensures the timer doesn't fire before the tariff window ends
+        end_period_hour = (charge_end // 2) % 24
+        end_period_minute = 30 if charge_end % 2 else 0
+        actual_expiry = now.replace(hour=end_period_hour, minute=end_period_minute, second=0, microsecond=0)
+
+        # Handle midnight wrap-around
+        if actual_expiry <= now:
+            actual_expiry += timedelta(days=1)
+
+        actual_duration = int((actual_expiry - now).total_seconds() / 60)
         _LOGGER.info(f"Charge window: periods {charge_start} to {charge_end} ({total_periods} periods), "
-                     f"current time: {now.hour:02d}:{now.minute:02d}, {remaining_in_current}min left in current period")
+                     f"current time: {now.hour:02d}:{now.minute:02d}, "
+                     f"actual duration: {actual_duration}min (aligned to period boundary)")
 
         for i in range(48):
             hour = i // 2
@@ -11018,9 +11057,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             }
         }
 
-        _LOGGER.info(f"Created charge tariff: buy=${buy_rate_charge}/kWh during charge, ${buy_rate_normal}/kWh outside for {total_periods} periods")
+        _LOGGER.info(f"Created charge tariff: buy=${buy_rate_charge}/kWh during charge, ${buy_rate_normal}/kWh outside for {total_periods} periods, "
+                     f"expires at {actual_expiry.strftime('%H:%M')}")
 
-        return tariff
+        return tariff, actual_expiry
 
     async def handle_restore_normal(call: ServiceCall) -> None:
         """Restore normal operation - restore saved tariff or trigger Amber sync."""
@@ -13368,16 +13408,20 @@ class OptimizationSettingsView(HomeAssistantView):
                     "error": "PowerSync not configured"
                 }, status=400)
 
-            # Build updated data
+            # Build updated data and options
             new_data = dict(config_entry.data)
+            new_options = dict(config_entry.options)
 
             if "enabled" in settings:
                 from .const import CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_POWERSYNC, OPT_PROVIDER_NATIVE
                 if settings["enabled"]:
                     new_data[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_POWERSYNC
+                    # Also set CONF_OPTIMIZATION_ENABLED in options so it persists correctly
+                    new_options[CONF_OPTIMIZATION_ENABLED] = True
                     changes.append("Enabled ML optimization")
                 else:
                     new_data[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_NATIVE
+                    new_options[CONF_OPTIMIZATION_ENABLED] = False
                     changes.append("Disabled ML optimization")
 
             if "cost_function" in settings:
@@ -13394,8 +13438,8 @@ class OptimizationSettingsView(HomeAssistantView):
                 new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = reserve
                 changes.append(f"Set backup reserve to {reserve}%")
 
-            # Update the config entry
-            self._hass.config_entries.async_update_entry(config_entry, data=new_data)
+            # Update the config entry (both data and options)
+            self._hass.config_entries.async_update_entry(config_entry, data=new_data, options=new_options)
             _LOGGER.info(f"🔧 ML optimization settings updated via API: {changes}")
 
             # If we enabled/disabled ML optimization, reload the integration in background

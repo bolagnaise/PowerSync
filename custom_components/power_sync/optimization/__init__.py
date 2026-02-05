@@ -1,71 +1,52 @@
-"""Optimization package for PowerSync ML-based battery scheduling."""
-from .engine import BatteryOptimiser, OptimizationResult, OptimizationConfig, CostFunction
-from .load_estimator import LoadEstimator, SolcastForecaster
-from .executor import ScheduleExecutor
-from .coordinator import OptimizationCoordinator
+"""
+Optimization package for PowerSync battery scheduling.
 
-# Future enhancements
-from .ml_load_forecaster import (
-    MLLoadEstimator,
-    WeatherAdjustedForecaster,
-    WeatherFeatures,
-    LoadFeatures,
-)
-from .ev_integration import (
-    EVOptimiser,
-    EVConfig,
-    EVChargingSchedule,
-    EVChargingPriority,
-    integrate_ev_with_home_battery,
-)
-from .multi_battery import (
-    MultiBatteryOptimiser,
-    MultiBatteryResult,
-    BatteryConfig,
-    BatterySystemType,
-)
-from .grid_services import (
-    GridServicesManager,
-    VPPAwareOptimiser,
-    VPPConfig,
-    VPPProgram,
-    GridEvent,
-    GridEventType,
-    GridEventResponse,
-)
+This module provides:
+- ForecastBridge: Creates forecast sensors for optimizer consumption
+- OptimizerConfigurator: Auto-configures external optimizer network
+- ScheduleReader: Reads optimizer output sensors
+- OptimizationCoordinator: Main coordinator for optimization
+- ScheduleExecutor: Executes battery commands
+- LoadEstimator, SolcastForecaster: Data sources for optimizer
+- EVCoordinator: Smart EV charging coordination (post-optimizer)
+
+External optimizer integration performs the actual LP optimization.
+"""
+from .load_estimator import LoadEstimator, SolcastForecaster, HAFOForecaster
+from .executor import ScheduleExecutor, BatteryAction, ExecutionStatus, CostFunction
+from .coordinator import OptimizationCoordinator, OptimizationConfig
+
+# Optimizer integration components
+from .forecast_bridge import ForecastBridge, ForecastSensor
+from .optimizer_configurator import OptimizerConfigurator
+from .schedule_reader import ScheduleReader, OptimizationSchedule, ScheduleAction
+
+# EV smart charging coordination
+from .ev_coordinator import EVCoordinator, EVConfig, EVChargingMode, EVChargingState, EVStatus
 
 __all__ = [
     # Core optimization
-    "BatteryOptimiser",
-    "OptimizationResult",
-    "OptimizationConfig",
-    "CostFunction",
     "LoadEstimator",
     "SolcastForecaster",
+    "HAFOForecaster",
     "ScheduleExecutor",
     "OptimizationCoordinator",
-    # ML Load Forecasting
-    "MLLoadEstimator",
-    "WeatherAdjustedForecaster",
-    "WeatherFeatures",
-    "LoadFeatures",
-    # EV Integration
-    "EVOptimiser",
+    "OptimizationConfig",
+    # Executor types
+    "BatteryAction",
+    "ExecutionStatus",
+    "CostFunction",
+    # Optimizer integration
+    "ForecastBridge",
+    "ForecastSensor",
+    "OptimizerConfigurator",
+    "ScheduleReader",
+    "OptimizationSchedule",
+    "ScheduleAction",
+    # EV smart charging
+    "EVCoordinator",
     "EVConfig",
-    "EVChargingSchedule",
-    "EVChargingPriority",
-    "integrate_ev_with_home_battery",
-    # Multi-battery
-    "MultiBatteryOptimiser",
-    "MultiBatteryResult",
-    "BatteryConfig",
-    "BatterySystemType",
-    # Grid Services / VPP
-    "GridServicesManager",
-    "VPPAwareOptimiser",
-    "VPPConfig",
-    "VPPProgram",
-    "GridEvent",
-    "GridEventType",
-    "GridEventResponse",
+    "EVChargingMode",
+    "EVChargingState",
+    "EVStatus",
 ]

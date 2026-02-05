@@ -958,7 +958,7 @@ def get_brand_defaults(brand: str) -> dict[str, int]:
 
 # ============================================================
 # Smart Optimization Configuration
-# ML-based battery scheduling using Linear Programming
+# External optimizer-based battery scheduling using Linear Programming
 # ============================================================
 
 # Battery management mode selection
@@ -967,18 +967,29 @@ CONF_BATTERY_MANAGEMENT_MODE = "battery_management_mode"
 # Management modes
 BATTERY_MODE_MANUAL = "manual"        # Use automations for control
 BATTERY_MODE_TOU_SYNC = "tou_sync"    # Sync prices to battery, let battery decide
-BATTERY_MODE_SMART_OPT = "smart_optimization"  # ML-optimized scheduling
+BATTERY_MODE_SMART_OPT = "smart_optimization"  # Optimizer-based scheduling
 
 BATTERY_MANAGEMENT_MODES = {
     BATTERY_MODE_MANUAL: "Manual (use automations)",
     BATTERY_MODE_TOU_SYNC: "TOU Sync (sync prices to battery)",
-    BATTERY_MODE_SMART_OPT: "Smart Optimization (ML-optimized scheduling)",
+    BATTERY_MODE_SMART_OPT: "Smart Optimization (LP-based scheduling)",
 }
 
 # Optimization provider selection
 CONF_OPTIMIZATION_PROVIDER = "optimization_provider"
 OPT_PROVIDER_NATIVE = "native"           # Use battery's built-in optimization
-OPT_PROVIDER_POWERSYNC = "powersync_ml"  # Use PowerSync ML optimization
+OPT_PROVIDER_POWERSYNC = "powersync_ml"  # Use PowerSync optimization
+
+# External Optimizer Integration
+OPTIMIZER_DOMAIN = "energy_optimizer"
+OPTIMIZER_INSTALL_URL = "https://github.com/hass-energy/energy-optimizer"
+
+# HAFO (Home Assistant Forecaster) Integration for ML-based load prediction
+# HAFO creates forecast sensors from historical entity data
+# Reference: https://hafo.haeo.io/
+HAFO_DOMAIN = "hafo"
+HAFO_INSTALL_URL = "https://hafo.haeo.io/"
+HAFO_LOAD_SENSOR_PREFIX = "sensor.hafo_"
 
 # Map battery system to native optimization name
 OPTIMIZATION_PROVIDER_NATIVE_NAMES = {
@@ -989,7 +1000,7 @@ OPTIMIZATION_PROVIDER_NATIVE_NAMES = {
 
 OPTIMIZATION_PROVIDERS = {
     OPT_PROVIDER_NATIVE: "Use battery's built-in optimization",
-    OPT_PROVIDER_POWERSYNC: "PowerSync ML Optimization (alpha)",
+    OPT_PROVIDER_POWERSYNC: "PowerSync Smart Optimization",
 }
 
 # Optimization configuration keys
@@ -1041,3 +1052,40 @@ SERVICE_OPTIMIZATION_REFRESH = "optimization_refresh"
 SENSOR_TYPE_OPTIMIZATION_STATUS = "optimization_status"
 SENSOR_TYPE_OPTIMIZATION_SAVINGS = "optimization_savings"
 SENSOR_TYPE_OPTIMIZATION_NEXT_ACTION = "optimization_next_action"
+
+# ============================================================
+# EV Smart Charging Configuration
+# Coordinates EV charging alongside battery optimization
+# ============================================================
+
+# EV smart charging mode configuration
+CONF_EV_SMART_CHARGING_ENABLED = "ev_smart_charging_enabled"
+CONF_EV_CHARGER_ENTITY = "ev_charger_entity"
+CONF_EV_CHARGING_MODE = "ev_charging_mode"
+CONF_EV_TARGET_SOC = "ev_target_soc"
+CONF_EV_DEPARTURE_TIME = "ev_departure_time"
+CONF_EV_PRICE_THRESHOLD = "ev_price_threshold"
+
+# EV charging modes
+EV_MODE_OFF = "off"
+EV_MODE_SMART = "smart"          # Charge during cheap periods
+EV_MODE_SOLAR_ONLY = "solar_only"  # Only charge from excess solar
+EV_MODE_IMMEDIATE = "immediate"   # Charge immediately
+EV_MODE_SCHEDULED = "scheduled"   # User-defined schedule
+
+EV_CHARGING_MODES = {
+    EV_MODE_OFF: "Off - Manual control only",
+    EV_MODE_SMART: "Smart - Charge during cheap electricity",
+    EV_MODE_SOLAR_ONLY: "Solar Only - Charge from excess solar",
+    EV_MODE_IMMEDIATE: "Immediate - Charge whenever plugged in",
+    EV_MODE_SCHEDULED: "Scheduled - Charge at specific times",
+}
+
+# Default EV charging settings
+DEFAULT_EV_TARGET_SOC = 0.8          # 80%
+DEFAULT_EV_DEPARTURE_TIME = "07:00"
+DEFAULT_EV_PRICE_THRESHOLD = 0.15    # $0.15/kWh
+
+# EV sensor types
+SENSOR_TYPE_EV_CHARGING_STATUS = "ev_charging_status"
+SENSOR_TYPE_EV_NEXT_CHARGE_WINDOW = "ev_next_charge_window"
