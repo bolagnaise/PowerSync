@@ -87,7 +87,7 @@ class PowerSyncDurationSelect(SelectEntity):
     _attr_has_entity_name = True
 
     def __init__(self, entry: ConfigEntry, key: str, name: str, suggested_object_id: str) -> None:
-        self._entry = entry
+        self._entry_id = entry.entry_id
         self._key = key
         self._attr_name = name
         self._attr_unique_id = f"{entry.entry_id}_{key}"
@@ -98,17 +98,28 @@ class PowerSyncDurationSelect(SelectEntity):
         # SelectEntity options must be strings
         self._attr_options = [str(x) for x in DISCHARGE_DURATIONS]
 
+    def _get_entry(self) -> ConfigEntry | None:
+        """Get the current config entry (not a stale reference)."""
+        return self.hass.config_entries.async_get_entry(self._entry_id)
+
     @property
     def current_option(self) -> str | None:
         """Return the currently selected option."""
-        return self._entry.options.get(self._key, str(DEFAULT_DISCHARGE_DURATION))
+        entry = self._get_entry()
+        if entry is None:
+            return str(DEFAULT_DISCHARGE_DURATION)
+        return entry.options.get(self._key, str(DEFAULT_DISCHARGE_DURATION))
 
     async def async_select_option(self, option: str) -> None:
         """Handle user selecting an option."""
         if option not in self.options:
             return
 
-        new_options = dict(self._entry.options)
+        entry = self._get_entry()
+        if entry is None:
+            return
+
+        new_options = dict(entry.options)
         new_options[self._key] = option
-        self.hass.config_entries.async_update_entry(self._entry, options=new_options)
+        self.hass.config_entries.async_update_entry(entry, options=new_options)
         self.async_write_ha_state()
