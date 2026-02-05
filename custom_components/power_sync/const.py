@@ -980,9 +980,9 @@ CONF_OPTIMIZATION_PROVIDER = "optimization_provider"
 OPT_PROVIDER_NATIVE = "native"           # Use battery's built-in optimization
 OPT_PROVIDER_POWERSYNC = "powersync_ml"  # Use PowerSync optimization
 
-# External Optimizer Integration
-OPTIMIZER_DOMAIN = "energy_optimizer"
-OPTIMIZER_INSTALL_URL = "https://github.com/hass-energy/energy-optimizer"
+# External Optimizer Integration (HAEO)
+OPTIMIZER_DOMAIN = "haeo"
+OPTIMIZER_INSTALL_URL = "https://github.com/hass-energy/haeo"
 
 # HAFO (Home Assistant Forecaster) Integration for ML-based load prediction
 # HAFO creates forecast sensors from historical entity data
