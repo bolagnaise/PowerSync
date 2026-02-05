@@ -49,7 +49,7 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 | Export Limit Control | ➖ N/A | ➖ N/A | ✅ Modbus TCP |
 | Battery SOH Monitoring | ✅ | ➖ N/A | ✅ Modbus TCP |
 | **Automations** | ✅ | ✅ | ✅ |
-| **EV Charging Controls** | ✅ Tesla Fleet | ➖ N/A | ➖ N/A |
+| **EV Smart Charging** | ✅ Dynamic power sharing | ✅ Dynamic power sharing | ✅ Dynamic power sharing |
 
 **Connection Methods:**
 - **Tesla Powerwall** - Fleet API or Teslemetry proxy
@@ -73,6 +73,7 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 
 ### Advanced Features
 - **Smart Optimization** - HAEO-powered LP optimization for optimal battery scheduling
+- **EV Smart Charging** - Dynamic power sharing between battery and EV during cheap/solar periods
 - **AEMO Spike Detection** - Monitors wholesale prices and switches to spike tariff during extreme price events
 - **Solar Curtailment** - Prevents solar export during negative pricing periods
 - **Spike Protection** - Prevents battery from charging from grid during Amber price spikes
@@ -263,6 +264,92 @@ The optimization screen shows:
 - Install HAFO for ML-based load prediction
 - Ensure you have at least 7 days of load history in Home Assistant recorder
 - Check that your load sensor is recording properly
+
+---
+
+## EV Smart Charging
+
+PowerSync coordinates EV charging alongside battery optimization using **dynamic power sharing**. Both your battery and EV charge during cheap electricity periods, with EV charging amps dynamically adjusted based on available grid capacity.
+
+### How It Works
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Optimizer Schedule                                         │
+│  Battery charging at 5kW during 2am-6am (cheap period)     │
+└─────────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────┐
+│  EV Coordinator                                             │
+│  Grid capacity: 7kW                                         │
+│  Battery using: 5kW                                         │
+│  Available for EV: 2kW → Set EV to 8A (single phase)       │
+└─────────────────────────────────────────────────────────────┘
+```
+
+During solar surplus periods, the EV coordinator calculates:
+1. How much solar exceeds home load
+2. How much the battery is absorbing
+3. Remaining power available for EV charging
+
+### Charging Modes
+
+| Mode | Description |
+|------|-------------|
+| **Solar Only** | Only charge from excess solar production |
+| **Solar Preferred** | Prefer solar, use grid during cheap periods if needed |
+| **Cost Optimized** | Charge during cheapest periods (grid or solar) |
+| **Time Critical** | Charge immediately to meet departure time |
+
+### Supported EV Chargers
+
+| Charger Type | Control Method |
+|--------------|----------------|
+| **Tesla Wall Connector** | Tesla Fleet API |
+| **OCPP Chargers** | OCPP 1.6J protocol |
+| **Wallbox** | Wallbox API |
+| **Easee** | Easee API |
+
+### Configuration
+
+1. **In the Mobile App:**
+   - Go to **Settings** → **EV Charging**
+   - Enable **Smart EV Charging**
+   - Select your **Charger Type**
+   - Enter charger credentials/connection details
+   - Set your **Grid Capacity** (typically 7kW for single phase, 22kW for three phase)
+
+2. **Set Charging Parameters:**
+   - **Departure Time** - When you need the car ready
+   - **Target SOC** - Desired battery percentage
+   - **Charging Mode** - Solar Only, Solar Preferred, Cost Optimized, or Time Critical
+
+### Dynamic Power Sharing
+
+The key insight: **cheap electricity periods are cheap for both battery and EV charging**. Rather than avoiding battery charging windows, PowerSync dynamically shares available grid capacity:
+
+```
+Example: 2am cheap period, 7kW grid capacity
+
+Battery schedule: Charge at 5kW
+Available for EV: 7kW - 5kW = 2kW
+EV charging amps: 2000W ÷ 240V = 8A
+
+If battery reduces to 3kW:
+Available for EV: 7kW - 3kW = 4kW
+EV charging amps: 4000W ÷ 240V = 16A
+```
+
+During solar surplus:
+```
+Solar production: 8kW
+Home load: 2kW
+Battery charging: 4kW
+Excess solar: 8kW - 2kW - 4kW = 2kW
+Grid capacity still available: 7kW
+Total for EV: 2kW + 7kW = 9kW (capped at charger max)
+```
 
 ---
 
