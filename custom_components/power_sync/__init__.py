@@ -972,8 +972,10 @@ class AEMOSpikeManager:
         # This creates a HUGE sell incentive that Powerwall will respond to
         sell_rate_spike = (current_aemo_price_mwh / 1000.0) * 3.0
 
-        # Normal rates for buy (make it unattractive to import)
-        buy_rate = 0.50  # 50c/kWh - expensive to discourage import
+        # Buy rate must EXCEED sell rate to prevent grid charging arbitrage.
+        # If buy < sell, Powerwall sees profit in charging from grid to re-sell,
+        # which is the opposite of what we want during a spike.
+        buy_rate = max(sell_rate_spike * 2.0, 5.0)  # Always >> sell rate
         sell_rate_normal = 0.08  # 8c/kWh normal feed-in
 
         # Get current 30-minute period
