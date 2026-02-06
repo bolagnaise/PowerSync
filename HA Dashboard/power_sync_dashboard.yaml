@@ -7,7 +7,7 @@ views:
       - type: horizontal-stack
         cards:
           - type: gauge
-            entity: sensor.power_sync_current_import_price
+            entity: sensor.current_import_price
             name: Import
             unit: $/kWh
             min: 0
@@ -23,7 +23,7 @@ views:
                   height: 140px;
                 }
           - type: gauge
-            entity: sensor.power_sync_current_export_price
+            entity: sensor.current_export_price
             name: Export Earnings
             unit: $/kWh
             min: -0.1
@@ -39,7 +39,7 @@ views:
                   height: 140px;
                 }
           - type: gauge
-            entity: sensor.power_sync_battery_level
+            entity: sensor.battery_level
             name: Battery
             unit: '%'
             min: 0
@@ -237,23 +237,23 @@ views:
       - type: custom:power-flow-card-plus
         entities:
           battery:
-            entity: sensor.power_sync_battery_power
-            state_of_charge: sensor.power_sync_battery_level
+            entity: sensor.battery_power
+            state_of_charge: sensor.battery_level
             name: Battery
             color_icon: true
             display_state: two_way
           grid:
-            entity: sensor.power_sync_grid_power
+            entity: sensor.grid_power
             name: Grid
             color_icon: true
             display_state: two_way
           solar:
-            entity: sensor.power_sync_solar_power
+            entity: sensor.solar_power
             name: Solar
             color_icon: true
             display_state: one_way
           home:
-            entity: sensor.power_sync_home_load
+            entity: sensor.home_load
             name: Home
             color_icon: true
         watt_threshold: 0
@@ -282,7 +282,7 @@ views:
                     return (val * 100).toFixed(0) + '¢';
                   }
         series:
-          - entity: sensor.power_sync_current_import_price
+          - entity: sensor.current_import_price
             name: Import
             type: line
             color: '#FF9800'
@@ -292,7 +292,7 @@ views:
             group_by:
               func: avg
               duration: 5min
-          - entity: sensor.power_sync_current_export_price
+          - entity: sensor.current_export_price
             name: Export Earnings
             type: line
             color: '#4CAF50'
@@ -342,7 +342,7 @@ views:
                     return val.toFixed(0) + '¢';
                   }
         series:
-          - entity: sensor.power_sync_tariff_schedule
+          - entity: sensor.tariff_schedule
             name: Buy Price
             type: line
             color: '#FF9800'
@@ -422,7 +422,7 @@ views:
               }
 
               return [];
-          - entity: sensor.power_sync_tariff_schedule
+          - entity: sensor.tariff_schedule
             name: Sell Price
             type: line
             color: '#4CAF50'
@@ -525,20 +525,20 @@ views:
       - type: horizontal-stack
         cards:
           - type: custom:button-card
-            entity: sensor.power_sync_dc_solar_curtailment
+            entity: sensor.dc_solar_curtailment
             name: DC Solar (Tesla)
             show_icon: true
             show_name: true
             show_label: true
             label: |-
               [[[
-                const state = states['sensor.power_sync_dc_solar_curtailment']?.state;
+                const state = states['sensor.dc_solar_curtailment']?.state;
                 if (state === 'Active') return 'CURTAILED - Export blocked';
                 return 'Normal - Export allowed';
               ]]]
             icon: |-
               [[[
-                const state = states['sensor.power_sync_dc_solar_curtailment']?.state;
+                const state = states['sensor.dc_solar_curtailment']?.state;
                 return state === 'Active'
                   ? 'mdi:solar-power-variant-outline'
                   : 'mdi:solar-power-variant';
@@ -549,7 +549,7 @@ views:
                 - padding: 12px
                 - background: |-
                     [[[
-                      const state = states['sensor.power_sync_dc_solar_curtailment']?.state;
+                      const state = states['sensor.dc_solar_curtailment']?.state;
                       return state === 'Active'
                         ? 'linear-gradient(135deg, rgba(244, 67, 54, 0.15) 0%, rgba(244, 67, 54, 0.05) 100%)'
                         : 'linear-gradient(135deg, rgba(76, 175, 80, 0.15) 0%, rgba(76, 175, 80, 0.05) 100%)';
@@ -564,7 +564,7 @@ views:
                 - width: 28px
                 - color: |-
                     [[[
-                      const state = states['sensor.power_sync_dc_solar_curtailment']?.state;
+                      const state = states['sensor.dc_solar_curtailment']?.state;
                       return state === 'Active' ? 'var(--red-color)' : 'var(--green-color)';
                     ]]]
               name:
@@ -578,14 +578,14 @@ views:
             tap_action:
               action: more-info
           - type: custom:button-card
-            entity: sensor.power_sync_inverter_status
+            entity: sensor.inverter_status
             name: AC Inverter
             show_icon: true
             show_name: true
             show_label: true
             label: |-
               [[[
-                const stateObj = states['sensor.power_sync_inverter_status'];
+                const stateObj = states['sensor.inverter_status'];
                 const raw = (stateObj?.state ?? 'unknown').toLowerCase();
                 const power = stateObj?.attributes?.power_limit_percent;
                 const powerW = Number(stateObj?.attributes?.power_output_w ?? 0);
@@ -608,9 +608,9 @@ views:
               ]]]
             icon: |-
               [[[
-                const raw = (states['sensor.power_sync_inverter_status']?.state ?? 'unknown').toLowerCase();
-                const powerW = Number(states['sensor.power_sync_inverter_status']?.attributes?.power_output_w ?? 0);
-                const running = (states['sensor.power_sync_inverter_status']?.attributes?.running_state ?? '').toLowerCase();
+                const raw = (states['sensor.inverter_status']?.state ?? 'unknown').toLowerCase();
+                const powerW = Number(states['sensor.inverter_status']?.attributes?.power_output_w ?? 0);
+                const running = (states['sensor.inverter_status']?.attributes?.running_state ?? '').toLowerCase();
                 const isNight = states['sun.sun']?.state === 'below_horizon';
                 const isSleep = isNight && ((powerW < 100) || (running === 'stopped')) && !['offline','error','unavailable','unknown'].includes(raw);
                 if (isSleep) return 'mdi:moon-waning-crescent';
@@ -623,7 +623,7 @@ views:
                 - padding: 12px
                 - background: |-
                     [[[
-                      const stateObj = states['sensor.power_sync_inverter_status'];
+                      const stateObj = states['sensor.inverter_status'];
                       const raw = (stateObj?.state ?? 'unknown').toLowerCase();
                       const powerW = Number(stateObj?.attributes?.power_output_w ?? 0);
                       const running = (stateObj?.attributes?.running_state ?? '').toLowerCase();
@@ -647,9 +647,9 @@ views:
                 - width: 28px
                 - color: |-
                     [[[
-                      const raw = (states['sensor.power_sync_inverter_status']?.state ?? 'unknown').toLowerCase();
-                      const powerW = Number(states['sensor.power_sync_inverter_status']?.attributes?.power_output_w ?? 0);
-                      const running = (states['sensor.power_sync_inverter_status']?.attributes?.running_state ?? '').toLowerCase();
+                      const raw = (states['sensor.inverter_status']?.state ?? 'unknown').toLowerCase();
+                      const powerW = Number(states['sensor.inverter_status']?.attributes?.power_output_w ?? 0);
+                      const running = (states['sensor.inverter_status']?.attributes?.running_state ?? '').toLowerCase();
                       const isNight = states['sun.sun']?.state === 'below_horizon';
                       const isSleep = isNight && ((powerW < 100) || (running === 'stopped')) && !['offline','error','unavailable','unknown'].includes(raw);
                       const state = isSleep ? 'sleep' : raw;
@@ -673,9 +673,9 @@ views:
             card_mod:
               style: |
                 ha-card {
-                  {% set raw_state = states('sensor.power_sync_inverter_status') | lower %}
-                  {% set power_w = state_attr('sensor.power_sync_inverter_status', 'power_output_w') | float(0) %}
-                  {% set running = state_attr('sensor.power_sync_inverter_status', 'running_state') | default('') | lower %}
+                  {% set raw_state = states('sensor.inverter_status') | lower %}
+                  {% set power_w = state_attr('sensor.inverter_status', 'power_output_w') | float(0) %}
+                  {% set running = state_attr('sensor.inverter_status', 'running_state') | default('') | lower %}
                   {% set is_night = states('sun.sun') == 'below_horizon' %}
                   {% set is_sleep = is_night and (power_w < 100 or running == 'stopped') and raw_state not in ['offline', 'error', 'unavailable', 'unknown'] %}
                   {% set state = 'sleep' if is_sleep else raw_state %}
@@ -694,10 +694,10 @@ views:
       - type: conditional
         conditions:
           - condition: state
-            entity: sensor.power_sync_inverter_status
+            entity: sensor.inverter_status
             state_not: unavailable
           - condition: state
-            entity: sensor.power_sync_inverter_status
+            entity: sensor.inverter_status
             state_not: unknown
         card:
           type: grid
@@ -802,14 +802,14 @@ views:
             square: false
             cards:
               - type: custom:button-card
-                entity: sensor.power_sync_battery_health
+                entity: sensor.battery_health
                 name: Overall
                 show_icon: false
                 show_name: true
                 show_state: true
                 state_display: |-
                   [[[
-                    const v = states['sensor.power_sync_battery_health']?.state;
+                    const v = states['sensor.battery_health']?.state;
                     if (!v || ['unknown','unavailable','none'].includes(String(v).toLowerCase())) return '';
                     const n = Number(v);
                     if (!Number.isFinite(n)) return '';
@@ -822,7 +822,7 @@ views:
                     - padding: 10px
                     - display: |-
                         [[[
-                          const v = states['sensor.power_sync_battery_health']?.state;
+                          const v = states['sensor.battery_health']?.state;
                           if (!v || ['unknown','unavailable','none'].includes(String(v).toLowerCase())) return 'none';
                           const n = Number(v);
                           return Number.isFinite(n) ? 'block' : 'none';
@@ -835,14 +835,14 @@ views:
                     - font-weight: 800
                     - margin-top: 6px
               - type: custom:button-card
-                entity: sensor.power_sync_battery_health
+                entity: sensor.battery_health
                 name: Battery 1
                 show_icon: false
                 show_name: true
                 show_state: true
                 state_display: |-
                   [[[
-                    const v = states['sensor.power_sync_battery_health']?.attributes?.battery_1_health_percent;
+                    const v = states['sensor.battery_health']?.attributes?.battery_1_health_percent;
                     if (v === undefined || v === null) return '';
                     const n = Number(v);
                     if (!Number.isFinite(n)) return '';
@@ -855,7 +855,7 @@ views:
                     - padding: 10px
                     - display: |-
                         [[[
-                          const v = states['sensor.power_sync_battery_health']?.attributes?.battery_1_health_percent;
+                          const v = states['sensor.battery_health']?.attributes?.battery_1_health_percent;
                           if (v === undefined || v === null) return 'none';
                           const n = Number(v);
                           return Number.isFinite(n) ? 'block' : 'none';
@@ -868,14 +868,14 @@ views:
                     - font-weight: 800
                     - margin-top: 6px
               - type: custom:button-card
-                entity: sensor.power_sync_battery_health
+                entity: sensor.battery_health
                 name: Battery 2
                 show_icon: false
                 show_name: true
                 show_state: true
                 state_display: |-
                   [[[
-                    const v = states['sensor.power_sync_battery_health']?.attributes?.battery_2_health_percent;
+                    const v = states['sensor.battery_health']?.attributes?.battery_2_health_percent;
                     if (v === undefined || v === null) return '';
                     const n = Number(v);
                     if (!Number.isFinite(n)) return '';
@@ -888,7 +888,7 @@ views:
                     - padding: 10px
                     - display: |-
                         [[[
-                          const v = states['sensor.power_sync_battery_health']?.attributes?.battery_2_health_percent;
+                          const v = states['sensor.battery_health']?.attributes?.battery_2_health_percent;
                           if (v === undefined || v === null) return 'none';
                           const n = Number(v);
                           return Number.isFinite(n) ? 'block' : 'none';
@@ -901,14 +901,14 @@ views:
                     - font-weight: 800
                     - margin-top: 6px
               - type: custom:button-card
-                entity: sensor.power_sync_battery_health
+                entity: sensor.battery_health
                 name: Battery 3
                 show_icon: false
                 show_name: true
                 show_state: true
                 state_display: |-
                   [[[
-                    const v = states['sensor.power_sync_battery_health']?.attributes?.battery_3_health_percent;
+                    const v = states['sensor.battery_health']?.attributes?.battery_3_health_percent;
                     if (v === undefined || v === null) return '';
                     const n = Number(v);
                     if (!Number.isFinite(n)) return '';
@@ -921,7 +921,7 @@ views:
                     - padding: 10px
                     - display: |-
                         [[[
-                          const v = states['sensor.power_sync_battery_health']?.attributes?.battery_3_health_percent;
+                          const v = states['sensor.battery_health']?.attributes?.battery_3_health_percent;
                           if (v === undefined || v === null) return 'none';
                           const n = Number(v);
                           return Number.isFinite(n) ? 'block' : 'none';
@@ -935,15 +935,15 @@ views:
                     - margin-top: 6px
           - type: markdown
             content: >
-              {% set original = state_attr('sensor.power_sync_battery_health',
+              {% set original = state_attr('sensor.battery_health',
               'original_capacity_kwh') %}
 
-              {% set current = state_attr('sensor.power_sync_battery_health',
+              {% set current = state_attr('sensor.battery_health',
               'current_capacity_kwh') %}
 
-              {% set scan = state_attr('sensor.power_sync_battery_health', 'last_scan') %}
+              {% set scan = state_attr('sensor.battery_health', 'last_scan') %}
 
-              {%- if states('sensor.power_sync_battery_health') not in ['unavailable',
+              {%- if states('sensor.battery_health') not in ['unavailable',
               'unknown'] %}
 
               **Capacity:** {{ current }} / {{ original }} kWh | **Last scan:**
@@ -964,7 +964,7 @@ views:
         span:
           start: day
         series:
-          - entity: sensor.power_sync_solar_power
+          - entity: sensor.solar_power
             name: Solar
             type: area
             color: '#FFD700'
@@ -987,7 +987,7 @@ views:
         span:
           start: day
         series:
-          - entity: sensor.power_sync_battery_power
+          - entity: sensor.battery_power
             name: Battery
             type: area
             color: '#2196F3'
@@ -1008,7 +1008,7 @@ views:
         span:
           start: day
         series:
-          - entity: sensor.power_sync_grid_power
+          - entity: sensor.grid_power
             name: Grid
             type: area
             color: '#F44336'
@@ -1029,7 +1029,7 @@ views:
         span:
           start: day
         series:
-          - entity: sensor.power_sync_home_load
+          - entity: sensor.home_load
             name: Home
             type: area
             color: '#9C27B0'
