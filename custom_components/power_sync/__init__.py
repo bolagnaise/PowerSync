@@ -7800,6 +7800,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "is_sungrow": is_sungrow,  # Track if Sungrow battery system
     }
 
+    # Early initialization of tariff_schedule for non-Amber providers
+    # This ensures price sensors can be created during platform setup
+    # The full automation_store loading happens later and will update this
+    if electricity_provider in ("globird", "aemo_vpp", "other", "tou_only"):
+        initial_custom_tariff = entry.data.get("initial_custom_tariff")
+        if initial_custom_tariff:
+            tariff_schedule = convert_custom_tariff_to_schedule(initial_custom_tariff)
+            hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = tariff_schedule
+            _LOGGER.info(f"Early tariff_schedule initialized for {electricity_provider} from config flow data")
+
     # Helper function to update and persist cached export rule
     async def update_cached_export_rule(new_rule: str) -> None:
         """Update the cached export rule in memory and persist to storage."""

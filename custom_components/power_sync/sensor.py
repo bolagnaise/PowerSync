@@ -394,7 +394,9 @@ async def async_setup_entry(
 
     entities: list[SensorEntity] = []
 
-    # Add price sensors (only if Amber mode - requires amber_coordinator)
+    # Add price sensors
+    # For Amber users: use AmberPriceSensor with live API data
+    # For non-Amber users (Globird, etc.): use TariffPriceSensor with TOU schedule
     if amber_coordinator:
         _LOGGER.info("Adding Amber price sensors (import and export)")
         for description in PRICE_SENSORS:
@@ -406,7 +408,28 @@ async def async_setup_entry(
                 )
             )
     else:
-        _LOGGER.debug("No amber_coordinator - skipping price sensors")
+        # Check if we have a tariff schedule for TOU-based pricing
+        tariff_schedule = domain_data.get("tariff_schedule")
+        if tariff_schedule:
+            _LOGGER.info("Adding tariff-based price sensors (import and export) for non-Amber provider")
+            entities.append(
+                TariffPriceSensor(
+                    hass=hass,
+                    entry=entry,
+                    sensor_type=SENSOR_TYPE_CURRENT_IMPORT_PRICE,
+                    name="Current Import Price",
+                )
+            )
+            entities.append(
+                TariffPriceSensor(
+                    hass=hass,
+                    entry=entry,
+                    sensor_type=SENSOR_TYPE_CURRENT_EXPORT_PRICE,
+                    name="Current Export Price",
+                )
+            )
+        else:
+            _LOGGER.debug("No amber_coordinator or tariff_schedule - skipping price sensors")
 
     # Add energy sensors - use Tesla or Sigenergy coordinator depending on battery system
     # Both coordinators return data with same field names (solar_power, grid_power, etc.)
@@ -867,6 +890,121 @@ class TariffScheduleSensor(SensorEntity):
             # Add current buy/sell prices in cents
             attributes["buy_price"] = tariff_data.get("buy_price")
             attributes["sell_price"] = tariff_data.get("sell_price")
+
+        return attributes
+
+
+class TariffPriceSensor(SensorEntity):
+    """Sensor for current price derived from TOU tariff schedule.
+
+    This sensor provides current import/export prices for non-Amber users
+    (e.g., Globird) by calculating prices from the stored tariff schedule.
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        sensor_type: str,
+        name: str,
+    ) -> None:
+        """Initialize the sensor."""
+        self.hass = hass
+        self._entry = entry
+        self._sensor_type = sensor_type
+        self._attr_unique_id = f"{entry.entry_id}_{sensor_type}"
+        self._attr_has_entity_name = True
+        self._attr_name = name
+        self._attr_suggested_object_id = f"power_sync_{sensor_type}"
+        self._attr_native_unit_of_measurement = f"{CURRENCY_DOLLAR}/{UnitOfEnergy.KILO_WATT_HOUR}"
+        self._attr_device_class = SensorDeviceClass.MONETARY
+        self._attr_suggested_display_precision = 4
+        self._attr_icon = "mdi:currency-usd" if "import" in sensor_type else "mdi:transmission-tower-export"
+        self._unsub_dispatcher = None
+        self._unsub_time_interval = None
+        self._current_period = None
+
+    async def async_added_to_hass(self) -> None:
+        """Run when entity is added to hass."""
+        await super().async_added_to_hass()
+
+        _LOGGER.info(
+            "Tariff price sensor registered: %s (entity_id=%s)",
+            self._sensor_type,
+            self.entity_id
+        )
+
+        @callback
+        def _handle_tariff_update():
+            """Handle tariff update signal."""
+            _LOGGER.debug("Tariff price sensor received update signal: %s", self._sensor_type)
+            self.async_write_ha_state()
+
+        # Subscribe to tariff update signal
+        self._unsub_dispatcher = async_dispatcher_connect(
+            self.hass,
+            SIGNAL_TARIFF_UPDATED.format(self._entry.entry_id),
+            _handle_tariff_update,
+        )
+
+        # Also update every minute to catch TOU period changes
+        @callback
+        def _periodic_update(_now=None):
+            """Update sensor periodically to catch TOU period changes."""
+            self.async_write_ha_state()
+
+        self._unsub_time_interval = async_track_time_interval(
+            self.hass,
+            _periodic_update,
+            timedelta(minutes=1),
+        )
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Run when entity is removed from hass."""
+        if self._unsub_dispatcher:
+            self._unsub_dispatcher()
+        if self._unsub_time_interval:
+            self._unsub_time_interval()
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the current price from tariff schedule."""
+        tariff_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("tariff_schedule")
+        if not tariff_data:
+            return None
+
+        # Import the function from __init__.py
+        from . import get_current_price_from_tariff_schedule
+
+        buy_price_cents, sell_price_cents, current_period = get_current_price_from_tariff_schedule(tariff_data)
+
+        # Update current period for attributes
+        self._current_period = current_period
+
+        # Return appropriate price (in $/kWh)
+        if self._sensor_type == SENSOR_TYPE_CURRENT_IMPORT_PRICE:
+            return round(buy_price_cents / 100, 4)  # Convert cents to dollars
+        else:  # export price
+            return round(sell_price_cents / 100, 4)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return additional attributes."""
+        tariff_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("tariff_schedule")
+        if not tariff_data:
+            return {}
+
+        attributes = {
+            "source": "tariff_schedule",
+            "current_period": self._current_period,
+            "utility": tariff_data.get("utility"),
+            "plan_name": tariff_data.get("plan_name"),
+        }
+
+        if self._sensor_type == SENSOR_TYPE_CURRENT_IMPORT_PRICE:
+            attributes["price_spike"] = None  # No spike detection for tariff-based pricing
+        else:
+            attributes["channel_type"] = "feedIn"
 
         return attributes
 
