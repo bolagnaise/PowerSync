@@ -5508,6 +5508,7 @@ class SolarSurplusStatusView(HomeAssistantView):
 
             tesla_coordinator = entry_data.get("tesla_coordinator")
             sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
+            sungrow_coordinator = entry_data.get("sungrow_coordinator")
 
             if tesla_coordinator and tesla_coordinator.data:
                 # Tesla coordinator stores values in kW
@@ -5524,6 +5525,13 @@ class SolarSurplusStatusView(HomeAssistantView):
                 load_power_kw = sigenergy_coordinator.data.get("load_power", 0)
                 battery_soc = sigenergy_coordinator.data.get("battery_level", 0)
                 _LOGGER.debug(f"Solar surplus status from sigenergy_coordinator: battery_soc={battery_soc}%")
+            elif sungrow_coordinator and sungrow_coordinator.data:
+                solar_power_kw = sungrow_coordinator.data.get("solar_power", 0)
+                grid_power_kw = sungrow_coordinator.data.get("grid_power", 0)
+                battery_power_kw = sungrow_coordinator.data.get("battery_power", 0)
+                load_power_kw = sungrow_coordinator.data.get("load_power", 0)
+                battery_soc = sungrow_coordinator.data.get("battery_level", 0)
+                _LOGGER.debug(f"Solar surplus status from sungrow_coordinator: battery_soc={battery_soc}%")
 
             # Calculate surplus
             live_status = {
@@ -6327,6 +6335,7 @@ class EVWidgetDataView(HomeAssistantView):
 
             tesla_coordinator = entry_data.get("tesla_coordinator")
             sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
+            sungrow_coordinator = entry_data.get("sungrow_coordinator")
 
             if tesla_coordinator and tesla_coordinator.data:
                 solar_power_kw = tesla_coordinator.data.get("solar_power", 0)
@@ -6340,6 +6349,12 @@ class EVWidgetDataView(HomeAssistantView):
                 battery_power_kw = sigenergy_coordinator.data.get("battery_power", 0)
                 load_power_kw = sigenergy_coordinator.data.get("load_power", 0)
                 battery_soc = sigenergy_coordinator.data.get("battery_level", 0)
+            elif sungrow_coordinator and sungrow_coordinator.data:
+                solar_power_kw = sungrow_coordinator.data.get("solar_power", 0)
+                grid_power_kw = sungrow_coordinator.data.get("grid_power", 0)
+                battery_power_kw = sungrow_coordinator.data.get("battery_power", 0)
+                load_power_kw = sungrow_coordinator.data.get("load_power", 0)
+                battery_soc = sungrow_coordinator.data.get("battery_level", 0)
 
             # Build live_status dict for surplus calculation (expects watts)
             live_status = {
@@ -6460,6 +6475,7 @@ class PriceRecommendationView(HomeAssistantView):
 
             tesla_coordinator = entry_data.get("tesla_coordinator")
             sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
+            sungrow_coordinator = entry_data.get("sungrow_coordinator")
 
             if tesla_coordinator and tesla_coordinator.data:
                 solar_power_kw = tesla_coordinator.data.get("solar_power", 0)
@@ -6473,6 +6489,12 @@ class PriceRecommendationView(HomeAssistantView):
                 battery_power_kw = sigenergy_coordinator.data.get("battery_power", 0)
                 load_power_kw = sigenergy_coordinator.data.get("load_power", 0)
                 battery_soc = sigenergy_coordinator.data.get("battery_level", 0)
+            elif sungrow_coordinator and sungrow_coordinator.data:
+                solar_power_kw = sungrow_coordinator.data.get("solar_power", 0)
+                grid_power_kw = sungrow_coordinator.data.get("grid_power", 0)
+                battery_power_kw = sungrow_coordinator.data.get("battery_power", 0)
+                load_power_kw = sungrow_coordinator.data.get("load_power", 0)
+                battery_soc = sungrow_coordinator.data.get("battery_level", 0)
 
             # Build live_status dict for surplus calculation (expects watts)
             live_status = {
@@ -12831,6 +12853,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
             tesla_coordinator = entry_data.get("tesla_coordinator")
             sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
+            sungrow_coordinator = entry_data.get("sungrow_coordinator")
 
             live_status = {}
             if tesla_coordinator and tesla_coordinator.data:
@@ -12846,6 +12869,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "solar_power": sigenergy_coordinator.data.get("solar_power", 0),
                     "grid_power": sigenergy_coordinator.data.get("grid_power", 0),
                     "load_power": sigenergy_coordinator.data.get("load_power", 0),
+                }
+            elif sungrow_coordinator and sungrow_coordinator.data:
+                live_status = {
+                    "battery_soc": sungrow_coordinator.data.get("battery_level", 0),
+                    "solar_power": sungrow_coordinator.data.get("solar_power", 0),
+                    "grid_power": sungrow_coordinator.data.get("grid_power", 0),
+                    "load_power": sungrow_coordinator.data.get("load_power", 0),
                 }
 
             # Get current price from Amber coordinator if available
@@ -12896,6 +12926,68 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             coordinator = get_ev_charging_coordinator()
             if coordinator:
                 await coordinator.evaluate(live_status, current_price)
+
+            # Evaluate solar surplus charging (app-driven toggle)
+            # When the user enables solar surplus in the mobile app, this starts/stops
+            # dynamic solar surplus EV charging based on the stored config.
+            try:
+                from .automations.actions import (
+                    _action_start_ev_charging_dynamic,
+                    _action_stop_ev_charging_dynamic,
+                    _dynamic_ev_state,
+                )
+
+                automation_store_ref = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("automation_store")
+                if automation_store_ref:
+                    stored = getattr(automation_store_ref, '_data', {}) or {}
+                    surplus_config = stored.get("solar_surplus_config", {})
+                    surplus_enabled = surplus_config.get("enabled", False)
+
+                    # Check if a solar surplus dynamic session is already active
+                    entry_vehicles = _dynamic_ev_state.get(entry.entry_id, {})
+                    surplus_session_active = any(
+                        v.get("active") and v.get("params", {}).get("dynamic_mode") == "solar_surplus"
+                        for v in entry_vehicles.values()
+                    )
+
+                    if surplus_enabled and not surplus_session_active and live_status:
+                        # Get vehicle charger config from store
+                        vehicle_configs = stored.get("vehicle_charging_configs", [])
+                        # Use first configured vehicle, or defaults
+                        vc = vehicle_configs[0] if vehicle_configs else {}
+
+                        params = {
+                            "dynamic_mode": "solar_surplus",
+                            "charger_type": vc.get("charger_type", "tesla"),
+                            "min_charge_amps": vc.get("min_amps", 5),
+                            "max_charge_amps": vc.get("max_amps", 32),
+                            "voltage": vc.get("voltage", 240),
+                            "charger_switch_entity": vc.get("charger_switch_entity"),
+                            "charger_amps_entity": vc.get("charger_amps_entity"),
+                            "ocpp_charger_id": vc.get("ocpp_charger_id"),
+                            "household_buffer_kw": surplus_config.get("household_buffer_kw", 0.5),
+                            "surplus_calculation": surplus_config.get("surplus_calculation", "grid_based"),
+                            "sustained_surplus_minutes": surplus_config.get("sustained_surplus_minutes", 2),
+                            "stop_delay_minutes": surplus_config.get("stop_delay_minutes", 5),
+                            "min_battery_soc": surplus_config.get("home_battery_minimum", 80),
+                            "pause_below_soc": max(0, surplus_config.get("home_battery_minimum", 80) - 10),
+                            "dual_vehicle_strategy": surplus_config.get("dual_vehicle_strategy", "priority_first"),
+                            "allow_parallel_charging": surplus_config.get("allow_parallel_charging", False),
+                            "max_battery_charge_rate_kw": surplus_config.get("max_battery_charge_rate_kw", 5.0),
+                        }
+
+                        if vc.get("vehicle_id"):
+                            params["vehicle_vin"] = vc["vehicle_id"]
+
+                        _LOGGER.info("☀️ Solar surplus charging enabled in app — starting dynamic solar surplus session")
+                        await _action_start_ev_charging_dynamic(hass, entry, params, context=None)
+
+                    elif not surplus_enabled and surplus_session_active:
+                        _LOGGER.info("☀️ Solar surplus charging disabled in app — stopping dynamic solar surplus session")
+                        await _action_stop_ev_charging_dynamic(hass, entry, {})
+
+            except Exception as e:
+                _LOGGER.debug(f"Solar surplus evaluation error: {e}")
 
         except Exception as e:
             _LOGGER.debug(f"EV charging evaluation error: {e}")
