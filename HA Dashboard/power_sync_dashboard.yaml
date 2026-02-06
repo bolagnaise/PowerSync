@@ -326,7 +326,7 @@ views:
       - type: custom:apexcharts-card
         header:
           show: true
-          title: TOU Schedule Sent to Battery
+          title: TOU Schedule
           show_states: false
         graph_span: 24h
         span:

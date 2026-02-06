@@ -760,7 +760,7 @@ class TariffScheduleSensor(SensorEntity):
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_{SENSOR_TYPE_TARIFF_SCHEDULE}"
         self._attr_has_entity_name = True
-        self._attr_name = "Tariff Schedule"
+        self._attr_name = "TOU Schedule"
         # HA 2026.2.0+ requires lowercase suggested_object_id
         self._attr_suggested_object_id = f"power_sync_{SENSOR_TYPE_TARIFF_SCHEDULE}"
         self._attr_icon = "mdi:calendar-clock"
@@ -796,10 +796,15 @@ class TariffScheduleSensor(SensorEntity):
 
     @property
     def native_value(self) -> Any:
-        """Return the state - current tariff period or last sync time."""
+        """Return the state - current tariff period and price (recalculated in real-time)."""
         tariff_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("tariff_schedule")
         if tariff_data:
-            # For Tesla/Globird users, show current period and price
+            # Recalculate current period and price in real-time from TOU schedule
+            if tariff_data.get("tou_periods"):
+                from . import get_current_price_from_tariff_schedule
+                buy_price_cents, _, current_period = get_current_price_from_tariff_schedule(tariff_data)
+                return f"{current_period} ({buy_price_cents:.1f}c/kWh)"
+            # Fallback to cached values for non-TOU tariffs (Amber)
             current_period = tariff_data.get("current_period")
             buy_price = tariff_data.get("buy_price")
             if current_period and buy_price is not None:
