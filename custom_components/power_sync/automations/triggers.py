@@ -236,7 +236,17 @@ def _evaluate_battery_trigger(
     automation_id: int,
     just_entered_window: bool = False
 ) -> TriggerResult:
-    """Evaluate battery state trigger."""
+    """Evaluate battery state trigger (SOC-based or mode-based)."""
+    # Check if this is a battery mode trigger (force_charge/force_discharge state)
+    battery_mode_condition = trigger.get("battery_mode_condition")
+    battery_mode_state = trigger.get("battery_mode_state")
+
+    if battery_mode_condition and battery_mode_state:
+        return _evaluate_battery_mode_trigger(
+            trigger, current_state, last_value, store, automation_id
+        )
+
+    # Otherwise, evaluate as SOC-based trigger
     battery_percent = current_state.get("battery_percent")
     if battery_percent is None:
         return TriggerResult(triggered=False, reason="Battery percent unavailable")
@@ -300,6 +310,81 @@ def _evaluate_battery_trigger(
         return TriggerResult(triggered=False, reason=f"Battery at {battery_percent}%")
 
     return TriggerResult(triggered=False, reason=f"Unknown condition: {condition}")
+
+
+def _evaluate_battery_mode_trigger(
+    trigger: Dict[str, Any],
+    current_state: Dict[str, Any],
+    last_value: Optional[float],
+    store: "AutomationStore",
+    automation_id: int
+) -> TriggerResult:
+    """Evaluate battery mode trigger (normal/force_charge/force_discharge).
+
+    This trigger fires when the battery enters or exits a specific mode.
+    Useful for automations like "exit force charge when price spikes".
+
+    Modes:
+        - normal: Battery operating in normal self-consumption mode
+        - force_charge: Battery is being force charged
+        - force_discharge: Battery is being force discharged
+
+    Conditions:
+        - enters: Trigger when battery enters the specified mode
+        - exits: Trigger when battery exits the specified mode
+    """
+    mode_condition = trigger.get("battery_mode_condition")  # enters or exits
+    target_mode = trigger.get("battery_mode_state")  # normal, force_charge, force_discharge
+
+    if not mode_condition or not target_mode:
+        return TriggerResult(triggered=False, reason="Incomplete battery mode trigger config")
+
+    # Get current battery mode from state
+    current_mode = current_state.get("battery_mode", "normal")
+
+    # Map mode to numeric value for state tracking
+    # 0 = normal, 1 = force_charge, 2 = force_discharge
+    mode_map = {"normal": 0, "force_charge": 1, "force_discharge": 2}
+    current_mode_value = mode_map.get(current_mode, 0)
+    target_mode_value = mode_map.get(target_mode, 0)
+
+    is_in_target_mode = (current_mode == target_mode)
+
+    if mode_condition == "enters":
+        # Trigger when entering the target mode (was not in mode, now is)
+        if is_in_target_mode:
+            # Check if we just entered (last value was different mode)
+            if last_value is not None and int(last_value) != target_mode_value:
+                store.update_trigger_state(automation_id, float(current_mode_value))
+                return TriggerResult(
+                    triggered=True,
+                    reason=f"Battery entered {target_mode.replace('_', ' ')} mode"
+                )
+            elif last_value is None:
+                # First evaluation - don't trigger, just record state
+                store.update_trigger_state(automation_id, float(current_mode_value))
+
+        store.update_trigger_state(automation_id, float(current_mode_value))
+        return TriggerResult(triggered=False, reason=f"Battery in {current_mode.replace('_', ' ')} mode")
+
+    elif mode_condition == "exits":
+        # Trigger when exiting the target mode (was in mode, now is not)
+        if not is_in_target_mode:
+            # Check if we just exited (last value was target mode)
+            if last_value is not None and int(last_value) == target_mode_value:
+                store.update_trigger_state(automation_id, float(current_mode_value))
+                return TriggerResult(
+                    triggered=True,
+                    reason=f"Battery exited {target_mode.replace('_', ' ')} mode (now {current_mode.replace('_', ' ')})"
+                )
+            elif last_value is None:
+                # First evaluation - don't trigger, just record state
+                store.update_trigger_state(automation_id, float(current_mode_value))
+
+        store.update_trigger_state(automation_id, float(current_mode_value))
+        return TriggerResult(triggered=False, reason=f"Battery in {current_mode.replace('_', ' ')} mode")
+
+    return TriggerResult(triggered=False, reason=f"Unknown battery mode condition: {mode_condition}")
 
 
 def _evaluate_flow_trigger(
@@ -371,7 +456,15 @@ def _evaluate_price_trigger(
     automation_id: int,
     just_entered_window: bool = False
 ) -> TriggerResult:
-    """Evaluate price trigger."""
+    """Evaluate price trigger (threshold-based or spike-based)."""
+    # Check if this is a price spike trigger
+    price_spike_condition = trigger.get("price_spike_condition")
+    if price_spike_condition:
+        return _evaluate_price_spike_trigger(
+            trigger, current_state, last_value, store, automation_id
+        )
+
+    # Otherwise, evaluate as threshold-based trigger
     price_type = trigger.get("price_type")
     transition = trigger.get("price_transition")
     threshold = trigger.get("price_threshold")
@@ -411,6 +504,85 @@ def _evaluate_price_trigger(
 
     store.update_trigger_state(automation_id, current_price)
     return TriggerResult(triggered=False, reason=f"{price_type} price at ${current_price:.4f}/kWh")
+
+
+def _evaluate_price_spike_trigger(
+    trigger: Dict[str, Any],
+    current_state: Dict[str, Any],
+    last_value: Optional[float],
+    store: "AutomationStore",
+    automation_id: int
+) -> TriggerResult:
+    """Evaluate price spike trigger (Amber/AEMO spike detection).
+
+    This trigger fires when a price spike starts, ends, or when a potential spike is detected.
+    Uses the spike status from Amber API or AEMO wholesale price monitoring.
+
+    Conditions:
+        - spike_starts: Trigger when spike becomes active
+        - spike_ends: Trigger when spike ends (returns to normal)
+        - potential_spike: Trigger when potential spike is detected
+
+    Spike status values:
+        - none (0): No spike
+        - potential (1): Potential spike detected
+        - spike (2): Active price spike
+    """
+    spike_condition = trigger.get("price_spike_condition")
+
+    if not spike_condition:
+        return TriggerResult(triggered=False, reason="No spike condition specified")
+
+    # Get current spike status from state (from Amber API or AEMO sensor)
+    # spike_status can be: "none", "potential", "spike" or numeric: 0, 1, 2
+    spike_status = current_state.get("spike_status", "none")
+
+    # Normalize to string
+    if isinstance(spike_status, (int, float)):
+        spike_map = {0: "none", 1: "potential", 2: "spike"}
+        spike_status = spike_map.get(int(spike_status), "none")
+
+    # Map spike status to numeric value for state tracking
+    status_map = {"none": 0, "potential": 1, "spike": 2}
+    current_status_value = status_map.get(spike_status, 0)
+
+    if spike_condition == "spike_starts":
+        # Trigger when spike becomes active (was not spike, now is spike)
+        if spike_status == "spike":
+            if last_value is not None and int(last_value) != 2:
+                store.update_trigger_state(automation_id, float(current_status_value))
+                return TriggerResult(triggered=True, reason="Price spike started")
+            elif last_value is None:
+                store.update_trigger_state(automation_id, float(current_status_value))
+
+        store.update_trigger_state(automation_id, float(current_status_value))
+        return TriggerResult(triggered=False, reason=f"Spike status: {spike_status}")
+
+    elif spike_condition == "spike_ends":
+        # Trigger when spike ends (was spike, now is not spike)
+        if spike_status != "spike":
+            if last_value is not None and int(last_value) == 2:
+                store.update_trigger_state(automation_id, float(current_status_value))
+                return TriggerResult(triggered=True, reason="Price spike ended")
+            elif last_value is None:
+                store.update_trigger_state(automation_id, float(current_status_value))
+
+        store.update_trigger_state(automation_id, float(current_status_value))
+        return TriggerResult(triggered=False, reason=f"Spike status: {spike_status}")
+
+    elif spike_condition == "potential_spike":
+        # Trigger when potential spike is detected (was none/spike, now is potential)
+        if spike_status == "potential":
+            if last_value is not None and int(last_value) != 1:
+                store.update_trigger_state(automation_id, float(current_status_value))
+                return TriggerResult(triggered=True, reason="Potential price spike detected")
+            elif last_value is None:
+                store.update_trigger_state(automation_id, float(current_status_value))
+
+        store.update_trigger_state(automation_id, float(current_status_value))
+        return TriggerResult(triggered=False, reason=f"Spike status: {spike_status}")
+
+    return TriggerResult(triggered=False, reason=f"Unknown spike condition: {spike_condition}")
 
 
 def _evaluate_grid_trigger(
@@ -874,7 +1046,16 @@ def _evaluate_single_condition(
 
 
 def _evaluate_battery_condition(condition: Dict[str, Any], current_state: Dict[str, Any]) -> TriggerResult:
-    """Evaluate battery level condition (current state, no edge detection)."""
+    """Evaluate battery condition (level-based or mode-based)."""
+    # Check if this is a battery mode condition
+    battery_mode_is = condition.get("battery_mode_is")
+    if battery_mode_is:
+        current_mode = current_state.get("battery_mode", "normal")
+        if current_mode == battery_mode_is:
+            return TriggerResult(triggered=True, reason=f"Battery is in {battery_mode_is.replace('_', ' ')} mode")
+        return TriggerResult(triggered=False, reason=f"Battery is in {current_mode.replace('_', ' ')} mode (not {battery_mode_is.replace('_', ' ')})")
+
+    # Otherwise, evaluate as level-based condition
     battery_percent = current_state.get("battery_percent")
     if battery_percent is None:
         return TriggerResult(triggered=False, reason="Battery level unavailable")
@@ -927,7 +1108,21 @@ def _evaluate_flow_condition(condition: Dict[str, Any], current_state: Dict[str,
 
 
 def _evaluate_price_condition(condition: Dict[str, Any], current_state: Dict[str, Any]) -> TriggerResult:
-    """Evaluate price condition."""
+    """Evaluate price condition (threshold-based or spike-based)."""
+    # Check if this is a spike status condition
+    price_spike_is = condition.get("price_spike_is")
+    if price_spike_is:
+        spike_status = current_state.get("spike_status", "none")
+        # Normalize to string if numeric
+        if isinstance(spike_status, (int, float)):
+            spike_map = {0: "none", 1: "potential", 2: "spike"}
+            spike_status = spike_map.get(int(spike_status), "none")
+
+        if spike_status == price_spike_is:
+            return TriggerResult(triggered=True, reason=f"Spike status is {price_spike_is}")
+        return TriggerResult(triggered=False, reason=f"Spike status is {spike_status} (not {price_spike_is})")
+
+    # Otherwise, evaluate as threshold-based condition
     price_type = condition.get("price_type", "import")
     comparison = condition.get("price_comparison", "below")
     threshold = condition.get("price_threshold", 0)

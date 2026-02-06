@@ -465,6 +465,8 @@ class AutomationEngine:
             "ev_state": {},
             "ocpp_state": {},
             "solcast_forecast": {},
+            "battery_mode": "normal",  # normal, force_charge, force_discharge
+            "spike_status": "none",    # none, potential, spike
         }
 
         # Get data from coordinator
@@ -545,6 +547,27 @@ class AutomationEngine:
                     if tariff_prices:
                         state["import_price"] = tariff_prices.get("import_price")
                         state["export_price"] = tariff_prices.get("export_price")
+
+                # Get spike status from Amber API or AEMO sensor
+                if amber_coord and amber_coord.data:
+                    current_prices = amber_coord.data.get("current", [])
+                    for price in current_prices:
+                        if price.get("channelType") == "general":
+                            spike = price.get("spikeStatus", "none")
+                            if spike:
+                                state["spike_status"] = spike.lower()
+                            break
+
+            # Get battery mode from force charge/discharge state
+            force_charge_state = data.get("force_charge_state", {})
+            force_discharge_state = data.get("force_discharge_state", {})
+
+            if force_charge_state.get("active"):
+                state["battery_mode"] = "force_charge"
+            elif force_discharge_state.get("active"):
+                state["battery_mode"] = "force_discharge"
+            else:
+                state["battery_mode"] = "normal"
 
         # Get EV state from Tesla Fleet entities
         try:
