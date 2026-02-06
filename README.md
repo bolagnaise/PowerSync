@@ -25,7 +25,7 @@ This is an unofficial integration and is not affiliated with or endorsed by Tesl
 2. **Add the integration** in Settings → Devices & Services → Add Integration → "PowerSync"
 3. **Pick your electricity provider** — Amber Electric, Flow Power, Globird (AU), or Octopus Energy (UK)
 4. **Connect your battery** — Tesla Powerwall, Sigenergy, or Sungrow SH-series
-5. **Done!** Sensors appear automatically. Optionally enable [Smart Optimization (HAEO)](#smart-optimization-haeo-powered-battery-scheduling) for automated scheduling or install the [Mobile App](#mobile-app-setup) for remote control.
+5. **Done!** Sensors appear automatically. Optionally enable [Smart Optimization](#smart-optimization-built-in-battery-scheduling) for automated scheduling or install the [Mobile App](#mobile-app-setup) for remote control.
 
 ---
 
@@ -334,7 +334,7 @@ Full support for UK users with **Octopus Energy** dynamic tariffs.
 
 | Feature | Tesla Powerwall | Sigenergy | Sungrow SH-series |
 |---------|:---------------:|:---------:|:-----------------:|
-| **Smart Optimization (HAEO)** | ✅ | ✅ | ✅ |
+| **Smart Optimization** | ✅ | ✅ | ✅ |
 | Automatic TOU Tariff Sync | ✅ | ✅ | ➖ N/A |
 | Spike Protection | ✅ | ✅ | ➖ N/A |
 | Export Price Boost | ✅ | ✅ | ➖ N/A |
@@ -357,29 +357,34 @@ Full support for UK users with **Octopus Energy** dynamic tariffs.
 
 ---
 
-## Smart Optimization (HAEO-Powered Battery Scheduling)
+## Smart Optimization (Built-in Battery Scheduling)
 
-PowerSync integrates with [HAEO (Home Assistant Energy Optimizer)](https://haeo.io/) to calculate the optimal battery charge/discharge schedule based on electricity prices, solar forecasts, and load patterns.
+PowerSync includes a **built-in linear programming (LP) optimizer** that calculates the optimal battery charge/discharge schedule based on electricity prices, solar forecasts, and load patterns. No external dependencies required — just enable it in the config flow and you're done.
+
+> **Acknowledgement:** The optimization approach in PowerSync was inspired by [HAEO (Home Assistant Energy Optimizer)](https://haeo.io/). We recommend checking out HAEO if you're interested in a standalone, general-purpose energy optimizer for Home Assistant.
 
 ### How It Works
 
-HAEO uses **linear programming** (LP) to solve a cost minimization problem over a 48-hour horizon:
+The built-in optimizer uses **scipy's HiGHS LP solver** to solve a cost minimization problem over a 48-hour horizon:
 
 ```
-Minimize: Σ (import_price[t] × grid_import[t] - export_price[t] × grid_export[t])
+Minimize: Σ (import_price[t] × grid_import[t] - export_price[t] × grid_export[t]) × dt
 
 Subject to:
-  - Power balance constraints (solar + grid + battery = load)
-  - Battery SOC limits (0% to 100%)
-  - Charge/discharge rate limits
-  - Backup reserve constraints
+  - Power balance: solar[t] + grid_import[t] + battery_discharge[t]
+                  = load[t] + grid_export[t] + battery_charge[t]
+  - SOC dynamics: soc[t] = soc_0 + Σ(charge×eff - discharge/eff) × dt / capacity
+  - SOC limits: backup_reserve ≤ soc[t] ≤ 1.0
+  - Rate limits: charge ≤ max_charge_kw, discharge ≤ max_discharge_kw
 ```
 
-PowerSync automatically:
-1. Creates HAEO-compatible forecast sensors with price, solar, and load data
-2. Configures HAEO with your battery specifications
-3. Reads the optimization schedule from HAEO
-4. Executes battery commands (charge/discharge) based on the schedule
+The optimizer runs directly inside PowerSync — no external integrations to install or configure:
+1. Collects price, solar, and load forecasts from configured providers
+2. Solves the LP problem in a background thread (typically < 1 second)
+3. Maps the solution to battery actions (charge, discharge, idle, self-consumption)
+4. Executes battery commands via the appropriate control method
+
+If scipy is unavailable, a **greedy fallback** optimizer runs instead — sorting time periods by price spread and scheduling charge/discharge accordingly.
 
 ### Features
 
@@ -387,93 +392,73 @@ PowerSync automatically:
 |---------|-------------|
 | **48-Hour Optimization** | Plans battery actions for the next 48 hours |
 | **5-Minute Resolution** | Fine-grained control with 576 optimization intervals |
-| **Multiple Objectives** | Cost minimization, profit maximization, or self-consumption |
+| **Cost Functions** | Cost minimization (default) or self-consumption mode |
 | **Solar Integration** | Uses Solcast forecast data for solar predictions |
-| **ML Load Forecasting** | Optional [HAFO](https://hafo.haeo.io/) integration for ML-based load prediction |
 | **Price Integration** | Works with Amber, Octopus, Flow Power, and AEMO pricing |
-| **Auto-Configuration** | PowerSync automatically configures HAEO — no manual setup required |
+| **Zero Setup** | Built-in — no external integrations, no HACS repos, no manual wiring |
+| **Greedy Fallback** | Works even without scipy installed (reduced optimality) |
+
+### Action Model
+
+The optimizer produces four battery actions:
+
+| Action | What It Does | When It's Used |
+|--------|-------------|----------------|
+| **CHARGE** | Force charge battery from grid | Cheap import periods (overnight off-peak) |
+| **EXPORT** | Force discharge battery to grid | Expensive export periods (evening peak) |
+| **IDLE** | Hold battery at current SOC | Periods where grid is cheaper than battery round-trip |
+| **SELF_CONSUMPTION** | Battery operates naturally | Solar hours, moderate prices — battery charges from solar and powers home |
 
 ### Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  PowerSync Data Sources                                     │
-│  - Amber/Octopus prices                                     │
+│  - Amber/Octopus/Flow Power/AEMO prices                    │
 │  - Solcast solar forecasts                                  │
-│  - HAFO load forecasts (or local estimation)               │
+│  - Historical load estimation                               │
 └─────────────────────────────────────────────────────────────┘
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│  PowerSync Forecast Sensors (HAEO-compatible)               │
-│  - sensor.powersync_price_import_forecast                   │
-│  - sensor.powersync_price_export_forecast                   │
-│  - sensor.powersync_solar_forecast                          │
-│  - sensor.powersync_load_forecast                           │
-└─────────────────────────────────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────┐
-│  HAEO (Home Assistant Energy Optimizer)                     │
-│  Reads PowerSync sensors → LP optimization → Schedule       │
+│  Built-in LP Optimizer (scipy linprog / HiGHS)              │
+│  Collects forecasts → LP solve → Optimal schedule           │
+│  Fallback: Greedy algorithm if scipy unavailable            │
 └─────────────────────────────────────────────────────────────┘
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │  PowerSync Execution Layer                                  │
-│  Reads HAEO schedule → Battery commands                     │
+│  Schedule → Battery commands                                │
 │  - Tesla: TOU tariff trick                                  │
 │  - Sigenergy/Sungrow: Modbus commands                       │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### HAEO Installation
-
-#### Step 1: Install HAEO via HACS
-
-1. Open **HACS** in Home Assistant
-2. Click **Integrations**
-3. Click the **⋮** menu → **Custom repositories**
-4. Add: `https://github.com/hass-energy/haeo`
-5. Category: **Integration**
-6. Click **Add**, then find and **Download** HAEO
-7. Restart Home Assistant
-
-#### Step 2: (Optional) Install HAFO for ML Load Forecasting
-
-For better load predictions, install HAFO (Home Assistant Forecaster):
-
-1. In HACS, add custom repository: `https://github.com/hass-energy/hafo`
-2. Download and install HAFO
-3. Create a HAFO forecast helper for your home load sensor
-4. PowerSync will automatically use HAFO forecasts when available
-
-> **Note:** If HAFO is not installed, PowerSync uses historical pattern matching for load forecasting.
-
-#### Step 3: Enable Smart Optimization in PowerSync
+### Enable Smart Optimization
 
 1. **In Home Assistant:**
    - Go to **Settings → Devices & Services → PowerSync**
    - Click **Configure**
-   - Enable **Smart Optimization**
+   - Select **Smart Optimization (Built-in LP)** as your optimization provider
+   - Set your **backup reserve** percentage
+   - Choose your **cost function**:
+     - **Cost Minimization** — Lowest electricity bill (default)
+     - **Self-Consumption** — Maximize solar self-use, minimize all grid interaction
 
 2. **In the Mobile App:**
    - Go to **Controls** screen
    - Find the **Smart Optimization** card
    - Toggle **Enable** to turn on optimization
-   - Select your preferred **Cost Function**:
-     - **Cost Minimization** — Lowest electricity bill (default)
-     - **Profit Maximization** — Best for high export rates (Amber, Octopus Flux)
-     - **Self-Consumption** — Maximum solar self-use
 
 3. **View the Schedule:**
    - Tap **View Full Schedule** to see the 48-hour optimization plan
    - Charts show SOC trajectory and charge/discharge power
    - Summary shows predicted daily cost and savings vs baseline
 
-### PowerSync Forecast Sensors
+### Dashboard Forecast Sensors
 
-PowerSync automatically creates these sensors for HAEO consumption:
+PowerSync creates forecast sensors for dashboard visibility:
 
 | Sensor | Description | Unit |
 |--------|-------------|------|
@@ -482,21 +467,7 @@ PowerSync automatically creates these sensors for HAEO consumption:
 | `sensor.powersync_solar_forecast` | Solar PV generation forecast | W |
 | `sensor.powersync_load_forecast` | Home consumption forecast | W |
 
-Each sensor includes a `forecast` attribute with 576 data points (48 hours at 5-minute intervals):
-
-```yaml
-state: 0.25
-attributes:
-  forecast:
-    - time: "2024-01-15T10:00:00+10:00"
-      value: 0.25
-    - time: "2024-01-15T10:05:00+10:00"
-      value: 0.28
-    # ... 576 points total
-  unit_of_measurement: "$/kWh"
-  device_class: monetary
-  haeo_compatible: true
-```
+Each sensor includes a `forecast` attribute with up to 576 data points (48 hours at 5-minute intervals). These sensors are for dashboard display — the optimizer reads forecast data directly via internal callbacks.
 
 ### Understanding the Schedule
 
@@ -750,8 +721,7 @@ The PowerSync mobile app connects to your Home Assistant instance to provide rem
 - **Controls** — Force charge/discharge, solar curtailment, backup reserve
 - **Automations** — Create and manage scheduled automations
 - **Solar** — Daily/monthly/yearly generation with forecast overlay
-- **Battery** — Health monitoring and BMS data (Tesla Powerwall, Sungrow SH-series)
-- **Settings** — Configure battery system, EV charging, and electricity provider
+- **Settings** — Configure battery system, EV charging, electricity provider, and battery health monitoring
 
 ---
 
@@ -858,12 +828,7 @@ The Force Charge and Force Discharge controls require `input_select` helpers:
   - Ensure the product code matches your actual tariff (Agile, Go, Flux, Tracker)
   - Octopus publishes next-day prices after 4pm UK time — prices may be limited before then
 
-### Smart Optimization (HAEO)
-
-**"External optimizer not installed"**
-- Install HAEO via HACS (see [HAEO Installation](#haeo-installation) steps)
-- Restart Home Assistant after installation
-- Check HAEO appears in Settings → Devices & Services
+### Smart Optimization
 
 **"Missing forecast data"**
 - Ensure you have price data (Amber/Octopus configured)
@@ -871,18 +836,17 @@ The Force Charge and Force Discharge controls require `input_select` helpers:
 - Verify PowerSync forecast sensors exist: Developer Tools → States → search "powersync"
 
 **Schedule not updating**
-- HAEO re-optimizes when input sensors change
-- Tap **Refresh Now** to force PowerSync to update forecast sensors
+- The optimizer re-runs when prices or forecasts change
+- Tap **Refresh Now** in the mobile app to force re-optimization
 - Check logs for errors: `custom_components.power_sync.optimization`
 
 **Incorrect cost predictions during force charge/discharge**
 - This is expected — force modes use fake tariff rates
 - Costs will recalculate correctly when force mode ends
 
-**Load forecasts inaccurate**
-- Install HAFO for ML-based load prediction
-- Ensure you have at least 7 days of load history in Home Assistant recorder
-- Check that your load sensor is recording properly
+**LP solver warnings**
+- If you see "scipy not available, using greedy fallback" — the greedy optimizer still works but may produce less optimal schedules
+- scipy is installed automatically with PowerSync; if missing, try restarting Home Assistant
 
 ### Mobile App
 
