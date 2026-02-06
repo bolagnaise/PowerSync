@@ -898,12 +898,11 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_ml_options(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Configure HAEO optimization options - cost function, backup reserve, VPP, and EV."""
+        """Configure HAEO optimization options - backup reserve, VPP, and EV."""
         if user_input is not None:
             self._ml_options = {
-                CONF_OPTIMIZATION_COST_FUNCTION: user_input.get(
-                    CONF_OPTIMIZATION_COST_FUNCTION, COST_FUNCTION_COST
-                ),
+                # HAEO only supports cost minimization - hardcode this
+                CONF_OPTIMIZATION_COST_FUNCTION: COST_FUNCTION_COST,
                 CONF_OPTIMIZATION_BACKUP_RESERVE: user_input.get(
                     CONF_OPTIMIZATION_BACKUP_RESERVE, DEFAULT_OPTIMIZATION_BACKUP_RESERVE
                 ),
@@ -917,13 +916,10 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # Proceed to electricity provider selection
             return await self.async_step_provider_selection()
 
+        # HAEO only supports cost minimization, so don't show cost function selector
         return self.async_show_form(
             step_id="ml_options",
             data_schema=vol.Schema({
-                vol.Required(
-                    CONF_OPTIMIZATION_COST_FUNCTION,
-                    default=COST_FUNCTION_COST
-                ): vol.In(OPTIMIZATION_COST_FUNCTIONS),
                 vol.Required(
                     CONF_OPTIMIZATION_BACKUP_RESERVE,
                     default=int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100)

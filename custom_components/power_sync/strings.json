@@ -155,15 +155,13 @@
       },
       "ml_options": {
         "title": "HAEO Optimization Settings",
-        "description": "Configure how HAEO manages your battery.\n\n**Note:** After setup, you must manually configure HAEO to use PowerSync's forecast sensors. See documentation for details.",
+        "description": "Configure how HAEO manages your battery.\n\nHAEO uses **cost minimization** to find the optimal battery schedule based on electricity prices.\n\n**Note:** After setup, you must manually configure HAEO to use PowerSync's forecast sensors. See documentation for details.",
         "data": {
-          "optimization_cost_function": "Optimization Objective",
           "optimization_backup_reserve": "Backup Reserve (%)",
           "optimization_vpp_enabled": "VPP Integration",
           "optimization_ev_integration": "EV Charging Integration"
         },
         "data_description": {
-          "optimization_cost_function": "Cost = lowest bill, Profit = best for Amber/VPP traders, Self-Consumption = maximize solar usage",
           "optimization_backup_reserve": "Minimum battery level to keep for backup power (0-100%, 20% recommended)",
           "optimization_vpp_enabled": "Include VPP spike events in optimization decisions",
           "optimization_ev_integration": "Coordinate battery optimization with EV charging schedules"
@@ -404,14 +402,12 @@
           "electricity_provider": "Electricity Provider",
           "tesla_api_provider": "Tesla API Provider",
           "optimization_provider": "Optimization Provider",
-          "optimization_cost_function": "Optimization Objective",
           "optimization_backup_reserve": "Backup Reserve (%)",
           "optimization_vpp_enabled": "VPP Integration",
           "optimization_ev_integration": "EV Charging Integration"
         },
         "data_description": {
           "optimization_provider": "Choose between Tesla's built-in optimization or HAEO Smart Optimization",
-          "optimization_cost_function": "What to optimize for (only applies to HAEO)",
           "optimization_backup_reserve": "Minimum battery charge level to maintain (only applies to HAEO)",
           "optimization_vpp_enabled": "Include VPP spike events in optimization decisions",
           "optimization_ev_integration": "Coordinate battery optimization with EV charging schedules"
@@ -423,7 +419,6 @@
         "data": {
           "electricity_provider": "Electricity Provider",
           "optimization_provider": "Optimization Provider",
-          "optimization_cost_function": "Optimization Objective",
           "optimization_backup_reserve": "Backup Reserve (%)",
           "optimization_vpp_enabled": "VPP Integration",
           "optimization_ev_integration": "EV Charging Integration",
@@ -453,7 +448,6 @@
         "data": {
           "electricity_provider": "Electricity Provider",
           "optimization_provider": "Optimization Provider",
-          "optimization_cost_function": "Optimization Objective",
           "optimization_backup_reserve": "Backup Reserve (%)",
           "optimization_vpp_enabled": "VPP Integration",
           "optimization_ev_integration": "EV Charging Integration",
@@ -463,7 +457,6 @@
         },
         "data_description": {
           "optimization_provider": "Choose between Sungrow's built-in scheduling or HAEO Smart Optimization",
-          "optimization_cost_function": "What to optimize for (only applies to HAEO)",
           "optimization_backup_reserve": "Minimum battery charge level to maintain (only applies to HAEO)",
           "sungrow_host": "Local IP address of your Sungrow inverter or WiNet-S dongle (e.g., 192.168.1.100)",
           "sungrow_port": "Modbus TCP port (default: 502)",
