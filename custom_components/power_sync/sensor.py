@@ -543,6 +543,8 @@ class AmberPriceSensor(CoordinatorEntity, SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_has_entity_name = True
+        # HA 2026.2.0+ requires lowercase suggested_object_id
+        self._attr_suggested_object_id = f"power_sync_{description.key}"
         _LOGGER.debug("AmberPriceSensor initialized: %s (unique_id=%s)", description.key, self._attr_unique_id)
 
     @property
@@ -578,6 +580,8 @@ class TeslaEnergySensor(CoordinatorEntity, SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_has_entity_name = True
+        # HA 2026.2.0+ requires lowercase suggested_object_id
+        self._attr_suggested_object_id = f"power_sync_{description.key}"
 
     @property
     def native_value(self) -> Any:
@@ -603,6 +607,8 @@ class DemandChargeSensor(CoordinatorEntity, SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_has_entity_name = True
+        # HA 2026.2.0+ requires lowercase suggested_object_id
+        self._attr_suggested_object_id = f"power_sync_{description.key}"
         self._entry = entry
 
     @property
@@ -655,6 +661,8 @@ class AEMOSpikeSensor(SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_has_entity_name = True
+        # HA 2026.2.0+ requires lowercase suggested_object_id
+        self._attr_suggested_object_id = f"power_sync_{description.key}"
 
     @property
     def native_value(self) -> Any:
@@ -687,6 +695,8 @@ class SolcastForecastSensor(CoordinatorEntity, SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_has_entity_name = True
+        # HA 2026.2.0+ requires lowercase suggested_object_id
+        self._attr_suggested_object_id = f"power_sync_{description.key}"
 
     @property
     def native_value(self) -> Any:
@@ -720,6 +730,8 @@ class TariffScheduleSensor(SensorEntity):
         self._attr_unique_id = f"{entry.entry_id}_{SENSOR_TYPE_TARIFF_SCHEDULE}"
         self._attr_has_entity_name = True
         self._attr_name = "Tariff Schedule"
+        # HA 2026.2.0+ requires lowercase suggested_object_id
+        self._attr_suggested_object_id = f"power_sync_{SENSOR_TYPE_TARIFF_SCHEDULE}"
         self._attr_icon = "mdi:calendar-clock"
         self._unsub_dispatcher = None
 
@@ -868,6 +880,8 @@ class SolarCurtailmentSensor(SensorEntity):
         self._attr_unique_id = f"{entry.entry_id}_{SENSOR_TYPE_SOLAR_CURTAILMENT}"
         self._attr_has_entity_name = True
         self._attr_name = "DC Solar Curtailment"
+        # HA 2026.2.0+ requires lowercase suggested_object_id
+        self._attr_suggested_object_id = f"power_sync_{SENSOR_TYPE_SOLAR_CURTAILMENT}"
         self._attr_icon = "mdi:solar-power-variant"
         self._unsub_dispatcher = None
 
@@ -985,6 +999,8 @@ class InverterStatusSensor(SensorEntity):
         self._attr_unique_id = f"{entry.entry_id}_{SENSOR_TYPE_INVERTER_STATUS}"
         self._attr_has_entity_name = True
         self._attr_name = "Inverter Status"
+        # HA 2026.2.0+ requires lowercase suggested_object_id
+        self._attr_suggested_object_id = f"power_sync_{SENSOR_TYPE_INVERTER_STATUS}"
         self._attr_icon = "mdi:solar-panel"
         self._unsub_dispatcher = None
         self._unsub_interval = None
@@ -1282,6 +1298,8 @@ class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):
         self._sensor_type = sensor_type
         self._attr_unique_id = f"{entry.entry_id}_{sensor_type}"
         self._attr_has_entity_name = True
+        # HA 2026.2.0+ requires lowercase suggested_object_id
+        self._attr_suggested_object_id = f"power_sync_{sensor_type}"
 
         # Configure based on sensor type
         if sensor_type == SENSOR_TYPE_FLOW_POWER_PRICE:
@@ -1440,6 +1458,8 @@ class BatteryHealthSensor(SensorEntity):
         """Initialize the sensor."""
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_{SENSOR_TYPE_BATTERY_HEALTH}"
+        # HA 2026.2.0+ requires lowercase suggested_object_id
+        self._attr_suggested_object_id = f"power_sync_{SENSOR_TYPE_BATTERY_HEALTH}"
 
         # Battery health data (from service call)
         self._original_capacity_wh: float | None = None

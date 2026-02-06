@@ -128,6 +128,8 @@ class ForecastSensor(Entity):
         self._attr_state_class = state_class
         self._attr_icon = icon
         self._attr_unique_id = f"powersync_{entry_id}_{sensor_type}_forecast"
+        # HA 2026.2.0+ requires lowercase suggested_object_id
+        self._attr_suggested_object_id = f"powersync_{sensor_type}_forecast"
 
         # Forecast data
         self._forecast: list[dict[str, Any]] = []

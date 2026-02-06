@@ -96,6 +96,8 @@ class AutoSyncSwitch(SwitchEntity):
         self.entity_description = description
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        # HA 2026.2.0+ requires lowercase suggested_object_id
+        self._attr_suggested_object_id = f"power_sync_{description.key}"
 
         # Initialize state from config
         self._attr_is_on = entry.options.get(
@@ -183,6 +185,8 @@ class ForceDischargeSwitch(SwitchEntity):
         self.entity_description = description
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        # HA 2026.2.0+ requires lowercase suggested_object_id
+        self._attr_suggested_object_id = f"power_sync_{description.key}"
         self._attr_is_on = False
         self._discharge_expires_at: datetime | None = None
         self._duration_minutes: int = DEFAULT_DISCHARGE_DURATION
@@ -317,6 +321,8 @@ class ForceChargeSwitch(SwitchEntity):
         self.entity_description = description
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        # HA 2026.2.0+ requires lowercase suggested_object_id
+        self._attr_suggested_object_id = f"power_sync_{description.key}"
         self._attr_is_on = False
         self._charge_expires_at: datetime | None = None
         self._duration_minutes: int = DEFAULT_DISCHARGE_DURATION  # Reuse same default
