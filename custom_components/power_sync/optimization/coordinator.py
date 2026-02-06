@@ -1,10 +1,12 @@
 """
 Optimization coordinator for PowerSync.
 
-Coordinates data collection and provides schedule data from external
-optimizer to the execution layer.
+Coordinates data collection and runs the built-in LP battery optimizer
+to produce a schedule, which the execution layer then applies.
 
-Simplified from previous CVXPY/ML implementation to use external optimizer exclusively.
+The ForecastBridge and its dashboard sensors are kept for visibility,
+but the optimizer reads data directly via callbacks — no external
+integration required.
 """
 from __future__ import annotations
 
@@ -20,8 +22,8 @@ from homeassistant.util import dt as dt_util
 from homeassistant.exceptions import ConfigEntryNotReady
 
 from .forecast_bridge import ForecastBridge
-from .optimizer_configurator import OptimizerConfigurator
-from .schedule_reader import ScheduleReader, OptimizationSchedule
+from .battery_optimizer import BatteryOptimizer, OptimizerResult
+from .schedule_reader import OptimizationSchedule
 from .executor import ScheduleExecutor, ExecutionStatus, BatteryAction
 from .load_estimator import LoadEstimator, SolcastForecaster
 from .ev_coordinator import EVCoordinator, EVConfig, EVChargingMode
@@ -73,13 +75,13 @@ class CostFunction:
 
 class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """
-    Coordinator for external optimizer-based battery optimization.
+    Coordinator for built-in LP battery optimization.
 
     Manages:
-    - External optimizer integration setup and configuration
-    - Data bridging to optimizer (prices, solar, load forecasts)
-    - Reading optimization schedules from optimizer
+    - Built-in LP optimizer (BatteryOptimizer)
+    - Data collection (prices, solar, load forecasts)
     - Schedule execution via the executor
+    - Dashboard sensor updates via ForecastBridge
     - Providing data for mobile app and HTTP API
     """
 
@@ -120,12 +122,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._cost_function = CostFunction("cost")
         self._provider_config = ProviderPriceConfig()
 
-        # Optimizer components
-        self._forecast_bridge: ForecastBridge | None = None
-        self._optimizer_configurator: OptimizerConfigurator | None = None
-        self._schedule_reader: ScheduleReader | None = None
+        # Built-in optimizer
+        self._optimizer: BatteryOptimizer | None = None
+        self._last_optimizer_result: OptimizerResult | None = None
 
-        # Data collection components (feed optimizer)
+        # Dashboard sensors (kept for visibility)
+        self._forecast_bridge: ForecastBridge | None = None
+
+        # Data collection components
         self._load_estimator: LoadEstimator | None = None
         self._solar_forecaster: SolcastForecaster | None = None
 
@@ -151,12 +155,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @property
     def optimiser_available(self) -> bool:
-        """Check if external optimizer is available."""
-        if self._optimizer_configurator:
-            return self.hass.async_add_executor_job(
-                lambda: self._optimizer_configurator is not None
-            )
-        return False
+        """Check if optimizer is available (always True with built-in)."""
+        return self._optimizer is not None
 
     @property
     def current_schedule(self) -> OptimizationSchedule | None:
@@ -164,20 +164,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return self._current_schedule
 
     async def async_setup(self) -> bool:
-        """Set up the optimization coordinator with external optimizer."""
-        _LOGGER.info("Setting up optimization coordinator")
+        """Set up the optimization coordinator with built-in LP optimizer."""
+        _LOGGER.info("Setting up optimization coordinator (built-in LP)")
 
-        # Initialize optimizer configurator
-        self._optimizer_configurator = OptimizerConfigurator(self.hass, self._entry)
-
-        # Check if optimizer is installed
-        if not await self._optimizer_configurator.ensure_optimizer_installed():
-            _LOGGER.warning(
-                "External optimizer integration not installed. "
-                "Install it from HACS to enable Smart Optimization."
-            )
-            # Don't fail setup - just disable optimization features
-            return True
+        # Initialize built-in optimizer
+        self._optimizer = BatteryOptimizer(
+            capacity_wh=self._config.battery_capacity_wh,
+            max_charge_w=self._config.max_charge_w,
+            max_discharge_w=self._config.max_discharge_w,
+            efficiency=0.92,
+            backup_reserve=self._config.backup_reserve,
+            interval_minutes=self._config.interval_minutes,
+            horizon_hours=self._config.horizon_hours,
+        )
 
         # Initialize load estimator
         load_entity = self._get_load_entity_id()
@@ -193,7 +192,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             interval_minutes=self._config.interval_minutes,
         )
 
-        # Initialize forecast data bridge
+        # Initialize forecast data bridge (for dashboard sensors)
         self._forecast_bridge = ForecastBridge(
             self.hass,
             self.entry_id,
@@ -210,13 +209,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             get_load=self._get_load_forecast,
         )
 
-        # Initialize schedule reader
-        self._schedule_reader = ScheduleReader(self.hass)
-
         # Initialize executor (for battery control)
         self._executor = ScheduleExecutor(
             self.hass,
-            optimiser=None,  # No longer using local optimizer
+            optimiser=None,
             battery_controller=self.battery_controller,
             interval_minutes=self._config.interval_minutes,
         )
@@ -229,22 +225,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             get_battery_state=self._get_battery_state,
         )
 
-        # Create/verify optimizer network
-        battery_config = {
-            "capacity_wh": self._config.battery_capacity_wh,
-            "max_charge_w": self._config.max_charge_w,
-            "max_discharge_w": self._config.max_discharge_w,
-            "efficiency": 0.92,
-            "backup_reserve": self._config.backup_reserve,
-        }
-
-        network_id = await self._optimizer_configurator.create_optimizer_network(battery_config)
-        if network_id:
-            _LOGGER.info(f"Optimizer network configured: {network_id}")
-        else:
-            _LOGGER.warning("Failed to create optimizer network - optimization may not work")
-
-        # Set up forecast sensors
+        # Set up forecast sensors for dashboard visibility
         await self._forecast_bridge.setup_forecast_sensors()
 
         # Set up price-triggered updates for dynamic pricing
@@ -254,9 +235,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self._setup_ev_coordinator()
 
         _LOGGER.info(
-            f"Optimization coordinator setup complete. "
-            f"Optimizer available: {await self._optimizer_configurator.ensure_optimizer_installed()}, "
-            f"Battery: {self._config.battery_capacity_wh/1000:.1f}kWh @ {self._config.max_charge_w/1000:.1f}kW"
+            "Optimization coordinator setup complete (built-in LP). "
+            "Battery: %.1fkWh @ %.1fkW",
+            self._config.battery_capacity_wh / 1000,
+            self._config.max_charge_w / 1000,
         )
         return True
 
@@ -328,53 +310,57 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._price_listener_unsub = self.price_coordinator.async_add_listener(
                 self._on_price_update
             )
-            _LOGGER.info(f"Dynamic pricing detected ({coordinator_name}) - updating optimizer on price changes")
+            _LOGGER.info(
+                "Dynamic pricing detected (%s) - re-optimizing on price changes",
+                coordinator_name,
+            )
 
     def _on_price_update(self) -> None:
         """Callback when price coordinator updates."""
         if not self._enabled or not self._is_dynamic_pricing:
             return
 
-        # Update optimizer forecast sensors with new prices
-        self.hass.async_create_task(self._update_optimizer_forecasts())
+        # Re-optimize with new prices and update dashboard sensors
+        self.hass.async_create_task(self._run_optimization())
 
-    async def _update_optimizer_forecasts(self) -> None:
-        """Update optimizer forecast sensors with latest data."""
+    async def _update_dashboard_forecasts(self) -> None:
+        """Update dashboard forecast sensors with latest data."""
         if self._forecast_bridge:
             await self._forecast_bridge.update_forecasts()
-            _LOGGER.debug("Updated optimizer forecast sensors")
+            _LOGGER.debug("Updated dashboard forecast sensors")
 
     async def enable(self) -> bool:
-        """Enable optimization and start reading from optimizer."""
+        """Enable optimization and start the built-in optimizer."""
         if self._enabled:
             return True
 
-        # Verify optimizer is available
-        if not self._optimizer_configurator or not await self._optimizer_configurator.ensure_optimizer_installed():
-            _LOGGER.error("Cannot enable optimization - external optimizer not installed")
+        if not self._optimizer:
+            _LOGGER.error("Cannot enable optimization - optimizer not initialized")
             return False
 
-        # Update optimizer forecasts
-        await self._update_optimizer_forecasts()
+        # Update dashboard forecasts
+        await self._update_dashboard_forecasts()
 
         # Start executor (for battery control)
         if self._executor:
             self._executor.set_config(self._config)
-            # Don't use periodic timer - we read from optimizer
             success = await self._executor.start(use_periodic_timer=False)
             if not success:
                 return False
 
         self._enabled = True
-        _LOGGER.info("Optimization enabled")
+        _LOGGER.info("Optimization enabled (built-in LP)")
 
-        # Start schedule polling
+        # Run initial optimization and start polling loop
+        self.hass.async_create_task(self._run_optimization())
         self.hass.async_create_task(self._schedule_polling_loop())
 
         # Start EV coordination if enabled
         if self._ev_coordinator and self._ev_configs:
             await self._ev_coordinator.start()
-            _LOGGER.info(f"EV coordination started with {len(self._ev_configs)} charger(s)")
+            _LOGGER.info(
+                "EV coordination started with %d charger(s)", len(self._ev_configs)
+            )
 
         return True
 
@@ -396,30 +382,91 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._enabled = False
         _LOGGER.info("Optimization disabled")
 
+    async def _run_optimization(self) -> None:
+        """Run the built-in LP optimizer with current forecast data."""
+        if not self._optimizer:
+            return
+
+        try:
+            # Collect forecast data
+            prices = await self._get_price_forecast()
+            solar = await self._get_solar_forecast()
+            load = await self._get_load_forecast()
+            soc, capacity = await self._get_battery_state()
+
+            import_prices = prices[0] if prices else []
+            export_prices = prices[1] if prices else []
+            solar_forecast = solar or []
+            load_forecast = load or []
+
+            # Run LP in executor thread to avoid blocking event loop
+            result: OptimizerResult = await self.hass.async_add_executor_job(
+                self._optimizer.optimize,
+                import_prices,
+                export_prices,
+                solar_forecast,
+                load_forecast,
+                soc,
+                self._cost_function.value,
+            )
+
+            self._last_optimizer_result = result
+            self._current_schedule = result.schedule
+            self._last_update_time = dt_util.now()
+
+            _LOGGER.info(
+                "Optimization complete (%s, %.2fs): cost=$%.2f, savings=$%.2f, %d steps",
+                result.solver_used,
+                result.solve_time_s,
+                result.schedule.predicted_cost,
+                result.schedule.predicted_savings,
+                len(result.schedule.actions),
+            )
+
+            # Update dashboard forecast sensors
+            await self._update_dashboard_forecasts()
+
+        except Exception as e:
+            _LOGGER.error("Optimization failed: %s", e, exc_info=True)
+
     async def _schedule_polling_loop(self) -> None:
-        """Poll optimizer for schedule updates and execute actions."""
+        """Periodically re-optimize and execute current action."""
         while self._enabled:
             try:
-                # Read schedule from optimizer
-                if self._schedule_reader:
-                    schedule = await self._schedule_reader.get_schedule()
-                    if schedule:
-                        self._current_schedule = schedule
-                        self._last_update_time = dt_util.now()
-
-                        # Execute current action
-                        current_action = await self._schedule_reader.get_current_action()
-                        if current_action and self._executor:
-                            await self._execute_optimizer_action(current_action)
+                # Execute current action from schedule
+                if self._current_schedule and self._current_schedule.actions:
+                    current_action = self._get_current_action()
+                    if current_action and self._executor:
+                        await self._execute_optimizer_action(current_action)
 
                 # Wait for next interval
                 await asyncio.sleep(self._config.interval_minutes * 60)
 
+                # Re-optimize on each interval
+                await self._run_optimization()
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                _LOGGER.error(f"Error in schedule polling: {e}")
-                await asyncio.sleep(60)  # Retry after 1 minute
+                _LOGGER.error("Error in schedule polling: %s", e)
+                await asyncio.sleep(60)
+
+    def _get_current_action(self) -> Any | None:
+        """Get the current scheduled action based on time."""
+        if not self._current_schedule or not self._current_schedule.actions:
+            return None
+
+        now = dt_util.now()
+
+        for i, action in enumerate(self._current_schedule.actions):
+            if action.timestamp <= now:
+                if i + 1 < len(self._current_schedule.actions):
+                    if now < self._current_schedule.actions[i + 1].timestamp:
+                        return action
+                else:
+                    return action
+
+        return self._current_schedule.actions[0] if self._current_schedule.actions else None
 
     async def _execute_optimizer_action(self, action: Any) -> None:
         """Execute an optimizer action on the battery."""
@@ -435,24 +482,41 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         duration_minutes=self._config.interval_minutes + 5,
                         power_w=action.power_w,
                     )
-                    _LOGGER.info(f"Optimizer: Charging at {action.power_w:.0f}W")
+                    _LOGGER.info("Optimizer: Charging at %.0fW", action.power_w)
             elif action.action in ("discharge", "export"):
                 if hasattr(battery, "force_discharge"):
                     await battery.force_discharge(
                         duration_minutes=self._config.interval_minutes + 5,
                         power_w=action.power_w,
                     )
-                    _LOGGER.info(f"Optimizer: Discharging at {action.power_w:.0f}W")
+                    _LOGGER.info("Optimizer: Discharging/exporting at %.0fW", action.power_w)
+            elif action.action == "idle":
+                # IDLE: Hold battery at current SOC by setting backup reserve
+                # to current percentage. This prevents discharge while grid
+                # serves the home load.
+                soc, _ = await self._get_battery_state()
+                soc_pct = int(soc * 100)
+                if hasattr(battery, "set_backup_reserve"):
+                    await battery.set_backup_reserve(soc_pct)
+                    _LOGGER.info(
+                        "Optimizer: IDLE — holding SOC at %d%% (backup reserve set)",
+                        soc_pct,
+                    )
+                elif hasattr(battery, "set_self_consumption_mode"):
+                    await battery.set_self_consumption_mode()
+                    _LOGGER.info("Optimizer: IDLE — self-consumption (no set_backup_reserve)")
+                elif hasattr(battery, "restore_normal"):
+                    await battery.restore_normal()
             else:
-                # Idle or consume - let battery operate normally
+                # self_consumption or consume — let battery operate naturally
                 if hasattr(battery, "set_self_consumption_mode"):
                     await battery.set_self_consumption_mode()
                 elif hasattr(battery, "restore_normal"):
                     await battery.restore_normal()
-                _LOGGER.debug(f"Optimizer: Self-consumption mode (action={action.action})")
+                _LOGGER.debug("Optimizer: Self-consumption mode (action=%s)", action.action)
 
         except Exception as e:
-            _LOGGER.error(f"Failed to execute optimizer action: {e}")
+            _LOGGER.error("Failed to execute optimizer action: %s", e)
 
     async def _get_price_forecast(self) -> tuple[list[float], list[float]] | None:
         """Get price forecasts for optimizer."""
@@ -517,7 +581,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._cost_function = cost_function
 
         self._config.cost_function = self._cost_function.value
-        _LOGGER.info(f"Cost function set to: {self._cost_function.value}")
+        _LOGGER.info("Cost function set to: %s", self._cost_function.value)
 
     def update_config(self, **kwargs) -> None:
         """Update optimization configuration."""
@@ -525,32 +589,32 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if hasattr(self._config, key):
                 setattr(self._config, key, value)
 
+        # Sync config to optimizer
+        if self._optimizer:
+            self._optimizer.update_config(
+                capacity_wh=self._config.battery_capacity_wh,
+                max_charge_w=self._config.max_charge_w,
+                max_discharge_w=self._config.max_discharge_w,
+                backup_reserve=self._config.backup_reserve,
+            )
+
     async def force_reoptimize(self) -> Any:
-        """Force optimizer to re-optimize by updating forecasts."""
-        await self._update_optimizer_forecasts()
-
-        # Read updated schedule from optimizer
-        if self._schedule_reader:
-            schedule = await self._schedule_reader.get_schedule()
-            if schedule:
-                self._current_schedule = schedule
-                return schedule
-
-        return None
+        """Force immediate re-optimization."""
+        await self._run_optimization()
+        return self._current_schedule
 
     def get_api_data(self) -> dict[str, Any]:
         """Get data for HTTP API and mobile app."""
-        # Check if optimizer is available
-        optimizer_available = self._schedule_reader.is_available() if self._schedule_reader else False
+        optimizer_available = self._optimizer is not None
 
         # Determine status message
         if optimizer_available:
-            if self._current_schedule:
+            if self._current_schedule and self._current_schedule.actions:
                 status_message = "Optimization active"
             else:
-                status_message = "Optimizer ready - waiting for schedule"
+                status_message = "Optimizer ready — waiting for data"
         else:
-            status_message = "External optimizer not installed"
+            status_message = "Optimizer not initialized"
 
         # Get current action info
         current_action = "idle"
@@ -559,18 +623,34 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         next_action_time = None
 
         if self._current_schedule and self._current_schedule.actions:
-            if len(self._current_schedule.actions) > 0:
-                current_action = self._current_schedule.actions[0].action
-            if len(self._current_schedule.actions) > 1:
-                next_action = self._current_schedule.actions[1].action
-                next_action_time = self._current_schedule.actions[1].timestamp.isoformat()
+            ca = self._get_current_action()
+            if ca:
+                current_action = ca.action
+
+            # Find next different action
+            now = dt_util.now()
+            for a in self._current_schedule.actions:
+                if a.timestamp > now and a.action != current_action:
+                    next_action = a.action
+                    next_action_time = a.timestamp.isoformat()
+                    break
+
+        # LP-specific stats
+        lp_stats = {}
+        if self._last_optimizer_result:
+            lp_stats = {
+                "solve_time_s": round(self._last_optimizer_result.solve_time_s, 3),
+                "objective_value": round(self._last_optimizer_result.objective_value, 4),
+                "solver_used": self._last_optimizer_result.solver_used,
+                "feasible": self._last_optimizer_result.feasible,
+            }
 
         data = {
             "success": True,
             "enabled": self._enabled,
             "optimizer_available": optimizer_available,
             "engine_available": optimizer_available,
-            "engine": "external",
+            "engine": "built-in",
             "status_message": status_message,
             "cost_function": self._cost_function.value,
             "status": "active" if self._enabled and optimizer_available else "disabled",
@@ -582,6 +662,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "last_optimization": self._last_update_time.isoformat() if self._last_update_time else None,
             "predicted_cost": self._current_schedule.predicted_cost if self._current_schedule else 0,
             "predicted_savings": self._current_schedule.predicted_savings if self._current_schedule else 0,
+            "lp_stats": lp_stats,
             "config": {
                 "battery_capacity_wh": self._config.battery_capacity_wh,
                 "max_charge_w": self._config.max_charge_w,
@@ -591,12 +672,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "horizon_hours": self._config.horizon_hours,
             },
             "features": {
-                "ml_forecasting": False,  # Optimizer handles this
-                "weather_integration": False,
                 "ev_integration": len(self._ev_configs) > 0,
-                "multi_battery": False,
                 "vpp_enabled": False,
-                "external_optimizer": True,
+                "built_in_optimizer": True,
             },
         }
 
@@ -606,14 +684,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Add schedule data if available
         if self._current_schedule:
-            data["schedule"] = self._current_schedule.to_api_response()
+            api_response = self._current_schedule.to_api_response()
+            # Add grid import/export from LP result
+            if self._last_optimizer_result:
+                api_response["grid_import_w"] = self._last_optimizer_result.grid_import_w
+                api_response["grid_export_w"] = self._last_optimizer_result.grid_export_w
+            data["schedule"] = api_response
+
+            dt_h = self._config.interval_minutes / 60
             data["summary"] = {
                 "total_cost": self._current_schedule.predicted_cost,
-                "total_import_kwh": 0,
-                "total_export_kwh": 0,
-                "total_charge_kwh": sum(self._current_schedule.charge_w) * (self._config.interval_minutes / 60) / 1000,
-                "total_discharge_kwh": sum(self._current_schedule.discharge_w) * (self._config.interval_minutes / 60) / 1000,
-                "baseline_cost": 0,
+                "total_import_kwh": sum(self._last_optimizer_result.grid_import_w) * dt_h / 1000 if self._last_optimizer_result else 0,
+                "total_export_kwh": sum(self._last_optimizer_result.grid_export_w) * dt_h / 1000 if self._last_optimizer_result else 0,
+                "total_charge_kwh": sum(self._current_schedule.charge_w) * dt_h / 1000,
+                "total_discharge_kwh": sum(self._current_schedule.discharge_w) * dt_h / 1000,
+                "baseline_cost": (self._current_schedule.predicted_cost + self._current_schedule.predicted_savings),
                 "savings": self._current_schedule.predicted_savings,
             }
             data["next_actions"] = [a.to_dict() for a in self._current_schedule.actions[:5]]
@@ -667,25 +752,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.update_config(**config_updates)
             response["changes"].append(f"config: {list(config_updates.keys())}")
 
-            # Update optimizer network with new battery config
-            if self._optimizer_configurator:
-                await self._optimizer_configurator.update_optimizer_network({
-                    "capacity_wh": self._config.battery_capacity_wh,
-                    "max_charge_w": self._config.max_charge_w,
-                    "max_discharge_w": self._config.max_discharge_w,
-                    "efficiency": 0.92,
-                    "backup_reserve": self._config.backup_reserve,
-                })
-
         return response
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Fetch data from optimizer."""
-        if self._schedule_reader and self._enabled:
-            schedule = await self._schedule_reader.get_schedule()
-            if schedule:
-                self._current_schedule = schedule
-                self._last_update_time = dt_util.now()
+        """Periodic data update — re-optimize and return API data."""
+        if self._enabled:
+            await self._run_optimization()
 
         return self.get_api_data()
 
@@ -729,7 +801,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._ev_coordinator:
             self._ev_coordinator.add_ev(config)
 
-        _LOGGER.info(f"Added EV charger: {config.name} ({entity_id})")
+        _LOGGER.info("Added EV charger: %s (%s)", config.name, entity_id)
         return True
 
     def remove_ev_charger(self, entity_id: str) -> bool:
@@ -746,7 +818,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._ev_coordinator:
             self._ev_coordinator.remove_ev(entity_id)
 
-        _LOGGER.info(f"Removed EV charger: {entity_id}")
+        _LOGGER.info("Removed EV charger: %s", entity_id)
         return True
 
     def set_ev_charging_mode(self, mode: str) -> bool:
@@ -763,7 +835,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._ev_coordinator.set_mode(EVChargingMode(mode))
                 return True
             except ValueError:
-                _LOGGER.error(f"Invalid EV charging mode: {mode}")
+                _LOGGER.error("Invalid EV charging mode: %s", mode)
                 return False
         return False
 

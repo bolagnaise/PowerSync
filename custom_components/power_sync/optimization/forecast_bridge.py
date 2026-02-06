@@ -1,8 +1,8 @@
 """
 Forecast Data Bridge for PowerSync.
 
-Creates Home Assistant sensor entities with forecast attributes that are
-fully compatible with HAEO (Home Assistant Energy Optimizer).
+Creates Home Assistant sensor entities with forecast attributes for
+dashboard visibility and external integration compatibility.
 
 Sensors created:
 - sensor.powersync_price_import_forecast
@@ -10,7 +10,7 @@ Sensors created:
 - sensor.powersync_solar_forecast
 - sensor.powersync_load_forecast
 
-These sensors use the standard HAEO forecast format:
+These sensors use the standard forecast format:
 {
   "state": <current_value>,
   "attributes": {
@@ -24,8 +24,8 @@ These sensors use the standard HAEO forecast format:
   }
 }
 
-Users can configure HAEO to use these sensors directly, or PowerSync
-can auto-configure HAEO via the OptimizerConfigurator.
+The built-in LP optimizer reads data directly via callbacks, but these
+sensors are kept for dashboard charts and external tool compatibility.
 """
 from __future__ import annotations
 

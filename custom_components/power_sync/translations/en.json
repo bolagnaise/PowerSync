@@ -147,22 +147,26 @@
       },
       "optimization_provider": {
         "title": "Choose Optimization Provider",
-        "description": "Your {battery_name} has built-in battery scheduling. Choose how PowerSync should manage your battery:\n\n**{battery_name} built-in**: Use your battery's native Time-of-Use scheduling.\n\n**PowerSync ML**: Use advanced ML optimization with Linear Programming to minimize costs, maximize profit, or maximize self-consumption.",
+        "description": "Your {battery_name} has built-in battery scheduling. Choose how PowerSync should manage your battery:\n\n**{battery_name} built-in**: Use your battery's native Time-of-Use scheduling.\n\n**Smart Optimization (Built-in LP)**: Uses Linear Programming to find the optimal battery schedule — minimizing costs, maximizing profit, or maximizing self-consumption. No external dependencies required.",
         "data": {
           "optimization_provider": "Optimization Provider"
         },
         "submit_button": "Next"
       },
       "ml_options": {
-        "title": "ML Optimization Settings",
-        "description": "Configure how the optimizer manages your battery.",
+        "title": "Smart Optimization Settings",
+        "description": "Configure how the built-in LP optimizer manages your battery.\n\nThe optimizer uses electricity price forecasts, solar generation, and load patterns to find the optimal charge/discharge schedule.",
         "data": {
           "optimization_cost_function": "Optimization Objective",
-          "optimization_backup_reserve": "Backup Reserve (%)"
+          "optimization_backup_reserve": "Backup Reserve (%)",
+          "optimization_vpp_enabled": "VPP Integration",
+          "optimization_ev_integration": "EV Charging Integration"
         },
         "data_description": {
           "optimization_cost_function": "Cost = lowest bill, Profit = best for Amber/VPP traders, Self-Consumption = maximize solar usage",
-          "optimization_backup_reserve": "Minimum battery level to keep for backup power (0-100%, 20% recommended)"
+          "optimization_backup_reserve": "Minimum battery level to keep for backup power (0-100%, 20% recommended)",
+          "optimization_vpp_enabled": "Include VPP spike events in optimization decisions",
+          "optimization_ev_integration": "Coordinate battery optimization with EV charging schedules"
         },
         "submit_button": "Next"
       },
@@ -403,9 +407,9 @@
           "optimization_backup_reserve": "Backup Reserve (%)"
         },
         "data_description": {
-          "optimization_provider": "Choose between Tesla's built-in optimization or PowerSync ML",
-          "optimization_cost_function": "What to optimize for (only applies to PowerSync ML)",
-          "optimization_backup_reserve": "Minimum battery charge level to maintain (only applies to PowerSync ML)"
+          "optimization_provider": "Choose between Tesla's built-in optimization or Smart Optimization (Built-in LP)",
+          "optimization_cost_function": "What to optimize for (only applies to Smart Optimization)",
+          "optimization_backup_reserve": "Minimum battery charge level to maintain (only applies to Smart Optimization)"
         }
       },
       "init_sigenergy": {
@@ -449,9 +453,9 @@
           "sungrow_slave_id": "Modbus Slave ID"
         },
         "data_description": {
-          "optimization_provider": "Choose between Sungrow's built-in scheduling or PowerSync ML",
-          "optimization_cost_function": "What to optimize for (only applies to PowerSync ML)",
-          "optimization_backup_reserve": "Minimum battery charge level to maintain (only applies to PowerSync ML)",
+          "optimization_provider": "Choose between Sungrow's built-in scheduling or Smart Optimization (Built-in LP)",
+          "optimization_cost_function": "What to optimize for (only applies to Smart Optimization)",
+          "optimization_backup_reserve": "Minimum battery charge level to maintain (only applies to Smart Optimization)",
           "sungrow_host": "Local IP address of your Sungrow inverter or WiNet-S dongle (e.g., 192.168.1.100)",
           "sungrow_port": "Modbus TCP port (default: 502)",
           "sungrow_slave_id": "Modbus slave ID (default: 1)"

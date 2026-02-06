@@ -66,7 +66,7 @@ class BatteryControllerWrapper:
             True if command was sent successfully
         """
         try:
-            _LOGGER.info(f"🔋 ML Optimizer: Force charge {duration_minutes}min at {power_w}W")
+            _LOGGER.info(f"🔋 Optimizer: Force charge {duration_minutes}min at {power_w}W")
 
             # Create a service call with the duration
             # ServiceCall takes (domain, service, data) positional args
@@ -98,7 +98,7 @@ class BatteryControllerWrapper:
             True if command was sent successfully
         """
         try:
-            _LOGGER.info(f"🔋 ML Optimizer: Force discharge {duration_minutes}min at {power_w}W")
+            _LOGGER.info(f"🔋 Optimizer: Force discharge {duration_minutes}min at {power_w}W")
 
             # ServiceCall takes (domain, service, data) positional args
             call = ServiceCall(
@@ -125,7 +125,7 @@ class BatteryControllerWrapper:
             True if command was sent successfully
         """
         try:
-            _LOGGER.info("🔋 ML Optimizer: Restoring normal operation")
+            _LOGGER.info("🔋 Optimizer: Restoring normal operation")
 
             # ServiceCall takes (domain, service, data) positional args
             call = ServiceCall(
@@ -158,7 +158,7 @@ class BatteryControllerWrapper:
             True if command was sent successfully
         """
         try:
-            _LOGGER.info("🔋 ML Optimizer: Setting pure self-consumption mode (battery→home, no TOU)")
+            _LOGGER.info("🔋 Optimizer: Setting pure self-consumption mode (battery→home, no TOU)")
 
             if self._set_self_consumption:
                 # Use dedicated handler

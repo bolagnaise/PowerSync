@@ -207,7 +207,7 @@ from .const import (
     TESLA_BLE_BUTTON_WAKE_UP,
     # Tesla integrations for device discovery
     TESLA_INTEGRATIONS,
-    # ML Optimization configuration
+    # Smart Optimization configuration
     CONF_OPTIMIZATION_PROVIDER,
     CONF_OPTIMIZATION_ENABLED,
     OPT_PROVIDER_NATIVE,
@@ -1908,6 +1908,168 @@ class PowerwallTypeView(HomeAssistantView):
             )
 
 
+class BatteryHealthView(HomeAssistantView):
+    """HTTP view for battery health data.
+
+    GET: Returns stored battery health from last TEDAPI scan
+    POST: Accepts battery health scan data from mobile app
+    """
+
+    url = "/api/power_sync/battery_health"
+    name = "api:power_sync:battery_health"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request - return stored battery health data."""
+        _LOGGER.info("🔋 Battery health HTTP request")
+
+        # Find the power_sync entry
+        entry = None
+        for config_entry in self._hass.config_entries.async_entries(DOMAIN):
+            entry = config_entry
+            break
+
+        if not entry:
+            return web.json_response(
+                {"success": False, "error": "PowerSync not configured"},
+                status=503
+            )
+
+        try:
+            # Get stored battery health data
+            domain_data = self._hass.data.get(DOMAIN, {})
+            entry_data = domain_data.get(entry.entry_id, {})
+            battery_health = entry_data.get("battery_health")
+
+            if not battery_health:
+                # Try loading from persistent storage
+                store = entry_data.get("store")
+                if store:
+                    stored_data = await store.async_load() or {}
+                    battery_health = stored_data.get("battery_health")
+
+            if not battery_health:
+                return web.json_response({
+                    "success": True,
+                    "available": False,
+                    "message": "No battery health data available. Run a TEDAPI scan from the mobile app.",
+                })
+
+            # Calculate health percentage
+            original = battery_health.get("original_capacity_wh", 0)
+            current = battery_health.get("current_capacity_wh", 0)
+            health_percent = round((current / original) * 100, 1) if original > 0 else 0
+
+            return web.json_response({
+                "success": True,
+                "available": True,
+                "health_percent": health_percent,
+                "original_capacity_wh": battery_health.get("original_capacity_wh"),
+                "current_capacity_wh": battery_health.get("current_capacity_wh"),
+                "original_capacity_kwh": round(battery_health.get("original_capacity_wh", 0) / 1000, 2),
+                "current_capacity_kwh": round(battery_health.get("current_capacity_wh", 0) / 1000, 2),
+                "degradation_percent": battery_health.get("degradation_percent"),
+                "battery_count": battery_health.get("battery_count", 1),
+                "last_scan": battery_health.get("scanned_at"),
+                "individual_batteries": battery_health.get("individual_batteries"),
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error fetching battery health: {e}", exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500
+            )
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Handle POST request - receive battery health scan data from mobile app."""
+        _LOGGER.info("🔋 Battery health scan data received via HTTP")
+
+        # Find the power_sync entry
+        entry = None
+        for config_entry in self._hass.config_entries.async_entries(DOMAIN):
+            entry = config_entry
+            break
+
+        if not entry:
+            return web.json_response(
+                {"success": False, "error": "PowerSync not configured"},
+                status=503
+            )
+
+        try:
+            data = await request.json()
+
+            original_capacity_wh = data.get("original_capacity_wh")
+            current_capacity_wh = data.get("current_capacity_wh")
+            degradation_percent = data.get("degradation_percent")
+            battery_count = data.get("battery_count", 1)
+            scanned_at = data.get("scanned_at", datetime.now().isoformat())
+            individual_batteries = data.get("individual_batteries")
+
+            # Validate required fields
+            if original_capacity_wh is None or current_capacity_wh is None or degradation_percent is None:
+                return web.json_response(
+                    {"success": False, "error": "Missing required fields: original_capacity_wh, current_capacity_wh, degradation_percent"},
+                    status=400
+                )
+
+            health_percent = round((current_capacity_wh / original_capacity_wh) * 100, 1) if original_capacity_wh > 0 else 0
+
+            _LOGGER.info(
+                f"🔋 Battery health received: {health_percent}% health ({current_capacity_wh}Wh / {original_capacity_wh}Wh, {battery_count} units)"
+            )
+
+            # Build battery health data
+            battery_health_data = {
+                "original_capacity_wh": original_capacity_wh,
+                "current_capacity_wh": current_capacity_wh,
+                "degradation_percent": degradation_percent,
+                "battery_count": battery_count,
+                "scanned_at": scanned_at,
+            }
+
+            if individual_batteries:
+                battery_health_data["individual_batteries"] = individual_batteries
+                _LOGGER.info(f"  Individual batteries: {len(individual_batteries)} units")
+
+            # Store in hass.data
+            self._hass.data[DOMAIN][entry.entry_id]["battery_health"] = battery_health_data
+
+            # Persist to storage
+            store = self._hass.data[DOMAIN][entry.entry_id].get("store")
+            if store:
+                stored_data = await store.async_load() or {}
+                stored_data["battery_health"] = battery_health_data
+                await store.async_save(stored_data)
+                _LOGGER.debug("Battery health persisted to storage")
+
+            # Notify sensor via dispatcher
+            from homeassistant.helpers.dispatcher import async_dispatcher_send
+            async_dispatcher_send(
+                self._hass,
+                f"{DOMAIN}_battery_health_update_{entry.entry_id}",
+                battery_health_data,
+            )
+
+            return web.json_response({
+                "success": True,
+                "message": f"Battery health synced: {health_percent}% health",
+                "data": battery_health_data,
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error processing battery health scan: {e}", exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500
+            )
+
+
 class InverterStatusView(HomeAssistantView):
     """HTTP view to get AC-coupled inverter status for mobile app."""
 
@@ -2639,12 +2801,30 @@ class ConfigView(HomeAssistantView):
                 entry.data.get(CONF_EV_PROVIDER)
             )
 
+            # Include battery health summary (from last TEDAPI scan)
+            battery_health = None
+            domain_data = self._hass.data.get(DOMAIN, {})
+            entry_data = domain_data.get(entry.entry_id, {})
+            health_data = entry_data.get("battery_health")
+            if health_data:
+                original = health_data.get("original_capacity_wh", 0)
+                current = health_data.get("current_capacity_wh", 0)
+                battery_health = {
+                    "health_percent": round((current / original) * 100, 1) if original > 0 else 0,
+                    "original_capacity_kwh": round(original / 1000, 2),
+                    "current_capacity_kwh": round(current / 1000, 2),
+                    "degradation_percent": health_data.get("degradation_percent"),
+                    "battery_count": health_data.get("battery_count", 1),
+                    "last_scan": health_data.get("scanned_at"),
+                }
+
             result = {
                 "success": True,
                 "battery_system": battery_system,
                 "electricity_provider": electricity_provider,
                 "ev_provider": ev_provider,  # Tesla (fleet_api/tesla_ble/both) or None for OCPP-only
                 "features": features,
+                "battery_health": battery_health,
                 "sigenergy": sigenergy_config,
                 "sungrow": sungrow_config,
             }
@@ -3168,7 +3348,7 @@ class TariffPriceView(HomeAssistantView):
                 }, status=404)
 
             # Static TOU providers (GloBird, etc.) - use Tesla tariff
-            # Check if ML optimizer has uploaded a fake tariff (force charge/discharge active)
+            # Check if optimizer has uploaded a fake tariff (force charge/discharge active)
             # If so, use the SAVED real tariff instead of fetching the fake one from Tesla
             force_charge_state = self._hass.data.get(DOMAIN, {}).get(entry_id, {}).get("force_charge_state", {})
             force_discharge_state = self._hass.data.get(DOMAIN, {}).get(entry_id, {}).get("force_discharge_state", {})
@@ -3284,7 +3464,7 @@ class TariffPriceView(HomeAssistantView):
     def _calculate_prices_from_saved_tariff(self, saved_tariff: dict) -> dict | None:
         """Calculate current prices from a saved tariff structure.
 
-        The saved tariff is the original user tariff before ML optimizer uploaded a fake one.
+        The saved tariff is the original user tariff before the optimizer uploaded a fake one.
         We need to determine the current TOU period and return the appropriate rates.
         """
         try:
@@ -7597,7 +7777,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("Demand charge coordinator initialized")
 
     # Initialize AEMO Spike Manager if enabled (for Globird/AEMO VPP users)
-    # Skip if ML optimization is enabled - ML VPP handles spike detection instead
+    # Skip if Smart Optimization is enabled - it handles spike detection instead
     aemo_spike_manager = None
     ml_optimization_enabled = (
         entry.options.get(
@@ -7639,7 +7819,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("AEMO spike detection enabled but no region configured")
 
     # Initialize Sungrow AEMO Spike Manager if enabled (for Globird VPP users with Sungrow)
-    # Skip if ML optimization is enabled - ML VPP handles spike detection instead
+    # Skip if Smart Optimization is enabled - it handles spike detection instead
     sungrow_aemo_spike_manager = None
     if is_sungrow and sungrow_coordinator:
         sungrow_aemo_spike_enabled = entry.options.get(
@@ -11434,7 +11614,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def handle_set_self_consumption(call: ServiceCall) -> None:
         """Set battery to pure self-consumption mode (no TOU optimization).
 
-        Used by ML optimizer for CONSUME action - battery should naturally offset
+        Used by optimizer for CONSUME action - battery should naturally offset
         home load without making autonomous charge/discharge decisions based on TOU.
 
         Unlike restore_normal, this:
@@ -11442,7 +11622,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         - Does NOT restore TOU tariff
         - Does NOT send push notifications (optimizer-controlled)
         """
-        _LOGGER.info("🔋 ML Optimizer: Setting pure self-consumption mode")
+        _LOGGER.info("Optimizer: Setting pure self-consumption mode")
 
         # Check if this is a Sigenergy system
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
@@ -12139,6 +12319,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register HTTP endpoint for Powerwall type (for mobile app Settings)
     hass.http.register_view(PowerwallTypeView(hass))
     _LOGGER.info("🔋 Powerwall type HTTP endpoint registered at /api/power_sync/powerwall_type")
+
+    # Register HTTP endpoint for Battery Health (for mobile app Settings - battery auto-detection section)
+    hass.http.register_view(BatteryHealthView(hass))
+    _LOGGER.info("🔋 Battery health HTTP endpoint registered at /api/power_sync/battery_health")
 
     # Register HTTP endpoint for Inverter status (for mobile app Solar controls)
     hass.http.register_view(InverterStatusView(hass))
@@ -13117,7 +13301,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     _LOGGER.info("🤖 Automation services registered")
 
-    # Initialize ML Optimization Coordinator if enabled
+    # Initialize Smart Optimization Coordinator if enabled
     optimization_provider = entry.options.get(
         CONF_OPTIMIZATION_PROVIDER,
         entry.data.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
@@ -13128,7 +13312,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     optimization_coordinator = None
 
     if optimization_provider == OPT_PROVIDER_POWERSYNC and optimization_enabled:
-        _LOGGER.info("🧠 ML Optimization enabled - initializing OptimizationCoordinator")
+        _LOGGER.info("Smart Optimization enabled - initializing OptimizationCoordinator")
         try:
             from .optimization.battery_controller import BatteryControllerWrapper
 
@@ -13172,9 +13356,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Check options first (where set_settings saves), then fall back to data for defaults
             enable_ev_integration = entry.options.get(CONF_OPTIMIZATION_EV_INTEGRATION, entry.data.get(CONF_OPTIMIZATION_EV_INTEGRATION, False))
             enable_vpp = entry.options.get(CONF_OPTIMIZATION_VPP_ENABLED, entry.data.get(CONF_OPTIMIZATION_VPP_ENABLED, False))
-            enable_multi_battery = entry.options.get(CONF_OPTIMIZATION_MULTI_BATTERY, entry.data.get(CONF_OPTIMIZATION_MULTI_BATTERY, False))
-            enable_ml_forecasting = entry.options.get(CONF_OPTIMIZATION_ML_FORECASTING, entry.data.get(CONF_OPTIMIZATION_ML_FORECASTING, True))
-            enable_weather_integration = entry.options.get(CONF_OPTIMIZATION_WEATHER_INTEGRATION, entry.data.get(CONF_OPTIMIZATION_WEATHER_INTEGRATION, False))
+            # Legacy feature flags (not supported by built-in LP optimizer, kept for config compat)
+            # enable_multi_battery, enable_ml_forecasting, enable_weather_integration — removed
             saved_cost_function = entry.options.get(CONF_OPTIMIZATION_COST_FUNCTION, entry.data.get(CONF_OPTIMIZATION_COST_FUNCTION, "self_consumption"))
             saved_interval_minutes = entry.options.get(CONF_OPTIMIZATION_INTERVAL, entry.data.get(CONF_OPTIMIZATION_INTERVAL, 5))
 
@@ -13188,11 +13371,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 energy_coordinator=energy_coordinator,
                 tariff_schedule=tariff_schedule,  # For Globird/TOU-based pricing
                 force_state_getter=get_force_state,  # For checking if force mode is active
-                enable_ml_forecasting=enable_ml_forecasting,
-                enable_weather_integration=enable_weather_integration,
-                enable_ev_integration=enable_ev_integration,
-                enable_multi_battery=enable_multi_battery,
-                enable_vpp=enable_vpp,
             )
 
             # Set up the coordinator
@@ -13202,13 +13380,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Set cost function and interval from saved settings
             optimization_coordinator.set_cost_function(saved_cost_function)
             optimization_coordinator.update_config(interval_minutes=saved_interval_minutes)
-            _LOGGER.info(f"🧠 ML Optimization cost function: {saved_cost_function}, interval: {saved_interval_minutes}min")
+            _LOGGER.info(f"Smart Optimization cost function: {saved_cost_function}, interval: {saved_interval_minutes}min")
 
             # Enable the optimizer
             await optimization_coordinator.enable()
 
             hass.data[DOMAIN][entry.entry_id]["optimization_coordinator"] = optimization_coordinator
-            _LOGGER.info("🧠 ML Optimization coordinator initialized and enabled")
+            _LOGGER.info("Smart Optimization coordinator initialized and enabled")
 
             # If VPP is enabled, set up AEMO price fetching and spike response
             # This handles Globird VPP spike detection - discharge at $3000/MWh
@@ -13353,18 +13531,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 await check_aemo_spike_for_vpp(None)
 
         except Exception as e:
-            _LOGGER.error(f"Failed to initialize ML Optimization coordinator: {e}", exc_info=True)
-            _LOGGER.warning("Continuing without ML optimization - battery will use native optimization")
+            _LOGGER.error(f"Failed to initialize Smart Optimization coordinator: {e}", exc_info=True)
+            _LOGGER.warning("Continuing without Smart Optimization - battery will use native optimization")
     else:
         if optimization_provider == OPT_PROVIDER_POWERSYNC and not optimization_enabled:
-            _LOGGER.info("🧠 ML Optimization is configured but DISABLED by user toggle")
+            _LOGGER.info("Smart Optimization is configured but DISABLED by user toggle")
         else:
-            _LOGGER.info("🔋 Using battery's native optimization (ML optimization not configured)")
+            _LOGGER.info("Using battery's native optimization (Smart Optimization not configured)")
 
-    # Register HTTP endpoint for Smart Optimization (ML-based battery scheduling)
+    # Register HTTP endpoints for Smart Optimization
     hass.http.register_view(OptimizationView(hass))
     hass.http.register_view(OptimizationSettingsView(hass))
-    _LOGGER.info("🧠 Optimization HTTP endpoints registered at /api/power_sync/optimization")
+    _LOGGER.info("Optimization HTTP endpoints registered at /api/power_sync/optimization")
 
     _LOGGER.info("=" * 60)
     _LOGGER.info("PowerSync integration setup complete!")
@@ -13387,7 +13565,7 @@ class OptimizationView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         """Handle GET request for optimization status."""
-        _LOGGER.info("🧠 Optimization status GET request")
+        _LOGGER.info("Optimization status GET request")
 
         # Find the optimization coordinator
         opt_coordinator = None
@@ -13398,7 +13576,7 @@ class OptimizationView(HomeAssistantView):
 
         if not opt_coordinator:
             # Optimization not enabled - return disabled status
-            _LOGGER.info("🧠 Optimization not configured")
+            _LOGGER.info("Optimization not configured")
             return web.json_response({
                 "success": True,
                 "enabled": False,
@@ -13408,7 +13586,7 @@ class OptimizationView(HomeAssistantView):
             })
 
         api_data = opt_coordinator.get_api_data()
-        _LOGGER.info(f"🧠 Optimization GET response: enabled={api_data.get('enabled')}, "
+        _LOGGER.info(f"Optimization GET response: enabled={api_data.get('enabled')}, "
                      f"predicted_cost=${api_data.get('predicted_cost', 0):.2f}, "
                      f"savings=${api_data.get('predicted_savings', 0):.2f}, "
                      f"has_schedule={api_data.get('schedule') is not None}")
@@ -13431,16 +13609,16 @@ class OptimizationView(HomeAssistantView):
 
         try:
             result = await opt_coordinator.force_reoptimize()
-            if result and result.success:
+            if result and hasattr(result, 'actions'):
                 return web.json_response({
                     "success": True,
                     "message": "Re-optimization triggered",
-                    "schedule": result.to_dict() if hasattr(result, 'to_dict') else None
+                    "schedule": result.to_api_response() if hasattr(result, 'to_api_response') else None
                 })
-            elif result:
+            elif result and hasattr(result, 'success') and not result.success:
                 return web.json_response({
                     "success": False,
-                    "error": f"Optimization failed: {result.status}"
+                    "error": f"Optimization failed: {getattr(result, 'status', 'unknown')}"
                 }, status=500)
             else:
                 # result is None - missing forecast data
@@ -13542,11 +13720,11 @@ class OptimizationSettingsView(HomeAssistantView):
                     new_data[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_POWERSYNC
                     # Also set CONF_OPTIMIZATION_ENABLED in options so it persists correctly
                     new_options[CONF_OPTIMIZATION_ENABLED] = True
-                    changes.append("Enabled ML optimization")
+                    changes.append("Enabled Smart Optimization")
                 else:
                     new_data[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_NATIVE
                     new_options[CONF_OPTIMIZATION_ENABLED] = False
-                    changes.append("Disabled ML optimization")
+                    changes.append("Disabled Smart Optimization")
 
             if "cost_function" in settings:
                 from .const import CONF_OPTIMIZATION_COST_FUNCTION
@@ -13564,11 +13742,11 @@ class OptimizationSettingsView(HomeAssistantView):
 
             # Update the config entry (both data and options)
             self._hass.config_entries.async_update_entry(config_entry, data=new_data, options=new_options)
-            _LOGGER.info(f"🔧 ML optimization settings updated via API: {changes}")
+            _LOGGER.info(f"Optimization settings updated via API: {changes}")
 
-            # If we enabled/disabled ML optimization, reload the integration in background
+            # If we enabled/disabled optimization, reload the integration in background
             if "enabled" in settings:
-                _LOGGER.info("🔄 Scheduling integration reload to apply ML optimization changes")
+                _LOGGER.info("Scheduling integration reload to apply optimization changes")
                 # Fire and forget - don't await, return immediately to avoid timeout
                 self._hass.async_create_task(
                     self._hass.config_entries.async_reload(config_entry.entry_id)
@@ -13643,7 +13821,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if opt_coordinator := entry_data.get("optimization_coordinator"):
         try:
             await opt_coordinator.disable()
-            _LOGGER.info("🧠 Optimization coordinator stopped")
+            _LOGGER.info("Optimization coordinator stopped")
         except Exception as e:
             _LOGGER.error(f"Error stopping optimization coordinator: {e}")
 

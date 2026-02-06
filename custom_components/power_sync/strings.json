@@ -147,21 +147,23 @@
       },
       "optimization_provider": {
         "title": "Choose Optimization Provider",
-        "description": "Your {battery_name} has built-in battery scheduling. Choose how PowerSync should manage your battery:\n\n**{battery_name} built-in**: Use your battery's native Time-of-Use scheduling.\n\n**HAEO Smart Optimization**: Use HAEO (Home Assistant Energy Optimizer) with Linear Programming to minimize costs, maximize profit, or maximize self-consumption.\n\n⚠️ HAEO requires manual setup via HACS. Install from: {optimizer_url}",
+        "description": "Your {battery_name} has built-in battery scheduling. Choose how PowerSync should manage your battery:\n\n**{battery_name} built-in**: Use your battery's native Time-of-Use scheduling.\n\n**Smart Optimization (Built-in LP)**: Uses Linear Programming to find the optimal battery schedule — minimizing costs, maximizing profit, or maximizing self-consumption. No external dependencies required.",
         "data": {
           "optimization_provider": "Optimization Provider"
         },
         "submit_button": "Next"
       },
       "ml_options": {
-        "title": "HAEO Optimization Settings",
-        "description": "Configure how HAEO manages your battery.\n\nHAEO uses **cost minimization** to find the optimal battery schedule based on electricity prices.\n\n**Note:** After setup, you must manually configure HAEO to use PowerSync's forecast sensors. See documentation for details.",
+        "title": "Smart Optimization Settings",
+        "description": "Configure how the built-in LP optimizer manages your battery.\n\nThe optimizer uses electricity price forecasts, solar generation, and load patterns to find the optimal charge/discharge schedule.",
         "data": {
+          "optimization_cost_function": "Optimization Objective",
           "optimization_backup_reserve": "Backup Reserve (%)",
           "optimization_vpp_enabled": "VPP Integration",
           "optimization_ev_integration": "EV Charging Integration"
         },
         "data_description": {
+          "optimization_cost_function": "Cost = lowest bill, Profit = best for Amber/VPP traders, Self-Consumption = maximize solar usage",
           "optimization_backup_reserve": "Minimum battery level to keep for backup power (0-100%, 20% recommended)",
           "optimization_vpp_enabled": "Include VPP spike events in optimization decisions",
           "optimization_ev_integration": "Coordinate battery optimization with EV charging schedules"
@@ -354,7 +356,7 @@
       },
       "battery_management_mode": {
         "title": "Battery Management Mode",
-        "description": "Choose how PowerSync should manage your battery:\n\n**Manual**: Use PowerSync automations to control charge/discharge.\n\n**TOU Sync**: Sync prices to battery, let battery's built-in scheduler decide.\n\n**HAEO Smart Optimization**: HAEO-powered scheduling using Linear Programming to minimize costs or maximize profit. Requires HAEO integration installed via HACS.",
+        "description": "Choose how PowerSync should manage your battery:\n\n**Manual**: Use PowerSync automations to control charge/discharge.\n\n**TOU Sync**: Sync prices to battery, let battery's built-in scheduler decide.\n\n**Smart Optimization**: Built-in LP scheduling to minimize costs, maximize profit, or maximize self-consumption. No external dependencies required.",
         "data": {
           "battery_management_mode": "Battery Management Mode",
           "optimization_cost_function": "Optimization Objective",
@@ -384,7 +386,7 @@
       "sungrow_host_required": "Sungrow IP address is required for Modbus connection.",
       "sungrow_modbus_conflict": "The AC inverter and Sungrow battery have the same IP, port, and slave ID. Use a different slave ID for the AC inverter.",
       "no_prices": "No Octopus prices found for this tariff and region. Check your product and GSP region are correct.",
-      "optimizer_not_installed": "HAEO integration is not installed. Please install HAEO via HACS first, then restart Home Assistant. Install from: https://github.com/hass-energy/haeo",
+      "optimizer_not_installed": "Smart Optimization requires scipy. Check Home Assistant logs for installation details.",
       "unknown": "An unexpected error occurred. Please try again."
     },
     "abort": {
@@ -407,8 +409,8 @@
           "optimization_ev_integration": "EV Charging Integration"
         },
         "data_description": {
-          "optimization_provider": "Choose between Tesla's built-in optimization or HAEO Smart Optimization",
-          "optimization_backup_reserve": "Minimum battery charge level to maintain (only applies to HAEO)",
+          "optimization_provider": "Choose between Tesla's built-in optimization or Smart Optimization (Built-in LP)",
+          "optimization_backup_reserve": "Minimum battery charge level to maintain (only applies to Smart Optimization)",
           "optimization_vpp_enabled": "Include VPP spike events in optimization decisions",
           "optimization_ev_integration": "Coordinate battery optimization with EV charging schedules"
         }
@@ -456,8 +458,8 @@
           "sungrow_slave_id": "Modbus Slave ID"
         },
         "data_description": {
-          "optimization_provider": "Choose between Sungrow's built-in scheduling or HAEO Smart Optimization",
-          "optimization_backup_reserve": "Minimum battery charge level to maintain (only applies to HAEO)",
+          "optimization_provider": "Choose between Sungrow's built-in scheduling or Smart Optimization (Built-in LP)",
+          "optimization_backup_reserve": "Minimum battery charge level to maintain (only applies to Smart Optimization)",
           "sungrow_host": "Local IP address of your Sungrow inverter or WiNet-S dongle (e.g., 192.168.1.100)",
           "sungrow_port": "Modbus TCP port (default: 502)",
           "sungrow_slave_id": "Modbus slave ID (default: 1)"

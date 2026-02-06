@@ -2424,7 +2424,7 @@ class AutoScheduleExecutor:
         # Plan regeneration interval (regenerate every 5 minutes to match Amber/AEMO pricing)
         self._plan_update_interval = timedelta(minutes=5)
 
-        # ML optimization integration
+        # Smart Optimization integration
         self._use_ml_optimization = False  # Set via settings
 
         # Variable charge rate tracking (per vehicle)
@@ -2433,10 +2433,10 @@ class AutoScheduleExecutor:
 
     def _get_ml_ev_schedule(self, vehicle_id: str):
         """
-        Get the ML optimization schedule for a vehicle if available.
+        Get the optimization schedule for a vehicle if available.
 
         Returns:
-            EVChargingSchedule or None if ML optimization is not enabled/available
+            EVChargingSchedule or None if Smart Optimization is not enabled/available
         """
         if not self._use_ml_optimization:
             return None
@@ -2452,7 +2452,7 @@ class AutoScheduleExecutor:
             if not opt_coordinator:
                 return None
 
-            # Check if EV integration is enabled in ML optimization
+            # Check if EV integration is enabled in Smart Optimization
             if not getattr(opt_coordinator, '_enable_ev', False):
                 return None
 
@@ -2473,9 +2473,9 @@ class AutoScheduleExecutor:
             return None
 
     def set_use_ml_optimization(self, enabled: bool) -> None:
-        """Enable or disable ML optimization for EV charging decisions."""
+        """Enable or disable Smart Optimization for EV charging decisions."""
         self._use_ml_optimization = enabled
-        _LOGGER.info(f"ML optimization for EV charging: {'enabled' if enabled else 'disabled'}")
+        _LOGGER.info(f"Smart Optimization for EV charging: {'enabled' if enabled else 'disabled'}")
 
     def _power_to_amps(self, power_w: float, voltage: int = 230, phases: int = 1) -> int:
         """
@@ -3123,9 +3123,9 @@ class AutoScheduleExecutor:
                 return
 
         # =====================================================================
-        # ML OPTIMIZATION INTEGRATION
-        # When ML optimization is enabled, use its schedule instead of the
-        # built-in charging planner. ML optimization considers home battery,
+        # SMART OPTIMIZATION INTEGRATION
+        # When Smart Optimization is enabled, use its schedule instead of the
+        # built-in charging planner. The optimizer considers home battery,
         # solar, prices, and EV charging jointly for whole-home optimization.
         #
         # VARIABLE CHARGE RATE: The optimizer outputs target power (kW) per
@@ -3143,7 +3143,7 @@ class AutoScheduleExecutor:
             target_amps = self._power_to_amps(power_w) if power_w > 0 else 0
 
             if should_charge:
-                reason = f"ML optimization: charge at {power_w/1000:.1f}kW ({target_amps}A)"
+                reason = f"Smart Optimization: charge at {power_w/1000:.1f}kW ({target_amps}A)"
                 source = "ml_optimized"
 
                 if not state.is_charging:
@@ -3161,9 +3161,9 @@ class AutoScheduleExecutor:
 
             else:
                 if next_start:
-                    reason = f"ML optimization: next window {next_start.strftime('%H:%M')} - {next_end.strftime('%H:%M')}"
+                    reason = f"Smart Optimization: next window {next_start.strftime('%H:%M')} - {next_end.strftime('%H:%M')}"
                 else:
-                    reason = "ML optimization: no charging scheduled"
+                    reason = "Smart Optimization: no charging scheduled"
 
                 if state.is_charging:
                     await self._stop_charging(vehicle_id, settings, state, restore_backup_reserve=True)
@@ -3176,11 +3176,11 @@ class AutoScheduleExecutor:
                     state.last_decision = "waiting"
                     state.last_decision_reason = reason
 
-            # Skip the normal planning logic when using ML optimization
+            # Skip the normal planning logic when using Smart Optimization
             return
 
         # =====================================================================
-        # STANDARD CHARGING PLANNER (when ML optimization not available)
+        # STANDARD CHARGING PLANNER (when Smart Optimization not available)
         # =====================================================================
 
         # Check if we need to regenerate the plan
