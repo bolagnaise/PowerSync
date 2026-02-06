@@ -577,6 +577,14 @@ SWITCH_TYPE_AUTO_SYNC = "auto_sync"
 SWITCH_TYPE_FORCE_DISCHARGE = "force_discharge"
 SWITCH_TYPE_FORCE_CHARGE = "force_charge"
 
+# Battery mode sensor (for automation triggers)
+SENSOR_TYPE_BATTERY_MODE = "battery_mode"
+
+# Battery mode states
+BATTERY_MODE_STATE_NORMAL = "normal"
+BATTERY_MODE_STATE_FORCE_CHARGE = "force_charge"
+BATTERY_MODE_STATE_FORCE_DISCHARGE = "force_discharge"
+
 # Services for manual battery control
 SERVICE_FORCE_DISCHARGE = "force_discharge"
 SERVICE_FORCE_CHARGE = "force_charge"

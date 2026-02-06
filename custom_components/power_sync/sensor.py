@@ -61,6 +61,10 @@ from .const import (
     SENSOR_TYPE_FLOW_POWER_EXPORT_PRICE,
     SENSOR_TYPE_BATTERY_HEALTH,
     SENSOR_TYPE_INVERTER_STATUS,
+    SENSOR_TYPE_BATTERY_MODE,
+    BATTERY_MODE_STATE_NORMAL,
+    BATTERY_MODE_STATE_FORCE_CHARGE,
+    BATTERY_MODE_STATE_FORCE_DISCHARGE,
     CONF_AC_INVERTER_CURTAILMENT_ENABLED,
     CONF_INVERTER_BRAND,
     CONF_INVERTER_MODEL,
@@ -523,6 +527,10 @@ async def async_setup_entry(
     # Always add battery health sensor (receives data from mobile app)
     entities.append(BatteryHealthSensor(entry=entry))
     _LOGGER.info("Battery health sensor added")
+
+    # Always add battery mode sensor (for automation triggers)
+    entities.append(BatteryModeSensor(hass=hass, entry=entry))
+    _LOGGER.info("Battery mode sensor added")
 
     async_add_entities(entities)
 
@@ -1573,5 +1581,132 @@ class BatteryHealthSensor(SensorEntity):
                         attributes[f"{prefix}_is_expansion"] = battery.get("isExpansion")
 
         attributes["source"] = "mobile_app_tedapi"
+
+        return attributes
+
+
+class BatteryModeSensor(SensorEntity):
+    """Sensor for displaying battery mode (normal/force_charge/force_discharge).
+
+    This sensor allows users to build automations that trigger when the battery
+    mode changes, e.g., to exit force charge when electricity prices spike.
+
+    States:
+        - normal: Battery operating in normal self-consumption mode
+        - force_charge: Battery is being force charged
+        - force_discharge: Battery is being force discharged
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialize the sensor."""
+        self.hass = hass
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_{SENSOR_TYPE_BATTERY_MODE}"
+        self._attr_has_entity_name = True
+        self._attr_name = "Battery Mode"
+        # HA 2026.2.0+ requires lowercase suggested_object_id
+        self._attr_suggested_object_id = f"power_sync_{SENSOR_TYPE_BATTERY_MODE}"
+        self._attr_icon = "mdi:battery-sync"
+        self._unsub_force_charge = None
+        self._unsub_force_discharge = None
+
+    async def async_added_to_hass(self) -> None:
+        """Run when entity is added to hass."""
+        await super().async_added_to_hass()
+
+        _LOGGER.info(
+            "Battery mode sensor registered with entity_id: %s",
+            self.entity_id
+        )
+
+        @callback
+        def _handle_mode_update(data=None):
+            """Handle battery mode update signal."""
+            _LOGGER.debug("Battery mode sensor received update signal: %s", data)
+            self.async_write_ha_state()
+
+        # Subscribe to existing force charge/discharge signals
+        self._unsub_force_charge = async_dispatcher_connect(
+            self.hass,
+            f"{DOMAIN}_force_charge_state",
+            _handle_mode_update,
+        )
+        self._unsub_force_discharge = async_dispatcher_connect(
+            self.hass,
+            f"{DOMAIN}_force_discharge_state",
+            _handle_mode_update,
+        )
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Run when entity is removed from hass."""
+        if self._unsub_force_charge:
+            self._unsub_force_charge()
+        if self._unsub_force_discharge:
+            self._unsub_force_discharge()
+
+    def _get_current_mode(self) -> str:
+        """Determine current battery mode from hass.data state."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+
+        # Check force charge state
+        force_charge_state = entry_data.get("force_charge_state", {})
+        if force_charge_state.get("active", False):
+            return BATTERY_MODE_STATE_FORCE_CHARGE
+
+        # Check force discharge state
+        force_discharge_state = entry_data.get("force_discharge_state", {})
+        if force_discharge_state.get("active", False):
+            return BATTERY_MODE_STATE_FORCE_DISCHARGE
+
+        # Default to normal
+        return BATTERY_MODE_STATE_NORMAL
+
+    @property
+    def native_value(self) -> str:
+        """Return the current battery mode."""
+        return self._get_current_mode()
+
+    @property
+    def icon(self) -> str:
+        """Return the icon based on current mode."""
+        mode = self._get_current_mode()
+        if mode == BATTERY_MODE_STATE_FORCE_CHARGE:
+            return "mdi:battery-charging"
+        elif mode == BATTERY_MODE_STATE_FORCE_DISCHARGE:
+            return "mdi:battery-arrow-down"
+        return "mdi:battery-sync"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return additional attributes."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        force_charge_state = entry_data.get("force_charge_state", {})
+        force_discharge_state = entry_data.get("force_discharge_state", {})
+
+        mode = self._get_current_mode()
+
+        attributes = {
+            "mode": mode,
+        }
+
+        # Add mode-specific attributes
+        if mode == BATTERY_MODE_STATE_FORCE_CHARGE:
+            attributes["description"] = "Battery is being force charged"
+            if force_charge_state.get("expiry"):
+                attributes["expires_at"] = force_charge_state["expiry"]
+            if force_charge_state.get("duration_minutes"):
+                attributes["duration_minutes"] = force_charge_state["duration_minutes"]
+        elif mode == BATTERY_MODE_STATE_FORCE_DISCHARGE:
+            attributes["description"] = "Battery is being force discharged"
+            if force_discharge_state.get("expiry"):
+                attributes["expires_at"] = force_discharge_state["expiry"]
+            if force_discharge_state.get("duration_minutes"):
+                attributes["duration_minutes"] = force_discharge_state["duration_minutes"]
+        else:
+            attributes["description"] = "Battery operating in normal self-consumption mode"
 
         return attributes
