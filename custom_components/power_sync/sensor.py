@@ -915,7 +915,9 @@ class TariffPriceSensor(SensorEntity):
         self._attr_unique_id = f"{entry.entry_id}_{sensor_type}"
         self._attr_has_entity_name = True
         self._attr_name = name
-        self._attr_suggested_object_id = f"power_sync_{sensor_type}"
+        # Use same entity naming as AmberPriceSensor for dashboard compatibility
+        # Creates: sensor.current_import_price, sensor.current_export_price
+        self._attr_suggested_object_id = sensor_type
         self._attr_native_unit_of_measurement = f"{CURRENCY_DOLLAR}/{UnitOfEnergy.KILO_WATT_HOUR}"
         self._attr_device_class = SensorDeviceClass.MONETARY
         self._attr_suggested_display_precision = 4
