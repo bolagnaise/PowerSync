@@ -13157,8 +13157,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if surplus_enabled and not surplus_session_active and live_status:
                         # Get vehicle charger config from store
                         vehicle_configs = stored.get("vehicle_charging_configs", [])
-                        # Use first configured vehicle, or defaults
-                        vc = vehicle_configs[0] if vehicle_configs else {}
+                        # Select highest priority vehicle (lowest priority number)
+                        sorted_configs = sorted(vehicle_configs, key=lambda c: c.get("priority", 999))
+                        vc = sorted_configs[0] if sorted_configs else {}
 
                         params = {
                             "dynamic_mode": "solar_surplus",
@@ -13182,6 +13183,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                         if vc.get("vehicle_id"):
                             params["vehicle_vin"] = vc["vehicle_id"]
+                        if vc.get("display_name"):
+                            params["vehicle_name"] = vc["display_name"]
 
                         _LOGGER.info("☀️ Solar surplus charging enabled in app — starting dynamic solar surplus session")
                         await _action_start_ev_charging_dynamic(hass, entry, params, context=None)

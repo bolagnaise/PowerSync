@@ -2093,6 +2093,21 @@ async def _get_tesla_live_status(hass: HomeAssistant, config_entry: ConfigEntry)
     from ..const import DOMAIN
 
     entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
+
+    # Try coordinator data first (cached, no API call needed)
+    for coord_key in ("tesla_coordinator", "sigenergy_coordinator", "sungrow_coordinator"):
+        coordinator = entry_data.get(coord_key)
+        if coordinator and coordinator.data:
+            data = coordinator.data
+            return {
+                "battery_soc": data.get("battery_level"),
+                "grid_power": (data.get("grid_power", 0) or 0) * 1000,
+                "solar_power": (data.get("solar_power", 0) or 0) * 1000,
+                "battery_power": (data.get("battery_power", 0) or 0) * 1000,
+                "load_power": (data.get("load_power", 0) or 0) * 1000,
+            }
+
+    # Fall back to direct API call
     token_getter = entry_data.get("token_getter")
     site_id = entry_data.get("site_id")
 
