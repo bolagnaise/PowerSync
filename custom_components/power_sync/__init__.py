@@ -5752,6 +5752,7 @@ class SolarSurplusStatusView(HomeAssistantView):
                     params = state.get("params", {})
                     vehicles_state.append({
                         "vehicle_id": vehicle_id,
+                        "vehicle_name": state.get("vehicle_name"),
                         "active": state.get("active", False),
                         "mode": params.get("dynamic_mode", "battery_target"),
                         "current_amps": state.get("current_amps", 0),

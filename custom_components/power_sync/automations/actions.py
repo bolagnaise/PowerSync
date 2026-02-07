@@ -2374,6 +2374,7 @@ async def _dynamic_ev_update_surplus(
             high_surplus_start = state.get("high_surplus_start")
             if high_surplus_start is None:
                 state["high_surplus_start"] = datetime.now()
+                new_amps = 0  # Don't set amps yet, wait for sustained surplus
             elif (datetime.now() - high_surplus_start).total_seconds() >= sustained_minutes * 60:
                 # Start charging after sustained surplus
                 _LOGGER.info(f"⚡ Solar surplus EV: Starting - sustained surplus for {sustained_minutes} min")
@@ -2884,6 +2885,22 @@ async def _action_start_ev_charging_dynamic(
         _dynamic_ev_state[entry_id] = {}
 
     # Store vehicle-specific state
+    # Read entity max for Tesla chargers to avoid over-reporting amps
+    if charger_type == "tesla" and vehicle_id != DEFAULT_VEHICLE_ID:
+        try:
+            entity = await _get_tesla_ev_entity(
+                hass, r"number\..*(charging_amps|charge_current)$", vehicle_id
+            )
+            if entity:
+                entity_state = hass.states.get(entity)
+                if entity_state:
+                    entity_max = int(entity_state.attributes.get("max", max_charge_amps))
+                    if entity_max < full_params.get("max_charge_amps", 32):
+                        _LOGGER.info(f"Capping max_charge_amps to {entity_max}A (entity limit)")
+                        full_params["max_charge_amps"] = entity_max
+        except Exception:
+            pass
+
     _dynamic_ev_state[entry_id][vehicle_id] = {
         "active": True,
         "params": full_params,
@@ -2896,6 +2913,7 @@ async def _action_start_ev_charging_dynamic(
         "charging_started": dynamic_mode == "battery_target",  # Already started for battery_target
         "allocated_surplus_kw": 0,
         "reason": "",
+        "vehicle_name": full_params.get("vehicle_name"),
         "session_id": None,  # Will be set when session tracking starts
     }
 
