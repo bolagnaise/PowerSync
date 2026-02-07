@@ -652,6 +652,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # buy_rates values are in $/kWh (e.g. 0.48 for 48c)
             buy = buy_rates.get(matched_period, 0.30)
             sell = sell_rates.get(matched_period, 0.05)
+
+            # Prevent grid cycling during free/very-cheap periods.
+            # If import is free but export pays, the LP will discharge to earn
+            # export revenue then recharge for free — wasting battery cycles.
+            # Cap export price at import price so there's no arbitrage incentive.
+            if buy < 0.01:
+                sell = 0.0
+
             import_prices.append(buy)
             export_prices.append(sell)
 
