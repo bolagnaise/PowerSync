@@ -2442,7 +2442,6 @@ async def _dynamic_ev_update_surplus(
 
                 # Fallback to Sigenergy tariff (for Sigenergy users with Amber)
                 elif entry_data.get("sigenergy_tariff"):
-                    from datetime import datetime
                     sigenergy_tariff = entry_data.get("sigenergy_tariff", {})
                     buy_prices = sigenergy_tariff.get("buy_prices", [])
                     sell_prices = sigenergy_tariff.get("sell_prices", [])
