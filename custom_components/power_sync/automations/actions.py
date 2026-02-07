@@ -2377,6 +2377,13 @@ async def _dynamic_ev_update_surplus(
             elif (datetime.now() - high_surplus_start).total_seconds() >= sustained_minutes * 60:
                 # Start charging after sustained surplus
                 _LOGGER.info(f"⚡ Solar surplus EV: Starting - sustained surplus for {sustained_minutes} min")
+
+                # Send the actual start-charging command to the vehicle
+                start_success = await _action_start_ev_charging(hass, config_entry, params, context=None)
+                if not start_success:
+                    _LOGGER.warning("⚡ Solar surplus EV: Failed to send start charging command")
+                    return
+
                 state["charging_started"] = True
 
                 # Send notification when solar charging actually begins
@@ -2760,6 +2767,14 @@ async def _action_start_ev_charging_dynamic(
 
     # Determine mode
     dynamic_mode = params.get("dynamic_mode", "battery_target")
+
+    # Prevent duplicate solar surplus sessions for the same entry
+    if dynamic_mode == "solar_surplus":
+        entry_vehicles = _dynamic_ev_state.get(entry_id, {})
+        for vid, v_state in entry_vehicles.items():
+            if v_state.get("active") and v_state.get("params", {}).get("dynamic_mode") == "solar_surplus":
+                _LOGGER.debug(f"Solar surplus session already active for vehicle {vid}, skipping duplicate")
+                return True
 
     # Get common parameters with defaults
     min_charge_amps = params.get("min_charge_amps", 5)
