@@ -3973,8 +3973,31 @@ def get_current_price_from_tariff_schedule(tariff_schedule: dict) -> tuple[float
 
         # Get prices for current period (rates are in $/kWh, convert to cents)
         # Note: buy_rates may already be in cents if from custom tariff, or $/kWh if from Tesla
-        buy_rate = buy_rates.get(current_period, buy_rates.get("ALL", buy_rates.get("OFF_PEAK", 0.25)))
-        sell_rate = sell_rates.get(current_period, sell_rates.get("ALL", 0.08))
+        # When the matched period isn't in buy_rates (e.g. GloBird gaps at 14-17, 21-24),
+        # try common fallback period names, then use the median of available rates.
+        buy_rate = buy_rates.get(current_period)
+        if buy_rate is None:
+            buy_rate = buy_rates.get("ALL")
+        if buy_rate is None:
+            for fb in ("OFF_PEAK", "PARTIAL_PEAK", "SHOULDER"):
+                if fb in buy_rates:
+                    buy_rate = buy_rates[fb]
+                    break
+        if buy_rate is None:
+            defined = sorted(v for v in buy_rates.values() if isinstance(v, (int, float)))
+            buy_rate = defined[len(defined) // 2] if defined else 0.25
+
+        sell_rate = sell_rates.get(current_period)
+        if sell_rate is None:
+            sell_rate = sell_rates.get("ALL")
+        if sell_rate is None:
+            for fb in ("OFF_PEAK", "PARTIAL_PEAK", "SHOULDER"):
+                if fb in sell_rates:
+                    sell_rate = sell_rates[fb]
+                    break
+        if sell_rate is None:
+            defined = sorted(v for v in sell_rates.values() if isinstance(v, (int, float)))
+            sell_rate = defined[len(defined) // 2] if defined else 0.08
 
         # Convert to cents if rates appear to be in $/kWh (< 1.0)
         if buy_rate < 1.0:

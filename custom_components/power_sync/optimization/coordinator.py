@@ -657,8 +657,28 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 matched_period = "OFF_PEAK"
 
             # buy_rates values are in $/kWh (e.g. 0.48 for 48c)
-            buy = buy_rates.get(matched_period, 0.30)
-            sell = sell_rates.get(matched_period, 0.05)
+            # When the matched period isn't in buy_rates (e.g. GloBird gaps at 14-17, 21-24),
+            # try common fallback period names, then use the median of available rates.
+            buy = buy_rates.get(matched_period)
+            if buy is None:
+                for fallback in ("OFF_PEAK", "PARTIAL_PEAK", "SHOULDER"):
+                    if fallback in buy_rates:
+                        buy = buy_rates[fallback]
+                        break
+                if buy is None:
+                    # Use median of defined rates (better than arbitrary hardcoded default)
+                    defined = sorted(v for v in buy_rates.values() if isinstance(v, (int, float)))
+                    buy = defined[len(defined) // 2] if defined else 0.30
+
+            sell = sell_rates.get(matched_period)
+            if sell is None:
+                for fallback in ("OFF_PEAK", "PARTIAL_PEAK", "SHOULDER"):
+                    if fallback in sell_rates:
+                        sell = sell_rates[fallback]
+                        break
+                if sell is None:
+                    defined = sorted(v for v in sell_rates.values() if isinstance(v, (int, float)))
+                    sell = defined[len(defined) // 2] if defined else 0.05
 
             # Prevent grid cycling during free/very-cheap periods.
             # If import is free but export pays, the LP will discharge to earn
