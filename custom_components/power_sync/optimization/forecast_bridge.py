@@ -145,11 +145,6 @@ class ForecastSensor(SensorEntity):
         self._last_forecast_update: datetime | None = None
 
     @property
-    def entity_id(self) -> str:
-        """Return the entity ID."""
-        return f"sensor.powersync_{self._sensor_type}_forecast"
-
-    @property
     def native_value(self) -> float:
         """Return the current value (first forecast point)."""
         return self._current_value
