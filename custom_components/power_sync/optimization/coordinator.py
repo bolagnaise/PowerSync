@@ -329,7 +329,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
 
         # Re-optimize with new prices and update dashboard sensors
-        self.hass.async_create_task(self._run_optimization())
+        self.hass.async_create_background_task(
+            self._run_optimization(), "powersync_price_reoptimize"
+        )
 
     async def _update_dashboard_forecasts(self) -> None:
         """Update dashboard forecast sensors with latest data."""
@@ -359,9 +361,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._enabled = True
         _LOGGER.info("Optimization enabled (built-in LP)")
 
-        # Run initial optimization and start polling loop
-        self.hass.async_create_task(self._run_optimization())
-        self.hass.async_create_task(self._schedule_polling_loop())
+        # Run initial optimization and start polling loop as background tasks
+        # so they don't block HA bootstrap (LP solve can take several seconds)
+        self.hass.async_create_background_task(
+            self._run_optimization(), "powersync_initial_optimization"
+        )
+        self.hass.async_create_background_task(
+            self._schedule_polling_loop(), "powersync_schedule_polling"
+        )
 
         # Start EV coordination if enabled
         if self._ev_coordinator and self._ev_configs:
