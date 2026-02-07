@@ -147,7 +147,7 @@
       },
       "optimization_provider": {
         "title": "Choose Optimization Provider",
-        "description": "Your {battery_name} has built-in battery scheduling. Choose how PowerSync should manage your battery:\n\n**{battery_name} built-in**: Use your battery's native Time-of-Use scheduling.\n\n**Smart Optimization (Built-in LP)**: Uses Linear Programming to find the optimal battery schedule — minimizing costs, maximizing profit, or maximizing self-consumption. No external dependencies required.",
+        "description": "Your {battery_name} has built-in battery scheduling. Choose how PowerSync should manage your battery:\n\n**{battery_name} built-in**: Use your battery's native Time-of-Use scheduling.\n\n**Smart Optimization (Built-in LP)**: Uses Linear Programming to find the optimal battery schedule — minimizing costs or maximizing self-consumption. No external dependencies required.",
         "data": {
           "optimization_provider": "Optimization Provider"
         },
@@ -158,15 +158,11 @@
         "description": "Configure how the built-in LP optimizer manages your battery.\n\nThe optimizer uses electricity price forecasts, solar generation, and load patterns to find the optimal charge/discharge schedule.",
         "data": {
           "optimization_cost_function": "Optimization Objective",
-          "optimization_backup_reserve": "Backup Reserve (%)",
-          "optimization_vpp_enabled": "VPP Integration",
-          "optimization_ev_integration": "EV Charging Integration"
+          "optimization_backup_reserve": "Backup Reserve (%)"
         },
         "data_description": {
-          "optimization_cost_function": "Cost = lowest bill, Profit = best for Amber/VPP traders, Self-Consumption = maximize solar usage",
-          "optimization_backup_reserve": "Minimum battery level to keep for backup power (0-100%, 20% recommended)",
-          "optimization_vpp_enabled": "Include VPP spike events in optimization decisions",
-          "optimization_ev_integration": "Coordinate battery optimization with EV charging schedules"
+          "optimization_cost_function": "What to optimize for (only applies to Smart Optimization)",
+          "optimization_backup_reserve": "Minimum battery charge level to maintain (only applies to Smart Optimization)"
         },
         "submit_button": "Next"
       },
@@ -404,15 +400,13 @@
           "electricity_provider": "Electricity Provider",
           "tesla_api_provider": "Tesla API Provider",
           "optimization_provider": "Optimization Provider",
-          "optimization_backup_reserve": "Backup Reserve (%)",
-          "optimization_vpp_enabled": "VPP Integration",
-          "optimization_ev_integration": "EV Charging Integration"
+          "optimization_cost_function": "Optimization Objective",
+          "optimization_backup_reserve": "Backup Reserve (%)"
         },
         "data_description": {
           "optimization_provider": "Choose between Tesla's built-in optimization or Smart Optimization (Built-in LP)",
-          "optimization_backup_reserve": "Minimum battery charge level to maintain (only applies to Smart Optimization)",
-          "optimization_vpp_enabled": "Include VPP spike events in optimization decisions",
-          "optimization_ev_integration": "Coordinate battery optimization with EV charging schedules"
+          "optimization_cost_function": "What to optimize for (only applies to Smart Optimization)",
+          "optimization_backup_reserve": "Minimum battery charge level to maintain (only applies to Smart Optimization)"
         }
       },
       "init_sigenergy": {
@@ -421,9 +415,8 @@
         "data": {
           "electricity_provider": "Electricity Provider",
           "optimization_provider": "Optimization Provider",
+          "optimization_cost_function": "Optimization Objective",
           "optimization_backup_reserve": "Backup Reserve (%)",
-          "optimization_vpp_enabled": "VPP Integration",
-          "optimization_ev_integration": "EV Charging Integration",
           "sigenergy_modbus_host": "Sigenergy IP Address",
           "sigenergy_modbus_port": "Modbus Port",
           "sigenergy_modbus_slave_id": "Modbus Slave ID",
@@ -450,9 +443,8 @@
         "data": {
           "electricity_provider": "Electricity Provider",
           "optimization_provider": "Optimization Provider",
+          "optimization_cost_function": "Optimization Objective",
           "optimization_backup_reserve": "Backup Reserve (%)",
-          "optimization_vpp_enabled": "VPP Integration",
-          "optimization_ev_integration": "EV Charging Integration",
           "sungrow_host": "Sungrow IP Address",
           "sungrow_port": "Modbus Port",
           "sungrow_slave_id": "Modbus Slave ID"

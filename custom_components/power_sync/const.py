@@ -1025,12 +1025,10 @@ CONF_OPTIMIZATION_WEATHER_INTEGRATION = "optimization_weather_integration"
 
 # Optimization cost functions
 COST_FUNCTION_COST = "cost"            # Minimize total electricity cost
-COST_FUNCTION_PROFIT = "profit"        # Maximize profit from grid trading
 COST_FUNCTION_SELF_USE = "self_consumption"  # Maximize solar self-consumption
 
 OPTIMIZATION_COST_FUNCTIONS = {
     COST_FUNCTION_COST: "Cost Minimization - lowest electricity bill",
-    COST_FUNCTION_PROFIT: "Profit Maximization - best for Amber/VPP",
     COST_FUNCTION_SELF_USE: "Self-Consumption - maximize solar usage",
 }
 

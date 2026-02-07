@@ -212,11 +212,6 @@ from .const import (
     CONF_OPTIMIZATION_ENABLED,
     OPT_PROVIDER_NATIVE,
     OPT_PROVIDER_POWERSYNC,
-    CONF_OPTIMIZATION_EV_INTEGRATION,
-    CONF_OPTIMIZATION_VPP_ENABLED,
-    CONF_OPTIMIZATION_MULTI_BATTERY,
-    CONF_OPTIMIZATION_ML_FORECASTING,
-    CONF_OPTIMIZATION_WEATHER_INTEGRATION,
     CONF_OPTIMIZATION_COST_FUNCTION,
     CONF_OPTIMIZATION_INTERVAL,
 )
@@ -13352,12 +13347,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return {"active": True, "type": "discharge", "expires_at": force_discharge_state.get("expires_at")}
                 return {"active": False}
 
-            # Load feature toggles and settings from config entry (persisted from previous sessions)
+            # Load settings from config entry (persisted from previous sessions)
             # Check options first (where set_settings saves), then fall back to data for defaults
-            enable_ev_integration = entry.options.get(CONF_OPTIMIZATION_EV_INTEGRATION, entry.data.get(CONF_OPTIMIZATION_EV_INTEGRATION, False))
-            enable_vpp = entry.options.get(CONF_OPTIMIZATION_VPP_ENABLED, entry.data.get(CONF_OPTIMIZATION_VPP_ENABLED, False))
-            # Legacy feature flags (not supported by built-in LP optimizer, kept for config compat)
-            # enable_multi_battery, enable_ml_forecasting, enable_weather_integration — removed
             saved_cost_function = entry.options.get(CONF_OPTIMIZATION_COST_FUNCTION, entry.data.get(CONF_OPTIMIZATION_COST_FUNCTION, "self_consumption"))
             saved_interval_minutes = entry.options.get(CONF_OPTIMIZATION_INTERVAL, entry.data.get(CONF_OPTIMIZATION_INTERVAL, 5))
 
@@ -13388,9 +13379,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.data[DOMAIN][entry.entry_id]["optimization_coordinator"] = optimization_coordinator
             _LOGGER.info("Smart Optimization coordinator initialized and enabled")
 
-            # If VPP is enabled, set up AEMO price fetching and spike response
+            # If using Globird/AEMO VPP provider, set up AEMO price fetching and spike response
             # This handles Globird VPP spike detection - discharge at $3000/MWh
-            if enable_vpp:
+            electricity_provider_for_vpp = entry.options.get(
+                CONF_ELECTRICITY_PROVIDER,
+                entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
+            )
+            if electricity_provider_for_vpp in ("globird", "aemo_vpp"):
                 aemo_region = entry.options.get(
                     CONF_AEMO_REGION,
                     entry.data.get(CONF_AEMO_REGION, "QLD1")
