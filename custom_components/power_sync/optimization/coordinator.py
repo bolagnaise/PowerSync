@@ -697,12 +697,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     defined = sorted(v for v in sell_rates.values() if isinstance(v, (int, float)))
                     sell = defined[len(defined) // 2] if defined else 0.05
 
-            # Prevent grid cycling during free/very-cheap periods.
-            # If import is free but export pays, the LP will discharge to earn
-            # export revenue then recharge for free — wasting battery cycles.
-            # Cap export price at import price so there's no arbitrage incentive.
+            # During free/very-cheap periods, the LP has zero marginal cost
+            # for both import and export, so HiGHS may assign exports arbitrarily.
+            # Set a tiny negative export price to penalize exports and a tiny
+            # negative import price to incentivize charging during free periods.
             if buy < 0.01:
-                sell = 0.0
+                buy = -0.001   # Small incentive: "charging is slightly better than not"
+                sell = -0.001  # Small penalty: "exporting costs slightly more than not"
 
             import_prices.append(buy)
             export_prices.append(sell)
