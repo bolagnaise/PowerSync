@@ -647,13 +647,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     defined = sorted(v for v in sell_rates.values() if isinstance(v, (int, float)))
                     sell = defined[len(defined) // 2] if defined else 0.05
 
-            # During free/very-cheap periods, the LP has zero marginal cost
-            # for both import and export, so HiGHS may assign exports arbitrarily.
-            # Set a tiny negative export price to penalize exports and a tiny
-            # negative import price to incentivize charging during free periods.
+            # When price is zero the LP has zero marginal cost, so HiGHS
+            # may assign imports/exports arbitrarily (LP degeneracy).
+            # Apply tiny penalties to break the degeneracy:
             if buy < 0.01:
-                buy = -0.001   # Small incentive: "charging is slightly better than not"
-                sell = -0.001  # Small penalty: "exporting costs slightly more than not"
+                buy = -0.001   # Incentivize charging during free periods
+            if sell < 0.01:
+                sell = -0.001  # Penalize exporting when there's no revenue
 
             import_prices.append(buy)
             export_prices.append(sell)
