@@ -46,6 +46,12 @@ FORECAST_HORIZON_HOURS = 48
 FORECAST_INTERVAL_MINUTES = 5
 FORECAST_POINTS = FORECAST_HORIZON_HOURS * 60 // FORECAST_INTERVAL_MINUTES
 
+# Attribute storage uses 30-min intervals to stay under HA's 16KB attribute limit.
+# Full 5-min data is kept in memory for the optimizer; only the downsampled version
+# is written to state attributes (576 → 96 points ≈ 5KB).
+ATTR_INTERVAL_MINUTES = 30
+ATTR_DOWNSAMPLE_FACTOR = ATTR_INTERVAL_MINUTES // FORECAST_INTERVAL_MINUTES  # 6
+
 # Sensor configuration for HAEO compatibility
 SENSOR_CONFIGS = {
     "price_import": {
@@ -151,20 +157,23 @@ class ForecastSensor(Entity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return forecast attributes in HAEO-compatible format.
+        """Return forecast attributes with downsampled data.
 
-        HAEO expects:
-        - forecast: array of {"time": "ISO8601", "value": float}
-        - Optionally: source_entity, last_forecast_update, etc.
+        Full 5-minute data is kept in self._forecast for the optimizer.
+        Attributes use 30-minute intervals to stay under HA's 16KB recorder limit
+        (576 points @ 5min ≈ 32KB vs 96 points @ 30min ≈ 5KB).
         """
+        # Downsample: take every Nth point (N = ATTR_DOWNSAMPLE_FACTOR)
+        downsampled = self._forecast[::ATTR_DOWNSAMPLE_FACTOR]
+
         attrs = {
-            # Core forecast data (HAEO format)
-            "forecast": self._forecast,
+            # Downsampled forecast data for dashboard/recorder
+            "forecast": downsampled,
 
             # Metadata
             "forecast_horizon_hours": FORECAST_HORIZON_HOURS,
-            "forecast_interval_minutes": FORECAST_INTERVAL_MINUTES,
-            "forecast_points": len(self._forecast),
+            "forecast_interval_minutes": ATTR_INTERVAL_MINUTES,
+            "forecast_points": len(downsampled),
 
             # HAFO-compatible attributes
             "last_forecast_update": self._last_forecast_update.isoformat() if self._last_forecast_update else None,
