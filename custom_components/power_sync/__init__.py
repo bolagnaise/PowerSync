@@ -3459,40 +3459,34 @@ class TariffPriceView(HomeAssistantView):
     def _calculate_prices_from_saved_tariff(self, saved_tariff: dict) -> dict | None:
         """Calculate current prices from a saved tariff structure.
 
-        The saved tariff is the original user tariff before the optimizer uploaded a fake one.
-        We need to determine the current TOU period and return the appropriate rates.
+        The saved tariff is the original Tesla tariff_content before force charge/discharge
+        uploaded a fake one. Structure:
+          - seasons at saved_tariff["seasons"][season_name] with fromMonth/toMonth
+          - TOU periods at seasons[season]["tou_periods"][period_name]["periods"] (list)
+          - Buy rates at saved_tariff["energy_charges"][season]["rates"][period]
+          - Sell rates at saved_tariff["sell_tariff"]["energy_charges"][season]["rates"][period]
         """
         try:
             from datetime import datetime as dt
-            from zoneinfo import ZoneInfo
 
-            # Get current time in the tariff's timezone
-            tz_name = saved_tariff.get("installation_time_zone", "Australia/Sydney")
-            try:
-                tz = ZoneInfo(tz_name)
-            except Exception:
-                tz = ZoneInfo("Australia/Sydney")
-            now = dt.now(tz)
+            now = dt.now()
             current_hour = now.hour
             current_month = now.month
-            current_weekday = now.weekday()  # 0=Monday, 6=Sunday
+            current_dow = now.weekday()  # 0=Monday, 6=Sunday
 
-            # Extract tariff structure
             utility = saved_tariff.get("utility", "")
             plan_name = saved_tariff.get("name", "")
 
-            # Get energy charges (contains buy/sell rates by period)
-            energy_charges = saved_tariff.get("energy_charges", {})
-            seasons = energy_charges.get("seasons", {})
-            tou_periods = energy_charges.get("tou_periods", {})
+            # Seasons are at the top level, NOT inside energy_charges
+            seasons = saved_tariff.get("seasons", {})
 
-            # Determine current season
+            # Find current season by month
             current_season = None
             for season_name, season_data in seasons.items():
+                if not isinstance(season_data, dict) or not season_data:
+                    continue
                 from_month = season_data.get("fromMonth", 1)
                 to_month = season_data.get("toMonth", 12)
-
-                # Handle wrap-around (e.g., Nov-Feb)
                 if from_month <= to_month:
                     if from_month <= current_month <= to_month:
                         current_season = season_name
@@ -3502,59 +3496,83 @@ class TariffPriceView(HomeAssistantView):
                         current_season = season_name
                         break
 
-            if not current_season and seasons:
-                current_season = list(seasons.keys())[0]
+            if not current_season:
+                # Default to first non-empty season
+                for sn, sd in seasons.items():
+                    if isinstance(sd, dict) and sd:
+                        current_season = sn
+                        break
 
-            # Determine current TOU period based on time and day
+            if not current_season:
+                _LOGGER.warning("Saved tariff has no valid seasons")
+                return None
+
+            # TOU periods are inside seasons[current_season]["tou_periods"]
+            tou_periods = seasons.get(current_season, {}).get("tou_periods", {})
+
+            # Find current TOU period - check in priority order
+            # Tesla DOW: 0=Sunday, Python weekday(): 0=Monday, 6=Sunday
+            tesla_dow = (current_dow + 1) % 7
+
+            period_priority = ["SUPER_OFF_PEAK", "ON_PEAK", "PEAK", "PARTIAL_PEAK", "SHOULDER", "OFF_PEAK"]
             current_period = None
-            for period_name, period_data in tou_periods.items():
-                periods = period_data.get("periods", {})
-                if current_season and current_season in periods:
-                    time_ranges = periods[current_season]
-                    for time_range in time_ranges:
-                        from_weekday = time_range.get("fromDayOfWeek", 0)
-                        to_weekday = time_range.get("toDayOfWeek", 6)
-                        from_hour = time_range.get("fromHour", 0)
-                        to_hour = time_range.get("toHour", 24)
+            for period_name in period_priority:
+                if period_name not in tou_periods:
+                    continue
+                period_data = tou_periods[period_name]
+                periods_list = period_data.get("periods", []) if isinstance(period_data, dict) else []
+                for p in periods_list:
+                    from_dow = p.get("fromDayOfWeek", 0)
+                    to_dow = p.get("toDayOfWeek", 6)
+                    from_hour = p.get("fromHour", 0)
+                    to_hour = p.get("toHour", 24)
 
-                        # Check if current time falls in this period
-                        weekday_match = from_weekday <= current_weekday <= to_weekday
-                        hour_match = from_hour <= current_hour < to_hour
-
-                        if weekday_match and hour_match:
-                            current_period = period_name
-                            break
+                    if from_dow <= tesla_dow <= to_dow:
+                        # Handle overnight periods (e.g., 23:00 to 11:00)
+                        if from_hour <= to_hour:
+                            if from_hour <= current_hour < to_hour:
+                                current_period = period_name
+                                break
+                        else:
+                            if current_hour >= from_hour or current_hour < to_hour:
+                                current_period = period_name
+                                break
                 if current_period:
                     break
 
-            if not current_period and tou_periods:
-                current_period = list(tou_periods.keys())[0]
+            if not current_period:
+                current_period = "OFF_PEAK"
 
-            # Get buy/sell rates for current period and season
+            # Buy rates: energy_charges[current_season]["rates"][period]
+            energy_charges = saved_tariff.get("energy_charges", {})
+            season_charges = energy_charges.get(current_season, {})
+            buy_rates = season_charges.get("rates", season_charges)
             buy_rate = 0.0
+            if isinstance(buy_rates, dict):
+                buy_rate = buy_rates.get(current_period, buy_rates.get("ALL", 0.0))
+
+            # Sell rates: sell_tariff["energy_charges"][current_season]["rates"][period]
+            sell_tariff = saved_tariff.get("sell_tariff", {})
+            sell_energy = sell_tariff.get("energy_charges", {})
+            sell_season = sell_energy.get(current_season, {})
+            sell_rates = sell_season.get("rates", sell_season)
             sell_rate = 0.0
+            if isinstance(sell_rates, dict):
+                sell_rate = sell_rates.get(current_period, sell_rates.get("ALL", 0.0))
 
-            season_data = seasons.get(current_season, {})
-            tou_rates = season_data.get("tou_periods", {})
-
-            if current_period and current_period in tou_rates:
-                period_rates = tou_rates[current_period]
-                buy_rate = period_rates.get("buy", 0.0)  # $/kWh
-                sell_rate = period_rates.get("sell", 0.0)  # $/kWh
-
-            # Convert to cents
-            buy_price_cents = buy_rate * 100
-            sell_price_cents = sell_rate * 100
+            # Rates are in $/kWh, convert to cents
+            buy_price_cents = round(buy_rate * 100, 2)
+            sell_price_cents = round(sell_rate * 100, 2)
 
             _LOGGER.debug(
-                f"Calculated prices from saved tariff: period={current_period}, "
+                f"Calculated prices from saved tariff: season={current_season}, period={current_period}, "
                 f"buy={buy_price_cents:.1f}c, sell={sell_price_cents:.1f}c"
             )
 
             return {
                 "buy_price": buy_price_cents,
                 "sell_price": sell_price_cents,
-                "current_period": current_period or "UNKNOWN",
+                "current_period": current_period,
                 "utility": utility,
                 "plan_name": plan_name,
             }
@@ -3664,7 +3682,13 @@ async def fetch_tesla_tariff_schedule(hass: HomeAssistant, entry: ConfigEntry) -
                 continue
             period_data = tou_periods[period_name]
             # Handle both list format and object format
-            periods_list = period_data if isinstance(period_data, list) else []
+            # Handle both custom format (list) and Tesla tariff_content format ({"periods": [...]})
+            if isinstance(period_data, dict) and "periods" in period_data:
+                periods_list = period_data["periods"]
+            elif isinstance(period_data, list):
+                periods_list = period_data
+            else:
+                periods_list = []
             for period in periods_list:
                 from_dow = period.get("fromDayOfWeek", 0)
                 to_dow = period.get("toDayOfWeek", 6)
@@ -3822,7 +3846,13 @@ def convert_custom_tariff_to_schedule(custom_tariff: dict) -> dict:
             if period_name not in tou_periods:
                 continue
             period_data = tou_periods[period_name]
-            periods_list = period_data if isinstance(period_data, list) else []
+            # Handle both custom format (list) and Tesla tariff_content format ({"periods": [...]})
+            if isinstance(period_data, dict) and "periods" in period_data:
+                periods_list = period_data["periods"]
+            elif isinstance(period_data, list):
+                periods_list = period_data
+            else:
+                periods_list = []
             for period in periods_list:
                 from_dow = period.get("fromDayOfWeek", 0)
                 to_dow = period.get("toDayOfWeek", 6)
@@ -3854,6 +3884,9 @@ def convert_custom_tariff_to_schedule(custom_tariff: dict) -> dict:
         # Get energy charges
         energy_charges = custom_tariff.get("energy_charges", {})
         season_charges = energy_charges.get(current_season, {})
+        # Handle Tesla tariff_content format with nested "rates" key
+        if "rates" in season_charges and isinstance(season_charges["rates"], dict):
+            season_charges = season_charges["rates"]
 
         # Build buy_rates dict ($/kWh)
         buy_rates = {}
@@ -3865,6 +3898,9 @@ def convert_custom_tariff_to_schedule(custom_tariff: dict) -> dict:
         sell_tariff = custom_tariff.get("sell_tariff", {})
         sell_energy_charges = sell_tariff.get("energy_charges", {})
         sell_season_charges = sell_energy_charges.get(current_season, {})
+        # Handle Tesla tariff_content format with nested "rates" key
+        if "rates" in sell_season_charges and isinstance(sell_season_charges["rates"], dict):
+            sell_season_charges = sell_season_charges["rates"]
 
         # Build sell_rates dict ($/kWh)
         sell_rates = {}
@@ -3944,7 +3980,13 @@ def get_current_price_from_tariff_schedule(tariff_schedule: dict) -> tuple[float
             if period_name not in tou_periods:
                 continue
             period_data = tou_periods[period_name]
-            periods_list = period_data if isinstance(period_data, list) else []
+            # Handle both custom format (list) and Tesla tariff_content format ({"periods": [...]})
+            if isinstance(period_data, dict) and "periods" in period_data:
+                periods_list = period_data["periods"]
+            elif isinstance(period_data, list):
+                periods_list = period_data
+            else:
+                periods_list = []
             for period in periods_list:
                 from_dow = period.get("fromDayOfWeek", 0)
                 to_dow = period.get("toDayOfWeek", 6)
@@ -12495,7 +12537,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if electricity_provider in ("globird", "aemo_vpp", "other"):
         _LOGGER.info(f"📊 Fetching Tesla tariff schedule for {electricity_provider} user...")
         try:
-            tariff_data = await fetch_tesla_tariff_schedule(hass, entry)
+            # If force charge/discharge is active, Tesla API returns the fake tariff.
+            # Use the saved real tariff instead to build the schedule.
+            tariff_data = None
+            force_state = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            fd_state = force_state.get("force_discharge_state", {})
+            fc_state = force_state.get("force_charge_state", {})
+            saved_tariff = None
+            if fd_state.get("active") and fd_state.get("saved_tariff"):
+                saved_tariff = fd_state["saved_tariff"]
+                _LOGGER.info("Force discharge active - using saved tariff for schedule instead of Tesla API")
+            elif fc_state.get("active") and fc_state.get("saved_tariff"):
+                saved_tariff = fc_state["saved_tariff"]
+                _LOGGER.info("Force charge active - using saved tariff for schedule instead of Tesla API")
+
+            if saved_tariff:
+                tariff_data = convert_custom_tariff_to_schedule(saved_tariff)
+                if tariff_data:
+                    hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = tariff_data
+            else:
+                tariff_data = await fetch_tesla_tariff_schedule(hass, entry)
             if tariff_data:
                 tou_count = len(tariff_data.get("tou_periods", {}))
                 _LOGGER.info(

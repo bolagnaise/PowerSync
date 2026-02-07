@@ -3063,6 +3063,10 @@ async def _action_stop_ev_charging_dynamic(
 
     # Stop EV charging if requested
     if stop_charging and vehicle_ids_to_stop:
-        return await _action_stop_ev_charging(hass, config_entry, params)
+        for vid_to_stop in vehicle_ids_to_stop:
+            stop_params = dict(params)
+            stop_params["vehicle_vin"] = vid_to_stop
+            await _action_stop_ev_charging(hass, config_entry, stop_params)
+        return True
 
     return True
