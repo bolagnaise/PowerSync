@@ -2865,6 +2865,8 @@ async def _action_start_ev_charging_dynamic(
     # Build full params dict
     full_params = {
         "dynamic_mode": dynamic_mode,
+        "vehicle_vin": params.get("vehicle_vin"),
+        "vehicle_name": params.get("vehicle_name"),
         "min_charge_amps": min_charge_amps,
         "max_charge_amps": max_charge_amps,
         "voltage": voltage,
