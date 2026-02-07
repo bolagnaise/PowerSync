@@ -583,10 +583,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 .get(self.entry_id, {})
                 .get("tariff_schedule")
             )
+            if tariff:
+                _LOGGER.info("Using tariff_schedule from hass.data (not constructor)")
+                self._tariff_schedule = tariff  # Cache for next time
 
         if tariff and tariff.get("tou_periods"):
+            periods = tariff["tou_periods"]
+            _LOGGER.info(
+                "TOU tariff available: %s, periods=%s, buy_rates=%s, sell_rates=%s",
+                tariff.get("plan_name", "unknown"),
+                list(periods.keys()),
+                {k: f"{v*100:.0f}c" for k, v in tariff.get("buy_rates", {}).items()},
+                {k: f"{v*100:.0f}c" for k, v in tariff.get("sell_rates", {}).items()},
+            )
             return self._generate_tou_price_forecast(tariff)
 
+        _LOGGER.warning(
+            "No price data available! price_coordinator=%s, tariff=%s. "
+            "Optimizer will use default flat rates.",
+            self.price_coordinator is not None,
+            tariff is not None,
+        )
         return None
 
     def _generate_tou_price_forecast(
@@ -691,12 +708,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             export_prices.append(sell)
 
         if import_prices:
+            # Log price profile summary: unique (buy, sell) combos with hour ranges
+            price_profile: dict[tuple[float, float], list[int]] = {}
+            for t_idx in range(len(import_prices)):
+                ts = now + timedelta(minutes=t_idx * interval)
+                key = (round(import_prices[t_idx] * 100, 1), round(export_prices[t_idx] * 100, 1))
+                if key not in price_profile:
+                    price_profile[key] = []
+                if not price_profile[key] or price_profile[key][-1] != ts.hour:
+                    price_profile[key].append(ts.hour)
+            profile_parts = []
+            for (buy_c, sell_c), hours in sorted(price_profile.items()):
+                unique_hours = sorted(set(hours))
+                profile_parts.append(f"buy={buy_c}c sell={sell_c}c hrs={unique_hours}")
             _LOGGER.info(
-                "Generated TOU price forecast: %d steps, current=%s (buy=%.2f$/kWh, sell=%.2f$/kWh)",
+                "Generated TOU price forecast: %d steps, %d unique profiles. %s",
                 len(import_prices),
-                matched_period,
-                import_prices[0],
-                export_prices[0],
+                len(price_profile),
+                " | ".join(profile_parts),
             )
 
         return (import_prices, export_prices)
