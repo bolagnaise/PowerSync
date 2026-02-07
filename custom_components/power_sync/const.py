@@ -1023,14 +1023,8 @@ CONF_OPTIMIZATION_MULTI_BATTERY = "optimization_multi_battery"
 CONF_OPTIMIZATION_ML_FORECASTING = "optimization_ml_forecasting"
 CONF_OPTIMIZATION_WEATHER_INTEGRATION = "optimization_weather_integration"
 
-# Optimization cost functions
-COST_FUNCTION_COST = "cost"            # Minimize total electricity cost
-COST_FUNCTION_SELF_USE = "self_consumption"  # Maximize solar self-consumption
-
-OPTIMIZATION_COST_FUNCTIONS = {
-    COST_FUNCTION_COST: "Cost Minimization - lowest electricity bill",
-    COST_FUNCTION_SELF_USE: "Self-Consumption - maximize solar usage",
-}
+# Optimization cost function (only cost minimization — self-consumption is the battery's native mode)
+COST_FUNCTION_COST = "cost"
 
 # Default optimization settings
 DEFAULT_OPTIMIZATION_INTERVAL = 30     # Re-optimize every 30 minutes

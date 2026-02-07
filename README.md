@@ -441,10 +441,7 @@ The optimizer produces four battery actions:
    - Go to **Settings → Devices & Services → PowerSync**
    - Click **Configure**
    - Select **Smart Optimization (Built-in LP)** as your optimization provider
-   - Set your **backup reserve** percentage
-   - Choose your **cost function**:
-     - **Cost Minimization** — Lowest electricity bill (default)
-     - **Self-Consumption** — Maximize solar self-use, minimize all grid interaction
+   - Set your **backup reserve** percentage (minimum SOC the optimizer won't go below)
 
 2. **In the Mobile App:**
    - Go to **Controls** screen

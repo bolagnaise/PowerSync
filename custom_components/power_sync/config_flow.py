@@ -196,8 +196,6 @@ from .const import (
     CONF_OPTIMIZATION_COST_FUNCTION,
     CONF_OPTIMIZATION_BACKUP_RESERVE,
     COST_FUNCTION_COST,
-    COST_FUNCTION_SELF_USE,
-    OPTIMIZATION_COST_FUNCTIONS,
     DEFAULT_OPTIMIZATION_BACKUP_RESERVE,
     # Optimization provider selection
     CONF_OPTIMIZATION_PROVIDER,
@@ -880,12 +878,10 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_ml_options(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Configure Smart Optimization options - cost function and backup reserve."""
+        """Configure Smart Optimization options - backup reserve."""
         if user_input is not None:
             self._ml_options = {
-                CONF_OPTIMIZATION_COST_FUNCTION: user_input.get(
-                    CONF_OPTIMIZATION_COST_FUNCTION, COST_FUNCTION_COST
-                ),
+                CONF_OPTIMIZATION_COST_FUNCTION: COST_FUNCTION_COST,
                 CONF_OPTIMIZATION_BACKUP_RESERVE: user_input.get(
                     CONF_OPTIMIZATION_BACKUP_RESERVE, DEFAULT_OPTIMIZATION_BACKUP_RESERVE
                 ),
@@ -896,10 +892,6 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="ml_options",
             data_schema=vol.Schema({
-                vol.Required(
-                    CONF_OPTIMIZATION_COST_FUNCTION,
-                    default=COST_FUNCTION_COST
-                ): vol.In(OPTIMIZATION_COST_FUNCTIONS),
                 vol.Required(
                     CONF_OPTIMIZATION_BACKUP_RESERVE,
                     default=int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100)
@@ -2181,9 +2173,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             new_data[CONF_OPTIMIZATION_PROVIDER] = optimization_provider
             # If Smart Optimization, store ML options
             if optimization_provider == OPT_PROVIDER_POWERSYNC:
-                new_data[CONF_OPTIMIZATION_COST_FUNCTION] = user_input.get(
-                    CONF_OPTIMIZATION_COST_FUNCTION, COST_FUNCTION_COST
-                )
+                new_data[CONF_OPTIMIZATION_COST_FUNCTION] = COST_FUNCTION_COST
                 new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = user_input.get(
                     CONF_OPTIMIZATION_BACKUP_RESERVE, int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100)
                 ) / 100.0  # Convert from % to decimal
@@ -2204,7 +2194,6 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
         current_tesla_provider = self.config_entry.data.get(CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_TESLEMETRY)
         current_opt_provider = self.config_entry.data.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
-        current_cost_function = self.config_entry.data.get(CONF_OPTIMIZATION_COST_FUNCTION, COST_FUNCTION_COST)
         current_backup_reserve = self.config_entry.data.get(CONF_OPTIMIZATION_BACKUP_RESERVE, DEFAULT_OPTIMIZATION_BACKUP_RESERVE)
 
         # Build Tesla provider choices
@@ -2235,10 +2224,6 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_OPTIMIZATION_PROVIDER,
                         default=current_opt_provider,
                     ): vol.In(opt_providers),
-                    vol.Optional(
-                        CONF_OPTIMIZATION_COST_FUNCTION,
-                        default=current_cost_function,
-                    ): vol.In(OPTIMIZATION_COST_FUNCTIONS),
                     vol.Optional(
                         CONF_OPTIMIZATION_BACKUP_RESERVE,
                         default=int(current_backup_reserve * 100) if current_backup_reserve < 1 else int(current_backup_reserve),
@@ -2308,9 +2293,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 optimization_provider = user_input.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
                 new_data[CONF_OPTIMIZATION_PROVIDER] = optimization_provider
                 if optimization_provider == OPT_PROVIDER_POWERSYNC:
-                    new_data[CONF_OPTIMIZATION_COST_FUNCTION] = user_input.get(
-                        CONF_OPTIMIZATION_COST_FUNCTION, COST_FUNCTION_COST
-                    )
+                    new_data[CONF_OPTIMIZATION_COST_FUNCTION] = COST_FUNCTION_COST
                     new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = user_input.get(
                         CONF_OPTIMIZATION_BACKUP_RESERVE, int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100)
                     ) / 100.0
@@ -2335,7 +2318,6 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         current_modbus_slave_id = self._get_option(CONF_SIGENERGY_MODBUS_SLAVE_ID, DEFAULT_SIGENERGY_MODBUS_SLAVE_ID)
         current_dc_curtailment = self._get_option(CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False)
         current_opt_provider = self.config_entry.data.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
-        current_cost_function = self.config_entry.data.get(CONF_OPTIMIZATION_COST_FUNCTION, COST_FUNCTION_COST)
         current_backup_reserve = self.config_entry.data.get(CONF_OPTIMIZATION_BACKUP_RESERVE, DEFAULT_OPTIMIZATION_BACKUP_RESERVE)
 
         # Get current Sigenergy Cloud credentials (for display, show empty if not set)
@@ -2362,10 +2344,6 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_OPTIMIZATION_PROVIDER,
                         default=current_opt_provider,
                     ): vol.In(opt_providers),
-                    vol.Optional(
-                        CONF_OPTIMIZATION_COST_FUNCTION,
-                        default=current_cost_function,
-                    ): vol.In(OPTIMIZATION_COST_FUNCTIONS),
                     vol.Optional(
                         CONF_OPTIMIZATION_BACKUP_RESERVE,
                         default=int(current_backup_reserve * 100) if current_backup_reserve < 1 else int(current_backup_reserve),
@@ -2444,9 +2422,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 optimization_provider = user_input.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
                 new_data[CONF_OPTIMIZATION_PROVIDER] = optimization_provider
                 if optimization_provider == OPT_PROVIDER_POWERSYNC:
-                    new_data[CONF_OPTIMIZATION_COST_FUNCTION] = user_input.get(
-                        CONF_OPTIMIZATION_COST_FUNCTION, COST_FUNCTION_COST
-                    )
+                    new_data[CONF_OPTIMIZATION_COST_FUNCTION] = COST_FUNCTION_COST
                     new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = user_input.get(
                         CONF_OPTIMIZATION_BACKUP_RESERVE, int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100)
                     ) / 100.0
@@ -2470,7 +2446,6 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         current_port = self._get_option(CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT)
         current_slave_id = self._get_option(CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID)
         current_opt_provider = self.config_entry.data.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
-        current_cost_function = self.config_entry.data.get(CONF_OPTIMIZATION_COST_FUNCTION, COST_FUNCTION_COST)
         current_backup_reserve = self.config_entry.data.get(CONF_OPTIMIZATION_BACKUP_RESERVE, DEFAULT_OPTIMIZATION_BACKUP_RESERVE)
 
         # Build optimization provider choices
@@ -2491,10 +2466,6 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_OPTIMIZATION_PROVIDER,
                         default=current_opt_provider,
                     ): vol.In(opt_providers),
-                    vol.Optional(
-                        CONF_OPTIMIZATION_COST_FUNCTION,
-                        default=current_cost_function,
-                    ): vol.In(OPTIMIZATION_COST_FUNCTIONS),
                     vol.Optional(
                         CONF_OPTIMIZATION_BACKUP_RESERVE,
                         default=int(current_backup_reserve * 100) if current_backup_reserve < 1 else int(current_backup_reserve),

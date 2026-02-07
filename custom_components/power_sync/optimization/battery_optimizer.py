@@ -137,7 +137,7 @@ class BatteryOptimizer:
             solar_forecast: Solar generation per time step (kW)
             load_forecast: Home load per time step (kW)
             current_soc: Current battery SOC (0-1)
-            cost_function: "cost" for cost minimization, "self_consumption" for max self-use
+            cost_function: Optimization objective (only "cost" is supported)
 
         Returns:
             OptimizerResult with schedule and metadata
@@ -240,19 +240,12 @@ class BatteryOptimizer:
         """
         dt = self.dt_hours
 
-        # === Objective function ===
+        # === Objective function: cost minimization ===
+        # minimize SUM(import_price * grid_import - export_price * grid_export) * dt
         c = [0.0] * (4 * n)
-
-        if cost_function == "self_consumption":
-            # Minimize all grid interaction: SUM(grid_import + grid_export) * dt
-            for t in range(n):
-                c[t] = dt          # grid_import
-                c[n + t] = dt      # grid_export
-        else:
-            # Cost minimization: SUM(import_price * grid_import - export_price * grid_export) * dt
-            for t in range(n):
-                c[t] = import_prices[t] * dt        # grid_import cost
-                c[n + t] = -export_prices[t] * dt   # grid_export revenue (negative = profit)
+        for t in range(n):
+            c[t] = import_prices[t] * dt        # grid_import cost
+            c[n + t] = -export_prices[t] * dt   # grid_export revenue (negative = profit)
 
         # === Equality constraints: power balance ===
         # solar[t] + grid_import[t] + battery_discharge[t] = load[t] + grid_export[t] + battery_charge[t]
@@ -434,81 +427,57 @@ class BatteryOptimizer:
         battery_charge = [0.0] * n
         battery_discharge = [0.0] * n
 
-        if cost_function == "self_consumption":
-            # Simple self-consumption: charge from excess solar, discharge for load
-            soc = soc_0
-            for t in range(n):
-                net = solar[t] - load[t]  # Positive = excess solar
+        # Price-based greedy: sort by price spread
+        # Charge during cheapest import, discharge during most profitable export
+        spreads = []
+        for t in range(n):
+            net_load = load[t] - solar[t]
+            spread = export_prices[t] - import_prices[t]
+            spreads.append((spread, t, net_load))
 
-                if net > 0:
-                    # Excess solar → charge battery
-                    charge_room = (1.0 - soc) * cap / (eff * dt)
-                    charge_kw = min(net, self.max_charge_kw, charge_room)
-                    battery_charge[t] = charge_kw
-                    remaining_excess = net - charge_kw
-                    grid_export[t] = remaining_excess
-                    soc += charge_kw * eff * dt / cap
-                else:
-                    # Deficit → discharge battery
-                    deficit = -net
-                    discharge_room = (soc - self.backup_reserve) * cap * eff / dt
-                    discharge_kw = min(deficit, self.max_discharge_kw, discharge_room)
-                    battery_discharge[t] = discharge_kw
-                    remaining_deficit = deficit - discharge_kw
-                    grid_import[t] = remaining_deficit
-                    soc -= discharge_kw * dt / (eff * cap)
-        else:
-            # Price-based greedy: sort by price spread
-            # Charge during cheapest import, discharge during most profitable export
-            spreads = []
-            for t in range(n):
-                net_load = load[t] - solar[t]
-                spread = export_prices[t] - import_prices[t]
-                spreads.append((spread, t, net_load))
+        # Sort: most profitable export first (highest spread)
+        spreads.sort(key=lambda x: -x[0])
 
-            # Sort: most profitable export first (highest spread)
-            spreads.sort(key=lambda x: -x[0])
+        # Two-pass: first assign exports (top spread), then imports (bottom spread)
+        soc = soc_0
+        actions = {}  # t -> (charge_kw, discharge_kw)
 
-            # Two-pass: first assign exports (top spread), then imports (bottom spread)
-            soc = soc_0
-            actions = {}  # t -> (charge_kw, discharge_kw)
+        # Pass 1: assign discharge/export to highest-spread periods
+        soc_tracker = soc_0
+        for spread, t, net_load in spreads:
+            if spread > 0:
+                # Profitable to discharge
+                discharge_room = (soc_tracker - self.backup_reserve) * cap * eff / dt
+                discharge_kw = min(self.max_discharge_kw, max(0, discharge_room))
+                if discharge_kw > 0.01:
+                    actions[t] = (0.0, discharge_kw)
+                    soc_tracker -= discharge_kw * dt / (eff * cap)
+            else:
+                # Cheap to charge
+                charge_room = (1.0 - soc_tracker) * cap / (eff * dt)
+                charge_kw = min(self.max_charge_kw, max(0, charge_room))
+                if charge_kw > 0.01:
+                    actions[t] = (charge_kw, 0.0)
+                    soc_tracker += charge_kw * eff * dt / cap
 
-            # Pass 1: assign discharge/export to highest-spread periods
-            soc_tracker = soc_0
-            for spread, t, net_load in spreads:
-                if spread > 0:
-                    # Profitable to discharge
-                    discharge_room = (soc_tracker - self.backup_reserve) * cap * eff / dt
-                    discharge_kw = min(self.max_discharge_kw, max(0, discharge_room))
-                    if discharge_kw > 0.01:
-                        actions[t] = (0.0, discharge_kw)
-                        soc_tracker -= discharge_kw * dt / (eff * cap)
-                else:
-                    # Cheap to charge
-                    charge_room = (1.0 - soc_tracker) * cap / (eff * dt)
-                    charge_kw = min(self.max_charge_kw, max(0, charge_room))
-                    if charge_kw > 0.01:
-                        actions[t] = (charge_kw, 0.0)
-                        soc_tracker += charge_kw * eff * dt / cap
+        # Now compute grid flows in time order
+        soc = soc_0
+        for t in range(n):
+            net_load = load[t] - solar[t]
+            charge_kw, discharge_kw = actions.get(t, (0.0, 0.0))
 
-            # Now compute grid flows in time order
-            soc = soc_0
-            for t in range(n):
-                net_load = load[t] - solar[t]
-                charge_kw, discharge_kw = actions.get(t, (0.0, 0.0))
+            battery_charge[t] = charge_kw
+            battery_discharge[t] = discharge_kw
 
-                battery_charge[t] = charge_kw
-                battery_discharge[t] = discharge_kw
+            # Power balance: grid_import + solar + discharge = load + grid_export + charge
+            net_grid = net_load + charge_kw - discharge_kw
+            if net_grid > 0:
+                grid_import[t] = net_grid
+            else:
+                grid_export[t] = -net_grid
 
-                # Power balance: grid_import + solar + discharge = load + grid_export + charge
-                net_grid = net_load + charge_kw - discharge_kw
-                if net_grid > 0:
-                    grid_import[t] = net_grid
-                else:
-                    grid_export[t] = -net_grid
-
-                soc += (charge_kw * eff - discharge_kw / eff) * dt / cap
-                soc = max(0.0, min(1.0, soc))
+            soc += (charge_kw * eff - discharge_kw / eff) * dt / cap
+            soc = max(0.0, min(1.0, soc))
 
         # Build schedule
         schedule = self._build_schedule(

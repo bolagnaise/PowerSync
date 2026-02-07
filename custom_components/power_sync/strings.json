@@ -147,7 +147,7 @@
       },
       "optimization_provider": {
         "title": "Choose Optimization Provider",
-        "description": "Your {battery_name} has built-in battery scheduling. Choose how PowerSync should manage your battery:\n\n**{battery_name} built-in**: Use your battery's native Time-of-Use scheduling.\n\n**Smart Optimization (Built-in LP)**: Uses Linear Programming to find the optimal battery schedule — minimizing costs or maximizing self-consumption. No external dependencies required.",
+        "description": "Your {battery_name} has built-in battery scheduling. Choose how PowerSync should manage your battery:\n\n**{battery_name} built-in**: Use your battery's native Time-of-Use scheduling.\n\n**Smart Optimization (Built-in LP)**: Uses Linear Programming to find the optimal battery schedule — minimizing costs. No external dependencies required.",
         "data": {
           "optimization_provider": "Optimization Provider"
         },
@@ -155,13 +155,11 @@
       },
       "ml_options": {
         "title": "Smart Optimization Settings",
-        "description": "Configure how the built-in LP optimizer manages your battery.\n\nThe optimizer uses electricity price forecasts, solar generation, and load patterns to find the optimal charge/discharge schedule.",
+        "description": "Configure the backup reserve for the built-in LP optimizer.\n\nThe optimizer uses electricity price forecasts, solar generation, and load patterns to find the cost-minimizing charge/discharge schedule.",
         "data": {
-          "optimization_cost_function": "Optimization Objective",
           "optimization_backup_reserve": "Backup Reserve (%)"
         },
         "data_description": {
-          "optimization_cost_function": "What to optimize for (only applies to Smart Optimization)",
           "optimization_backup_reserve": "Minimum battery charge level to maintain (only applies to Smart Optimization)"
         },
         "submit_button": "Next"
@@ -352,15 +350,13 @@
       },
       "battery_management_mode": {
         "title": "Battery Management Mode",
-        "description": "Choose how PowerSync should manage your battery:\n\n**Manual**: Use PowerSync automations to control charge/discharge.\n\n**TOU Sync**: Sync prices to battery, let battery's built-in scheduler decide.\n\n**Smart Optimization**: Built-in LP scheduling to minimize costs, maximize profit, or maximize self-consumption. No external dependencies required.",
+        "description": "Choose how PowerSync should manage your battery:\n\n**Manual**: Use PowerSync automations to control charge/discharge.\n\n**TOU Sync**: Sync prices to battery, let battery's built-in scheduler decide.\n\n**Smart Optimization**: Built-in LP scheduling to minimize costs. No external dependencies required.",
         "data": {
           "battery_management_mode": "Battery Management Mode",
-          "optimization_cost_function": "Optimization Objective",
           "optimization_backup_reserve": "Backup Reserve (%)"
         },
         "data_description": {
           "battery_management_mode": "Select how PowerSync should manage your battery system",
-          "optimization_cost_function": "Choose what to optimize for: minimize cost, maximize profit, or maximize self-consumption",
           "optimization_backup_reserve": "Minimum battery charge level to maintain (20% recommended for backup)"
         },
         "submit_button": "Next"
@@ -400,12 +396,10 @@
           "electricity_provider": "Electricity Provider",
           "tesla_api_provider": "Tesla API Provider",
           "optimization_provider": "Optimization Provider",
-          "optimization_cost_function": "Optimization Objective",
           "optimization_backup_reserve": "Backup Reserve (%)"
         },
         "data_description": {
           "optimization_provider": "Choose between Tesla's built-in optimization or Smart Optimization (Built-in LP)",
-          "optimization_cost_function": "What to optimize for (only applies to Smart Optimization)",
           "optimization_backup_reserve": "Minimum battery charge level to maintain (only applies to Smart Optimization)"
         }
       },
@@ -415,7 +409,6 @@
         "data": {
           "electricity_provider": "Electricity Provider",
           "optimization_provider": "Optimization Provider",
-          "optimization_cost_function": "Optimization Objective",
           "optimization_backup_reserve": "Backup Reserve (%)",
           "sigenergy_modbus_host": "Sigenergy IP Address",
           "sigenergy_modbus_port": "Modbus Port",
@@ -443,7 +436,6 @@
         "data": {
           "electricity_provider": "Electricity Provider",
           "optimization_provider": "Optimization Provider",
-          "optimization_cost_function": "Optimization Objective",
           "optimization_backup_reserve": "Backup Reserve (%)",
           "sungrow_host": "Sungrow IP Address",
           "sungrow_port": "Modbus Port",

@@ -66,11 +66,10 @@ UPDATE_INTERVAL = timedelta(minutes=5)
 class CostFunction:
     """Cost function enumeration."""
     COST_MINIMIZATION = "cost"
-    PROFIT_MAXIMIZATION = "profit"
-    SELF_CONSUMPTION = "self_consumption"
 
     def __init__(self, value: str = "cost"):
-        self.value = value
+        # Always use cost minimization (self-consumption is the battery's native mode)
+        self.value = "cost"
 
 
 class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
