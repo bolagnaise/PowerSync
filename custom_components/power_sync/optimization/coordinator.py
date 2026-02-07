@@ -3,10 +3,6 @@ Optimization coordinator for PowerSync.
 
 Coordinates data collection and runs the built-in LP battery optimizer
 to produce a schedule, which the execution layer then applies.
-
-The ForecastBridge and its dashboard sensors are kept for visibility,
-but the optimizer reads data directly via callbacks — no external
-integration required.
 """
 from __future__ import annotations
 
@@ -21,7 +17,6 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 from homeassistant.exceptions import ConfigEntryNotReady
 
-from .forecast_bridge import ForecastBridge
 from .battery_optimizer import BatteryOptimizer, OptimizerResult
 from .schedule_reader import OptimizationSchedule
 from .executor import ScheduleExecutor, ExecutionStatus, BatteryAction
@@ -80,7 +75,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     - Built-in LP optimizer (BatteryOptimizer)
     - Data collection (prices, solar, load forecasts)
     - Schedule execution via the executor
-    - Dashboard sensor updates via ForecastBridge
     - Providing data for mobile app and HTTP API
     """
 
@@ -124,9 +118,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Built-in optimizer
         self._optimizer: BatteryOptimizer | None = None
         self._last_optimizer_result: OptimizerResult | None = None
-
-        # Dashboard sensors (kept for visibility)
-        self._forecast_bridge: ForecastBridge | None = None
 
         # Data collection components
         self._load_estimator: LoadEstimator | None = None
@@ -191,23 +182,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             interval_minutes=self._config.interval_minutes,
         )
 
-        # Initialize forecast data bridge (for dashboard sensors)
-        self._forecast_bridge = ForecastBridge(
-            self.hass,
-            self.entry_id,
-            price_coordinator=self.price_coordinator,
-            solar_forecaster=self._solar_forecaster,
-            load_estimator=self._load_estimator,
-            tariff_schedule=self._tariff_schedule,
-        )
-
-        # Set data callbacks for the bridge
-        self._forecast_bridge.set_data_callbacks(
-            get_prices=self._get_price_forecast,
-            get_solar=self._get_solar_forecast,
-            get_load=self._get_load_forecast,
-        )
-
         # Initialize executor (for battery control)
         self._executor = ScheduleExecutor(
             self.hass,
@@ -223,18 +197,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             get_load=self._get_load_forecast,
             get_battery_state=self._get_battery_state,
         )
-
-        # Set up forecast sensors for dashboard visibility
-        # Retrieve async_add_entities stored by sensor platform for proper registration
-        from ..const import DOMAIN
-        domain_data = self.hass.data.get(DOMAIN, {}).get(self.entry_id, {})
-        async_add_entities = domain_data.get("sensor_async_add_entities")
-        if not async_add_entities:
-            _LOGGER.warning(
-                "sensor_async_add_entities not available - forecast sensors "
-                "will not be registered with the entity platform"
-            )
-        await self._forecast_bridge.setup_forecast_sensors(async_add_entities)
 
         # Set up price-triggered updates for dynamic pricing
         await self._setup_price_listener()
@@ -333,12 +295,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._run_optimization(), "powersync_price_reoptimize"
         )
 
-    async def _update_dashboard_forecasts(self) -> None:
-        """Update dashboard forecast sensors with latest data."""
-        if self._forecast_bridge:
-            await self._forecast_bridge.update_forecasts()
-            _LOGGER.debug("Updated dashboard forecast sensors")
-
     async def enable(self) -> bool:
         """Enable optimization and start the built-in optimizer."""
         if self._enabled:
@@ -347,9 +303,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not self._optimizer:
             _LOGGER.error("Cannot enable optimization - optimizer not initialized")
             return False
-
-        # Update dashboard forecasts
-        await self._update_dashboard_forecasts()
 
         # Start executor (for battery control)
         if self._executor:
@@ -446,9 +399,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 len(result.schedule.actions),
                 action_summary,
             )
-
-            # Update dashboard forecast sensors
-            await self._update_dashboard_forecasts()
 
         except Exception as e:
             _LOGGER.error("Optimization failed: %s", e, exc_info=True)

@@ -567,10 +567,6 @@ async def async_setup_entry(
     entities.append(BatteryModeSensor(hass=hass, entry=entry))
     _LOGGER.info("Battery mode sensor added")
 
-    # Store async_add_entities for deferred sensor registration
-    # (optimization coordinator creates forecast sensors after platform setup)
-    domain_data["sensor_async_add_entities"] = async_add_entities
-
     async_add_entities(entities)
 
 

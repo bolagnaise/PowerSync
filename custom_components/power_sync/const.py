@@ -988,10 +988,6 @@ CONF_OPTIMIZATION_PROVIDER = "optimization_provider"
 OPT_PROVIDER_NATIVE = "native"           # Use battery's built-in optimization
 OPT_PROVIDER_POWERSYNC = "powersync_ml"  # Use PowerSync optimization
 
-# External Optimizer Integration (deprecated — built-in LP optimizer now used)
-# Kept for backward compatibility during migration
-OPTIMIZER_DOMAIN = "haeo"  # deprecated
-
 # HAFO (Home Assistant Forecaster) Integration for ML-based load prediction
 # HAFO creates forecast sensors from historical entity data
 # Reference: https://hafo.haeo.io/

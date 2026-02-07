@@ -3,22 +3,12 @@ Schedule data models for PowerSync optimization.
 
 Provides the ScheduleAction and OptimizationSchedule dataclasses used by
 the built-in LP optimizer and the execution layer.
-
-Previously this module also read from external optimizer sensors (HAEO).
-That functionality has been removed — the built-in optimizer produces
-schedules directly.
 """
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
-
-from homeassistant.core import HomeAssistant
-from homeassistant.util import dt as dt_util
-
-_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -89,25 +79,3 @@ class OptimizationSchedule:
         }
 
 
-class ScheduleReader:
-    """Legacy schedule reader (deprecated).
-
-    Previously read optimization schedules from external HAEO sensors.
-    The built-in LP optimizer now produces schedules directly.
-    Kept as a stub for backward compatibility.
-    """
-
-    def __init__(self, hass: HomeAssistant) -> None:
-        self.hass = hass
-
-    async def get_schedule(self) -> OptimizationSchedule | None:
-        """Read schedule (deprecated — returns None)."""
-        return None
-
-    async def get_current_action(self) -> ScheduleAction | None:
-        """Get current action (deprecated — returns None)."""
-        return None
-
-    def is_available(self) -> bool:
-        """Check if optimizer sensors are available (deprecated — returns False)."""
-        return False

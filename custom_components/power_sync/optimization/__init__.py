@@ -3,9 +3,6 @@ Optimization package for PowerSync battery scheduling.
 
 This module provides:
 - BatteryOptimizer: Built-in LP optimizer (scipy) with greedy fallback
-- ForecastBridge: Creates forecast sensors for dashboard visibility
-- OptimizerConfigurator: Deprecated (was HAEO auto-configuration)
-- ScheduleReader: Deprecated stub (was HAEO sensor reading)
 - OptimizationCoordinator: Main coordinator for optimization
 - ScheduleExecutor: Executes battery commands
 - LoadEstimator, SolcastForecaster: Data sources for optimizer
@@ -18,12 +15,8 @@ from .coordinator import OptimizationCoordinator, OptimizationConfig
 # Built-in LP optimizer
 from .battery_optimizer import BatteryOptimizer, OptimizerResult
 
-# Dashboard sensors
-from .forecast_bridge import ForecastBridge, ForecastSensor
-
-# Legacy / deprecated (kept for backward compatibility)
-from .optimizer_configurator import OptimizerConfigurator
-from .schedule_reader import ScheduleReader, OptimizationSchedule, ScheduleAction
+# Schedule data models
+from .schedule_reader import OptimizationSchedule, ScheduleAction
 
 # EV smart charging coordination
 from .ev_coordinator import EVCoordinator, EVConfig, EVChargingMode, EVChargingState, EVStatus
@@ -43,12 +36,7 @@ __all__ = [
     "BatteryAction",
     "ExecutionStatus",
     "CostFunction",
-    # Dashboard sensors
-    "ForecastBridge",
-    "ForecastSensor",
-    # Legacy / deprecated
-    "OptimizerConfigurator",
-    "ScheduleReader",
+    # Schedule data models
     "OptimizationSchedule",
     "ScheduleAction",
     # EV smart charging
