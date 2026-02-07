@@ -33,9 +33,8 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
-from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
@@ -89,7 +88,7 @@ SENSOR_CONFIGS = {
 }
 
 
-class ForecastSensor(Entity):
+class ForecastSensor(SensorEntity):
     """
     Forecast sensor compatible with HAEO (Home Assistant Energy Optimizer).
 
@@ -151,7 +150,7 @@ class ForecastSensor(Entity):
         return f"sensor.powersync_{self._sensor_type}_forecast"
 
     @property
-    def state(self) -> float:
+    def native_value(self) -> float:
         """Return the current value (first forecast point)."""
         return self._current_value
 
@@ -313,7 +312,7 @@ class ForecastBridge:
     async def setup_forecast_sensors(
         self,
         async_add_entities: AddEntitiesCallback | None = None,
-    ) -> list[Entity]:
+    ) -> list[SensorEntity]:
         """Create HAEO-compatible forecast sensors.
 
         Returns:

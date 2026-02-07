@@ -225,7 +225,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
 
         # Set up forecast sensors for dashboard visibility
-        await self._forecast_bridge.setup_forecast_sensors()
+        # Retrieve async_add_entities stored by sensor platform for proper registration
+        from ..const import DOMAIN
+        domain_data = self.hass.data.get(DOMAIN, {}).get(self.entry_id, {})
+        async_add_entities = domain_data.get("sensor_async_add_entities")
+        if not async_add_entities:
+            _LOGGER.warning(
+                "sensor_async_add_entities not available - forecast sensors "
+                "will not be registered with the entity platform"
+            )
+        await self._forecast_bridge.setup_forecast_sensors(async_add_entities)
 
         # Set up price-triggered updates for dynamic pricing
         await self._setup_price_listener()
