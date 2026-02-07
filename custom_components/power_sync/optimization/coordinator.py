@@ -413,13 +413,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._current_schedule = result.schedule
             self._last_update_time = dt_util.now()
 
+            # Log action distribution summary
+            action_counts: dict[str, int] = {}
+            for a in result.schedule.actions:
+                action_counts[a.action] = action_counts.get(a.action, 0) + 1
+            action_summary = ", ".join(
+                f"{k}={v}" for k, v in sorted(action_counts.items())
+            )
+
             _LOGGER.info(
-                "Optimization complete (%s, %.2fs): cost=$%.2f, savings=$%.2f, %d steps",
+                "Optimization complete (%s, %.2fs): cost=$%.2f, savings=$%.2f, %d steps [%s]",
                 result.solver_used,
                 result.solve_time_s,
                 result.schedule.predicted_cost,
                 result.schedule.predicted_savings,
                 len(result.schedule.actions),
+                action_summary,
             )
 
             # Update dashboard forecast sensors
@@ -436,7 +445,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if self._current_schedule and self._current_schedule.actions:
                     current_action = self._get_current_action()
                     if current_action and self._executor:
+                        _LOGGER.info(
+                            "Polling: current action=%s power=%.0fW soc=%.1f%%",
+                            current_action.action,
+                            current_action.power_w,
+                            current_action.soc * 100,
+                        )
                         await self._execute_optimizer_action(current_action)
+                    elif not current_action:
+                        _LOGGER.debug("Polling: no current action found in schedule")
 
                 # Wait for next interval
                 await asyncio.sleep(self._config.interval_minutes * 60)
@@ -518,22 +535,127 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.error("Failed to execute optimizer action: %s", e)
 
     async def _get_price_forecast(self) -> tuple[list[float], list[float]] | None:
-        """Get price forecasts for optimizer."""
-        if not self.price_coordinator or not self.price_coordinator.data:
-            return None
+        """Get price forecasts for optimizer.
 
-        data = self.price_coordinator.data
-        import_prices = []
-        export_prices = []
+        For dynamic providers (Amber, Flow Power): reads from price_coordinator.
+        For static TOU providers (GloBird, etc.): generates from tariff_schedule.
+        """
+        # Dynamic pricing (Amber, Flow Power, etc.)
+        if self.price_coordinator and self.price_coordinator.data:
+            data = self.price_coordinator.data
+            import_prices = []
+            export_prices = []
 
-        # Amber format
-        if "import_prices" in data:
-            for p in data.get("import_prices", []):
-                import_prices.append(p.get("perKwh", 0) / 100)
-            for p in data.get("export_prices", []):
-                export_prices.append(p.get("perKwh", 0) / 100)
+            # Amber format
+            if "import_prices" in data:
+                for p in data.get("import_prices", []):
+                    import_prices.append(p.get("perKwh", 0) / 100)
+                for p in data.get("export_prices", []):
+                    export_prices.append(p.get("perKwh", 0) / 100)
 
-        return (import_prices, export_prices) if import_prices else None
+            if import_prices:
+                return (import_prices, export_prices)
+
+        # Static TOU pricing (GloBird, custom tariff, etc.)
+        # Generate 576-point price forecast from tariff schedule
+        tariff = self._tariff_schedule
+        if not tariff:
+            # Try reading from hass.data (updated by fetch_tesla_tariff_schedule)
+            from ..const import DOMAIN
+            tariff = (
+                self.hass.data.get(DOMAIN, {})
+                .get(self.entry_id, {})
+                .get("tariff_schedule")
+            )
+
+        if tariff and tariff.get("tou_periods"):
+            return self._generate_tou_price_forecast(tariff)
+
+        return None
+
+    def _generate_tou_price_forecast(
+        self, tariff: dict
+    ) -> tuple[list[float], list[float]]:
+        """Generate a 576-point price forecast from a TOU tariff schedule.
+
+        Uses the tariff's TOU periods and buy/sell rates to produce
+        per-interval prices for the LP optimizer's 48-hour horizon.
+        """
+        now = dt_util.now()
+        tou_periods = tariff.get("tou_periods", {})
+        buy_rates = tariff.get("buy_rates", {})
+        sell_rates = tariff.get("sell_rates", {})
+        horizon_minutes = int(self._config.horizon_hours * 60)
+        interval = self._config.interval_minutes
+        n_steps = horizon_minutes // interval
+
+        import_prices: list[float] = []
+        export_prices: list[float] = []
+
+        for t in range(n_steps):
+            ts = now + timedelta(minutes=t * interval)
+            hour = ts.hour
+            dow = ts.weekday()
+            # Tesla format: 0=Sunday, Python: 0=Monday
+            tesla_dow = (dow + 1) % 7
+
+            matched_period = None
+            # Check in priority order to handle overlaps
+            priority = [
+                "SUPER_OFF_PEAK", "ON_PEAK", "PEAK",
+                "PARTIAL_PEAK", "SHOULDER", "OFF_PEAK",
+            ]
+            for period_name in priority:
+                if period_name not in tou_periods:
+                    continue
+                periods_list = tou_periods[period_name]
+                if not isinstance(periods_list, list):
+                    continue
+                for period in periods_list:
+                    from_dow = period.get("fromDayOfWeek", 0)
+                    to_dow = period.get("toDayOfWeek", 6)
+                    from_hour = period.get("fromHour", 0)
+                    to_hour = period.get("toHour", 24)
+
+                    # Day-of-week check
+                    if from_dow <= to_dow:
+                        if not (from_dow <= tesla_dow <= to_dow):
+                            continue
+                    else:
+                        if not (tesla_dow >= from_dow or tesla_dow <= to_dow):
+                            continue
+
+                    # Hour check (handles overnight periods)
+                    if from_hour <= to_hour:
+                        if from_hour <= hour < to_hour:
+                            matched_period = period_name
+                            break
+                    else:
+                        if hour >= from_hour or hour < to_hour:
+                            matched_period = period_name
+                            break
+                if matched_period:
+                    break
+
+            if not matched_period:
+                matched_period = "OFF_PEAK"
+
+            # buy_rates values are in $/kWh (e.g. 0.48 for 48c)
+            buy = buy_rates.get(matched_period, 0.30)
+            sell = sell_rates.get(matched_period, 0.05)
+            import_prices.append(buy)
+            export_prices.append(sell)
+
+        if import_prices:
+            _LOGGER.info(
+                "Generated TOU price forecast: %d steps, current=%s (buy=%.2f$/kWh, sell=%.2f$/kWh)",
+                len(import_prices),
+                matched_period,
+                import_prices[0],
+                export_prices[0],
+            )
+
+        return (import_prices, export_prices)
 
     async def _get_solar_forecast(self) -> list[float] | None:
         """Get solar forecast for optimizer."""
