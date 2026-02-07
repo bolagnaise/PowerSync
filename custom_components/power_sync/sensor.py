@@ -55,6 +55,7 @@ from .const import (
     SENSOR_TYPE_SOLCAST_TOMORROW,
     SENSOR_TYPE_SOLCAST_CURRENT,
     CONF_SOLCAST_ENABLED,
+    CONF_ELECTRICITY_PROVIDER,
     SENSOR_TYPE_TARIFF_SCHEDULE,
     SENSOR_TYPE_SOLAR_CURTAILMENT,
     SENSOR_TYPE_FLOW_POWER_PRICE,
@@ -408,10 +409,21 @@ async def async_setup_entry(
                 )
             )
     else:
-        # Check if we have a tariff schedule for TOU-based pricing
+        # For non-Amber TOU providers (Globird, etc.), always create TariffPriceSensor.
+        # The sensor handles missing tariff_schedule gracefully (returns None until
+        # the Tesla tariff is fetched later during setup). This avoids a race condition
+        # where sensors were skipped because tariff_schedule hadn't been fetched yet.
+        electricity_provider = entry.options.get(
+            CONF_ELECTRICITY_PROVIDER,
+            entry.data.get(CONF_ELECTRICITY_PROVIDER, ""),
+        )
+        tou_providers = ("globird", "aemo_vpp", "other", "tou_only", "octopus")
         tariff_schedule = domain_data.get("tariff_schedule")
-        if tariff_schedule:
-            _LOGGER.info("Adding tariff-based price sensors (import and export) for non-Amber provider")
+        if tariff_schedule or electricity_provider in tou_providers:
+            _LOGGER.info(
+                "Adding tariff-based price sensors (import and export) for %s provider",
+                electricity_provider or "non-Amber",
+            )
             entities.append(
                 TariffPriceSensor(
                     hass=hass,
@@ -429,7 +441,7 @@ async def async_setup_entry(
                 )
             )
         else:
-            _LOGGER.debug("No amber_coordinator or tariff_schedule - skipping price sensors")
+            _LOGGER.debug("No amber_coordinator or TOU provider - skipping price sensors")
 
     # Add energy sensors - use Tesla or Sigenergy coordinator depending on battery system
     # Both coordinators return data with same field names (solar_power, grid_power, etc.)
