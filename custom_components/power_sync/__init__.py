@@ -3962,8 +3962,20 @@ def get_current_price_from_tariff_schedule(tariff_schedule: dict) -> tuple[float
         buy_rates = tariff_schedule.get("buy_rates", {})
         sell_rates = tariff_schedule.get("sell_rates", {})
 
-        # If no TOU periods, use cached prices
+        # If no TOU periods, try Amber format (PERIOD_HH_MM keys) or fall back to cached
         if not tou_periods:
+            buy_prices = tariff_schedule.get("buy_prices", {})
+            sell_prices = tariff_schedule.get("sell_prices", {})
+            if buy_prices:
+                # Amber format: find current 30-min slot
+                current_min = now.minute
+                slot_min = 0 if current_min < 30 else 30
+                period_key = f"PERIOD_{current_hour:02d}_{slot_min:02d}"
+                buy_val = buy_prices.get(period_key)
+                sell_val = sell_prices.get(period_key, 0)
+                if buy_val is not None:
+                    return (buy_val, sell_val, f"{current_hour:02d}:{slot_min:02d}")
+            # Fall back to cached prices
             return (
                 tariff_schedule.get("buy_price", 25.0),
                 tariff_schedule.get("sell_price", 8.0),

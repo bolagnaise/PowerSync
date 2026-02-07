@@ -777,6 +777,7 @@ class TariffScheduleSensor(SensorEntity):
         self._attr_suggested_object_id = f"power_sync_{SENSOR_TYPE_TARIFF_SCHEDULE}"
         self._attr_icon = "mdi:calendar-clock"
         self._unsub_dispatcher = None
+        self._unsub_time_interval = None
 
     async def async_added_to_hass(self) -> None:
         """Run when entity is added to hass."""
@@ -801,26 +802,34 @@ class TariffScheduleSensor(SensorEntity):
             _handle_tariff_update,
         )
 
+        # Update every minute to reflect real-time price/period changes
+        @callback
+        def _periodic_update(_now=None):
+            """Update sensor periodically to catch TOU period changes."""
+            self.async_write_ha_state()
+
+        self._unsub_time_interval = async_track_time_interval(
+            self.hass,
+            _periodic_update,
+            timedelta(minutes=1),
+        )
+
     async def async_will_remove_from_hass(self) -> None:
         """Run when entity is removed from hass."""
         if self._unsub_dispatcher:
             self._unsub_dispatcher()
+        if self._unsub_time_interval:
+            self._unsub_time_interval()
 
     @property
     def native_value(self) -> Any:
         """Return the state - current tariff period and price (recalculated in real-time)."""
         tariff_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("tariff_schedule")
         if tariff_data:
-            # Recalculate current period and price in real-time from TOU schedule
-            if tariff_data.get("tou_periods"):
-                from . import get_current_price_from_tariff_schedule
-                buy_price_cents, _, current_period = get_current_price_from_tariff_schedule(tariff_data)
+            from . import get_current_price_from_tariff_schedule
+            buy_price_cents, _, current_period = get_current_price_from_tariff_schedule(tariff_data)
+            if current_period and current_period != "UNKNOWN":
                 return f"{current_period} ({buy_price_cents:.1f}c/kWh)"
-            # Fallback to cached values for non-TOU tariffs (Amber)
-            current_period = tariff_data.get("current_period")
-            buy_price = tariff_data.get("buy_price")
-            if current_period and buy_price is not None:
-                return f"{current_period} ({buy_price}c/kWh)"
             # Fallback to last sync time
             return tariff_data.get("last_sync", "Unknown")
         return "Not synced"
@@ -840,12 +849,24 @@ class TariffScheduleSensor(SensorEntity):
         sell_rates = tariff_data.get("sell_rates", {})
         tou_periods = tariff_data.get("tou_periods", {})
 
+        # Calculate real-time current price and period
+        from . import get_current_price_from_tariff_schedule
+        now = datetime.now()
+        buy_price_cents, sell_price_cents, current_period = get_current_price_from_tariff_schedule(tariff_data)
+
         attributes = {
             "last_sync": tariff_data.get("last_sync"),
             "utility": tariff_data.get("utility"),
             "plan_name": tariff_data.get("plan_name"),
-            "current_period": tariff_data.get("current_period"),
+            "current_period": current_period,
             "current_season": tariff_data.get("current_season"),
+            # Real-time prices (cents/kWh) - updated every minute
+            "buy_price": round(buy_price_cents, 2),
+            "sell_price": round(sell_price_cents, 2),
+            # Current time marker for chart vertical line/tooltip
+            "current_time": now.strftime("%H:%M"),
+            "current_hour": now.hour,
+            "current_minute": now.minute,
         }
 
         # Amber format: PERIOD_HH_MM keys with 30-min granularity
@@ -880,8 +901,15 @@ class TariffScheduleSensor(SensorEntity):
 
                 # Get time windows for this period
                 period_times = tou_periods.get(period_name, [])
+                # Handle both list format and Tesla {"periods": [...]} format
+                if isinstance(period_times, dict) and "periods" in period_times:
+                    periods_list = period_times["periods"]
+                elif isinstance(period_times, list):
+                    periods_list = period_times
+                else:
+                    periods_list = []
                 time_windows = []
-                for window in period_times if isinstance(period_times, list) else []:
+                for window in periods_list:
                     from_hour = window.get("fromHour", 0)
                     to_hour = window.get("toHour", 24)
                     from_dow = window.get("fromDayOfWeek", 0)
@@ -903,10 +931,6 @@ class TariffScheduleSensor(SensorEntity):
             attributes["tou_schedule"] = tou_schedule
             attributes["buy_rates"] = {k: round(v * 100 if v < 1 else v, 2) for k, v in buy_rates.items()}
             attributes["sell_rates"] = {k: round(v * 100 if v < 1 else v, 2) for k, v in sell_rates.items()}
-
-            # Add current buy/sell prices in cents
-            attributes["buy_price"] = tariff_data.get("buy_price")
-            attributes["sell_price"] = tariff_data.get("sell_price")
 
         return attributes
 
