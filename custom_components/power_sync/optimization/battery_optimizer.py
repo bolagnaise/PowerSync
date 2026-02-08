@@ -537,7 +537,13 @@ class BatteryOptimizer:
         dt = self.dt_hours
         eff = self.efficiency
         cap = self.capacity_kwh
-        now = dt_util.now()
+        # Snap to previous interval boundary so schedule timestamps
+        # align with hour/TOU boundaries (e.g. :00, :05, :10 for 5-min)
+        raw_now = dt_util.now()
+        now = raw_now.replace(
+            minute=(raw_now.minute // self.interval_minutes) * self.interval_minutes,
+            second=0, microsecond=0,
+        )
         threshold_kw = ACTION_THRESHOLD_W / 1000.0
 
         actions = []

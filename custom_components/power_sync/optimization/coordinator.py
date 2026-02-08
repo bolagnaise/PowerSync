@@ -619,12 +619,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Uses the tariff's TOU periods and buy/sell rates to produce
         per-interval prices for the LP optimizer's 48-hour horizon.
         """
-        now = dt_util.now()
+        # Snap to previous interval boundary so price steps align with
+        # hour/TOU boundaries and match the schedule timestamps.
+        raw_now = dt_util.now()
+        interval = self._config.interval_minutes
+        now = raw_now.replace(
+            minute=(raw_now.minute // interval) * interval,
+            second=0, microsecond=0,
+        )
         tou_periods = tariff.get("tou_periods", {})
         buy_rates = tariff.get("buy_rates", {})
         sell_rates = tariff.get("sell_rates", {})
         horizon_minutes = int(self._config.horizon_hours * 60)
-        interval = self._config.interval_minutes
         n_steps = horizon_minutes // interval
 
         import_prices: list[float] = []
