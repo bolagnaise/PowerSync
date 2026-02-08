@@ -1049,6 +1049,12 @@ SENSOR_TYPE_OPTIMIZATION_STATUS = "optimization_status"
 SENSOR_TYPE_OPTIMIZATION_SAVINGS = "optimization_savings"
 SENSOR_TYPE_OPTIMIZATION_NEXT_ACTION = "optimization_next_action"
 
+# LP forecast sensors (populated from built-in optimizer data each cycle)
+SENSOR_TYPE_LP_SOLAR_FORECAST = "lp_solar_forecast"
+SENSOR_TYPE_LP_LOAD_FORECAST = "lp_load_forecast"
+SENSOR_TYPE_LP_IMPORT_PRICE_FORECAST = "lp_import_price_forecast"
+SENSOR_TYPE_LP_EXPORT_PRICE_FORECAST = "lp_export_price_forecast"
+
 # ============================================================
 # EV Smart Charging Configuration
 # Coordinates EV charging alongside battery optimization

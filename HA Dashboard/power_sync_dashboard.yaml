@@ -524,6 +524,161 @@ views:
                 }
       - type: horizontal-stack
         cards:
+          - type: entity
+            entity: sensor.power_sync_lp_solar_forecast
+            name: Solar Forecast
+            icon: mdi:solar-power-variant
+          - type: entity
+            entity: sensor.power_sync_lp_load_forecast
+            name: Load Forecast
+            icon: mdi:home-lightning-bolt
+          - type: entity
+            entity: sensor.power_sync_lp_import_price_forecast
+            name: Import Price Avg
+            icon: mdi:cash-clock
+          - type: entity
+            entity: sensor.power_sync_lp_export_price_forecast
+            name: Export Price Avg
+            icon: mdi:cash-clock
+      - type: custom:apexcharts-card
+        header:
+          show: true
+          title: LP Forecast - Solar & Load (48h)
+          show_states: false
+        graph_span: 48h
+        span:
+          start: minute
+        yaxis:
+          - id: power
+            min: 0
+            apex_config:
+              tickAmount: 5
+              labels:
+                formatter: |
+                  EVAL:function(val) {
+                    return val.toFixed(1) + ' kW';
+                  }
+        series:
+          - entity: sensor.power_sync_lp_solar_forecast
+            name: Solar Forecast
+            type: area
+            color: '#FFD700'
+            yaxis_id: power
+            stroke_width: 2
+            opacity: 0.3
+            curve: smooth
+            extend_to: false
+            data_generator: |
+              const values = entity?.attributes?.forecast_values_kw;
+              if (!values || !Array.isArray(values)) return [];
+              const now = new Date();
+              const interval = 5 * 60 * 1000;
+              const start = new Date(Math.floor(now.getTime() / interval) * interval);
+              return values.map((v, i) => [start.getTime() + i * interval, v]);
+          - entity: sensor.power_sync_lp_load_forecast
+            name: Load Forecast
+            type: line
+            color: '#9C27B0'
+            yaxis_id: power
+            stroke_width: 2
+            curve: smooth
+            extend_to: false
+            data_generator: |
+              const values = entity?.attributes?.forecast_values_kw;
+              if (!values || !Array.isArray(values)) return [];
+              const now = new Date();
+              const interval = 5 * 60 * 1000;
+              const start = new Date(Math.floor(now.getTime() / interval) * interval);
+              return values.map((v, i) => [start.getTime() + i * interval, v]);
+        apex_config:
+          chart:
+            height: 200
+          stroke:
+            curve: smooth
+          legend:
+            show: true
+            position: bottom
+          tooltip:
+            x:
+              format: ddd HH:mm
+            'y':
+              formatter: |
+                EVAL:function(value) {
+                  if (value === null || value === undefined) return '';
+                  return value.toFixed(2) + ' kW';
+                }
+      - type: custom:apexcharts-card
+        header:
+          show: true
+          title: LP Forecast - Import & Export Prices (48h)
+          show_states: false
+        graph_span: 48h
+        span:
+          start: minute
+        yaxis:
+          - id: price
+            min: 0
+            apex_config:
+              tickAmount: 5
+              labels:
+                formatter: |
+                  EVAL:function(val) {
+                    return (val * 100).toFixed(0) + '¢';
+                  }
+        series:
+          - entity: sensor.power_sync_lp_import_price_forecast
+            name: Import Price
+            type: line
+            color: '#FF9800'
+            yaxis_id: price
+            stroke_width: 2
+            curve: stepline
+            extend_to: false
+            data_generator: |
+              const values = entity?.attributes?.price_values;
+              if (!values || !Array.isArray(values)) return [];
+              const now = new Date();
+              const interval = 5 * 60 * 1000;
+              const start = new Date(Math.floor(now.getTime() / interval) * interval);
+              return values.map((v, i) => [start.getTime() + i * interval, v]);
+          - entity: sensor.power_sync_lp_export_price_forecast
+            name: Export Price
+            type: line
+            color: '#4CAF50'
+            yaxis_id: price
+            stroke_width: 2
+            curve: stepline
+            extend_to: false
+            data_generator: |
+              const values = entity?.attributes?.price_values;
+              if (!values || !Array.isArray(values)) return [];
+              const now = new Date();
+              const interval = 5 * 60 * 1000;
+              const start = new Date(Math.floor(now.getTime() / interval) * interval);
+              return values.map((v, i) => [start.getTime() + i * interval, v]);
+        apex_config:
+          chart:
+            height: 200
+          stroke:
+            curve: stepline
+          legend:
+            show: true
+            position: bottom
+          tooltip:
+            x:
+              format: ddd HH:mm
+            'y':
+              formatter: |
+                EVAL:function(value) {
+                  if (value === null || value === undefined) return '';
+                  const cents = value * 100;
+                  if (Math.abs(cents) >= 1000) {
+                    return '$' + value.toFixed(2);
+                  }
+                  return cents.toFixed(1) + '¢';
+                }
+      - type: horizontal-stack
+        cards:
           - type: custom:button-card
             entity: sensor.dc_solar_curtailment
             name: DC Solar (Tesla)

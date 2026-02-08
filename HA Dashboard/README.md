@@ -9,6 +9,7 @@ The dashboard includes:
 - **Battery Control** - Force charge, force discharge, and restore normal buttons with duration selectors
 - **Power Flow Card** - Real-time energy flow visualization
 - **Price Charts** - Amber/Flow Power prices and TOU schedule sent to battery
+- **LP Forecast Charts** - 48-hour solar, load, and price forecasts from the built-in optimizer
 - **Solar Curtailment Status** - DC curtailment (Tesla) and AC inverter status cards
 - **AC Inverter Controls** - Load following, shutdown, and restore buttons for AC-coupled inverters
 - **Battery Health** - Gauges showing overall and individual battery health (up to 4 batteries)
@@ -73,6 +74,10 @@ The dashboard uses these default entity names. If your entities have different n
 | `sensor.grid_power` | Grid import/export power (kW) |
 | `sensor.home_load` | Home consumption power (kW) |
 | `sensor.tariff_schedule` | TOU schedule sent to Tesla |
+| `sensor.power_sync_lp_solar_forecast` | LP optimizer solar forecast (kWh total) |
+| `sensor.power_sync_lp_load_forecast` | LP optimizer load forecast (kWh total) |
+| `sensor.power_sync_lp_import_price_forecast` | LP optimizer import price forecast (avg $/kWh) |
+| `sensor.power_sync_lp_export_price_forecast` | LP optimizer export price forecast (avg $/kWh) |
 | `sensor.dc_solar_curtailment` | DC solar curtailment status (Tesla) |
 | `sensor.inverter_status` | AC-coupled inverter status |
 | `sensor.battery_health` | Battery health from mobile app TEDAPI scan |

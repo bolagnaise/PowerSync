@@ -134,6 +134,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._current_schedule: OptimizationSchedule | None = None
         self._last_update_time: datetime | None = None
 
+        # Cached forecast data (populated each optimization run)
+        self._last_solar_forecast: list[float] | None = None    # kW values
+        self._last_load_forecast: list[float] | None = None     # kW values
+        self._last_import_prices: list[float] | None = None     # $/kWh values
+        self._last_export_prices: list[float] | None = None     # $/kWh values
+
         # Price monitoring
         self._is_dynamic_pricing = False
         self._price_listener_unsub: Callable | None = None
@@ -394,6 +400,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._last_optimizer_result = result
             self._current_schedule = result.schedule
             self._last_update_time = dt_util.now()
+
+            # Store forecast data for LP forecast sensors
+            self._last_solar_forecast = solar_forecast
+            self._last_load_forecast = load_forecast
+            self._last_import_prices = import_prices
+            self._last_export_prices = export_prices
 
             # Log action distribution summary
             action_counts: dict[str, int] = {}
@@ -809,6 +821,40 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Force immediate re-optimization."""
         await self._run_optimization()
         return self._current_schedule
+
+    def get_forecast_data(self) -> dict[str, Any]:
+        """Get forecast data for LP forecast sensors.
+
+        Returns summary values (for sensor state) and full arrays (for attributes).
+        """
+        data: dict[str, Any] = {
+            "available": self._last_solar_forecast is not None,
+        }
+        dt_h = self._config.interval_minutes / 60
+
+        if self._last_solar_forecast:
+            data["solar_forecast_kwh"] = sum(self._last_solar_forecast) * dt_h
+            data["solar_peak_kw"] = max(self._last_solar_forecast)
+            data["solar_forecast"] = self._last_solar_forecast
+
+        if self._last_load_forecast:
+            data["load_forecast_kwh"] = sum(self._last_load_forecast) * dt_h
+            data["load_peak_kw"] = max(self._last_load_forecast)
+            data["load_forecast"] = self._last_load_forecast
+
+        if self._last_import_prices:
+            data["import_price_avg"] = sum(self._last_import_prices) / len(self._last_import_prices)
+            data["import_price_min"] = min(self._last_import_prices)
+            data["import_price_max"] = max(self._last_import_prices)
+            data["import_prices"] = self._last_import_prices
+
+        if self._last_export_prices:
+            data["export_price_avg"] = sum(self._last_export_prices) / len(self._last_export_prices)
+            data["export_price_min"] = min(self._last_export_prices)
+            data["export_price_max"] = max(self._last_export_prices)
+            data["export_prices"] = self._last_export_prices
+
+        return data
 
     def get_api_data(self) -> dict[str, Any]:
         """Get data for HTTP API and mobile app."""

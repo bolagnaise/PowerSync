@@ -63,6 +63,10 @@ from .const import (
     SENSOR_TYPE_BATTERY_HEALTH,
     SENSOR_TYPE_INVERTER_STATUS,
     SENSOR_TYPE_BATTERY_MODE,
+    SENSOR_TYPE_LP_SOLAR_FORECAST,
+    SENSOR_TYPE_LP_LOAD_FORECAST,
+    SENSOR_TYPE_LP_IMPORT_PRICE_FORECAST,
+    SENSOR_TYPE_LP_EXPORT_PRICE_FORECAST,
     BATTERY_MODE_STATE_NORMAL,
     BATTERY_MODE_STATE_FORCE_CHARGE,
     BATTERY_MODE_STATE_FORCE_DISCHARGE,
@@ -495,6 +499,19 @@ async def async_setup_entry(
                 )
             )
 
+    # Add LP forecast sensors if optimization coordinator exists
+    optimization_coordinator = domain_data.get("optimization_coordinator")
+    if optimization_coordinator:
+        _LOGGER.info("LP optimizer active - adding forecast sensors")
+        for description in LP_FORECAST_SENSORS:
+            entities.append(
+                LPForecastSensor(
+                    coordinator=optimization_coordinator,
+                    description=description,
+                    entry=entry,
+                )
+            )
+
     # Add tariff schedule sensor (always added for visualization)
     entities.append(
         TariffScheduleSensor(
@@ -753,6 +770,112 @@ class SolcastForecastSensor(CoordinatorEntity, SensorEntity):
         """Return additional attributes."""
         if self.entity_description.attr_fn:
             return self.entity_description.attr_fn(self.coordinator.data)
+        return {}
+
+
+# ============================================================
+# LP Forecast Sensors (built-in optimizer forecast data)
+# ============================================================
+
+LP_FORECAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_LP_SOLAR_FORECAST,
+        name="Solar Forecast",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        suggested_display_precision=1,
+        icon="mdi:solar-power-variant",
+        value_fn=lambda data: data.get("solar_forecast_kwh") if data and data.get("available") else None,
+        attr_fn=lambda data: {
+            "peak_kw": data.get("solar_peak_kw"),
+            "forecast_values_kw": data.get("solar_forecast"),
+        } if data and data.get("available") else {},
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_LP_LOAD_FORECAST,
+        name="Load Forecast",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        suggested_display_precision=1,
+        icon="mdi:home-lightning-bolt",
+        value_fn=lambda data: data.get("load_forecast_kwh") if data and data.get("available") else None,
+        attr_fn=lambda data: {
+            "peak_kw": data.get("load_peak_kw"),
+            "forecast_values_kw": data.get("load_forecast"),
+        } if data and data.get("available") else {},
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_LP_IMPORT_PRICE_FORECAST,
+        name="Import Price Forecast",
+        native_unit_of_measurement=f"{CURRENCY_DOLLAR}/{UnitOfEnergy.KILO_WATT_HOUR}",
+        device_class=SensorDeviceClass.MONETARY,
+        suggested_display_precision=4,
+        icon="mdi:cash-clock",
+        value_fn=lambda data: data.get("import_price_avg") if data and data.get("available") else None,
+        attr_fn=lambda data: {
+            "min_price": data.get("import_price_min"),
+            "max_price": data.get("import_price_max"),
+            "price_values": data.get("import_prices"),
+        } if data and data.get("available") else {},
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_LP_EXPORT_PRICE_FORECAST,
+        name="Export Price Forecast",
+        native_unit_of_measurement=f"{CURRENCY_DOLLAR}/{UnitOfEnergy.KILO_WATT_HOUR}",
+        device_class=SensorDeviceClass.MONETARY,
+        suggested_display_precision=4,
+        icon="mdi:cash-clock",
+        value_fn=lambda data: data.get("export_price_avg") if data and data.get("available") else None,
+        attr_fn=lambda data: {
+            "min_price": data.get("export_price_min"),
+            "max_price": data.get("export_price_max"),
+            "price_values": data.get("export_prices"),
+        } if data and data.get("available") else {},
+    ),
+)
+
+
+class LPForecastSensor(CoordinatorEntity, SensorEntity):
+    """Sensor for LP optimizer forecast data (solar, load, prices).
+
+    Reads forecast data stored by the OptimizationCoordinator each
+    optimization cycle via get_forecast_data().
+    """
+
+    entity_description: PowerSyncSensorEntityDescription
+
+    def __init__(
+        self,
+        coordinator,
+        description: PowerSyncSensorEntityDescription,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator)
+        self.entity_description = description
+        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        self._attr_has_entity_name = True
+        self._attr_suggested_object_id = f"power_sync_{description.key}"
+
+    @property
+    def _forecast_data(self) -> dict[str, Any]:
+        """Get forecast data from the optimization coordinator."""
+        if hasattr(self.coordinator, "get_forecast_data"):
+            return self.coordinator.get_forecast_data()
+        return {}
+
+    @property
+    def native_value(self) -> Any:
+        """Return the state of the sensor."""
+        if self.entity_description.value_fn:
+            return self.entity_description.value_fn(self._forecast_data)
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return additional attributes."""
+        if self.entity_description.attr_fn:
+            return self.entity_description.attr_fn(self._forecast_data)
         return {}
 
 
