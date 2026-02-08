@@ -2956,8 +2956,10 @@ async def _action_start_ev_charging_dynamic(
     _LOGGER.info(f"⚡ Dynamic EV charging started ({mode_label} mode, vehicle={vehicle_id})")
 
     # Send push notification if enabled
+    # For solar_surplus mode, skip the immediate notification — a notification will be
+    # sent when charging actually starts (after conditions are met) in _dynamic_ev_update
     notify_on_start = params.get("notify_on_start", True)
-    if notify_on_start:
+    if notify_on_start and dynamic_mode != "solar_surplus":
         try:
             # Look up vehicle name from VIN, fallback to param or truncated VIN
             vehicle_name = params.get("vehicle_name")
