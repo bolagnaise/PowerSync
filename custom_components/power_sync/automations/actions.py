@@ -585,19 +585,27 @@ async def _set_ev_charging_amps_ble(
     """Set EV charging amps via Tesla BLE."""
     amps_entity = TESLA_BLE_NUMBER_CHARGING_AMPS.format(prefix=ble_prefix)
 
-    if hass.states.get(amps_entity) is None:
+    state = hass.states.get(amps_entity)
+    if state is None:
         _LOGGER.error(f"Tesla BLE charging amps entity not found: {amps_entity}")
         return False
+
+    # Cap amps to entity's min/max range
+    entity_min = state.attributes.get("min", 0)
+    entity_max = state.attributes.get("max", amps)
+    capped_amps = max(int(entity_min), min(int(entity_max), int(amps)))
+    if capped_amps != amps:
+        _LOGGER.debug(f"BLE amps capped from {amps}A to {capped_amps}A (entity range: {entity_min}-{entity_max})")
 
     try:
         await _wake_tesla_ble(hass, ble_prefix)
         await hass.services.async_call(
             "number",
             "set_value",
-            {"entity_id": amps_entity, "value": amps},
+            {"entity_id": amps_entity, "value": capped_amps},
             blocking=True,
         )
-        _LOGGER.info(f"Set EV charging amps to {amps}A via Tesla BLE: {amps_entity}")
+        _LOGGER.info(f"Set EV charging amps to {capped_amps}A via Tesla BLE: {amps_entity}")
         return True
     except Exception as e:
         _LOGGER.error(f"Failed to set EV charging amps via BLE: {e}")

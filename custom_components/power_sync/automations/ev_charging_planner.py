@@ -2310,9 +2310,10 @@ class AutoScheduleSettings:
             priority = ChargingPriority.COST_OPTIMIZED
 
         # Backward compatibility: map old min_battery_soc to new names
+        # Guard: old min_battery_soc > 30 was likely the EV target_soc (e.g. 80%), not home battery
         old_min_battery = data.get("min_battery_soc", 20)
         home_battery_minimum = data.get("home_battery_minimum", old_min_battery if old_min_battery <= 30 else 20)
-        home_battery_reserve = data.get("home_battery_reserve", old_min_battery)
+        home_battery_reserve = data.get("home_battery_reserve", old_min_battery if old_min_battery <= 30 else 20)
 
         return cls(
             enabled=data.get("enabled", False),
@@ -3958,6 +3959,7 @@ class AutoScheduleExecutor:
 
         params = {
             "vehicle_vin": vehicle_vin,
+            "vehicle_name": settings.display_name,
             "dynamic_mode": dynamic_mode,
             "min_charge_amps": settings.min_charge_amps,
             "max_charge_amps": settings.max_charge_amps,
