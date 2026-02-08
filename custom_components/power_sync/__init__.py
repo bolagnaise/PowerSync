@@ -7058,7 +7058,9 @@ class AutoScheduleStatusView(HomeAssistantView):
                     "priority": vehicle_settings.priority.value,
                     "target_soc": vehicle_settings.target_soc,
                     "departure_time": vehicle_settings.departure_time,
+                    "departure_days": vehicle_settings.departure_days,
                     "home_battery_minimum": vehicle_settings.home_battery_minimum,
+                    "no_grid_import": vehicle_settings.no_grid_import,
                 }
 
             return web.json_response({
