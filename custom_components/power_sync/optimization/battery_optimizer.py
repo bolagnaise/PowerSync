@@ -295,11 +295,14 @@ class BatteryOptimizer:
             b_ub.append(soc_0 - self.backup_reserve)
 
         # === Variable bounds ===
+        # Cap grid at 100 kW (generous safety limit; prevents unbounded LP
+        # if a price accidentally goes negative or zero).
+        max_grid_kw = 100.0
         bounds = []
         for t in range(n):
-            bounds.append((0, None))  # grid_import >= 0, unbounded above
+            bounds.append((0, max_grid_kw))  # grid_import
         for t in range(n):
-            bounds.append((0, None))  # grid_export >= 0
+            bounds.append((0, max_grid_kw))  # grid_export
         for t in range(n):
             bounds.append((0, self.max_charge_kw))  # battery_charge
         for t in range(n):

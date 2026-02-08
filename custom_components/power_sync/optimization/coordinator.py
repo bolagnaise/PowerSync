@@ -704,11 +704,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             # When price is zero the LP has zero marginal cost, so HiGHS
             # may assign imports/exports arbitrarily (LP degeneracy).
-            # Apply tiny penalties to break the degeneracy:
-            if buy < 0.01:
-                buy = -0.001   # Incentivize charging during free periods
-            if sell < 0.01:
-                sell = -0.001  # Penalize exporting when there's no revenue
+            # Use tiny positive values to break degeneracy while keeping
+            # the LP bounded (negative import price → unbounded!).
+            if buy < 0.001:
+                buy = 0.001    # Near-free import: incentivizes charging
+            if sell < 0.001:
+                sell = 0.001   # Near-zero export: discourages wasteful export
 
             import_prices.append(buy)
             export_prices.append(sell)
