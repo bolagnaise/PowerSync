@@ -2250,7 +2250,6 @@ class AutoScheduleSettings:
 
     # Battery constraints (new unified naming)
     home_battery_minimum: int = 20  # Don't START EV charging unless home battery >= this %
-    home_battery_reserve: int = 20  # Set Powerwall backup reserve to this % during charging
     max_grid_price_cents: float = 25.0  # Don't charge from grid above this price
     no_grid_import: bool = False  # Prevent grid imports during EV charging
 
@@ -2286,7 +2285,6 @@ class AutoScheduleSettings:
             "departure_days": self.departure_days,
             "priority": self.priority.value,
             "home_battery_minimum": self.home_battery_minimum,
-            "home_battery_reserve": self.home_battery_reserve,
             "max_grid_price_cents": self.max_grid_price_cents,
             "no_grid_import": self.no_grid_import,
             "charger_type": self.charger_type,
@@ -2313,12 +2311,6 @@ class AutoScheduleSettings:
         # Guard: old min_battery_soc > 30 was likely the EV target_soc (e.g. 80%), not home battery
         old_min_battery = data.get("min_battery_soc", 20)
         home_battery_minimum = data.get("home_battery_minimum", old_min_battery if old_min_battery <= 30 else 20)
-        home_battery_reserve = data.get("home_battery_reserve", old_min_battery if old_min_battery <= 30 else 20)
-        # home_battery_reserve is the Powerwall backup reserve set DURING EV charging
-        # (low value = allow more discharge). Values > 30% are nonsensical (likely
-        # corrupted from old target_soc) and would PREVENT battery discharge.
-        if home_battery_reserve > 30:
-            home_battery_reserve = 20
 
         return cls(
             enabled=data.get("enabled", False),
@@ -2329,7 +2321,6 @@ class AutoScheduleSettings:
             departure_days=data.get("departure_days", [0, 1, 2, 3, 4]),
             priority=priority,
             home_battery_minimum=home_battery_minimum,
-            home_battery_reserve=home_battery_reserve,
             max_grid_price_cents=data.get("max_grid_price_cents", 25.0),
             no_grid_import=data.get("no_grid_import", False),
             charger_type=data.get("charger_type", "tesla"),
@@ -2355,10 +2346,6 @@ class AutoScheduleState:
     last_decision_reason: str = ""
     started_at: Optional[datetime] = None
 
-    # Backup reserve management - track original to restore after charging
-    original_backup_reserve: Optional[int] = None
-    backup_reserve_modified: bool = False
-
     # Curtailment override management - track original export rule to restore after charging
     original_export_rule: Optional[str] = None
     curtailment_override_active: bool = False
@@ -2381,8 +2368,6 @@ class AutoScheduleState:
             "last_decision": self.last_decision,
             "last_decision_reason": self.last_decision_reason,
             "started_at": self.started_at.isoformat() if self.started_at else None,
-            "original_backup_reserve": self.original_backup_reserve,
-            "backup_reserve_modified": self.backup_reserve_modified,
             "original_export_rule": self.original_export_rule,
             "curtailment_override_active": self.curtailment_override_active,
             "last_known_soc": self.last_known_soc,
@@ -2656,9 +2641,6 @@ class AutoScheduleExecutor:
                     value = ChargingPriority(value)
                 except ValueError:
                     continue
-            # Clamp home_battery_reserve to max 30% (backup reserve during EV charging)
-            if key == "home_battery_reserve" and isinstance(value, (int, float)) and value > 30:
-                value = 20
             if hasattr(settings, key):
                 setattr(settings, key, value)
 
@@ -3049,14 +3031,9 @@ class AutoScheduleExecutor:
         """
         for vehicle_id, settings in self._settings.items():
             if not settings.enabled:
-                # Restore backup reserve and curtailment if modified and auto-schedule is now disabled
+                # Restore curtailment if modified and auto-schedule is now disabled
                 state = self._state.get(vehicle_id)
                 if state:
-                    if state.backup_reserve_modified:
-                        _LOGGER.info(
-                            f"Auto-schedule disabled for {vehicle_id}, restoring backup reserve"
-                        )
-                        await self._restore_backup_reserve(state)
                     if state.curtailment_override_active:
                         _LOGGER.info(
                             f"Auto-schedule disabled for {vehicle_id}, restoring curtailment"
@@ -3111,15 +3088,8 @@ class AutoScheduleExecutor:
         # Get EV's current SoC to check if we've reached target
         ev_soc = await self._get_vehicle_soc(vehicle_id)
 
-        # Check if EV has reached target SoC - if so, restore backup reserve
+        # Check if EV has reached target SoC
         if ev_soc >= settings.target_soc:
-            if state.backup_reserve_modified:
-                _LOGGER.info(
-                    f"Auto-schedule: EV reached target SoC ({ev_soc}% >= {settings.target_soc}%), "
-                    f"restoring backup reserve"
-                )
-                await self._restore_backup_reserve(state)
-
             # Stop charging if still charging
             if state.is_charging:
                 await self._stop_charging(vehicle_id, settings, state)
@@ -3175,7 +3145,7 @@ class AutoScheduleExecutor:
                     reason = "Smart Optimization: no charging scheduled"
 
                 if state.is_charging:
-                    await self._stop_charging(vehicle_id, settings, state, restore_backup_reserve=True)
+                    await self._stop_charging(vehicle_id, settings, state)
                     state.last_decision = "stopped"
                     state.last_decision_reason = reason
                     # Clear tracked charge rate
@@ -3341,7 +3311,7 @@ class AutoScheduleExecutor:
             state.last_decision_reason = reason
         elif not should_charge and state.is_charging:
             # Restore backup reserve when stopping - we'll set it again when next window starts
-            await self._stop_charging(vehicle_id, settings, state, restore_backup_reserve=True)
+            await self._stop_charging(vehicle_id, settings, state)
             state.last_decision = "stopped"
             state.last_decision_reason = reason
         else:
@@ -3936,20 +3906,6 @@ class AutoScheduleExecutor:
         """Start dynamic charging for the vehicle."""
         from .actions import _action_start_ev_charging_dynamic
 
-        # Set backup reserve to allow battery discharge down to min_battery_soc
-        # This lets the home battery contribute to EV charging
-        if not state.backup_reserve_modified:
-            current_reserve = await self._get_current_backup_reserve()
-            if current_reserve is not None:
-                state.original_backup_reserve = current_reserve
-                # Set backup reserve to home_battery_reserve to allow discharge to that level
-                if await self._set_backup_reserve(settings.home_battery_reserve):
-                    state.backup_reserve_modified = True
-                    _LOGGER.info(
-                        f"Auto-schedule: Set backup reserve from {current_reserve}% to {settings.home_battery_reserve}% "
-                        f"to allow battery discharge for EV charging"
-                    )
-
         # Determine mode based on source
         if source == "solar_surplus":
             dynamic_mode = "solar_surplus"
@@ -3973,8 +3929,8 @@ class AutoScheduleExecutor:
             "max_charge_amps": settings.max_charge_amps,
             "voltage": settings.voltage,
             "charger_type": settings.charger_type,
-            "min_battery_soc": settings.home_battery_reserve,
-            "pause_below_soc": settings.home_battery_reserve - 10,
+            "min_battery_soc": settings.home_battery_minimum,
+            "pause_below_soc": max(0, settings.home_battery_minimum - 10),
             "charger_switch_entity": settings.charger_switch_entity,
             "charger_amps_entity": settings.charger_amps_entity,
             "ocpp_charger_id": settings.ocpp_charger_id,
@@ -4001,14 +3957,8 @@ class AutoScheduleExecutor:
         vehicle_id: str,
         settings: AutoScheduleSettings,
         state: AutoScheduleState,
-        restore_backup_reserve: bool = False,
     ) -> None:
-        """Stop charging for the vehicle.
-
-        Args:
-            restore_backup_reserve: If True, restore the original backup reserve
-                                   (used when EV charging is complete/target reached)
-        """
+        """Stop charging for the vehicle."""
         from .actions import _action_stop_ev_charging_dynamic
 
         # Only pass vehicle_id if it looks like a valid VIN (17 chars)
@@ -4026,28 +3976,12 @@ class AutoScheduleExecutor:
             _LOGGER.info(f"Auto-schedule: Stopped charging for {vehicle_id}")
             # Note: Notifications are sent by _action_stop_ev_charging_dynamic
 
-            # Restore backup reserve if requested (EV charging complete)
-            if restore_backup_reserve:
-                await self._restore_backup_reserve(state)
-
             # Always restore curtailment when stopping (if it was overridden)
             await self._restore_curtailment(state)
 
         except Exception as e:
             _LOGGER.error(f"Auto-schedule: Error stopping charging for {vehicle_id}: {e}")
 
-    async def _restore_backup_reserve(self, state: AutoScheduleState) -> None:
-        """Restore the original backup reserve after EV charging completes."""
-        if state.backup_reserve_modified and state.original_backup_reserve is not None:
-            if await self._set_backup_reserve(state.original_backup_reserve):
-                _LOGGER.info(
-                    f"Auto-schedule: Restored backup reserve to original {state.original_backup_reserve}% "
-                    f"after EV charging complete"
-                )
-                state.backup_reserve_modified = False
-                state.original_backup_reserve = None
-            else:
-                _LOGGER.warning("Auto-schedule: Failed to restore backup reserve")
 
 
 # Global auto-schedule executor instance

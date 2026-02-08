@@ -7059,7 +7059,6 @@ class AutoScheduleStatusView(HomeAssistantView):
                     "target_soc": vehicle_settings.target_soc,
                     "departure_time": vehicle_settings.departure_time,
                     "home_battery_minimum": vehicle_settings.home_battery_minimum,
-                    "home_battery_reserve": vehicle_settings.home_battery_reserve,
                 }
 
             return web.json_response({
