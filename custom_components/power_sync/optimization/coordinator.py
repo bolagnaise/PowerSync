@@ -364,8 +364,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             import_prices = prices[0] if prices else []
             export_prices = prices[1] if prices else []
-            solar_forecast = solar or []
-            load_forecast = load or []
+
+            # Convert forecasts from Watts (forecaster output) to kW (LP input)
+            solar_forecast = [v / 1000.0 for v in solar] if solar else []
+            load_forecast = [v / 1000.0 for v in load] if load else []
+
+            if solar_forecast and load_forecast:
+                _LOGGER.debug(
+                    "LP inputs: solar=%.1f-%.1fkW (avg %.1fkW), "
+                    "load=%.1f-%.1fkW (avg %.1fkW), soc=%.1f%%",
+                    min(solar_forecast), max(solar_forecast),
+                    sum(solar_forecast) / len(solar_forecast),
+                    min(load_forecast), max(load_forecast),
+                    sum(load_forecast) / len(load_forecast),
+                    soc * 100,
+                )
 
             # Run LP in executor thread to avoid blocking event loop
             result: OptimizerResult = await self.hass.async_add_executor_job(
