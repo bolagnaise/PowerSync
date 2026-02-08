@@ -7861,9 +7861,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         and entry.options.get(CONF_OPTIMIZATION_ENABLED, True)  # Also check user's toggle
     )
 
-    if aemo_spike_enabled and ml_optimization_enabled:
-        _LOGGER.info("⚡ AEMO spike detection disabled - ML VPP handles spike response instead")
-    elif aemo_spike_enabled:
+    if aemo_spike_enabled:
         aemo_region = entry.options.get(
             CONF_AEMO_REGION,
             entry.data.get(CONF_AEMO_REGION)
@@ -7905,9 +7903,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_AEMO_REGION)
         )
 
-        if sungrow_aemo_spike_enabled and ml_optimization_enabled:
-            _LOGGER.info("⚡ Sungrow AEMO spike detection disabled - ML VPP handles spike response instead")
-        elif sungrow_aemo_spike_enabled and sungrow_aemo_region:
+        if sungrow_aemo_spike_enabled and sungrow_aemo_region:
             sungrow_aemo_spike_manager = SungrowAEMOSpikeManager(
                 hass=hass,
                 entry=entry,
