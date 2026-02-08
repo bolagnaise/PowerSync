@@ -509,18 +509,60 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Dynamic pricing (Amber, Flow Power, etc.)
         if self.price_coordinator and self.price_coordinator.data:
             data = self.price_coordinator.data
-            import_prices = []
-            export_prices = []
 
-            # Amber format
-            if "import_prices" in data:
-                for p in data.get("import_prices", []):
-                    import_prices.append(p.get("perKwh", 0) / 100)
-                for p in data.get("export_prices", []):
-                    export_prices.append(p.get("perKwh", 0) / 100)
+            # Amber format: {"current": [...], "forecast": [...]}
+            # Each entry has perKwh (cents), channelType ("general"/"feedIn")
+            # forecast is 30-min resolution; expand to 5-min intervals for LP
+            if "current" in data or "forecast" in data:
+                all_entries = list(data.get("current", []) or []) + list(data.get("forecast", []) or [])
+                if all_entries:
+                    # Separate by channel type
+                    general = [e for e in all_entries if e.get("channelType") == "general"]
+                    feed_in = [e for e in all_entries if e.get("channelType") == "feedIn"]
 
-            if import_prices:
-                return (import_prices, export_prices)
+                    # Sort by startTime if available
+                    for lst in (general, feed_in):
+                        lst.sort(key=lambda e: e.get("startTime", ""))
+
+                    # Build 5-min price arrays: each 30-min entry → 6 intervals
+                    interval = self._config.interval_minutes  # 5
+                    expand = 30 // interval  # 6
+                    n_steps = int(self._config.horizon_hours * 60) // interval  # 576
+
+                    import_prices = []
+                    for e in general:
+                        price_dollar = e.get("perKwh", 0) / 100  # cents → $/kWh
+                        import_prices.extend([price_dollar] * expand)
+
+                    export_prices = []
+                    for e in feed_in:
+                        # feedIn perKwh is negative (you get paid), abs for optimizer
+                        price_dollar = abs(e.get("perKwh", 0)) / 100
+                        export_prices.extend([price_dollar] * expand)
+
+                    # Pad or trim to n_steps
+                    if import_prices:
+                        if len(import_prices) < n_steps:
+                            last = import_prices[-1] if import_prices else 0.25
+                            import_prices.extend([last] * (n_steps - len(import_prices)))
+                        import_prices = import_prices[:n_steps]
+
+                    if export_prices:
+                        if len(export_prices) < n_steps:
+                            last = export_prices[-1] if export_prices else 0.08
+                            export_prices.extend([last] * (n_steps - len(export_prices)))
+                        export_prices = export_prices[:n_steps]
+
+                    if import_prices:
+                        _LOGGER.debug(
+                            "Amber price forecast: %d import steps (%.1fc-%.1fc), %d export steps (%.1fc-%.1fc)",
+                            len(import_prices),
+                            min(import_prices) * 100, max(import_prices) * 100,
+                            len(export_prices),
+                            min(export_prices) * 100 if export_prices else 0,
+                            max(export_prices) * 100 if export_prices else 0,
+                        )
+                        return (import_prices, export_prices)
 
         # Static TOU pricing (GloBird, custom tariff, etc.)
         # Generate 576-point price forecast from tariff schedule
