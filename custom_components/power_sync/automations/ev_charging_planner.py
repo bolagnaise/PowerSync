@@ -2314,6 +2314,11 @@ class AutoScheduleSettings:
         old_min_battery = data.get("min_battery_soc", 20)
         home_battery_minimum = data.get("home_battery_minimum", old_min_battery if old_min_battery <= 30 else 20)
         home_battery_reserve = data.get("home_battery_reserve", old_min_battery if old_min_battery <= 30 else 20)
+        # home_battery_reserve is the Powerwall backup reserve set DURING EV charging
+        # (low value = allow more discharge). Values > 30% are nonsensical (likely
+        # corrupted from old target_soc) and would PREVENT battery discharge.
+        if home_battery_reserve > 30:
+            home_battery_reserve = 20
 
         return cls(
             enabled=data.get("enabled", False),
@@ -2651,6 +2656,9 @@ class AutoScheduleExecutor:
                     value = ChargingPriority(value)
                 except ValueError:
                     continue
+            # Clamp home_battery_reserve to max 30% (backup reserve during EV charging)
+            if key == "home_battery_reserve" and isinstance(value, (int, float)) and value > 30:
+                value = 20
             if hasattr(settings, key):
                 setattr(settings, key, value)
 
