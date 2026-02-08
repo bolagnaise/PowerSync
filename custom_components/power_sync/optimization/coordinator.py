@@ -1002,8 +1002,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         ]
         config_updates = {k: v for k, v in settings.items() if k in config_keys}
         if config_updates:
+            # Convert backup_reserve from percentage (0-100) to decimal (0-1)
+            if "backup_reserve" in config_updates:
+                reserve = config_updates["backup_reserve"]
+                if reserve > 1:
+                    config_updates["backup_reserve"] = reserve / 100
+
             self.update_config(**config_updates)
             response["changes"].append(f"config: {list(config_updates.keys())}")
+
+            # Persist backup_reserve to config entry (as percentage)
+            if "backup_reserve" in settings and self._entry:
+                from ..const import CONF_OPTIMIZATION_BACKUP_RESERVE
+                reserve_pct = settings["backup_reserve"]
+                if reserve_pct <= 1:
+                    reserve_pct = int(reserve_pct * 100)
+                new_options = dict(self._entry.options)
+                new_options[CONF_OPTIMIZATION_BACKUP_RESERVE] = reserve_pct
+                self.hass.config_entries.async_update_entry(self._entry, options=new_options)
 
         return response
 

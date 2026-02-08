@@ -214,6 +214,8 @@ from .const import (
     OPT_PROVIDER_POWERSYNC,
     CONF_OPTIMIZATION_COST_FUNCTION,
     CONF_OPTIMIZATION_INTERVAL,
+    CONF_OPTIMIZATION_BACKUP_RESERVE,
+    DEFAULT_OPTIMIZATION_BACKUP_RESERVE,
 )
 from .inverters import get_inverter_controller
 from .optimization.coordinator import OptimizationCoordinator
@@ -13448,6 +13450,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Check options first (where set_settings saves), then fall back to data for defaults
             saved_cost_function = entry.options.get(CONF_OPTIMIZATION_COST_FUNCTION, entry.data.get(CONF_OPTIMIZATION_COST_FUNCTION, "self_consumption"))
             saved_interval_minutes = entry.options.get(CONF_OPTIMIZATION_INTERVAL, entry.data.get(CONF_OPTIMIZATION_INTERVAL, 5))
+            saved_backup_reserve_pct = entry.options.get(
+                CONF_OPTIMIZATION_BACKUP_RESERVE,
+                entry.data.get(CONF_OPTIMIZATION_BACKUP_RESERVE))
+            if saved_backup_reserve_pct is not None:
+                # Config entry stores as percentage (0-100), convert to decimal
+                saved_backup_reserve = saved_backup_reserve_pct / 100
+            else:
+                saved_backup_reserve = DEFAULT_OPTIMIZATION_BACKUP_RESERVE  # 0.20
 
             optimization_coordinator = OptimizationCoordinator(
                 hass=hass,
@@ -13465,10 +13475,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await optimization_coordinator.async_setup()
             await optimization_coordinator.async_config_entry_first_refresh()
 
-            # Set cost function and interval from saved settings
+            # Set cost function, interval, and backup reserve from saved settings
             optimization_coordinator.set_cost_function(saved_cost_function)
-            optimization_coordinator.update_config(interval_minutes=saved_interval_minutes)
-            _LOGGER.info(f"Smart Optimization cost function: {saved_cost_function}, interval: {saved_interval_minutes}min")
+            optimization_coordinator.update_config(
+                interval_minutes=saved_interval_minutes,
+                backup_reserve=saved_backup_reserve,
+            )
+            _LOGGER.info(f"Smart Optimization cost function: {saved_cost_function}, interval: {saved_interval_minutes}min, backup_reserve: {saved_backup_reserve:.0%}")
 
             # Enable the optimizer
             await optimization_coordinator.enable()
@@ -13751,7 +13764,7 @@ class OptimizationSettingsView(HomeAssistantView):
                 "success": True,
                 "enabled": False,
                 "cost_function": "cost",
-                "backup_reserve": 0.2,
+                "backup_reserve": int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
             })
 
         return web.json_response({
@@ -13763,7 +13776,7 @@ class OptimizationSettingsView(HomeAssistantView):
                 "battery_capacity_wh": opt_coordinator._config.battery_capacity_wh,
                 "max_charge_w": opt_coordinator._config.max_charge_w,
                 "max_discharge_w": opt_coordinator._config.max_discharge_w,
-                "backup_reserve": opt_coordinator._config.backup_reserve,
+                "backup_reserve": round(opt_coordinator._config.backup_reserve * 100),
                 "interval_minutes": opt_coordinator._config.interval_minutes,
                 "horizon_hours": opt_coordinator._config.horizon_hours,
             }
