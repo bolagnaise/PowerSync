@@ -2710,7 +2710,7 @@ async def _dynamic_ev_update(
                 )
             elif current_amps > 0 and new_amps == 0:
                 # Session end - charging stopped
-                live_soc = live_status.get("ev_state_of_charge")
+                live_soc = live_status.get("battery_soc")
                 end_soc = int(live_soc) if live_soc else None
                 await session_manager.end_session(
                     vehicle_id=vehicle_id,
@@ -3021,8 +3021,8 @@ async def _action_stop_ev_charging_dynamic(
                     end_soc = None
                     try:
                         live_status = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("live_status", {})
-                        if live_status.get("ev_state_of_charge"):
-                            end_soc = int(live_status["ev_state_of_charge"])
+                        if live_status.get("battery_soc"):
+                            end_soc = int(live_status["battery_soc"])
                     except Exception:
                         pass
 

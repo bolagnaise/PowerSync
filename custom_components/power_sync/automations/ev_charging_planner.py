@@ -3966,7 +3966,7 @@ class AutoScheduleExecutor:
         if vehicle_id and vehicle_id != "_default" and len(vehicle_id) == 17:
             vid = vehicle_id
 
-        params = {"vehicle_id": vid}
+        params = {"vehicle_vin": vid}
 
         try:
             await _action_stop_ev_charging_dynamic(self.hass, self.config_entry, params)
@@ -4211,7 +4211,7 @@ class PriceLevelChargingExecutor:
             "dynamic_mode": "battery_target",
             "min_charge_amps": 5,
             "max_charge_amps": 32,
-            "voltage": 240,
+            "voltage": 230,
             "charger_type": "tesla",
             "no_grid_import": self._get_settings().get("no_grid_import", False),
         }
@@ -4679,7 +4679,7 @@ class ScheduledChargingExecutor:
             "dynamic_mode": "battery_target",
             "min_charge_amps": 5,
             "max_charge_amps": 32,
-            "voltage": 240,
+            "voltage": 230,
             "charger_type": "tesla",
         }
 
@@ -4876,7 +4876,7 @@ class EVChargingModeCoordinator:
             "dynamic_mode": "battery_target",
             "min_charge_amps": 5,
             "max_charge_amps": 32,
-            "voltage": 240,
+            "voltage": 230,
             "charger_type": "tesla",
         }
 
