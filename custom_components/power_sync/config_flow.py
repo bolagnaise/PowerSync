@@ -1330,8 +1330,10 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         ),
                     }
 
-                    # For Globird/AEMO VPP users, offer custom tariff configuration
-                    if self._selected_electricity_provider in ("globird", "aemo_vpp", "other"):
+                    # For Globird/AEMO VPP users with non-Tesla batteries, offer custom tariff
+                    # Tesla users don't need custom tariff - rates come from the Tesla tariff API
+                    if (self._selected_electricity_provider in ("globird", "aemo_vpp", "other")
+                            and self._selected_battery_system != BATTERY_SYSTEM_TESLA):
                         return await self.async_step_custom_tariff()
 
                     # Route based on battery system selection
@@ -1345,17 +1347,18 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # AEMO disabled
                 self._aemo_data = {CONF_AEMO_SPIKE_ENABLED: False}
 
-                if self._aemo_only_mode:
-                    # Can't be in AEMO-only mode without AEMO enabled
-                    errors["base"] = "aemo_required_in_aemo_mode"
+                # For Globird/AEMO VPP with non-Tesla batteries, offer custom tariff
+                # Tesla users don't need it - rates come from the Tesla tariff API
+                if (self._selected_electricity_provider in ("globird", "aemo_vpp", "other")
+                        and self._selected_battery_system != BATTERY_SYSTEM_TESLA):
+                    return await self.async_step_custom_tariff()
+
+                if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
+                    return await self.async_step_sigenergy_credentials()
+                elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
+                    return await self.async_step_sungrow()
                 else:
-                    # Amber mode without AEMO: route based on battery system
-                    if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
-                        return await self.async_step_sigenergy_credentials()
-                    elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
-                        return await self.async_step_sungrow()
-                    else:
-                        return await self.async_step_tesla_provider()
+                    return await self.async_step_tesla_provider()
 
         # Build region choices
         region_choices = {"": "Select Region..."}
@@ -1368,7 +1371,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             {
                 vol.Optional(CONF_AEMO_SPIKE_ENABLED, default=default_enabled): bool,
                 vol.Optional(CONF_AEMO_REGION, default=""): vol.In(region_choices),
-                vol.Optional(CONF_AEMO_SPIKE_THRESHOLD, default=300.0): vol.All(
+                vol.Optional(CONF_AEMO_SPIKE_THRESHOLD, default=3000.0): vol.All(
                     vol.Coerce(float), vol.Range(min=0.0, max=20000.0)
                 ),
             }
@@ -1379,7 +1382,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=data_schema,
             errors=errors,
             description_placeholders={
-                "threshold_hint": "300 = $300/MWh (typical spike level)",
+                "threshold_hint": "Default: $3,000/MWh. GloBird spike exports use $3,000/MWh. Adjust only if your plan specifies a different threshold.",
             },
         )
 
@@ -2557,8 +2560,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             if not is_tesla:
                 self._amber_options[CONF_FORCE_TARIFF_MODE_TOGGLE] = False
 
-            # Route to curtailment options page
-            return await self.async_step_curtailment_options()
+            # Route to demand charge options page
+            return await self.async_step_demand_charge_options()
 
         # Build schema dict - conditionally include force mode toggle for Tesla only
         schema_dict = {
@@ -2641,51 +2644,67 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_CHIP_MODE_THRESHOLD,
                 default=self._get_option(CONF_CHIP_MODE_THRESHOLD, DEFAULT_CHIP_MODE_THRESHOLD),
             ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=200.0)),
-            vol.Optional(
-                CONF_DEMAND_CHARGE_ENABLED,
-                default=self._get_option(CONF_DEMAND_CHARGE_ENABLED, False),
-            ): bool,
-            vol.Optional(
-                CONF_DEMAND_CHARGE_RATE,
-                default=self._get_option(CONF_DEMAND_CHARGE_RATE, 10.0),
-            ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
-            vol.Optional(
-                CONF_DEMAND_CHARGE_START_TIME,
-                default=self._get_option(CONF_DEMAND_CHARGE_START_TIME, "14:00"),
-            ): str,
-            vol.Optional(
-                CONF_DEMAND_CHARGE_END_TIME,
-                default=self._get_option(CONF_DEMAND_CHARGE_END_TIME, "20:00"),
-            ): str,
-            vol.Optional(
-                CONF_DEMAND_CHARGE_DAYS,
-                default=self._get_option(CONF_DEMAND_CHARGE_DAYS, "All Days"),
-            ): vol.In(["All Days", "Weekdays Only", "Weekends Only"]),
-            vol.Optional(
-                CONF_DEMAND_CHARGE_BILLING_DAY,
-                default=self._get_option(CONF_DEMAND_CHARGE_BILLING_DAY, 1),
-            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=28)),
-            vol.Optional(
-                CONF_DEMAND_CHARGE_APPLY_TO,
-                default=self._get_option(CONF_DEMAND_CHARGE_APPLY_TO, "Buy Only"),
-            ): vol.In(["Buy Only", "Sell Only", "Both"]),
-            vol.Optional(
-                CONF_DEMAND_ARTIFICIAL_PRICE,
-                default=self._get_option(CONF_DEMAND_ARTIFICIAL_PRICE, False),
-            ): bool,
-            vol.Optional(
-                CONF_DAILY_SUPPLY_CHARGE,
-                default=self._get_option(CONF_DAILY_SUPPLY_CHARGE, 0.0),
-            ): vol.Coerce(float),
-            vol.Optional(
-                CONF_MONTHLY_SUPPLY_CHARGE,
-                default=self._get_option(CONF_MONTHLY_SUPPLY_CHARGE, 0.0),
-            ): vol.Coerce(float),
         })
 
         return self.async_show_form(
             step_id="amber_options",
             data_schema=vol.Schema(schema_dict),
+        )
+
+    async def async_step_demand_charge_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Dedicated step for Network Demand Charge configuration."""
+        if user_input is not None:
+            # Store demand charge options
+            self._demand_options = user_input
+            # Route to curtailment options
+            return await self.async_step_curtailment_options()
+
+        return self.async_show_form(
+            step_id="demand_charge_options",
+            data_schema=vol.Schema({
+                vol.Optional(
+                    CONF_DEMAND_CHARGE_ENABLED,
+                    default=self._get_option(CONF_DEMAND_CHARGE_ENABLED, False),
+                ): bool,
+                vol.Optional(
+                    CONF_DEMAND_CHARGE_RATE,
+                    default=self._get_option(CONF_DEMAND_CHARGE_RATE, 10.0),
+                ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
+                vol.Optional(
+                    CONF_DEMAND_CHARGE_START_TIME,
+                    default=self._get_option(CONF_DEMAND_CHARGE_START_TIME, "14:00"),
+                ): str,
+                vol.Optional(
+                    CONF_DEMAND_CHARGE_END_TIME,
+                    default=self._get_option(CONF_DEMAND_CHARGE_END_TIME, "20:00"),
+                ): str,
+                vol.Optional(
+                    CONF_DEMAND_CHARGE_DAYS,
+                    default=self._get_option(CONF_DEMAND_CHARGE_DAYS, "All Days"),
+                ): vol.In(["All Days", "Weekdays Only", "Weekends Only"]),
+                vol.Optional(
+                    CONF_DEMAND_CHARGE_BILLING_DAY,
+                    default=self._get_option(CONF_DEMAND_CHARGE_BILLING_DAY, 1),
+                ): vol.All(vol.Coerce(int), vol.Range(min=1, max=28)),
+                vol.Optional(
+                    CONF_DEMAND_CHARGE_APPLY_TO,
+                    default=self._get_option(CONF_DEMAND_CHARGE_APPLY_TO, "Buy Only"),
+                ): vol.In(["Buy Only", "Sell Only", "Both"]),
+                vol.Optional(
+                    CONF_DEMAND_ARTIFICIAL_PRICE,
+                    default=self._get_option(CONF_DEMAND_ARTIFICIAL_PRICE, False),
+                ): bool,
+                vol.Optional(
+                    CONF_DAILY_SUPPLY_CHARGE,
+                    default=self._get_option(CONF_DAILY_SUPPLY_CHARGE, 0.0),
+                ): vol.Coerce(float),
+                vol.Optional(
+                    CONF_MONTHLY_SUPPLY_CHARGE,
+                    default=self._get_option(CONF_MONTHLY_SUPPLY_CHARGE, 0.0),
+                ): vol.Coerce(float),
+            }),
         )
 
     async def async_step_curtailment_options(
@@ -2780,10 +2799,10 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             # Combine with previous options - check if came from inverter_config or curtailment_options
             if hasattr(self, '_inverter_options') and self._inverter_options:
                 # Came from inverter_config - _inverter_options already has everything except weather
-                final_data = {**self._inverter_options, **weather_options}
+                final_data = {**self._inverter_options, **getattr(self, '_demand_options', {}), **weather_options}
             else:
                 # Came directly from curtailment_options
-                final_data = {**getattr(self, '_amber_options', {}), **getattr(self, '_curtailment_options', {}), **weather_options}
+                final_data = {**getattr(self, '_amber_options', {}), **getattr(self, '_demand_options', {}), **getattr(self, '_curtailment_options', {}), **weather_options}
 
             self._final_options = final_data
             return await self.async_step_ev_charging()
@@ -3115,10 +3134,10 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     user_input[CONF_AEMO_SENSOR_30MIN]
                 )
 
-            # Store flow power options and route to curtailment page
+            # Store flow power options and route to demand charge page
             user_input[CONF_ELECTRICITY_PROVIDER] = "flow_power"
             self._amber_options = user_input
-            return await self.async_step_curtailment_options()
+            return await self.async_step_demand_charge_options()
 
         # Build current combined tariff value from stored options
         current_distributor = self._get_option(CONF_NETWORK_DISTRIBUTOR, "energex")
@@ -3214,42 +3233,6 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_AUTO_SYNC_ENABLED,
                         default=self._get_option(CONF_AUTO_SYNC_ENABLED, True),
                     ): bool,
-                    vol.Optional(
-                        CONF_DEMAND_CHARGE_ENABLED,
-                        default=self._get_option(CONF_DEMAND_CHARGE_ENABLED, False),
-                    ): bool,
-                    vol.Optional(
-                        CONF_DEMAND_CHARGE_RATE,
-                        default=self._get_option(CONF_DEMAND_CHARGE_RATE, 10.0),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
-                    vol.Optional(
-                        CONF_DEMAND_CHARGE_START_TIME,
-                        default=self._get_option(CONF_DEMAND_CHARGE_START_TIME, "14:00"),
-                    ): str,
-                    vol.Optional(
-                        CONF_DEMAND_CHARGE_END_TIME,
-                        default=self._get_option(CONF_DEMAND_CHARGE_END_TIME, "20:00"),
-                    ): str,
-                    vol.Optional(
-                        CONF_DEMAND_CHARGE_DAYS,
-                        default=self._get_option(CONF_DEMAND_CHARGE_DAYS, "All Days"),
-                    ): vol.In(["All Days", "Weekdays Only", "Weekends Only"]),
-                    vol.Optional(
-                        CONF_DEMAND_CHARGE_BILLING_DAY,
-                        default=self._get_option(CONF_DEMAND_CHARGE_BILLING_DAY, 1),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=1, max=28)),
-                    vol.Optional(
-                        CONF_DEMAND_CHARGE_APPLY_TO,
-                        default=self._get_option(CONF_DEMAND_CHARGE_APPLY_TO, "Buy Only"),
-                    ): vol.In(["Buy Only", "Sell Only", "Both"]),
-                    vol.Optional(
-                        CONF_DAILY_SUPPLY_CHARGE,
-                        default=self._get_option(CONF_DAILY_SUPPLY_CHARGE, 0.0),
-                    ): vol.Coerce(float),
-                    vol.Optional(
-                        CONF_MONTHLY_SUPPLY_CHARGE,
-                        default=self._get_option(CONF_MONTHLY_SUPPLY_CHARGE, 0.0),
-                    ): vol.Coerce(float),
                 }
             ),
         )
@@ -3257,12 +3240,15 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
     async def async_step_globird_options(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step 2c: Globird (AEMO Spike Detection) specific options."""
+        """Step 2c: Globird specific options."""
         if user_input is not None:
             # Add provider to the data
             user_input[CONF_ELECTRICITY_PROVIDER] = "globird"
-            # Enable AEMO spike detection for Globird
-            user_input[CONF_AEMO_SPIKE_ENABLED] = True
+
+            # If spike not enabled, ensure region/threshold don't cause issues
+            if not user_input.get(CONF_AEMO_SPIKE_ENABLED, False):
+                user_input.pop(CONF_AEMO_REGION, None)
+                user_input.pop(CONF_AEMO_SPIKE_THRESHOLD, None)
 
             # Check if user wants to configure custom tariff
             configure_tariff = user_input.pop("configure_custom_tariff", False)
@@ -3273,7 +3259,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             if configure_tariff:
                 return await self.async_step_custom_tariff_options()
 
-            return await self.async_step_curtailment_options()
+            return await self.async_step_demand_charge_options()
 
         # Build region choices for AEMO
         region_choices = {"": "Select Region..."}
@@ -3283,13 +3269,17 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             step_id="globird_options",
             data_schema=vol.Schema(
                 {
-                    vol.Required(
+                    vol.Optional(
+                        CONF_AEMO_SPIKE_ENABLED,
+                        default=self._get_option(CONF_AEMO_SPIKE_ENABLED, False),
+                    ): bool,
+                    vol.Optional(
                         CONF_AEMO_REGION,
                         default=self._get_option(CONF_AEMO_REGION, ""),
                     ): vol.In(region_choices),
                     vol.Optional(
                         CONF_AEMO_SPIKE_THRESHOLD,
-                        default=self._get_option(CONF_AEMO_SPIKE_THRESHOLD, 300.0),
+                        default=self._get_option(CONF_AEMO_SPIKE_THRESHOLD, 3000.0),
                     ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=20000.0)),
                     vol.Optional(
                         "configure_custom_tariff",
@@ -3357,8 +3347,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     product_code, tariff_code, region
                 )
 
-                # Continue to curtailment options
-                return await self.async_step_curtailment_options()
+                # Continue to demand charge options
+                return await self.async_step_demand_charge_options()
 
         # Get current values
         current_product = self._get_option(CONF_OCTOPUS_PRODUCT, "agile")
@@ -3504,8 +3494,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         _LOGGER.info("Custom tariff saved via options flow")
                         break
 
-            # Continue to curtailment options
-            return await self.async_step_curtailment_options()
+            # Continue to demand charge options
+            return await self.async_step_demand_charge_options()
 
         # Build hour options
         hour_options = {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}

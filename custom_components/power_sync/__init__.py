@@ -7870,7 +7870,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         aemo_threshold = entry.options.get(
             CONF_AEMO_SPIKE_THRESHOLD,
-            entry.data.get(CONF_AEMO_SPIKE_THRESHOLD, 300.0)
+            entry.data.get(CONF_AEMO_SPIKE_THRESHOLD, 3000.0)
         )
 
         if aemo_region:
@@ -13086,12 +13086,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
     )
     if electricity_provider in ("globird", "aemo_vpp", "other"):
-        # Try to get custom tariff from automation_store
-        custom_tariff = automation_store.get_custom_tariff()
-        if custom_tariff:
-            tariff_schedule = convert_custom_tariff_to_schedule(custom_tariff)
-            hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = tariff_schedule
-            _LOGGER.info(f"Custom tariff loaded for {electricity_provider}: {custom_tariff.get('name')}")
+        # Only apply custom tariff if Tesla tariff wasn't already fetched
+        existing_tariff = hass.data[DOMAIN][entry.entry_id].get("tariff_schedule")
+        if existing_tariff and existing_tariff.get("tou_periods"):
+            _LOGGER.info(
+                f"Tesla tariff already loaded for {electricity_provider} - "
+                f"skipping custom tariff override ({existing_tariff.get('plan_name', 'Unknown')})"
+            )
+        else:
+            custom_tariff = automation_store.get_custom_tariff()
+            if custom_tariff:
+                tariff_schedule = convert_custom_tariff_to_schedule(custom_tariff)
+                hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = tariff_schedule
+                _LOGGER.info(f"Custom tariff loaded for {electricity_provider}: {custom_tariff.get('name')}")
 
     automation_engine = AutomationEngine(hass, automation_store, entry)
 

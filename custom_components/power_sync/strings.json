@@ -8,7 +8,7 @@
       },
       "provider_selection": {
         "title": "Select Electricity Provider",
-        "description": "Choose your electricity provider:\n\n**Amber Electric**: Full real-time price sync using Amber API.\n\n**Flow Power**: Wholesale electricity with Happy Hour exports. Choose AEMO or Amber pricing.\n\n**Globird/VPP**: AEMO spike detection for VPP exports.",
+        "description": "Choose your electricity provider:\n\n**Amber Electric**: Full real-time price sync using Amber API.\n\n**Flow Power**: Wholesale electricity with Happy Hour exports. Choose AEMO or Amber pricing.\n\n**Globird**: Static tariff plans with optional AEMO spike export.\n\n**AEMO VPP**: AEMO spike detection for VPP exports (AGL, Engie, etc.).",
         "data": {
           "electricity_provider": "Electricity Provider"
         },
@@ -91,6 +91,9 @@
       "aemo_config": {
         "title": "AEMO Spike Detection",
         "description": "Configure AEMO wholesale price spike detection. When prices spike above your threshold, your battery will be configured to export energy to the grid.\n\n{threshold_hint}",
+        "data_description": {
+          "aemo_spike_threshold": "Default: $3,000/MWh. GloBird spike exports use $3,000/MWh threshold."
+        },
         "data": {
           "aemo_spike_enabled": "Enable AEMO Spike Detection",
           "aemo_region": "NEM Region",
@@ -264,14 +267,14 @@
         "title": "Weather & Solar Forecast (Optional)",
         "description": "Configure weather-based automations and solar production forecasting.\n\n**Already using Solcast HA integration?** PowerSync will automatically detect and use your existing Solcast sensors - no API key needed! Just enable Solcast below and leave the API fields blank.\n\n**New to Solcast?** Get a free API key from toolkit.solcast.com.au (10 API calls/day on hobbyist tier).",
         "data": {
-          "weather_location": "Weather Location (City, Country)",
+          "weather_location": "Weather Location",
           "openweathermap_api_key": "OpenWeatherMap API Key",
           "solcast_enabled": "Enable Solcast Solar Forecast",
           "solcast_api_key": "Solcast API Key (optional if using Solcast HA integration)",
           "solcast_resource_id": "Solcast Resource ID(s) (optional if using Solcast HA integration)"
         },
         "data_description": {
-          "weather_location": "City and country for weather-based automation triggers (e.g., 'Melbourne, Australia'). Leave blank to disable weather triggers.",
+          "weather_location": "Your suburb or city name (e.g., 'Berowra' or 'Melbourne'). For duplicate names, use full state (e.g., 'Berowra, New South Wales'). You can also use a postcode (e.g., '2081') or lat,lon coordinates (e.g., '-33.62,151.15'). Leave blank to auto-detect from timezone.",
           "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny/cloudy triggers). Leave blank to disable weather triggers.",
           "solcast_enabled": "Enable solar production forecasting. If the Solcast HA integration is installed, PowerSync will automatically read from its sensors (no API calls). Otherwise, enter your API key below.",
           "solcast_api_key": "Your Solcast API key from toolkit.solcast.com.au. **Leave blank if you have the Solcast HA integration installed** - PowerSync will use its sensors automatically.",
@@ -369,7 +372,7 @@
       "no_energy_sites": "No Tesla energy sites found in your account.",
       "no_token_provided": "Please provide a Teslemetry API token.",
       "aemo_region_required": "Please select an AEMO NEM region when spike detection is enabled.",
-      "aemo_required_in_aemo_mode": "AEMO spike detection must be enabled in AEMO-only mode.",
+      "aemo_required_in_aemo_mode": "AEMO spike detection is recommended for Globird/VPP plans that include spike export payments. Disable if your plan does not include this feature.",
       "missing_credentials": "Please provide all Sigenergy credentials (email, password, and device ID).",
       "invalid_device_id": "Device ID must be exactly 13 digits.",
       "no_stations": "No Sigenergy stations found for this account.",
@@ -458,7 +461,7 @@
       },
       "amber_options": {
         "title": "Amber Electric Options",
-        "description": "Configure Amber Electric TOU sync, export boost, demand charges, and supply charges.",
+        "description": "Configure Amber Electric TOU sync, export boost, and pricing options.",
         "data": {
           "auto_sync_enabled": "Enable automatic TOU schedule syncing",
           "amber_forecast_type": "Amber Forecast Type",
@@ -478,16 +481,6 @@
           "chip_mode_start": "Chip Mode Start Time (HH:MM)",
           "chip_mode_end": "Chip Mode End Time (HH:MM)",
           "chip_mode_threshold": "Price Threshold (c/kWh)",
-          "demand_charge_enabled": "Enable Demand Charge Tracking",
-          "demand_charge_rate": "Demand Charge Rate ($/kW)",
-          "demand_charge_start_time": "Peak Period Start Time (HH:MM)",
-          "demand_charge_end_time": "Peak Period End Time (HH:MM)",
-          "demand_charge_days": "Demand Charge Days",
-          "demand_charge_billing_day": "Billing Cycle Reset Day",
-          "demand_charge_apply_to": "Apply Demand Charge To",
-          "demand_artificial_price_enabled": "Artificial Price Increase (ALPHA)",
-          "daily_supply_charge": "Daily Supply Charge ($)",
-          "monthly_supply_charge": "Monthly Supply Charge ($)",
           "ac_inverter_curtailment_enabled": "Enable AC-Coupled Inverter Curtailment",
           "inverter_brand": "Inverter Brand",
           "inverter_model": "Inverter Model",
@@ -509,8 +502,6 @@
           "export_price_offset": "Amount to ADD to the actual Amber export price. Example: Amber=18c + Offset=5c → Tesla sees 23c",
           "export_min_price": "Floor price AFTER offset is applied. Example: Amber=12c + Offset=5c = 17c → bumped up to Floor=20c",
           "export_boost_threshold": "Only apply boost when ACTUAL Amber price (before boost) is at or above this value. Prices below this are sent unchanged. Use 0 to always boost.",
-          "demand_charge_enabled": "Track your peak grid draw during demand charge periods and calculate monthly capacity fees based on your highest 30-minute average",
-          "demand_artificial_price_enabled": "Artificially increases the current price by $2 during demand charge periods to encourage battery discharge",
           "chip_mode_enabled": "Suppress exports during configured hours unless price exceeds threshold (inverse of Export Boost)",
           "chip_mode_threshold": "Allow exports only when price is at or above this value"
         }
@@ -527,32 +518,24 @@
           "flow_power_base_rate": "Base Rate (c/kWh)",
           "pea_custom_value": "Custom PEA Override (c/kWh, leave empty for auto)",
           "auto_sync_enabled": "Enable automatic TOU schedule syncing",
-          "battery_curtailment_enabled": "Enable DC Solar Curtailment (stop export at negative prices)",
-          "demand_charge_enabled": "Enable Demand Charge Tracking",
-          "demand_charge_rate": "Demand Charge Rate ($/kW)",
-          "demand_charge_start_time": "Peak Period Start Time (HH:MM)",
-          "demand_charge_end_time": "Peak Period End Time (HH:MM)",
-          "demand_charge_days": "Demand Charge Days",
-          "demand_charge_billing_day": "Billing Cycle Reset Day",
-          "demand_charge_apply_to": "Apply Demand Charge To",
-          "daily_supply_charge": "Daily Supply Charge ($)",
-          "monthly_supply_charge": "Monthly Supply Charge ($)"
+          "battery_curtailment_enabled": "Enable DC Solar Curtailment (stop export at negative prices)"
         },
         "data_description": {
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices",
-          "battery_curtailment_enabled": "Automatically stop battery exports and DC solar production when feed-in prices go negative to avoid paying to export",
-          "demand_charge_enabled": "Track your peak grid draw during demand charge periods and calculate monthly capacity fees based on your highest 30-minute average"
+          "battery_curtailment_enabled": "Automatically stop battery exports and DC solar production when feed-in prices go negative to avoid paying to export"
         }
       },
       "globird_options": {
-        "title": "AEMO Spike Detection",
-        "description": "Configure AEMO wholesale price spike detection. When prices spike above your threshold, your battery will export to the grid.\n\n{tariff_hint}",
+        "title": "Globird Settings",
+        "description": "Configure your Globird plan settings.\n\n**AEMO Spike Export** (optional): If your plan includes spike export payments, enable this to automatically export when AEMO wholesale prices exceed your threshold. GloBird uses a $3,000/MWh spike threshold by default.\n\n{tariff_hint}",
         "data": {
+          "aemo_spike_enabled": "Enable AEMO Spike Export",
           "aemo_region": "AEMO NEM Region",
           "aemo_spike_threshold": "Spike Threshold ($/MWh)",
           "configure_custom_tariff": "Configure Custom Tariff"
         },
         "data_description": {
+          "aemo_spike_enabled": "Enable if your Globird plan includes payments for exporting during AEMO price spikes. Not all plans include this feature.",
           "configure_custom_tariff": "Enable to configure your TOU rates for EV charging price decisions"
         }
       },
@@ -651,6 +634,34 @@
           "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny/cloudy triggers). Leave blank to disable weather triggers."
         }
       },
+      "demand_charge_options": {
+        "title": "Network Demand Charges (Optional)",
+        "description": "Configure demand charge tracking for electricity plans with capacity-based network fees.\n\nDemand charges are based on your peak power draw during specified periods. Your network provider charges a monthly fee based on your highest 30-minute average demand.\n\nLeave 'Enable Demand Charge Tracking' unchecked if your plan does not have demand charges.",
+        "data": {
+          "demand_charge_enabled": "Enable Demand Charge Tracking",
+          "demand_charge_rate": "Demand Charge Rate ($/kW)",
+          "demand_charge_start_time": "Peak Period Start Time (HH:MM)",
+          "demand_charge_end_time": "Peak Period End Time (HH:MM)",
+          "demand_charge_days": "Demand Charge Days",
+          "demand_charge_billing_day": "Billing Cycle Reset Day",
+          "demand_charge_apply_to": "Apply Demand Charge To",
+          "demand_artificial_price": "Apply Artificial Price During Demand Peak",
+          "daily_supply_charge": "Daily Supply Charge ($)",
+          "monthly_supply_charge": "Monthly Supply Charge ($)"
+        },
+        "data_description": {
+          "demand_charge_enabled": "Track your peak grid draw during demand charge periods and calculate monthly capacity fees based on your highest 30-minute average",
+          "demand_charge_rate": "Your network demand charge rate in dollars per kW of peak demand",
+          "demand_charge_start_time": "Start time of the demand charge peak measurement period",
+          "demand_charge_end_time": "End time of the demand charge peak measurement period",
+          "demand_charge_days": "Which days demand charges apply",
+          "demand_charge_billing_day": "Day of month when the billing cycle resets (1-28)",
+          "demand_charge_apply_to": "Whether demand charges apply to grid imports, exports, or both",
+          "demand_artificial_price": "Add an artificial price component during demand peak periods to discourage grid draw",
+          "daily_supply_charge": "Your daily electricity supply charge for cost tracking",
+          "monthly_supply_charge": "Your monthly electricity supply charge for cost tracking"
+        }
+      },
       "ev_ocpp_options": {
         "title": "EV Charging, OCPP & Solar Forecast",
         "description": "Configure EV charging, OCPP charger management, and solar production forecasting.\n\n**Solcast:** PowerSync auto-detects the Solcast HA integration - if installed, just enable Solcast and leave the API fields blank! Otherwise, get a free API key from toolkit.solcast.com.au (10 calls/day).\n\n**EV Charging:** Control Tesla vehicles via Fleet API/Teslemetry or Tesla BLE (ESPHome).\n\n**OCPP:** Connect OCPP 1.6-compliant chargers.",
@@ -673,6 +684,24 @@
           "tesla_ble_entity_prefix": "Entity prefix for Tesla BLE entities (default: tesla_ble). Must match the ESPHome device name. Example: if your entities are sensor.my_tesla_charge_level, enter 'my_tesla'.",
           "ocpp_enabled": "Run an OCPP 1.6J WebSocket server for connecting OCPP-compliant EV chargers. Chargers connect to ws://server:port/{charger_id}",
           "ocpp_port": "Port for OCPP WebSocket server (default: 9000). Chargers will connect to this port."
+        }
+      },
+      "weather_options": {
+        "title": "Weather & Solar Forecast",
+        "description": "Configure weather-based automations and solar production forecasting.\n\n**Already using Solcast HA integration?** PowerSync will automatically detect and use your existing Solcast sensors - no API key needed! Just enable Solcast below and leave the API fields blank.",
+        "data": {
+          "weather_location": "Weather Location",
+          "openweathermap_api_key": "OpenWeatherMap API Key",
+          "solcast_enabled": "Enable Solcast Solar Forecast",
+          "solcast_api_key": "Solcast API Key (optional if using Solcast HA integration)",
+          "solcast_resource_id": "Solcast Resource ID(s) (optional if using Solcast HA integration)"
+        },
+        "data_description": {
+          "weather_location": "Your suburb or city name (e.g., 'Berowra' or 'Melbourne'). For duplicate names, use full state (e.g., 'Berowra, New South Wales'). You can also use a postcode (e.g., '2081') or lat,lon coordinates (e.g., '-33.62,151.15'). Leave blank to auto-detect from timezone.",
+          "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny/cloudy triggers). Leave blank to disable weather triggers.",
+          "solcast_enabled": "Enable solar production forecasting. If the Solcast HA integration is installed, PowerSync will automatically read from its sensors (no API calls).",
+          "solcast_api_key": "Your Solcast API key from toolkit.solcast.com.au. **Leave blank if you have the Solcast HA integration installed.**",
+          "solcast_resource_id": "Your rooftop site Resource ID(s). For split arrays, enter comma-separated IDs (e.g., abc123,def456). **Leave blank if using Solcast HA integration.**"
         }
       }
     }

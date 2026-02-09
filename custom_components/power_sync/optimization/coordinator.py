@@ -130,6 +130,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._ev_coordinator: EVCoordinator | None = None
         self._ev_configs: list[EVConfig] = []
 
+        # EV integration persisted flag (loaded from config entry)
+        self._ev_integration_enabled = False
+        if self._entry:
+            from ..const import CONF_OPTIMIZATION_EV_INTEGRATION
+            self._ev_integration_enabled = self._entry.options.get(
+                CONF_OPTIMIZATION_EV_INTEGRATION, False
+            )
+
         # Cached schedule from optimizer
         self._current_schedule: OptimizationSchedule | None = None
         self._last_update_time: datetime | None = None
@@ -139,6 +147,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_load_forecast: list[float] | None = None     # kW values
         self._last_import_prices: list[float] | None = None     # $/kWh values
         self._last_export_prices: list[float] | None = None     # $/kWh values
+
+        # Battery specs source tracking
+        self._battery_specs_source = "default"  # "default", "auto", or "manual"
+
+        # Daily cost tracking (midnight-to-midnight)
+        self._actual_cost_today = 0.0        # Accumulated actual cost since midnight ($)
+        self._actual_baseline_today = 0.0    # Accumulated baseline cost since midnight ($)
+        self._last_cost_date: str | None = None  # Date string for midnight reset
 
         # Price monitoring
         self._is_dynamic_pricing = False
@@ -432,6 +448,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._last_import_prices = import_prices
             self._last_export_prices = export_prices
 
+            # Track actual cost for this interval (midnight-to-midnight daily cost)
+            self._track_actual_cost()
+
             # Log action distribution summary
             action_counts: dict[str, int] = {}
             for a in result.schedule.actions:
@@ -441,11 +460,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
 
             _LOGGER.info(
-                "Optimization complete (%s, %.2fs): cost=$%.2f, savings=$%.2f, %d steps [%s]",
+                "Optimization complete (%s, %.2fs): "
+                "daily_cost=$%.2f (actual=$%.2f + remaining=$%.2f), "
+                "daily_savings=$%.2f, %d steps [%s]",
                 result.solver_used,
                 result.solve_time_s,
-                result.schedule.predicted_cost,
-                result.schedule.predicted_savings,
+                self._get_daily_cost(),
+                self._actual_cost_today,
+                self._get_predicted_cost_to_midnight()[0],
+                self._get_daily_savings(),
                 len(result.schedule.actions),
                 action_summary,
             )
@@ -797,7 +820,38 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return None
 
     async def _auto_detect_battery_specs(self) -> None:
-        """Auto-detect battery capacity and power from Tesla site_info."""
+        """Auto-detect battery capacity and power from Tesla site_info.
+
+        User overrides saved in config entry take priority over auto-detection.
+        """
+        # Check for user overrides in config entry first
+        if self._entry:
+            from ..const import (
+                CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,
+                CONF_OPTIMIZATION_MAX_CHARGE_W,
+                CONF_OPTIMIZATION_MAX_DISCHARGE_W,
+            )
+            opts = self._entry.options
+            saved_capacity = opts.get(CONF_OPTIMIZATION_BATTERY_CAPACITY_WH)
+            saved_charge = opts.get(CONF_OPTIMIZATION_MAX_CHARGE_W)
+            saved_discharge = opts.get(CONF_OPTIMIZATION_MAX_DISCHARGE_W)
+
+            if saved_capacity or saved_charge or saved_discharge:
+                if saved_capacity:
+                    self._config.battery_capacity_wh = int(saved_capacity)
+                if saved_charge:
+                    self._config.max_charge_w = int(saved_charge)
+                if saved_discharge:
+                    self._config.max_discharge_w = int(saved_discharge)
+                self._battery_specs_source = "manual"
+                _LOGGER.info(
+                    "Using saved battery specs (manual): %.1f kWh, charge %.1f kW, discharge %.1f kW",
+                    self._config.battery_capacity_wh / 1000,
+                    self._config.max_charge_w / 1000,
+                    self._config.max_discharge_w / 1000,
+                )
+                return
+
         if not self.energy_coordinator:
             return
 
@@ -826,6 +880,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._config.battery_capacity_wh = capacity_wh
             self._config.max_charge_w = charge_w
             self._config.max_discharge_w = discharge_w
+            self._battery_specs_source = "auto"
 
             _LOGGER.info(
                 "Auto-detected battery specs from site_info: "
@@ -844,6 +899,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._config.battery_capacity_wh = capacity_wh
             self._config.max_charge_w = charge_w
             self._config.max_discharge_w = discharge_w
+            self._battery_specs_source = "auto"
 
             _LOGGER.info(
                 "Estimated battery specs from count: "
@@ -874,6 +930,145 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if power is not None:
                 return abs(float(power) * 1000) if abs(power) < 100 else abs(power)
         return 0.0
+
+    def _track_actual_cost(self) -> None:
+        """Track actual electricity cost for the current 5-min interval.
+
+        Accumulates actual grid import/export costs since midnight.
+        Also tracks baseline cost (what cost would be without battery).
+        Resets automatically at midnight.
+        """
+        now = dt_util.now()
+        today = now.strftime("%Y-%m-%d")
+
+        # Reset at midnight
+        if self._last_cost_date != today:
+            if self._last_cost_date is not None:
+                _LOGGER.info(
+                    "Daily cost reset (new day). Yesterday actual=$%.2f, baseline=$%.2f, savings=$%.2f",
+                    self._actual_cost_today,
+                    self._actual_baseline_today,
+                    self._actual_baseline_today - self._actual_cost_today,
+                )
+            self._actual_cost_today = 0.0
+            self._actual_baseline_today = 0.0
+            self._last_cost_date = today
+
+        # Need energy coordinator data and cached prices
+        if not self.energy_coordinator or not self.energy_coordinator.data:
+            return
+        if not self._last_import_prices or not self._last_export_prices:
+            return
+
+        data = self.energy_coordinator.data
+        # Energy coordinator stores values in kW
+        grid_power_kw = float(data.get("grid_power", 0) or 0)
+        solar_power_kw = float(data.get("solar_power", 0) or 0)
+        battery_power_kw = float(data.get("battery_power", 0) or 0)
+
+        # Current prices (first element of cached forecast = current interval)
+        import_price = self._last_import_prices[0]  # $/kWh
+        export_price = self._last_export_prices[0]   # $/kWh
+
+        dt_hours = self._config.interval_minutes / 60  # 5/60 = 0.0833h
+
+        # Actual cost: grid_import costs money, grid_export earns money
+        grid_import_kw = max(0.0, grid_power_kw)
+        grid_export_kw = max(0.0, -grid_power_kw)
+        actual_cost = (
+            grid_import_kw * import_price * dt_hours
+            - grid_export_kw * export_price * dt_hours
+        )
+        self._actual_cost_today += actual_cost
+
+        # Baseline cost: what would happen without a battery
+        # Power balance: load = solar + grid + battery (Tesla sign convention)
+        # Without battery, net_grid = load - solar = grid_power + battery_power
+        baseline_grid_kw = grid_power_kw + battery_power_kw
+        baseline_import_kw = max(0.0, baseline_grid_kw)
+        baseline_export_kw = max(0.0, -baseline_grid_kw)
+        baseline_cost = (
+            baseline_import_kw * import_price * dt_hours
+            - baseline_export_kw * export_price * dt_hours
+        )
+        self._actual_baseline_today += baseline_cost
+
+        _LOGGER.debug(
+            "Cost tracking: grid=%.2fkW, actual_interval=$%.4f, "
+            "actual_today=$%.2f, baseline_today=$%.2f",
+            grid_power_kw, actual_cost,
+            self._actual_cost_today, self._actual_baseline_today,
+        )
+
+    def _get_predicted_cost_to_midnight(self) -> tuple[float, float]:
+        """Calculate predicted cost and baseline from now until midnight.
+
+        Uses the LP optimizer's solution (grid_import/export arrays) and
+        cached forecasts to project cost for the remainder of today.
+
+        Returns:
+            Tuple of (predicted_cost_remaining, baseline_cost_remaining)
+        """
+        if not self._last_optimizer_result or not self._last_import_prices:
+            return (0.0, 0.0)
+
+        now = dt_util.now()
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        minutes_to_midnight = (midnight - now).total_seconds() / 60
+        steps_to_midnight = int(minutes_to_midnight / self._config.interval_minutes)
+
+        # LP arrays start from "now", so step 0 = current interval
+        # Skip step 0 since we've already tracked the current interval's actual cost
+        grid_import_w = self._last_optimizer_result.grid_import_w
+        grid_export_w = self._last_optimizer_result.grid_export_w
+        n = min(steps_to_midnight, len(grid_import_w), len(self._last_import_prices))
+
+        dt_hours = self._config.interval_minutes / 60
+
+        predicted_cost = 0.0
+        baseline_cost = 0.0
+        for t in range(1, n):  # Start from 1 to skip current interval
+            import_p = self._last_import_prices[t]
+            export_p = (
+                self._last_export_prices[t]
+                if t < len(self._last_export_prices)
+                else 0.05
+            )
+
+            # Predicted cost with battery optimization
+            predicted_cost += import_p * (grid_import_w[t] / 1000) * dt_hours
+            predicted_cost -= export_p * (grid_export_w[t] / 1000) * dt_hours
+
+            # Baseline cost without battery
+            solar_kw = (
+                self._last_solar_forecast[t]
+                if self._last_solar_forecast and t < len(self._last_solar_forecast)
+                else 0.0
+            )
+            load_kw = (
+                self._last_load_forecast[t]
+                if self._last_load_forecast and t < len(self._last_load_forecast)
+                else 0.0
+            )
+            net_load = load_kw - solar_kw
+            baseline_import = max(0.0, net_load)
+            baseline_export = max(0.0, -net_load)
+            baseline_cost += import_p * baseline_import * dt_hours
+            baseline_cost -= export_p * baseline_export * dt_hours
+
+        return (predicted_cost, baseline_cost)
+
+    def _get_daily_cost(self) -> float:
+        """Get today's total cost: actual (midnight→now) + predicted (now→midnight)."""
+        predicted_remaining, _ = self._get_predicted_cost_to_midnight()
+        return round(self._actual_cost_today + predicted_remaining, 2)
+
+    def _get_daily_savings(self) -> float:
+        """Get today's total savings vs baseline without battery."""
+        predicted_remaining, baseline_remaining = self._get_predicted_cost_to_midnight()
+        total_cost = self._actual_cost_today + predicted_remaining
+        total_baseline = self._actual_baseline_today + baseline_remaining
+        return round(total_baseline - total_cost, 2)
 
     def set_cost_function(self, cost_function: str | CostFunction) -> None:
         """Set the optimization cost function."""
@@ -999,22 +1194,33 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "next_action_time": next_action_time,
             "next_action_power_w": next_action_power_w,
             "last_optimization": self._last_update_time.isoformat() if self._last_update_time else None,
-            "predicted_cost": self._current_schedule.predicted_cost if self._current_schedule else 0,
-            "predicted_savings": self._current_schedule.predicted_savings if self._current_schedule else 0,
+            "predicted_cost": self._get_daily_cost(),
+            "predicted_savings": self._get_daily_savings(),
             "lp_stats": lp_stats,
             "config": {
                 "battery_capacity_wh": self._config.battery_capacity_wh,
                 "max_charge_w": self._config.max_charge_w,
                 "max_discharge_w": self._config.max_discharge_w,
+                "battery_specs_source": self._battery_specs_source,
                 "backup_reserve": self._config.backup_reserve,
                 "interval_minutes": self._config.interval_minutes,
                 "horizon_hours": self._config.horizon_hours,
             },
             "features": {
-                "ev_integration": len(self._ev_configs) > 0,
+                "ev_integration": self._ev_integration_enabled or len(self._ev_configs) > 0,
                 "vpp_enabled": False,
                 "built_in_optimizer": True,
             },
+        }
+
+        # Add daily cost breakdown (actual + predicted remaining)
+        pred_remaining, baseline_remaining = self._get_predicted_cost_to_midnight()
+        data["daily_cost_breakdown"] = {
+            "actual_cost": round(self._actual_cost_today, 2),
+            "actual_baseline": round(self._actual_baseline_today, 2),
+            "actual_savings": round(self._actual_baseline_today - self._actual_cost_today, 2),
+            "predicted_remaining": round(pred_remaining, 2),
+            "predicted_baseline_remaining": round(baseline_remaining, 2),
         }
 
         # Add EV status if EV coordination is active
@@ -1031,14 +1237,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             data["schedule"] = api_response
 
             dt_h = self._config.interval_minutes / 60
+            daily_cost = self._get_daily_cost()
+            daily_savings = self._get_daily_savings()
             data["summary"] = {
-                "total_cost": self._current_schedule.predicted_cost,
+                "total_cost": daily_cost,
                 "total_import_kwh": sum(self._last_optimizer_result.grid_import_w) * dt_h / 1000 if self._last_optimizer_result else 0,
                 "total_export_kwh": sum(self._last_optimizer_result.grid_export_w) * dt_h / 1000 if self._last_optimizer_result else 0,
                 "total_charge_kwh": sum(self._current_schedule.charge_w) * dt_h / 1000,
                 "total_discharge_kwh": sum(self._current_schedule.discharge_w) * dt_h / 1000,
-                "baseline_cost": (self._current_schedule.predicted_cost + self._current_schedule.predicted_savings),
-                "savings": self._current_schedule.predicted_savings,
+                "baseline_cost": daily_cost + daily_savings,
+                "savings": daily_savings,
             }
             # Consolidate schedule into action ranges for the next 24h
             # e.g. [self_consumption 16:00-17:00, export 17:00-21:00, ...]
@@ -1130,15 +1338,42 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.update_config(**config_updates)
             response["changes"].append(f"config: {list(config_updates.keys())}")
 
-            # Persist backup_reserve to config entry (as percentage)
-            if "backup_reserve" in settings and self._entry:
-                from ..const import CONF_OPTIMIZATION_BACKUP_RESERVE
-                reserve_pct = settings["backup_reserve"]
-                if reserve_pct <= 1:
-                    reserve_pct = int(reserve_pct * 100)
+            # Persist settings to config entry
+            if self._entry:
+                from ..const import (
+                    CONF_OPTIMIZATION_BACKUP_RESERVE,
+                    CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,
+                    CONF_OPTIMIZATION_MAX_CHARGE_W,
+                    CONF_OPTIMIZATION_MAX_DISCHARGE_W,
+                )
                 new_options = dict(self._entry.options)
-                new_options[CONF_OPTIMIZATION_BACKUP_RESERVE] = reserve_pct
+                if "backup_reserve" in settings:
+                    reserve_pct = settings["backup_reserve"]
+                    if reserve_pct <= 1:
+                        reserve_pct = int(reserve_pct * 100)
+                    new_options[CONF_OPTIMIZATION_BACKUP_RESERVE] = reserve_pct
+                if "battery_capacity_wh" in settings:
+                    new_options[CONF_OPTIMIZATION_BATTERY_CAPACITY_WH] = int(settings["battery_capacity_wh"])
+                if "max_charge_w" in settings:
+                    new_options[CONF_OPTIMIZATION_MAX_CHARGE_W] = int(settings["max_charge_w"])
+                if "max_discharge_w" in settings:
+                    new_options[CONF_OPTIMIZATION_MAX_DISCHARGE_W] = int(settings["max_discharge_w"])
                 self.hass.config_entries.async_update_entry(self._entry, options=new_options)
+
+            # Mark as manual when user explicitly sets battery specs
+            if any(k in settings for k in ("battery_capacity_wh", "max_charge_w", "max_discharge_w")):
+                self._battery_specs_source = "manual"
+
+        # Handle EV integration toggle
+        if "ev_integration" in settings:
+            ev_enabled = settings["ev_integration"]
+            self._ev_integration_enabled = ev_enabled
+            if self._entry:
+                from ..const import CONF_OPTIMIZATION_EV_INTEGRATION
+                new_options = dict(self._entry.options)
+                new_options[CONF_OPTIMIZATION_EV_INTEGRATION] = ev_enabled
+                self.hass.config_entries.async_update_entry(self._entry, options=new_options)
+                response["changes"].append(f"ev_integration: {ev_enabled}")
 
         return response
 
