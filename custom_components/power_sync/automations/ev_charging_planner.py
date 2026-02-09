@@ -316,6 +316,15 @@ async def is_ev_plugged_in(
             if entity_id.startswith("binary_sensor.") and "charge_cable" in entity_id_lower:
                 state = hass.states.get(entity_id)
                 if state:
+                    if state.state in ("unavailable", "unknown"):
+                        # Car likely asleep — check location to determine if still plugged in
+                        location = await get_ev_location(hass, config_entry, device_vin)
+                        if location == "home":
+                            _LOGGER.debug(f"Charge cable {entity_id} is {state.state} but car is home, treating as plugged in")
+                            return True
+                        else:
+                            _LOGGER.debug(f"Charge cable {entity_id} is {state.state} and car not home, treating as unplugged")
+                            return False
                     is_plugged = state.state == "on"
                     _LOGGER.debug(f"Found plugged in state from {entity_id} (VIN: {device_vin}): {is_plugged}")
                     return is_plugged
@@ -3004,6 +3013,15 @@ class AutoScheduleExecutor:
                 if entity_id.startswith("binary_sensor.") and "charge_cable" in entity_id_lower:
                     state = self.hass.states.get(entity_id)
                     if state:
+                        if state.state in ("unavailable", "unknown"):
+                            # Car likely asleep — check location to determine if still plugged in
+                            location = await self._get_vehicle_location(vehicle_id)
+                            if location == "home":
+                                _LOGGER.debug(f"Charge cable {entity_id} is {state.state} but car is home, treating as plugged in")
+                                return True
+                            else:
+                                _LOGGER.debug(f"Charge cable {entity_id} is {state.state} and car not home, treating as unplugged")
+                                return False
                         is_plugged = state.state == "on"
                         _LOGGER.debug(f"Found plugged in state from {entity_id}: {is_plugged}")
                         return is_plugged

@@ -409,6 +409,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             load = await self._get_load_forecast()
             soc, capacity = await self._get_battery_state()
 
+            # Overlay EV charging plan onto load forecast
+            ev_peak_kw = 0.0
+            if load and self._ev_integration_enabled:
+                ev_load_w = self._get_ev_planned_load(len(load))
+                if ev_load_w:
+                    load = [l + ev for l, ev in zip(load, ev_load_w)]
+                    ev_peak_kw = max(ev_load_w) / 1000
+
             import_prices = prices[0] if prices else []
             export_prices = prices[1] if prices else []
 
@@ -417,13 +425,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             load_forecast = [v / 1000.0 for v in load] if load else []
 
             if solar_forecast and load_forecast:
+                ev_msg = f" (ev={ev_peak_kw:.1f}kW peak)" if ev_peak_kw > 0 else ""
                 _LOGGER.debug(
                     "LP inputs: solar=%.1f-%.1fkW (avg %.1fkW), "
-                    "load=%.1f-%.1fkW (avg %.1fkW), soc=%.1f%%",
+                    "load=%.1f-%.1fkW (avg %.1fkW)%s, soc=%.1f%%",
                     min(solar_forecast), max(solar_forecast),
                     sum(solar_forecast) / len(solar_forecast),
                     min(load_forecast), max(load_forecast),
                     sum(load_forecast) / len(load_forecast),
+                    ev_msg,
                     soc * 100,
                 )
 
@@ -818,6 +828,89 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 horizon_hours=self._config.horizon_hours
             )
         return None
+
+    def _get_ev_planned_load(self, n_intervals: int) -> list[float] | None:
+        """Get EV planned charging load from AutoScheduleExecutor.
+
+        Reads the selected charging windows from each vehicle's current plan
+        and returns a per-interval power array in Watts matching the load
+        forecast resolution.
+
+        Args:
+            n_intervals: Number of intervals in the load forecast.
+
+        Returns:
+            List of EV load in Watts per interval, or None if no EV plan.
+        """
+        from ..automations.ev_charging_planner import get_auto_schedule_executor
+
+        executor = get_auto_schedule_executor()
+        if not executor:
+            return None
+
+        # Access vehicle states directly for typed AutoScheduleState objects
+        states = getattr(executor, "_state", {})
+        if not states:
+            return None
+
+        now = dt_util.now()
+        interval_minutes = self._config.interval_minutes
+        ev_load = [0.0] * n_intervals
+        has_any_windows = False
+
+        for vehicle_id, state in states.items():
+            plan = state.current_plan
+            if not plan or not plan.windows:
+                continue
+
+            for window in plan.windows:
+                try:
+                    w_start = datetime.fromisoformat(window.start_time)
+                    w_end = datetime.fromisoformat(window.end_time)
+                except (ValueError, TypeError):
+                    continue
+
+                # Ensure timezone-aware comparison
+                if w_start.tzinfo is None:
+                    w_start = w_start.replace(tzinfo=now.tzinfo)
+                if w_end.tzinfo is None:
+                    w_end = w_end.replace(tzinfo=now.tzinfo)
+
+                # Skip windows entirely in the past
+                if w_end <= now:
+                    continue
+
+                power_w = window.estimated_power_kw * 1000
+
+                # Map window to forecast indices
+                start_offset_min = (w_start - now).total_seconds() / 60
+                end_offset_min = (w_end - now).total_seconds() / 60
+
+                idx_start = int(start_offset_min / interval_minutes)
+                idx_end = int(end_offset_min / interval_minutes)
+
+                # Clamp to valid range
+                idx_start = max(0, idx_start)
+                idx_end = min(n_intervals, idx_end)
+
+                for i in range(idx_start, idx_end):
+                    ev_load[i] += power_w
+                    has_any_windows = True
+
+        if not has_any_windows:
+            return None
+
+        # Log summary
+        peak_kw = max(ev_load) / 1000
+        dt_h = interval_minutes / 60
+        total_kwh = sum(ev_load) / 1000 * dt_h
+        active_intervals = sum(1 for v in ev_load if v > 0)
+        _LOGGER.debug(
+            "EV load overlay: %d intervals, peak %.1f kW, total %.1f kWh",
+            active_intervals, peak_kw, total_kwh,
+        )
+
+        return ev_load
 
     async def _auto_detect_battery_specs(self) -> None:
         """Auto-detect battery capacity and power from Tesla site_info.
@@ -1227,6 +1320,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._ev_coordinator:
             data["ev"] = self._ev_coordinator.get_status()
 
+            # Also include auto-schedule plan data if available
+            from ..automations.ev_charging_planner import get_auto_schedule_executor
+            executor = get_auto_schedule_executor()
+            if executor:
+                data["ev"]["auto_schedule"] = executor.get_all_states()
+
         # Add schedule data if available
         if self._current_schedule:
             api_response = self._current_schedule.to_api_response()
@@ -1235,6 +1334,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 api_response["grid_import_w"] = self._last_optimizer_result.grid_import_w
                 api_response["grid_export_w"] = self._last_optimizer_result.grid_export_w
             data["schedule"] = api_response
+
+            # Add EV charging power overlay if EV coordination is active
+            if self._ev_coordinator and data.get("ev"):
+                ev_power = [0.0] * len(api_response["timestamps"])
+                charging_plan = data["ev"].get("charging_plan", [])
+                if charging_plan:
+                    from datetime import datetime as _dt
+                    for window in charging_plan:
+                        w_start = _dt.fromisoformat(window["start"])
+                        w_end = _dt.fromisoformat(window["end"])
+                        w_power = window.get("power_available_w", 0)
+                        for idx, ts_str in enumerate(api_response["timestamps"]):
+                            ts = _dt.fromisoformat(ts_str)
+                            if w_start <= ts < w_end:
+                                ev_power[idx] = w_power
+                api_response["ev_charging_w"] = ev_power
 
             dt_h = self._config.interval_minutes / 60
             daily_cost = self._get_daily_cost()
