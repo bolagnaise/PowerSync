@@ -215,8 +215,7 @@ See the [wiki](https://github.com/bolagnaise/PowerSync/wiki) for the full servic
 
 ## Support
 
-- **Discord:** https://discord.gg/eaWDWxEWE3
-- **Issues:** https://github.com/bolagnaise/PowerSync/issues
+- **Discord:** https://discord.gg/eaWDWxEWE3 — bug reports, feature requests, and support
 - **Wiki:** https://github.com/bolagnaise/PowerSync/wiki
 
 ## License
