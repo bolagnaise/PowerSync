@@ -87,6 +87,8 @@ class FoxESSRegisterMap:
     supports_energy_totals: bool = True
     supports_work_mode_rw: bool = True
     supports_charge_periods: bool = False
+    # H3-Pro and H3 Smart use holding registers for ALL data (no input registers)
+    all_holding: bool = False
 
 
 # Register maps for each model family
@@ -191,6 +193,7 @@ REGISTER_MAPS: dict[FoxESSModelFamily, FoxESSRegisterMap] = {
         supports_energy_totals=True,
         supports_work_mode_rw=True,
         supports_charge_periods=False,
+        all_holding=True,
     ),
     # H3 Smart shares the H3-Pro register address space.
     # Native WiFi Modbus TCP — no external adapter needed.
@@ -222,6 +225,7 @@ REGISTER_MAPS: dict[FoxESSModelFamily, FoxESSRegisterMap] = {
         supports_energy_totals=True,
         supports_work_mode_rw=True,
         supports_charge_periods=False,
+        all_holding=True,
     ),
 }
 
@@ -368,6 +372,16 @@ class FoxESSController(InverterController):
             _LOGGER.debug("FoxESS read holding register %d exception: %s", address, e)
             return None
 
+    async def _read_data_register(self, address: int, count: int = 1) -> Optional[list[int]]:
+        """Read a data register using the correct type for the detected model.
+
+        H3-Pro and H3-Smart use holding registers for all data.
+        Other models use input registers for read-only data.
+        """
+        if self._register_map and self._register_map.all_holding:
+            return await self._read_holding_registers(address, count)
+        return await self._read_input_registers(address, count)
+
     async def _write_holding_register(self, address: int, value: int) -> bool:
         """Write a single holding register."""
         if not self._client or not self._connected:
@@ -417,6 +431,19 @@ class FoxESSController(InverterController):
 
     # ---- Model detection ----
 
+    async def _probe_register(self, address: int) -> bool:
+        """Probe a register address, trying both input and holding types.
+
+        H3-Pro and H3-Smart use holding registers for everything, while
+        H1/H3/KH use input registers for read-only data. During detection
+        we don't know the model yet, so try both.
+        """
+        result = await self._read_input_registers(address, 1)
+        if result is not None:
+            return True
+        result = await self._read_holding_registers(address, 1)
+        return result is not None
+
     async def detect_model(self) -> FoxESSModelFamily:
         """Auto-detect FoxESS model family by probing registers.
 
@@ -425,12 +452,15 @@ class FoxESSController(InverterController):
         H3-Pro vs H3 Smart is distinguished by 41xxx register availability
         (H3 Smart's 41001-41006 are invalid per the Modbus protocol spec).
 
+        Each probe tries both input and holding register types because
+        H3-Pro/Smart use holding registers for all data while H1/H3/KH
+        use input registers.
+
         Returns:
             Detected model family enum
         """
         # Try H3-Pro/Smart first (unique register 37612)
-        result = await self._read_input_registers(37612, 1)
-        if result is not None:
+        if await self._probe_register(37612):
             # Both H3-Pro and H3 Smart respond on 37612.
             # Distinguish by probing holding register 41001, which is valid
             # on H3-Pro but invalid on H3 Smart (per FoxESS Modbus protocol
@@ -449,16 +479,14 @@ class FoxESSController(InverterController):
             return self._model_family
 
         # Try H3 (register 31038)
-        result = await self._read_input_registers(31038, 1)
-        if result is not None:
+        if await self._probe_register(31038):
             self._model_family = FoxESSModelFamily.H3
             self._register_map = REGISTER_MAPS[self._model_family]
             _LOGGER.info("FoxESS model detected: H3 (register 31038 responded)")
             return self._model_family
 
         # Try H1/KH (register 31024)
-        result = await self._read_input_registers(31024, 1)
-        if result is not None:
+        if await self._probe_register(31024):
             # Try to distinguish H1 from KH by checking BMS register availability
             bms_check = await self._read_holding_registers(41009, 1)
             if bms_check is not None:
@@ -494,7 +522,7 @@ class FoxESSController(InverterController):
 
         try:
             # Battery SOC
-            soc_raw = await self._read_input_registers(reg.battery_soc, 1)
+            soc_raw = await self._read_data_register(reg.battery_soc, 1)
             battery_soc = soc_raw[0] if soc_raw else None
             attrs["battery_soc"] = battery_soc
 
@@ -507,7 +535,7 @@ class FoxESSController(InverterController):
                 else:
                     battery_power_kw = None
             elif reg.battery_power:
-                bp_raw = await self._read_input_registers(reg.battery_power, 1)
+                bp_raw = await self._read_data_register(reg.battery_power, 1)
                 battery_power_kw = self._to_signed16(bp_raw[0]) / gain if bp_raw else None
             else:
                 battery_power_kw = None
@@ -518,10 +546,10 @@ class FoxESSController(InverterController):
             pv1_kw = None
             pv2_kw = None
             if reg.pv1_power:
-                pv1_raw = await self._read_input_registers(reg.pv1_power, 1)
+                pv1_raw = await self._read_data_register(reg.pv1_power, 1)
                 pv1_kw = pv1_raw[0] / gain if pv1_raw else None
             if reg.pv2_power:
-                pv2_raw = await self._read_input_registers(reg.pv2_power, 1)
+                pv2_raw = await self._read_data_register(reg.pv2_power, 1)
                 pv2_kw = pv2_raw[0] / gain if pv2_raw else None
             total_pv_kw = (pv1_kw or 0) + (pv2_kw or 0)
             attrs["pv1_power_kw"] = pv1_kw
@@ -537,7 +565,7 @@ class FoxESSController(InverterController):
                 else:
                     grid_power_kw = None
             elif reg.grid_power:
-                gp_raw = await self._read_input_registers(reg.grid_power, 1)
+                gp_raw = await self._read_data_register(reg.grid_power, 1)
                 grid_power_kw = self._to_signed16(gp_raw[0]) / gain if gp_raw else None
             else:
                 grid_power_kw = None
@@ -545,7 +573,7 @@ class FoxESSController(InverterController):
 
             # Load/home power
             if reg.load_power:
-                lp_raw = await self._read_input_registers(reg.load_power, 1)
+                lp_raw = await self._read_data_register(reg.load_power, 1)
                 load_power_kw = lp_raw[0] / gain if lp_raw else None
             else:
                 # H3-Pro: no load register, calculate from other values
@@ -856,12 +884,12 @@ class FoxESSController(InverterController):
         result: dict[str, float] = {}
 
         if reg.charge_energy_today:
-            raw = await self._read_input_registers(reg.charge_energy_today, 1)
+            raw = await self._read_data_register(reg.charge_energy_today, 1)
             if raw:
                 result["charge_today_kwh"] = raw[0] / GAIN_ENERGY
 
         if reg.discharge_energy_today:
-            raw = await self._read_input_registers(reg.discharge_energy_today, 1)
+            raw = await self._read_data_register(reg.discharge_energy_today, 1)
             if raw:
                 result["discharge_today_kwh"] = raw[0] / GAIN_ENERGY
 
@@ -878,7 +906,7 @@ class FoxESSController(InverterController):
         if not self._register_map:
             return None
 
-        soc_raw = await self._read_input_registers(self._register_map.battery_soc, 1)
+        soc_raw = await self._read_data_register(self._register_map.battery_soc, 1)
         if soc_raw is not None:
             return {
                 "battery_soc": soc_raw[0],
