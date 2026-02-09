@@ -10636,44 +10636,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             now = dt_util.utcnow()
 
             if now >= expires_at:
-                # Force mode has expired during restart - restore saved tariff
+                # Force mode has expired during restart - need to restore Tesla to normal
                 _LOGGER.info(f"⏰ Persisted force {mode} has expired (was {expires_at_str}), restoring saved tariff")
 
-                # Get saved tariff before clearing state
                 saved_tariff = persisted_force_state.get("saved_tariff")
-                saved_operation_mode = persisted_force_state.get("saved_operation_mode")
+                saved_backup_reserve = persisted_force_state.get("saved_backup_reserve")
+
+                # Populate force state so handle_restore_normal can do a full cleanup
+                # (restore tariff, operation mode, backup reserve, clear state)
+                state = force_charge_state if mode == "charge" else force_discharge_state
+                state["active"] = True
+                state["expires_at"] = expires_at
+                state["saved_tariff"] = saved_tariff
+                state["saved_operation_mode"] = persisted_force_state.get("saved_operation_mode")
+                state["saved_backup_reserve"] = saved_backup_reserve
+
+                # Use handle_restore_normal for full cleanup — it has direct API access
+                # and doesn't depend on battery_controller (which isn't created yet)
+                try:
+                    await handle_restore_normal(ServiceCall(DOMAIN, SERVICE_RESTORE_NORMAL, {}))
+                    _LOGGER.info("✅ Restored normal operation after expired force mode")
+                except Exception as e:
+                    _LOGGER.error(f"Error restoring after expired force mode: {e}", exc_info=True)
 
                 # Clear the persisted state
                 store = hass.data[DOMAIN][entry.entry_id]["store"]
                 stored_data = await store.async_load() or {}
                 stored_data["force_mode_state"] = None
                 await store.async_save(stored_data)
-
-                # Restore the saved tariff if we have one
-                # Get battery_controller from hass.data (it's created later in setup)
-                stored_battery_controller = hass.data[DOMAIN][entry.entry_id].get("battery_controller")
-                if saved_tariff and stored_battery_controller:
-                    _LOGGER.info("Restoring saved tariff after expired force mode...")
-                    try:
-                        success = await stored_battery_controller.upload_tariff(saved_tariff)
-                        if success:
-                            _LOGGER.info("✅ Restored saved tariff successfully after restart")
-                        else:
-                            _LOGGER.error("Failed to restore saved tariff after restart")
-                    except Exception as e:
-                        _LOGGER.error(f"Error restoring saved tariff: {e}")
-
-                # Restore operation mode if we have one
-                if saved_operation_mode and stored_battery_controller:
-                    try:
-                        await stored_battery_controller.set_operation_mode(saved_operation_mode)
-                        _LOGGER.info(f"Restored operation mode to {saved_operation_mode}")
-                    except Exception as e:
-                        _LOGGER.error(f"Error restoring operation mode: {e}")
-
-                if not saved_tariff:
-                    _LOGGER.warning("No saved tariff to restore - triggering TOU sync as fallback")
-                    # For dynamic pricing users, sync will fetch fresh prices
             else:
                 # Force mode is still active - restore state and re-setup timer
                 remaining_seconds = (expires_at - now).total_seconds()
@@ -10733,9 +10723,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.error(f"Error restoring force mode from persistence: {e}", exc_info=True)
 
-    # Schedule the restoration to run after setup is complete
-    if persisted_force_state:
-        hass.async_create_task(restore_force_mode_from_persistence())
+    # NOTE: restore_force_mode_from_persistence is scheduled AFTER handle_restore_normal
+    # is defined (see below), because it needs handle_restore_normal in its closure.
 
     async def handle_force_discharge(call: ServiceCall) -> None:
         """Force discharge mode - switches to autonomous with high export tariff."""
@@ -12383,6 +12372,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_register(DOMAIN, SERVICE_FORCE_CHARGE, handle_force_charge)
     hass.services.async_register(DOMAIN, SERVICE_RESTORE_NORMAL, handle_restore_normal)
 
+    # Now that handle_restore_normal is defined, schedule expired force mode restore
+    if persisted_force_state:
+        hass.async_create_task(restore_force_mode_from_persistence())
+
     # Register Powerwall settings services
     hass.services.async_register(DOMAIN, SERVICE_SET_BACKUP_RESERVE, handle_set_backup_reserve)
     hass.services.async_register(DOMAIN, SERVICE_SET_OPERATION_MODE, handle_set_operation_mode)
@@ -12894,8 +12887,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if electricity_provider in ("globird", "aemo_vpp", "other"):
         _LOGGER.info(f"📊 Fetching Tesla tariff schedule for {electricity_provider} user...")
         try:
-            # If force charge/discharge is active, Tesla API returns the fake tariff.
-            # Use the saved real tariff instead to build the schedule.
+            # If force charge/discharge is/was active, Tesla API may still have
+            # the fake tariff. Use the saved real tariff instead.
             tariff_data = None
             force_state = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
             fd_state = force_state.get("force_discharge_state", {})
@@ -12907,6 +12900,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             elif fc_state.get("active") and fc_state.get("saved_tariff"):
                 saved_tariff = fc_state["saved_tariff"]
                 _LOGGER.info("Force charge active - using saved tariff for schedule instead of Tesla API")
+            elif persisted_force_state and persisted_force_state.get("saved_tariff"):
+                # Force mode expired during restart — restore_normal is uploading
+                # the real tariff but may not have completed yet. Use saved tariff
+                # so the optimizer gets correct prices immediately.
+                saved_tariff = persisted_force_state["saved_tariff"]
+                _LOGGER.info("Force mode recently expired - using saved tariff to avoid stale force-charge tariff")
 
             if saved_tariff:
                 tariff_data = convert_custom_tariff_to_schedule(saved_tariff)
