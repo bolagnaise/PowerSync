@@ -815,37 +815,43 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         nameplate_power = site_info.get("nameplate_power", 0)
 
         if battery_count > 0 and nameplate_power > 0:
-            # nameplate_power is total site battery power in watts
-            power_w = int(nameplate_power)
+            # nameplate_power is total site discharge power in watts
+            discharge_w = int(nameplate_power)
+            # Grid charge rate is limited by the gateway/inverter (~5kW per unit),
+            # which is typically lower than the discharge rate.
+            charge_w = min(discharge_w, 5000)
             # Estimate capacity: battery_count * 13.5 kWh per unit
             capacity_wh = int(battery_count * 13500)
 
             self._config.battery_capacity_wh = capacity_wh
-            self._config.max_charge_w = power_w
-            self._config.max_discharge_w = power_w
+            self._config.max_charge_w = charge_w
+            self._config.max_discharge_w = discharge_w
 
             _LOGGER.info(
                 "Auto-detected battery specs from site_info: "
-                "%d units, %.1f kWh capacity, %.1f kW max power",
+                "%d units, %.1f kWh, charge %.1f kW, discharge %.1f kW",
                 battery_count,
                 capacity_wh / 1000,
-                power_w / 1000,
+                charge_w / 1000,
+                discharge_w / 1000,
             )
         elif battery_count > 0:
             # Have count but no nameplate — estimate power per unit
             capacity_wh = int(battery_count * 13500)
-            power_w = int(battery_count * 5000)  # Conservative 5kW per unit
+            charge_w = 5000  # Conservative single gateway limit
+            discharge_w = int(battery_count * 5000)
 
             self._config.battery_capacity_wh = capacity_wh
-            self._config.max_charge_w = power_w
-            self._config.max_discharge_w = power_w
+            self._config.max_charge_w = charge_w
+            self._config.max_discharge_w = discharge_w
 
             _LOGGER.info(
                 "Estimated battery specs from count: "
-                "%d units, %.1f kWh capacity, %.1f kW max power",
+                "%d units, %.1f kWh, charge %.1f kW, discharge %.1f kW",
                 battery_count,
                 capacity_wh / 1000,
-                power_w / 1000,
+                charge_w / 1000,
+                discharge_w / 1000,
             )
 
     async def _get_battery_state(self) -> tuple[float, float]:
