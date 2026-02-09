@@ -12090,11 +12090,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     else:
                         _LOGGER.warning(f"Sigenergy self-consumption partial: charge={charge_result}, discharge={discharge_result}")
 
-                # Clear forced states since we're now in normal self-consumption
-                force_discharge_state["active"] = False
-                force_charge_state["active"] = False
-
-                _LOGGER.info("✅ SIGENERGY SELF-CONSUMPTION MODE SET")
+                    _LOGGER.info("✅ SIGENERGY SELF-CONSUMPTION MODE SET")
                 return
             except Exception as e:
                 _LOGGER.error(f"Error setting Sigenergy self-consumption: {e}", exc_info=True)
@@ -12130,21 +12126,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     text = await response.text()
                     _LOGGER.warning(f"Could not set self_consumption mode: {response.status} - {text}")
 
-            # Clear forced states
-            force_discharge_state["active"] = False
-            force_charge_state["active"] = False
-
-            # Dispatch events for UI (show as not in forced mode)
-            async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
-                "active": False,
-                "expires_at": None,
-                "duration": 0,
-            })
-            async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
-                "active": False,
-                "expires_at": None,
-                "duration": 0,
-            })
+            # Do NOT clear force_charge_state/force_discharge_state here.
+            # If force charge/discharge is active, the expiry timer owns cleanup
+            # (restoring backup_reserve, tariff, and mode). Clearing active=False
+            # here would orphan the timer and leave backup_reserve stuck at 100%.
 
         except Exception as e:
             _LOGGER.error(f"Error setting self-consumption mode: {e}", exc_info=True)
