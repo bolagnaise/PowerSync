@@ -191,6 +191,19 @@ async def _geocode_location(api_key: str, location: str) -> Optional[Tuple[float
         Tuple of (latitude, longitude) or None if not found
     """
     try:
+        # Check if location looks like lat,lon coordinates
+        if "," in location:
+            parts = location.split(",")
+            if len(parts) == 2:
+                try:
+                    lat = float(parts[0].strip())
+                    lon = float(parts[1].strip())
+                    if -90 <= lat <= 90 and -180 <= lon <= 180:
+                        _LOGGER.debug("Using explicit coordinates: %s, %s", lat, lon)
+                        return (lat, lon)
+                except ValueError:
+                    pass  # Not coordinates, continue to city name geocoding
+
         async with aiohttp.ClientSession() as session:
             # Check if location looks like a postcode (all digits)
             if location.isdigit():
@@ -208,10 +221,15 @@ async def _geocode_location(api_key: str, location: str) -> Optional[Tuple[float
                         return (data.get("lat"), data.get("lon"))
             else:
                 # Use direct geocoding API for city names
+                # Strip state abbreviations like "NSW" -> use full name for better results
+                query = location
+                # If location already contains a country, use as-is; otherwise append AU
+                if not any(c in location.lower() for c in ["australia", ",au"]):
+                    query = f"{location},AU"
                 async with session.get(
                     OPENWEATHERMAP_GEO_URL,
                     params={
-                        "q": f"{location},AU",
+                        "q": query,
                         "limit": 1,
                         "appid": api_key,
                     },

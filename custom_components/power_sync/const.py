@@ -1017,6 +1017,9 @@ CONF_OPTIMIZATION_EV_INTEGRATION = "optimization_ev_integration"
 CONF_OPTIMIZATION_VPP_ENABLED = "optimization_vpp_enabled"
 CONF_OPTIMIZATION_MULTI_BATTERY = "optimization_multi_battery"
 CONF_OPTIMIZATION_ML_FORECASTING = "optimization_ml_forecasting"
+CONF_OPTIMIZATION_BATTERY_CAPACITY_WH = "optimization_battery_capacity_wh"
+CONF_OPTIMIZATION_MAX_CHARGE_W = "optimization_max_charge_w"
+CONF_OPTIMIZATION_MAX_DISCHARGE_W = "optimization_max_discharge_w"
 CONF_OPTIMIZATION_WEATHER_INTEGRATION = "optimization_weather_integration"
 
 # Optimization cost function (only cost minimization — self-consumption is the battery's native mode)

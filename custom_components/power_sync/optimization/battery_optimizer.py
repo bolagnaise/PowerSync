@@ -350,14 +350,15 @@ class BatteryOptimizer:
             solar, load, soc_0
         )
 
-        # Calculate costs
+        # Calculate costs for first 24 hours only (display as daily cost)
+        n_24h = min(n, int(24 * 60 / self.interval_minutes))
         predicted_cost = sum(
             import_prices[t] * grid_import[t] * dt
             - export_prices[t] * grid_export[t] * dt
-            for t in range(n)
+            for t in range(n_24h)
         )
         baseline_cost = self._calculate_baseline_cost(
-            n, import_prices, export_prices, solar, load
+            n_24h, import_prices, export_prices, solar, load
         )
         predicted_savings = baseline_cost - predicted_cost
 
@@ -488,14 +489,15 @@ class BatteryOptimizer:
             solar, load, soc_0
         )
 
-        # Calculate costs
+        # Calculate costs for first 24 hours only (display as daily cost)
+        n_24h = min(n, int(24 * 60 / self.interval_minutes))
         predicted_cost = sum(
             import_prices[t] * grid_import[t] * dt
             - export_prices[t] * grid_export[t] * dt
-            for t in range(n)
+            for t in range(n_24h)
         )
         baseline_cost = self._calculate_baseline_cost(
-            n, import_prices, export_prices, solar, load
+            n_24h, import_prices, export_prices, solar, load
         )
 
         schedule.predicted_cost = round(predicted_cost, 2)
