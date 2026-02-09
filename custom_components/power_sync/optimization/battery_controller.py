@@ -27,7 +27,7 @@ class BatteryControllerWrapper:
     def __init__(
         self,
         hass: HomeAssistant,
-        battery_system: str,  # "tesla", "sigenergy", "sungrow"
+        battery_system: str,  # "tesla", "sigenergy", "sungrow", "foxess"
         force_charge_handler: Callable[[ServiceCall], Coroutine[Any, Any, None]],
         force_discharge_handler: Callable[[ServiceCall], Coroutine[Any, Any, None]],
         restore_normal_handler: Callable[[ServiceCall], Coroutine[Any, Any, None]],

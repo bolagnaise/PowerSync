@@ -181,6 +181,21 @@ from .const import (
     CONF_SUNGROW_SLAVE_ID,
     DEFAULT_SUNGROW_PORT,
     DEFAULT_SUNGROW_SLAVE_ID,
+    # FoxESS battery system configuration
+    BATTERY_SYSTEM_FOXESS,
+    CONF_FOXESS_HOST,
+    CONF_FOXESS_PORT,
+    CONF_FOXESS_SLAVE_ID,
+    CONF_FOXESS_CONNECTION_TYPE,
+    CONF_FOXESS_SERIAL_PORT,
+    CONF_FOXESS_SERIAL_BAUDRATE,
+    CONF_FOXESS_MODEL_FAMILY,
+    DEFAULT_FOXESS_PORT,
+    DEFAULT_FOXESS_SLAVE_ID,
+    DEFAULT_FOXESS_SERIAL_BAUDRATE,
+    FOXESS_CONNECTION_TCP,
+    FOXESS_CONNECTION_SERIAL,
+    FOXESS_WORK_MODES,
     # Octopus Energy UK configuration
     CONF_OCTOPUS_PRODUCT_CODE,
     CONF_OCTOPUS_TARIFF_CODE,
@@ -224,6 +239,7 @@ from .coordinator import (
     TeslaEnergyCoordinator,
     SigenergyEnergyCoordinator,
     SungrowEnergyCoordinator,
+    FoxESSEnergyCoordinator,
     DemandChargeCoordinator,
     AEMOSensorCoordinator,
     OctopusPriceCoordinator,
@@ -1684,9 +1700,20 @@ class PowerwallSettingsView(HomeAssistantView):
                 status=503
             )
 
-        # Check if this is a Sigenergy or Sungrow setup - Powerwall settings not applicable
+        # Check if this is a Sigenergy, Sungrow, or FoxESS setup - Powerwall settings not applicable
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
         is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
+        is_foxess = bool(entry.data.get(CONF_FOXESS_HOST) or entry.data.get(CONF_FOXESS_SERIAL_PORT))
+        if is_foxess:
+            _LOGGER.info("Powerwall settings not available for FoxESS battery systems")
+            return web.json_response(
+                {
+                    "success": False,
+                    "error": "Powerwall settings are not available for FoxESS battery systems",
+                    "reason": "foxess_not_supported"
+                },
+                status=200
+            )
         if is_sigenergy:
             _LOGGER.info("Powerwall settings not available for Sigenergy battery systems")
             return web.json_response(
@@ -2512,6 +2539,158 @@ class SungrowSettingsView(HomeAssistantView):
             )
 
 
+class FoxESSSettingsView(HomeAssistantView):
+    """HTTP view to get/set FoxESS battery settings for mobile app Controls."""
+
+    url = "/api/power_sync/foxess_settings"
+    name = "api:power_sync:foxess_settings"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request for FoxESS settings."""
+        _LOGGER.info("FoxESS settings HTTP GET request")
+
+        entry = None
+        for config_entry in self._hass.config_entries.async_entries(DOMAIN):
+            entry = config_entry
+            break
+
+        if not entry:
+            return web.json_response(
+                {"success": False, "error": "PowerSync not configured"},
+                status=503
+            )
+
+        is_foxess = bool(entry.data.get(CONF_FOXESS_HOST) or entry.data.get(CONF_FOXESS_SERIAL_PORT))
+        if not is_foxess:
+            return web.json_response(
+                {"success": False, "error": "Not a FoxESS battery system", "reason": "not_foxess"},
+                status=200
+            )
+
+        try:
+            entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            foxess_coordinator = entry_data.get("foxess_coordinator")
+
+            if not foxess_coordinator or not foxess_coordinator.data:
+                return web.json_response(
+                    {"success": False, "error": "FoxESS data not available"},
+                    status=503
+                )
+
+            data = foxess_coordinator.data
+            result = {
+                "success": True,
+                "battery_soc": data.get("battery_level"),
+                "battery_power": data.get("battery_power"),
+                "work_mode": data.get("work_mode"),
+                "work_mode_name": data.get("work_mode_name"),
+                "min_soc": data.get("min_soc"),
+                "max_charge_current_a": data.get("max_charge_current_a"),
+                "max_discharge_current_a": data.get("max_discharge_current_a"),
+                "model_family": data.get("model_family"),
+            }
+
+            _LOGGER.info(
+                "FoxESS settings: SOC=%.1f%%, mode=%s, min_soc=%s",
+                data.get("battery_level", 0),
+                data.get("work_mode_name", "?"),
+                data.get("min_soc", "?"),
+            )
+            return web.json_response(result)
+
+        except Exception as e:
+            _LOGGER.error(f"Error fetching FoxESS settings: {e}", exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500
+            )
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Handle POST request to update FoxESS settings."""
+        _LOGGER.info("FoxESS settings POST request")
+
+        entry = None
+        for config_entry in self._hass.config_entries.async_entries(DOMAIN):
+            entry = config_entry
+            break
+
+        if not entry:
+            return web.json_response(
+                {"success": False, "error": "PowerSync not configured"},
+                status=503
+            )
+
+        is_foxess = bool(entry.data.get(CONF_FOXESS_HOST) or entry.data.get(CONF_FOXESS_SERIAL_PORT))
+        if not is_foxess:
+            return web.json_response(
+                {"success": False, "error": "Not a FoxESS battery system"},
+                status=400
+            )
+
+        try:
+            body = await request.json()
+
+            entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            foxess_coordinator = entry_data.get("foxess_coordinator")
+
+            if not foxess_coordinator:
+                return web.json_response(
+                    {"success": False, "error": "FoxESS coordinator not available"},
+                    status=503
+                )
+
+            results = {}
+
+            if "min_soc" in body:
+                success = await foxess_coordinator.set_backup_reserve(int(body["min_soc"]))
+                results["min_soc"] = success
+
+            if "work_mode" in body:
+                success = await foxess_coordinator.set_work_mode(int(body["work_mode"]))
+                results["work_mode"] = success
+
+            if "max_charge_current_a" in body:
+                success = await foxess_coordinator.set_charge_rate_limit(float(body["max_charge_current_a"]))
+                results["max_charge_current_a"] = success
+
+            if "max_discharge_current_a" in body:
+                success = await foxess_coordinator.set_discharge_rate_limit(float(body["max_discharge_current_a"]))
+                results["max_discharge_current_a"] = success
+
+            if "force_charge" in body:
+                if body["force_charge"]:
+                    success = await foxess_coordinator.force_charge()
+                else:
+                    success = await foxess_coordinator.restore_normal()
+                results["force_charge"] = success
+
+            if "force_discharge" in body:
+                if body["force_discharge"]:
+                    success = await foxess_coordinator.force_discharge()
+                else:
+                    success = await foxess_coordinator.restore_normal()
+                results["force_discharge"] = success
+
+            await foxess_coordinator.async_request_refresh()
+
+            return web.json_response({
+                "success": True,
+                "results": results,
+            })
+
+        except Exception as e:
+            _LOGGER.error(f"Error updating FoxESS settings: {e}", exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500
+            )
+
+
 class SungrowAEMOSpikeView(HomeAssistantView):
     """HTTP view to manage Sungrow AEMO spike detection (Globird VPP).
 
@@ -2792,6 +2971,20 @@ class ConfigView(HomeAssistantView):
                     "aemo_threshold": SUNGROW_AEMO_SPIKE_THRESHOLD,  # Always $3000/MWh for Globird
                 }
 
+            # Add FoxESS-specific info if applicable
+            foxess_config = None
+            if battery_system == "foxess":
+                foxess_host = entry.options.get(
+                    CONF_FOXESS_HOST,
+                    entry.data.get(CONF_FOXESS_HOST)
+                )
+                foxess_config = {
+                    "host": foxess_host,
+                    "model_family": entry.data.get(CONF_FOXESS_MODEL_FAMILY, "unknown"),
+                    "modbus_enabled": bool(foxess_host or entry.data.get(CONF_FOXESS_SERIAL_PORT)),
+                    "connection_type": entry.data.get(CONF_FOXESS_CONNECTION_TYPE, FOXESS_CONNECTION_TCP),
+                }
+
             # Get EV provider configuration
             ev_provider = entry.options.get(
                 CONF_EV_PROVIDER,
@@ -2824,6 +3017,7 @@ class ConfigView(HomeAssistantView):
                 "battery_health": battery_health,
                 "sigenergy": sigenergy_config,
                 "sungrow": sungrow_config,
+                "foxess": foxess_config,
             }
 
             _LOGGER.info(f"✅ Config response: battery_system={battery_system}, provider={electricity_provider}")
@@ -7686,12 +7880,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ws_client=ws_client,  # Pass WebSocket client to coordinator
         )
 
-    # Check if this is a Sigenergy or Sungrow setup (no Tesla needed)
+    # Check if this is a Sigenergy, Sungrow, or FoxESS setup (no Tesla needed)
     is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
     is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
+    is_foxess = bool(entry.data.get(CONF_FOXESS_HOST) or entry.data.get(CONF_FOXESS_SERIAL_PORT))
     tesla_coordinator = None
     sigenergy_coordinator = None
     sungrow_coordinator = None
+    foxess_coordinator = None
     token_getter = None  # Will be set for Tesla users
 
     if is_sigenergy:
@@ -7748,6 +7944,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             sungrow_host,
             port=sungrow_port,
             slave_id=sungrow_slave_id,
+        )
+    elif is_foxess:
+        _LOGGER.info("Running in FoxESS mode - Tesla credentials not required")
+
+        # Initialize FoxESS Modbus coordinator
+        foxess_conn_type = entry.data.get(CONF_FOXESS_CONNECTION_TYPE, FOXESS_CONNECTION_TCP)
+        foxess_host = entry.options.get(CONF_FOXESS_HOST, entry.data.get(CONF_FOXESS_HOST, ""))
+        foxess_port = entry.options.get(CONF_FOXESS_PORT, entry.data.get(CONF_FOXESS_PORT, DEFAULT_FOXESS_PORT))
+        foxess_slave_id = entry.options.get(CONF_FOXESS_SLAVE_ID, entry.data.get(CONF_FOXESS_SLAVE_ID, DEFAULT_FOXESS_SLAVE_ID))
+        foxess_serial_port = entry.data.get(CONF_FOXESS_SERIAL_PORT)
+        foxess_baudrate = entry.data.get(CONF_FOXESS_SERIAL_BAUDRATE, DEFAULT_FOXESS_SERIAL_BAUDRATE)
+        foxess_model_family = entry.data.get(CONF_FOXESS_MODEL_FAMILY)
+
+        _LOGGER.info(
+            "Initializing FoxESS Modbus coordinator: %s (%s, model=%s)",
+            foxess_host if foxess_conn_type == FOXESS_CONNECTION_TCP else foxess_serial_port,
+            foxess_conn_type,
+            foxess_model_family,
+        )
+        foxess_coordinator = FoxESSEnergyCoordinator(
+            hass,
+            foxess_host,
+            port=foxess_port,
+            slave_id=foxess_slave_id,
+            connection_type=foxess_conn_type,
+            serial_port=foxess_serial_port,
+            baudrate=foxess_baudrate,
+            model_family=foxess_model_family,
         )
     else:
         # Get initial Tesla API token and provider
@@ -8054,6 +8278,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "tesla_coordinator": tesla_coordinator,
         "sigenergy_coordinator": sigenergy_coordinator,  # For Sigenergy Modbus energy data
         "sungrow_coordinator": sungrow_coordinator,  # For Sungrow Modbus energy/battery data
+        "foxess_coordinator": foxess_coordinator,  # For FoxESS Modbus energy/battery data
         "demand_charge_coordinator": demand_charge_coordinator,
         "aemo_spike_manager": aemo_spike_manager,
         "sungrow_aemo_spike_manager": sungrow_aemo_spike_manager,  # For Sungrow Globird VPP
@@ -10602,6 +10827,50 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error in Sigenergy force discharge: {e}", exc_info=True)
                 return
 
+        # Check if this is a FoxESS system
+        is_foxess = bool(entry.data.get(CONF_FOXESS_HOST) or entry.data.get(CONF_FOXESS_SERIAL_PORT))
+        if is_foxess:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                foxess_coord = entry_data.get("foxess_coordinator")
+                if not foxess_coord:
+                    _LOGGER.error("Force discharge: FoxESS coordinator not available")
+                    return
+
+                discharge_result = await foxess_coord.force_discharge(duration)
+
+                if discharge_result:
+                    force_discharge_state["active"] = True
+                    force_discharge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
+                    _LOGGER.info(f"FoxESS FORCE DISCHARGE ACTIVE for {duration} minutes")
+
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                        "active": True,
+                        "expires_at": force_discharge_state["expires_at"].isoformat(),
+                        "duration": duration,
+                    })
+
+                    if force_discharge_state.get("cancel_expiry_timer"):
+                        force_discharge_state["cancel_expiry_timer"]()
+
+                    async def auto_restore_discharge_foxess(_now):
+                        if force_discharge_state["active"]:
+                            _LOGGER.info("FoxESS force discharge expired, auto-restoring")
+                            await handle_restore_normal(ServiceCall(DOMAIN, SERVICE_RESTORE_NORMAL, {}))
+
+                    force_discharge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass,
+                        auto_restore_discharge_foxess,
+                        force_discharge_state["expires_at"],
+                    )
+                    await persist_force_mode_state()
+                else:
+                    _LOGGER.error("FoxESS force discharge failed")
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error in FoxESS force discharge: {e}", exc_info=True)
+                return
+
         try:
             # Get current token and provider using helper function
             current_token, provider = get_tesla_api_token(hass, entry)
@@ -11028,6 +11297,59 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
             except Exception as e:
                 _LOGGER.error(f"Error in Sigenergy force charge: {e}", exc_info=True)
+                return
+
+        # Check if this is a FoxESS system
+        is_foxess = bool(entry.data.get(CONF_FOXESS_HOST) or entry.data.get(CONF_FOXESS_SERIAL_PORT))
+        if is_foxess:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                foxess_coord = entry_data.get("foxess_coordinator")
+                if not foxess_coord:
+                    _LOGGER.error("Force charge: FoxESS coordinator not available")
+                    return
+
+                # Cancel active discharge mode if switching to charge
+                if force_discharge_state["active"]:
+                    _LOGGER.info("Canceling active discharge mode to enable charge mode")
+                    if force_discharge_state.get("cancel_expiry_timer"):
+                        force_discharge_state["cancel_expiry_timer"]()
+                        force_discharge_state["cancel_expiry_timer"] = None
+                    force_discharge_state["active"] = False
+                    force_discharge_state["expires_at"] = None
+
+                charge_result = await foxess_coord.force_charge(duration)
+
+                if charge_result:
+                    force_charge_state["active"] = True
+                    force_charge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
+                    _LOGGER.info(f"FoxESS FORCE CHARGE ACTIVE for {duration} minutes")
+
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
+                        "active": True,
+                        "expires_at": force_charge_state["expires_at"].isoformat(),
+                        "duration": duration,
+                    })
+
+                    if force_charge_state.get("cancel_expiry_timer"):
+                        force_charge_state["cancel_expiry_timer"]()
+
+                    async def auto_restore_charge_foxess(_now):
+                        if force_charge_state["active"]:
+                            _LOGGER.info("FoxESS force charge expired, auto-restoring")
+                            await handle_restore_normal(ServiceCall(DOMAIN, SERVICE_RESTORE_NORMAL, {}))
+
+                    force_charge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass,
+                        auto_restore_charge_foxess,
+                        force_charge_state["expires_at"],
+                    )
+                    await persist_force_mode_state()
+                else:
+                    _LOGGER.error("FoxESS force charge failed")
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error in FoxESS force charge: {e}", exc_info=True)
                 return
 
         try:
@@ -11461,6 +11783,41 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
             except Exception as e:
                 _LOGGER.error(f"Error in Sigenergy restore normal: {e}", exc_info=True)
+                return
+
+        # Check if this is a FoxESS system
+        is_foxess = bool(entry.data.get(CONF_FOXESS_HOST) or entry.data.get(CONF_FOXESS_SERIAL_PORT))
+        if is_foxess:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                foxess_coord = entry_data.get("foxess_coordinator")
+                if foxess_coord:
+                    await foxess_coord.restore_normal()
+
+                force_charge_state["active"] = False
+                force_discharge_state["active"] = False
+                force_charge_state["expires_at"] = None
+                force_discharge_state["expires_at"] = None
+
+                _LOGGER.info("FoxESS NORMAL OPERATION RESTORED")
+
+                try:
+                    from .automations.actions import _send_expo_push
+                    await _send_expo_push(hass, "Battery", "Normal operation restored")
+                except Exception as notify_err:
+                    _LOGGER.debug(f"Could not send success notification: {notify_err}")
+
+                async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                    "active": False, "expires_at": None, "duration": 0,
+                })
+                async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
+                    "active": False, "expires_at": None, "duration": 0,
+                })
+
+                await persist_force_mode_state()
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error in FoxESS restore normal: {e}", exc_info=True)
                 return
 
         try:
@@ -12407,6 +12764,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register HTTP endpoint for Sungrow settings (for mobile app Controls)
     hass.http.register_view(SungrowSettingsView(hass))
     _LOGGER.info("⚙️ Sungrow settings HTTP endpoint registered at /api/power_sync/sungrow_settings")
+
+    # Register HTTP endpoint for FoxESS settings (for mobile app Controls)
+    hass.http.register_view(FoxESSSettingsView(hass))
+    _LOGGER.info("⚙️ FoxESS settings HTTP endpoint registered at /api/power_sync/foxess_settings")
 
     # Register HTTP endpoint for Sungrow AEMO spike settings (for mobile app - Globird VPP)
     hass.http.register_view(SungrowAEMOSpikeView(hass))
@@ -13424,6 +13785,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             elif is_sungrow:
                 battery_system = "sungrow"
                 energy_coordinator = sungrow_coordinator
+            elif is_foxess:
+                battery_system = "foxess"
+                energy_coordinator = foxess_coordinator
             else:
                 battery_system = "tesla"
                 energy_coordinator = tesla_coordinator

@@ -1,0 +1,796 @@
+"""FoxESS inverter/battery controller via Modbus TCP or RS485 serial.
+
+Supports FoxESS model families: H1, H3, H3-Pro, KH (plus rebrands like Kuara, A-tronix).
+Control includes force charge/discharge, work mode switching, backup reserve, and solar curtailment.
+
+Reference: https://github.com/nathanmarlor/foxess_modbus
+"""
+import asyncio
+import logging
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Optional
+
+from pymodbus.client import AsyncModbusTcpClient
+from pymodbus.exceptions import ModbusException
+
+from .base import InverterController, InverterState, InverterStatus
+
+_LOGGER = logging.getLogger(__name__)
+
+# Modbus scaling factors
+GAIN_POWER = 1000       # kW × 0.001 → W
+GAIN_SOC = 1            # % (no scaling)
+GAIN_CURRENT = 10       # A × 0.1
+GAIN_VOLTAGE = 10       # V × 0.1
+GAIN_TEMPERATURE = 10   # °C × 0.1
+
+# Remote control re-send interval (seconds) — FoxESS timeout is 600s (10 min)
+REMOTE_CONTROL_RESEND_INTERVAL = 480  # 8 minutes
+
+
+class FoxESSModelFamily(Enum):
+    """FoxESS inverter model families."""
+    H1 = "H1"
+    H3 = "H3"
+    H3_PRO = "H3-Pro"
+    KH = "KH"
+    UNKNOWN = "unknown"
+
+
+@dataclass
+class FoxESSRegisterMap:
+    """Model-specific Modbus register addresses for FoxESS inverters."""
+    # Battery registers
+    battery_soc: int
+    battery_power: int          # kW × 0.001, signed (neg=charge, pos=discharge)
+    battery_power_is_32bit: bool = False  # H3-Pro uses 32-bit battery power
+    battery_voltage: int = 0
+    battery_current: int = 0
+    battery_temperature: int = 0
+
+    # PV registers
+    pv1_power: int = 0         # kW × 0.001
+    pv2_power: int = 0         # kW × 0.001
+
+    # Grid registers
+    grid_power: int = 0        # kW × 0.001, signed (neg=export, pos=import)
+
+    # Load registers
+    load_power: int = 0        # kW × 0.001
+
+    # Control registers (holding — write)
+    min_soc: int = 0           # % backup reserve
+    max_charge_current: int = 0   # A × 0.1
+    max_discharge_current: int = 0  # A × 0.1
+    work_mode: int = 0         # Work mode enum
+
+    # Remote control registers
+    remote_enable: int = 0     # 0/1
+    remote_timeout: int = 0    # seconds
+    remote_active_power: int = 0  # W, signed
+    remote_active_power_is_32bit: bool = False
+
+    # Energy totals (daily/lifetime)
+    charge_energy_today: int = 0
+    discharge_energy_today: int = 0
+
+    # Feature flags
+    supports_bms: bool = True
+    supports_energy_totals: bool = True
+    supports_work_mode_rw: bool = True
+    supports_charge_periods: bool = False
+
+
+# Register maps for each model family
+# Reference: https://github.com/nathanmarlor/foxess_modbus/tree/main/custom_components/foxess_modbus/entities
+REGISTER_MAPS: dict[FoxESSModelFamily, FoxESSRegisterMap] = {
+    FoxESSModelFamily.H1: FoxESSRegisterMap(
+        battery_soc=31024,
+        battery_power=31022,
+        battery_voltage=31020,
+        battery_current=31021,
+        battery_temperature=31023,
+        pv1_power=31002,
+        pv2_power=31003,
+        grid_power=31008,
+        load_power=31016,
+        min_soc=41009,
+        max_charge_current=41007,
+        max_discharge_current=41008,
+        work_mode=41000,
+        remote_enable=44000,
+        remote_timeout=44001,
+        remote_active_power=44002,
+        charge_energy_today=31088,
+        discharge_energy_today=31089,
+        supports_bms=False,          # H1 LAN = no BMS; RS485 = BMS
+        supports_energy_totals=False,  # H1 LAN = no; RS485 = yes
+        supports_work_mode_rw=False,   # H1 LAN = no; RS485 = yes
+        supports_charge_periods=False,
+    ),
+    FoxESSModelFamily.KH: FoxESSRegisterMap(
+        battery_soc=31024,
+        battery_power=31022,
+        battery_voltage=31020,
+        battery_current=31021,
+        battery_temperature=31023,
+        pv1_power=31002,
+        pv2_power=31003,
+        grid_power=31008,
+        load_power=31016,
+        min_soc=41009,
+        max_charge_current=41007,
+        max_discharge_current=41008,
+        work_mode=41000,
+        remote_enable=44000,
+        remote_timeout=44001,
+        remote_active_power=44002,
+        charge_energy_today=31088,
+        discharge_energy_today=31089,
+        supports_bms=True,
+        supports_energy_totals=True,
+        supports_work_mode_rw=True,
+        supports_charge_periods=False,
+    ),
+    FoxESSModelFamily.H3: FoxESSRegisterMap(
+        battery_soc=31038,
+        battery_power=31036,
+        battery_voltage=31034,
+        battery_current=31035,
+        battery_temperature=31037,
+        pv1_power=31002,
+        pv2_power=31003,
+        grid_power=31008,
+        load_power=31016,
+        min_soc=41009,
+        max_charge_current=41007,
+        max_discharge_current=41008,
+        work_mode=41000,
+        remote_enable=44000,
+        remote_timeout=44001,
+        remote_active_power=44002,
+        charge_energy_today=31088,
+        discharge_energy_today=31089,
+        supports_bms=True,
+        supports_energy_totals=True,
+        supports_work_mode_rw=True,
+        supports_charge_periods=False,
+    ),
+    FoxESSModelFamily.H3_PRO: FoxESSRegisterMap(
+        battery_soc=37612,
+        battery_power=39238,      # 32-bit: 39238 (high) + 39237 (low)
+        battery_power_is_32bit=True,
+        battery_voltage=37610,
+        battery_current=37611,
+        battery_temperature=37613,
+        pv1_power=39070,
+        pv2_power=39071,
+        grid_power=39238,         # Same register block for grid
+        load_power=0,             # H3-Pro: calculated from grid + pv - battery
+        min_soc=46609,
+        max_charge_current=46607,
+        max_discharge_current=46608,
+        work_mode=49203,
+        remote_enable=46001,
+        remote_timeout=46002,
+        remote_active_power=46003,  # 32-bit: 46003 + 46004
+        remote_active_power_is_32bit=True,
+        charge_energy_today=37120,
+        discharge_energy_today=37121,
+        supports_bms=True,
+        supports_energy_totals=True,
+        supports_work_mode_rw=True,
+        supports_charge_periods=False,
+    ),
+}
+
+
+class FoxESSController(InverterController):
+    """FoxESS inverter/battery controller via Modbus TCP or RS485 serial.
+
+    Provides battery monitoring and control for FoxESS H1, H3, H3-Pro, and KH
+    model families. Supports force charge/discharge via work mode switching
+    and remote control registers.
+    """
+
+    def __init__(
+        self,
+        host: str,
+        port: int = 502,
+        slave_id: int = 247,
+        model: Optional[str] = None,
+        connection_type: str = "tcp",
+        serial_port: Optional[str] = None,
+        baudrate: int = 9600,
+        model_family: Optional[str] = None,
+    ):
+        """Initialize FoxESS controller.
+
+        Args:
+            host: IP address for TCP connection
+            port: Modbus TCP port (default: 502)
+            slave_id: Modbus slave ID (default: 247)
+            model: Model name string
+            connection_type: "tcp" or "serial"
+            serial_port: Serial device path (e.g., /dev/ttyUSB0)
+            baudrate: Serial baud rate (default: 9600)
+            model_family: Pre-detected model family (H1, H3, H3-Pro, KH)
+        """
+        super().__init__(host=host, port=port, slave_id=slave_id, model=model)
+        self._client: Optional[AsyncModbusTcpClient] = None
+        self._lock = asyncio.Lock()
+        self._connection_type = connection_type
+        self._serial_port = serial_port
+        self._baudrate = baudrate
+        self._original_work_mode: Optional[int] = None
+        self._original_min_soc: Optional[int] = None
+
+        # Model detection
+        if model_family:
+            try:
+                self._model_family = FoxESSModelFamily(model_family)
+            except ValueError:
+                self._model_family = FoxESSModelFamily.UNKNOWN
+        else:
+            self._model_family = FoxESSModelFamily.UNKNOWN
+
+        self._register_map: Optional[FoxESSRegisterMap] = REGISTER_MAPS.get(self._model_family)
+
+    async def connect(self) -> bool:
+        """Establish Modbus connection."""
+        try:
+            async with self._lock:
+                if self._connection_type == "serial" and self._serial_port:
+                    from pymodbus.client import AsyncModbusSerialClient
+                    self._client = AsyncModbusSerialClient(
+                        port=self._serial_port,
+                        baudrate=self._baudrate,
+                        bytesize=8,
+                        parity="N",
+                        stopbits=1,
+                        timeout=5,
+                    )
+                else:
+                    self._client = AsyncModbusTcpClient(
+                        host=self.host,
+                        port=self.port,
+                        timeout=5,
+                    )
+
+                connected = await self._client.connect()
+                if connected:
+                    self._connected = True
+                    _LOGGER.info(
+                        "FoxESS Modbus connected: %s (%s)",
+                        self.host if self._connection_type == "tcp" else self._serial_port,
+                        self._connection_type,
+                    )
+                else:
+                    _LOGGER.error("FoxESS Modbus connection failed")
+                return connected
+
+        except Exception as e:
+            _LOGGER.error("FoxESS connection error: %s", e)
+            self._connected = False
+            return False
+
+    async def disconnect(self) -> None:
+        """Close Modbus connection."""
+        async with self._lock:
+            if self._client:
+                self._client.close()
+                self._client = None
+            self._connected = False
+
+    # ---- Low-level Modbus operations ----
+
+    async def _read_input_registers(self, address: int, count: int = 1) -> Optional[list[int]]:
+        """Read input registers."""
+        if not self._client or not self._connected:
+            return None
+        try:
+            result = await self._client.read_input_registers(
+                address=address, count=count, slave=self.slave_id
+            )
+            if result.isError():
+                _LOGGER.debug("FoxESS read input register %d error: %s", address, result)
+                return None
+            return list(result.registers)
+        except (ModbusException, Exception) as e:
+            _LOGGER.debug("FoxESS read input register %d exception: %s", address, e)
+            return None
+
+    async def _read_holding_registers(self, address: int, count: int = 1) -> Optional[list[int]]:
+        """Read holding registers."""
+        if not self._client or not self._connected:
+            return None
+        try:
+            result = await self._client.read_holding_registers(
+                address=address, count=count, slave=self.slave_id
+            )
+            if result.isError():
+                _LOGGER.debug("FoxESS read holding register %d error: %s", address, result)
+                return None
+            return list(result.registers)
+        except (ModbusException, Exception) as e:
+            _LOGGER.debug("FoxESS read holding register %d exception: %s", address, e)
+            return None
+
+    async def _write_holding_register(self, address: int, value: int) -> bool:
+        """Write a single holding register."""
+        if not self._client or not self._connected:
+            return False
+        try:
+            result = await self._client.write_register(
+                address=address, value=value, slave=self.slave_id
+            )
+            if result.isError():
+                _LOGGER.error("FoxESS write register %d error: %s", address, result)
+                return False
+            return True
+        except (ModbusException, Exception) as e:
+            _LOGGER.error("FoxESS write register %d exception: %s", address, e)
+            return False
+
+    async def _write_holding_registers(self, address: int, values: list[int]) -> bool:
+        """Write multiple holding registers."""
+        if not self._client or not self._connected:
+            return False
+        try:
+            result = await self._client.write_registers(
+                address=address, values=values, slave=self.slave_id
+            )
+            if result.isError():
+                _LOGGER.error("FoxESS write registers %d error: %s", address, result)
+                return False
+            return True
+        except (ModbusException, Exception) as e:
+            _LOGGER.error("FoxESS write registers %d exception: %s", address, e)
+            return False
+
+    @staticmethod
+    def _to_signed16(value: int) -> int:
+        """Convert unsigned 16-bit to signed."""
+        if value >= 0x8000:
+            return value - 0x10000
+        return value
+
+    @staticmethod
+    def _to_signed32(high: int, low: int) -> int:
+        """Convert two unsigned 16-bit registers to signed 32-bit."""
+        value = (high << 16) | low
+        if value >= 0x80000000:
+            return value - 0x100000000
+        return value
+
+    # ---- Model detection ----
+
+    async def detect_model(self) -> FoxESSModelFamily:
+        """Auto-detect FoxESS model family by probing registers.
+
+        Probe order: H3-Pro (37612) → H3 (31038) → H1/KH (31024).
+        H1 vs KH is distinguished by feature availability.
+
+        Returns:
+            Detected model family enum
+        """
+        # Try H3-Pro first (unique register 37612)
+        result = await self._read_input_registers(37612, 1)
+        if result is not None:
+            self._model_family = FoxESSModelFamily.H3_PRO
+            self._register_map = REGISTER_MAPS[self._model_family]
+            _LOGGER.info("FoxESS model detected: H3-Pro (register 37612 responded)")
+            return self._model_family
+
+        # Try H3 (register 31038)
+        result = await self._read_input_registers(31038, 1)
+        if result is not None:
+            self._model_family = FoxESSModelFamily.H3
+            self._register_map = REGISTER_MAPS[self._model_family]
+            _LOGGER.info("FoxESS model detected: H3 (register 31038 responded)")
+            return self._model_family
+
+        # Try H1/KH (register 31024)
+        result = await self._read_input_registers(31024, 1)
+        if result is not None:
+            # Try to distinguish H1 from KH by checking BMS register availability
+            bms_check = await self._read_holding_registers(41009, 1)
+            if bms_check is not None:
+                self._model_family = FoxESSModelFamily.KH
+                _LOGGER.info("FoxESS model detected: KH (holding register 41009 accessible)")
+            else:
+                self._model_family = FoxESSModelFamily.H1
+                _LOGGER.info("FoxESS model detected: H1 (holding register 41009 not accessible)")
+            self._register_map = REGISTER_MAPS[self._model_family]
+            return self._model_family
+
+        _LOGGER.warning("FoxESS model detection failed — no registers responded")
+        self._model_family = FoxESSModelFamily.UNKNOWN
+        return self._model_family
+
+    # ---- Status reading ----
+
+    async def get_status(self) -> InverterState:
+        """Read current inverter/battery status."""
+        if not self._register_map:
+            return InverterState(
+                status=InverterStatus.ERROR,
+                is_curtailed=False,
+                error_message="No register map — model not detected",
+            )
+
+        reg = self._register_map
+        attrs: dict[str, Any] = {
+            "model_family": self._model_family.value,
+            "connection_type": self._connection_type,
+            "host": self.host if self._connection_type == "tcp" else self._serial_port,
+        }
+
+        try:
+            # Battery SOC
+            soc_raw = await self._read_input_registers(reg.battery_soc, 1)
+            battery_soc = soc_raw[0] if soc_raw else None
+            attrs["battery_soc"] = battery_soc
+
+            # Battery power
+            if reg.battery_power_is_32bit and reg.battery_power:
+                bp_raw = await self._read_input_registers(reg.battery_power - 1, 2)
+                if bp_raw and len(bp_raw) == 2:
+                    battery_power_kw = self._to_signed32(bp_raw[1], bp_raw[0]) / GAIN_POWER
+                else:
+                    battery_power_kw = None
+            elif reg.battery_power:
+                bp_raw = await self._read_input_registers(reg.battery_power, 1)
+                battery_power_kw = self._to_signed16(bp_raw[0]) / GAIN_POWER if bp_raw else None
+            else:
+                battery_power_kw = None
+            attrs["battery_power_kw"] = battery_power_kw
+            attrs["battery_power_w"] = battery_power_kw * 1000 if battery_power_kw is not None else None
+
+            # PV power
+            pv1_kw = None
+            pv2_kw = None
+            if reg.pv1_power:
+                pv1_raw = await self._read_input_registers(reg.pv1_power, 1)
+                pv1_kw = pv1_raw[0] / GAIN_POWER if pv1_raw else None
+            if reg.pv2_power:
+                pv2_raw = await self._read_input_registers(reg.pv2_power, 1)
+                pv2_kw = pv2_raw[0] / GAIN_POWER if pv2_raw else None
+            total_pv_kw = (pv1_kw or 0) + (pv2_kw or 0)
+            attrs["pv1_power_kw"] = pv1_kw
+            attrs["pv2_power_kw"] = pv2_kw
+            attrs["pv_power_kw"] = total_pv_kw
+            attrs["pv_power_w"] = total_pv_kw * 1000
+
+            # Grid power
+            if reg.grid_power:
+                gp_raw = await self._read_input_registers(reg.grid_power, 1)
+                grid_power_kw = self._to_signed16(gp_raw[0]) / GAIN_POWER if gp_raw else None
+            else:
+                grid_power_kw = None
+            attrs["grid_power_kw"] = grid_power_kw
+
+            # Load/home power
+            if reg.load_power:
+                lp_raw = await self._read_input_registers(reg.load_power, 1)
+                load_power_kw = lp_raw[0] / GAIN_POWER if lp_raw else None
+            else:
+                load_power_kw = None
+            attrs["load_power_kw"] = load_power_kw
+
+            # Work mode (holding register)
+            if reg.work_mode and reg.supports_work_mode_rw:
+                wm_raw = await self._read_holding_registers(reg.work_mode, 1)
+                work_mode = wm_raw[0] if wm_raw else None
+            else:
+                work_mode = None
+            attrs["work_mode"] = work_mode
+            from ..const import FOXESS_WORK_MODES
+            attrs["work_mode_name"] = FOXESS_WORK_MODES.get(work_mode, "Unknown") if work_mode is not None else None
+
+            # Min SOC / backup reserve
+            if reg.min_soc and reg.supports_work_mode_rw:
+                ms_raw = await self._read_holding_registers(reg.min_soc, 1)
+                min_soc = ms_raw[0] if ms_raw else None
+            else:
+                min_soc = None
+            attrs["min_soc"] = min_soc
+
+            # Charge/discharge current limits
+            if reg.max_charge_current and reg.supports_work_mode_rw:
+                mc_raw = await self._read_holding_registers(reg.max_charge_current, 1)
+                max_charge_a = mc_raw[0] / GAIN_CURRENT if mc_raw else None
+            else:
+                max_charge_a = None
+            attrs["max_charge_current_a"] = max_charge_a
+
+            if reg.max_discharge_current and reg.supports_work_mode_rw:
+                md_raw = await self._read_holding_registers(reg.max_discharge_current, 1)
+                max_discharge_a = md_raw[0] / GAIN_CURRENT if md_raw else None
+            else:
+                max_discharge_a = None
+            attrs["max_discharge_current_a"] = max_discharge_a
+
+            is_curtailed = False  # Determined by export limit state if tracked
+
+            return InverterState(
+                status=InverterStatus.ONLINE,
+                is_curtailed=is_curtailed,
+                power_output_w=total_pv_kw * 1000 if total_pv_kw else 0,
+                power_limit_percent=100,
+                attributes=attrs,
+            )
+
+        except Exception as e:
+            _LOGGER.error("FoxESS get_status error: %s", e, exc_info=True)
+            return InverterState(
+                status=InverterStatus.ERROR,
+                is_curtailed=False,
+                error_message=str(e),
+            )
+
+    # ---- Battery control methods ----
+
+    async def set_work_mode(self, mode: int) -> bool:
+        """Set FoxESS work mode.
+
+        Args:
+            mode: Work mode value (0=Self Use, 1=Feed-in, 2=Backup, 3=Force Charge, 4=Force Discharge)
+        """
+        if not self._register_map or not self._register_map.work_mode:
+            _LOGGER.error("Work mode register not available for model %s", self._model_family.value)
+            return False
+
+        _LOGGER.info("FoxESS setting work mode to %d (%s)", mode, {
+            0: "Self Use", 1: "Feed-in First", 2: "Backup",
+            3: "Force Charge", 4: "Force Discharge",
+        }.get(mode, "Unknown"))
+
+        return await self._write_holding_register(self._register_map.work_mode, mode)
+
+    async def force_charge(self, duration_minutes: int = 60, power_w: float = 5000) -> bool:
+        """Force battery to charge from grid.
+
+        Sets work mode to Force Charge and optionally sets remote power level.
+        """
+        if not self._register_map:
+            return False
+
+        reg = self._register_map
+
+        # Save current work mode for restore
+        if reg.work_mode and reg.supports_work_mode_rw:
+            wm_raw = await self._read_holding_registers(reg.work_mode, 1)
+            if wm_raw:
+                self._original_work_mode = wm_raw[0]
+
+        # Save current min_soc for restore
+        if reg.min_soc and reg.supports_work_mode_rw:
+            ms_raw = await self._read_holding_registers(reg.min_soc, 1)
+            if ms_raw:
+                self._original_min_soc = ms_raw[0]
+
+        # Enable remote control
+        if reg.remote_enable:
+            await self._write_holding_register(reg.remote_enable, 1)
+            # Set timeout to 600 seconds (10 min)
+            if reg.remote_timeout:
+                await self._write_holding_register(reg.remote_timeout, 600)
+
+        # Set work mode to Force Charge
+        from ..const import FOXESS_WORK_MODE_FORCE_CHARGE
+        success = await self.set_work_mode(FOXESS_WORK_MODE_FORCE_CHARGE)
+
+        if success:
+            _LOGGER.info("FoxESS force charge activated for %d minutes", duration_minutes)
+
+        return success
+
+    async def force_discharge(self, duration_minutes: int = 60, power_w: float = 5000) -> bool:
+        """Force battery to discharge/export.
+
+        Sets work mode to Force Discharge.
+        """
+        if not self._register_map:
+            return False
+
+        reg = self._register_map
+
+        # Save current work mode for restore
+        if reg.work_mode and reg.supports_work_mode_rw:
+            wm_raw = await self._read_holding_registers(reg.work_mode, 1)
+            if wm_raw:
+                self._original_work_mode = wm_raw[0]
+
+        # Save current min_soc for restore
+        if reg.min_soc and reg.supports_work_mode_rw:
+            ms_raw = await self._read_holding_registers(reg.min_soc, 1)
+            if ms_raw:
+                self._original_min_soc = ms_raw[0]
+
+        # Enable remote control
+        if reg.remote_enable:
+            await self._write_holding_register(reg.remote_enable, 1)
+            if reg.remote_timeout:
+                await self._write_holding_register(reg.remote_timeout, 600)
+
+        # Set work mode to Force Discharge
+        from ..const import FOXESS_WORK_MODE_FORCE_DISCHARGE
+        success = await self.set_work_mode(FOXESS_WORK_MODE_FORCE_DISCHARGE)
+
+        if success:
+            _LOGGER.info("FoxESS force discharge activated for %d minutes", duration_minutes)
+
+        return success
+
+    async def restore_normal(self) -> bool:
+        """Restore normal operation (Self Use mode)."""
+        if not self._register_map:
+            return False
+
+        from ..const import FOXESS_WORK_MODE_SELF_USE
+
+        # Restore to saved mode or default Self Use
+        target_mode = self._original_work_mode if self._original_work_mode is not None else FOXESS_WORK_MODE_SELF_USE
+        success = await self.set_work_mode(target_mode)
+
+        # Restore original min_soc if saved
+        if self._original_min_soc is not None and self._register_map.min_soc:
+            await self._write_holding_register(self._register_map.min_soc, self._original_min_soc)
+            self._original_min_soc = None
+
+        # Disable remote control override
+        if self._register_map.remote_enable:
+            await self._write_holding_register(self._register_map.remote_enable, 0)
+
+        self._original_work_mode = None
+
+        if success:
+            _LOGGER.info("FoxESS restored to normal operation (mode %d)", target_mode)
+
+        return success
+
+    async def set_backup_reserve(self, percent: int) -> bool:
+        """Set minimum SOC (backup reserve).
+
+        Args:
+            percent: Minimum SOC percentage (0-100)
+        """
+        if not self._register_map or not self._register_map.min_soc:
+            _LOGGER.error("Min SOC register not available for model %s", self._model_family.value)
+            return False
+
+        percent = max(0, min(100, percent))
+        _LOGGER.info("FoxESS setting min SOC to %d%%", percent)
+        return await self._write_holding_register(self._register_map.min_soc, percent)
+
+    async def get_backup_reserve(self) -> Optional[int]:
+        """Read current minimum SOC (backup reserve)."""
+        if not self._register_map or not self._register_map.min_soc:
+            return None
+
+        result = await self._read_holding_registers(self._register_map.min_soc, 1)
+        return result[0] if result else None
+
+    async def set_charge_rate_limit(self, amps: float) -> bool:
+        """Set maximum charge current.
+
+        Args:
+            amps: Maximum charge current in amps
+        """
+        if not self._register_map or not self._register_map.max_charge_current:
+            return False
+
+        raw_value = int(amps * GAIN_CURRENT)
+        _LOGGER.info("FoxESS setting max charge current to %.1f A (raw=%d)", amps, raw_value)
+        return await self._write_holding_register(self._register_map.max_charge_current, raw_value)
+
+    async def set_discharge_rate_limit(self, amps: float) -> bool:
+        """Set maximum discharge current.
+
+        Args:
+            amps: Maximum discharge current in amps
+        """
+        if not self._register_map or not self._register_map.max_discharge_current:
+            return False
+
+        raw_value = int(amps * GAIN_CURRENT)
+        _LOGGER.info("FoxESS setting max discharge current to %.1f A (raw=%d)", amps, raw_value)
+        return await self._write_holding_register(self._register_map.max_discharge_current, raw_value)
+
+    # ---- Solar curtailment ----
+
+    async def curtail(
+        self,
+        home_load_w: Optional[float] = None,
+        rated_capacity_w: Optional[float] = None,
+    ) -> bool:
+        """Curtail solar export by enabling remote control with zero export power.
+
+        Sets remote active power to 0 to prevent grid export during negative price periods.
+        """
+        if not self._register_map:
+            return False
+
+        reg = self._register_map
+
+        # Enable remote control
+        if reg.remote_enable:
+            await self._write_holding_register(reg.remote_enable, 1)
+            if reg.remote_timeout:
+                await self._write_holding_register(reg.remote_timeout, 600)
+
+        # Set remote active power to 0 (no export)
+        if reg.remote_active_power:
+            if reg.remote_active_power_is_32bit:
+                await self._write_holding_registers(reg.remote_active_power, [0, 0])
+            else:
+                await self._write_holding_register(reg.remote_active_power, 0)
+
+        _LOGGER.info("FoxESS solar export curtailed (remote power = 0)")
+        return True
+
+    async def restore(self) -> bool:
+        """Restore normal solar export by disabling remote control."""
+        if not self._register_map:
+            return False
+
+        # Disable remote control — inverter returns to normal autonomous operation
+        if self._register_map.remote_enable:
+            await self._write_holding_register(self._register_map.remote_enable, 0)
+
+        _LOGGER.info("FoxESS solar export restored (remote control disabled)")
+        return True
+
+    # ---- Energy summary ----
+
+    async def get_energy_summary(self) -> Optional[dict[str, float]]:
+        """Read daily energy totals."""
+        if not self._register_map or not self._register_map.supports_energy_totals:
+            return None
+
+        reg = self._register_map
+        result: dict[str, float] = {}
+
+        if reg.charge_energy_today:
+            raw = await self._read_input_registers(reg.charge_energy_today, 1)
+            if raw:
+                result["charge_today_kwh"] = raw[0] / GAIN_POWER
+
+        if reg.discharge_energy_today:
+            raw = await self._read_input_registers(reg.discharge_energy_today, 1)
+            if raw:
+                result["discharge_today_kwh"] = raw[0] / GAIN_POWER
+
+        return result if result else None
+
+    # ---- Battery data for connection test ----
+
+    async def get_battery_data(self) -> Optional[dict[str, Any]]:
+        """Read battery SOC (used for connection testing)."""
+        if not self._register_map:
+            # Try to detect model first
+            await self.detect_model()
+
+        if not self._register_map:
+            return None
+
+        soc_raw = await self._read_input_registers(self._register_map.battery_soc, 1)
+        if soc_raw is not None:
+            return {
+                "battery_soc": soc_raw[0],
+                "model_family": self._model_family.value,
+            }
+        return None
+
+    # ---- Async context manager ----
+
+    async def __aenter__(self):
+        """Enter async context."""
+        await self.connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Exit async context."""
+        await self.disconnect()

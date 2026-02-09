@@ -82,10 +82,13 @@ BATTERY_SYSTEM_TESLA = "tesla"
 BATTERY_SYSTEM_SIGENERGY = "sigenergy"
 BATTERY_SYSTEM_SUNGROW = "sungrow"
 
+BATTERY_SYSTEM_FOXESS = "foxess"
+
 BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_TESLA: "Tesla Powerwall",
     BATTERY_SYSTEM_SIGENERGY: "Sigenergy",
     BATTERY_SYSTEM_SUNGROW: "Sungrow SH-series",
+    BATTERY_SYSTEM_FOXESS: "FoxESS",
 }
 
 # Sungrow SH-series Battery System Configuration (Modbus TCP)
@@ -119,6 +122,59 @@ SUNGROW_REG_MAX_CHARGE_CURRENT = 13067   # 0.001A scale (milliamps)
 SUNGROW_REG_EXPORT_LIMIT = 13074         # 1W
 SUNGROW_REG_EXPORT_LIMIT_ENABLED = 13087 # 0=Disabled, 1=Enabled
 SUNGROW_REG_BACKUP_RESERVE = 13100       # 0.1% scale
+
+# FoxESS Battery System Configuration (Modbus TCP / RS485 Serial)
+# Hybrid inverters with integrated battery control
+# Reference: https://github.com/nathanmarlor/foxess_modbus
+CONF_FOXESS_HOST = "foxess_host"
+CONF_FOXESS_PORT = "foxess_port"
+CONF_FOXESS_SLAVE_ID = "foxess_slave_id"
+CONF_FOXESS_CONNECTION_TYPE = "foxess_connection_type"
+CONF_FOXESS_SERIAL_PORT = "foxess_serial_port"
+CONF_FOXESS_SERIAL_BAUDRATE = "foxess_serial_baudrate"
+CONF_FOXESS_MODEL_FAMILY = "foxess_model_family"
+CONF_FOXESS_DETECTED_MODEL = "foxess_detected_model"
+CONF_FOXESS_CLOUD_USERNAME = "foxess_cloud_username"
+CONF_FOXESS_CLOUD_PASSWORD = "foxess_cloud_password"
+CONF_FOXESS_CLOUD_DEVICE_SN = "foxess_cloud_device_sn"
+
+DEFAULT_FOXESS_PORT = 502
+DEFAULT_FOXESS_SLAVE_ID = 247
+DEFAULT_FOXESS_SERIAL_BAUDRATE = 9600
+
+# FoxESS connection types
+FOXESS_CONNECTION_TCP = "tcp"
+FOXESS_CONNECTION_SERIAL = "serial"
+
+# FoxESS model families
+FOXESS_MODEL_H1 = "H1"
+FOXESS_MODEL_H3 = "H3"
+FOXESS_MODEL_H3_PRO = "H3-Pro"
+FOXESS_MODEL_KH = "KH"
+FOXESS_MODEL_UNKNOWN = "unknown"
+
+FOXESS_MODEL_FAMILIES = {
+    FOXESS_MODEL_H1: "H1 Series (Single Phase)",
+    FOXESS_MODEL_H3: "H3 Series (Three Phase)",
+    FOXESS_MODEL_H3_PRO: "H3-Pro Series (Three Phase, Higher Power)",
+    FOXESS_MODEL_KH: "KH Series (Single Phase Hybrid)",
+}
+
+# FoxESS Work Mode constants (standard models: H1, H3, KH)
+FOXESS_WORK_MODE_SELF_USE = 0
+FOXESS_WORK_MODE_FEED_IN = 1
+FOXESS_WORK_MODE_BACKUP = 2
+FOXESS_WORK_MODE_FORCE_CHARGE = 3
+FOXESS_WORK_MODE_FORCE_DISCHARGE = 4
+
+# FoxESS Work Mode names
+FOXESS_WORK_MODES = {
+    FOXESS_WORK_MODE_SELF_USE: "Self Use",
+    FOXESS_WORK_MODE_FEED_IN: "Feed-in First",
+    FOXESS_WORK_MODE_BACKUP: "Backup",
+    FOXESS_WORK_MODE_FORCE_CHARGE: "Force Charge",
+    FOXESS_WORK_MODE_FORCE_DISCHARGE: "Force Discharge",
+}
 
 # Sungrow Command Values
 SUNGROW_CMD_CHARGE = 0xAA
@@ -1000,6 +1056,7 @@ OPTIMIZATION_PROVIDER_NATIVE_NAMES = {
     BATTERY_SYSTEM_TESLA: "Tesla Powerwall",
     BATTERY_SYSTEM_SIGENERGY: "Sigenergy",
     BATTERY_SYSTEM_SUNGROW: "Sungrow",
+    BATTERY_SYSTEM_FOXESS: "FoxESS",
 }
 
 OPTIMIZATION_PROVIDERS = {
@@ -1035,6 +1092,7 @@ BATTERY_CAPACITY_DEFAULTS = {
     BATTERY_SYSTEM_TESLA: 13500,     # Powerwall 2: 13.5 kWh
     BATTERY_SYSTEM_SIGENERGY: 10000,  # Varies, default 10 kWh
     BATTERY_SYSTEM_SUNGROW: 10000,    # Varies, default 10 kWh
+    BATTERY_SYSTEM_FOXESS: 10000,     # Varies, default 10 kWh
 }
 
 # Max charge/discharge power defaults by system (W)
@@ -1042,6 +1100,7 @@ BATTERY_POWER_DEFAULTS = {
     BATTERY_SYSTEM_TESLA: 5000,       # Powerwall 2: 5 kW continuous
     BATTERY_SYSTEM_SIGENERGY: 5000,   # Varies
     BATTERY_SYSTEM_SUNGROW: 5000,     # Varies
+    BATTERY_SYSTEM_FOXESS: 5000,      # Varies by model
 }
 
 # Optimization service

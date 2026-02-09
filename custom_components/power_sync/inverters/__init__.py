@@ -330,5 +330,14 @@ def get_inverter_controller(
             model=model,
         )
 
+    if brand_lower == "foxess":
+        from .foxess import FoxESSController
+        return FoxESSController(
+            host=host,
+            port=port,
+            slave_id=slave_id,
+            model=model,
+        )
+
     _LOGGER.error(f"Unsupported inverter brand: {brand}")
     return None

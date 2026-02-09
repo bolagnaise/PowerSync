@@ -1337,6 +1337,135 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         await self._controller.disconnect()
 
 
+class FoxESSEnergyCoordinator(DataUpdateCoordinator):
+    """Coordinator to fetch FoxESS battery system data via Modbus.
+
+    Polls the FoxESS inverter via Modbus TCP or RS485 to get real-time
+    power data (solar, battery, grid, load), battery SOC, and control settings.
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        host: str,
+        port: int = 502,
+        slave_id: int = 247,
+        connection_type: str = "tcp",
+        serial_port: str | None = None,
+        baudrate: int = 9600,
+        model_family: str | None = None,
+    ) -> None:
+        """Initialize the coordinator."""
+        from .inverters.foxess import FoxESSController
+
+        self.host = host
+        self.port = port
+        self.slave_id = slave_id
+        self._controller = FoxESSController(
+            host=host,
+            port=port,
+            slave_id=slave_id,
+            connection_type=connection_type,
+            serial_port=serial_port,
+            baudrate=baudrate,
+            model_family=model_family,
+        )
+
+        super().__init__(
+            hass,
+            _LOGGER,
+            name="FoxESS Energy",
+            update_interval=timedelta(seconds=30),
+        )
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Fetch data from FoxESS system via Modbus."""
+        try:
+            async with self._controller:
+                status = await self._controller.get_status()
+
+            if not status.attributes:
+                raise UpdateFailed("No data from FoxESS controller")
+
+            attrs = status.attributes
+
+            # Map to standard format (convention: positive = discharging, negative = charging)
+            battery_kw = attrs.get("battery_power_kw", 0) or 0
+            grid_kw = attrs.get("grid_power_kw", 0) or 0
+            load_kw = attrs.get("load_power_kw", 0) or 0
+            solar_kw = attrs.get("pv_power_kw", 0) or 0
+
+            energy_data = {
+                "solar_power": max(0, solar_kw),
+                "grid_power": grid_kw,
+                "battery_power": battery_kw,
+                "load_power": load_kw,
+                "battery_level": attrs.get("battery_soc", 0),
+                "last_update": dt_util.utcnow(),
+                # FoxESS-specific data
+                "work_mode": attrs.get("work_mode"),
+                "work_mode_name": attrs.get("work_mode_name"),
+                "min_soc": attrs.get("min_soc"),
+                "max_charge_current_a": attrs.get("max_charge_current_a"),
+                "max_discharge_current_a": attrs.get("max_discharge_current_a"),
+                "model_family": attrs.get("model_family"),
+            }
+
+            _LOGGER.debug(
+                "FoxESS data: solar=%.2f kW, grid=%.2f kW, battery=%.2f kW (%.0f%%), load=%.2f kW, mode=%s",
+                energy_data["solar_power"],
+                energy_data["grid_power"],
+                energy_data["battery_power"],
+                energy_data["battery_level"],
+                energy_data["load_power"],
+                energy_data.get("work_mode_name", "?"),
+            )
+
+            return energy_data
+
+        except Exception as err:
+            raise UpdateFailed(f"Error fetching FoxESS energy data: {err}") from err
+
+    async def force_charge(self, duration_minutes: int = 30) -> bool:
+        """Set FoxESS to force charge mode."""
+        async with self._controller:
+            return await self._controller.force_charge(duration_minutes)
+
+    async def force_discharge(self, duration_minutes: int = 30) -> bool:
+        """Set FoxESS to force discharge mode."""
+        async with self._controller:
+            return await self._controller.force_discharge(duration_minutes)
+
+    async def restore_normal(self) -> bool:
+        """Restore FoxESS to normal (Self Use) operation."""
+        async with self._controller:
+            return await self._controller.restore_normal()
+
+    async def set_backup_reserve(self, percent: int) -> bool:
+        """Set minimum SOC (backup reserve)."""
+        async with self._controller:
+            return await self._controller.set_backup_reserve(percent)
+
+    async def set_work_mode(self, mode: int) -> bool:
+        """Set FoxESS work mode."""
+        async with self._controller:
+            return await self._controller.set_work_mode(mode)
+
+    async def set_charge_rate_limit(self, amps: float) -> bool:
+        """Set maximum charge current in amps."""
+        async with self._controller:
+            return await self._controller.set_charge_rate_limit(amps)
+
+    async def set_discharge_rate_limit(self, amps: float) -> bool:
+        """Set maximum discharge current in amps."""
+        async with self._controller:
+            return await self._controller.set_discharge_rate_limit(amps)
+
+    async def async_shutdown(self) -> None:
+        """Disconnect from FoxESS system on shutdown."""
+        await self._controller.disconnect()
+
+
 class SolcastForecastCoordinator(DataUpdateCoordinator):
     """Coordinator to fetch Solcast solar production forecasts.
 

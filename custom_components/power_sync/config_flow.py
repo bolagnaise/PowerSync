@@ -44,6 +44,7 @@ from .const import (
     BATTERY_SYSTEM_TESLA,
     BATTERY_SYSTEM_SIGENERGY,
     BATTERY_SYSTEM_SUNGROW,
+    BATTERY_SYSTEM_FOXESS,
     BATTERY_SYSTEMS,
     # Sungrow battery system configuration
     CONF_SUNGROW_HOST,
@@ -203,6 +204,23 @@ from .const import (
     OPT_PROVIDER_POWERSYNC,
     OPTIMIZATION_PROVIDERS,
     OPTIMIZATION_PROVIDER_NATIVE_NAMES,
+    # FoxESS battery system configuration
+    CONF_FOXESS_HOST,
+    CONF_FOXESS_PORT,
+    CONF_FOXESS_SLAVE_ID,
+    CONF_FOXESS_CONNECTION_TYPE,
+    CONF_FOXESS_SERIAL_PORT,
+    CONF_FOXESS_SERIAL_BAUDRATE,
+    CONF_FOXESS_MODEL_FAMILY,
+    CONF_FOXESS_DETECTED_MODEL,
+    CONF_FOXESS_CLOUD_USERNAME,
+    CONF_FOXESS_CLOUD_PASSWORD,
+    CONF_FOXESS_CLOUD_DEVICE_SN,
+    DEFAULT_FOXESS_PORT,
+    DEFAULT_FOXESS_SLAVE_ID,
+    DEFAULT_FOXESS_SERIAL_BAUDRATE,
+    FOXESS_CONNECTION_TCP,
+    FOXESS_CONNECTION_SERIAL,
 )
 
 # Combined network tariff key for config flow
@@ -413,6 +431,46 @@ async def test_sungrow_connection(
         return {"success": False, "error": "cannot_connect"}
 
 
+async def test_foxess_connection(
+    hass: HomeAssistant,
+    host: str,
+    port: int = 502,
+    slave_id: int = 247,
+    connection_type: str = "tcp",
+    serial_port: str | None = None,
+    baudrate: int = 9600,
+) -> dict[str, Any]:
+    """Test FoxESS Modbus connection by detecting model and reading battery SOC."""
+    from .inverters.foxess import FoxESSController
+
+    try:
+        controller = FoxESSController(
+            host=host,
+            port=port,
+            slave_id=slave_id,
+            connection_type=connection_type,
+            serial_port=serial_port,
+            baudrate=baudrate,
+        )
+        async with controller:
+            # Auto-detect model family
+            model_family = await controller.detect_model()
+
+            # Try to read battery SOC
+            data = await controller.get_battery_data()
+            if data and "battery_soc" in data:
+                return {
+                    "success": True,
+                    "battery_soc": data.get("battery_soc"),
+                    "model_family": model_family.value,
+                }
+            else:
+                return {"success": False, "error": "cannot_connect"}
+    except Exception as err:
+        _LOGGER.error("FoxESS connection test failed: %s", err)
+        return {"success": False, "error": "cannot_connect"}
+
+
 class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for PowerSync."""
 
@@ -433,6 +491,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._sigenergy_data: dict[str, Any] = {}
         self._sigenergy_stations: list[dict[str, Any]] = []
         self._sungrow_data: dict[str, Any] = {}  # Sungrow Modbus configuration
+        self._foxess_data: dict[str, Any] = {}  # FoxESS Modbus configuration
         self._aemo_only_mode: bool = False  # True if using AEMO spike only (no Amber)
         self._aemo_data: dict[str, Any] = {}
         self._flow_power_data: dict[str, Any] = {}
@@ -530,6 +589,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     return await self.async_step_sigenergy_credentials()
                 elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
                     return await self.async_step_sungrow()
+                elif self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
+                    return await self.async_step_foxess_connection()
                 else:
                     return await self.async_step_tesla_provider()
             else:
@@ -650,6 +711,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     return await self.async_step_sigenergy_credentials()
                 elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
                     return await self.async_step_sungrow()
+                elif self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
+                    return await self.async_step_foxess_connection()
                 else:
                     return await self.async_step_tesla_provider()
 
@@ -768,6 +831,21 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     }
                     _LOGGER.info(f"Auto-selected Amber site for Sungrow: {amber_site_id}")
                 return await self.async_step_sungrow()
+            elif self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
+                # Auto-select Amber site for FoxESS
+                if self._amber_sites:
+                    active_sites = [s for s in self._amber_sites if s.get("status") == "active"]
+                    if active_sites:
+                        amber_site_id = active_sites[0]["id"]
+                    else:
+                        amber_site_id = self._amber_sites[0]["id"]
+                    self._site_data = {
+                        CONF_AMBER_SITE_ID: amber_site_id,
+                        CONF_AUTO_SYNC_ENABLED: True,
+                        CONF_AMBER_FORECAST_TYPE: "predicted",
+                    }
+                    _LOGGER.info(f"Auto-selected Amber site for FoxESS: {amber_site_id}")
+                return await self.async_step_foxess_connection()
             else:
                 return await self.async_step_tesla_provider()
 
@@ -834,6 +912,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "tesla_desc": "Tesla Powerwall with Fleet API or Teslemetry",
                 "sigenergy_desc": "Sigenergy via Cloud API + optional Modbus curtailment",
                 "sungrow_desc": "Sungrow SH-series hybrid inverters via Modbus TCP",
+                "foxess_desc": "FoxESS H1/H3/H3-Pro/KH inverters via Modbus TCP or RS485",
             },
         )
 
@@ -1192,6 +1271,182 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data=final_data,
         )
 
+    # ---- FoxESS Config Flow Steps ----
+
+    async def async_step_foxess_connection(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Choose FoxESS connection type: TCP or Serial."""
+        if user_input is not None:
+            conn_type = user_input.get(CONF_FOXESS_CONNECTION_TYPE, FOXESS_CONNECTION_TCP)
+            if conn_type == FOXESS_CONNECTION_SERIAL:
+                return await self.async_step_foxess_serial()
+            else:
+                return await self.async_step_foxess_tcp()
+
+        return self.async_show_form(
+            step_id="foxess_connection",
+            data_schema=vol.Schema({
+                vol.Required(CONF_FOXESS_CONNECTION_TYPE, default=FOXESS_CONNECTION_TCP): vol.In({
+                    FOXESS_CONNECTION_TCP: "Modbus TCP (LAN/Wi-Fi)",
+                    FOXESS_CONNECTION_SERIAL: "RS485 Serial",
+                }),
+            }),
+        )
+
+    async def async_step_foxess_tcp(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure FoxESS Modbus TCP connection."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            host = user_input.get(CONF_FOXESS_HOST, "").strip()
+            port = user_input.get(CONF_FOXESS_PORT, DEFAULT_FOXESS_PORT)
+            slave_id = user_input.get(CONF_FOXESS_SLAVE_ID, DEFAULT_FOXESS_SLAVE_ID)
+
+            if not host:
+                errors["base"] = "foxess_host_required"
+            else:
+                # Test Modbus connection and auto-detect model
+                test_result = await test_foxess_connection(
+                    self.hass, host, port, slave_id,
+                    connection_type="tcp",
+                )
+
+                if test_result["success"]:
+                    self._foxess_data = {
+                        CONF_FOXESS_HOST: host,
+                        CONF_FOXESS_PORT: port,
+                        CONF_FOXESS_SLAVE_ID: slave_id,
+                        CONF_FOXESS_CONNECTION_TYPE: FOXESS_CONNECTION_TCP,
+                        CONF_FOXESS_MODEL_FAMILY: test_result.get("model_family", "unknown"),
+                    }
+                    _LOGGER.info(
+                        "FoxESS Modbus TCP connection successful: host=%s, model=%s, SOC=%.1f%%",
+                        host,
+                        test_result.get("model_family", "unknown"),
+                        test_result.get("battery_soc", 0),
+                    )
+                    return await self.async_step_foxess_cloud()
+                else:
+                    errors["base"] = "cannot_connect"
+
+        return self.async_show_form(
+            step_id="foxess_tcp",
+            data_schema=vol.Schema({
+                vol.Required(CONF_FOXESS_HOST): str,
+                vol.Optional(CONF_FOXESS_PORT, default=DEFAULT_FOXESS_PORT): int,
+                vol.Optional(CONF_FOXESS_SLAVE_ID, default=DEFAULT_FOXESS_SLAVE_ID): int,
+            }),
+            errors=errors,
+        )
+
+    async def async_step_foxess_serial(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure FoxESS RS485 serial connection."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            serial_port = user_input.get(CONF_FOXESS_SERIAL_PORT, "").strip()
+            baudrate = user_input.get(CONF_FOXESS_SERIAL_BAUDRATE, DEFAULT_FOXESS_SERIAL_BAUDRATE)
+            slave_id = user_input.get(CONF_FOXESS_SLAVE_ID, DEFAULT_FOXESS_SLAVE_ID)
+
+            if not serial_port:
+                errors["base"] = "foxess_serial_required"
+            else:
+                # Test serial connection
+                test_result = await test_foxess_connection(
+                    self.hass, "", 0, slave_id,
+                    connection_type="serial",
+                    serial_port=serial_port,
+                    baudrate=baudrate,
+                )
+
+                if test_result["success"]:
+                    self._foxess_data = {
+                        CONF_FOXESS_SERIAL_PORT: serial_port,
+                        CONF_FOXESS_SERIAL_BAUDRATE: baudrate,
+                        CONF_FOXESS_SLAVE_ID: slave_id,
+                        CONF_FOXESS_CONNECTION_TYPE: FOXESS_CONNECTION_SERIAL,
+                        CONF_FOXESS_MODEL_FAMILY: test_result.get("model_family", "unknown"),
+                    }
+                    _LOGGER.info(
+                        "FoxESS RS485 connection successful: port=%s, model=%s, SOC=%.1f%%",
+                        serial_port,
+                        test_result.get("model_family", "unknown"),
+                        test_result.get("battery_soc", 0),
+                    )
+                    return await self.async_step_foxess_cloud()
+                else:
+                    errors["base"] = "cannot_connect"
+
+        return self.async_show_form(
+            step_id="foxess_serial",
+            data_schema=vol.Schema({
+                vol.Required(CONF_FOXESS_SERIAL_PORT, default="/dev/ttyUSB0"): str,
+                vol.Optional(CONF_FOXESS_SERIAL_BAUDRATE, default=DEFAULT_FOXESS_SERIAL_BAUDRATE): int,
+                vol.Optional(CONF_FOXESS_SLAVE_ID, default=DEFAULT_FOXESS_SLAVE_ID): int,
+            }),
+            errors=errors,
+        )
+
+    async def async_step_foxess_cloud(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Optional FoxESS Cloud credentials (for tariff data only)."""
+        if user_input is not None:
+            # Cloud is optional — store if provided, skip if empty
+            username = user_input.get(CONF_FOXESS_CLOUD_USERNAME, "").strip()
+            if username:
+                self._foxess_data[CONF_FOXESS_CLOUD_USERNAME] = username
+                self._foxess_data[CONF_FOXESS_CLOUD_PASSWORD] = user_input.get(CONF_FOXESS_CLOUD_PASSWORD, "")
+                self._foxess_data[CONF_FOXESS_CLOUD_DEVICE_SN] = user_input.get(CONF_FOXESS_CLOUD_DEVICE_SN, "")
+            return await self.async_step_finish_foxess()
+
+        return self.async_show_form(
+            step_id="foxess_cloud",
+            data_schema=vol.Schema({
+                vol.Optional(CONF_FOXESS_CLOUD_USERNAME, default=""): str,
+                vol.Optional(CONF_FOXESS_CLOUD_PASSWORD, default=""): str,
+                vol.Optional(CONF_FOXESS_CLOUD_DEVICE_SN, default=""): str,
+            }),
+        )
+
+    async def async_step_finish_foxess(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Finish FoxESS setup and create config entry."""
+        final_data = {
+            CONF_BATTERY_SYSTEM: BATTERY_SYSTEM_FOXESS,
+            CONF_AUTO_SYNC_ENABLED: True,
+            **self._amber_data,
+            **self._site_data,
+            **self._flow_power_data,
+            **self._octopus_data,
+            **self._foxess_data,
+            **self._aemo_data,
+        }
+
+        if self._selected_electricity_provider:
+            final_data[CONF_ELECTRICITY_PROVIDER] = self._selected_electricity_provider
+
+        if self._custom_tariff_data:
+            final_data["initial_custom_tariff"] = self._custom_tariff_data
+
+        final_data[CONF_OPTIMIZATION_PROVIDER] = self._optimization_provider
+        if self._optimization_provider == OPT_PROVIDER_POWERSYNC and self._ml_options:
+            final_data.update(self._ml_options)
+
+        model_family = self._foxess_data.get(CONF_FOXESS_MODEL_FAMILY, "unknown")
+        title = f"PowerSync - FoxESS ({model_family})"
+
+        return self.async_create_entry(
+            title=title,
+            data=final_data,
+        )
+
     async def async_step_tesla_provider(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -1341,6 +1596,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         return await self.async_step_sigenergy_credentials()
                     elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
                         return await self.async_step_sungrow()
+                    elif self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
+                        return await self.async_step_foxess_connection()
                     else:
                         return await self.async_step_tesla_provider()
             else:
@@ -1357,6 +1614,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     return await self.async_step_sigenergy_credentials()
                 elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
                     return await self.async_step_sungrow()
+                elif self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
+                    return await self.async_step_foxess_connection()
                 else:
                     return await self.async_step_tesla_provider()
 
@@ -1513,6 +1772,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_sigenergy_credentials()
             elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
                 return await self.async_step_sungrow()
+            elif self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
+                return await self.async_step_foxess_connection()
             else:
                 return await self.async_step_tesla_provider()
 
@@ -2146,6 +2407,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             return await self.async_step_init_sigenergy(user_input)
         elif battery_system == BATTERY_SYSTEM_SUNGROW:
             return await self.async_step_init_sungrow(user_input)
+        elif battery_system == BATTERY_SYSTEM_FOXESS:
+            return await self.async_step_init_foxess(user_input)
         else:
             return await self.async_step_init_tesla(user_input)
 
@@ -2484,6 +2747,128 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_SUNGROW_SLAVE_ID,
                         default=current_slave_id,
+                    ): int,
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_init_foxess(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step 1 for FoxESS users: Configure Modbus connection and optimization settings."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            # Validate connection
+            conn_type = user_input.get(CONF_FOXESS_CONNECTION_TYPE, FOXESS_CONNECTION_TCP)
+            modbus_host = user_input.get(CONF_FOXESS_HOST, "").strip()
+            serial_port = user_input.get(CONF_FOXESS_SERIAL_PORT, "").strip()
+
+            if conn_type == FOXESS_CONNECTION_TCP and not modbus_host:
+                errors["base"] = "foxess_host_required"
+            elif conn_type == FOXESS_CONNECTION_SERIAL and not serial_port:
+                errors["base"] = "foxess_serial_required"
+            else:
+                self._provider = user_input.get(CONF_ELECTRICITY_PROVIDER, "amber")
+
+                # Update config entry data with FoxESS settings
+                new_data = dict(self.config_entry.data)
+                new_data[CONF_FOXESS_CONNECTION_TYPE] = conn_type
+                if conn_type == FOXESS_CONNECTION_TCP:
+                    new_data[CONF_FOXESS_HOST] = modbus_host
+                    new_data[CONF_FOXESS_PORT] = user_input.get(
+                        CONF_FOXESS_PORT, DEFAULT_FOXESS_PORT
+                    )
+                else:
+                    new_data[CONF_FOXESS_SERIAL_PORT] = serial_port
+                    new_data[CONF_FOXESS_SERIAL_BAUDRATE] = user_input.get(
+                        CONF_FOXESS_SERIAL_BAUDRATE, DEFAULT_FOXESS_SERIAL_BAUDRATE
+                    )
+                new_data[CONF_FOXESS_SLAVE_ID] = user_input.get(
+                    CONF_FOXESS_SLAVE_ID, DEFAULT_FOXESS_SLAVE_ID
+                )
+
+                # Optimization provider settings
+                optimization_provider = user_input.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
+                new_data[CONF_OPTIMIZATION_PROVIDER] = optimization_provider
+                if optimization_provider == OPT_PROVIDER_POWERSYNC:
+                    new_data[CONF_OPTIMIZATION_COST_FUNCTION] = COST_FUNCTION_COST
+                    new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = user_input.get(
+                        CONF_OPTIMIZATION_BACKUP_RESERVE, int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100)
+                    ) / 100.0
+
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data=new_data
+                )
+
+                # Route to provider-specific step
+                if self._provider == "amber":
+                    return await self.async_step_amber_options()
+                elif self._provider == "flow_power":
+                    return await self.async_step_flow_power_options()
+                elif self._provider in ("globird", "aemo_vpp"):
+                    return await self.async_step_globird_options()
+                elif self._provider == "octopus":
+                    return await self.async_step_octopus_options()
+
+        current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
+        current_conn_type = self._get_option(CONF_FOXESS_CONNECTION_TYPE, FOXESS_CONNECTION_TCP)
+        current_host = self._get_option(CONF_FOXESS_HOST, "")
+        current_port = self._get_option(CONF_FOXESS_PORT, DEFAULT_FOXESS_PORT)
+        current_slave_id = self._get_option(CONF_FOXESS_SLAVE_ID, DEFAULT_FOXESS_SLAVE_ID)
+        current_serial_port = self._get_option(CONF_FOXESS_SERIAL_PORT, "")
+        current_baudrate = self._get_option(CONF_FOXESS_SERIAL_BAUDRATE, DEFAULT_FOXESS_SERIAL_BAUDRATE)
+        current_opt_provider = self.config_entry.data.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
+        current_backup_reserve = self.config_entry.data.get(CONF_OPTIMIZATION_BACKUP_RESERVE, DEFAULT_OPTIMIZATION_BACKUP_RESERVE)
+
+        opt_providers = {
+            OPT_PROVIDER_NATIVE: "FoxESS built-in optimization",
+            OPT_PROVIDER_POWERSYNC: "Smart Optimization (Built-in LP)",
+        }
+
+        return self.async_show_form(
+            step_id="init_foxess",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_ELECTRICITY_PROVIDER,
+                        default=current_provider,
+                    ): vol.In(ELECTRICITY_PROVIDERS),
+                    vol.Required(
+                        CONF_OPTIMIZATION_PROVIDER,
+                        default=current_opt_provider,
+                    ): vol.In(opt_providers),
+                    vol.Optional(
+                        CONF_OPTIMIZATION_BACKUP_RESERVE,
+                        default=int(current_backup_reserve * 100) if current_backup_reserve < 1 else int(current_backup_reserve),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=0, max=100)),
+                    vol.Required(
+                        CONF_FOXESS_CONNECTION_TYPE,
+                        default=current_conn_type,
+                    ): vol.In({
+                        FOXESS_CONNECTION_TCP: "Modbus TCP",
+                        FOXESS_CONNECTION_SERIAL: "RS485 Serial",
+                    }),
+                    vol.Optional(
+                        CONF_FOXESS_HOST,
+                        default=current_host,
+                    ): str,
+                    vol.Optional(
+                        CONF_FOXESS_PORT,
+                        default=current_port,
+                    ): int,
+                    vol.Optional(
+                        CONF_FOXESS_SLAVE_ID,
+                        default=current_slave_id,
+                    ): int,
+                    vol.Optional(
+                        CONF_FOXESS_SERIAL_PORT,
+                        default=current_serial_port,
+                    ): str,
+                    vol.Optional(
+                        CONF_FOXESS_SERIAL_BAUDRATE,
+                        default=current_baudrate,
                     ): int,
                 }
             ),
