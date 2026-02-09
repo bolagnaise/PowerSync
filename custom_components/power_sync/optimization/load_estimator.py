@@ -337,14 +337,23 @@ class LoadEstimator:
         try:
             history = await self._get_load_history(days=7)
             if history:
-                _LOGGER.debug("Using historical pattern for load forecast")
-                return self._forecast_from_history(history, start_time, n_intervals)
+                forecast = self._forecast_from_history(history, start_time, n_intervals)
+                avg_w = sum(forecast) / len(forecast) if forecast else 0
+                _LOGGER.info(
+                    "Using historical load forecast (%d history points, avg %.0fW)",
+                    len(history), avg_w,
+                )
+                return forecast
         except Exception as e:
-            _LOGGER.warning(f"Failed to get load history: {e}")
+            _LOGGER.warning("Failed to get load history: %s", e)
 
         # Final fallback: use current load or default
-        _LOGGER.debug("Using simple forecast fallback")
         current_load = self._get_current_load()
+        _LOGGER.warning(
+            "Using simple forecast fallback (%.0fW base) — "
+            "no load history available for %s",
+            current_load, self.load_entity_id,
+        )
         return self._simple_forecast(current_load, start_time, n_intervals)
 
     async def _get_load_history(self, days: int = 7) -> list[tuple[datetime, float]]:
@@ -358,6 +367,7 @@ class LoadEstimator:
             List of (timestamp, load_watts) tuples
         """
         if not self.load_entity_id:
+            _LOGGER.debug("No load entity ID configured, skipping history")
             return []
 
         # Check cache
@@ -368,6 +378,18 @@ class LoadEstimator:
             and self.load_entity_id in self._history_cache
         ):
             return self._history_cache[self.load_entity_id]
+
+        # Determine unit multiplier from current state
+        multiplier = 1.0
+        current_state = self.hass.states.get(self.load_entity_id)
+        if current_state:
+            unit = (current_state.attributes.get("unit_of_measurement") or "").lower()
+            if unit == "kw":
+                multiplier = 1000.0
+            _LOGGER.debug(
+                "Load sensor %s: unit=%s, multiplier=%.0f",
+                self.load_entity_id, unit, multiplier,
+            )
 
         try:
             from homeassistant.components.recorder import get_instance
@@ -388,16 +410,16 @@ class LoadEstimator:
             )
 
             if not history or self.load_entity_id not in history:
-                _LOGGER.warning(f"No history found for {self.load_entity_id}")
+                _LOGGER.warning("No history found for %s", self.load_entity_id)
                 return []
 
-            # Parse states into (timestamp, value) tuples
+            # Parse states into (timestamp, value_watts) tuples
             result = []
             for state in history[self.load_entity_id]:
                 try:
                     value = float(state.state)
                     if value >= 0:  # Filter invalid values
-                        result.append((state.last_changed, value))
+                        result.append((state.last_changed, value * multiplier))
                 except (ValueError, TypeError):
                     continue
 
@@ -405,14 +427,24 @@ class LoadEstimator:
             self._history_cache[self.load_entity_id] = result
             self._cache_time = now
 
-            _LOGGER.debug(f"Loaded {len(result)} history points for {self.load_entity_id}")
+            if result:
+                avg_w = sum(v for _, v in result) / len(result)
+                _LOGGER.info(
+                    "Loaded %d history points for %s (avg %.0fW, %.1f days)",
+                    len(result), self.load_entity_id, avg_w, days,
+                )
+            else:
+                _LOGGER.warning(
+                    "History returned for %s but no valid numeric values",
+                    self.load_entity_id,
+                )
             return result
 
         except ImportError:
             _LOGGER.warning("Recorder not available for load history")
             return []
         except Exception as e:
-            _LOGGER.error(f"Error fetching load history: {e}")
+            _LOGGER.error("Error fetching load history for %s: %s", self.load_entity_id, e)
             return []
 
     def _forecast_from_history(

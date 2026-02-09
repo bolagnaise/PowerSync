@@ -258,16 +258,38 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _get_load_entity_id(self) -> str | None:
         """Get the load entity ID based on battery system."""
-        from ..const import DOMAIN
-
-        # Try to find the home load sensor
+        # Try known sensor names first (most specific → least specific)
         fallbacks = [
-            f"sensor.power_sync_home_load",
-            f"sensor.power_sync_load",
+            "sensor.power_sync_home_load",
+            "sensor.power_sync_load",
+            "sensor.home_load",
+            "sensor.home_load_power",
+            "sensor.house_consumption",
+            "sensor.load_power",
         ]
         for entity_id in fallbacks:
-            if self.hass.states.get(entity_id):
+            state = self.hass.states.get(entity_id)
+            if state and state.state not in ("unknown", "unavailable"):
+                _LOGGER.info("Using load sensor: %s", entity_id)
                 return entity_id
+
+        # Broader search: find any sensor with "load" or "consumption" in the name
+        # that has a power unit (W or kW)
+        for state in self.hass.states.async_all("sensor"):
+            eid = state.entity_id
+            name_lower = eid.lower()
+            if state.state in ("unknown", "unavailable"):
+                continue
+            unit = (state.attributes.get("unit_of_measurement") or "").lower()
+            if unit not in ("w", "kw"):
+                continue
+            if "home_load" in name_lower or "house_load" in name_lower or (
+                "load" in name_lower and "power" in name_lower
+            ):
+                _LOGGER.info("Auto-discovered load sensor: %s", eid)
+                return eid
+
+        _LOGGER.warning("No home load sensor found — load forecast will use defaults")
         return None
 
     async def _setup_price_listener(self) -> None:
