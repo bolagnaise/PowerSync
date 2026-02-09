@@ -874,6 +874,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         current_power_w = self._get_actual_battery_power_w()
         next_action = "idle"
         next_action_time = None
+        next_action_power_w = 0
 
         if self._current_schedule and self._current_schedule.actions:
             ca = self._get_current_action()
@@ -886,6 +887,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if a.timestamp > now and a.action != current_action:
                     next_action = a.action
                     next_action_time = a.timestamp.isoformat()
+                    next_action_power_w = a.power_w
                     break
 
         # LP-specific stats
@@ -912,6 +914,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "current_power_w": current_power_w,
             "next_action": next_action,
             "next_action_time": next_action_time,
+            "next_action_power_w": next_action_power_w,
             "last_optimization": self._last_update_time.isoformat() if self._last_update_time else None,
             "predicted_cost": self._current_schedule.predicted_cost if self._current_schedule else 0,
             "predicted_savings": self._current_schedule.predicted_savings if self._current_schedule else 0,
