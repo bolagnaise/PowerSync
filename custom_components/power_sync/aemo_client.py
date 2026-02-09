@@ -1,6 +1,7 @@
 """Async AEMO API client for Home Assistant."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any
@@ -52,10 +53,9 @@ class AEMOAPIClient:
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as response:
                 if response.status != 200:
-                    _LOGGER.error(
-                        "AEMO API error: %s - %s",
+                    _LOGGER.warning(
+                        "AEMO API returned %s",
                         response.status,
-                        await response.text()
                     )
                     return {}
 
@@ -85,8 +85,11 @@ class AEMOAPIClient:
                 _LOGGER.debug("Fetched AEMO prices for %d regions", len(prices))
                 return prices
 
+        except (TimeoutError, asyncio.TimeoutError) as err:
+            _LOGGER.warning("AEMO API timeout: %s", err)
+            return {}
         except aiohttp.ClientError as err:
-            _LOGGER.error("AEMO API connection error: %s", err)
+            _LOGGER.warning("AEMO API connection error: %s", err)
             return {}
         except Exception as err:
             _LOGGER.exception("Unexpected error fetching AEMO prices: %s", err)
