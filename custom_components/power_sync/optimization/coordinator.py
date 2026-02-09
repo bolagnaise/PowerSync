@@ -1333,6 +1333,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if self._last_optimizer_result:
                 api_response["grid_import_w"] = self._last_optimizer_result.grid_import_w
                 api_response["grid_export_w"] = self._last_optimizer_result.grid_export_w
+            # Add price arrays for pricing overlay
+            n_sched = len(api_response["timestamps"])
+            if self._last_import_prices:
+                api_response["import_price"] = self._last_import_prices[:n_sched]
+            if self._last_export_prices:
+                api_response["export_price"] = self._last_export_prices[:n_sched]
             data["schedule"] = api_response
 
             # Add EV charging power overlay if EV coordination is active
