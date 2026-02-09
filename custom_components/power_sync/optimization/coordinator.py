@@ -145,8 +145,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Cached forecast data (populated each optimization run)
         self._last_solar_forecast: list[float] | None = None    # kW values
         self._last_load_forecast: list[float] | None = None     # kW values
-        self._last_import_prices: list[float] | None = None     # $/kWh values
-        self._last_export_prices: list[float] | None = None     # $/kWh values
+        self._last_import_prices: list[float] | None = None     # $/kWh values (LP-adjusted)
+        self._last_export_prices: list[float] | None = None     # $/kWh values (LP-adjusted)
+        self._last_display_import_prices: list[float] | None = None  # $/kWh actual tariff
+        self._last_display_export_prices: list[float] | None = None  # $/kWh actual tariff
 
         # Battery specs source tracking
         self._battery_specs_source = "default"  # "default", "auto", or "manual"
@@ -675,6 +677,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             min(export_prices) * 100 if export_prices else 0,
                             max(export_prices) * 100 if export_prices else 0,
                         )
+                        # Dynamic prices are real market rates — no LP adjustment needed
+                        self._last_display_import_prices = list(import_prices)
+                        self._last_display_export_prices = list(export_prices)
                         return (import_prices, export_prices)
 
         # Static TOU pricing (GloBird, custom tariff, etc.)
@@ -718,6 +723,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         Uses the tariff's TOU periods and buy/sell rates to produce
         per-interval prices for the LP optimizer's 48-hour horizon.
+
+        Also stores unadjusted display prices for the mobile app chart
+        (the LP needs tiny positive values to avoid degeneracy, but users
+        should see the actual tariff rates).
         """
         # Snap to previous interval boundary so price steps align with
         # hour/TOU boundaries and match the schedule timestamps.
@@ -735,6 +744,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         import_prices: list[float] = []
         export_prices: list[float] = []
+        display_import: list[float] = []
+        display_export: list[float] = []
 
         for t in range(n_steps):
             ts = now + timedelta(minutes=t * interval)
@@ -808,6 +819,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     defined = sorted(v for v in sell_rates.values() if isinstance(v, (int, float)))
                     sell = defined[len(defined) // 2] if defined else 0.05
 
+            # Store actual tariff rates for display before LP adjustment
+            display_import.append(buy)
+            display_export.append(sell)
+
             # When price is zero the LP has zero marginal cost, so HiGHS
             # may assign imports/exports arbitrarily (LP degeneracy).
             # Use tiny positive values to break degeneracy while keeping
@@ -840,6 +855,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 len(price_profile),
                 " | ".join(profile_parts),
             )
+
+        # Store actual tariff prices for mobile app display
+        self._last_display_import_prices = display_import
+        self._last_display_export_prices = display_export
 
         return (import_prices, export_prices)
 
@@ -1089,9 +1108,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         solar_power_kw = float(data.get("solar_power", 0) or 0)
         battery_power_kw = float(data.get("battery_power", 0) or 0)
 
-        # Current prices (first element of cached forecast = current interval)
-        import_price = self._last_import_prices[0]  # $/kWh
-        export_price = self._last_export_prices[0]   # $/kWh
+        # Current prices (first element = current interval)
+        # Use actual tariff prices for cost tracking, not LP-adjusted
+        disp_import = self._last_display_import_prices or self._last_import_prices
+        disp_export = self._last_display_export_prices or self._last_export_prices
+        import_price = disp_import[0]  # $/kWh
+        export_price = disp_export[0]   # $/kWh
 
         dt_hours = self._config.interval_minutes / 60  # 5/60 = 0.0833h
 
@@ -1140,21 +1162,25 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         minutes_to_midnight = (midnight - now).total_seconds() / 60
         steps_to_midnight = int(minutes_to_midnight / self._config.interval_minutes)
 
+        # Use actual tariff prices for cost projections, not LP-adjusted
+        prices_import = self._last_display_import_prices or self._last_import_prices
+        prices_export = self._last_display_export_prices or self._last_export_prices
+
         # LP arrays start from "now", so step 0 = current interval
         # Skip step 0 since we've already tracked the current interval's actual cost
         grid_import_w = self._last_optimizer_result.grid_import_w
         grid_export_w = self._last_optimizer_result.grid_export_w
-        n = min(steps_to_midnight, len(grid_import_w), len(self._last_import_prices))
+        n = min(steps_to_midnight, len(grid_import_w), len(prices_import))
 
         dt_hours = self._config.interval_minutes / 60
 
         predicted_cost = 0.0
         baseline_cost = 0.0
         for t in range(1, n):  # Start from 1 to skip current interval
-            import_p = self._last_import_prices[t]
+            import_p = prices_import[t]
             export_p = (
-                self._last_export_prices[t]
-                if t < len(self._last_export_prices)
+                prices_export[t]
+                if t < len(prices_export)
                 else 0.05
             )
 
@@ -1243,17 +1269,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             data["load_peak_kw"] = max(self._last_load_forecast)
             data["load_forecast"] = self._last_load_forecast
 
-        if self._last_import_prices:
-            data["import_price_avg"] = sum(self._last_import_prices) / len(self._last_import_prices)
-            data["import_price_min"] = min(self._last_import_prices)
-            data["import_price_max"] = max(self._last_import_prices)
-            data["import_prices"] = self._last_import_prices
+        # Use actual tariff prices for display (not LP-adjusted values)
+        disp_import = self._last_display_import_prices or self._last_import_prices
+        disp_export = self._last_display_export_prices or self._last_export_prices
 
-        if self._last_export_prices:
-            data["export_price_avg"] = sum(self._last_export_prices) / len(self._last_export_prices)
-            data["export_price_min"] = min(self._last_export_prices)
-            data["export_price_max"] = max(self._last_export_prices)
-            data["export_prices"] = self._last_export_prices
+        if disp_import:
+            data["import_price_avg"] = sum(disp_import) / len(disp_import)
+            data["import_price_min"] = min(disp_import)
+            data["import_price_max"] = max(disp_import)
+            data["import_prices"] = disp_import
+
+        if disp_export:
+            data["export_price_avg"] = sum(disp_export) / len(disp_export)
+            data["export_price_min"] = min(disp_export)
+            data["export_price_max"] = max(disp_export)
+            data["export_prices"] = disp_export
 
         return data
 
@@ -1363,12 +1393,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if self._last_optimizer_result:
                 api_response["grid_import_w"] = self._last_optimizer_result.grid_import_w
                 api_response["grid_export_w"] = self._last_optimizer_result.grid_export_w
-            # Add price arrays for pricing overlay
+            # Add price arrays for pricing overlay (use actual tariff rates, not LP-adjusted)
             n_sched = len(api_response["timestamps"])
-            if self._last_import_prices:
-                api_response["import_price"] = self._last_import_prices[:n_sched]
-            if self._last_export_prices:
-                api_response["export_price"] = self._last_export_prices[:n_sched]
+            display_import = self._last_display_import_prices or self._last_import_prices
+            display_export = self._last_display_export_prices or self._last_export_prices
+            if display_import:
+                api_response["import_price"] = display_import[:n_sched]
+            if display_export:
+                api_response["export_price"] = display_export[:n_sched]
             data["schedule"] = api_response
 
             # Add EV charging power overlay if EV coordination is active
