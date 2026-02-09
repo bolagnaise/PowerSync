@@ -150,6 +150,7 @@ FOXESS_CONNECTION_SERIAL = "serial"
 FOXESS_MODEL_H1 = "H1"
 FOXESS_MODEL_H3 = "H3"
 FOXESS_MODEL_H3_PRO = "H3-Pro"
+FOXESS_MODEL_H3_SMART = "H3-Smart"
 FOXESS_MODEL_KH = "KH"
 FOXESS_MODEL_UNKNOWN = "unknown"
 
@@ -157,6 +158,7 @@ FOXESS_MODEL_FAMILIES = {
     FOXESS_MODEL_H1: "H1 Series (Single Phase)",
     FOXESS_MODEL_H3: "H3 Series (Three Phase)",
     FOXESS_MODEL_H3_PRO: "H3-Pro Series (Three Phase, Higher Power)",
+    FOXESS_MODEL_H3_SMART: "H3 Smart Series (Three Phase, Native WiFi Modbus)",
     FOXESS_MODEL_KH: "KH Series (Single Phase Hybrid)",
 }
 

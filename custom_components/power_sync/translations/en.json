@@ -192,7 +192,7 @@
       },
       "foxess_tcp": {
         "title": "FoxESS Modbus TCP Connection",
-        "description": "Configure the Modbus TCP connection to your FoxESS inverter.\n\nThe model family (H1, H3, H3-Pro, KH) will be auto-detected.",
+        "description": "Configure the Modbus TCP connection to your FoxESS inverter.\n\n**H3 Smart**: Has built-in WiFi Modbus — use the inverter's IP address directly (may appear as 'espressif' on your network). Ensure inverter firmware is up to date.\n\nThe model family will be auto-detected.",
         "data": {
           "foxess_host": "FoxESS IP Address",
           "foxess_port": "Modbus Port",
@@ -219,6 +219,14 @@
           "foxess_slave_id": "Modbus slave ID (default: 247)"
         },
         "submit_button": "Test Connection"
+      },
+      "foxess_model": {
+        "title": "Confirm FoxESS Model",
+        "description": "Connection successful! Please confirm your inverter model.\n\nBoth H3-Pro and H3 Smart use the same register set. The H3 Smart has built-in WiFi Modbus and does not require an external adapter.",
+        "data": {
+          "foxess_model_family": "Inverter Model"
+        },
+        "submit_button": "Confirm"
       },
       "foxess_cloud": {
         "title": "FoxESS Cloud (Optional)",
@@ -434,6 +442,7 @@
       "sungrow_host_required": "Sungrow IP address is required for Modbus connection.",
       "sungrow_modbus_conflict": "The AC inverter and Sungrow battery have the same IP, port, and slave ID. Use a different slave ID for the AC inverter.",
       "foxess_host_required": "FoxESS IP address is required for Modbus TCP connection.",
+      "foxess_tcp_failed": "Cannot connect to FoxESS inverter via Modbus TCP. Check: (1) IP address is correct — H3 Smart shows as 'espressif' on your network, (2) inverter firmware is up to date, (3) port 502 is accessible.",
       "foxess_serial_required": "Serial port path is required for RS485 connection.",
       "no_prices": "No Octopus prices found for this tariff and region. Check your product and GSP region are correct.",
       "unknown": "An unexpected error occurred. Please try again."

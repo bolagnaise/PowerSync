@@ -1,6 +1,6 @@
 """FoxESS inverter/battery controller via Modbus TCP or RS485 serial.
 
-Supports FoxESS model families: H1, H3, H3-Pro, KH (plus rebrands like Kuara, A-tronix).
+Supports FoxESS model families: H1, H3, H3-Pro, H3 Smart, KH (plus rebrands).
 Control includes force charge/discharge, work mode switching, backup reserve, and solar curtailment.
 
 Reference: https://github.com/nathanmarlor/foxess_modbus
@@ -36,6 +36,7 @@ class FoxESSModelFamily(Enum):
     H1 = "H1"
     H3 = "H3"
     H3_PRO = "H3-Pro"
+    H3_SMART = "H3-Smart"
     KH = "KH"
     UNKNOWN = "unknown"
 
@@ -191,15 +192,48 @@ REGISTER_MAPS: dict[FoxESSModelFamily, FoxESSRegisterMap] = {
         supports_work_mode_rw=True,
         supports_charge_periods=False,
     ),
+    # H3 Smart shares the H3-Pro register address space.
+    # Native WiFi Modbus TCP — no external adapter needed.
+    # Ref: https://github.com/nathanmarlor/foxess_modbus (H3_SMART profile)
+    FoxESSModelFamily.H3_SMART: FoxESSRegisterMap(
+        battery_soc=37612,
+        battery_power=39238,
+        battery_power_is_32bit=True,
+        battery_voltage=37610,
+        battery_current=37611,
+        battery_temperature=37613,
+        pv1_power=39070,
+        pv2_power=39071,
+        grid_power=38815,
+        grid_power_is_32bit=True,
+        load_power=0,             # Calculated from grid + pv - battery
+        power_gain=10000,         # 0.0001 kW scaling (same as H3-Pro)
+        min_soc=46609,
+        max_charge_current=46607,
+        max_discharge_current=46608,
+        work_mode=49203,
+        remote_enable=46001,
+        remote_timeout=46002,
+        remote_active_power=46003,
+        remote_active_power_is_32bit=True,
+        charge_energy_today=37120,
+        discharge_energy_today=37121,
+        supports_bms=True,
+        supports_energy_totals=True,
+        supports_work_mode_rw=True,
+        supports_charge_periods=False,
+    ),
 }
 
 
 class FoxESSController(InverterController):
     """FoxESS inverter/battery controller via Modbus TCP or RS485 serial.
 
-    Provides battery monitoring and control for FoxESS H1, H3, H3-Pro, and KH
-    model families. Supports force charge/discharge via work mode switching
+    Provides battery monitoring and control for FoxESS H1, H3, H3-Pro, H3 Smart,
+    and KH model families. Supports force charge/discharge via work mode switching
     and remote control registers.
+
+    H3 Smart models have native WiFi Modbus TCP (no external adapter needed).
     """
 
     def __init__(
@@ -223,7 +257,7 @@ class FoxESSController(InverterController):
             connection_type: "tcp" or "serial"
             serial_port: Serial device path (e.g., /dev/ttyUSB0)
             baudrate: Serial baud rate (default: 9600)
-            model_family: Pre-detected model family (H1, H3, H3-Pro, KH)
+            model_family: Pre-detected model family (H1, H3, H3-Pro, H3-Smart, KH)
         """
         super().__init__(host=host, port=port, slave_id=slave_id, model=model)
         self._client: Optional[AsyncModbusTcpClient] = None
@@ -386,18 +420,32 @@ class FoxESSController(InverterController):
     async def detect_model(self) -> FoxESSModelFamily:
         """Auto-detect FoxESS model family by probing registers.
 
-        Probe order: H3-Pro (37612) → H3 (31038) → H1/KH (31024).
+        Probe order: H3-Pro/Smart (37612) → H3 (31038) → H1/KH (31024).
         H1 vs KH is distinguished by feature availability.
+        H3-Pro vs H3 Smart is distinguished by 41xxx register availability
+        (H3 Smart's 41001-41006 are invalid per the Modbus protocol spec).
 
         Returns:
             Detected model family enum
         """
-        # Try H3-Pro first (unique register 37612)
+        # Try H3-Pro/Smart first (unique register 37612)
         result = await self._read_input_registers(37612, 1)
         if result is not None:
-            self._model_family = FoxESSModelFamily.H3_PRO
+            # Both H3-Pro and H3 Smart respond on 37612.
+            # Distinguish by probing holding register 41001, which is valid
+            # on H3-Pro but invalid on H3 Smart (per FoxESS Modbus protocol
+            # V1.05.03.00 — 41001-41006 are not specified for H3 Smart).
+            h3pro_check = await self._read_holding_registers(41001, 1)
+            if h3pro_check is not None:
+                self._model_family = FoxESSModelFamily.H3_PRO
+                _LOGGER.info("FoxESS model detected: H3-Pro (registers 37612 + 41001 responded)")
+            else:
+                self._model_family = FoxESSModelFamily.H3_SMART
+                _LOGGER.info(
+                    "FoxESS model detected: H3 Smart (register 37612 responded, "
+                    "41001 invalid — native WiFi Modbus)"
+                )
             self._register_map = REGISTER_MAPS[self._model_family]
-            _LOGGER.info("FoxESS model detected: H3-Pro (register 37612 responded)")
             return self._model_family
 
         # Try H3 (register 31038)

@@ -221,6 +221,8 @@ from .const import (
     DEFAULT_FOXESS_SERIAL_BAUDRATE,
     FOXESS_CONNECTION_TCP,
     FOXESS_CONNECTION_SERIAL,
+    FOXESS_MODEL_H3_PRO,
+    FOXESS_MODEL_H3_SMART,
 )
 
 # Combined network tariff key for config flow
@@ -1315,22 +1317,26 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
 
                 if test_result["success"]:
+                    detected_model = test_result.get("model_family", "unknown")
                     self._foxess_data = {
                         CONF_FOXESS_HOST: host,
                         CONF_FOXESS_PORT: port,
                         CONF_FOXESS_SLAVE_ID: slave_id,
                         CONF_FOXESS_CONNECTION_TYPE: FOXESS_CONNECTION_TCP,
-                        CONF_FOXESS_MODEL_FAMILY: test_result.get("model_family", "unknown"),
+                        CONF_FOXESS_MODEL_FAMILY: detected_model,
                     }
                     _LOGGER.info(
                         "FoxESS Modbus TCP connection successful: host=%s, model=%s, SOC=%.1f%%",
                         host,
-                        test_result.get("model_family", "unknown"),
+                        detected_model,
                         test_result.get("battery_soc", 0),
                     )
+                    # Let user confirm/override model if in H3-Pro register family
+                    if detected_model in ("H3-Pro", "H3-Smart"):
+                        return await self.async_step_foxess_model()
                     return await self.async_step_foxess_cloud()
                 else:
-                    errors["base"] = "cannot_connect"
+                    errors["base"] = "foxess_tcp_failed"
 
         return self.async_show_form(
             step_id="foxess_tcp",
@@ -1365,19 +1371,23 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
 
                 if test_result["success"]:
+                    detected_model = test_result.get("model_family", "unknown")
                     self._foxess_data = {
                         CONF_FOXESS_SERIAL_PORT: serial_port,
                         CONF_FOXESS_SERIAL_BAUDRATE: baudrate,
                         CONF_FOXESS_SLAVE_ID: slave_id,
                         CONF_FOXESS_CONNECTION_TYPE: FOXESS_CONNECTION_SERIAL,
-                        CONF_FOXESS_MODEL_FAMILY: test_result.get("model_family", "unknown"),
+                        CONF_FOXESS_MODEL_FAMILY: detected_model,
                     }
                     _LOGGER.info(
                         "FoxESS RS485 connection successful: port=%s, model=%s, SOC=%.1f%%",
                         serial_port,
-                        test_result.get("model_family", "unknown"),
+                        detected_model,
                         test_result.get("battery_soc", 0),
                     )
+                    # Let user confirm/override model if in H3-Pro register family
+                    if detected_model in ("H3-Pro", "H3-Smart"):
+                        return await self.async_step_foxess_model()
                     return await self.async_step_foxess_cloud()
                 else:
                     errors["base"] = "cannot_connect"
@@ -1390,6 +1400,32 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional(CONF_FOXESS_SLAVE_ID, default=DEFAULT_FOXESS_SLAVE_ID): int,
             }),
             errors=errors,
+        )
+
+    async def async_step_foxess_model(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Confirm or override detected FoxESS model family.
+
+        Shown when auto-detection finds H3-Pro-class registers, since H3-Pro
+        and H3 Smart share the same register address space.
+        """
+        if user_input is not None:
+            selected = user_input.get(CONF_FOXESS_MODEL_FAMILY, FOXESS_MODEL_H3_PRO)
+            self._foxess_data[CONF_FOXESS_MODEL_FAMILY] = selected
+            _LOGGER.info("FoxESS model confirmed by user: %s", selected)
+            return await self.async_step_foxess_cloud()
+
+        detected = self._foxess_data.get(CONF_FOXESS_MODEL_FAMILY, FOXESS_MODEL_H3_PRO)
+
+        return self.async_show_form(
+            step_id="foxess_model",
+            data_schema=vol.Schema({
+                vol.Required(CONF_FOXESS_MODEL_FAMILY, default=detected): vol.In({
+                    FOXESS_MODEL_H3_SMART: "H3 Smart (Native WiFi Modbus)",
+                    FOXESS_MODEL_H3_PRO: "H3-Pro",
+                }),
+            }),
         )
 
     async def async_step_foxess_cloud(
