@@ -163,6 +163,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Set up the optimization coordinator with built-in LP optimizer."""
         _LOGGER.info("Setting up optimization coordinator (built-in LP)")
 
+        # Auto-detect battery specs from Tesla site_info if available
+        await self._auto_detect_battery_specs()
+
         # Initialize built-in optimizer
         self._optimizer = BatteryOptimizer(
             capacity_wh=self._config.battery_capacity_wh,
@@ -770,6 +773,58 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 horizon_hours=self._config.horizon_hours
             )
         return None
+
+    async def _auto_detect_battery_specs(self) -> None:
+        """Auto-detect battery capacity and power from Tesla site_info."""
+        if not self.energy_coordinator:
+            return
+
+        site_info = getattr(self.energy_coordinator, "_site_info_cache", None)
+        if not site_info:
+            # Try fetching it
+            if hasattr(self.energy_coordinator, "async_get_site_info"):
+                site_info = await self.energy_coordinator.async_get_site_info()
+
+        if not site_info:
+            _LOGGER.debug("No site_info available for battery auto-detection")
+            return
+
+        battery_count = site_info.get("battery_count", 0)
+        nameplate_power = site_info.get("nameplate_power", 0)
+
+        if battery_count > 0 and nameplate_power > 0:
+            # nameplate_power is total site battery power in watts
+            power_w = int(nameplate_power)
+            # Estimate capacity: battery_count * 13.5 kWh per unit
+            capacity_wh = int(battery_count * 13500)
+
+            self._config.battery_capacity_wh = capacity_wh
+            self._config.max_charge_w = power_w
+            self._config.max_discharge_w = power_w
+
+            _LOGGER.info(
+                "Auto-detected battery specs from site_info: "
+                "%d units, %.1f kWh capacity, %.1f kW max power",
+                battery_count,
+                capacity_wh / 1000,
+                power_w / 1000,
+            )
+        elif battery_count > 0:
+            # Have count but no nameplate — estimate power per unit
+            capacity_wh = int(battery_count * 13500)
+            power_w = int(battery_count * 5000)  # Conservative 5kW per unit
+
+            self._config.battery_capacity_wh = capacity_wh
+            self._config.max_charge_w = power_w
+            self._config.max_discharge_w = power_w
+
+            _LOGGER.info(
+                "Estimated battery specs from count: "
+                "%d units, %.1f kWh capacity, %.1f kW max power",
+                battery_count,
+                capacity_wh / 1000,
+                power_w / 1000,
+            )
 
     async def _get_battery_state(self) -> tuple[float, float]:
         """Get current battery state (SOC, capacity)."""
