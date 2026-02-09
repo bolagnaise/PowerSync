@@ -954,7 +954,40 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "baseline_cost": (self._current_schedule.predicted_cost + self._current_schedule.predicted_savings),
                 "savings": self._current_schedule.predicted_savings,
             }
-            data["next_actions"] = [a.to_dict() for a in self._current_schedule.actions[:5]]
+            # Consolidate schedule into action ranges for the next 24h
+            # e.g. [self_consumption 16:00-17:00, export 17:00-21:00, ...]
+            intervals_24h = min(
+                int(24 * 60 / self._config.interval_minutes),
+                len(self._current_schedule.actions),
+            )
+            action_ranges: list[dict[str, Any]] = []
+            for a in self._current_schedule.actions[:intervals_24h]:
+                ad = a.to_dict()
+                if (
+                    action_ranges
+                    and action_ranges[-1]["action"] == ad["action"]
+                ):
+                    # Extend the current range
+                    action_ranges[-1]["end_time"] = ad["timestamp"]
+                    action_ranges[-1]["soc"] = ad["soc"]
+                    if ad["power_w"]:
+                        power_vals = action_ranges[-1].setdefault("_powers", [])
+                        power_vals.append(ad["power_w"])
+                        action_ranges[-1]["power_w"] = max(power_vals)
+                else:
+                    # Start a new range
+                    action_ranges.append({
+                        "action": ad["action"],
+                        "timestamp": ad["timestamp"],
+                        "end_time": ad["timestamp"],
+                        "power_w": ad["power_w"],
+                        "soc": ad["soc"],
+                        "_powers": [ad["power_w"]] if ad["power_w"] else [],
+                    })
+            # Clean up internal _powers list before sending
+            for ar in action_ranges:
+                ar.pop("_powers", None)
+            data["next_actions"] = action_ranges
 
         return data
 
