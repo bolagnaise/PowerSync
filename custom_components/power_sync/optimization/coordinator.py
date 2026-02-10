@@ -681,6 +681,44 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as e:
             _LOGGER.error("Failed to execute optimizer action: %s", e)
 
+    def _apply_confidence_decay(
+        self,
+        import_prices: list[float],
+        export_prices: list[float],
+        confidence_horizon_hours: float = 4.0,
+        decay_rate: float = 0.15,
+    ) -> tuple[list[float], list[float]]:
+        """Pull far-future prices toward median to reflect forecast uncertainty.
+
+        Prices within confidence_horizon_hours are unchanged. Beyond that,
+        each price decays toward the median at exp(-decay_rate * excess_hours).
+        This prevents the LP from over-valuing speculative spikes far in the future.
+        """
+        import math
+
+        if not import_prices:
+            return (import_prices, export_prices)
+
+        import_median = sorted(import_prices)[len(import_prices) // 2]
+        export_median = sorted(export_prices)[len(export_prices) // 2] if export_prices else 0.05
+        interval = self._config.interval_minutes
+
+        decayed_import = []
+        for t, price in enumerate(import_prices):
+            hours_ahead = (t * interval) / 60.0
+            excess = max(0.0, hours_ahead - confidence_horizon_hours)
+            confidence = math.exp(-decay_rate * excess)
+            decayed_import.append(import_median + (price - import_median) * confidence)
+
+        decayed_export = []
+        for t, price in enumerate(export_prices):
+            hours_ahead = (t * interval) / 60.0
+            excess = max(0.0, hours_ahead - confidence_horizon_hours)
+            confidence = math.exp(-decay_rate * excess)
+            decayed_export.append(export_median + (price - export_median) * confidence)
+
+        return (decayed_import, decayed_export)
+
     async def _get_price_forecast(self) -> tuple[list[float], list[float]] | None:
         """Get price forecasts for optimizer.
 
@@ -768,17 +806,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                         )
 
                     if import_prices:
-                        _LOGGER.debug(
-                            "Amber price forecast: %d import steps (%.1fc-%.1fc), %d export steps (%.1fc-%.1fc)",
-                            len(import_prices),
-                            min(import_prices) * 100, max(import_prices) * 100,
-                            len(export_prices),
-                            min(export_prices) * 100 if export_prices else 0,
-                            max(export_prices) * 100 if export_prices else 0,
-                        )
-                        # Dynamic prices are real market rates — no LP adjustment needed
+                        # Store actual Amber prices for UI display BEFORE decay
                         self._last_display_import_prices = list(import_prices)
                         self._last_display_export_prices = list(export_prices)
+
+                        # Apply confidence decay for LP input
+                        import_prices, export_prices = self._apply_confidence_decay(
+                            import_prices, export_prices
+                        )
+
+                        _LOGGER.debug(
+                            "Amber prices: %d steps, display %.1fc-%.1fc, "
+                            "LP (decayed) %.1fc-%.1fc",
+                            len(import_prices),
+                            min(self._last_display_import_prices) * 100,
+                            max(self._last_display_import_prices) * 100,
+                            min(import_prices) * 100,
+                            max(import_prices) * 100,
+                        )
                         return (import_prices, export_prices)
 
         # Static TOU pricing (GloBird, custom tariff, etc.)
