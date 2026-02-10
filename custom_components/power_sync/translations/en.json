@@ -711,13 +711,13 @@
         "description": "Configure automatic curtailment during negative feed-in tariff (FIT) prices, and optionally enable weather-based automations.\n\nWhen feed-in prices go negative, you PAY to export power. These settings prevent that by stopping battery export and optionally shutting down solar production.",
         "data": {
           "battery_curtailment_enabled": "Enable Battery Export Curtailment",
-          "ac_ac_inverter_curtailment_enabled": "Enable AC-Coupled Inverter Shutdown",
+          "ac_inverter_curtailment_enabled": "Enable AC-Coupled Inverter Shutdown",
           "sigenergy_dc_curtailment_enabled": "Enable DC Solar Curtailment (Sigenergy)",
           "openweathermap_api_key": "OpenWeatherMap API Key (Optional)"
         },
         "data_description": {
           "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. Sets Tesla to self-consumption mode or Sigenergy export limit to 0. This is the MAIN toggle - must be enabled for curtailment to work.",
-          "ac_ac_inverter_curtailment_enabled": "Shutdown AC-coupled solar inverter (Fronius, Sungrow, GoodWe, Enphase, etc.) when feed-in price is negative. Use this if your solar bypasses the battery and exports directly to grid. Requires inverter IP configuration in next step.",
+          "ac_inverter_curtailment_enabled": "Shutdown AC-coupled solar inverter (Fronius, Sungrow, GoodWe, Enphase, etc.) when feed-in price is negative. Use this if your solar bypasses the battery and exports directly to grid. Requires inverter IP configuration in next step.",
           "sigenergy_dc_curtailment_enabled": "Limit DC solar production via Sigenergy Modbus when feed-in price is negative. Only applies to Sigenergy systems with DC-coupled solar.",
           "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny/cloudy triggers). Leave blank to disable weather triggers."
         }
@@ -733,7 +733,7 @@
           "demand_charge_days": "Demand Charge Days",
           "demand_charge_billing_day": "Billing Cycle Reset Day",
           "demand_charge_apply_to": "Apply Demand Charge To",
-          "demand_artificial_price": "Apply Artificial Price During Demand Peak",
+          "demand_artificial_price_enabled": "Apply Artificial Price During Demand Peak",
           "daily_supply_charge": "Daily Supply Charge ($)",
           "monthly_supply_charge": "Monthly Supply Charge ($)"
         },
@@ -745,18 +745,15 @@
           "demand_charge_days": "Which days demand charges apply",
           "demand_charge_billing_day": "Day of month when the billing cycle resets (1-28)",
           "demand_charge_apply_to": "Whether demand charges apply to grid imports, exports, or both",
-          "demand_artificial_price": "Add an artificial price component during demand peak periods to discourage grid draw",
+          "demand_artificial_price_enabled": "Add an artificial price component during demand peak periods to discourage grid draw",
           "daily_supply_charge": "Your daily electricity supply charge for cost tracking",
           "monthly_supply_charge": "Your monthly electricity supply charge for cost tracking"
         }
       },
-      "ev_ocpp_options": {
-        "title": "EV Charging, OCPP & Solar Forecast",
-        "description": "Configure EV charging, OCPP charger management, and solar production forecasting.\n\n**Solcast:** PowerSync auto-detects the Solcast HA integration - if installed, just enable Solcast and leave the API fields blank! Otherwise, get a free API key from toolkit.solcast.com.au (10 calls/day).\n\n**EV Charging:** Control Tesla vehicles via Fleet API/Teslemetry or Tesla BLE (ESPHome).\n\n**OCPP:** Connect OCPP 1.6-compliant chargers.",
+      "ev_charging_setup": {
+        "title": "EV Charging & OCPP",
+        "description": "Configure EV charging and OCPP charger management.\n\n**EV Charging:** Control Tesla vehicles via Fleet API/Teslemetry or Tesla BLE (ESPHome).\n\n**OCPP:** Connect OCPP 1.6-compliant chargers.",
         "data": {
-          "solcast_enabled": "Enable Solcast Solar Forecast",
-          "solcast_api_key": "Solcast API Key (optional if using Solcast HA integration)",
-          "solcast_resource_id": "Solcast Resource ID(s) (optional if using Solcast HA integration)",
           "ev_charging_enabled": "Enable EV Charging Control",
           "ev_provider": "EV Control Provider",
           "tesla_ble_entity_prefix": "Tesla BLE Entity Prefix",
@@ -764,9 +761,24 @@
           "ocpp_port": "OCPP WebSocket Port"
         },
         "data_description": {
-          "solcast_enabled": "Enable solar production forecasting. If the Solcast HA integration is installed, PowerSync will automatically read from its sensors (no API calls needed). Otherwise, enter your API key below.",
-          "solcast_api_key": "Your Solcast API key from toolkit.solcast.com.au. **Leave blank if you have the Solcast HA integration installed** - PowerSync will use its sensors automatically, saving your API quota.",
-          "solcast_resource_id": "Your rooftop site Resource ID(s). For split arrays, enter comma-separated IDs (e.g., abc123,def456). **Leave blank if using Solcast HA integration.**",
+          "ev_charging_enabled": "Allow automations to control Tesla vehicle charging (start/stop, set charge limits, set amps).",
+          "ev_provider": "Choose how to control your Tesla: **Fleet API/Teslemetry** uses cloud API (requires HA Tesla Fleet or Teslemetry integration), **Tesla BLE** uses local Bluetooth via ESPHome (requires esphome-tesla-ble), **Both** uses BLE for control with Fleet API fallback.",
+          "tesla_ble_entity_prefix": "Entity prefix for Tesla BLE entities (default: tesla_ble). Must match the ESPHome device name. Example: if your entities are sensor.my_tesla_charge_level, enter 'my_tesla'.",
+          "ocpp_enabled": "Run an OCPP 1.6J WebSocket server for connecting OCPP-compliant EV chargers. Chargers connect to ws://server:port/{charger_id}",
+          "ocpp_port": "Port for OCPP WebSocket server (default: 9000). Chargers will connect to this port."
+        }
+      },
+      "ev_charging": {
+        "title": "EV Charging & OCPP",
+        "description": "Configure EV charging and OCPP charger management.\n\n**EV Charging:** Control Tesla vehicles via Fleet API/Teslemetry or Tesla BLE (ESPHome).\n\n**OCPP:** Connect OCPP 1.6-compliant chargers.",
+        "data": {
+          "ev_charging_enabled": "Enable EV Charging Control",
+          "ev_provider": "EV Control Provider",
+          "tesla_ble_entity_prefix": "Tesla BLE Entity Prefix",
+          "ocpp_enabled": "Enable OCPP Central System",
+          "ocpp_port": "OCPP WebSocket Port"
+        },
+        "data_description": {
           "ev_charging_enabled": "Allow automations to control Tesla vehicle charging (start/stop, set charge limits, set amps).",
           "ev_provider": "Choose how to control your Tesla: **Fleet API/Teslemetry** uses cloud API (requires HA Tesla Fleet or Teslemetry integration), **Tesla BLE** uses local Bluetooth via ESPHome (requires esphome-tesla-ble), **Both** uses BLE for control with Fleet API fallback.",
           "tesla_ble_entity_prefix": "Entity prefix for Tesla BLE entities (default: tesla_ble). Must match the ESPHome device name. Example: if your entities are sensor.my_tesla_charge_level, enter 'my_tesla'.",
