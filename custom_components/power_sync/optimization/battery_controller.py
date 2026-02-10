@@ -32,6 +32,7 @@ class BatteryControllerWrapper:
         force_discharge_handler: Callable[[ServiceCall], Coroutine[Any, Any, None]],
         restore_normal_handler: Callable[[ServiceCall], Coroutine[Any, Any, None]],
         set_self_consumption_handler: Callable[[ServiceCall], Coroutine[Any, Any, None]] | None = None,
+        set_backup_reserve_handler: Callable[[ServiceCall], Coroutine[Any, Any, None]] | None = None,
     ):
         """
         Initialize the battery controller wrapper.
@@ -43,6 +44,7 @@ class BatteryControllerWrapper:
             force_discharge_handler: Service handler for force discharge
             restore_normal_handler: Service handler for restore normal
             set_self_consumption_handler: Service handler for pure self-consumption mode
+            set_backup_reserve_handler: Service handler for setting backup reserve %
         """
         self.hass = hass
         self.battery_system = battery_system
@@ -50,6 +52,7 @@ class BatteryControllerWrapper:
         self._force_discharge = force_discharge_handler
         self._restore_normal = restore_normal_handler
         self._set_self_consumption = set_self_consumption_handler
+        self._set_backup_reserve = set_backup_reserve_handler
 
     async def force_charge(self, duration_minutes: int = 60, power_w: float = 5000) -> bool:
         """
@@ -176,4 +179,35 @@ class BatteryControllerWrapper:
 
         except Exception as e:
             _LOGGER.error(f"Set self-consumption mode failed: {e}", exc_info=True)
+            return False
+
+    async def set_backup_reserve(self, percent: int) -> bool:
+        """
+        Set battery backup reserve percentage.
+
+        Used by the optimizer's IDLE action to hold SOC by setting backup
+        reserve to the current SOC%. This prevents the battery from
+        discharging while the home draws from the grid.
+
+        Args:
+            percent: Backup reserve percentage (0-100)
+
+        Returns:
+            True if command was sent successfully
+        """
+        try:
+            if self._set_backup_reserve:
+                call = ServiceCall(
+                    "power_sync",
+                    "set_backup_reserve",
+                    {"percent": percent},
+                )
+                await self._set_backup_reserve(call)
+                return True
+            else:
+                _LOGGER.debug("No set_backup_reserve handler available")
+                return False
+
+        except Exception as e:
+            _LOGGER.error(f"Set backup reserve failed: {e}", exc_info=True)
             return False

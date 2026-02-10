@@ -13785,6 +13785,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 force_discharge_handler=handle_force_discharge,
                 restore_normal_handler=handle_restore_normal,
                 set_self_consumption_handler=handle_set_self_consumption,
+                set_backup_reserve_handler=handle_set_backup_reserve,
             )
 
             # Get tariff schedule for TOU-based pricing (Globird, etc.)

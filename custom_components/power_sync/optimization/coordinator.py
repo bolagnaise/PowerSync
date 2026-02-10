@@ -162,6 +162,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._is_dynamic_pricing = False
         self._price_listener_unsub: Callable | None = None
 
+        # Track last executed action for IDLE→non-IDLE transition
+        self._last_executed_action: str | None = None
+
     @property
     def enabled(self) -> bool:
         """Check if optimization is enabled."""
@@ -573,6 +576,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # Fall through to execute the new action below
 
         try:
+            # When transitioning from IDLE to any other action, restore backup
+            # reserve to the user's configured value. IDLE sets backup_reserve
+            # to current SOC% to prevent discharge; we must undo that.
+            if (
+                self._last_executed_action == "idle"
+                and action.action != "idle"
+                and hasattr(battery, "set_backup_reserve")
+            ):
+                configured_reserve_pct = int(self._config.backup_reserve * 100)
+                await battery.set_backup_reserve(configured_reserve_pct)
+                _LOGGER.info(
+                    "Optimizer: Exiting IDLE — restored backup reserve to %d%%",
+                    configured_reserve_pct,
+                )
+
             if action.action == "charge":
                 if hasattr(battery, "force_charge"):
                     await battery.force_charge(
@@ -590,7 +608,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             elif action.action == "idle":
                 # IDLE: Hold battery at current SOC by setting backup reserve
                 # to current percentage. This prevents discharge while grid
-                # serves the home load.
+                # serves the home load. Useful for Amber when prices are cheap
+                # and the battery should hold charge for an upcoming spike.
                 soc, _ = await self._get_battery_state()
                 soc_pct = int(soc * 100)
                 if hasattr(battery, "set_backup_reserve"):
@@ -611,6 +630,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 elif hasattr(battery, "restore_normal"):
                     await battery.restore_normal()
                 _LOGGER.debug("Optimizer: Self-consumption mode (action=%s)", action.action)
+
+            self._last_executed_action = action.action
 
         except Exception as e:
             _LOGGER.error("Failed to execute optimizer action: %s", e)
