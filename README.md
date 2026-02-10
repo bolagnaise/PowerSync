@@ -104,7 +104,7 @@ Direct Modbus TCP — no cloud API required. Supports SH-series hybrid inverters
 
 ## Smart Optimization
 
-> **Alpha Feature:** Smart Optimization is currently in alpha. Bugs and unexpected behaviour will occur. Only enable this feature if you are willing to provide feedback and experience issues. Please report any problems via [GitHub Issues](https://github.com/benbollpower/power-sync/issues).
+> **Alpha Feature:** Smart Optimization is currently in alpha. Bugs and unexpected behaviour will occur. Only enable this feature if you are willing to provide feedback and experience issues. Please report any problems in our Discord server.
 
 PowerSync includes a **built-in LP optimizer** (scipy HiGHS) that calculates the optimal battery schedule over a 48-hour horizon using electricity prices, solar forecasts, and load patterns.
 
