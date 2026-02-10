@@ -12207,6 +12207,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         else:
             # Tesla Powerwall via Fleet API
             try:
+                # Tesla constraint (July 2025): only 0-80% and 100% are valid.
+                # Values 81-99% are rejected and auto-clamped to 80%.
+                # Clamp here to avoid silent misbehaviour.
+                if 81 <= percent <= 99:
+                    _LOGGER.info(
+                        "Clamping backup reserve %d%% → 100%% (Tesla rejects 81-99%%)",
+                        percent,
+                    )
+                    percent = 100
+
                 current_token, provider = get_tesla_api_token(hass, entry)
                 site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
                 if not site_id or not current_token:

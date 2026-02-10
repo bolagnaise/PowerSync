@@ -647,13 +647,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # to current percentage. This prevents discharge while grid
                 # serves the home load. Useful for Amber when prices are cheap
                 # and the battery should hold charge for an upcoming spike.
+                #
+                # Tesla constraint (July 2025): backup_reserve only accepts
+                # 0-80% or 100%. Values 81-99% are rejected and clamped to 80%.
+                # When SOC > 80%, use 100% to fully prevent discharge.
                 soc, _ = await self._get_battery_state()
                 soc_pct = int(soc * 100)
+                if soc_pct > 80:
+                    reserve_pct = 100  # Tesla rejects 81-99%
+                else:
+                    reserve_pct = soc_pct
                 if hasattr(battery, "set_backup_reserve"):
-                    await battery.set_backup_reserve(soc_pct)
+                    await battery.set_backup_reserve(reserve_pct)
                     _LOGGER.info(
-                        "Optimizer: IDLE — holding SOC at %d%% (backup reserve set)",
-                        soc_pct,
+                        "Optimizer: IDLE — holding SOC at %d%% (backup reserve=%d%%)",
+                        soc_pct, reserve_pct,
                     )
                 elif hasattr(battery, "set_self_consumption_mode"):
                     await battery.set_self_consumption_mode()
