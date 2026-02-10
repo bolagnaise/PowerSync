@@ -366,6 +366,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._enabled = True
         _LOGGER.info("Optimization enabled (built-in LP)")
 
+        # Safety: restore backup_reserve to configured value on enable.
+        # Handles HA restart during IDLE where backup_reserve was set to
+        # current SOC% but _last_executed_action was lost (in-memory only).
+        if self.battery_controller and hasattr(self.battery_controller, "set_backup_reserve"):
+            configured_reserve_pct = int(self._config.backup_reserve * 100)
+            try:
+                await self.battery_controller.set_backup_reserve(configured_reserve_pct)
+                _LOGGER.info(
+                    "Optimizer startup: ensured backup reserve is %d%%",
+                    configured_reserve_pct,
+                )
+            except Exception as e:
+                _LOGGER.warning("Failed to restore backup reserve on enable: %s", e)
+        self._last_executed_action = None
+
         # Run initial optimization and start polling loop as background tasks
         # so they don't block HA bootstrap (LP solve can take several seconds)
         self.hass.async_create_background_task(
@@ -388,6 +403,25 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Disable optimization."""
         if not self._enabled:
             return
+
+        # Safety: if IDLE was the last action, restore backup_reserve to
+        # configured value before shutting down. Otherwise the battery
+        # stays locked at the IDLE-elevated backup_reserve.
+        if (
+            self._last_executed_action == "idle"
+            and self.battery_controller
+            and hasattr(self.battery_controller, "set_backup_reserve")
+        ):
+            configured_reserve_pct = int(self._config.backup_reserve * 100)
+            try:
+                await self.battery_controller.set_backup_reserve(configured_reserve_pct)
+                _LOGGER.info(
+                    "Optimizer disable: restored backup reserve from IDLE to %d%%",
+                    configured_reserve_pct,
+                )
+            except Exception as e:
+                _LOGGER.warning("Failed to restore backup reserve on disable: %s", e)
+        self._last_executed_action = None
 
         if self._price_listener_unsub:
             self._price_listener_unsub()
