@@ -9571,11 +9571,49 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await _sync_tariff_to_sigenergy(forecast_data, sync_mode, current_actual_interval)
             return
 
+        # FoxESS and Sungrow use Modbus commands, not TOU tariff uploads
+        # Store price data for sensors/dashboard but skip Tesla API upload
+        if battery_system in ("foxess", "sungrow"):
+            _LOGGER.info("🔀 %s uses Modbus control — skipping TOU tariff upload", battery_system)
+            # Still build tariff schedule for sensor display
+            tariff = convert_amber_to_tesla_tariff(
+                forecast_data,
+                tesla_energy_site_id="none",
+                forecast_type=forecast_type,
+                powerwall_timezone=powerwall_timezone,
+                current_actual_interval=current_actual_interval,
+                demand_charge_enabled=demand_charge_enabled,
+                demand_charge_rate=demand_charge_rate,
+                demand_charge_start_time=demand_charge_start_time,
+                demand_charge_end_time=demand_charge_end_time,
+                demand_charge_apply_to=demand_charge_apply_to,
+                demand_charge_days=demand_charge_days,
+                demand_artificial_price_enabled=demand_artificial_price_enabled,
+                electricity_provider=electricity_provider,
+                spike_protection_enabled=spike_protection_enabled,
+                export_boost_enabled=export_boost_enabled,
+                export_price_offset=export_price_offset,
+                export_min_price=export_min_price,
+            )
+            if tariff:
+                from datetime import datetime as dt
+                from homeassistant.helpers.dispatcher import async_dispatcher_send
+                buy_prices = tariff.get("energy_charges", {}).get("Summer", {}).get("rates", {})
+                sell_prices = tariff.get("sell_tariff", {}).get("energy_charges", {}).get("Summer", {}).get("rates", {})
+                hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = {
+                    "buy_prices": buy_prices,
+                    "sell_prices": sell_prices,
+                    "last_sync": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                async_dispatcher_send(hass, f"power_sync_tariff_updated_{entry.entry_id}")
+                _LOGGER.info("Tariff schedule stored for %s dashboard (%d periods)", battery_system, len(buy_prices))
+            return
+
         # Convert prices to Tesla tariff format
         # forecast_data comes from either AEMO sensor or Amber coordinator (set above)
         tariff = convert_amber_to_tesla_tariff(
             forecast_data,
-            tesla_energy_site_id=entry.data[CONF_TESLA_ENERGY_SITE_ID],
+            tesla_energy_site_id=entry.data.get(CONF_TESLA_ENERGY_SITE_ID, ""),
             forecast_type=forecast_type,
             powerwall_timezone=powerwall_timezone,
             current_actual_interval=current_actual_interval,
