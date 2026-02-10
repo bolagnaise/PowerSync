@@ -654,15 +654,15 @@ class FoxESSController(InverterController):
         """Set FoxESS work mode.
 
         Args:
-            mode: Work mode value (0=Self Use, 1=Feed-in, 2=Backup, 3=Force Charge, 4=Force Discharge)
+            mode: Work mode value (1=Self Use, 2=Feed-in, 3=Backup, 4=Force Charge, 5=Force Discharge)
         """
         if not self._register_map or not self._register_map.work_mode:
             _LOGGER.error("Work mode register not available for model %s", self._model_family.value)
             return False
 
         _LOGGER.info("FoxESS setting work mode to %d (%s)", mode, {
-            0: "Self Use", 1: "Feed-in First", 2: "Backup",
-            3: "Force Charge", 4: "Force Discharge",
+            1: "Self Use", 2: "Feed-in First", 3: "Backup",
+            4: "Force Charge", 5: "Force Discharge",
         }.get(mode, "Unknown"))
 
         return await self._write_holding_register(self._register_map.work_mode, mode)

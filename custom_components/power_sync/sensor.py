@@ -393,9 +393,13 @@ async def async_setup_entry(
     amber_coordinator: AmberPriceCoordinator | None = domain_data.get("amber_coordinator")
     tesla_coordinator: TeslaEnergyCoordinator | None = domain_data.get("tesla_coordinator")
     sigenergy_coordinator = domain_data.get("sigenergy_coordinator")
+    sungrow_coordinator = domain_data.get("sungrow_coordinator")
+    foxess_coordinator = domain_data.get("foxess_coordinator")
     demand_charge_coordinator: DemandChargeCoordinator | None = domain_data.get("demand_charge_coordinator")
     aemo_spike_manager = domain_data.get("aemo_spike_manager")
     is_sigenergy = domain_data.get("is_sigenergy", False)
+    is_sungrow = domain_data.get("is_sungrow", False)
+    is_foxess = domain_data.get("is_foxess", False)
 
     entities: list[SensorEntity] = []
 
@@ -447,9 +451,16 @@ async def async_setup_entry(
         else:
             _LOGGER.debug("No amber_coordinator or TOU provider - skipping price sensors")
 
-    # Add energy sensors - use Tesla or Sigenergy coordinator depending on battery system
-    # Both coordinators return data with same field names (solar_power, grid_power, etc.)
-    energy_coordinator = sigenergy_coordinator if is_sigenergy else tesla_coordinator
+    # Add energy sensors - select the correct coordinator for battery system type
+    # All coordinators return data with same field names (solar_power, grid_power, etc.)
+    if is_foxess:
+        energy_coordinator = foxess_coordinator
+    elif is_sungrow:
+        energy_coordinator = sungrow_coordinator
+    elif is_sigenergy:
+        energy_coordinator = sigenergy_coordinator
+    else:
+        energy_coordinator = tesla_coordinator
     if energy_coordinator:
         for description in ENERGY_SENSORS:
             entities.append(

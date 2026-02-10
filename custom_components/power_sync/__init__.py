@@ -8024,6 +8024,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("Sungrow Modbus coordinator failed to initialize: %s", e)
             # Don't fail the entire setup - allow other features to work
             sungrow_coordinator = None
+    if foxess_coordinator:
+        try:
+            await foxess_coordinator.async_config_entry_first_refresh()
+            _LOGGER.info("FoxESS Modbus coordinator initialized successfully")
+        except Exception as e:
+            _LOGGER.warning("FoxESS Modbus coordinator failed to initialize: %s", e)
+            # Don't fail the entire setup - allow other features to work
+            foxess_coordinator = None
 
     # Initialize demand charge coordinator if enabled (Tesla only - requires grid power data)
     demand_charge_coordinator = None
@@ -8299,6 +8307,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "token_getter": token_getter,  # Function to get fresh Tesla API token
         "is_sigenergy": is_sigenergy,  # Track battery system type
         "is_sungrow": is_sungrow,  # Track if Sungrow battery system
+        "is_foxess": is_foxess,  # Track if FoxESS battery system
     }
 
     # Early initialization of tariff_schedule for non-Amber providers
