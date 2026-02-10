@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 from homeassistant.exceptions import ConfigEntryNotReady
@@ -24,6 +25,9 @@ from .load_estimator import LoadEstimator, SolcastForecaster
 from .ev_coordinator import EVCoordinator, EVConfig, EVChargingMode
 
 _LOGGER = logging.getLogger(__name__)
+
+COST_STORE_VERSION = 1
+COST_STORE_SAVE_DELAY = 300  # Coalesce writes — flush at most every 5 minutes
 
 
 @dataclass
@@ -153,10 +157,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Battery specs source tracking
         self._battery_specs_source = "default"  # "default", "auto", or "manual"
 
-        # Daily cost tracking (midnight-to-midnight)
+        # Daily cost tracking (midnight-to-midnight), persisted via Store
         self._actual_cost_today = 0.0        # Accumulated actual cost since midnight ($)
         self._actual_baseline_today = 0.0    # Accumulated baseline cost since midnight ($)
         self._last_cost_date: str | None = None  # Date string for midnight reset
+        self._cost_store = Store(
+            hass,
+            COST_STORE_VERSION,
+            f"power_sync.costs.{entry_id}",
+        )
 
         # Price monitoring
         self._is_dynamic_pricing = False
@@ -233,6 +242,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Initialize EV coordinator
         await self._setup_ev_coordinator()
+
+        # Restore persisted daily cost data (survives HA restarts)
+        await self._restore_cost_data()
 
         _LOGGER.info(
             "Optimization coordinator setup complete (built-in LP). "
@@ -435,6 +447,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         if self._ev_coordinator:
             await self._ev_coordinator.stop()
+
+        # Flush cost data to disk before shutdown
+        await self._cost_store.async_save(self._cost_data_to_save())
 
         self._enabled = False
         _LOGGER.info("Optimization disabled")
@@ -1217,6 +1232,63 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return abs(float(power) * 1000) if abs(power) < 100 else abs(power)
         return 0.0
 
+    async def _restore_cost_data(self) -> None:
+        """Restore daily cost accumulators from persistent storage."""
+        try:
+            data = await self._cost_store.async_load()
+        except Exception as e:
+            _LOGGER.warning("Failed to load persisted cost data: %s", e)
+            return
+
+        if not data:
+            _LOGGER.debug("No persisted cost data found (first run)")
+            return
+
+        stored_date = data.get("date")
+        today = dt_util.now().strftime("%Y-%m-%d")
+
+        if stored_date == today:
+            self._actual_cost_today = float(data.get("actual_cost", 0.0))
+            self._actual_baseline_today = float(data.get("baseline_cost", 0.0))
+            self._last_cost_date = stored_date
+            _LOGGER.info(
+                "Restored daily costs: actual=$%.2f, baseline=$%.2f (date=%s)",
+                self._actual_cost_today,
+                self._actual_baseline_today,
+                stored_date,
+            )
+        else:
+            _LOGGER.info(
+                "Persisted cost data is from %s (today=%s), starting fresh",
+                stored_date, today,
+            )
+
+    def _schedule_cost_save(self) -> None:
+        """Schedule a coalesced write of daily cost data to persistent storage."""
+        self._cost_store.async_delay_save(
+            self._cost_data_to_save,
+            COST_STORE_SAVE_DELAY,
+        )
+
+    def _cost_data_to_save(self) -> dict:
+        """Return cost data dict for Store serialization."""
+        return {
+            "date": self._last_cost_date,
+            "actual_cost": round(self._actual_cost_today, 4),
+            "baseline_cost": round(self._actual_baseline_today, 4),
+        }
+
+    def _get_forecast_offset(self) -> int:
+        """Get number of steps elapsed since last LP run.
+
+        The cached price/grid arrays start from the LP run time, not 'now'.
+        This offset allows correct indexing when reading them later.
+        """
+        if not self._last_update_time:
+            return 0
+        elapsed = (dt_util.now() - self._last_update_time).total_seconds()
+        return max(0, int(elapsed / (self._config.interval_minutes * 60)))
+
     def _track_actual_cost(self) -> None:
         """Track actual electricity cost for the current 5-min interval.
 
@@ -1242,8 +1314,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Need energy coordinator data and cached prices
         if not self.energy_coordinator or not self.energy_coordinator.data:
+            _LOGGER.debug("Cost tracking skipped: no energy coordinator data")
             return
         if not self._last_import_prices or not self._last_export_prices:
+            _LOGGER.debug("Cost tracking skipped: no cached prices yet")
             return
 
         data = self.energy_coordinator.data
@@ -1252,11 +1326,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         solar_power_kw = float(data.get("solar_power", 0) or 0)
         battery_power_kw = float(data.get("battery_power", 0) or 0)
 
-        # Current prices (first element = current interval)
-        # Use actual tariff prices for cost tracking, not LP-adjusted
+        # Current prices — use actual tariff prices, not LP-adjusted
         disp_import = self._last_display_import_prices or self._last_import_prices
         disp_export = self._last_display_export_prices or self._last_export_prices
-        import_price = disp_import[0]  # $/kWh
+        if not disp_import or not disp_export:
+            _LOGGER.warning("Cost tracking skipped: empty price arrays")
+            return
+        import_price = disp_import[0]  # $/kWh — safe: arrays verified non-empty
         export_price = disp_export[0]   # $/kWh
 
         dt_hours = self._config.interval_minutes / 60  # 5/60 = 0.0833h
@@ -1289,16 +1365,30 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._actual_cost_today, self._actual_baseline_today,
         )
 
+        # Persist cost data (coalesced — writes at most every 5 minutes)
+        self._schedule_cost_save()
+
     def _get_predicted_cost_to_midnight(self) -> tuple[float, float]:
         """Calculate predicted cost and baseline from now until midnight.
 
         Uses the LP optimizer's solution (grid_import/export arrays) and
         cached forecasts to project cost for the remainder of today.
 
+        Arrays are indexed from the LP run time, so we apply a time offset
+        to align them with 'now'.
+
         Returns:
             Tuple of (predicted_cost_remaining, baseline_cost_remaining)
         """
         if not self._last_optimizer_result or not self._last_import_prices:
+            return (0.0, 0.0)
+
+        grid_import_w = self._last_optimizer_result.grid_import_w
+        grid_export_w = self._last_optimizer_result.grid_export_w
+        if not grid_import_w or not grid_export_w:
+            _LOGGER.warning(
+                "Predicted cost: LP returned empty grid arrays, skipping prediction"
+            )
             return (0.0, 0.0)
 
         now = dt_util.now()
@@ -1310,37 +1400,45 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         prices_import = self._last_display_import_prices or self._last_import_prices
         prices_export = self._last_display_export_prices or self._last_export_prices
 
-        # LP arrays start from "now", so step 0 = current interval
-        # Skip step 0 since we've already tracked the current interval's actual cost
-        grid_import_w = self._last_optimizer_result.grid_import_w
-        grid_export_w = self._last_optimizer_result.grid_export_w
-        n = min(steps_to_midnight, len(grid_import_w), len(prices_import))
+        # Arrays start from LP run time — offset to align with 'now'
+        offset = self._get_forecast_offset()
 
         dt_hours = self._config.interval_minutes / 60
 
         predicted_cost = 0.0
         baseline_cost = 0.0
-        for t in range(1, n):  # Start from 1 to skip current interval
-            import_p = prices_import[t]
+        for step in range(1, steps_to_midnight + 1):
+            # Index into arrays: offset (LP run → now) + step (now → future)
+            idx = offset + step
+
+            # Bounds-check all arrays consistently
+            if idx >= len(grid_import_w) or idx >= len(prices_import):
+                break
+
+            import_p = prices_import[idx]
             export_p = (
-                prices_export[t]
-                if t < len(prices_export)
+                prices_export[idx]
+                if idx < len(prices_export)
                 else 0.05
             )
 
             # Predicted cost with battery optimization
-            predicted_cost += import_p * (grid_import_w[t] / 1000) * dt_hours
-            predicted_cost -= export_p * (grid_export_w[t] / 1000) * dt_hours
+            predicted_cost += import_p * (grid_import_w[idx] / 1000) * dt_hours
+            predicted_cost -= export_p * (
+                grid_export_w[idx] / 1000
+                if idx < len(grid_export_w)
+                else 0.0
+            ) * dt_hours
 
             # Baseline cost without battery
             solar_kw = (
-                self._last_solar_forecast[t]
-                if self._last_solar_forecast and t < len(self._last_solar_forecast)
+                self._last_solar_forecast[idx]
+                if self._last_solar_forecast and idx < len(self._last_solar_forecast)
                 else 0.0
             )
             load_kw = (
-                self._last_load_forecast[t]
-                if self._last_load_forecast and t < len(self._last_load_forecast)
+                self._last_load_forecast[idx]
+                if self._last_load_forecast and idx < len(self._last_load_forecast)
                 else 0.0
             )
             net_load = load_kw - solar_kw

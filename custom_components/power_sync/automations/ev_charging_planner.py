@@ -1467,10 +1467,9 @@ class ChargingPlanner:
                     target_time_local = target_time.astimezone(local_tz).replace(tzinfo=None)
                 except Exception:
                     target_time_local = target_time.replace(tzinfo=None)
-            # Use ceil to ensure we include the final hour up to target time
-            # Add 1 extra hour as buffer to ensure we capture all available cheap windows
+            # Exact hours available until departure — ceil to include the partial final hour
             import math
-            hours_available = max(1, math.ceil((target_time_local - now).total_seconds() / 3600) + 1)
+            hours_available = max(1, math.ceil((target_time_local - now).total_seconds() / 3600))
         else:
             hours_available = 24
 
@@ -1814,6 +1813,15 @@ class ChargingPlanner:
             if hour_dt < now - timedelta(hours=1):
                 continue
 
+            # Calculate usable fraction of this hour (clamp to departure and now)
+            hour_end = hour_dt + timedelta(hours=1)
+            if target_time_local and hour_end > target_time_local:
+                hour_end = target_time_local
+            usable_fraction = (hour_end - max(hour_dt, now)).total_seconds() / 3600
+            usable_fraction = max(0.0, min(1.0, usable_fraction))
+            if usable_fraction < 0.1:
+                continue  # Less than 6 minutes usable — skip
+
             # Check for solar surplus at this hour
             solar_available = 0
             if i < len(surplus_forecast):
@@ -1829,6 +1837,7 @@ class ChargingPlanner:
                     "cost_cents": 0,  # Solar is free
                     "actual_price": price.import_cents,  # Store actual price for reference
                     "confidence": surplus_forecast[i].confidence if i < len(surplus_forecast) else 0.5,
+                    "usable_fraction": usable_fraction,
                 })
 
             # Grid option
@@ -1848,6 +1857,7 @@ class ChargingPlanner:
                     "cost_cents": price.import_cents,
                     "actual_price": price.import_cents,
                     "confidence": 0.95,
+                    "usable_fraction": usable_fraction,
                 })
 
         # Log available options
@@ -1916,7 +1926,8 @@ class ChargingPlanner:
             if hour_key in used_hours:
                 continue
 
-            energy_this_hour = min(option["power_kw"], energy_needed_kwh - energy_allocated)
+            usable = option.get("usable_fraction", 1.0)
+            energy_this_hour = min(option["power_kw"] * usable, energy_needed_kwh - energy_allocated)
             hour_dt = option["hour_dt"]
             end_dt = hour_dt + timedelta(hours=1)
 
@@ -1999,8 +2010,8 @@ class ChargingPlanner:
                 battery_power_schedule=battery_power_schedule,
             )
 
-        # Calculate minimum hours needed
-        hours_needed = energy_needed_kwh / charger_power_kw
+        # Calculate minimum hours needed (0.85 efficiency: AC-DC losses, ramp-up, thermal)
+        hours_needed = energy_needed_kwh / (charger_power_kw * 0.85)
         now = datetime.now()
 
         # Convert target_time to naive local time for comparison
@@ -2013,9 +2024,9 @@ class ChargingPlanner:
             except Exception:
                 target_time_local = target_time.replace(tzinfo=None)
 
-        # Use ceil to ensure we include the final hour up to target time
+        # Exact hours available until departure — no padding
         import math
-        hours_available = max(1, math.ceil((target_time_local - now).total_seconds() / 3600) + 1)
+        hours_available = max(1, math.ceil((target_time_local - now).total_seconds() / 3600))
 
         if hours_needed > hours_available:
             # Can't meet target even charging continuously
@@ -2044,25 +2055,32 @@ class ChargingPlanner:
                 hour_dt = hour_dt.replace(tzinfo=None)
 
             if target_time_local and hour_dt >= target_time_local:
-                continue  # Skip hours after deadline
+                continue  # Skip hours that start at or after deadline
 
-            # Use whatever is available
+            # Calculate usable fraction of this hour (clamp end to departure)
+            end_dt = hour_dt + timedelta(hours=1)
+            if target_time_local and end_dt > target_time_local:
+                end_dt = target_time_local
+            usable_fraction = (end_dt - max(hour_dt, now)).total_seconds() / 3600
+            usable_fraction = max(0.0, min(1.0, usable_fraction))
+            if usable_fraction < 0.1:
+                continue  # Less than 6 minutes usable — skip
+
+            # Use whatever is available, scaled by usable fraction of the hour
             if surplus.surplus_kw >= 1.0:
                 # Prefer solar
-                energy_this_hour = min(surplus.surplus_kw, charger_power_kw)
+                energy_this_hour = min(surplus.surplus_kw, charger_power_kw) * usable_fraction
                 source = "solar_surplus"
                 cost = 0
                 solar_energy += min(energy_this_hour, energy_needed_kwh - energy_allocated)
             else:
                 # Use grid
-                energy_this_hour = charger_power_kw
+                energy_this_hour = charger_power_kw * usable_fraction
                 source = f"grid_{price.period}"
                 cost = price.import_cents
                 grid_energy += min(energy_this_hour, energy_needed_kwh - energy_allocated)
 
             energy_this_hour = min(energy_this_hour, energy_needed_kwh - energy_allocated)
-
-            end_dt = hour_dt + timedelta(hours=1)
 
             windows.append(PlannedChargingWindow(
                 start_time=surplus.hour,

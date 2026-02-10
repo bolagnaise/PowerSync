@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
@@ -504,8 +505,10 @@ class EVCoordinator:
                 energy_needed_kwh = 50  # Assume needs ~50kWh
 
             # Calculate how many 5-min intervals needed
-            charging_rate_kw = config.max_charging_power_w / 1000
-            intervals_needed = int((energy_needed_kwh / charging_rate_kw) * 12)  # 12 intervals per hour
+            # Use 0.85 efficiency factor: chargers lose ~15% to AC-DC conversion,
+            # ramp-up time, and thermal throttling vs peak rated power
+            charging_rate_kw = (config.max_charging_power_w / 1000) * 0.85
+            intervals_needed = math.ceil((energy_needed_kwh / charging_rate_kw) * 12)  # 12 intervals per hour
 
             # Check if departure time requires charging now
             if config.departure_time:
