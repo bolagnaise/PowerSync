@@ -18,6 +18,20 @@ from .base import InverterController, InverterState, InverterStatus
 
 _LOGGER = logging.getLogger(__name__)
 
+# pymodbus 3.10+ renamed 'slave' to 'device_id'
+def _detect_slave_kwarg() -> str:
+    """Detect the correct keyword argument for the Modbus slave/device ID."""
+    try:
+        import inspect
+        sig = inspect.signature(AsyncModbusTcpClient.read_input_registers)
+        if "slave" in sig.parameters:
+            return "slave"
+    except (ValueError, TypeError):
+        pass
+    return "device_id"
+
+_SLAVE_KWARG: str = _detect_slave_kwarg()
+
 # Modbus scaling factors
 GAIN_POWER = 1000       # kW × 0.001 → W (standard models)
 GAIN_POWER_H3PRO = 10000  # kW × 0.0001 → W (H3-Pro models)
@@ -346,7 +360,7 @@ class FoxESSController(InverterController):
             return None
         try:
             result = await self._client.read_input_registers(
-                address=address, count=count, slave=self.slave_id
+                address=address, count=count, **{_SLAVE_KWARG: self.slave_id}
             )
             if result.isError():
                 _LOGGER.debug("FoxESS read input register %d error: %s", address, result)
@@ -362,7 +376,7 @@ class FoxESSController(InverterController):
             return None
         try:
             result = await self._client.read_holding_registers(
-                address=address, count=count, slave=self.slave_id
+                address=address, count=count, **{_SLAVE_KWARG: self.slave_id}
             )
             if result.isError():
                 _LOGGER.debug("FoxESS read holding register %d error: %s", address, result)
@@ -388,7 +402,7 @@ class FoxESSController(InverterController):
             return False
         try:
             result = await self._client.write_register(
-                address=address, value=value, slave=self.slave_id
+                address=address, value=value, **{_SLAVE_KWARG: self.slave_id}
             )
             if result.isError():
                 _LOGGER.error("FoxESS write register %d error: %s", address, result)
@@ -404,7 +418,7 @@ class FoxESSController(InverterController):
             return False
         try:
             result = await self._client.write_registers(
-                address=address, values=values, slave=self.slave_id
+                address=address, values=values, **{_SLAVE_KWARG: self.slave_id}
             )
             if result.isError():
                 _LOGGER.error("FoxESS write registers %d error: %s", address, result)
