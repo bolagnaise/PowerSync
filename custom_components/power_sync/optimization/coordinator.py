@@ -696,6 +696,152 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as e:
             _LOGGER.error("Failed to execute optimizer action: %s", e)
 
+    def _apply_export_boost(
+        self,
+        export_prices: list[float],
+    ) -> list[float]:
+        """Apply export boost to LP export prices during configured window.
+
+        Increases export prices by offset and applies a minimum floor so the LP
+        is more willing to discharge during the boost window. Mirrors the Tesla
+        tariff pipeline logic but operates on flat 5-min price arrays.
+        """
+        if not self._entry:
+            return export_prices
+
+        from ..const import (
+            CONF_EXPORT_BOOST_ENABLED,
+            CONF_EXPORT_PRICE_OFFSET,
+            CONF_EXPORT_MIN_PRICE,
+            CONF_EXPORT_BOOST_START,
+            CONF_EXPORT_BOOST_END,
+            CONF_EXPORT_BOOST_THRESHOLD,
+            DEFAULT_EXPORT_BOOST_START,
+            DEFAULT_EXPORT_BOOST_END,
+            DEFAULT_EXPORT_BOOST_THRESHOLD,
+        )
+
+        opts = self._entry.options
+        data = self._entry.data
+        if not opts.get(CONF_EXPORT_BOOST_ENABLED, data.get(CONF_EXPORT_BOOST_ENABLED, False)):
+            return export_prices
+
+        offset = (opts.get(CONF_EXPORT_PRICE_OFFSET, 0) or 0) / 100  # cents → $/kWh
+        min_price = (opts.get(CONF_EXPORT_MIN_PRICE, 0) or 0) / 100
+        threshold = (opts.get(CONF_EXPORT_BOOST_THRESHOLD,
+                              DEFAULT_EXPORT_BOOST_THRESHOLD) or 0) / 100
+        boost_start = opts.get(CONF_EXPORT_BOOST_START, DEFAULT_EXPORT_BOOST_START)
+        boost_end = opts.get(CONF_EXPORT_BOOST_END, DEFAULT_EXPORT_BOOST_END)
+
+        try:
+            sh, sm = map(int, boost_start.split(":"))
+            eh, em = map(int, boost_end.split(":"))
+        except (ValueError, IndexError):
+            return export_prices
+
+        start_min = sh * 60 + sm
+        end_min = eh * 60 + em
+        interval = self._config.interval_minutes
+        now = dt_util.now()
+        boosted = 0
+
+        result = list(export_prices)
+        for t in range(len(result)):
+            ts = now + timedelta(minutes=t * interval)
+            minutes_of_day = ts.hour * 60 + ts.minute
+
+            # Check if in boost window (handles overnight wrap)
+            if end_min <= start_min:
+                in_window = minutes_of_day >= start_min or minutes_of_day < end_min
+            else:
+                in_window = start_min <= minutes_of_day < end_min
+
+            if in_window and result[t] >= threshold:
+                boosted_price = result[t] + offset
+                result[t] = max(boosted_price, min_price)
+                boosted += 1
+
+        if boosted:
+            _LOGGER.debug(
+                "Export boost: boosted %d intervals (offset=%.1fc, min=%.1fc, window=%s-%s)",
+                boosted, offset * 100, min_price * 100, boost_start, boost_end,
+            )
+
+        return result
+
+    def _apply_chip_mode(
+        self,
+        export_prices: list[float],
+    ) -> list[float]:
+        """Apply chip mode to LP export prices — suppress exports unless price exceeds threshold.
+
+        During the configured window, sets export prices to 0 so the LP won't plan
+        exports. Preserves original price for spikes above threshold. Mirrors the
+        Tesla tariff pipeline logic but operates on flat 5-min price arrays.
+        """
+        if not self._entry:
+            return export_prices
+
+        from ..const import (
+            CONF_CHIP_MODE_ENABLED,
+            CONF_CHIP_MODE_START,
+            CONF_CHIP_MODE_END,
+            CONF_CHIP_MODE_THRESHOLD,
+            DEFAULT_CHIP_MODE_START,
+            DEFAULT_CHIP_MODE_END,
+            DEFAULT_CHIP_MODE_THRESHOLD,
+        )
+
+        opts = self._entry.options
+        data = self._entry.data
+        if not opts.get(CONF_CHIP_MODE_ENABLED, data.get(CONF_CHIP_MODE_ENABLED, False)):
+            return export_prices
+
+        chip_start = opts.get(CONF_CHIP_MODE_START, DEFAULT_CHIP_MODE_START)
+        chip_end = opts.get(CONF_CHIP_MODE_END, DEFAULT_CHIP_MODE_END)
+        threshold = (opts.get(CONF_CHIP_MODE_THRESHOLD,
+                              DEFAULT_CHIP_MODE_THRESHOLD) or 0) / 100  # cents → $/kWh
+
+        try:
+            sh, sm = map(int, chip_start.split(":"))
+            eh, em = map(int, chip_end.split(":"))
+        except (ValueError, IndexError):
+            return export_prices
+
+        start_min = sh * 60 + sm
+        end_min = eh * 60 + em
+        interval = self._config.interval_minutes
+        now = dt_util.now()
+        suppressed = 0
+        allowed_spikes = 0
+
+        result = list(export_prices)
+        for t in range(len(result)):
+            ts = now + timedelta(minutes=t * interval)
+            minutes_of_day = ts.hour * 60 + ts.minute
+
+            # Check if in chip window (handles overnight wrap)
+            if end_min <= start_min:
+                in_window = minutes_of_day >= start_min or minutes_of_day < end_min
+            else:
+                in_window = start_min <= minutes_of_day < end_min
+
+            if in_window:
+                if result[t] >= threshold:
+                    allowed_spikes += 1  # Keep original price for spike
+                else:
+                    result[t] = 0.0  # Suppress export
+                    suppressed += 1
+
+        if suppressed or allowed_spikes:
+            _LOGGER.debug(
+                "Chip mode: suppressed %d intervals, allowed %d spikes "
+                "(threshold=%.1fc, window=%s-%s)",
+                suppressed, allowed_spikes, threshold * 100, chip_start, chip_end,
+            )
+
+        return result
+
     def _apply_confidence_decay(
         self,
         import_prices: list[float],
@@ -821,9 +967,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                         )
 
                     if import_prices:
-                        # Store actual Amber prices for UI display BEFORE decay
+                        # Store actual Amber prices for UI display BEFORE LP adjustments
                         self._last_display_import_prices = list(import_prices)
                         self._last_display_export_prices = list(export_prices)
+
+                        # Apply export boost and chip mode to LP export prices
+                        export_prices = self._apply_export_boost(export_prices)
+                        export_prices = self._apply_chip_mode(export_prices)
 
                         # Apply confidence decay for LP input
                         import_prices, export_prices = self._apply_confidence_decay(
