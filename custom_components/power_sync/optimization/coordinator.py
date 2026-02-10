@@ -734,6 +734,39 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             export_prices.extend([last] * (n_steps - len(export_prices)))
                         export_prices = export_prices[:n_steps]
 
+                    # Spike protection: cap buy prices during Amber spike periods
+                    # so the LP optimizer won't choose to charge at extreme prices
+                    if import_prices and general:
+                        spike_protection_on = False
+                        if self._entry:
+                            from ..const import CONF_SPIKE_PROTECTION_ENABLED
+                            spike_protection_on = self._entry.options.get(
+                                CONF_SPIKE_PROTECTION_ENABLED,
+                                self._entry.data.get(CONF_SPIKE_PROTECTION_ENABLED, False),
+                            )
+
+                        if spike_protection_on:
+                            median_price = sorted(import_prices)[len(import_prices) // 2]
+                            cap_price = max(median_price * 2, 0.50)  # At least 50c/kWh cap
+                            for idx, e in enumerate(general):
+                                spike_status = e.get("spikeStatus", "none")
+                                if spike_status in ("spike", "potential"):
+                                    base_idx = idx * expand
+                                    original_price = e.get("perKwh", 0)
+                                    capped_count = 0
+                                    for j in range(expand):
+                                        pos = base_idx + j
+                                        if pos < len(import_prices) and import_prices[pos] > cap_price:
+                                            import_prices[pos] = cap_price
+                                            capped_count += 1
+                                    if capped_count:
+                                        _LOGGER.info(
+                                            "Spike protection: capped %d intervals at %.1fc/kWh "
+                                            "(was %.1fc, status=%s)",
+                                            capped_count, cap_price * 100,
+                                            original_price, spike_status,
+                                        )
+
                     if import_prices:
                         _LOGGER.debug(
                             "Amber price forecast: %d import steps (%.1fc-%.1fc), %d export steps (%.1fc-%.1fc)",

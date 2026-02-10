@@ -10692,7 +10692,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # Use handle_restore_normal for full cleanup — it has direct API access
                 # and doesn't depend on battery_controller (which isn't created yet)
                 try:
-                    await handle_restore_normal(ServiceCall(DOMAIN, SERVICE_RESTORE_NORMAL, {}))
+                    await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
                     _LOGGER.info("✅ Restored normal operation after expired force mode")
                 except Exception as e:
                     _LOGGER.error(f"Error restoring after expired force mode: {e}", exc_info=True)
@@ -10719,7 +10719,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     async def auto_restore_charge(_now):
                         if force_charge_state["active"]:
                             _LOGGER.info("⏰ Force charge expired (restored timer), auto-restoring")
-                            await handle_restore_normal(ServiceCall(DOMAIN, SERVICE_RESTORE_NORMAL, {}))
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
 
                     force_charge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
                         hass, auto_restore_charge, expires_at
@@ -10744,7 +10744,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     async def auto_restore_discharge(_now):
                         if force_discharge_state["active"]:
                             _LOGGER.info("⏰ Force discharge expired (restored timer), auto-restoring")
-                            await handle_restore_normal(ServiceCall(DOMAIN, SERVICE_RESTORE_NORMAL, {}))
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
 
                     force_discharge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
                         hass, auto_restore_discharge, expires_at
@@ -10839,7 +10839,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     async def auto_restore_sigenergy(_now):
                         if force_discharge_state["active"]:
                             _LOGGER.info("⏰ Sigenergy force discharge expired, auto-restoring")
-                            await handle_restore_normal(ServiceCall(DOMAIN, SERVICE_RESTORE_NORMAL, {}))
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
 
                     force_discharge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
                         hass,
@@ -10883,7 +10883,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     async def auto_restore_discharge_foxess(_now):
                         if force_discharge_state["active"]:
                             _LOGGER.info("FoxESS force discharge expired, auto-restoring")
-                            await handle_restore_normal(ServiceCall(DOMAIN, SERVICE_RESTORE_NORMAL, {}))
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
 
                     force_discharge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
                         hass,
@@ -11038,7 +11038,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     """Auto-restore normal operation when discharge expires."""
                     if force_discharge_state["active"]:
                         _LOGGER.info("⏰ Force discharge expired, auto-restoring normal operation")
-                        await handle_restore_normal(ServiceCall(DOMAIN, SERVICE_RESTORE_NORMAL, {}))
+                        await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
 
                 # Use async_track_point_in_utc_time for one-time expiry (not recurring daily)
                 force_discharge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
@@ -11311,7 +11311,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     async def auto_restore_charge_sigenergy(_now):
                         if force_charge_state["active"]:
                             _LOGGER.info("⏰ Sigenergy force charge expired, auto-restoring")
-                            await handle_restore_normal(ServiceCall(DOMAIN, SERVICE_RESTORE_NORMAL, {}))
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
 
                     force_charge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
                         hass,
@@ -11364,7 +11364,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     async def auto_restore_charge_foxess(_now):
                         if force_charge_state["active"]:
                             _LOGGER.info("FoxESS force charge expired, auto-restoring")
-                            await handle_restore_normal(ServiceCall(DOMAIN, SERVICE_RESTORE_NORMAL, {}))
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
 
                     force_charge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
                         hass,
@@ -11529,7 +11529,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     """Auto-restore normal operation when charge expires."""
                     if force_charge_state["active"]:
                         _LOGGER.info("⏰ Force charge expired, auto-restoring normal operation")
-                        await handle_restore_normal(ServiceCall(DOMAIN, SERVICE_RESTORE_NORMAL, {}))
+                        await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
 
                 # Use async_track_point_in_utc_time for one-time expiry (not recurring daily)
                 force_charge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
@@ -11907,7 +11907,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if electricity_provider in dynamic_providers:
                 # Dynamic pricing users - trigger a fresh sync to get current prices
                 _LOGGER.info(f"{electricity_provider} user - triggering sync to restore normal operation")
-                await handle_sync_tou(ServiceCall(DOMAIN, SERVICE_SYNC_TOU, {}))
+                await hass.services.async_call(DOMAIN, SERVICE_SYNC_TOU, {}, blocking=True)
             elif saved_tariff:
                 # Non-Amber users - restore the saved tariff
                 _LOGGER.info("Restoring saved tariff...")
@@ -11937,7 +11937,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _LOGGER.debug(f"Could not send notification: {notify_err}")
                 else:
                     _LOGGER.warning("No saved tariff to restore, triggering sync")
-                    await handle_sync_tou(ServiceCall(DOMAIN, SERVICE_SYNC_TOU, {}))
+                    await hass.services.async_call(DOMAIN, SERVICE_SYNC_TOU, {}, blocking=True)
 
             # Restore operation mode (prefer discharge saved mode, then charge)
             restore_mode = (
@@ -13923,11 +13923,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             battery_controller = BatteryControllerWrapper(
                 hass=hass,
                 battery_system=battery_system,
-                force_charge_handler=handle_force_charge,
-                force_discharge_handler=handle_force_discharge,
-                restore_normal_handler=handle_restore_normal,
-                set_self_consumption_handler=handle_set_self_consumption,
-                set_backup_reserve_handler=handle_set_backup_reserve,
             )
 
             # Get tariff schedule for TOU-based pricing (Globird, etc.)
@@ -14013,7 +14008,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         from .aemo_client import AEMOAPIClient
                         from homeassistant.helpers.aiohttp_client import async_get_clientsession
                         from homeassistant.util import dt as dt_util
-                        from homeassistant.core import ServiceCall
 
                         session = async_get_clientsession(hass)
                         client = AEMOAPIClient(session)
@@ -14038,13 +14032,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             )
                             try:
                                 # Use the force discharge service (30 min for VPP events)
-                                # Create a ServiceCall to invoke the handler
-                                discharge_call = ServiceCall(
-                                    DOMAIN,
-                                    SERVICE_FORCE_DISCHARGE,
+                                await hass.services.async_call(
+                                    DOMAIN, SERVICE_FORCE_DISCHARGE,
                                     {"duration": 30},
+                                    blocking=True,
                                 )
-                                await handle_force_discharge(discharge_call)
 
                                 # Check if discharge was activated
                                 if force_discharge_state.get("active"):
@@ -14076,13 +14068,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 region_price
                             )
                             try:
-                                # Create a ServiceCall for restore normal
-                                restore_call = ServiceCall(
-                                    DOMAIN,
-                                    SERVICE_RESTORE_NORMAL,
+                                await hass.services.async_call(
+                                    DOMAIN, SERVICE_RESTORE_NORMAL,
                                     {},
+                                    blocking=True,
                                 )
-                                await handle_restore_normal(restore_call)
 
                                 vpp_spike_state["in_spike_mode"] = False
                                 spike_duration = None

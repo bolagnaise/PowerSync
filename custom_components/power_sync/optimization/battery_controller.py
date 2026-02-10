@@ -9,9 +9,8 @@ Provides unified interface for controlling different battery systems:
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Coroutine
 
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -20,19 +19,14 @@ class BatteryControllerWrapper:
     """
     Wrapper that provides force_charge/force_discharge/restore_normal interface.
 
-    Delegates to the existing PowerSync service handlers which implement
-    the battery-specific logic (Tesla tariff trick, Sigenergy Modbus, etc.)
+    Delegates to the existing PowerSync service handlers via hass.services.async_call,
+    which is the stable HA service API across all versions.
     """
 
     def __init__(
         self,
         hass: HomeAssistant,
         battery_system: str,  # "tesla", "sigenergy", "sungrow", "foxess"
-        force_charge_handler: Callable[[ServiceCall], Coroutine[Any, Any, None]],
-        force_discharge_handler: Callable[[ServiceCall], Coroutine[Any, Any, None]],
-        restore_normal_handler: Callable[[ServiceCall], Coroutine[Any, Any, None]],
-        set_self_consumption_handler: Callable[[ServiceCall], Coroutine[Any, Any, None]] | None = None,
-        set_backup_reserve_handler: Callable[[ServiceCall], Coroutine[Any, Any, None]] | None = None,
     ):
         """
         Initialize the battery controller wrapper.
@@ -40,19 +34,9 @@ class BatteryControllerWrapper:
         Args:
             hass: Home Assistant instance
             battery_system: Type of battery system
-            force_charge_handler: Service handler for force charge
-            force_discharge_handler: Service handler for force discharge
-            restore_normal_handler: Service handler for restore normal
-            set_self_consumption_handler: Service handler for pure self-consumption mode
-            set_backup_reserve_handler: Service handler for setting backup reserve %
         """
         self.hass = hass
         self.battery_system = battery_system
-        self._force_charge = force_charge_handler
-        self._force_discharge = force_discharge_handler
-        self._restore_normal = restore_normal_handler
-        self._set_self_consumption = set_self_consumption_handler
-        self._set_backup_reserve = set_backup_reserve_handler
 
     async def force_charge(self, duration_minutes: int = 60, power_w: float = 5000) -> bool:
         """
@@ -71,15 +55,11 @@ class BatteryControllerWrapper:
         try:
             _LOGGER.info(f"🔋 Optimizer: Force charge {duration_minutes}min at {power_w}W")
 
-            # Create a service call with the duration
-            # Use data= keyword arg — positional order varies across HA versions
-            call = ServiceCall(
-                "power_sync",
-                "force_charge",
-                data={"duration": duration_minutes},
+            await self.hass.services.async_call(
+                "power_sync", "force_charge",
+                {"duration": duration_minutes},
+                blocking=True,
             )
-
-            await self._force_charge(call)
             return True
 
         except Exception as e:
@@ -103,13 +83,11 @@ class BatteryControllerWrapper:
         try:
             _LOGGER.info(f"🔋 Optimizer: Force discharge {duration_minutes}min at {power_w}W")
 
-            call = ServiceCall(
-                "power_sync",
-                "force_discharge",
-                data={"duration": duration_minutes},
+            await self.hass.services.async_call(
+                "power_sync", "force_discharge",
+                {"duration": duration_minutes},
+                blocking=True,
             )
-
-            await self._force_discharge(call)
             return True
 
         except Exception as e:
@@ -129,13 +107,11 @@ class BatteryControllerWrapper:
         try:
             _LOGGER.info("🔋 Optimizer: Restoring normal operation")
 
-            call = ServiceCall(
-                "power_sync",
-                "restore_normal",
-                data={},
+            await self.hass.services.async_call(
+                "power_sync", "restore_normal",
+                {},
+                blocking=True,
             )
-
-            await self._restore_normal(call)
             return True
 
         except Exception as e:
@@ -161,19 +137,12 @@ class BatteryControllerWrapper:
         try:
             _LOGGER.info("🔋 Optimizer: Setting pure self-consumption mode (battery→home, no TOU)")
 
-            if self._set_self_consumption:
-                # Use dedicated handler
-                call = ServiceCall(
-                    "power_sync",
-                    "set_self_consumption",
-                    data={},
-                )
-                await self._set_self_consumption(call)
-                return True
-            else:
-                # Fallback to restore_normal if handler not available
-                _LOGGER.warning("No set_self_consumption handler, falling back to restore_normal")
-                return await self.restore_normal()
+            await self.hass.services.async_call(
+                "power_sync", "set_self_consumption",
+                {},
+                blocking=True,
+            )
+            return True
 
         except Exception as e:
             _LOGGER.error(f"Set self-consumption mode failed: {e}", exc_info=True)
@@ -194,17 +163,12 @@ class BatteryControllerWrapper:
             True if command was sent successfully
         """
         try:
-            if self._set_backup_reserve:
-                call = ServiceCall(
-                    "power_sync",
-                    "set_backup_reserve",
-                    data={"percent": percent},
-                )
-                await self._set_backup_reserve(call)
-                return True
-            else:
-                _LOGGER.debug("No set_backup_reserve handler available")
-                return False
+            await self.hass.services.async_call(
+                "power_sync", "set_backup_reserve",
+                {"percent": percent},
+                blocking=True,
+            )
+            return True
 
         except Exception as e:
             _LOGGER.error(f"Set backup reserve failed: {e}", exc_info=True)
