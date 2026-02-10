@@ -11809,6 +11809,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error in FoxESS restore normal: {e}", exc_info=True)
                 return
 
+        # Guard: if no force mode is active and no saved state exists, there's
+        # nothing to restore. Skip to avoid false "tariff not restored" warnings,
+        # wrong mode switches (autonomous instead of self_consumption), and
+        # spurious push notifications.
+        has_active_force = force_discharge_state.get("active") or force_charge_state.get("active")
+        has_saved_state = (
+            force_discharge_state.get("saved_tariff") or force_charge_state.get("saved_tariff") or
+            force_discharge_state.get("saved_operation_mode") or force_charge_state.get("saved_operation_mode") or
+            force_discharge_state.get("saved_backup_reserve") is not None or
+            force_charge_state.get("saved_backup_reserve") is not None
+        )
+        if not has_active_force and not has_saved_state:
+            _LOGGER.info("Restore normal: no force mode active and no saved state — nothing to restore")
+            return
+
         try:
             # Get current token and provider using helper function
             current_token, provider = get_tesla_api_token(hass, entry)

@@ -372,11 +372,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self.battery_controller and hasattr(self.battery_controller, "set_backup_reserve"):
             configured_reserve_pct = int(self._config.backup_reserve * 100)
             try:
-                await self.battery_controller.set_backup_reserve(configured_reserve_pct)
-                _LOGGER.info(
-                    "Optimizer startup: ensured backup reserve is %d%%",
-                    configured_reserve_pct,
-                )
+                success = await self.battery_controller.set_backup_reserve(configured_reserve_pct)
+                if success:
+                    _LOGGER.info(
+                        "Optimizer startup: ensured backup reserve is %d%%",
+                        configured_reserve_pct,
+                    )
+                else:
+                    _LOGGER.warning("Optimizer startup: set_backup_reserve returned failure")
             except Exception as e:
                 _LOGGER.warning("Failed to restore backup reserve on enable: %s", e)
         self._last_executed_action = None

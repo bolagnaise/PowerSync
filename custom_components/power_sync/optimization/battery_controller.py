@@ -72,11 +72,11 @@ class BatteryControllerWrapper:
             _LOGGER.info(f"🔋 Optimizer: Force charge {duration_minutes}min at {power_w}W")
 
             # Create a service call with the duration
-            # ServiceCall takes (domain, service, data) positional args
+            # Use data= keyword arg — positional order varies across HA versions
             call = ServiceCall(
                 "power_sync",
                 "force_charge",
-                {"duration": duration_minutes},
+                data={"duration": duration_minutes},
             )
 
             await self._force_charge(call)
@@ -103,11 +103,10 @@ class BatteryControllerWrapper:
         try:
             _LOGGER.info(f"🔋 Optimizer: Force discharge {duration_minutes}min at {power_w}W")
 
-            # ServiceCall takes (domain, service, data) positional args
             call = ServiceCall(
                 "power_sync",
                 "force_discharge",
-                {"duration": duration_minutes},
+                data={"duration": duration_minutes},
             )
 
             await self._force_discharge(call)
@@ -130,11 +129,10 @@ class BatteryControllerWrapper:
         try:
             _LOGGER.info("🔋 Optimizer: Restoring normal operation")
 
-            # ServiceCall takes (domain, service, data) positional args
             call = ServiceCall(
                 "power_sync",
                 "restore_normal",
-                {},
+                data={},
             )
 
             await self._restore_normal(call)
@@ -168,7 +166,7 @@ class BatteryControllerWrapper:
                 call = ServiceCall(
                     "power_sync",
                     "set_self_consumption",
-                    {},
+                    data={},
                 )
                 await self._set_self_consumption(call)
                 return True
@@ -200,7 +198,7 @@ class BatteryControllerWrapper:
                 call = ServiceCall(
                     "power_sync",
                     "set_backup_reserve",
-                    {"percent": percent},
+                    data={"percent": percent},
                 )
                 await self._set_backup_reserve(call)
                 return True
