@@ -12095,6 +12095,46 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """
         _LOGGER.info("Optimizer: Setting pure self-consumption mode")
 
+        # Check if this is a FoxESS system
+        is_foxess = bool(entry.data.get(CONF_FOXESS_HOST) or entry.data.get(CONF_FOXESS_SERIAL_PORT))
+        if is_foxess:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                foxess_coord = entry_data.get("foxess_coordinator")
+                if not foxess_coord:
+                    _LOGGER.error("Self-consumption: FoxESS coordinator not available")
+                    return
+
+                success = await foxess_coord.restore_normal()
+                if success:
+                    _LOGGER.info("✅ FoxESS self-consumption mode set (Self Use)")
+                else:
+                    _LOGGER.error("Failed to set FoxESS self-consumption mode")
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error setting FoxESS self-consumption: {e}", exc_info=True)
+                return
+
+        # Check if this is a Sungrow system
+        is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
+        if is_sungrow:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                sungrow_coord = entry_data.get("sungrow_coordinator")
+                if not sungrow_coord:
+                    _LOGGER.error("Self-consumption: Sungrow coordinator not available")
+                    return
+
+                success = await sungrow_coord.restore_normal()
+                if success:
+                    _LOGGER.info("✅ Sungrow self-consumption mode set")
+                else:
+                    _LOGGER.error("Failed to set Sungrow self-consumption mode")
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error setting Sungrow self-consumption: {e}", exc_info=True)
+                return
+
         # Check if this is a Sigenergy system
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
         if is_sigenergy:
@@ -12204,7 +12244,46 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Check if this is a SigEnergy system
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
 
-        if is_sigenergy:
+        # Check if this is a FoxESS system
+        is_foxess = bool(entry.data.get(CONF_FOXESS_HOST) or entry.data.get(CONF_FOXESS_SERIAL_PORT))
+        # Check if this is a Sungrow system
+        is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
+
+        if is_foxess:
+            # FoxESS via Modbus
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                foxess_coord = entry_data.get("foxess_coordinator")
+                if not foxess_coord:
+                    _LOGGER.error("FoxESS coordinator not available for set_backup_reserve")
+                    return
+
+                success = await foxess_coord.set_backup_reserve(percent)
+                if success:
+                    _LOGGER.info(f"✅ FoxESS backup reserve set to {percent}%")
+                else:
+                    _LOGGER.error("Failed to set FoxESS backup reserve")
+
+            except Exception as e:
+                _LOGGER.error(f"Error setting FoxESS backup reserve: {e}", exc_info=True)
+        elif is_sungrow:
+            # Sungrow via Modbus
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                sungrow_coord = entry_data.get("sungrow_coordinator")
+                if not sungrow_coord:
+                    _LOGGER.error("Sungrow coordinator not available for set_backup_reserve")
+                    return
+
+                success = await sungrow_coord.set_backup_reserve(percent)
+                if success:
+                    _LOGGER.info(f"✅ Sungrow backup reserve set to {percent}%")
+                else:
+                    _LOGGER.error("Failed to set Sungrow backup reserve")
+
+            except Exception as e:
+                _LOGGER.error(f"Error setting Sungrow backup reserve: {e}", exc_info=True)
+        elif is_sigenergy:
             # SigEnergy via Modbus
             try:
                 from .inverters.sigenergy import SigenergyController
