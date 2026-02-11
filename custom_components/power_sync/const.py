@@ -162,21 +162,17 @@ FOXESS_MODEL_FAMILIES = {
     FOXESS_MODEL_KH: "KH Series (Single Phase Hybrid)",
 }
 
-# FoxESS Work Mode constants (standard models: H1, H3, KH)
-# FoxESS firmware uses 1-based indexing for work modes via Modbus
-FOXESS_WORK_MODE_SELF_USE = 1
-FOXESS_WORK_MODE_FEED_IN = 2
-FOXESS_WORK_MODE_BACKUP = 3
-FOXESS_WORK_MODE_FORCE_CHARGE = 4
-FOXESS_WORK_MODE_FORCE_DISCHARGE = 5
+# FoxESS Work Mode constants — DEPRECATED, use FoxESSRegisterMap fields instead.
+# Kept for backward compat; these match register 41000 (H1/H3/KH) 0-based values.
+FOXESS_WORK_MODE_SELF_USE = 0
+FOXESS_WORK_MODE_FEED_IN = 1
+FOXESS_WORK_MODE_BACKUP = 2
 
-# FoxESS Work Mode names
+# FoxESS Work Mode names — DEPRECATED, use FoxESSRegisterMap.work_mode_names() instead.
 FOXESS_WORK_MODES = {
-    FOXESS_WORK_MODE_SELF_USE: "Self Use",
-    FOXESS_WORK_MODE_FEED_IN: "Feed-in First",
-    FOXESS_WORK_MODE_BACKUP: "Backup",
-    FOXESS_WORK_MODE_FORCE_CHARGE: "Force Charge",
-    FOXESS_WORK_MODE_FORCE_DISCHARGE: "Force Discharge",
+    0: "Self Use",
+    1: "Feed-in First",
+    2: "Backup",
 }
 
 # Sungrow Command Values

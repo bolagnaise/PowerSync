@@ -81,7 +81,14 @@ class FoxESSRegisterMap:
     min_soc: int = 0           # % backup reserve
     max_charge_current: int = 0   # A × 0.1
     max_discharge_current: int = 0  # A × 0.1
-    work_mode: int = 0         # Work mode enum
+    work_mode: int = 0         # Work mode register address
+
+    # Work mode enum values (differ between register 41000 and 49203)
+    # Register 41000 (H1/H3/KH): 0-based (0=Self Use, 1=Feed-in, 2=Backup)
+    # Register 49203 (H3-Pro/Smart): 1-based (1=Self Use, 2=Feed-in, 3=Backup, 4=Peak Shaving)
+    work_mode_self_use: int = 0
+    work_mode_feed_in: int = 1
+    work_mode_backup: int = 2
 
     # Remote control registers
     remote_enable: int = 0     # 0/1
@@ -107,6 +114,14 @@ class FoxESSRegisterMap:
     supports_charge_periods: bool = False
     # H3-Pro and H3 Smart use holding registers for ALL data (no input registers)
     all_holding: bool = False
+
+    def get_work_mode_names(self) -> dict[int, str]:
+        """Return model-specific work mode value→name mapping."""
+        return {
+            self.work_mode_self_use: "Self Use",
+            self.work_mode_feed_in: "Feed-in First",
+            self.work_mode_backup: "Backup",
+        }
 
 
 # Register maps for each model family
@@ -202,6 +217,9 @@ REGISTER_MAPS: dict[FoxESSModelFamily, FoxESSRegisterMap] = {
         max_charge_current=46607,
         max_discharge_current=46608,
         work_mode=49203,
+        work_mode_self_use=1,     # Register 49203 uses 1-based indexing
+        work_mode_feed_in=2,
+        work_mode_backup=3,
         remote_enable=46001,
         remote_timeout=46002,
         remote_active_power=46003,  # 32-bit: 46003 + 46004
@@ -235,6 +253,9 @@ REGISTER_MAPS: dict[FoxESSModelFamily, FoxESSRegisterMap] = {
         max_charge_current=46607,
         max_discharge_current=46608,
         work_mode=49203,
+        work_mode_self_use=1,     # Register 49203 uses 1-based indexing
+        work_mode_feed_in=2,
+        work_mode_backup=3,
         remote_enable=46001,
         remote_timeout=46002,
         remote_active_power=46003,
@@ -615,8 +636,8 @@ class FoxESSController(InverterController):
             else:
                 work_mode = None
             attrs["work_mode"] = work_mode
-            from ..const import FOXESS_WORK_MODES
-            attrs["work_mode_name"] = FOXESS_WORK_MODES.get(work_mode, "Unknown") if work_mode is not None else None
+            wm_names = reg.get_work_mode_names()
+            attrs["work_mode_name"] = wm_names.get(work_mode, f"Unknown ({work_mode})") if work_mode is not None else None
 
             # Min SOC / backup reserve
             if reg.min_soc and reg.supports_work_mode_rw:
@@ -671,19 +692,13 @@ class FoxESSController(InverterController):
             _LOGGER.error("Work mode register not available for model %s", self._model_family.value)
             return False
 
-        _LOGGER.info("FoxESS setting work mode to %d (%s)", mode, {
-            1: "Self Use", 2: "Feed-in First", 3: "Backup",
-            4: "Force Charge", 5: "Force Discharge",
-        }.get(mode, "Unknown"))
+        wm_names = self._register_map.get_work_mode_names()
+        _LOGGER.info("FoxESS setting work mode to %d (%s)", mode, wm_names.get(mode, f"Unknown ({mode})"))
 
         return await self._write_holding_register(self._register_map.work_mode, mode)
 
     async def force_charge(self, duration_minutes: int = 60, power_w: float = 5000) -> bool:
-        """Force battery to charge from grid.
-
-        Uses work mode register if available (H3, KH, H3-Pro), otherwise
-        falls back to remote control registers (H1 LAN).
-        """
+        """Force battery to charge from grid via remote control registers."""
         if not self._register_map:
             return False
 
@@ -701,30 +716,22 @@ class FoxESSController(InverterController):
             if ms_raw:
                 self._original_min_soc = ms_raw[0]
 
-        # Enable remote control
+        # Enable remote control and set active power to charge (negative)
         if reg.remote_enable:
             await self._write_holding_register(reg.remote_enable, 1)
             if reg.remote_timeout:
                 await self._write_holding_register(reg.remote_timeout, 600)
 
-        # Set work mode to Force Charge (if supported)
-        if reg.supports_work_mode_rw:
-            from ..const import FOXESS_WORK_MODE_FORCE_CHARGE
-            success = await self.set_work_mode(FOXESS_WORK_MODE_FORCE_CHARGE)
+        power_val = -int(abs(power_w))
+        if reg.remote_active_power_is_32bit:
+            if power_val < 0:
+                power_val = power_val + 0x100000000
+            high = (power_val >> 16) & 0xFFFF
+            low = power_val & 0xFFFF
+            success = await self._write_holding_registers(reg.remote_active_power, [high, low])
         else:
-            # H1 LAN: use remote control active power (negative = charge)
-            power_val = -int(abs(power_w))
-            if reg.remote_active_power_is_32bit:
-                # Split signed 32-bit into two 16-bit registers
-                if power_val < 0:
-                    power_val = power_val + 0x100000000
-                high = (power_val >> 16) & 0xFFFF
-                low = power_val & 0xFFFF
-                success = await self._write_holding_registers(reg.remote_active_power, [high, low])
-            else:
-                # Signed 16-bit
-                raw = power_val & 0xFFFF
-                success = await self._write_holding_register(reg.remote_active_power, raw)
+            raw = power_val & 0xFFFF
+            success = await self._write_holding_register(reg.remote_active_power, raw)
 
         if success:
             _LOGGER.info("FoxESS force charge activated for %d minutes", duration_minutes)
@@ -732,11 +739,7 @@ class FoxESSController(InverterController):
         return success
 
     async def force_discharge(self, duration_minutes: int = 60, power_w: float = 5000) -> bool:
-        """Force battery to discharge/export.
-
-        Uses work mode register if available, otherwise falls back to
-        remote control registers with positive power (H1 LAN).
-        """
+        """Force battery to discharge/export via remote control registers."""
         if not self._register_map:
             return False
 
@@ -754,25 +757,19 @@ class FoxESSController(InverterController):
             if ms_raw:
                 self._original_min_soc = ms_raw[0]
 
-        # Enable remote control
+        # Enable remote control and set active power to discharge (positive)
         if reg.remote_enable:
             await self._write_holding_register(reg.remote_enable, 1)
             if reg.remote_timeout:
                 await self._write_holding_register(reg.remote_timeout, 600)
 
-        # Set work mode to Force Discharge (if supported)
-        if reg.supports_work_mode_rw:
-            from ..const import FOXESS_WORK_MODE_FORCE_DISCHARGE
-            success = await self.set_work_mode(FOXESS_WORK_MODE_FORCE_DISCHARGE)
+        power_val = int(abs(power_w))
+        if reg.remote_active_power_is_32bit:
+            high = (power_val >> 16) & 0xFFFF
+            low = power_val & 0xFFFF
+            success = await self._write_holding_registers(reg.remote_active_power, [high, low])
         else:
-            # H1 LAN: use remote control active power (positive = discharge)
-            power_val = int(abs(power_w))
-            if reg.remote_active_power_is_32bit:
-                high = (power_val >> 16) & 0xFFFF
-                low = power_val & 0xFFFF
-                success = await self._write_holding_registers(reg.remote_active_power, [high, low])
-            else:
-                success = await self._write_holding_register(reg.remote_active_power, power_val & 0xFFFF)
+            success = await self._write_holding_register(reg.remote_active_power, power_val & 0xFFFF)
 
         if success:
             _LOGGER.info("FoxESS force discharge activated for %d minutes", duration_minutes)
@@ -784,10 +781,10 @@ class FoxESSController(InverterController):
         if not self._register_map:
             return False
 
-        from ..const import FOXESS_WORK_MODE_SELF_USE
+        reg = self._register_map
 
-        # Restore to saved mode or default Self Use
-        target_mode = self._original_work_mode if self._original_work_mode is not None else FOXESS_WORK_MODE_SELF_USE
+        # Restore to saved mode or default Self Use (model-specific value)
+        target_mode = self._original_work_mode if self._original_work_mode is not None else reg.work_mode_self_use
         success = await self.set_work_mode(target_mode)
 
         # Restore original min_soc if saved

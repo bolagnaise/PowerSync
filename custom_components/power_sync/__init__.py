@@ -2608,12 +2608,21 @@ class FoxESSSettingsView(HomeAssistantView):
                 )
 
             data = foxess_coordinator.data
+            # Get model-specific work mode options from the controller's register map
+            work_mode_options = {}
+            try:
+                controller = foxess_coordinator._controller
+                if controller and controller._register_map:
+                    work_mode_options = controller._register_map.get_work_mode_names()
+            except Exception:
+                pass
             result = {
                 "success": True,
                 "battery_soc": data.get("battery_level"),
                 "battery_power": data.get("battery_power"),
                 "work_mode": data.get("work_mode"),
                 "work_mode_name": data.get("work_mode_name"),
+                "work_mode_options": work_mode_options,
                 "min_soc": data.get("min_soc"),
                 "max_charge_current_a": data.get("max_charge_current_a"),
                 "max_discharge_current_a": data.get("max_discharge_current_a"),
