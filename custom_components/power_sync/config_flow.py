@@ -1167,6 +1167,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             **self._octopus_data,  # Include Octopus Energy UK configuration
             **self._sigenergy_data,
             **self._aemo_data,  # Include AEMO configuration
+            **getattr(self, '_demand_data', {}),
         }
 
         # Add electricity provider if set
@@ -1249,6 +1250,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             **self._octopus_data,  # Include Octopus Energy UK configuration
             **self._sungrow_data,
             **self._aemo_data,  # Include AEMO configuration
+            **getattr(self, '_demand_data', {}),
         }
 
         # Add electricity provider if set
@@ -1463,6 +1465,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             **self._octopus_data,
             **self._foxess_data,
             **self._aemo_data,
+            **getattr(self, '_demand_data', {}),
         }
 
         if self._selected_electricity_provider:

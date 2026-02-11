@@ -8063,13 +8063,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Don't fail the entire setup - allow other features to work
             foxess_coordinator = None
 
-    # Initialize demand charge coordinator if enabled (Tesla only - requires grid power data)
+    # Initialize demand charge coordinator if enabled (any battery system with grid power data)
     demand_charge_coordinator = None
     demand_charge_enabled = entry.options.get(
         CONF_DEMAND_CHARGE_ENABLED,
         entry.data.get(CONF_DEMAND_CHARGE_ENABLED, False)
     )
-    if demand_charge_enabled and tesla_coordinator:
+    energy_coord_for_demand = tesla_coordinator or foxess_coordinator or sigenergy_coordinator or sungrow_coordinator
+    if demand_charge_enabled and energy_coord_for_demand:
         demand_charge_rate = entry.options.get(
             CONF_DEMAND_CHARGE_RATE,
             entry.data.get(CONF_DEMAND_CHARGE_RATE, 10.0)
@@ -8101,7 +8102,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         demand_charge_coordinator = DemandChargeCoordinator(
             hass,
-            tesla_coordinator,
+            energy_coord_for_demand,
             enabled=True,
             rate=demand_charge_rate,
             start_time=demand_charge_start_time,

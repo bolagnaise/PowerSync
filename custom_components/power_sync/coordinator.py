@@ -821,7 +821,7 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
     def __init__(
         self,
         hass: HomeAssistant,
-        tesla_coordinator: TeslaEnergyCoordinator,
+        energy_coordinator: DataUpdateCoordinator,
         enabled: bool = False,
         rate: float = 0.0,
         start_time: str = "14:00",
@@ -832,7 +832,7 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
         monthly_supply_charge: float = 0.0,
     ) -> None:
         """Initialize the coordinator."""
-        self.tesla_coordinator = tesla_coordinator
+        self.tesla_coordinator = energy_coordinator
         self.enabled = enabled
         self.rate = rate
         self.start_time = start_time
@@ -910,9 +910,9 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
 
         self._last_billing_day_check = now
 
-        # Get current grid power from Tesla coordinator
-        tesla_data = self.tesla_coordinator.data or {}
-        grid_power_kw = tesla_data.get("grid_power", 0.0)
+        # Get current grid power from energy coordinator (Tesla, FoxESS, Sigenergy, or Sungrow)
+        energy_data = self.tesla_coordinator.data or {}
+        grid_power_kw = energy_data.get("grid_power", 0.0)
 
         # Grid import is positive, export is negative
         # We only care about import for demand charges
