@@ -842,6 +842,101 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return result
 
+    def _apply_demand_charge_penalty(
+        self, import_prices: list[float]
+    ) -> list[float]:
+        """Add import price penalty during demand charge windows.
+
+        During configured demand charge peak periods, adds a penalty to
+        import prices that strongly discourages grid imports. The LP will
+        prefer battery discharge or self-consumption during these windows.
+        """
+        if not self._entry or not import_prices:
+            return import_prices
+
+        from ..const import (
+            CONF_DEMAND_CHARGE_ENABLED,
+            CONF_DEMAND_CHARGE_RATE,
+            CONF_DEMAND_CHARGE_START_TIME,
+            CONF_DEMAND_CHARGE_END_TIME,
+            CONF_DEMAND_CHARGE_DAYS,
+        )
+
+        enabled = self._entry.options.get(
+            CONF_DEMAND_CHARGE_ENABLED,
+            self._entry.data.get(CONF_DEMAND_CHARGE_ENABLED, False),
+        )
+        if not enabled:
+            return import_prices
+
+        rate = self._entry.options.get(
+            CONF_DEMAND_CHARGE_RATE,
+            self._entry.data.get(CONF_DEMAND_CHARGE_RATE, 0.0),
+        )
+        if rate <= 0:
+            return import_prices
+
+        start_str = self._entry.options.get(
+            CONF_DEMAND_CHARGE_START_TIME,
+            self._entry.data.get(CONF_DEMAND_CHARGE_START_TIME, "14:00"),
+        )
+        end_str = self._entry.options.get(
+            CONF_DEMAND_CHARGE_END_TIME,
+            self._entry.data.get(CONF_DEMAND_CHARGE_END_TIME, "20:00"),
+        )
+        days = self._entry.options.get(
+            CONF_DEMAND_CHARGE_DAYS,
+            self._entry.data.get(CONF_DEMAND_CHARGE_DAYS, "All Days"),
+        )
+
+        # Parse start/end times
+        try:
+            s_parts = start_str.split(":")
+            start_min = int(s_parts[0]) * 60 + int(s_parts[1])
+            e_parts = end_str.split(":")
+            end_min = int(e_parts[0]) * 60 + int(e_parts[1])
+        except (ValueError, IndexError):
+            return import_prices
+
+        # Penalty: rate/10 converts $/kW/month to aggressive $/kWh penalty
+        penalty = rate / 10.0
+
+        now = dt_util.now()
+        interval = self._config.interval_minutes
+        adjusted = list(import_prices)
+        penalised = 0
+
+        for t in range(len(adjusted)):
+            ts = now + timedelta(minutes=t * interval)
+            weekday = ts.weekday()
+
+            # Day filter
+            if days == "Weekdays Only" and weekday >= 5:
+                continue
+            if days == "Weekends Only" and weekday < 5:
+                continue
+
+            current_min = ts.hour * 60 + ts.minute
+
+            # Time window check (handles overnight wrap)
+            in_window = False
+            if end_min <= start_min:
+                in_window = current_min >= start_min or current_min < end_min
+            else:
+                in_window = start_min <= current_min < end_min
+
+            if in_window:
+                adjusted[t] += penalty
+                penalised += 1
+
+        if penalised:
+            _LOGGER.info(
+                "Demand charge penalty: +$%.2f/kWh on %d intervals (%s-%s, %s)",
+                penalty, penalised, start_str, end_str, days,
+            )
+
+        return adjusted
+
     def _apply_confidence_decay(
         self,
         import_prices: list[float],
@@ -1007,6 +1102,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         # Apply export boost and chip mode to LP export prices
                         export_prices = self._apply_export_boost(export_prices)
                         export_prices = self._apply_chip_mode(export_prices)
+
+                        # Apply demand charge penalty to LP import prices
+                        import_prices = self._apply_demand_charge_penalty(import_prices)
 
                         # Apply confidence decay for LP input
                         import_prices, export_prices = self._apply_confidence_decay(
@@ -1201,6 +1299,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Store actual tariff prices for mobile app display
         self._last_display_import_prices = display_import
         self._last_display_export_prices = display_export
+
+        # Apply demand charge penalty to LP import prices
+        import_prices = self._apply_demand_charge_penalty(import_prices)
 
         return (import_prices, export_prices)
 
