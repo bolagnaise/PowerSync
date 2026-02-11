@@ -71,9 +71,6 @@ from .const import (
     CONF_AEMO_SPIKE_ENABLED,
     CONF_AEMO_REGION,
     CONF_AEMO_SPIKE_THRESHOLD,
-    # Sungrow AEMO spike (Globird VPP)
-    CONF_SUNGROW_AEMO_SPIKE_ENABLED,
-    SUNGROW_AEMO_SPIKE_THRESHOLD,
     # Solcast solar forecasting
     CONF_SOLCAST_ENABLED,
     CONF_SOLCAST_API_KEY,
@@ -1074,18 +1071,21 @@ class AEMOSpikeManager:
         }
 
 
-class SungrowAEMOSpikeManager:
+class GenericAEMOSpikeManager:
     """
-    Manages AEMO price spike detection for Sungrow battery systems.
+    Battery-agnostic AEMO price spike detection manager.
 
-    Simpler than Tesla's AEMOSpikeManager - just monitors AEMO prices and
-    triggers force discharge when prices hit $3000/MWh (Globird's VPP trigger).
+    Monitors AEMO prices and triggers force discharge via HA service calls
+    (power_sync.force_discharge / power_sync.restore_normal) which handle
+    all battery systems internally (Sigenergy, Sungrow, FoxESS).
+
+    Tesla uses its own AEMOSpikeManager with tariff-based control.
 
     When a price spike is detected:
-    1. Force discharge the battery
+    1. Force discharge the battery via service call
     2. Send push notification to user
     3. Wait for price to normalize
-    4. Restore normal operation
+    4. Restore normal operation via service call
     5. Send notification that spike ended
     """
 
@@ -1094,23 +1094,23 @@ class SungrowAEMOSpikeManager:
         hass: HomeAssistant,
         entry: ConfigEntry,
         region: str,
-        sungrow_coordinator,
+        threshold: float,
+        battery_type: str,
     ):
-        """Initialize the Sungrow AEMO spike manager.
+        """Initialize the generic AEMO spike manager.
 
         Args:
             hass: HomeAssistant instance
             entry: Config entry
             region: AEMO NEM region code (NSW1, QLD1, VIC1, SA1, TAS1)
-            sungrow_coordinator: SungrowEnergyCoordinator instance for battery control
+            threshold: Price threshold in $/MWh to trigger spike mode
+            battery_type: Battery system type for logging (sigenergy, sungrow, foxess)
         """
-        from .const import SUNGROW_AEMO_SPIKE_THRESHOLD
-
         self.hass = hass
         self.entry = entry
         self.region = region
-        self.threshold = SUNGROW_AEMO_SPIKE_THRESHOLD  # $3000/MWh - Globird's trigger
-        self._coordinator = sungrow_coordinator
+        self.threshold = threshold
+        self._battery_type = battery_type
 
         # State tracking
         self._in_spike_mode = False
@@ -1124,7 +1124,8 @@ class SungrowAEMOSpikeManager:
         self._aemo_client = AEMOAPIClient(session)
 
         _LOGGER.info(
-            "Sungrow AEMO Spike Manager initialized: region=%s, threshold=$%.0f/MWh (Globird VPP)",
+            "Generic AEMO Spike Manager initialized: battery=%s, region=%s, threshold=$%.0f/MWh",
+            battery_type,
             region,
             self.threshold,
         )
@@ -1159,7 +1160,7 @@ class SungrowAEMOSpikeManager:
             self._last_price = current_price
 
         if current_price is None:
-            _LOGGER.warning("Sungrow: Could not fetch AEMO price - skipping spike check")
+            _LOGGER.warning("%s: Could not fetch AEMO price - skipping spike check", self._battery_type)
             return
 
         # SPIKE DETECTED - Enter spike mode
@@ -1173,55 +1174,58 @@ class SungrowAEMOSpikeManager:
         # Still in spike mode - log status
         elif is_spike and self._in_spike_mode:
             _LOGGER.debug(
-                "Sungrow: Still in spike mode: $%.2f/MWh (threshold: $%.0f/MWh)",
+                "%s: Still in spike mode: $%.2f/MWh (threshold: $%.0f/MWh)",
+                self._battery_type,
                 current_price,
                 self.threshold,
             )
 
     async def _enter_spike_mode(self, current_price: float) -> None:
-        """Enter spike mode: force discharge and notify user."""
+        """Enter spike mode: force discharge via service call and notify user."""
         from homeassistant.util import dt as dt_util
 
         _LOGGER.warning(
-            "Sungrow SPIKE DETECTED: $%.2f/MWh >= $%.0f/MWh threshold - starting force discharge",
+            "%s SPIKE DETECTED: $%.2f/MWh >= $%.0f/MWh threshold - starting force discharge",
+            self._battery_type,
             current_price,
             self.threshold,
         )
 
         try:
-            # Force discharge the battery
-            success = await self._coordinator.force_discharge()
+            # Force discharge via battery-agnostic service call
+            await self.hass.services.async_call(
+                DOMAIN, SERVICE_FORCE_DISCHARGE, {}, blocking=True
+            )
 
-            if success:
-                self._in_spike_mode = True
-                self._spike_start_time = dt_util.utcnow()
-                _LOGGER.warning(
-                    "Sungrow SPIKE MODE ACTIVE: Battery force discharging at $%.2f/MWh",
-                    current_price,
+            self._in_spike_mode = True
+            self._spike_start_time = dt_util.utcnow()
+            _LOGGER.warning(
+                "%s SPIKE MODE ACTIVE: Battery force discharging at $%.2f/MWh",
+                self._battery_type,
+                current_price,
+            )
+
+            # Send push notification
+            try:
+                from .automations.actions import _send_expo_push
+                await _send_expo_push(
+                    self.hass,
+                    "Price Spike",
+                    f"${current_price:.0f}/MWh - discharging battery",
                 )
-
-                # Send push notification
-                try:
-                    from .automations.actions import _send_expo_push
-                    await _send_expo_push(
-                        self.hass,
-                        "Price Spike",
-                        f"${current_price:.0f}/MWh - discharging battery",
-                    )
-                except Exception as notify_err:
-                    _LOGGER.debug(f"Could not send spike start notification: {notify_err}")
-            else:
-                _LOGGER.error("Sungrow: Failed to start force discharge for price spike")
+            except Exception as notify_err:
+                _LOGGER.debug("Could not send spike start notification: %s", notify_err)
 
         except Exception as e:
-            _LOGGER.error("Sungrow: Error entering spike mode: %s", e, exc_info=True)
+            _LOGGER.error("%s: Error entering spike mode: %s", self._battery_type, e, exc_info=True)
 
     async def _exit_spike_mode(self, current_price: float) -> None:
-        """Exit spike mode: restore normal operation and notify user."""
+        """Exit spike mode: restore normal operation via service call and notify user."""
         from homeassistant.util import dt as dt_util
 
         _LOGGER.info(
-            "Sungrow: Price normalized: $%.2f/MWh < $%.0f/MWh threshold - restoring normal operation",
+            "%s: Price normalized: $%.2f/MWh < $%.0f/MWh threshold - restoring normal operation",
+            self._battery_type,
             current_price,
             self.threshold,
         )
@@ -1233,31 +1237,30 @@ class SungrowAEMOSpikeManager:
                 spike_duration = dt_util.utcnow() - self._spike_start_time
                 spike_duration_minutes = int(spike_duration.total_seconds() / 60)
 
-            # Restore normal operation
-            success = await self._coordinator.restore_normal()
+            # Restore normal operation via battery-agnostic service call
+            await self.hass.services.async_call(
+                DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True
+            )
 
-            if success:
-                _LOGGER.info("Sungrow: Normal operation restored after spike")
+            _LOGGER.info("%s: Normal operation restored after spike", self._battery_type)
 
-                # Send push notification
-                try:
-                    from .automations.actions import _send_expo_push
-                    await _send_expo_push(
-                        self.hass,
-                        "Price Normal",
-                        f"${current_price:.0f}/MWh - spike ended ({spike_duration_minutes}min)",
-                    )
-                except Exception as notify_err:
-                    _LOGGER.debug(f"Could not send spike end notification: {notify_err}")
-            else:
-                _LOGGER.error("Sungrow: Failed to restore normal operation after spike")
+            # Send push notification
+            try:
+                from .automations.actions import _send_expo_push
+                await _send_expo_push(
+                    self.hass,
+                    "Price Normal",
+                    f"${current_price:.0f}/MWh - spike ended ({spike_duration_minutes}min)",
+                )
+            except Exception as notify_err:
+                _LOGGER.debug("Could not send spike end notification: %s", notify_err)
 
-            # Clear spike state regardless of restore success
+            # Clear spike state
             self._in_spike_mode = False
             self._spike_start_time = None
 
         except Exception as e:
-            _LOGGER.error("Sungrow: Error exiting spike mode: %s", e, exc_info=True)
+            _LOGGER.error("%s: Error exiting spike mode: %s", self._battery_type, e, exc_info=True)
             # Still clear state on error to avoid getting stuck
             self._in_spike_mode = False
             self._spike_start_time = None
@@ -1272,7 +1275,7 @@ class SungrowAEMOSpikeManager:
             "last_price": self._last_price,
             "spike_start_time": self._spike_start_time.isoformat() if self._spike_start_time else None,
             "last_check": self._last_check.isoformat() if self._last_check else None,
-            "battery_system": "sungrow",
+            "battery_system": self._battery_type,
         }
 
 
@@ -2694,15 +2697,15 @@ class FoxESSSettingsView(HomeAssistantView):
             )
 
 
-class SungrowAEMOSpikeView(HomeAssistantView):
-    """HTTP view to manage Sungrow AEMO spike detection (Globird VPP).
+class AEMOSpikeView(HomeAssistantView):
+    """HTTP view to manage AEMO spike detection for all battery systems.
 
     GET: Returns current spike status and whether feature is enabled
     POST: Enable/disable the spike detection feature
     """
 
-    url = "/api/power_sync/sungrow_aemo_spike"
-    name = "api:power_sync:sungrow_aemo_spike"
+    url = "/api/power_sync/aemo_spike"
+    name = "api:power_sync:aemo_spike"
     requires_auth = True
 
     def __init__(self, hass: HomeAssistant):
@@ -2710,8 +2713,8 @@ class SungrowAEMOSpikeView(HomeAssistantView):
         self._hass = hass
 
     async def get(self, request: web.Request) -> web.Response:
-        """Handle GET request for Sungrow AEMO spike status."""
-        _LOGGER.info("⚡ Sungrow AEMO spike status HTTP request")
+        """Handle GET request for AEMO spike status."""
+        _LOGGER.info("AEMO spike status HTTP request")
 
         # Find the power_sync entry
         entry = None
@@ -2725,57 +2728,58 @@ class SungrowAEMOSpikeView(HomeAssistantView):
                 status=503
             )
 
-        # Check this is a Sungrow setup
-        is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
-        if not is_sungrow:
-            return web.json_response(
-                {
-                    "success": False,
-                    "error": "Not a Sungrow battery system",
-                    "reason": "not_sungrow"
-                },
-                status=200
-            )
-
         try:
-            # Check if feature is enabled in config
+            # Check if feature is enabled in config (shared key for all battery systems)
             enabled = entry.options.get(
-                CONF_SUNGROW_AEMO_SPIKE_ENABLED,
-                entry.data.get(CONF_SUNGROW_AEMO_SPIKE_ENABLED, False)
+                CONF_AEMO_SPIKE_ENABLED,
+                entry.data.get(CONF_AEMO_SPIKE_ENABLED, False)
             )
             region = entry.options.get(
                 CONF_AEMO_REGION,
                 entry.data.get(CONF_AEMO_REGION)
             )
+            threshold = entry.options.get(
+                CONF_AEMO_SPIKE_THRESHOLD,
+                entry.data.get(CONF_AEMO_SPIKE_THRESHOLD, 3000.0)
+            )
 
-            # Get spike manager status if available
+            # Look up active spike manager (generic for non-Tesla, or Tesla-specific)
             entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-            spike_manager = entry_data.get("sungrow_aemo_spike_manager")
+            spike_manager = entry_data.get("generic_aemo_spike_manager") or entry_data.get("aemo_spike_manager")
 
             if spike_manager:
                 status = spike_manager.get_status()
             else:
+                # Determine battery system for status response
+                battery_system = "tesla"
+                if entry.data.get(CONF_SIGENERGY_STATION_ID):
+                    battery_system = "sigenergy"
+                elif entry.data.get(CONF_SUNGROW_HOST):
+                    battery_system = "sungrow"
+                elif entry.data.get(CONF_FOXESS_HOST) or entry.data.get(CONF_FOXESS_SERIAL_PORT):
+                    battery_system = "foxess"
+
                 status = {
                     "enabled": enabled,
                     "region": region,
-                    "threshold": SUNGROW_AEMO_SPIKE_THRESHOLD,
+                    "threshold": threshold,
                     "in_spike_mode": False,
                     "last_price": None,
                     "spike_start_time": None,
                     "last_check": None,
-                    "battery_system": "sungrow",
+                    "battery_system": battery_system,
                 }
 
             result = {
                 "success": True,
                 "enabled": enabled,
                 "region": region,
-                "threshold": SUNGROW_AEMO_SPIKE_THRESHOLD,  # Always $3000/MWh for Globird
+                "threshold": threshold,
                 **status,
             }
 
             _LOGGER.info(
-                "✅ Sungrow AEMO spike status: enabled=%s, region=%s, in_spike_mode=%s",
+                "AEMO spike status: enabled=%s, region=%s, in_spike_mode=%s",
                 enabled,
                 region,
                 status.get("in_spike_mode", False),
@@ -2783,15 +2787,15 @@ class SungrowAEMOSpikeView(HomeAssistantView):
             return web.json_response(result)
 
         except Exception as e:
-            _LOGGER.error(f"Error fetching Sungrow AEMO spike status: {e}", exc_info=True)
+            _LOGGER.error("Error fetching AEMO spike status: %s", e, exc_info=True)
             return web.json_response(
                 {"success": False, "error": str(e)},
                 status=500
             )
 
     async def post(self, request: web.Request) -> web.Response:
-        """Handle POST request to enable/disable Sungrow AEMO spike detection."""
-        _LOGGER.info("⚡ Sungrow AEMO spike settings POST request")
+        """Handle POST request to enable/disable AEMO spike detection."""
+        _LOGGER.info("AEMO spike settings POST request")
 
         # Find the power_sync entry
         entry = None
@@ -2803,14 +2807,6 @@ class SungrowAEMOSpikeView(HomeAssistantView):
             return web.json_response(
                 {"success": False, "error": "PowerSync not configured"},
                 status=503
-            )
-
-        # Check this is a Sungrow setup
-        is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
-        if not is_sungrow:
-            return web.json_response(
-                {"success": False, "error": "Not a Sungrow battery system"},
-                status=400
             )
 
         try:
@@ -2820,12 +2816,12 @@ class SungrowAEMOSpikeView(HomeAssistantView):
             if "enabled" in body:
                 new_enabled = bool(body["enabled"])
 
-                # Update config entry options
-                new_options = {**entry.options, CONF_SUNGROW_AEMO_SPIKE_ENABLED: new_enabled}
+                # Update config entry options (shared key for all battery systems)
+                new_options = {**entry.options, CONF_AEMO_SPIKE_ENABLED: new_enabled}
                 self._hass.config_entries.async_update_entry(entry, options=new_options)
 
                 _LOGGER.info(
-                    "Sungrow AEMO spike detection %s",
+                    "AEMO spike detection %s",
                     "enabled" if new_enabled else "disabled",
                 )
 
@@ -2850,7 +2846,7 @@ class SungrowAEMOSpikeView(HomeAssistantView):
                 new_options = {**entry.options, CONF_AEMO_REGION: new_region}
                 self._hass.config_entries.async_update_entry(entry, options=new_options)
 
-                _LOGGER.info("Sungrow AEMO region updated to %s", new_region)
+                _LOGGER.info("AEMO region updated to %s", new_region)
 
                 return web.json_response({
                     "success": True,
@@ -2864,7 +2860,7 @@ class SungrowAEMOSpikeView(HomeAssistantView):
             }, status=400)
 
         except Exception as e:
-            _LOGGER.error(f"Error updating Sungrow AEMO spike settings: {e}", exc_info=True)
+            _LOGGER.error("Error updating AEMO spike settings: %s", e, exc_info=True)
             return web.json_response(
                 {"success": False, "error": str(e)},
                 status=500
@@ -2954,14 +2950,6 @@ class ConfigView(HomeAssistantView):
                     CONF_SUNGROW_HOST,
                     entry.data.get(CONF_SUNGROW_HOST)
                 )
-                sungrow_aemo_spike_enabled = entry.options.get(
-                    CONF_SUNGROW_AEMO_SPIKE_ENABLED,
-                    entry.data.get(CONF_SUNGROW_AEMO_SPIKE_ENABLED, False)
-                )
-                sungrow_aemo_region = entry.options.get(
-                    CONF_AEMO_REGION,
-                    entry.data.get(CONF_AEMO_REGION)
-                )
                 sungrow_config = {
                     "host": sungrow_host,
                     "port": entry.options.get(
@@ -2969,9 +2957,18 @@ class ConfigView(HomeAssistantView):
                         entry.data.get(CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT)
                     ),
                     "modbus_enabled": bool(sungrow_host),
-                    "aemo_spike_enabled": sungrow_aemo_spike_enabled,
-                    "aemo_region": sungrow_aemo_region,
-                    "aemo_threshold": SUNGROW_AEMO_SPIKE_THRESHOLD,  # Always $3000/MWh for Globird
+                    "aemo_spike_enabled": entry.options.get(
+                        CONF_AEMO_SPIKE_ENABLED,
+                        entry.data.get(CONF_AEMO_SPIKE_ENABLED, False)
+                    ),
+                    "aemo_region": entry.options.get(
+                        CONF_AEMO_REGION,
+                        entry.data.get(CONF_AEMO_REGION)
+                    ),
+                    "aemo_threshold": entry.options.get(
+                        CONF_AEMO_SPIKE_THRESHOLD,
+                        entry.data.get(CONF_AEMO_SPIKE_THRESHOLD, 3000.0)
+                    ),
                 }
 
             # Add FoxESS-specific info if applicable
@@ -8090,6 +8087,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Initialize AEMO Spike Manager if enabled (for Globird/AEMO VPP users)
     # Skip if Smart Optimization is enabled - it handles spike detection instead
     aemo_spike_manager = None
+    generic_aemo_spike_manager = None
     ml_optimization_enabled = (
         entry.options.get(
             CONF_OPTIMIZATION_PROVIDER,
@@ -8098,7 +8096,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         and entry.options.get(CONF_OPTIMIZATION_ENABLED, True)  # Also check user's toggle
     )
 
-    if aemo_spike_enabled:
+    # Tesla AEMO Spike Manager (tariff-based) — only for Tesla
+    if aemo_spike_enabled and has_tesla_site and not is_sigenergy and not is_sungrow and not is_foxess:
         aemo_region = entry.options.get(
             CONF_AEMO_REGION,
             entry.data.get(CONF_AEMO_REGION)
@@ -8127,33 +8126,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         else:
             _LOGGER.warning("AEMO spike detection enabled but no region configured")
 
-    # Initialize Sungrow AEMO Spike Manager if enabled (for Globird VPP users with Sungrow)
-    # Skip if Smart Optimization is enabled - it handles spike detection instead
-    sungrow_aemo_spike_manager = None
-    if is_sungrow and sungrow_coordinator:
-        sungrow_aemo_spike_enabled = entry.options.get(
-            CONF_SUNGROW_AEMO_SPIKE_ENABLED,
-            entry.data.get(CONF_SUNGROW_AEMO_SPIKE_ENABLED, False)
-        )
-        sungrow_aemo_region = entry.options.get(
+    # Generic AEMO Spike Manager (service-call-based) for non-Tesla systems
+    if aemo_spike_enabled and (is_sigenergy or is_sungrow or is_foxess):
+        aemo_region = entry.options.get(
             CONF_AEMO_REGION,
             entry.data.get(CONF_AEMO_REGION)
         )
+        aemo_threshold = entry.options.get(
+            CONF_AEMO_SPIKE_THRESHOLD,
+            entry.data.get(CONF_AEMO_SPIKE_THRESHOLD, 3000.0)
+        )
 
-        if sungrow_aemo_spike_enabled and sungrow_aemo_region:
-            sungrow_aemo_spike_manager = SungrowAEMOSpikeManager(
+        if aemo_region:
+            battery_type = "sigenergy" if is_sigenergy else "sungrow" if is_sungrow else "foxess"
+            generic_aemo_spike_manager = GenericAEMOSpikeManager(
                 hass=hass,
                 entry=entry,
-                region=sungrow_aemo_region,
-                sungrow_coordinator=sungrow_coordinator,
+                region=aemo_region,
+                threshold=aemo_threshold,
+                battery_type=battery_type,
             )
-            _LOGGER.info(
-                "Sungrow AEMO Spike Manager initialized: region=%s, threshold=$%.0f/MWh (Globird VPP)",
-                sungrow_aemo_region,
-                SUNGROW_AEMO_SPIKE_THRESHOLD,
-            )
-        elif sungrow_aemo_spike_enabled and not sungrow_aemo_region:
-            _LOGGER.warning("Sungrow AEMO spike detection enabled but no region configured")
+        elif aemo_spike_enabled:
+            _LOGGER.warning("AEMO spike detection enabled but no region configured")
 
     # Initialize AEMO Price Coordinator for Flow Power AEMO mode
     # Now fetches directly from AEMO API - no external integration required
@@ -8292,7 +8286,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "foxess_coordinator": foxess_coordinator,  # For FoxESS Modbus energy/battery data
         "demand_charge_coordinator": demand_charge_coordinator,
         "aemo_spike_manager": aemo_spike_manager,
-        "sungrow_aemo_spike_manager": sungrow_aemo_spike_manager,  # For Sungrow Globird VPP
+        "generic_aemo_spike_manager": generic_aemo_spike_manager,  # For non-Tesla AEMO spike detection
         "aemo_sensor_coordinator": aemo_sensor_coordinator,  # For Flow Power AEMO-only mode
         "solcast_coordinator": solcast_coordinator,  # For Solcast solar forecasting
         "octopus_coordinator": octopus_coordinator,  # For Octopus Energy UK pricing
@@ -8300,7 +8294,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "entry": entry,
         "auto_sync_cancel": None,  # Will store the timer cancel function
         "aemo_spike_cancel": None,  # Will store the AEMO spike check cancel function
-        "sungrow_aemo_spike_cancel": None,  # Will store the Sungrow AEMO spike check cancel function
+        "generic_aemo_spike_cancel": None,  # Will store the generic AEMO spike check cancel function
         "demand_charging_cancel": None,  # Will store the demand period grid charging cancel function
         "grid_charging_disabled_for_demand": False,  # Track if grid charging is disabled for demand period
         "cached_export_rule": cached_export_rule,  # Restored from persistent storage
@@ -12958,9 +12952,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.http.register_view(FoxESSSettingsView(hass))
     _LOGGER.info("⚙️ FoxESS settings HTTP endpoint registered at /api/power_sync/foxess_settings")
 
-    # Register HTTP endpoint for Sungrow AEMO spike settings (for mobile app - Globird VPP)
-    hass.http.register_view(SungrowAEMOSpikeView(hass))
-    _LOGGER.info("⚡ Sungrow AEMO spike HTTP endpoint registered at /api/power_sync/sungrow_aemo_spike")
+    # Register HTTP endpoint for AEMO spike settings (for mobile app - all battery systems)
+    hass.http.register_view(AEMOSpikeView(hass))
+    _LOGGER.info("⚡ AEMO spike HTTP endpoint registered at /api/power_sync/aemo_spike")
 
     # Register HTTP endpoint for Config (for mobile app auto-detection)
     config_view = ConfigView(hass)
@@ -13522,30 +13516,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("Performing initial AEMO spike check")
         await aemo_spike_manager.check_and_handle_spike()
 
-    # Set up automatic Sungrow AEMO spike check every minute if enabled (for Globird VPP)
-    if sungrow_aemo_spike_manager:
-        async def auto_sungrow_aemo_spike_check(now):
-            """Automatically check AEMO prices for spikes (Sungrow)."""
-            await sungrow_aemo_spike_manager.check_and_handle_spike()
+    # Set up automatic generic AEMO spike check every minute if enabled (for non-Tesla systems)
+    if generic_aemo_spike_manager:
+        async def auto_generic_aemo_spike_check(now):
+            """Automatically check AEMO prices for spikes (generic/non-Tesla)."""
+            await generic_aemo_spike_manager.check_and_handle_spike()
 
         # Check every minute at :40 seconds (offset from Tesla check at :35)
-        sungrow_aemo_spike_cancel_timer = async_track_utc_time_change(
+        generic_aemo_spike_cancel_timer = async_track_utc_time_change(
             hass,
-            auto_sungrow_aemo_spike_check,
+            auto_generic_aemo_spike_check,
             second=40,  # Every minute at :40 seconds
         )
 
-        # Store the Sungrow AEMO spike cancel function
-        hass.data[DOMAIN][entry.entry_id]["sungrow_aemo_spike_cancel"] = sungrow_aemo_spike_cancel_timer
+        # Store the generic AEMO spike cancel function
+        hass.data[DOMAIN][entry.entry_id]["generic_aemo_spike_cancel"] = generic_aemo_spike_cancel_timer
         _LOGGER.info(
-            "Sungrow AEMO spike check scheduled every minute (region=%s, threshold=$%.0f/MWh - Globird VPP)",
-            sungrow_aemo_spike_manager.region,
-            sungrow_aemo_spike_manager.threshold,
+            "Generic AEMO spike check scheduled every minute (battery=%s, region=%s, threshold=$%.0f/MWh)",
+            generic_aemo_spike_manager._battery_type,
+            generic_aemo_spike_manager.region,
+            generic_aemo_spike_manager.threshold,
         )
 
-        # Perform initial Sungrow AEMO spike check
-        _LOGGER.info("Performing initial Sungrow AEMO spike check")
-        await sungrow_aemo_spike_manager.check_and_handle_spike()
+        # Perform initial generic AEMO spike check
+        _LOGGER.info("Performing initial generic AEMO spike check")
+        await generic_aemo_spike_manager.check_and_handle_spike()
 
     # Set up automatic demand period grid charging check if demand charges enabled
     if demand_charge_coordinator:
@@ -14464,10 +14459,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         aemo_spike_cancel()
         _LOGGER.debug("Cancelled AEMO spike timer")
 
-    # Cancel the Sungrow AEMO spike timer if it exists
-    if sungrow_aemo_spike_cancel := entry_data.get("sungrow_aemo_spike_cancel"):
-        sungrow_aemo_spike_cancel()
-        _LOGGER.debug("Cancelled Sungrow AEMO spike timer")
+    # Cancel the generic AEMO spike timer if it exists
+    if generic_aemo_spike_cancel := entry_data.get("generic_aemo_spike_cancel"):
+        generic_aemo_spike_cancel()
+        _LOGGER.debug("Cancelled generic AEMO spike timer")
 
     # Cancel the demand period grid charging timer if it exists
     if demand_charging_cancel := entry_data.get("demand_charging_cancel"):
