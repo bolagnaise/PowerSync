@@ -9902,18 +9902,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                     if current_mode == 'self_consumption':
                         # Check if we recently toggled - if so, Tesla might have reverted the mode
-                        # Only respect "user setting" if we haven't toggled in the last 10 minutes
+                        # Only re-toggle once after the initial toggle to avoid infinite loops
+                        # (if self_consumption persists after our re-toggle, it's the user's choice)
                         from homeassistant.util import dt as dt_util
                         last_toggle_time = hass.data[DOMAIN].get(entry.entry_id, {}).get("last_force_toggle_time")
+                        retoggle_attempted = hass.data[DOMAIN].get(entry.entry_id, {}).get("retoggle_attempted", False)
                         now = dt_util.utcnow()
 
-                        if last_toggle_time and (now - last_toggle_time).total_seconds() < 600:
-                            # We toggled recently - Tesla likely reverted the mode, not user
-                            _LOGGER.info(f"⚠️ Mode reverted to self_consumption after recent toggle ({(now - last_toggle_time).total_seconds():.0f}s ago) - will re-toggle")
+                        if last_toggle_time and (now - last_toggle_time).total_seconds() < 600 and not retoggle_attempted:
+                            # We toggled recently and haven't re-toggled yet - Tesla likely reverted
+                            _LOGGER.info(
+                                "Mode reverted to self_consumption after recent toggle (%.0fs ago) - will re-toggle once",
+                                (now - last_toggle_time).total_seconds(),
+                            )
                             force_retoggle = True
                         else:
-                            # User has manually set self_consumption mode - don't override their choice
-                            _LOGGER.info(f"⏭️  Skipping force toggle - already in self_consumption mode (respecting user setting)")
+                            # Either we already re-toggled (and it reverted again = user's choice),
+                            # or the toggle was > 10 minutes ago (user set it manually)
+                            if retoggle_attempted:
+                                _LOGGER.info("Skipping force toggle - self_consumption persisted after re-toggle (respecting user setting)")
+                            else:
+                                _LOGGER.info("Skipping force toggle - already in self_consumption mode (respecting user setting)")
                             skip_toggle = True
                     elif current_mode and current_mode != 'autonomous':
                         # Not in TOU mode (e.g., backup mode) - don't toggle
@@ -9938,15 +9947,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                         if not force_retoggle and grid_power < 0:
                             # Negative grid_power means exporting - already doing what we want
-                            _LOGGER.info(f"⏭️  Skipping force toggle - already exporting ({abs(grid_power):.0f}W to grid)")
+                            _LOGGER.info(f"Skipping force toggle - already exporting ({abs(grid_power):.0f}W to grid)")
                         elif not force_retoggle and battery_power < 0:
                             # Negative battery_power means charging - already doing what we want
-                            _LOGGER.info(f"⏭️  Skipping force toggle - battery already charging ({abs(battery_power):.0f}W)")
+                            _LOGGER.info(f"Skipping force toggle - battery already charging ({abs(battery_power):.0f}W)")
                         else:
                             if force_retoggle:
-                                _LOGGER.info(f"🔄 Re-toggling to autonomous (Tesla reverted mode)")
+                                _LOGGER.info("Re-toggling to autonomous (Tesla reverted mode)")
+                                # Mark that we've attempted a re-toggle — won't try again if it reverts
+                                hass.data[DOMAIN][entry.entry_id]["retoggle_attempted"] = True
                             else:
-                                _LOGGER.info(f"🔄 Force mode toggle - grid: {grid_power:.0f}W, battery: {battery_power:.0f}W")
+                                _LOGGER.info(f"Force mode toggle - grid: {grid_power:.0f}W, battery: {battery_power:.0f}W")
+                                # Fresh toggle — clear the re-toggle flag
+                                hass.data[DOMAIN][entry.entry_id]["retoggle_attempted"] = False
 
                                 # Switch to self_consumption first (only if not already in self_consumption)
                                 async with session.post(
@@ -9989,24 +10002,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                             verify_data = await verify_response.json()
                                             current_mode = verify_data.get("response", {}).get("default_real_mode")
                                             if current_mode == "autonomous":
-                                                _LOGGER.info("🔄 Force mode toggle complete - verified autonomous")
+                                                _LOGGER.info("Force mode toggle complete - verified autonomous")
                                                 switched_back = True
-                                                # Track successful toggle time to detect Tesla reversions
+                                                # Only update toggle time on fresh toggles, not re-toggles
+                                                # This prevents the re-toggle window from refreshing indefinitely
+                                                if not force_retoggle:
+                                                    from homeassistant.util import dt as dt_util
+                                                    if entry.entry_id not in hass.data[DOMAIN]:
+                                                        hass.data[DOMAIN][entry.entry_id] = {}
+                                                    hass.data[DOMAIN][entry.entry_id]["last_force_toggle_time"] = dt_util.utcnow()
+                                                break
+                                            else:
+                                                _LOGGER.warning(
+                                                    "Mode verification failed: expected 'autonomous', got '%s' (attempt %d/3)",
+                                                    current_mode, attempt + 1,
+                                                )
+                                        else:
+                                            _LOGGER.warning("Could not verify mode (status %s) - assuming success", verify_response.status)
+                                            switched_back = True
+                                            if not force_retoggle:
                                                 from homeassistant.util import dt as dt_util
                                                 if entry.entry_id not in hass.data[DOMAIN]:
                                                     hass.data[DOMAIN][entry.entry_id] = {}
                                                 hass.data[DOMAIN][entry.entry_id]["last_force_toggle_time"] = dt_util.utcnow()
-                                                break
-                                            else:
-                                                _LOGGER.warning(f"⚠️ Mode verification failed: expected 'autonomous', got '{current_mode}' (attempt {attempt+1}/3)")
-                                        else:
-                                            _LOGGER.warning(f"Could not verify mode (status {verify_response.status}) - assuming success")
-                                            switched_back = True
-                                            # Track toggle time even when assuming success
-                                            from homeassistant.util import dt as dt_util
-                                            if entry.entry_id not in hass.data[DOMAIN]:
-                                                hass.data[DOMAIN][entry.entry_id] = {}
-                                            hass.data[DOMAIN][entry.entry_id]["last_force_toggle_time"] = dt_util.utcnow()
                                             break
 
                                 except Exception as e:
