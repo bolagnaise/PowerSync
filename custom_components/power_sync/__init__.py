@@ -1415,14 +1415,16 @@ async def send_tariff_to_tesla(
     url = f"{api_base}/api/1/energy_sites/{site_id}/time_of_use_settings"
     _LOGGER.debug("Sending TOU schedule via %s API", api_provider)
     last_error = None
+    retry_after_delay = None  # Set by Retry-After header
 
     for attempt in range(max_retries):
         try:
-            # Exponential backoff: 2^attempt seconds (1s, 2s, 4s)
             if attempt > 0:
-                wait_time = 2 ** attempt
+                # Use Retry-After delay if available, otherwise exponential backoff
+                wait_time = retry_after_delay or (2 ** attempt)
+                retry_after_delay = None  # Reset for next attempt
                 _LOGGER.info(
-                    "TOU sync retry attempt %d/%d after %ds delay",
+                    "TOU sync retry attempt %d/%d after %.0fs delay",
                     attempt + 1,
                     max_retries,
                     wait_time
@@ -1455,25 +1457,42 @@ async def send_tariff_to_tesla(
                 # Log error and potentially retry
                 error_text = await response.text()
 
-                if response.status >= 500:
-                    # Server error - retry
+                if response.status == 429:
+                    # Rate limited — retry with Retry-After if provided
+                    from .coordinator import _parse_retry_after
+                    retry_after_delay = _parse_retry_after(response)
                     _LOGGER.warning(
-                        "Failed to sync TOU schedule: %s - %s (attempt %d/%d, will retry)",
+                        "TOU sync rate limited 429 (attempt %d/%d): %s (retry-after: %s)",
+                        attempt + 1,
+                        max_retries,
+                        error_text[:200],
+                        f"{retry_after_delay:.0f}s" if retry_after_delay else "not set",
+                    )
+                    last_error = f"Rate limited 429"
+                    continue  # Retry on 429
+
+                if response.status >= 500:
+                    # Server error — retry, respect Retry-After if present
+                    from .coordinator import _parse_retry_after
+                    retry_after_delay = _parse_retry_after(response)
+                    _LOGGER.warning(
+                        "Failed to sync TOU schedule: %s - %s (attempt %d/%d, will retry%s)",
                         response.status,
                         error_text[:200],
                         attempt + 1,
-                        max_retries
+                        max_retries,
+                        f", retry-after: {retry_after_delay:.0f}s" if retry_after_delay else "",
                     )
                     last_error = f"Server error {response.status}"
                     continue  # Retry on 5xx errors
-                else:
-                    # Client error - don't retry
-                    _LOGGER.error(
-                        "Failed to sync TOU schedule: %s - %s (client error, not retrying)",
-                        response.status,
-                        error_text
-                    )
-                    return False
+
+                # Other 4xx client errors — don't retry
+                _LOGGER.error(
+                    "Failed to sync TOU schedule: %s - %s (client error, not retrying)",
+                    response.status,
+                    error_text
+                )
+                return False
 
         except aiohttp.ClientError as err:
             _LOGGER.warning(

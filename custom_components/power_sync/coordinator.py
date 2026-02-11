@@ -239,6 +239,31 @@ _LOGGER = logging.getLogger(__name__)
 _LOGGER.addFilter(SensitiveDataFilter())
 
 
+def _parse_retry_after(response: aiohttp.ClientResponse) -> float | None:
+    """Parse Retry-After header from an HTTP response.
+
+    Returns delay in seconds, or None if header is missing/invalid.
+    Supports both delta-seconds and HTTP-date formats.
+    """
+    retry_after = response.headers.get("Retry-After")
+    if not retry_after:
+        return None
+    try:
+        # Try delta-seconds first (e.g. "30")
+        return max(1.0, min(float(retry_after), 300.0))  # Clamp 1-300s
+    except (ValueError, TypeError):
+        pass
+    try:
+        # Try HTTP-date format (e.g. "Tue, 11 Feb 2026 03:00:00 GMT")
+        from email.utils import parsedate_to_datetime
+        retry_date = parsedate_to_datetime(retry_after)
+        from homeassistant.util import dt as dt_util
+        delay = (retry_date - dt_util.utcnow()).total_seconds()
+        return max(1.0, min(delay, 300.0))  # Clamp 1-300s
+    except (ValueError, TypeError):
+        return None
+
+
 async def _fetch_with_retry(
     session: aiohttp.ClientSession,
     url: str,
@@ -248,6 +273,9 @@ async def _fetch_with_retry(
     **kwargs
 ) -> dict[str, Any]:
     """Fetch data with exponential backoff retry logic.
+
+    Respects Retry-After headers from 429/503 responses. Retries on
+    5xx server errors and 429 rate limits; fails immediately on other 4xx.
 
     Args:
         session: aiohttp client session
@@ -264,13 +292,18 @@ async def _fetch_with_retry(
         UpdateFailed: If all retries fail
     """
     last_error = None
+    retry_after_delay = None  # Set by Retry-After header
 
     for attempt in range(max_retries):
         try:
-            # Exponential backoff: 2^attempt seconds (1s, 2s, 4s)
             if attempt > 0:
-                wait_time = 2 ** attempt
-                _LOGGER.info(f"Retry attempt {attempt + 1}/{max_retries} after {wait_time}s delay")
+                # Use Retry-After delay if available, otherwise exponential backoff
+                wait_time = retry_after_delay or (2 ** attempt)
+                retry_after_delay = None  # Reset for next attempt
+                _LOGGER.info(
+                    "Retry attempt %d/%d after %.0fs delay",
+                    attempt + 1, max_retries, wait_time,
+                )
                 await asyncio.sleep(wait_time)
 
             async with session.get(
@@ -282,32 +315,47 @@ async def _fetch_with_retry(
                 if response.status == 200:
                     return await response.json()
 
-                # Log the error but continue retrying on 5xx errors
                 error_text = await response.text()
 
-                if response.status >= 500:
+                if response.status == 429:
+                    # Rate limited — retry with Retry-After if provided
+                    retry_after_delay = _parse_retry_after(response)
                     _LOGGER.warning(
-                        f"Server error (attempt {attempt + 1}/{max_retries}): {response.status} - {error_text[:200]}"
+                        "Rate limited 429 (attempt %d/%d): %s (retry-after: %s)",
+                        attempt + 1, max_retries, error_text[:200],
+                        f"{retry_after_delay:.0f}s" if retry_after_delay else "not set",
+                    )
+                    last_error = UpdateFailed(f"Rate limited: 429")
+                    continue
+
+                if response.status >= 500:
+                    # Server error — retry, respect Retry-After if present
+                    retry_after_delay = _parse_retry_after(response)
+                    _LOGGER.warning(
+                        "Server error (attempt %d/%d): %s - %s",
+                        attempt + 1, max_retries, response.status, error_text[:200],
                     )
                     last_error = UpdateFailed(f"Server error: {response.status}")
-                    continue  # Retry on 5xx errors
-                else:
-                    # Don't retry on 4xx client errors
-                    raise UpdateFailed(f"Client error {response.status}: {error_text}")
+                    continue
+
+                # Other 4xx client errors — don't retry
+                raise UpdateFailed(f"Client error {response.status}: {error_text}")
 
         except aiohttp.ClientError as err:
             _LOGGER.warning(
-                f"Network error (attempt {attempt + 1}/{max_retries}): {err}"
+                "Network error (attempt %d/%d): %s",
+                attempt + 1, max_retries, err,
             )
             last_error = UpdateFailed(f"Network error: {err}")
-            continue  # Retry on network errors
+            continue
 
         except asyncio.TimeoutError:
             _LOGGER.warning(
-                f"Timeout error (attempt {attempt + 1}/{max_retries}): Request exceeded {timeout_seconds}s"
+                "Timeout error (attempt %d/%d): Request exceeded %ds",
+                attempt + 1, max_retries, timeout_seconds,
             )
             last_error = UpdateFailed(f"Timeout after {timeout_seconds}s")
-            continue  # Retry on timeout
+            continue
 
     # All retries failed
     raise last_error or UpdateFailed("All retry attempts failed")
