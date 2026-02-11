@@ -4971,6 +4971,21 @@ class EVChargingModeCoordinator:
             f"currently_charging={self._is_charging}"
         )
 
+        # Safety: do not start EV charging while force discharge/charge is active.
+        # Charging the car while force-discharging the house battery is counterproductive.
+        try:
+            entry_data = self.hass.data.get(self._domain, {}).get(self.config_entry.entry_id, {})
+            fd_state = entry_data.get("force_discharge_state", {})
+            fc_state = entry_data.get("force_charge_state", {})
+            if fd_state.get("active") or fc_state.get("active"):
+                force_type = "discharge" if fd_state.get("active") else "charge"
+                _LOGGER.debug(
+                    "EV Coordinator: skipping — force %s active", force_type
+                )
+                return
+        except Exception:
+            pass  # Don't let force state check break EV evaluation
+
         # Get price-level executor for multi-vehicle evaluation
         price_level_exec = get_price_level_executor()
         scheduled_exec = get_scheduled_charging_executor()
