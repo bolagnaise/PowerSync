@@ -90,6 +90,11 @@ restore_normal:
   description: Restore normal operation - restores saved tariff or triggers Amber sync for Amber users
   fields: {}
 
+set_self_consumption:
+  name: Set Self Consumption
+  description: Set battery to pure self-consumption mode (battery offsets home load, no TOU optimization)
+  fields: {}
+
 set_backup_reserve:
   name: Set Backup Reserve
   description: Set the battery backup reserve percentage (0-100%). Supports both Tesla Powerwall and SigEnergy systems.

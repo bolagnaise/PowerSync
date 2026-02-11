@@ -12613,6 +12613,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_register(DOMAIN, SERVICE_FORCE_DISCHARGE, handle_force_discharge)
     hass.services.async_register(DOMAIN, SERVICE_FORCE_CHARGE, handle_force_charge)
     hass.services.async_register(DOMAIN, SERVICE_RESTORE_NORMAL, handle_restore_normal)
+    hass.services.async_register(DOMAIN, "set_self_consumption", handle_set_self_consumption)
 
     # Now that handle_restore_normal is defined, schedule expired force mode restore
     if persisted_force_state:
