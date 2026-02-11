@@ -247,6 +247,32 @@ from .coordinator import (
 import re
 
 
+def _resolve_ble_prefix(hass, config: dict) -> str:
+    """Resolve Tesla BLE entity prefix with auto-detection fallback.
+
+    If the configured prefix doesn't find a BLE status entity, scan for
+    a *_charging_state sensor whose prefix contains 'ble' and use that instead.
+    """
+    prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+
+    # Check if configured prefix finds the BLE status entity
+    status_entity = TESLA_BLE_BINARY_STATUS.format(prefix=prefix)
+    if hass.states.get(status_entity) is not None:
+        return prefix
+
+    # Auto-detect from BLE charging_state sensor
+    for state in hass.states.async_all():
+        match = re.match(r"sensor\.(\w+)_charging_state$", state.entity_id)
+        if match and "ble" in match.group(1).lower():
+            detected = match.group(1)
+            _LOGGER.debug(
+                "BLE prefix auto-detected as '%s' (configured: '%s')", detected, prefix
+            )
+            return detected
+
+    return prefix
+
+
 class SensitiveDataFilter(logging.Filter):
     """
     Logging filter that obfuscates sensitive data like API keys and tokens.
@@ -2610,17 +2636,26 @@ class FoxESSSettingsView(HomeAssistantView):
             data = foxess_coordinator.data
             # Get model-specific work mode options from the controller's register map
             work_mode_options = {}
+            work_mode_index = data.get("work_mode")  # default: raw register value
             try:
                 controller = foxess_coordinator._controller
                 if controller and controller._register_map:
-                    work_mode_options = controller._register_map.get_work_mode_names()
+                    reg = controller._register_map
+                    work_mode_options = reg.get_work_mode_names()
+                    # Map register value back to 0-based index for mobile app
+                    reverse_map = {
+                        reg.work_mode_self_use: 0,
+                        reg.work_mode_feed_in: 1,
+                        reg.work_mode_backup: 2,
+                    }
+                    work_mode_index = reverse_map.get(data.get("work_mode"), data.get("work_mode"))
             except Exception:
                 pass
             result = {
                 "success": True,
                 "battery_soc": data.get("battery_level"),
                 "battery_power": data.get("battery_power"),
-                "work_mode": data.get("work_mode"),
+                "work_mode": work_mode_index,
                 "work_mode_name": data.get("work_mode_name"),
                 "work_mode_options": work_mode_options,
                 "min_soc": data.get("min_soc"),
@@ -2685,7 +2720,28 @@ class FoxESSSettingsView(HomeAssistantView):
                 results["min_soc"] = success
 
             if "work_mode" in body:
-                success = await foxess_coordinator.set_work_mode(int(body["work_mode"]))
+                requested_mode = int(body["work_mode"])
+                # App sends 0-based indices: 0=Self Use, 1=Feed-in, 2=Backup,
+                # 3=Force Charge, 4=Force Discharge.
+                # Translate to model-specific register values (H3-Pro/Smart use 1-based).
+                controller = foxess_coordinator._controller
+                if controller and hasattr(controller, '_register_map') and controller._register_map:
+                    reg = controller._register_map
+                    mode_map = {
+                        0: reg.work_mode_self_use,
+                        1: reg.work_mode_feed_in,
+                        2: reg.work_mode_backup,
+                    }
+                    if requested_mode in mode_map:
+                        success = await foxess_coordinator.set_work_mode(mode_map[requested_mode])
+                    elif requested_mode == 3:
+                        success = await foxess_coordinator.force_charge()
+                    elif requested_mode == 4:
+                        success = await foxess_coordinator.force_discharge()
+                    else:
+                        success = await foxess_coordinator.set_work_mode(requested_mode)
+                else:
+                    success = await foxess_coordinator.set_work_mode(requested_mode)
                 results["work_mode"] = success
 
             if "max_charge_current_a" in body:
@@ -4994,7 +5050,7 @@ class EVStatusView(HomeAssistantView):
         if ev_provider not in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
             return {"available": False, "configured": False}
 
-        prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+        prefix = _resolve_ble_prefix(self._hass, config)
 
         # Check if the BLE status entity exists
         status_entity = TESLA_BLE_BINARY_STATUS.format(prefix=prefix)
@@ -5184,7 +5240,7 @@ class EVVehiclesView(HomeAssistantView):
             # Get PowerSync config for EV provider setting
             config = self._get_powersync_config()
             ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
-            ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+            ble_prefix = _resolve_ble_prefix(self._hass, config)
 
             # Check for Tesla Fleet/Teslemetry integration
             active_integration = None
@@ -5565,7 +5621,7 @@ class EVVehicleCommandView(HomeAssistantView):
         # Try BLE first
         config = self._get_powersync_config()
         ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
-        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+        ble_prefix = _resolve_ble_prefix(self._hass, config)
 
         wake_sent = False
 
@@ -5686,7 +5742,7 @@ class EVVehicleCommandView(HomeAssistantView):
 
         config = self._get_powersync_config()
         ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
-        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+        ble_prefix = _resolve_ble_prefix(self._hass, config)
 
         # Try BLE first
         if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
@@ -5745,7 +5801,7 @@ class EVVehicleCommandView(HomeAssistantView):
 
         config = self._get_powersync_config()
         ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
-        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+        ble_prefix = _resolve_ble_prefix(self._hass, config)
 
         # Try BLE first
         if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
@@ -5796,7 +5852,7 @@ class EVVehicleCommandView(HomeAssistantView):
 
         config = self._get_powersync_config()
         ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
-        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+        ble_prefix = _resolve_ble_prefix(self._hass, config)
 
         # Try BLE first
         if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
@@ -5845,7 +5901,7 @@ class EVVehicleCommandView(HomeAssistantView):
 
         config = self._get_powersync_config()
         ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
-        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+        ble_prefix = _resolve_ble_prefix(self._hass, config)
 
         # Try BLE first (BLE supports same 5-32A range as cloud API)
         if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
@@ -6474,7 +6530,7 @@ class ChargingScheduleView(HomeAssistantView):
         if entries:
             config = dict(entries[0].options)
 
-        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+        ble_prefix = _resolve_ble_prefix(self._hass, config)
         ble_charge_level_entity = TESLA_BLE_SENSOR_CHARGE_LEVEL.format(prefix=ble_prefix)
         ble_state = self._hass.states.get(ble_charge_level_entity)
 

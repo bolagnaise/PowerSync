@@ -686,7 +686,9 @@ class FoxESSController(InverterController):
         """Set FoxESS work mode.
 
         Args:
-            mode: Work mode value (1=Self Use, 2=Feed-in, 3=Backup, 4=Force Charge, 5=Force Discharge)
+            mode: Model-specific work mode register value.
+                  H1/H3/KH (reg 41000): 0=Self Use, 1=Feed-in, 2=Backup
+                  H3-Pro/Smart (reg 49203): 1=Self Use, 2=Feed-in, 3=Backup
         """
         if not self._register_map or not self._register_map.work_mode:
             _LOGGER.error("Work mode register not available for model %s", self._model_family.value)
