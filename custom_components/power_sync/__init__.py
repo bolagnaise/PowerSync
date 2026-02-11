@@ -9460,23 +9460,55 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 forecast_type=forecast_type
             )
 
+            # Dedup: only send one notification per spike period.
+            # Reset the set each new day so tomorrow's spikes can notify.
+            entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            notified_spikes: set = entry_data.setdefault("_notified_spikes", set())
+            from homeassistant.util import dt as _dt_util
+            today_str = _dt_util.now().strftime("%Y-%m-%d")
+            if entry_data.get("_spike_notif_date") != today_str:
+                notified_spikes.clear()
+                entry_data["_spike_notif_date"] = today_str
+
+            from datetime import datetime as _spike_dt
+
+            def _spike_is_imminent(spike_time_str: str) -> bool:
+                """Check if spike is within 60 minutes of now."""
+                try:
+                    spike_dt = _spike_dt.fromisoformat(
+                        spike_time_str.replace("Z", "+00:00")
+                    )
+                    from homeassistant.util import dt as _dt_util
+                    now_dt = _dt_util.now()
+                    delta = (spike_dt - now_dt).total_seconds()
+                    return -300 <= delta <= 3600  # -5min (current) to +60min
+                except (ValueError, TypeError):
+                    return False
+
             # Send notifications for import spikes
             import_spikes = spike_result.get("import_spikes", {})
             if import_spikes.get("has_spike"):
                 max_price = import_spikes.get("max_price", 0)
-                spike_count = import_spikes.get("count", 0)
                 spike_details = import_spikes.get("details", [])
 
                 try:
                     from .automations.actions import _send_expo_push
                     if spike_details:
                         first_spike = spike_details[0]
-                        spike_time = first_spike.get("time", "").split("T")[1][:5] if "T" in first_spike.get("time", "") else ""
-                        await _send_expo_push(
-                            hass,
-                            "High Import Price",
-                            f"${max_price/100:.2f}/kWh at {spike_time}",
-                        )
+                        spike_time_raw = first_spike.get("time", "")
+                        spike_time = spike_time_raw.split("T")[1][:5] if "T" in spike_time_raw else ""
+                        notif_key = f"import_{spike_time}"
+                        if notif_key not in notified_spikes:
+                            if _spike_is_imminent(spike_time_raw):
+                                body = f"${max_price/100:.2f}/kWh at {spike_time} - avoid importing!"
+                            else:
+                                body = f"${max_price/100:.2f}/kWh upcoming at {spike_time}"
+                            await _send_expo_push(
+                                hass,
+                                "High Import Price",
+                                body,
+                            )
+                            notified_spikes.add(notif_key)
                 except Exception as notify_err:
                     _LOGGER.debug(f"Could not send import spike notification: {notify_err}")
 
@@ -9484,19 +9516,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             export_spikes = spike_result.get("export_spikes", {})
             if export_spikes.get("has_spike"):
                 max_price = export_spikes.get("max_price", 0)
-                spike_count = export_spikes.get("count", 0)
                 spike_details = export_spikes.get("details", [])
 
                 try:
                     from .automations.actions import _send_expo_push
                     if spike_details:
                         first_spike = spike_details[0]
-                        spike_time = first_spike.get("time", "").split("T")[1][:5] if "T" in first_spike.get("time", "") else ""
-                        await _send_expo_push(
-                            hass,
-                            "High Export Price",
-                            f"${max_price/100:.2f}/kWh at {spike_time} - export now!",
-                        )
+                        spike_time_raw = first_spike.get("time", "")
+                        spike_time = spike_time_raw.split("T")[1][:5] if "T" in spike_time_raw else ""
+                        notif_key = f"export_{spike_time}"
+                        if notif_key not in notified_spikes:
+                            if _spike_is_imminent(spike_time_raw):
+                                body = f"${max_price/100:.2f}/kWh at {spike_time} - export now!"
+                            else:
+                                body = f"${max_price/100:.2f}/kWh upcoming at {spike_time}"
+                            await _send_expo_push(
+                                hass,
+                                "High Export Price",
+                                body,
+                            )
+                            notified_spikes.add(notif_key)
                 except Exception as notify_err:
                     _LOGGER.debug(f"Could not send export spike notification: {notify_err}")
 
