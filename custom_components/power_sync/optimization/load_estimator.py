@@ -418,8 +418,10 @@ class LoadEstimator:
             for state in history[self.load_entity_id]:
                 try:
                     value = float(state.state)
-                    if value >= 0:  # Filter invalid values
-                        result.append((state.last_changed, value * multiplier))
+                    value_watts = value * multiplier
+                    # Filter invalid values: must be positive and < 100kW residential max
+                    if 0 < value_watts < 100_000:
+                        result.append((state.last_changed, value_watts))
                 except (ValueError, TypeError):
                     continue
 
@@ -524,6 +526,13 @@ class LoadEstimator:
                 unit = state.attributes.get("unit_of_measurement", "kW")
                 if unit.lower() == "kw":
                     value *= 1000
+                # Sanity check: residential load should be < 100kW
+                if value > 100_000:
+                    _LOGGER.warning(
+                        "Load sensor %s returned implausible value %.0fW, using default",
+                        self.load_entity_id, value,
+                    )
+                    return 500.0
                 return max(0, value)
         except (ValueError, TypeError, AttributeError):
             pass

@@ -324,8 +324,8 @@ class BatteryOptimizer:
 
         if not result.success:
             _LOGGER.warning(f"LP solver status: {result.message}")
-            if "infeasible" in result.message.lower():
-                # Try relaxing constraints
+            if "infeasible" in result.message.lower() and not getattr(self, '_relaxing', False):
+                # Try relaxing constraints (guard prevents infinite recursion)
                 return self._solve_lp_relaxed(
                     n, import_prices, export_prices, solar, load, soc_0, cost_function
                 )
@@ -391,6 +391,7 @@ class BatteryOptimizer:
         )
         original_reserve = self.backup_reserve
         self.backup_reserve = 0.05  # Minimal reserve
+        self._relaxing = True  # Guard against infinite recursion
 
         try:
             result = self._solve_lp(
@@ -405,6 +406,7 @@ class BatteryOptimizer:
             )
         finally:
             self.backup_reserve = original_reserve
+            self._relaxing = False
 
     def _solve_greedy(
         self,
