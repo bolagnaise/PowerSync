@@ -3855,6 +3855,17 @@ async def fetch_tesla_tariff_schedule(hass: HomeAssistant, entry: ConfigEntry) -
 
         _LOGGER.debug(f"Tesla tariff_content utility: {tariff.get('utility')}, name: {tariff.get('name')}")
 
+        # Reject PowerSync-generated fake tariffs (force charge/discharge).
+        # If HA restarts while a force mode tariff is on the Tesla API, we must
+        # not use it as the real TOU schedule.
+        if tariff.get("utility") == "PowerSync":
+            _LOGGER.warning(
+                "Tesla API returned a PowerSync-generated tariff (%s) — "
+                "ignoring and falling back to custom tariff",
+                tariff.get("name"),
+            )
+            return None
+
         # Determine current season and TOU period
         from datetime import datetime as dt
         from zoneinfo import ZoneInfo
