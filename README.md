@@ -26,7 +26,7 @@
 | System | Connection | Control |
 |--------|-----------|---------|
 | **Tesla Powerwall** | Fleet API or Teslemetry | TOU tariff sync, force charge/discharge, export rules |
-| **FoxESS** (H1, H3, H3-Pro, H3 Smart, KH) | Modbus TCP or RS485 | Work mode, force charge/discharge, backup reserve |
+| **FoxESS** (H1, H3, H3-Pro, H3 Smart, KH + OEM rebrands) | Modbus TCP or RS485 | Work mode, force charge/discharge, backup reserve |
 | **Sigenergy** | Cloud API + Modbus TCP | Tariff sync, DC solar curtailment |
 | **Sungrow SH-series** | Modbus TCP | Force charge/discharge, rate limiting, export control |
 
@@ -82,8 +82,18 @@ Two connection options — choose one:
 
 Supports **H1, H3, H3-Pro, H3 Smart, and KH** model families via Modbus TCP or RS485 serial. No cloud API required for battery control.
 
+OEM rebrands using identical hardware are also supported — the model family is auto-detected via register probing:
+
+| Model Family | Also sold as |
+|-------------|-------------|
+| **H1** | AIO-H1, a-TroniX AX |
+| **H3** | AIO-H3, Kuara H3, Sonnenkraft SK-HWR, 1KOMMA5 |
+| **H3-Pro** | — |
+| **H3 Smart** | — |
+| **KH** | — |
+
 - **H3 Smart:** Has built-in WiFi Modbus TCP — connect directly to the inverter's IP (appears as "espressif" on your network). Ensure inverter firmware is up to date.
-- **All models:** Default port 502, slave ID 247. Model family is auto-detected during setup.
+- **All models:** Default port 502, slave ID 247. Model family is auto-detected during setup — no manual selection needed for rebrands.
 - **Cloud credentials** are optional (only needed for tariff data from FoxESS Cloud).
 
 ### Sigenergy
@@ -125,7 +135,7 @@ The optimizer runs every 5 minutes, re-optimizing as prices and forecasts update
 
 Coordinates EV charging alongside battery optimization with dynamic power sharing. The EV charging plan is fed into the battery optimizer's load forecast so both systems work together.
 
-**Modes:** Solar Only | Solar Preferred | Cost Optimized | Time Critical
+**Modes:** Prefer Solar | Solar Only | Cheapest | Meet Deadline
 
 **Supported chargers:** Tesla Wall Connector (BLE), OCPP, Wallbox, Easee, Generic (switch + number entity)
 
