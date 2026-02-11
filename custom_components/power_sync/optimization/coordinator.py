@@ -904,6 +904,39 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     for lst in (general, feed_in):
                         lst.sort(key=lambda e: e.get("startTime", ""))
 
+                    # Filter out past entries — Amber API returns
+                    # ActualInterval entries from midnight, but the LP
+                    # needs prices starting from the current interval.
+                    now = dt_util.now()
+                    current_window = now.replace(
+                        minute=(now.minute // 30) * 30,
+                        second=0, microsecond=0,
+                    )
+                    for lst in (general, feed_in):
+                        original_len = len(lst)
+                        filtered = []
+                        for e in lst:
+                            st = e.get("startTime")
+                            if st:
+                                try:
+                                    entry_time = datetime.fromisoformat(
+                                        st.replace("Z", "+00:00")
+                                    )
+                                    if entry_time < current_window:
+                                        continue
+                                except (ValueError, TypeError):
+                                    pass
+                            filtered.append(e)
+                        lst[:] = filtered
+                        if len(lst) < original_len:
+                            _LOGGER.debug(
+                                "Filtered %d past Amber entries (before %s), "
+                                "%d remaining",
+                                original_len - len(lst),
+                                current_window.isoformat(),
+                                len(lst),
+                            )
+
                     # Build 5-min price arrays: each 30-min entry → 6 intervals
                     interval = self._config.interval_minutes  # 5
                     expand = 30 // interval  # 6
