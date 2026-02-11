@@ -597,35 +597,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         battery = self._executor.battery_controller
 
-        # Check if force charge/discharge is active and handle transitions.
-        # Force mode owns the battery state (backup_reserve=100%, TOU tariff,
-        # autonomous mode). The optimizer must either continue the same mode
-        # or call restore_normal to properly tear down before switching.
+        # Check if force charge/discharge is active — skip optimizer execution.
+        # Force mode is manually triggered by the user and owns the battery state
+        # (backup_reserve, TOU tariff, operation mode). The optimizer must not
+        # override it regardless of what the LP schedule wants.
         if self._force_state_getter:
             force_state = self._force_state_getter()
             if force_state and force_state.get("active"):
                 force_type = force_state.get("type", "unknown")
-                # Same direction — let existing force mode continue
-                same_direction = (
-                    (force_type == "charge" and action.action == "charge") or
-                    (force_type == "discharge" and action.action in ("discharge", "export"))
-                )
-                if same_direction:
-                    _LOGGER.debug(
-                        "Optimizer: force %s active, action=%s matches — continuing",
-                        force_type, action.action,
-                    )
-                    return
-
-                # Different direction — need to properly tear down force mode
-                # (restore backup_reserve, tariff, operation mode) before switching
-                _LOGGER.info(
-                    "Optimizer: force %s active but action=%s — restoring normal first",
+                _LOGGER.debug(
+                    "Optimizer: force %s active — skipping action execution (LP wants %s)",
                     force_type, action.action,
                 )
-                if hasattr(battery, "restore_normal"):
-                    await battery.restore_normal()
-                # Fall through to execute the new action below
+                return
 
         try:
             # When transitioning from IDLE to any other action, restore backup
