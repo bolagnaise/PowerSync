@@ -10,7 +10,10 @@ from typing import Any
 
 # Module-level state for alert cooldowns (keyed by entry_id)
 _last_discrepancy_alert: dict[str, datetime] = {}
+_discrepancy_alert_count: dict[str, int] = {}
+_discrepancy_alert_date: dict[str, str] = {}
 DISCREPANCY_ALERT_COOLDOWN = timedelta(minutes=30)
+DISCREPANCY_ALERT_DAILY_MAX = 4
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform, CONF_ACCESS_TOKEN, CONF_TOKEN
@@ -9343,11 +9346,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             forecast_discrepancy_alert_enabled and
             forecast_data
         ):
-            # Check cooldown - only alert once per 30 minutes
+            # Check cooldown and daily limit to prevent notification fatigue
             entry_id = entry.entry_id
-            now = datetime.now()
+            from homeassistant.util import dt as _dt_util2
+            now = _dt_util2.now()
             last_alert = _last_discrepancy_alert.get(entry_id)
             cooldown_passed = last_alert is None or (now - last_alert) > DISCREPANCY_ALERT_COOLDOWN
+
+            # Reset daily counter
+            today_str = now.strftime("%Y-%m-%d")
+            if _discrepancy_alert_date.get(entry_id) != today_str:
+                _discrepancy_alert_count[entry_id] = 0
+                _discrepancy_alert_date[entry_id] = today_str
+            daily_limit_ok = _discrepancy_alert_count.get(entry_id, 0) < DISCREPANCY_ALERT_DAILY_MAX
 
             discrepancy_threshold = entry.options.get(
                 CONF_FORECAST_DISCREPANCY_THRESHOLD,
@@ -9385,7 +9396,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         actual_vs_forecast_diff = abs(current_forecast - actual_price)
                         if actual_vs_forecast_diff > discrepancy_threshold:
                             _LOGGER.warning(
-                                "⚠️ Forecast vs Actual discrepancy: forecast=%.1fc, actual=%.1fc, diff=%.1fc",
+                                "Forecast vs Actual discrepancy: forecast=%.1fc, actual=%.1fc, diff=%.1fc",
                                 current_forecast, actual_price, actual_vs_forecast_diff
                             )
             except Exception as actual_err:
@@ -9394,32 +9405,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Determine if we should alert
             has_actual_discrepancy = actual_vs_forecast_diff is not None and actual_vs_forecast_diff > discrepancy_threshold
 
-            if (has_forecast_discrepancy or has_actual_discrepancy) and cooldown_passed:
+            if (has_forecast_discrepancy or has_actual_discrepancy) and cooldown_passed and daily_limit_ok:
                 avg_diff = discrepancy_result.get("avg_difference", 0)
                 max_diff = discrepancy_result.get("max_difference", 0)
 
-                # Build alert message
+                # Build user-friendly notification body
+                if has_actual_discrepancy and has_forecast_discrepancy:
+                    notif_body = (
+                        f"Forecast off by {actual_vs_forecast_diff:.0f}c/kWh "
+                        f"(predicted {current_forecast:.0f}c, actual {actual_price:.0f}c). "
+                        f"{'Prices are volatile.' if is_on_conservative else 'Try conservative forecast mode.'}"
+                    )
+                elif has_actual_discrepancy:
+                    notif_body = (
+                        f"Price forecast off by {actual_vs_forecast_diff:.0f}c/kWh "
+                        f"(predicted {current_forecast:.0f}c, actual {actual_price:.0f}c)"
+                    )
+                else:
+                    notif_body = (
+                        f"Predicted vs conservative forecasts differ by avg {avg_diff:.0f}c/kWh. "
+                        f"{'Prices are volatile.' if is_on_conservative else 'Try conservative forecast mode.'}"
+                    )
+
+                # Log detail
                 alert_parts = []
                 if has_forecast_discrepancy:
-                    alert_parts.append(f"predicted vs conservative differ by avg {avg_diff:.0f}c/kWh (max {max_diff:.0f}c)")
+                    alert_parts.append(f"predicted vs conservative avg {avg_diff:.0f}c (max {max_diff:.0f}c)")
                 if has_actual_discrepancy:
-                    alert_parts.append(f"current forecast ({current_forecast:.0f}c) differs from actual ({actual_price:.0f}c) by {actual_vs_forecast_diff:.0f}c/kWh")
-
-                alert_message = " AND ".join(alert_parts)
-
-                # Tailor advice based on current forecast type
-                if is_on_conservative:
-                    advice = "Amber forecasts are unreliable - prices are volatile."
-                else:
-                    advice = "Consider switching to 'conservative' forecast type."
-
+                    alert_parts.append(f"forecast {current_forecast:.0f}c vs actual {actual_price:.0f}c (diff {actual_vs_forecast_diff:.0f}c)")
                 _LOGGER.warning(
-                    "⚠️ Amber forecast discrepancy: %s. %s",
-                    alert_message, advice
+                    "Amber forecast discrepancy: %s",
+                    ", ".join(alert_parts),
                 )
 
-                # Update cooldown timestamp
+                # Update cooldown and daily counter
                 _last_discrepancy_alert[entry_id] = now
+                _discrepancy_alert_count[entry_id] = _discrepancy_alert_count.get(entry_id, 0) + 1
 
                 # Send mobile push notification
                 try:
@@ -9427,7 +9448,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await _send_expo_push(
                         hass,
                         "Forecast Alert",
-                        f"{alert_message}",
+                        notif_body,
                     )
                 except Exception as notify_err:
                     _LOGGER.debug(f"Could not send forecast discrepancy notification: {notify_err}")
