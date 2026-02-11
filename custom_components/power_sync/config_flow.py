@@ -1140,7 +1140,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             dc_enabled = user_input.get(CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False)
             self._sigenergy_data[CONF_SIGENERGY_DC_CURTAILMENT_ENABLED] = dc_enabled
-            return await self.async_step_finish_sigenergy()
+            return await self.async_step_demand_charges()
 
         return self.async_show_form(
             step_id="sigenergy_dc_curtailment",
@@ -1222,7 +1222,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         test_result.get("battery_soc", 0),
                         test_result.get("battery_soh", 0),
                     )
-                    return await self.async_step_finish_sungrow()
+                    return await self.async_step_demand_charges()
                 else:
                     errors["base"] = "cannot_connect"
 
@@ -1441,7 +1441,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._foxess_data[CONF_FOXESS_CLOUD_USERNAME] = username
                 self._foxess_data[CONF_FOXESS_CLOUD_PASSWORD] = user_input.get(CONF_FOXESS_CLOUD_PASSWORD, "")
                 self._foxess_data[CONF_FOXESS_CLOUD_DEVICE_SN] = user_input.get(CONF_FOXESS_CLOUD_DEVICE_SN, "")
-            return await self.async_step_finish_foxess()
+            return await self.async_step_demand_charges()
 
         return self.async_show_form(
             step_id="foxess_cloud",
@@ -2250,7 +2250,13 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._demand_data[CONF_DAILY_SUPPLY_CHARGE] = user_input.get(CONF_DAILY_SUPPLY_CHARGE, 0.0)
             self._demand_data[CONF_MONTHLY_SUPPLY_CHARGE] = user_input.get(CONF_MONTHLY_SUPPLY_CHARGE, 0.0)
 
-            # Route to EV charging setup
+            # Route based on battery system
+            if self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
+                return await self.async_step_finish_foxess()
+            elif self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
+                return await self.async_step_finish_sigenergy()
+            elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
+                return await self.async_step_finish_sungrow()
             return await self.async_step_ev_charging_setup()
 
         # Build the form schema
