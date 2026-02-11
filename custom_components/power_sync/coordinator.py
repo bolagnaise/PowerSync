@@ -1474,15 +1474,43 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
         except Exception as err:
             raise UpdateFailed(f"Error fetching FoxESS energy data: {err}") from err
 
-    async def force_charge(self, duration_minutes: int = 30) -> bool:
-        """Set FoxESS to force charge mode."""
-        async with self._controller:
-            return await self._controller.force_charge(duration_minutes)
+    async def force_charge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
+        """Set FoxESS to force charge mode.
 
-    async def force_discharge(self, duration_minutes: int = 30) -> bool:
-        """Set FoxESS to force discharge mode."""
+        Args:
+            duration_minutes: How long to charge
+            power_w: Charge power in watts. If 0, reads max_charge_current from
+                     the inverter and uses that (respects user's FoxESS app setting).
+        """
         async with self._controller:
-            return await self._controller.force_discharge(duration_minutes)
+            if power_w <= 0 and self.data:
+                # Use inverter's configured max charge current (set via FoxESS app)
+                max_charge_a = self.data.get("max_charge_current_a")
+                if max_charge_a and max_charge_a > 0:
+                    power_w = max_charge_a * 300  # Conservative voltage estimate
+                    _LOGGER.info("FoxESS force_charge using inverter max: %.0fA → %.0fW", max_charge_a, power_w)
+            if power_w <= 0:
+                power_w = 5000  # Fallback default
+            return await self._controller.force_charge(duration_minutes, power_w=power_w)
+
+    async def force_discharge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
+        """Set FoxESS to force discharge mode.
+
+        Args:
+            duration_minutes: How long to discharge
+            power_w: Discharge power in watts. If 0, reads max_discharge_current from
+                     the inverter and uses that (respects user's FoxESS app setting).
+        """
+        async with self._controller:
+            if power_w <= 0 and self.data:
+                # Use inverter's configured max discharge current (set via FoxESS app)
+                max_discharge_a = self.data.get("max_discharge_current_a")
+                if max_discharge_a and max_discharge_a > 0:
+                    power_w = max_discharge_a * 300  # Conservative voltage estimate
+                    _LOGGER.info("FoxESS force_discharge using inverter max: %.0fA → %.0fW", max_discharge_a, power_w)
+            if power_w <= 0:
+                power_w = 5000  # Fallback default
+            return await self._controller.force_discharge(duration_minutes, power_w=power_w)
 
     async def restore_normal(self) -> bool:
         """Restore FoxESS to normal (Self Use) operation."""

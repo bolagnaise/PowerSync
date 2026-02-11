@@ -19,6 +19,7 @@ INVERTER_BRANDS = {
     "enphase": "Enphase",
     "zeversolar": "Zeversolar",
     "sigenergy": "Sigenergy",
+    "foxess": "FoxESS",
 }
 
 # Fronius models (SunSpec Modbus)
@@ -124,6 +125,15 @@ ZEVERSOLAR_MODELS = {
     "tlc10000": "TLC10000",
     "zeversolair-mini-3000": "Zeversolair Mini 3000",
     "zeversolair-tl3000": "Zeversolair TL3000",
+}
+
+# FoxESS models (for AC-coupled string inverter curtailment)
+FOXESS_INVERTER_MODELS = {
+    "h1": "H1 (Single Phase)",
+    "h3": "H3 (Three Phase)",
+    "h3-pro": "H3-Pro (Three Phase)",
+    "h3-smart": "H3 Smart (Three Phase, WiFi)",
+    "kh": "KH (Single Phase Hybrid)",
 }
 
 # Sungrow SG series (string inverters) - single phase residential

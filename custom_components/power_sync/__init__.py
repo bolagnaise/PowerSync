@@ -190,6 +190,8 @@ from .const import (
     CONF_FOXESS_SERIAL_PORT,
     CONF_FOXESS_SERIAL_BAUDRATE,
     CONF_FOXESS_MODEL_FAMILY,
+    CONF_FOXESS_CLOUD_API_KEY,
+    CONF_FOXESS_CLOUD_DEVICE_SN,
     DEFAULT_FOXESS_PORT,
     DEFAULT_FOXESS_SLAVE_ID,
     DEFAULT_FOXESS_SERIAL_BAUDRATE,
@@ -1357,6 +1359,14 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         )
 
         _LOGGER.info("Migration to version 3 complete")
+
+    # Within-version migration: foxess_cloud_password → foxess_cloud_api_key
+    if "foxess_cloud_password" in config_entry.data and "foxess_cloud_api_key" not in config_entry.data:
+        new_data = {**config_entry.data}
+        new_data.pop("foxess_cloud_password", None)
+        new_data.pop("foxess_cloud_username", None)
+        _LOGGER.info("Migrated FoxESS Cloud credentials: removed username/password (user should re-enter API key)")
+        hass.config_entries.async_update_entry(config_entry, data=new_data)
 
     return True
 
@@ -8401,6 +8411,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "is_sigenergy": is_sigenergy,  # Track battery system type
         "is_sungrow": is_sungrow,  # Track if Sungrow battery system
         "is_foxess": is_foxess,  # Track if FoxESS battery system
+        "foxess_curtailment_state": "normal",  # Track FoxESS DC curtailment state
     }
 
     # Early initialization of tariff_schedule for non-Amber providers
@@ -9235,6 +9246,104 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.error(f"❌ Error in Sigenergy tariff sync: {e}", exc_info=True)
 
+    async def _sync_tariff_to_foxess(forecast_data: list, sync_mode: str, current_actual_interval: dict = None) -> None:
+        """Sync Amber/Octopus prices to FoxESS Cloud API as time-based schedule.
+
+        Converts price data to FoxESS scheduler groups and uploads via Cloud API.
+        Skipped when LP optimizer is active (LP controls via Modbus directly).
+        """
+        try:
+            from .foxess_api import FoxESSCloudClient, convert_prices_to_foxess_schedule
+            from .sigenergy_api import convert_amber_prices_to_sigenergy
+        except ImportError as e:
+            _LOGGER.error(f"Failed to import foxess_api: {e}")
+            return
+
+        try:
+            api_key = entry.data.get(CONF_FOXESS_CLOUD_API_KEY)
+            device_sn = entry.data.get(CONF_FOXESS_CLOUD_DEVICE_SN, "")
+
+            if not api_key:
+                _LOGGER.debug("FoxESS Cloud API key not configured, skipping schedule sync")
+                return
+
+            if not device_sn:
+                _LOGGER.warning("FoxESS Cloud device SN not configured, skipping schedule sync")
+                return
+
+            # Guard: skip cloud schedule sync when LP optimizer is active
+            # LP controls the inverter via Modbus directly and cloud scheduler would conflict
+            optimization_provider = entry.options.get(
+                CONF_OPTIMIZATION_PROVIDER,
+                entry.data.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
+            )
+            if optimization_provider == OPT_PROVIDER_POWERSYNC:
+                _LOGGER.debug("FoxESS Cloud schedule sync skipped — LP optimizer controls via Modbus")
+                return
+
+            if not forecast_data:
+                _LOGGER.warning("No forecast data available for FoxESS schedule sync")
+                return
+
+            # Get forecast type from options
+            forecast_type = entry.options.get(
+                CONF_AMBER_FORECAST_TYPE, entry.data.get(CONF_AMBER_FORECAST_TYPE, "predicted")
+            )
+
+            # Get NEM region for timezone selection
+            nem_region = entry.options.get(
+                CONF_AEMO_REGION, entry.data.get(CONF_AEMO_REGION)
+            )
+            if not nem_region:
+                nem_region = await _get_nem_region_from_amber()
+
+            # Convert Amber forecast to price slots (reuse Sigenergy converter for consistency)
+            general_prices = [p for p in forecast_data if p.get("channelType") == "general"]
+            feedin_prices = [p for p in forecast_data if p.get("channelType") == "feedIn"]
+
+            buy_prices = convert_amber_prices_to_sigenergy(
+                general_prices, price_type="buy", forecast_type=forecast_type,
+                current_actual_interval=current_actual_interval, nem_region=nem_region
+            )
+            sell_prices = convert_amber_prices_to_sigenergy(
+                feedin_prices, price_type="sell", forecast_type=forecast_type,
+                current_actual_interval=current_actual_interval, nem_region=nem_region
+            )
+
+            if not buy_prices:
+                _LOGGER.warning("No buy prices converted for FoxESS schedule sync")
+                return
+
+            # Convert price slots to FoxESS scheduler groups
+            groups = convert_prices_to_foxess_schedule(
+                buy_prices,
+                sell_prices if sell_prices else buy_prices,
+            )
+
+            if not groups:
+                _LOGGER.warning("No schedule groups generated for FoxESS")
+                return
+
+            # Upload schedule via Cloud API
+            client = FoxESSCloudClient(api_key=api_key, device_sn=device_sn)
+            try:
+                result = await client.set_scheduler(sn=device_sn, groups=groups)
+                _LOGGER.info(f"FoxESS schedule synced successfully ({sync_mode}, {len(groups)} groups)")
+
+                # Store schedule in hass.data for dashboard
+                hass.data[DOMAIN][entry.entry_id]["foxess_schedule"] = {
+                    "groups": groups,
+                    "buy_prices": buy_prices,
+                    "sell_prices": sell_prices if sell_prices else buy_prices,
+                    "synced_at": datetime.now().isoformat(),
+                    "sync_mode": sync_mode,
+                }
+            finally:
+                await client.close()
+
+        except Exception as e:
+            _LOGGER.error(f"Error in FoxESS schedule sync: {e}", exc_info=True)
+
     async def _handle_sync_tou_internal(websocket_data, sync_mode='initial_forecast') -> None:
         """
         Internal sync logic with smart price-aware re-sync.
@@ -9730,10 +9839,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await _sync_tariff_to_sigenergy(forecast_data, sync_mode, current_actual_interval)
             return
 
-        # FoxESS and Sungrow use Modbus commands, not TOU tariff uploads
-        # Store price data for sensors/dashboard but skip Tesla API upload
-        if battery_system in ("foxess", "sungrow"):
-            _LOGGER.info("🔀 %s uses Modbus control — skipping TOU tariff upload", battery_system)
+        # FoxESS: sync to Cloud API if configured, otherwise store for sensors only
+        if battery_system == "foxess":
+            foxess_api_key = entry.data.get(CONF_FOXESS_CLOUD_API_KEY)
+            if foxess_api_key:
+                _LOGGER.info("🔀 Using FoxESS Cloud API for schedule sync")
+                await _sync_tariff_to_foxess(forecast_data, sync_mode, current_actual_interval)
+            else:
+                _LOGGER.info("🔀 FoxESS uses Modbus control — storing prices for sensors only")
             # Still build tariff schedule for sensor display
             tariff = convert_amber_to_tesla_tariff(
                 forecast_data,
@@ -9765,7 +9878,45 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "last_sync": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
                 async_dispatcher_send(hass, f"power_sync_tariff_updated_{entry.entry_id}")
-                _LOGGER.info("Tariff schedule stored for %s dashboard (%d periods)", battery_system, len(buy_prices))
+                _LOGGER.info("Tariff schedule stored for foxess dashboard (%d periods)", len(buy_prices))
+            return
+
+        # Sungrow uses Modbus commands, not TOU tariff uploads
+        # Store price data for sensors/dashboard but skip Tesla API upload
+        if battery_system == "sungrow":
+            _LOGGER.info("🔀 Sungrow uses Modbus control — skipping TOU tariff upload")
+            # Still build tariff schedule for sensor display
+            tariff = convert_amber_to_tesla_tariff(
+                forecast_data,
+                tesla_energy_site_id="none",
+                forecast_type=forecast_type,
+                powerwall_timezone=powerwall_timezone,
+                current_actual_interval=current_actual_interval,
+                demand_charge_enabled=demand_charge_enabled,
+                demand_charge_rate=demand_charge_rate,
+                demand_charge_start_time=demand_charge_start_time,
+                demand_charge_end_time=demand_charge_end_time,
+                demand_charge_apply_to=demand_charge_apply_to,
+                demand_charge_days=demand_charge_days,
+                demand_artificial_price_enabled=demand_artificial_price_enabled,
+                electricity_provider=electricity_provider,
+                spike_protection_enabled=spike_protection_enabled,
+                export_boost_enabled=export_boost_enabled,
+                export_price_offset=export_price_offset,
+                export_min_price=export_min_price,
+            )
+            if tariff:
+                from datetime import datetime as dt
+                from homeassistant.helpers.dispatcher import async_dispatcher_send
+                buy_prices = tariff.get("energy_charges", {}).get("Summer", {}).get("rates", {})
+                sell_prices = tariff.get("sell_tariff", {}).get("energy_charges", {}).get("Summer", {}).get("rates", {})
+                hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = {
+                    "buy_prices": buy_prices,
+                    "sell_prices": sell_prices,
+                    "last_sync": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                async_dispatcher_send(hass, f"power_sync_tariff_updated_{entry.entry_id}")
+                _LOGGER.info("Tariff schedule stored for sungrow dashboard (%d periods)", len(buy_prices))
             return
 
         # Convert prices to Tesla tariff format
@@ -10165,6 +10316,72 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if tesla_coordinator:
             await tesla_coordinator.async_request_refresh()
 
+    async def handle_foxess_curtailment(feedin_price=None, import_price=None) -> None:
+        """Handle FoxESS DC curtailment via Modbus (zero export during negative prices).
+
+        Uses the FoxESS controller's curtail()/restore() methods which set remote
+        control registers to prevent/allow grid export.
+
+        Args:
+            feedin_price: Current feed-in price in c/kWh (None to fetch from Amber)
+            import_price: Current import price in c/kWh (for logging only)
+        """
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        current_state = entry_data.get("foxess_curtailment_state", "normal")
+
+        # Get prices from Amber if not provided
+        if feedin_price is None and amber_coordinator and amber_coordinator.data:
+            current_prices = amber_coordinator.data.get("current", [])
+            for price_data in current_prices:
+                if price_data.get("channelType") == "feedIn":
+                    feedin_price = price_data.get("perKwh", 0)
+                elif price_data.get("channelType") == "general":
+                    import_price = price_data.get("perKwh", 0)
+
+        if feedin_price is None:
+            _LOGGER.warning("FoxESS curtailment: no feed-in price available")
+            return
+
+        export_earnings = -feedin_price
+        _LOGGER.info(
+            "FoxESS curtailment check: export_earnings=%.2fc/kWh, import=%.2fc/kWh, state=%s",
+            export_earnings, import_price or 0, current_state,
+        )
+
+        # Get FoxESS controller from coordinator
+        fc = entry_data.get("foxess_coordinator")
+        if not fc or not hasattr(fc, '_controller') or not fc._controller:
+            _LOGGER.debug("FoxESS curtailment: no controller available")
+            return
+
+        controller = fc._controller
+
+        try:
+            if export_earnings < 1:
+                # Negative or near-zero export earnings → curtail
+                if current_state != "curtailed":
+                    _LOGGER.info("FoxESS curtailment TRIGGERED: export_earnings=%.2fc (<1c) → zero export", export_earnings)
+                    success = await controller.curtail()
+                    if success:
+                        hass.data[DOMAIN][entry.entry_id]["foxess_curtailment_state"] = "curtailed"
+                    else:
+                        _LOGGER.error("FoxESS curtail() failed")
+                else:
+                    _LOGGER.debug("FoxESS already curtailed, no action needed")
+            else:
+                # Positive export earnings → restore
+                if current_state != "normal":
+                    _LOGGER.info("FoxESS curtailment RESTORED: export_earnings=%.2fc (>=1c) → normal export", export_earnings)
+                    success = await controller.restore()
+                    if success:
+                        hass.data[DOMAIN][entry.entry_id]["foxess_curtailment_state"] = "normal"
+                    else:
+                        _LOGGER.error("FoxESS restore() failed")
+                else:
+                    _LOGGER.debug("FoxESS already in normal mode, no action needed")
+        except Exception as e:
+            _LOGGER.error("FoxESS curtailment error: %s", e, exc_info=True)
+
     async def handle_solar_curtailment_check(call: ServiceCall = None) -> None:
         """
         Check Amber export prices and curtail solar export when price is below 1c/kWh.
@@ -10189,6 +10406,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         if entry_data.get("ev_curtailment_override"):
             _LOGGER.info("☀️ Solar curtailment skipped - EV charging using solar surplus")
+            return
+
+        # FoxESS uses Modbus-based curtailment, not Tesla API
+        if is_foxess:
+            await handle_foxess_curtailment()
             return
 
         # Skip if no Amber coordinator (AEMO-only mode) - curtailment requires Amber prices
@@ -10492,6 +10714,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         if entry_data.get("ev_curtailment_override"):
             _LOGGER.info("☀️ Solar curtailment skipped - EV charging using solar surplus")
+            return
+
+        # FoxESS uses Modbus-based curtailment, not Tesla API
+        if is_foxess:
+            feedin_price = websocket_data.get('feedIn', {}).get('perKwh') if websocket_data else None
+            import_price = websocket_data.get('general', {}).get('perKwh') if websocket_data else None
+            await handle_foxess_curtailment(feedin_price=feedin_price, import_price=import_price)
             return
 
         _LOGGER.info("=== Starting solar curtailment check (WebSocket event-driven) ===")

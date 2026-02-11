@@ -216,6 +216,7 @@ from .const import (
     CONF_FOXESS_CLOUD_USERNAME,
     CONF_FOXESS_CLOUD_PASSWORD,
     CONF_FOXESS_CLOUD_DEVICE_SN,
+    CONF_FOXESS_CLOUD_API_KEY,
     DEFAULT_FOXESS_PORT,
     DEFAULT_FOXESS_SLAVE_ID,
     DEFAULT_FOXESS_SERIAL_BAUDRATE,
@@ -1433,23 +1434,44 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_foxess_cloud(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Optional FoxESS Cloud credentials (for tariff data only)."""
+        """Optional FoxESS Cloud API key (for tariff schedule sync)."""
+        errors = {}
+
         if user_input is not None:
             # Cloud is optional — store if provided, skip if empty
-            username = user_input.get(CONF_FOXESS_CLOUD_USERNAME, "").strip()
-            if username:
-                self._foxess_data[CONF_FOXESS_CLOUD_USERNAME] = username
-                self._foxess_data[CONF_FOXESS_CLOUD_PASSWORD] = user_input.get(CONF_FOXESS_CLOUD_PASSWORD, "")
-                self._foxess_data[CONF_FOXESS_CLOUD_DEVICE_SN] = user_input.get(CONF_FOXESS_CLOUD_DEVICE_SN, "")
-            return await self.async_step_demand_charges()
+            api_key = user_input.get(CONF_FOXESS_CLOUD_API_KEY, "").strip()
+            if api_key:
+                device_sn = user_input.get(CONF_FOXESS_CLOUD_DEVICE_SN, "").strip()
+                # Validate connection
+                try:
+                    from .foxess_api import FoxESSCloudClient
+                    client = FoxESSCloudClient(api_key=api_key, device_sn=device_sn)
+                    try:
+                        success, message = await client.test_connection()
+                    finally:
+                        await client.close()
+
+                    if success:
+                        self._foxess_data[CONF_FOXESS_CLOUD_API_KEY] = api_key
+                        self._foxess_data[CONF_FOXESS_CLOUD_DEVICE_SN] = device_sn
+                        return await self.async_step_demand_charges()
+                    else:
+                        _LOGGER.warning("FoxESS Cloud connection test failed: %s", message)
+                        errors["base"] = "foxess_cloud_auth_failed"
+                except Exception as e:
+                    _LOGGER.error("FoxESS Cloud connection error: %s", e)
+                    errors["base"] = "foxess_cloud_connection_error"
+            else:
+                # Blank API key — skip cloud setup
+                return await self.async_step_demand_charges()
 
         return self.async_show_form(
             step_id="foxess_cloud",
             data_schema=vol.Schema({
-                vol.Optional(CONF_FOXESS_CLOUD_USERNAME, default=""): str,
-                vol.Optional(CONF_FOXESS_CLOUD_PASSWORD, default=""): str,
+                vol.Optional(CONF_FOXESS_CLOUD_API_KEY, default=""): str,
                 vol.Optional(CONF_FOXESS_CLOUD_DEVICE_SN, default=""): str,
             }),
+            errors=errors,
         )
 
     async def async_step_finish_foxess(

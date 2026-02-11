@@ -230,15 +230,13 @@
       },
       "foxess_cloud": {
         "title": "FoxESS Cloud (Optional)",
-        "description": "Optionally provide your FoxESS Cloud credentials for tariff data.\n\nThis is **not required** for battery control — all control is done locally via Modbus.\n\nLeave blank to skip.",
+        "description": "Optionally provide your FoxESS Cloud API key to sync Amber/Octopus prices as time-based schedules on your inverter.\n\nGet your API key from **foxesscloud.com > User Profile > API Management**.\n\nThis is **not required** for battery control — all control is done locally via Modbus.\n\nLeave blank to skip.",
         "data": {
-          "foxess_cloud_username": "FoxESS Cloud Email",
-          "foxess_cloud_password": "FoxESS Cloud Password",
+          "foxess_cloud_api_key": "FoxESS Cloud API Key",
           "foxess_cloud_device_sn": "Device Serial Number"
         },
         "data_description": {
-          "foxess_cloud_username": "Your FoxESS Cloud account email (optional)",
-          "foxess_cloud_password": "Your FoxESS Cloud account password (optional)",
+          "foxess_cloud_api_key": "API key from foxesscloud.com (optional)",
           "foxess_cloud_device_sn": "Inverter serial number from FoxESS Cloud (optional)"
         },
         "submit_button": "Next"
@@ -444,6 +442,8 @@
       "foxess_host_required": "FoxESS IP address is required for Modbus TCP connection.",
       "foxess_tcp_failed": "Cannot connect to FoxESS inverter via Modbus TCP. Check: (1) IP address is correct — H3 Smart shows as 'espressif' on your network, (2) inverter firmware is up to date, (3) port 502 is accessible.",
       "foxess_serial_required": "Serial port path is required for RS485 connection.",
+      "foxess_cloud_auth_failed": "FoxESS Cloud API key validation failed. Check your API key is correct and your account has API access enabled.",
+      "foxess_cloud_connection_error": "Unable to connect to FoxESS Cloud. Check your internet connection and try again.",
       "no_prices": "No Octopus prices found for this tariff and region. Check your product and GSP region are correct.",
       "optimizer_not_installed": "Smart Optimization requires scipy. Check Home Assistant logs for installation details.",
       "unknown": "An unexpected error occurred. Please try again."

@@ -1424,6 +1424,33 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not self.energy_coordinator:
             return
 
+        # FoxESS auto-detection: read max charge/discharge current from Modbus data
+        # FoxESS coordinators don't have site_info, but provide current limits via Modbus
+        if hasattr(self.energy_coordinator, '_controller') and self.energy_coordinator.data:
+            data = self.energy_coordinator.data
+            max_charge_a = data.get("max_charge_current_a")
+            max_discharge_a = data.get("max_discharge_current_a")
+
+            if max_charge_a and max_charge_a > 0:
+                # FoxESS HV batteries typically run at ~300-400V nominal
+                # Use a conservative 300V to estimate power from current
+                # Users can override via app settings if this is inaccurate
+                battery_voltage = 300
+                charge_w = int(max_charge_a * battery_voltage)
+                discharge_w = int((max_discharge_a or max_charge_a) * battery_voltage)
+
+                self._config.max_charge_w = charge_w
+                self._config.max_discharge_w = discharge_w
+                self._battery_specs_source = "auto"
+
+                _LOGGER.info(
+                    "Auto-detected FoxESS battery power from Modbus: "
+                    "charge %.1fA × %dV = %.1f kW, discharge %.1fA × %dV = %.1f kW",
+                    max_charge_a, battery_voltage, charge_w / 1000,
+                    max_discharge_a or max_charge_a, battery_voltage, discharge_w / 1000,
+                )
+                return
+
         site_info = getattr(self.energy_coordinator, "_site_info_cache", None)
         if not site_info:
             # Try fetching it

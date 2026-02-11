@@ -137,6 +137,9 @@ CONF_FOXESS_DETECTED_MODEL = "foxess_detected_model"
 CONF_FOXESS_CLOUD_USERNAME = "foxess_cloud_username"
 CONF_FOXESS_CLOUD_PASSWORD = "foxess_cloud_password"
 CONF_FOXESS_CLOUD_DEVICE_SN = "foxess_cloud_device_sn"
+CONF_FOXESS_CLOUD_API_KEY = "foxess_cloud_api_key"
+FOXESS_CLOUD_BASE_URL = "https://www.foxesscloud.com"
+FOXESS_MAX_SCHEDULE_PERIODS = 8
 
 DEFAULT_FOXESS_PORT = 502
 DEFAULT_FOXESS_SLAVE_ID = 247
