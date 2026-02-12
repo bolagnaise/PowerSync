@@ -649,18 +649,31 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 #
                 # Tesla constraint (July 2025): backup_reserve only accepts
                 # 0-80% or 100%. Values 81-99% are rejected and clamped to 80%.
-                # When SOC > 80%, use 100% to fully prevent discharge.
+                # When SOC > 80%, we CANNOT set backup_reserve to the actual SOC.
+                # Setting 100% causes the Powerwall to charge FROM GRID to reach
+                # 100% (especially when a TOU tariff shows cheap buy / expensive
+                # sell). Instead, use self_consumption mode with backup_reserve=80%
+                # — the Powerwall won't charge from grid in self_consumption mode,
+                # and the 80% floor limits discharge. Minor SOC decline from home
+                # load is acceptable as the LP re-evaluates every 5 minutes.
                 soc, _ = await self._get_battery_state()
                 soc_pct = int(soc * 100)
                 if soc_pct > 80:
-                    reserve_pct = 100  # Tesla rejects 81-99%
-                else:
-                    reserve_pct = soc_pct
-                if hasattr(battery, "set_backup_reserve"):
-                    await battery.set_backup_reserve(reserve_pct)
+                    # Self_consumption mode prevents TOU-driven grid charging
+                    if hasattr(battery, "set_self_consumption_mode"):
+                        await battery.set_self_consumption_mode()
+                    if hasattr(battery, "set_backup_reserve"):
+                        await battery.set_backup_reserve(80)
+                    _LOGGER.info(
+                        "Optimizer: IDLE — holding SOC at %d%% via self_consumption "
+                        "(backup reserve=80%%, Tesla 81-99%% constraint)",
+                        soc_pct,
+                    )
+                elif hasattr(battery, "set_backup_reserve"):
+                    await battery.set_backup_reserve(soc_pct)
                     _LOGGER.info(
                         "Optimizer: IDLE — holding SOC at %d%% (backup reserve=%d%%)",
-                        soc_pct, reserve_pct,
+                        soc_pct, soc_pct,
                     )
                 elif hasattr(battery, "set_self_consumption_mode"):
                     await battery.set_self_consumption_mode()

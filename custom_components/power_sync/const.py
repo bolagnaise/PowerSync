@@ -657,7 +657,7 @@ SERVICE_CURTAIL_INVERTER = "curtail_inverter"
 SERVICE_RESTORE_INVERTER = "restore_inverter"
 
 # Manual discharge/charge duration options (minutes)
-DISCHARGE_DURATIONS = [15, 30, 45, 60, 75, 90, 105, 120, 150, 180, 210, 240]
+DISCHARGE_DURATIONS = [10, 15, 30, 45, 60, 75, 90, 105, 120, 150, 180, 210, 240]
 DEFAULT_DISCHARGE_DURATION = 30
 
 # Duration dropdown entity option keys (stored in ConfigEntry.options)
