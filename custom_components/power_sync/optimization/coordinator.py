@@ -161,6 +161,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._actual_cost_today = 0.0        # Accumulated actual cost since midnight ($)
         self._actual_baseline_today = 0.0    # Accumulated baseline cost since midnight ($)
         self._last_cost_date: str | None = None  # Date string for midnight reset
+        self._last_cost_tracking_time: datetime | None = None  # For actual elapsed time
+        self._actual_import_kwh_today = 0.0
+        self._actual_export_kwh_today = 0.0
+        self._actual_charge_kwh_today = 0.0
+        self._actual_discharge_kwh_today = 0.0
+        self._actual_import_cost_today = 0.0    # Gross import cost ($)
+        self._actual_export_earnings_today = 0.0  # Gross export earnings ($)
         self._cost_store = Store(
             hass,
             COST_STORE_VERSION,
@@ -1570,11 +1577,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if stored_date == today:
             self._actual_cost_today = float(data.get("actual_cost", 0.0))
             self._actual_baseline_today = float(data.get("baseline_cost", 0.0))
+            self._actual_import_kwh_today = float(data.get("import_kwh", 0.0))
+            self._actual_export_kwh_today = float(data.get("export_kwh", 0.0))
+            self._actual_charge_kwh_today = float(data.get("charge_kwh", 0.0))
+            self._actual_discharge_kwh_today = float(data.get("discharge_kwh", 0.0))
+            self._actual_import_cost_today = float(data.get("import_cost", 0.0))
+            self._actual_export_earnings_today = float(data.get("export_earnings", 0.0))
             self._last_cost_date = stored_date
             _LOGGER.info(
-                "Restored daily costs: actual=$%.2f, baseline=$%.2f (date=%s)",
+                "Restored daily costs: actual=$%.2f, baseline=$%.2f, "
+                "import=%.2fkWh, export=%.2fkWh (date=%s)",
                 self._actual_cost_today,
                 self._actual_baseline_today,
+                self._actual_import_kwh_today,
+                self._actual_export_kwh_today,
                 stored_date,
             )
         else:
@@ -1596,6 +1612,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "date": self._last_cost_date,
             "actual_cost": round(self._actual_cost_today, 4),
             "baseline_cost": round(self._actual_baseline_today, 4),
+            "import_kwh": round(self._actual_import_kwh_today, 4),
+            "export_kwh": round(self._actual_export_kwh_today, 4),
+            "charge_kwh": round(self._actual_charge_kwh_today, 4),
+            "discharge_kwh": round(self._actual_discharge_kwh_today, 4),
+            "import_cost": round(self._actual_import_cost_today, 4),
+            "export_earnings": round(self._actual_export_earnings_today, 4),
         }
 
     def _get_forecast_offset(self) -> int:
@@ -1610,10 +1632,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return max(0, int(elapsed / (self._config.interval_minutes * 60)))
 
     def _track_actual_cost(self) -> None:
-        """Track actual electricity cost for the current 5-min interval.
+        """Track actual electricity cost using real elapsed time.
 
         Accumulates actual grid import/export costs since midnight.
         Also tracks baseline cost (what cost would be without battery).
+        Uses actual elapsed time between calls to prevent multi-counting
+        when called from multiple triggers (DataUpdateCoordinator, polling
+        loop, price updates).
         Resets automatically at midnight.
         """
         now = dt_util.now()
@@ -1630,7 +1655,30 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
             self._actual_cost_today = 0.0
             self._actual_baseline_today = 0.0
+            self._actual_import_kwh_today = 0.0
+            self._actual_export_kwh_today = 0.0
+            self._actual_charge_kwh_today = 0.0
+            self._actual_discharge_kwh_today = 0.0
+            self._actual_import_cost_today = 0.0
+            self._actual_export_earnings_today = 0.0
+            self._last_cost_tracking_time = None
             self._last_cost_date = today
+
+        # Use actual elapsed time to prevent multi-counting
+        if self._last_cost_tracking_time is None:
+            self._last_cost_tracking_time = now
+            return  # First call — no interval to accumulate yet
+
+        elapsed_seconds = (now - self._last_cost_tracking_time).total_seconds()
+
+        # Skip if called too frequently (< 30s) — eliminates multi-counting
+        if elapsed_seconds < 30:
+            return
+
+        self._last_cost_tracking_time = now
+
+        # Cap at 10 minutes to avoid inflated accumulation after long gaps
+        dt_hours = min(elapsed_seconds / 3600, 10.0 / 60)
 
         # Need energy coordinator data and cached prices
         if not self.energy_coordinator or not self.energy_coordinator.data:
@@ -1655,8 +1703,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         import_price = disp_import[0]  # $/kWh — safe: arrays verified non-empty
         export_price = disp_export[0]   # $/kWh
 
-        dt_hours = self._config.interval_minutes / 60  # 5/60 = 0.0833h
-
         # Actual cost: grid_import costs money, grid_export earns money
         grid_import_kw = max(0.0, grid_power_kw)
         grid_export_kw = max(0.0, -grid_power_kw)
@@ -1665,6 +1711,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             - grid_export_kw * export_price * dt_hours
         )
         self._actual_cost_today += actual_cost
+
+        # Accumulate actual energy measurements
+        self._actual_import_kwh_today += grid_import_kw * dt_hours
+        self._actual_export_kwh_today += grid_export_kw * dt_hours
+        self._actual_import_cost_today += grid_import_kw * import_price * dt_hours
+        self._actual_export_earnings_today += grid_export_kw * export_price * dt_hours
+
+        # Track battery charge/discharge energy
+        battery_charge_kw = max(0.0, -battery_power_kw)   # negative = charging
+        battery_discharge_kw = max(0.0, battery_power_kw)  # positive = discharging
+        self._actual_charge_kwh_today += battery_charge_kw * dt_hours
+        self._actual_discharge_kwh_today += battery_discharge_kw * dt_hours
 
         # Baseline cost: what would happen without a battery
         # Power balance: load = solar + grid + battery (Tesla sign convention)
@@ -1679,10 +1737,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._actual_baseline_today += baseline_cost
 
         _LOGGER.debug(
-            "Cost tracking: grid=%.2fkW, actual_interval=$%.4f, "
-            "actual_today=$%.2f, baseline_today=$%.2f",
-            grid_power_kw, actual_cost,
+            "Cost tracking: grid=%.2fkW, dt=%.4fh, actual_interval=$%.4f, "
+            "actual_today=$%.2f, baseline_today=$%.2f, "
+            "import=%.2fkWh, export=%.2fkWh",
+            grid_power_kw, dt_hours, actual_cost,
             self._actual_cost_today, self._actual_baseline_today,
+            self._actual_import_kwh_today, self._actual_export_kwh_today,
         )
 
         # Persist cost data (coalesced — writes at most every 5 minutes)
@@ -1936,6 +1996,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "actual_savings": round(self._actual_baseline_today - self._actual_cost_today, 2),
             "predicted_remaining": round(pred_remaining, 2),
             "predicted_baseline_remaining": round(baseline_remaining, 2),
+            "actual_import_cost": round(self._actual_import_cost_today, 2),
+            "actual_export_earnings": round(self._actual_export_earnings_today, 2),
         }
 
         # Add EV status if EV coordination is active
@@ -1981,15 +2043,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 ev_power[idx] = w_power
                 api_response["ev_charging_w"] = ev_power
 
-            dt_h = self._config.interval_minutes / 60
             daily_cost = self._get_daily_cost()
             daily_savings = self._get_daily_savings()
             data["summary"] = {
                 "total_cost": daily_cost,
-                "total_import_kwh": sum(self._last_optimizer_result.grid_import_w) * dt_h / 1000 if self._last_optimizer_result else 0,
-                "total_export_kwh": sum(self._last_optimizer_result.grid_export_w) * dt_h / 1000 if self._last_optimizer_result else 0,
-                "total_charge_kwh": sum(self._current_schedule.charge_w) * dt_h / 1000,
-                "total_discharge_kwh": sum(self._current_schedule.discharge_w) * dt_h / 1000,
+                "total_import_kwh": round(self._actual_import_kwh_today, 2),
+                "total_export_kwh": round(self._actual_export_kwh_today, 2),
+                "total_charge_kwh": round(self._actual_charge_kwh_today, 2),
+                "total_discharge_kwh": round(self._actual_discharge_kwh_today, 2),
                 "baseline_cost": daily_cost + daily_savings,
                 "savings": daily_savings,
             }

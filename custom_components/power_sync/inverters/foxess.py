@@ -119,6 +119,9 @@ class FoxESSRegisterMap:
     supports_charge_periods: bool = False
     # H3-Pro and H3 Smart use holding registers for ALL data (no input registers)
     all_holding: bool = False
+    # H3-Pro/H3-Smart grid CT returns inverted sign (positive=export, negative=import)
+    # compared to H1/H3/KH (positive=import, negative=export). Negate to normalize.
+    grid_sign_inverted: bool = False
 
     def get_work_mode_names(self) -> dict[int, str]:
         """Return model-specific work mode value→name mapping."""
@@ -239,6 +242,7 @@ REGISTER_MAPS: dict[FoxESSModelFamily, FoxESSRegisterMap] = {
         supports_work_mode_rw=True,
         supports_charge_periods=False,
         all_holding=True,
+        grid_sign_inverted=True,
     ),
     # H3 Smart shares the H3-Pro register address space.
     # Native WiFi Modbus TCP — no external adapter needed.
@@ -278,6 +282,7 @@ REGISTER_MAPS: dict[FoxESSModelFamily, FoxESSRegisterMap] = {
         supports_work_mode_rw=True,
         supports_charge_periods=False,
         all_holding=True,
+        grid_sign_inverted=True,
     ),
 }
 
@@ -643,6 +648,10 @@ class FoxESSController(InverterController):
                 grid_power_kw = self._to_signed16(gp_raw[0]) / grid_gain if gp_raw else None
             else:
                 grid_power_kw = None
+            # H3-Pro/H3-Smart grid CT has inverted sign (pos=export, neg=import).
+            # Negate to normalize to our convention (pos=import, neg=export).
+            if reg.grid_sign_inverted and grid_power_kw is not None:
+                grid_power_kw = -grid_power_kw
             attrs["grid_power_kw"] = grid_power_kw
 
             # CT2 power (AC-coupled inverter meter)
@@ -656,6 +665,9 @@ class FoxESSController(InverterController):
                     ct2_raw = await self._read_data_register(reg.ct2_power, 1)
                     if ct2_raw:
                         ct2_power_kw = self._to_signed16(ct2_raw[0]) / grid_gain
+                # CT2 on same meter board — same sign convention as grid CT
+                if reg.grid_sign_inverted:
+                    ct2_power_kw = -ct2_power_kw
             attrs["ct2_power_kw"] = ct2_power_kw
 
             # Load/home power
