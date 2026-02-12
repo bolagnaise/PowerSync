@@ -2613,17 +2613,24 @@ async def _dynamic_ev_update(
     # - If battery has surplus (deficit > 0.1), use that surplus
     # - Otherwise, use grid headroom
     if no_grid_import:
-        # Calculate home load (excluding EV) from power balance
-        # When battery is discharging: home_load = battery_discharge + grid_import - ev_load
-        home_load_kw = battery_power_kw + grid_power_kw - current_ev_power_kw
+        # Exclude intentional home battery grid-charging from the grid import figure.
+        # When the LP optimizer force-charges the home battery from grid, battery_power_kw
+        # is negative (charging) and grid_power_kw includes that draw.  The EV should not
+        # be throttled because of intentional battery charging — only because of the EV's
+        # own grid draw and household load.
+        battery_charging_kw = max(0.0, -battery_power_kw)  # positive when battery is charging
+        ev_relevant_grid_kw = grid_power_kw - battery_charging_kw
+
+        # Calculate home load (excluding EV and battery charging) from power balance
+        home_load_kw = ev_relevant_grid_kw - current_ev_power_kw
 
         # Max power available from inverter for EV = inverter_capacity - home_load
         # This is proactive: we know the limit before hitting it
         inverter_headroom_kw = max_inverter_kw - max(0, home_load_kw)
 
-        # Reactive adjustment based on current grid state
-        # grid_power_kw: positive = importing (bad), negative = exporting (good)
-        grid_reactive_kw = -(grid_power_kw + grid_import_tolerance_kw)
+        # Reactive adjustment based on current grid state (excluding battery charging)
+        # ev_relevant_grid_kw: positive = importing for home+EV (bad), negative = exporting (good)
+        grid_reactive_kw = -(ev_relevant_grid_kw + grid_import_tolerance_kw)
 
         # Use the more conservative of the two approaches
         # - inverter_headroom: proactive limit based on known capacity
@@ -2646,11 +2653,16 @@ async def _dynamic_ev_update(
         new_amps = 0
 
     # In no_grid_import mode, respond immediately to grid imports (don't wait for 1A threshold)
-    if no_grid_import and grid_power_kw > grid_import_tolerance_kw:
-        # We're importing - reduce aggressively
+    # Use ev_relevant_grid_kw (excludes battery charging) to avoid throttling due to
+    # intentional home battery grid-charging by the LP optimizer
+    ev_grid_check = ev_relevant_grid_kw if no_grid_import else grid_power_kw
+    if no_grid_import and ev_grid_check > grid_import_tolerance_kw:
+        # We're importing (beyond battery charging) - reduce aggressively
         if new_amps < current_amps:
             _LOGGER.info(
-                f"⚡ No-grid-import: Grid importing {grid_power_kw:.2f}kW (inverter_max={max_inverter_kw}kW), "
+                f"⚡ No-grid-import: Grid importing {grid_power_kw:.2f}kW "
+                f"(battery_charging={battery_charging_kw:.2f}kW, "
+                f"ev_relevant={ev_grid_check:.2f}kW, inverter_max={max_inverter_kw}kW), "
                 f"reducing to {new_amps}A"
             )
             success = await _action_set_ev_charging_amps(hass, config_entry, {"amps": new_amps})
