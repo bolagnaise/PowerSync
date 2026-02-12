@@ -27,6 +27,81 @@ from .const import (
 )
 
 
+class EnergyAccumulator:
+    """Accumulates daily energy totals from instantaneous power readings.
+
+    Integrates power (kW) over time to estimate daily energy (kWh).
+    Resets at local midnight. Data is approximate and lost on restart.
+    """
+
+    def __init__(self) -> None:
+        self._last_update: datetime | None = None
+        self._last_date: Any = None
+        self.solar_kwh: float = 0.0
+        self.grid_import_kwh: float = 0.0
+        self.grid_export_kwh: float = 0.0
+        self.battery_charge_kwh: float = 0.0
+        self.battery_discharge_kwh: float = 0.0
+        self.load_kwh: float = 0.0
+
+    def update(
+        self,
+        solar_kw: float,
+        grid_kw: float,
+        battery_kw: float,
+        load_kw: float,
+    ) -> None:
+        """Update accumulators with current power readings.
+
+        Sign conventions (standard PowerSync format):
+            solar_kw: always >= 0
+            grid_kw: positive = importing, negative = exporting
+            battery_kw: positive = discharging, negative = charging
+            load_kw: always >= 0
+        """
+        now = dt_util.now()  # Local time for midnight reset
+
+        # Reset at local midnight
+        if self._last_date is not None and now.date() != self._last_date:
+            _LOGGER.info(
+                "Energy accumulator midnight reset: solar=%.2f grid_in=%.2f grid_out=%.2f "
+                "charge=%.2f discharge=%.2f load=%.2f kWh",
+                self.solar_kwh, self.grid_import_kwh, self.grid_export_kwh,
+                self.battery_charge_kwh, self.battery_discharge_kwh, self.load_kwh,
+            )
+            self.solar_kwh = 0.0
+            self.grid_import_kwh = 0.0
+            self.grid_export_kwh = 0.0
+            self.battery_charge_kwh = 0.0
+            self.battery_discharge_kwh = 0.0
+            self.load_kwh = 0.0
+
+        # Integrate power × time
+        if self._last_update is not None:
+            delta_h = (now - self._last_update).total_seconds() / 3600
+            if 0 < delta_h < 0.1:  # Sanity: skip if > 6 min gap (stale/restart)
+                self.solar_kwh += max(0, solar_kw) * delta_h
+                self.grid_import_kwh += max(0, grid_kw) * delta_h
+                self.grid_export_kwh += max(0, -grid_kw) * delta_h
+                self.battery_charge_kwh += max(0, -battery_kw) * delta_h
+                self.battery_discharge_kwh += max(0, battery_kw) * delta_h
+                self.load_kwh += max(0, load_kw) * delta_h
+
+        self._last_update = now
+        self._last_date = now.date()
+
+    def as_dict(self) -> dict[str, float]:
+        """Return accumulated totals as a dict for energy_summary."""
+        return {
+            "pv_today_kwh": round(self.solar_kwh, 3),
+            "grid_import_today_kwh": round(self.grid_import_kwh, 3),
+            "grid_export_today_kwh": round(self.grid_export_kwh, 3),
+            "charge_today_kwh": round(self.battery_charge_kwh, 3),
+            "discharge_today_kwh": round(self.battery_discharge_kwh, 3),
+            "load_today_kwh": round(self.load_kwh, 3),
+        }
+
+
 class SensitiveDataFilter(logging.Filter):
     """
     Logging filter that obfuscates sensitive data like API keys and tokens.
@@ -1233,6 +1308,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         self.port = port
         self.slave_id = slave_id
         self._controller = SungrowSHController(host, port, slave_id)
+        self._energy_acc = EnergyAccumulator()
 
         super().__init__(
             hass,
@@ -1260,6 +1336,9 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             # If battery charging (negative power), Solar = Load + Export + Battery_Charge
             solar_kw = load_kw - grid_kw - battery_kw
 
+            # Accumulate daily energy from power readings
+            self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw)
+
             energy_data = {
                 "solar_power": max(0, solar_kw),  # kW, clamp to 0 if calculated negative
                 "grid_power": grid_kw,  # kW, positive = importing, negative = exporting
@@ -1282,6 +1361,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 "discharge_rate_limit_kw": data.get("discharge_rate_limit_kw"),
                 "export_limit_w": data.get("export_limit_w"),
                 "export_limit_enabled": data.get("export_limit_enabled"),
+                "energy_summary": self._energy_acc.as_dict(),
             }
 
             _LOGGER.debug(
@@ -1419,6 +1499,8 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
             model_family=model_family,
         )
 
+        self._energy_acc = EnergyAccumulator()
+
         super().__init__(
             hass,
             _LOGGER,
@@ -1444,6 +1526,16 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
             load_kw = attrs.get("load_power_kw", 0) or 0
             solar_kw = attrs.get("pv_power_kw", 0) or 0
 
+            # Accumulate daily energy from power readings
+            self._energy_acc.update(solar_kw, grid_kw, battery_kw, load_kw)
+
+            # Merge Modbus energy registers (charge/discharge) with accumulated values
+            acc = self._energy_acc.as_dict()
+            if energy_summary:
+                # Prefer Modbus registers for charge/discharge (more accurate)
+                acc["charge_today_kwh"] = energy_summary.get("charge_today_kwh", acc["charge_today_kwh"])
+                acc["discharge_today_kwh"] = energy_summary.get("discharge_today_kwh", acc["discharge_today_kwh"])
+
             energy_data = {
                 "solar_power": max(0, solar_kw),
                 "grid_power": grid_kw,
@@ -1458,7 +1550,7 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
                 "max_charge_current_a": attrs.get("max_charge_current_a"),
                 "max_discharge_current_a": attrs.get("max_discharge_current_a"),
                 "model_family": attrs.get("model_family"),
-                "energy_summary": energy_summary or {},
+                "energy_summary": acc,
             }
 
             _LOGGER.debug(

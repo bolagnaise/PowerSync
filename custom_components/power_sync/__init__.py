@@ -1662,15 +1662,36 @@ class CalendarHistoryView(HomeAssistantView):
             )
 
         if is_sungrow and not tesla_coordinator:
-            _LOGGER.info("Calendar history not yet available for Sungrow battery systems")
-            return web.json_response(
-                {
-                    "success": False,
-                    "error": "Calendar history is not yet available for Sungrow battery systems",
-                    "reason": "sungrow_not_supported"
-                },
-                status=200
-            )
+            # Sungrow: return accumulated daily energy from coordinator
+            from homeassistant.util import dt as dt_util
+
+            sungrow_coordinator = None
+            for _eid, _data in self._hass.data.get(DOMAIN, {}).items():
+                if isinstance(_data, dict) and _data.get("sungrow_coordinator") is not None:
+                    sungrow_coordinator = _data["sungrow_coordinator"]
+                    break
+
+            energy_data = {}
+            if sungrow_coordinator and sungrow_coordinator.data:
+                energy_data = sungrow_coordinator.data.get("energy_summary", {})
+
+            time_series = [{
+                "timestamp": dt_util.utcnow().isoformat(),
+                "solar_generation": energy_data.get("pv_today_kwh", 0) * 1000,
+                "battery_discharge": energy_data.get("discharge_today_kwh", 0) * 1000,
+                "battery_charge": energy_data.get("charge_today_kwh", 0) * 1000,
+                "grid_import": energy_data.get("grid_import_today_kwh", 0) * 1000,
+                "grid_export": energy_data.get("grid_export_today_kwh", 0) * 1000,
+                "home_consumption": energy_data.get("load_today_kwh", 0) * 1000,
+            }]
+
+            return web.json_response({
+                "success": True,
+                "period": period,
+                "time_series": time_series,
+                "serial_number": None,
+                "installation_date": None,
+            })
 
         if is_foxess and foxess_coordinator:
             # FoxESS: return daily energy from Modbus registers
