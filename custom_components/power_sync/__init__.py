@@ -1632,6 +1632,8 @@ class CalendarHistoryView(HomeAssistantView):
         tesla_coordinator = None
         is_sigenergy = False
         is_sungrow = False
+        is_foxess = False
+        foxess_coordinator = None
         for entry_id, data in self._hass.data.get(DOMAIN, {}).items():
             if isinstance(data, dict):
                 # Check battery system types
@@ -1639,6 +1641,9 @@ class CalendarHistoryView(HomeAssistantView):
                     is_sigenergy = True
                 if data.get("is_sungrow", False):
                     is_sungrow = True
+                if data.get("foxess_coordinator") is not None:
+                    is_foxess = True
+                    foxess_coordinator = data["foxess_coordinator"]
                 # Look for Tesla coordinator (this is the main data source for calendar history)
                 if "tesla_coordinator" in data and data["tesla_coordinator"] is not None:
                     tesla_coordinator = data["tesla_coordinator"]
@@ -1655,6 +1660,30 @@ class CalendarHistoryView(HomeAssistantView):
                 },
                 status=200  # Return 200 with error in body so mobile app handles gracefully
             )
+
+        if is_foxess and foxess_coordinator:
+            # FoxESS: return daily energy from Modbus registers
+            energy_data = {}
+            if foxess_coordinator.data:
+                energy_data = foxess_coordinator.data.get("energy_summary", {})
+
+            time_series = [{
+                "timestamp": dt_util.utcnow().isoformat(),
+                "solar_generation": energy_data.get("pv_today_kwh", 0) * 1000,
+                "battery_discharge": energy_data.get("discharge_today_kwh", 0) * 1000,
+                "battery_charge": energy_data.get("charge_today_kwh", 0) * 1000,
+                "grid_import": energy_data.get("grid_import_today_kwh", 0) * 1000,
+                "grid_export": energy_data.get("grid_export_today_kwh", 0) * 1000,
+                "home_consumption": energy_data.get("load_today_kwh", 0) * 1000,
+            }]
+
+            return web.json_response({
+                "success": True,
+                "period": period,
+                "time_series": time_series,
+                "serial_number": None,
+                "installation_date": None,
+            })
 
         if not tesla_coordinator:
             # Check if we have ANY power_sync entries - if yes, system might still be loading
@@ -2665,6 +2694,9 @@ class FoxESSSettingsView(HomeAssistantView):
                 "success": True,
                 "battery_soc": data.get("battery_level"),
                 "battery_power": data.get("battery_power"),
+                "solar_power": data.get("solar_power"),
+                "grid_power": data.get("grid_power"),
+                "load_power": data.get("load_power"),
                 "work_mode": work_mode_index,
                 "work_mode_name": data.get("work_mode_name"),
                 "work_mode_options": work_mode_options,
@@ -6064,6 +6096,7 @@ class SolarSurplusStatusView(HomeAssistantView):
             tesla_coordinator = entry_data.get("tesla_coordinator")
             sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
             sungrow_coordinator = entry_data.get("sungrow_coordinator")
+            foxess_coordinator = entry_data.get("foxess_coordinator")
 
             if tesla_coordinator and tesla_coordinator.data:
                 # Tesla coordinator stores values in kW
@@ -6087,6 +6120,13 @@ class SolarSurplusStatusView(HomeAssistantView):
                 load_power_kw = sungrow_coordinator.data.get("load_power", 0)
                 battery_soc = sungrow_coordinator.data.get("battery_level", 0)
                 _LOGGER.debug(f"Solar surplus status from sungrow_coordinator: battery_soc={battery_soc}%")
+            elif foxess_coordinator and foxess_coordinator.data:
+                solar_power_kw = foxess_coordinator.data.get("solar_power", 0)
+                grid_power_kw = foxess_coordinator.data.get("grid_power", 0)
+                battery_power_kw = foxess_coordinator.data.get("battery_power", 0)
+                load_power_kw = foxess_coordinator.data.get("load_power", 0)
+                battery_soc = foxess_coordinator.data.get("battery_level", 0)
+                _LOGGER.debug(f"Solar surplus status from foxess_coordinator: battery_soc={battery_soc}%")
 
             # Calculate surplus
             live_status = {
@@ -6892,6 +6932,7 @@ class EVWidgetDataView(HomeAssistantView):
             tesla_coordinator = entry_data.get("tesla_coordinator")
             sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
             sungrow_coordinator = entry_data.get("sungrow_coordinator")
+            foxess_coordinator = entry_data.get("foxess_coordinator")
 
             if tesla_coordinator and tesla_coordinator.data:
                 solar_power_kw = tesla_coordinator.data.get("solar_power", 0)
@@ -6911,6 +6952,12 @@ class EVWidgetDataView(HomeAssistantView):
                 battery_power_kw = sungrow_coordinator.data.get("battery_power", 0)
                 load_power_kw = sungrow_coordinator.data.get("load_power", 0)
                 battery_soc = sungrow_coordinator.data.get("battery_level", 0)
+            elif foxess_coordinator and foxess_coordinator.data:
+                solar_power_kw = foxess_coordinator.data.get("solar_power", 0)
+                grid_power_kw = foxess_coordinator.data.get("grid_power", 0)
+                battery_power_kw = foxess_coordinator.data.get("battery_power", 0)
+                load_power_kw = foxess_coordinator.data.get("load_power", 0)
+                battery_soc = foxess_coordinator.data.get("battery_level", 0)
 
             # Build live_status dict for surplus calculation (expects watts)
             live_status = {
@@ -7032,6 +7079,7 @@ class PriceRecommendationView(HomeAssistantView):
             tesla_coordinator = entry_data.get("tesla_coordinator")
             sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
             sungrow_coordinator = entry_data.get("sungrow_coordinator")
+            foxess_coordinator = entry_data.get("foxess_coordinator")
 
             if tesla_coordinator and tesla_coordinator.data:
                 solar_power_kw = tesla_coordinator.data.get("solar_power", 0)
@@ -7051,6 +7099,12 @@ class PriceRecommendationView(HomeAssistantView):
                 battery_power_kw = sungrow_coordinator.data.get("battery_power", 0)
                 load_power_kw = sungrow_coordinator.data.get("load_power", 0)
                 battery_soc = sungrow_coordinator.data.get("battery_level", 0)
+            elif foxess_coordinator and foxess_coordinator.data:
+                solar_power_kw = foxess_coordinator.data.get("solar_power", 0)
+                grid_power_kw = foxess_coordinator.data.get("grid_power", 0)
+                battery_power_kw = foxess_coordinator.data.get("battery_power", 0)
+                load_power_kw = foxess_coordinator.data.get("load_power", 0)
+                battery_soc = foxess_coordinator.data.get("battery_level", 0)
 
             # Build live_status dict for surplus calculation (expects watts)
             live_status = {

@@ -1431,6 +1431,7 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
         try:
             async with self._controller:
                 status = await self._controller.get_status()
+                energy_summary = await self._controller.get_energy_summary()
 
             if not status.attributes:
                 raise UpdateFailed("No data from FoxESS controller")
@@ -1457,6 +1458,7 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
                 "max_charge_current_a": attrs.get("max_charge_current_a"),
                 "max_discharge_current_a": attrs.get("max_discharge_current_a"),
                 "model_family": attrs.get("model_family"),
+                "energy_summary": energy_summary or {},
             }
 
             _LOGGER.debug(
