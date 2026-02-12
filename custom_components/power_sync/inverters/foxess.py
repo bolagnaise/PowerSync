@@ -41,7 +41,7 @@ GAIN_VOLTAGE = 10       # V × 0.1
 GAIN_TEMPERATURE = 10   # °C × 0.1
 GAIN_ENERGY = 10        # kWh × 0.1 (energy totals)
 
-# Remote control re-send interval (seconds) — FoxESS timeout is 600s (10 min)
+# Remote control re-send interval (seconds) — for future periodic resend if needed
 REMOTE_CONTROL_RESEND_INTERVAL = 480  # 8 minutes
 
 
@@ -719,10 +719,11 @@ class FoxESSController(InverterController):
                 self._original_min_soc = ms_raw[0]
 
         # Enable remote control and set active power to charge (negative)
+        timeout_seconds = max(duration_minutes * 60, 600)
         if reg.remote_enable:
             await self._write_holding_register(reg.remote_enable, 1)
             if reg.remote_timeout:
-                await self._write_holding_register(reg.remote_timeout, 600)
+                await self._write_holding_register(reg.remote_timeout, timeout_seconds)
 
         power_val = -int(abs(power_w))
         if reg.remote_active_power_is_32bit:
@@ -736,7 +737,7 @@ class FoxESSController(InverterController):
             success = await self._write_holding_register(reg.remote_active_power, raw)
 
         if success:
-            _LOGGER.info("FoxESS force charge activated for %d minutes", duration_minutes)
+            _LOGGER.info("FoxESS force charge activated for %d minutes (timeout %ds)", duration_minutes, timeout_seconds)
 
         return success
 
@@ -760,10 +761,11 @@ class FoxESSController(InverterController):
                 self._original_min_soc = ms_raw[0]
 
         # Enable remote control and set active power to discharge (positive)
+        timeout_seconds = max(duration_minutes * 60, 600)
         if reg.remote_enable:
             await self._write_holding_register(reg.remote_enable, 1)
             if reg.remote_timeout:
-                await self._write_holding_register(reg.remote_timeout, 600)
+                await self._write_holding_register(reg.remote_timeout, timeout_seconds)
 
         power_val = int(abs(power_w))
         if reg.remote_active_power_is_32bit:
@@ -774,7 +776,7 @@ class FoxESSController(InverterController):
             success = await self._write_holding_register(reg.remote_active_power, power_val & 0xFFFF)
 
         if success:
-            _LOGGER.info("FoxESS force discharge activated for %d minutes", duration_minutes)
+            _LOGGER.info("FoxESS force discharge activated for %d minutes (timeout %ds)", duration_minutes, timeout_seconds)
 
         return success
 
