@@ -94,7 +94,7 @@ OEM rebrands using identical hardware are also supported — the model family is
 
 - **H3 Smart:** Has built-in WiFi Modbus TCP — connect directly to the inverter's IP (appears as "espressif" on your network). Ensure inverter firmware is up to date.
 - **All models:** Default port 502, slave ID 247. Model family is auto-detected during setup — no manual selection needed for rebrands.
-- **Cloud credentials** are optional (only needed for tariff data from FoxESS Cloud).
+- **Cloud API key** is optional — sync Amber/Octopus prices as time-based schedules on the inverter. Get your key from [foxesscloud.com](https://www.foxesscloud.com) > User Profile > API Management.
 
 ### Sigenergy
 
@@ -148,8 +148,8 @@ Coordinates EV charging alongside battery optimization with dynamic power sharin
 | Feature | Description |
 |---------|-------------|
 | **AEMO Spike Detection** | Auto-discharge during price spikes for VPP participation (Tesla & Sungrow) |
-| **Solar Curtailment** | Prevents paying to export during negative prices (Tesla export rules, Sigenergy Modbus) |
-| **AC Inverter Curtailment** | Control AC-coupled inverters (Sungrow, Fronius, GoodWe, Huawei, Enphase, Zeversolar) |
+| **Solar Curtailment** | Prevents paying to export during negative prices (Tesla export rules, Sigenergy/FoxESS Modbus) |
+| **AC Inverter Curtailment** | Control AC-coupled inverters (Sungrow, Fronius, GoodWe, Huawei, Enphase, Zeversolar, FoxESS) |
 | **Spike Protection** | Prevents grid charging during Amber price spikes |
 | **Export Price Boost** | Adjusts export prices to trigger battery discharge at lower thresholds |
 | **Chip Mode** | Suppress overnight exports unless price exceeds threshold |
