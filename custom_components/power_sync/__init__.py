@@ -1661,6 +1661,17 @@ class CalendarHistoryView(HomeAssistantView):
                 status=200  # Return 200 with error in body so mobile app handles gracefully
             )
 
+        if is_sungrow and not tesla_coordinator:
+            _LOGGER.info("Calendar history not yet available for Sungrow battery systems")
+            return web.json_response(
+                {
+                    "success": False,
+                    "error": "Calendar history is not yet available for Sungrow battery systems",
+                    "reason": "sungrow_not_supported"
+                },
+                status=200
+            )
+
         if is_foxess and foxess_coordinator:
             # FoxESS: return daily energy from Modbus registers
             from homeassistant.util import dt as dt_util
