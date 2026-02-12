@@ -75,6 +75,10 @@ class FoxESSRegisterMap:
     grid_power: int = 0        # Scaled by power_gain, signed (neg=export, pos=import)
     grid_power_is_32bit: bool = False  # H3-Pro uses 32-bit grid power
 
+    # CT2 meter registers (AC-coupled inverter measurement)
+    ct2_power: int = 0             # Total CT2 power, signed
+    ct2_power_is_32bit: bool = False
+
     # Load registers
     load_power: int = 0        # kW × 0.001
 
@@ -212,7 +216,9 @@ REGISTER_MAPS: dict[FoxESSModelFamily, FoxESSRegisterMap] = {
         pv_power_is_32bit=True,
         grid_power=38815,         # 32-bit: 38814 (high) + 38815 (low), scale 0.0001
         grid_power_is_32bit=True,
-        load_power=0,             # H3-Pro: calculated from pv + grid + battery
+        ct2_power=38915,          # 32-bit: 38914 (high) + 38915 (low), scale 0.0001
+        ct2_power_is_32bit=True,
+        load_power=0,             # H3-Pro: calculated from pv + ct2 + grid + battery
         power_gain=10000,         # Grid CT uses 0.0001 kW scaling
         battery_pv_gain=1000,     # Battery/PV use 0.001 kW scaling
         min_soc=46609,
@@ -249,7 +255,9 @@ REGISTER_MAPS: dict[FoxESSModelFamily, FoxESSRegisterMap] = {
         pv_power_is_32bit=True,
         grid_power=38815,         # 32-bit: scale 0.0001
         grid_power_is_32bit=True,
-        load_power=0,             # Calculated from pv + grid + battery
+        ct2_power=38915,          # 32-bit: 38914 (high) + 38915 (low), scale 0.0001
+        ct2_power_is_32bit=True,
+        load_power=0,             # Calculated from pv + ct2 + grid + battery
         power_gain=10000,         # Grid CT uses 0.0001 kW scaling
         battery_pv_gain=1000,     # Battery/PV use 0.001 kW scaling
         min_soc=46609,
@@ -637,6 +645,19 @@ class FoxESSController(InverterController):
                 grid_power_kw = None
             attrs["grid_power_kw"] = grid_power_kw
 
+            # CT2 power (AC-coupled inverter meter)
+            ct2_power_kw = 0.0
+            if reg.ct2_power:
+                if reg.ct2_power_is_32bit:
+                    ct2_raw = await self._read_holding_registers(reg.ct2_power - 1, 2)
+                    if ct2_raw and len(ct2_raw) == 2:
+                        ct2_power_kw = self._to_signed32(ct2_raw[0], ct2_raw[1]) / grid_gain
+                else:
+                    ct2_raw = await self._read_data_register(reg.ct2_power, 1)
+                    if ct2_raw:
+                        ct2_power_kw = self._to_signed16(ct2_raw[0]) / grid_gain
+            attrs["ct2_power_kw"] = ct2_power_kw
+
             # Load/home power
             if reg.load_power:
                 lp_raw = await self._read_data_register(reg.load_power, 1)
@@ -644,9 +665,9 @@ class FoxESSController(InverterController):
             else:
                 # H3-Pro/H3-Smart: no load register, calculate from energy balance
                 # Sign convention: battery positive=discharge, grid positive=import
-                # Load = PV + battery_discharge + grid_import = PV + battery + grid
+                # Load = PV_DC + CT2_AC + battery_discharge + grid_import
                 if grid_power_kw is not None and battery_power_kw is not None:
-                    load_power_kw = total_pv_kw + grid_power_kw + battery_power_kw
+                    load_power_kw = total_pv_kw + ct2_power_kw + grid_power_kw + battery_power_kw
                 else:
                     load_power_kw = None
             attrs["load_power_kw"] = load_power_kw

@@ -1525,9 +1525,13 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
             grid_kw = attrs.get("grid_power_kw", 0) or 0
             load_kw = attrs.get("load_power_kw", 0) or 0
             solar_kw = attrs.get("pv_power_kw", 0) or 0
+            ct2_kw = attrs.get("ct2_power_kw", 0) or 0
+
+            # Total solar = DC PV strings + AC-coupled CT2 meter
+            total_solar_kw = solar_kw + max(0, ct2_kw)
 
             # Accumulate daily energy from power readings
-            self._energy_acc.update(solar_kw, grid_kw, battery_kw, load_kw)
+            self._energy_acc.update(total_solar_kw, grid_kw, battery_kw, load_kw)
 
             # Merge Modbus energy registers (charge/discharge) with accumulated values
             acc = self._energy_acc.as_dict()
@@ -1537,7 +1541,8 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
                 acc["discharge_today_kwh"] = energy_summary.get("discharge_today_kwh", acc["discharge_today_kwh"])
 
             energy_data = {
-                "solar_power": max(0, solar_kw),
+                "solar_power": max(0, total_solar_kw),
+                "ct2_power": ct2_kw,
                 "grid_power": grid_kw,
                 "battery_power": battery_kw,
                 "load_power": load_kw,
