@@ -210,7 +210,7 @@ REGISTER_MAPS: dict[FoxESSModelFamily, FoxESSRegisterMap] = {
         pv2_power=39071,          # scale 0.001
         grid_power=38815,         # 32-bit: 38814 (high) + 38815 (low), scale 0.0001
         grid_power_is_32bit=True,
-        load_power=0,             # H3-Pro: calculated from grid + pv - battery
+        load_power=0,             # H3-Pro: calculated from pv + grid + battery
         power_gain=10000,         # Grid CT uses 0.0001 kW scaling
         battery_pv_gain=1000,     # Battery/PV use 0.001 kW scaling
         min_soc=46609,
@@ -246,7 +246,7 @@ REGISTER_MAPS: dict[FoxESSModelFamily, FoxESSRegisterMap] = {
         pv2_power=39071,          # scale 0.001
         grid_power=38815,         # 32-bit: scale 0.0001
         grid_power_is_32bit=True,
-        load_power=0,             # Calculated from grid + pv - battery
+        load_power=0,             # Calculated from pv + grid + battery
         power_gain=10000,         # Grid CT uses 0.0001 kW scaling
         battery_pv_gain=1000,     # Battery/PV use 0.001 kW scaling
         min_soc=46609,
@@ -591,6 +591,8 @@ class FoxESSController(InverterController):
             # PV power
             pv1_kw = None
             pv2_kw = None
+            pv1_raw = None
+            pv2_raw = None
             if reg.pv1_power:
                 pv1_raw = await self._read_data_register(reg.pv1_power, 1)
                 pv1_kw = pv1_raw[0] / bp_gain if pv1_raw else None
@@ -602,6 +604,13 @@ class FoxESSController(InverterController):
             attrs["pv2_power_kw"] = pv2_kw
             attrs["pv_power_kw"] = total_pv_kw
             attrs["pv_power_w"] = total_pv_kw * 1000
+
+            _LOGGER.debug(
+                "FoxESS PV raw: pv1_reg=%s pv1_raw=%s pv1=%.3f kW, pv2_reg=%s pv2_raw=%s pv2=%.3f kW, gain=%d",
+                reg.pv1_power, pv1_raw[0] if pv1_raw else None, pv1_kw or 0,
+                reg.pv2_power, pv2_raw[0] if pv2_raw else None, pv2_kw or 0,
+                bp_gain,
+            )
 
             # Grid power
             if reg.grid_power_is_32bit and reg.grid_power:
@@ -622,9 +631,11 @@ class FoxESSController(InverterController):
                 lp_raw = await self._read_data_register(reg.load_power, 1)
                 load_power_kw = lp_raw[0] / bp_gain if lp_raw else None
             else:
-                # H3-Pro: no load register, calculate from other values
+                # H3-Pro/H3-Smart: no load register, calculate from energy balance
+                # Sign convention: battery positive=discharge, grid positive=import
+                # Load = PV + battery_discharge + grid_import = PV + battery + grid
                 if grid_power_kw is not None and battery_power_kw is not None:
-                    load_power_kw = total_pv_kw + grid_power_kw - battery_power_kw
+                    load_power_kw = total_pv_kw + grid_power_kw + battery_power_kw
                 else:
                     load_power_kw = None
             attrs["load_power_kw"] = load_power_kw
