@@ -945,7 +945,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         Prices within confidence_horizon_hours are unchanged. Beyond that,
         each price decays toward the median at exp(-decay_rate * excess_hours).
-        This prevents the LP from over-valuing speculative spikes far in the future.
+
+        Asymmetric decay: only prices ABOVE median are decayed. Below-median
+        prices are preserved so the LP can see that cheap future periods
+        (e.g. midday solar + low grid) are genuinely cheaper than overnight,
+        and won't pre-charge overnight for a spike 18h away when cheaper
+        daytime charging is available. Above-median export prices (spikes)
+        are still decayed to prevent over-valuing speculative opportunities.
         """
         import math
 
@@ -960,15 +966,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for t, price in enumerate(import_prices):
             hours_ahead = (t * interval) / 60.0
             excess = max(0.0, hours_ahead - confidence_horizon_hours)
-            confidence = math.exp(-decay_rate * excess)
-            decayed_import.append(import_median + (price - import_median) * confidence)
+            if excess > 0 and price > import_median:
+                confidence = math.exp(-decay_rate * excess)
+                decayed_import.append(import_median + (price - import_median) * confidence)
+            else:
+                decayed_import.append(price)
 
         decayed_export = []
         for t, price in enumerate(export_prices):
             hours_ahead = (t * interval) / 60.0
             excess = max(0.0, hours_ahead - confidence_horizon_hours)
-            confidence = math.exp(-decay_rate * excess)
-            decayed_export.append(export_median + (price - export_median) * confidence)
+            if excess > 0 and price > export_median:
+                confidence = math.exp(-decay_rate * excess)
+                decayed_export.append(export_median + (price - export_median) * confidence)
+            else:
+                decayed_export.append(price)
 
         return (decayed_import, decayed_export)
 
