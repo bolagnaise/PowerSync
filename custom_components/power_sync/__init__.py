@@ -1663,6 +1663,8 @@ class CalendarHistoryView(HomeAssistantView):
 
         if is_foxess and foxess_coordinator:
             # FoxESS: return daily energy from Modbus registers
+            from homeassistant.util import dt as dt_util
+
             energy_data = {}
             if foxess_coordinator.data:
                 energy_data = foxess_coordinator.data.get("energy_summary", {})
