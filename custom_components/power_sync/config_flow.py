@@ -175,6 +175,11 @@ from .const import (
     # Zaptec EV charger configuration
     CONF_ZAPTEC_CHARGER_ENTITY,
     CONF_ZAPTEC_INSTALLATION_ID,
+    CONF_ZAPTEC_STANDALONE_ENABLED,
+    CONF_ZAPTEC_USERNAME,
+    CONF_ZAPTEC_PASSWORD,
+    CONF_ZAPTEC_CHARGER_ID,
+    CONF_ZAPTEC_INSTALLATION_ID_CLOUD,
     # Solcast Solar Forecast configuration
     CONF_SOLCAST_ENABLED,
     CONF_SOLCAST_API_KEY,
@@ -2322,58 +2327,14 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> FlowResult:
         """Handle EV charging configuration during initial setup."""
         if user_input is not None:
-            # Combine all data
-            data = {
-                **self._amber_data,
-                **self._teslemetry_data,
-                **self._site_data,
-                **self._aemo_data,  # Include AEMO configuration
-                **self._flow_power_data,  # Include Flow Power configuration
-                **self._octopus_data,  # Include Octopus Energy UK configuration
-                **getattr(self, '_curtailment_data', {}),  # Include curtailment configuration
-                **getattr(self, '_inverter_data', {}),  # Include inverter configuration
-                **getattr(self, '_demand_data', {}),  # Include demand charge configuration
-                CONF_ELECTRICITY_PROVIDER: self._selected_electricity_provider,
-            }
+            # Store EV data for potential zaptec_cloud step
+            self._ev_data = dict(user_input)
 
-            # Include custom tariff data if configured (will be moved to automation_store on setup)
-            if self._custom_tariff_data:
-                data["initial_custom_tariff"] = self._custom_tariff_data
+            # If Zaptec standalone is enabled, go to credentials step
+            if user_input.get(CONF_ZAPTEC_STANDALONE_ENABLED, False):
+                return await self.async_step_zaptec_cloud()
 
-            # Include optimization provider selection (for Tesla)
-            data[CONF_OPTIMIZATION_PROVIDER] = self._optimization_provider
-            if self._optimization_provider == OPT_PROVIDER_POWERSYNC and self._ml_options:
-                data.update(self._ml_options)
-
-            # Add EV settings
-            data[CONF_EV_CHARGING_ENABLED] = user_input.get(CONF_EV_CHARGING_ENABLED, False)
-            data[CONF_EV_PROVIDER] = user_input.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
-            data[CONF_TESLA_BLE_ENTITY_PREFIX] = user_input.get(
-                CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX
-            )
-
-            # Add OCPP settings
-            data[CONF_OCPP_ENABLED] = user_input.get(CONF_OCPP_ENABLED, False)
-            data[CONF_OCPP_PORT] = user_input.get(CONF_OCPP_PORT, DEFAULT_OCPP_PORT)
-
-            # Add Zaptec settings
-            zaptec_entity = user_input.get(CONF_ZAPTEC_CHARGER_ENTITY, "")
-            if zaptec_entity:
-                data[CONF_ZAPTEC_CHARGER_ENTITY] = zaptec_entity
-            data[CONF_ZAPTEC_INSTALLATION_ID] = user_input.get(
-                CONF_ZAPTEC_INSTALLATION_ID, ""
-            )
-
-            # Set appropriate title based on provider
-            if self._aemo_only_mode:
-                title = "PowerSync Globird"
-            elif self._selected_electricity_provider == "flow_power":
-                title = "PowerSync Flow Power"
-            elif self._selected_electricity_provider == "octopus":
-                title = "PowerSync Octopus"
-            else:
-                title = "PowerSync Amber"
-            return self.async_create_entry(title=title, data=data)
+            return self._create_final_entry_from_ev(user_input)
 
         return self.async_show_form(
             step_id="ev_charging_setup",
@@ -2406,7 +2367,129 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_ZAPTEC_INSTALLATION_ID,
                     default="",
                 ): str,
+                vol.Optional(
+                    CONF_ZAPTEC_STANDALONE_ENABLED,
+                    default=False,
+                ): bool,
             }),
+        )
+
+    def _create_final_entry_from_ev(
+        self, ev_input: dict[str, Any]
+    ) -> FlowResult:
+        """Create final config entry from EV charging step data."""
+        # Combine all data
+        data = {
+            **self._amber_data,
+            **self._teslemetry_data,
+            **self._site_data,
+            **self._aemo_data,
+            **self._flow_power_data,
+            **self._octopus_data,
+            **getattr(self, '_curtailment_data', {}),
+            **getattr(self, '_inverter_data', {}),
+            **getattr(self, '_demand_data', {}),
+            CONF_ELECTRICITY_PROVIDER: self._selected_electricity_provider,
+        }
+
+        # Include custom tariff data if configured
+        if self._custom_tariff_data:
+            data["initial_custom_tariff"] = self._custom_tariff_data
+
+        # Include optimization provider selection (for Tesla)
+        data[CONF_OPTIMIZATION_PROVIDER] = self._optimization_provider
+        if self._optimization_provider == OPT_PROVIDER_POWERSYNC and self._ml_options:
+            data.update(self._ml_options)
+
+        # Add EV settings
+        data[CONF_EV_CHARGING_ENABLED] = ev_input.get(CONF_EV_CHARGING_ENABLED, False)
+        data[CONF_EV_PROVIDER] = ev_input.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
+        data[CONF_TESLA_BLE_ENTITY_PREFIX] = ev_input.get(
+            CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX
+        )
+
+        # Add OCPP settings
+        data[CONF_OCPP_ENABLED] = ev_input.get(CONF_OCPP_ENABLED, False)
+        data[CONF_OCPP_PORT] = ev_input.get(CONF_OCPP_PORT, DEFAULT_OCPP_PORT)
+
+        # Add Zaptec settings
+        zaptec_entity = ev_input.get(CONF_ZAPTEC_CHARGER_ENTITY, "")
+        if zaptec_entity:
+            data[CONF_ZAPTEC_CHARGER_ENTITY] = zaptec_entity
+        data[CONF_ZAPTEC_INSTALLATION_ID] = ev_input.get(
+            CONF_ZAPTEC_INSTALLATION_ID, ""
+        )
+
+        # Add Zaptec standalone settings (from _ev_data or zaptec_cloud step)
+        data[CONF_ZAPTEC_STANDALONE_ENABLED] = ev_input.get(
+            CONF_ZAPTEC_STANDALONE_ENABLED, False
+        )
+        for key in (CONF_ZAPTEC_USERNAME, CONF_ZAPTEC_PASSWORD,
+                     CONF_ZAPTEC_CHARGER_ID, CONF_ZAPTEC_INSTALLATION_ID_CLOUD):
+            if key in ev_input:
+                data[key] = ev_input[key]
+
+        # Set appropriate title based on provider
+        if self._aemo_only_mode:
+            title = "PowerSync Globird"
+        elif self._selected_electricity_provider == "flow_power":
+            title = "PowerSync Flow Power"
+        elif self._selected_electricity_provider == "octopus":
+            title = "PowerSync Octopus"
+        else:
+            title = "PowerSync Amber"
+        return self.async_create_entry(title=title, data=data)
+
+    async def async_step_zaptec_cloud(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle Zaptec Cloud API credentials during initial setup."""
+        errors = {}
+
+        if user_input is not None:
+            username = user_input.get(CONF_ZAPTEC_USERNAME, "")
+            password = user_input.get(CONF_ZAPTEC_PASSWORD, "")
+
+            if username and password:
+                # Validate credentials
+                from .zaptec_api import ZaptecCloudClient
+                client = ZaptecCloudClient(username, password)
+                try:
+                    success, message = await client.test_connection()
+                    if success:
+                        # Auto-discover chargers and installations
+                        chargers = await client.get_chargers()
+                        installations = await client.get_installations()
+
+                        ev_data = getattr(self, '_ev_data', {})
+                        ev_data[CONF_ZAPTEC_USERNAME] = username
+                        ev_data[CONF_ZAPTEC_PASSWORD] = password
+
+                        # Store first charger/installation IDs
+                        if chargers:
+                            ev_data[CONF_ZAPTEC_CHARGER_ID] = chargers[0].get("Id", "")
+                        if installations:
+                            ev_data[CONF_ZAPTEC_INSTALLATION_ID_CLOUD] = installations[0].get("Id", "")
+
+                        return self._create_final_entry_from_ev(ev_data)
+                    else:
+                        errors["base"] = "zaptec_auth_failed"
+                        _LOGGER.error("Zaptec Cloud auth failed: %s", message)
+                except Exception as e:
+                    errors["base"] = "zaptec_auth_failed"
+                    _LOGGER.error("Zaptec Cloud connection error: %s", e)
+                finally:
+                    await client.close()
+            else:
+                errors["base"] = "zaptec_missing_credentials"
+
+        return self.async_show_form(
+            step_id="zaptec_cloud",
+            data_schema=vol.Schema({
+                vol.Required(CONF_ZAPTEC_USERNAME): str,
+                vol.Required(CONF_ZAPTEC_PASSWORD): str,
+            }),
+            errors=errors,
         )
 
     @staticmethod
@@ -3517,39 +3600,18 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
     ) -> FlowResult:
         """Step for EV Charging and OCPP configuration."""
         if user_input is not None:
-            # Start with existing options to preserve any settings not in this flow
-            final_data = dict(self.config_entry.options)
+            # Store EV data for potential zaptec_cloud step
+            self._ev_options_data = dict(user_input)
 
-            # Update with options collected from earlier steps in this flow
-            flow_options = getattr(self, '_final_options', {})
-            final_data.update(flow_options)
+            # If Zaptec standalone is being newly enabled, go to credentials step
+            was_standalone = self._get_option(CONF_ZAPTEC_STANDALONE_ENABLED, False)
+            now_standalone = user_input.get(CONF_ZAPTEC_STANDALONE_ENABLED, False)
+            has_credentials = bool(self._get_option(CONF_ZAPTEC_USERNAME, ""))
 
-            # Add EV settings
-            final_data[CONF_EV_CHARGING_ENABLED] = user_input.get(
-                CONF_EV_CHARGING_ENABLED, False
-            )
-            final_data[CONF_EV_PROVIDER] = user_input.get(
-                CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API
-            )
-            final_data[CONF_TESLA_BLE_ENTITY_PREFIX] = user_input.get(
-                CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX
-            )
+            if now_standalone and (not was_standalone or not has_credentials):
+                return await self.async_step_zaptec_cloud_options()
 
-            # Add OCPP settings
-            final_data[CONF_OCPP_ENABLED] = user_input.get(CONF_OCPP_ENABLED, False)
-            final_data[CONF_OCPP_PORT] = user_input.get(
-                CONF_OCPP_PORT, DEFAULT_OCPP_PORT
-            )
-
-            # Add Zaptec settings
-            zaptec_entity = user_input.get(CONF_ZAPTEC_CHARGER_ENTITY, "")
-            if zaptec_entity:
-                final_data[CONF_ZAPTEC_CHARGER_ENTITY] = zaptec_entity
-            final_data[CONF_ZAPTEC_INSTALLATION_ID] = user_input.get(
-                CONF_ZAPTEC_INSTALLATION_ID, ""
-            )
-
-            return self.async_create_entry(title="", data=final_data)
+            return self._save_ev_options(user_input)
 
         # Build schema for EV and OCPP options
         current_ev_enabled = self._get_option(CONF_EV_CHARGING_ENABLED, False)
@@ -3589,11 +3651,113 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_ZAPTEC_INSTALLATION_ID,
                 default=self._get_option(CONF_ZAPTEC_INSTALLATION_ID, ""),
             ): str,
+            # Zaptec standalone (direct API)
+            vol.Optional(
+                CONF_ZAPTEC_STANDALONE_ENABLED,
+                default=self._get_option(CONF_ZAPTEC_STANDALONE_ENABLED, False),
+            ): bool,
         }
 
         return self.async_show_form(
             step_id="ev_charging",
             data_schema=vol.Schema(schema_dict),
+        )
+
+    def _save_ev_options(self, ev_input: dict[str, Any]) -> FlowResult:
+        """Save EV charging options and create entry."""
+        # Start with existing options to preserve any settings not in this flow
+        final_data = dict(self.config_entry.options)
+
+        # Update with options collected from earlier steps in this flow
+        flow_options = getattr(self, '_final_options', {})
+        final_data.update(flow_options)
+
+        # Add EV settings
+        final_data[CONF_EV_CHARGING_ENABLED] = ev_input.get(
+            CONF_EV_CHARGING_ENABLED, False
+        )
+        final_data[CONF_EV_PROVIDER] = ev_input.get(
+            CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API
+        )
+        final_data[CONF_TESLA_BLE_ENTITY_PREFIX] = ev_input.get(
+            CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX
+        )
+
+        # Add OCPP settings
+        final_data[CONF_OCPP_ENABLED] = ev_input.get(CONF_OCPP_ENABLED, False)
+        final_data[CONF_OCPP_PORT] = ev_input.get(
+            CONF_OCPP_PORT, DEFAULT_OCPP_PORT
+        )
+
+        # Add Zaptec settings
+        zaptec_entity = ev_input.get(CONF_ZAPTEC_CHARGER_ENTITY, "")
+        if zaptec_entity:
+            final_data[CONF_ZAPTEC_CHARGER_ENTITY] = zaptec_entity
+        final_data[CONF_ZAPTEC_INSTALLATION_ID] = ev_input.get(
+            CONF_ZAPTEC_INSTALLATION_ID, ""
+        )
+
+        # Add Zaptec standalone settings
+        final_data[CONF_ZAPTEC_STANDALONE_ENABLED] = ev_input.get(
+            CONF_ZAPTEC_STANDALONE_ENABLED, False
+        )
+        for key in (CONF_ZAPTEC_USERNAME, CONF_ZAPTEC_PASSWORD,
+                     CONF_ZAPTEC_CHARGER_ID, CONF_ZAPTEC_INSTALLATION_ID_CLOUD):
+            if key in ev_input:
+                final_data[key] = ev_input[key]
+
+        return self.async_create_entry(title="", data=final_data)
+
+    async def async_step_zaptec_cloud_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle Zaptec Cloud API credentials in options flow."""
+        errors = {}
+
+        if user_input is not None:
+            username = user_input.get(CONF_ZAPTEC_USERNAME, "")
+            password = user_input.get(CONF_ZAPTEC_PASSWORD, "")
+
+            if username and password:
+                from .zaptec_api import ZaptecCloudClient
+                client = ZaptecCloudClient(username, password)
+                try:
+                    success, message = await client.test_connection()
+                    if success:
+                        chargers = await client.get_chargers()
+                        installations = await client.get_installations()
+
+                        ev_data = getattr(self, '_ev_options_data', {})
+                        ev_data[CONF_ZAPTEC_USERNAME] = username
+                        ev_data[CONF_ZAPTEC_PASSWORD] = password
+
+                        if chargers:
+                            ev_data[CONF_ZAPTEC_CHARGER_ID] = chargers[0].get("Id", "")
+                        if installations:
+                            ev_data[CONF_ZAPTEC_INSTALLATION_ID_CLOUD] = installations[0].get("Id", "")
+
+                        return self._save_ev_options(ev_data)
+                    else:
+                        errors["base"] = "zaptec_auth_failed"
+                        _LOGGER.error("Zaptec Cloud auth failed: %s", message)
+                except Exception as e:
+                    errors["base"] = "zaptec_auth_failed"
+                    _LOGGER.error("Zaptec Cloud connection error: %s", e)
+                finally:
+                    await client.close()
+            else:
+                errors["base"] = "zaptec_missing_credentials"
+
+        return self.async_show_form(
+            step_id="zaptec_cloud_options",
+            data_schema=vol.Schema({
+                vol.Required(
+                    CONF_ZAPTEC_USERNAME,
+                    default=self._get_option(CONF_ZAPTEC_USERNAME, ""),
+                ): str,
+                vol.Required(CONF_ZAPTEC_PASSWORD): str,
+            }),
+            errors=errors,
         )
 
     async def async_step_flow_power_options(

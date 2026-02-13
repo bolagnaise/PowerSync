@@ -227,6 +227,11 @@ from .const import (
     # Zaptec EV charger configuration
     CONF_ZAPTEC_CHARGER_ENTITY,
     CONF_ZAPTEC_INSTALLATION_ID,
+    CONF_ZAPTEC_STANDALONE_ENABLED,
+    CONF_ZAPTEC_USERNAME,
+    CONF_ZAPTEC_PASSWORD,
+    CONF_ZAPTEC_CHARGER_ID,
+    CONF_ZAPTEC_INSTALLATION_ID_CLOUD,
     # Smart Optimization configuration
     CONF_OPTIMIZATION_PROVIDER,
     CONF_OPTIMIZATION_ENABLED,
@@ -5146,12 +5151,46 @@ class EVStatusView(HomeAssistantView):
         return {"available": False, "configured": True, "entity_prefix": prefix}
 
     def _get_zaptec_status(self) -> dict:
-        """Check if Zaptec charger entities are available."""
+        """Check if Zaptec charger entities are available.
+
+        Supports two modes:
+        1. Standalone (direct Zaptec Cloud API) — no HA integration needed
+        2. HA integration (custom-components/zaptec) — uses HA entities
+        Standalone takes priority if configured.
+        """
         config = self._get_powersync_config()
         configured_entity = config.get(CONF_ZAPTEC_CHARGER_ENTITY, "")
         installation_id = config.get(CONF_ZAPTEC_INSTALLATION_ID, "")
+        standalone_enabled = config.get(CONF_ZAPTEC_STANDALONE_ENABLED, False)
 
-        # Check if zaptec integration is loaded
+        # Standalone mode: fetch live status from Zaptec Cloud API
+        if standalone_enabled and config.get(CONF_ZAPTEC_USERNAME):
+            charger_id = config.get(CONF_ZAPTEC_CHARGER_ID, "")
+            cloud_installation_id = config.get(CONF_ZAPTEC_INSTALLATION_ID_CLOUD, "")
+
+            # Get cached client from hass.data
+            cloud_status = None
+            for entry in self._hass.config_entries.async_entries(DOMAIN):
+                entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                zaptec_client = entry_data.get("zaptec_client")
+                zaptec_cached_state = entry_data.get("zaptec_cached_state")
+                if zaptec_cached_state:
+                    cloud_status = zaptec_cached_state
+                    break
+
+            return {
+                "available": True,
+                "configured": True,
+                "standalone": True,
+                "charger_id": charger_id,
+                "installation_id": cloud_installation_id,
+                "charger_entity": configured_entity,
+                "detected_entities": [],
+                "charger_status": None,
+                "cloud_status": cloud_status,
+            }
+
+        # HA integration mode: check if zaptec integration is loaded
         zaptec_available = "zaptec" in self._hass.config_entries.async_domains()
 
         if not zaptec_available:
@@ -5204,6 +5243,7 @@ class EVStatusView(HomeAssistantView):
         return {
             "available": zaptec_available,
             "configured": bool(configured_entity),
+            "standalone": False,
             "charger_entity": configured_entity,
             "installation_id": detected_installation_id,
             "detected_entities": detected_entities,
@@ -7128,7 +7168,59 @@ class EVWidgetDataView(HomeAssistantView):
                     "surplus_kw": round(surplus_kw, 2),
                 })
 
-            # If no active vehicles, return status with no vehicles
+            # If no PowerSync-managed EV sessions, check external chargers
+            if not widget_data:
+                # Check Zaptec standalone charger
+                zaptec_cached = entry_data.get("zaptec_cached_state")
+                if zaptec_cached and zaptec_cached.get("charger_operation_mode") == "charging":
+                    power_w = zaptec_cached.get("total_charge_power_w", 0)
+                    power_kw = power_w / 1000
+                    # Determine source: if surplus > 80% of charge power, it's solar
+                    if surplus_kw >= power_kw * 0.8 and power_kw > 0:
+                        zaptec_source = "solar"
+                    elif surplus_kw > 0 and power_kw > 0:
+                        zaptec_source = "grid"  # mixed, but grid-dominant
+                    else:
+                        zaptec_source = "grid"
+                    widget_data.append({
+                        "vehicle_name": "EV Charger",
+                        "is_charging": True,
+                        "current_soc": 0,
+                        "target_soc": 80,
+                        "current_power_kw": round(power_kw, 2),
+                        "source": zaptec_source,
+                        "eta_minutes": None,
+                        "surplus_kw": round(surplus_kw, 2),
+                    })
+
+                # Check OCPP chargers
+                if not widget_data:
+                    ocpp_server = entry_data.get("ocpp_server")
+                    if ocpp_server:
+                        try:
+                            for cp_id, cp in ocpp_server.charge_points.items():
+                                if hasattr(cp, 'active_transaction') and cp.active_transaction:
+                                    meter_w = getattr(cp, 'meter_power_w', 0) or 0
+                                    power_kw = meter_w / 1000
+                                    if power_kw > 0.05:
+                                        if surplus_kw >= power_kw * 0.8:
+                                            ocpp_source = "solar"
+                                        else:
+                                            ocpp_source = "grid"
+                                        widget_data.append({
+                                            "vehicle_name": f"OCPP {cp_id[:8]}",
+                                            "is_charging": True,
+                                            "current_soc": 0,
+                                            "target_soc": 80,
+                                            "current_power_kw": round(power_kw, 2),
+                                            "source": ocpp_source,
+                                            "eta_minutes": None,
+                                            "surplus_kw": round(surplus_kw, 2),
+                                        })
+                        except Exception as e:
+                            _LOGGER.debug(f"Error checking OCPP chargers for widget: {e}")
+
+            # If still no active vehicles, return idle status
             if not widget_data:
                 widget_data.append({
                     "vehicle_name": "No Active Vehicle",
@@ -13502,6 +13594,39 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.http.register_view(CurrentWeatherView(hass))
     _LOGGER.info("🌤️ Current weather HTTP endpoint registered at /api/power_sync/weather")
 
+    # Initialize Zaptec Cloud client if standalone mode is configured
+    all_opts = {**entry.data, **entry.options}
+    if all_opts.get(CONF_ZAPTEC_STANDALONE_ENABLED) and all_opts.get(CONF_ZAPTEC_USERNAME):
+        from .zaptec_api import ZaptecCloudClient
+        zaptec_client = ZaptecCloudClient(
+            username=all_opts[CONF_ZAPTEC_USERNAME],
+            password=all_opts[CONF_ZAPTEC_PASSWORD],
+        )
+        hass.data[DOMAIN][entry.entry_id]["zaptec_client"] = zaptec_client
+        _LOGGER.info("Zaptec Cloud standalone client initialized")
+
+        # Start background state polling (every 60s, cached for status endpoint)
+        async def _poll_zaptec_state(now=None):
+            """Poll Zaptec charger state and cache it."""
+            charger_id = all_opts.get(CONF_ZAPTEC_CHARGER_ID, "")
+            if not charger_id:
+                return
+            try:
+                raw_state = await zaptec_client.get_charger_state(charger_id)
+                parsed = zaptec_client.parse_charger_state(raw_state)
+                hass.data[DOMAIN][entry.entry_id]["zaptec_cached_state"] = parsed
+            except Exception as e:
+                _LOGGER.debug(f"Zaptec state poll error: {e}")
+
+        # Poll immediately, then every 60s
+        from homeassistant.helpers.event import async_track_time_interval
+        from datetime import timedelta
+        await _poll_zaptec_state()
+        unsub_zaptec_poll = async_track_time_interval(
+            hass, _poll_zaptec_state, timedelta(seconds=60)
+        )
+        hass.data[DOMAIN][entry.entry_id]["unsub_zaptec_poll"] = unsub_zaptec_poll
+
     # Register HTTP endpoints for EV/Tesla vehicles (for mobile app EV section)
     hass.http.register_view(EVStatusView(hass))
     hass.http.register_view(EVVehiclesView(hass))
@@ -14961,6 +15086,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if load_following_cancel := entry_data.get("load_following_cancel"):
         load_following_cancel()
         _LOGGER.debug("Cancelled load-following timer")
+
+    # Cancel Zaptec state polling and close client
+    if unsub_zaptec := entry_data.get("unsub_zaptec_poll"):
+        unsub_zaptec()
+        _LOGGER.debug("Cancelled Zaptec state polling")
+    if zaptec_client := entry_data.get("zaptec_client"):
+        await zaptec_client.close()
+        _LOGGER.debug("Closed Zaptec Cloud client")
 
     # Cancel the AEMO spike timer if it exists
     if aemo_spike_cancel := entry_data.get("aemo_spike_cancel"):

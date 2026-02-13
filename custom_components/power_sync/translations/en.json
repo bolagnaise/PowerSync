@@ -444,6 +444,8 @@
       "foxess_serial_required": "Serial port path is required for RS485 connection.",
       "foxess_cloud_auth_failed": "FoxESS Cloud API key validation failed. Check your API key is correct and your account has API access enabled.",
       "foxess_cloud_connection_error": "Unable to connect to FoxESS Cloud. Check your internet connection and try again.",
+      "zaptec_auth_failed": "Zaptec Cloud authentication failed. Check your email and password are correct.",
+      "zaptec_missing_credentials": "Please provide both your Zaptec email and password.",
       "no_prices": "No Octopus prices found for this tariff and region. Check your product and GSP region are correct.",
       "unknown": "An unexpected error occurred. Please try again."
     },
@@ -719,8 +721,8 @@
         "submit_button": "Next"
       },
       "curtailment_options": {
-        "title": "Curtailment & Automations Settings",
-        "description": "Configure automatic curtailment during negative feed-in tariff (FIT) prices, and optionally enable weather-based automations.\n\nWhen feed-in prices go negative, you PAY to export power. These settings prevent that by stopping battery export and optionally shutting down solar production.",
+        "title": "Curtailment & Weather Settings",
+        "description": "Configure automatic curtailment during negative feed-in tariff (FIT) prices.\n\nWhen feed-in prices go negative, you PAY to export power. These settings prevent that by stopping battery export and optionally shutting down solar production.\n\n**Weather automations** are independent of curtailment and can be enabled separately below.",
         "data": {
           "battery_curtailment_enabled": "Enable Battery Export Curtailment",
           "ac_inverter_curtailment_enabled": "Enable AC-Coupled Inverter Shutdown",
@@ -766,7 +768,7 @@
       },
       "ev_charging_setup": {
         "title": "EV Charging & OCPP",
-        "description": "Configure EV charging and OCPP charger management.\n\n**EV Charging:** Control Tesla vehicles via Fleet API/Teslemetry or Tesla BLE (ESPHome).\n\n**OCPP:** Connect OCPP 1.6-compliant chargers.\n\n**Zaptec:** Connect Zaptec chargers (requires custom-components/zaptec HA integration).",
+        "description": "Configure EV charging and OCPP charger management.\n\n**EV Charging:** Control Tesla vehicles via Fleet API/Teslemetry or Tesla BLE (ESPHome).\n\n**OCPP:** Connect OCPP 1.6-compliant chargers.\n\n**Zaptec:** Connect Zaptec chargers via HA integration or standalone (direct Zaptec Cloud API).",
         "data": {
           "ev_charging_enabled": "Enable EV Charging Control",
           "ev_provider": "EV Control Provider",
@@ -774,22 +776,37 @@
           "ocpp_enabled": "Enable OCPP Central System",
           "ocpp_port": "OCPP WebSocket Port",
           "zaptec_charger_entity": "Zaptec Charger Entity",
-          "zaptec_installation_id": "Zaptec Installation ID"
+          "zaptec_installation_id": "Zaptec Installation ID",
+          "zaptec_standalone_enabled": "Zaptec Standalone (Direct API)"
         },
         "data_description": {
           "ev_charging_enabled": "Allow automations to control Tesla vehicle charging (start/stop, set charge limits, set amps).",
           "ev_provider": "Choose how to control your Tesla: **Fleet API/Teslemetry** uses cloud API (requires HA Tesla Fleet or Teslemetry integration), **Tesla BLE** uses local Bluetooth via ESPHome (requires esphome-tesla-ble), **Both** uses BLE for control with Fleet API fallback.",
           "tesla_ble_entity_prefix": "Entity prefix for Tesla BLE entities (default: tesla_ble). Must match the ESPHome device name. Example: if your entities are sensor.my_tesla_charge_level, enter 'my_tesla'.",
-          "ocpp_enabled": "Run an OCPP 1.6J WebSocket server for connecting OCPP-compliant EV chargers. Chargers connect to ws://server:port/{charger_id}",
+          "ocpp_enabled": "Run an OCPP 1.6J WebSocket server for connecting OCPP-compliant EV chargers. Chargers connect to ws://server:port/'{charger_id}'",
           "ocpp_port": "Port for OCPP WebSocket server (default: 9000). Chargers will connect to this port.",
-          "zaptec_charger_entity": "Entity ID of your Zaptec charger (e.g. switch.zaptec_charger). Leave blank if not using Zaptec. Requires the custom-components/zaptec HA integration.",
-          "zaptec_installation_id": "Zaptec installation device ID for current limiting. Found in the Zaptec integration's device list. Leave blank to auto-detect."
+          "zaptec_charger_entity": "Entity ID of your Zaptec charger (e.g. switch.zaptec_charger). Leave blank if not using Zaptec or if using standalone mode.",
+          "zaptec_installation_id": "Zaptec installation device ID for current limiting. Found in the Zaptec integration's device list. Leave blank to auto-detect.",
+          "zaptec_standalone_enabled": "Connect directly to Zaptec Cloud API without requiring the custom-components/zaptec HA integration. You will be prompted for your Zaptec account credentials."
         },
         "submit_button": "Submit"
       },
+      "zaptec_cloud": {
+        "title": "Zaptec Cloud Credentials",
+        "description": "Enter your Zaptec account credentials to connect directly to the Zaptec Cloud API.\n\nPowerSync will auto-discover your chargers and installations.",
+        "data": {
+          "zaptec_username": "Zaptec Email",
+          "zaptec_password": "Zaptec Password"
+        },
+        "data_description": {
+          "zaptec_username": "Your Zaptec account email address (same as Zaptec Portal login).",
+          "zaptec_password": "Your Zaptec account password."
+        },
+        "submit_button": "Connect"
+      },
       "ev_charging": {
         "title": "EV Charging & OCPP",
-        "description": "Configure EV charging and OCPP charger management.\n\n**EV Charging:** Control Tesla vehicles via Fleet API/Teslemetry or Tesla BLE (ESPHome).\n\n**OCPP:** Connect OCPP 1.6-compliant chargers.\n\n**Zaptec:** Connect Zaptec chargers (requires custom-components/zaptec HA integration).",
+        "description": "Configure EV charging and OCPP charger management.\n\n**EV Charging:** Control Tesla vehicles via Fleet API/Teslemetry or Tesla BLE (ESPHome).\n\n**OCPP:** Connect OCPP 1.6-compliant chargers.\n\n**Zaptec:** Connect Zaptec chargers via HA integration or standalone (direct Zaptec Cloud API).",
         "data": {
           "ev_charging_enabled": "Enable EV Charging Control",
           "ev_provider": "EV Control Provider",
@@ -797,18 +814,33 @@
           "ocpp_enabled": "Enable OCPP Central System",
           "ocpp_port": "OCPP WebSocket Port",
           "zaptec_charger_entity": "Zaptec Charger Entity",
-          "zaptec_installation_id": "Zaptec Installation ID"
+          "zaptec_installation_id": "Zaptec Installation ID",
+          "zaptec_standalone_enabled": "Zaptec Standalone (Direct API)"
         },
         "data_description": {
           "ev_charging_enabled": "Allow automations to control Tesla vehicle charging (start/stop, set charge limits, set amps).",
           "ev_provider": "Choose how to control your Tesla: **Fleet API/Teslemetry** uses cloud API (requires HA Tesla Fleet or Teslemetry integration), **Tesla BLE** uses local Bluetooth via ESPHome (requires esphome-tesla-ble), **Both** uses BLE for control with Fleet API fallback.",
           "tesla_ble_entity_prefix": "Entity prefix for Tesla BLE entities (default: tesla_ble). Must match the ESPHome device name. Example: if your entities are sensor.my_tesla_charge_level, enter 'my_tesla'.",
-          "ocpp_enabled": "Run an OCPP 1.6J WebSocket server for connecting OCPP-compliant EV chargers. Chargers connect to ws://server:port/{charger_id}",
+          "ocpp_enabled": "Run an OCPP 1.6J WebSocket server for connecting OCPP-compliant EV chargers. Chargers connect to ws://server:port/'{charger_id}'",
           "ocpp_port": "Port for OCPP WebSocket server (default: 9000). Chargers will connect to this port.",
-          "zaptec_charger_entity": "Entity ID of your Zaptec charger (e.g. switch.zaptec_charger). Leave blank if not using Zaptec. Requires the custom-components/zaptec HA integration.",
-          "zaptec_installation_id": "Zaptec installation device ID for current limiting. Found in the Zaptec integration's device list. Leave blank to auto-detect."
+          "zaptec_charger_entity": "Entity ID of your Zaptec charger (e.g. switch.zaptec_charger). Leave blank if not using Zaptec or if using standalone mode.",
+          "zaptec_installation_id": "Zaptec installation device ID for current limiting. Found in the Zaptec integration's device list. Leave blank to auto-detect.",
+          "zaptec_standalone_enabled": "Connect directly to Zaptec Cloud API without requiring the custom-components/zaptec HA integration. You will be prompted for your Zaptec account credentials."
         },
         "submit_button": "Submit"
+      },
+      "zaptec_cloud_options": {
+        "title": "Zaptec Cloud Credentials",
+        "description": "Enter your Zaptec account credentials to connect directly to the Zaptec Cloud API.\n\nPowerSync will auto-discover your chargers and installations.",
+        "data": {
+          "zaptec_username": "Zaptec Email",
+          "zaptec_password": "Zaptec Password"
+        },
+        "data_description": {
+          "zaptec_username": "Your Zaptec account email address (same as Zaptec Portal login).",
+          "zaptec_password": "Your Zaptec account password."
+        },
+        "submit_button": "Connect"
       },
       "weather_options": {
         "title": "Weather & Solar Forecast",

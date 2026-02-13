@@ -24,6 +24,15 @@ from typing import Any, Callable
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
+from ..const import (
+    DOMAIN,
+    CONF_ZAPTEC_STANDALONE_ENABLED,
+    CONF_ZAPTEC_USERNAME,
+    CONF_ZAPTEC_PASSWORD,
+    CONF_ZAPTEC_CHARGER_ID,
+    CONF_ZAPTEC_INSTALLATION_ID_CLOUD,
+)
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -131,6 +140,9 @@ class EVCoordinator:
         self._last_update: datetime | None = None
         self._charging_plan: list[ChargingWindow] = []
         self._current_charge_amps: dict[str, int] = {}  # Track current amps per charger
+
+        # Cached Zaptec standalone client
+        self._zaptec_client = None
 
     @property
     def enabled(self) -> bool:
@@ -546,6 +558,47 @@ class EVCoordinator:
 
         return False
 
+    def _is_zaptec_standalone(self) -> bool:
+        """Check if Zaptec standalone mode is configured."""
+        for entry in self.hass.config_entries.async_entries(DOMAIN):
+            opts = {**entry.data, **entry.options}
+            if opts.get(CONF_ZAPTEC_STANDALONE_ENABLED) and opts.get(CONF_ZAPTEC_USERNAME):
+                return True
+        return False
+
+    def _get_zaptec_config(self) -> dict:
+        """Get Zaptec standalone configuration from config entry."""
+        for entry in self.hass.config_entries.async_entries(DOMAIN):
+            opts = {**entry.data, **entry.options}
+            if opts.get(CONF_ZAPTEC_STANDALONE_ENABLED):
+                return opts
+        return {}
+
+    async def _get_zaptec_client(self):
+        """Get or create a cached ZaptecCloudClient instance."""
+        if self._zaptec_client is not None:
+            return self._zaptec_client
+
+        config = self._get_zaptec_config()
+        username = config.get(CONF_ZAPTEC_USERNAME, "")
+        password = config.get(CONF_ZAPTEC_PASSWORD, "")
+        if not username or not password:
+            return None
+
+        # Check if client is already stored in hass.data
+        for entry in self.hass.config_entries.async_entries(DOMAIN):
+            entry_data = self.hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            client = entry_data.get("zaptec_client")
+            if client is not None:
+                self._zaptec_client = client
+                return client
+
+        # Create new client
+        from ..zaptec_api import ZaptecCloudClient
+        client = ZaptecCloudClient(username, password)
+        self._zaptec_client = client
+        return client
+
     async def _start_charging(self, config: EVConfig, power_w: float | None = None) -> None:
         """Start EV charging with dynamic amp adjustment.
 
@@ -569,6 +622,20 @@ class EVCoordinator:
         _LOGGER.info(f"Starting EV charging: {config.name} at {target_amps}A ({power_w or config.max_charging_power_w}W)")
 
         try:
+            # Zaptec standalone takes priority over HA integration
+            if self._is_zaptec_standalone():
+                client = await self._get_zaptec_client()
+                zaptec_config = self._get_zaptec_config()
+                charger_id = zaptec_config.get(CONF_ZAPTEC_CHARGER_ID, "")
+                if client and charger_id:
+                    await self._set_charging_amps(config, target_amps)
+                    self._current_charge_amps[entity_id] = target_amps
+                    await client.resume_charging(charger_id)
+                    _LOGGER.info(f"Started Zaptec standalone charging: {charger_id}")
+                    return
+                else:
+                    _LOGGER.warning("Zaptec standalone configured but missing client or charger_id")
+
             # Set charging amps first (if supported)
             await self._set_charging_amps(config, target_amps)
             self._current_charge_amps[entity_id] = target_amps
@@ -602,6 +669,20 @@ class EVCoordinator:
             amps: Target charging amps
         """
         entity_id = config.entity_id
+
+        # 0. Zaptec standalone — set installation current directly via API
+        if self._is_zaptec_standalone():
+            client = await self._get_zaptec_client()
+            zaptec_config = self._get_zaptec_config()
+            installation_id = zaptec_config.get(CONF_ZAPTEC_INSTALLATION_ID_CLOUD, "")
+            if client and installation_id:
+                try:
+                    await client.set_installation_current(installation_id, amps)
+                    _LOGGER.debug(f"Set Zaptec standalone charging amps to {amps}A")
+                    return
+                except Exception as e:
+                    # Rate limit or other error — log but don't fail
+                    _LOGGER.debug(f"Zaptec standalone set_current: {e}")
 
         # Try various methods to set charging amps
         # 1. Tesla BLE number entity
@@ -692,6 +773,16 @@ class EVCoordinator:
         domain = entity_id.split(".")[0]
 
         try:
+            # Zaptec standalone takes priority
+            if self._is_zaptec_standalone():
+                client = await self._get_zaptec_client()
+                zaptec_config = self._get_zaptec_config()
+                charger_id = zaptec_config.get(CONF_ZAPTEC_CHARGER_ID, "")
+                if client and charger_id:
+                    await client.stop_charging(charger_id)
+                    _LOGGER.info(f"Stopped Zaptec standalone charging: {charger_id}")
+                    return
+
             if domain == "switch":
                 await self.hass.services.async_call(
                     "switch", "turn_off",

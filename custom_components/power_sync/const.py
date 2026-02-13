@@ -1156,6 +1156,14 @@ DEFAULT_EV_PRICE_THRESHOLD = 0.15    # $0.15/kWh
 CONF_ZAPTEC_CHARGER_ENTITY = "zaptec_charger_entity"
 CONF_ZAPTEC_INSTALLATION_ID = "zaptec_installation_id"
 
+# Zaptec Cloud API standalone configuration
+# Direct API access without requiring custom-components/zaptec HA integration
+CONF_ZAPTEC_STANDALONE_ENABLED = "zaptec_standalone_enabled"
+CONF_ZAPTEC_USERNAME = "zaptec_username"
+CONF_ZAPTEC_PASSWORD = "zaptec_password"
+CONF_ZAPTEC_CHARGER_ID = "zaptec_charger_id"  # API charger UUID
+CONF_ZAPTEC_INSTALLATION_ID_CLOUD = "zaptec_installation_id_cloud"  # API installation UUID
+
 # EV sensor types
 SENSOR_TYPE_EV_CHARGING_STATUS = "ev_charging_status"
 SENSOR_TYPE_EV_NEXT_CHARGE_WINDOW = "ev_next_charge_window"
