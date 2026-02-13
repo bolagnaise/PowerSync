@@ -101,9 +101,11 @@ class FoxESSRegisterMap:
     remote_active_power: int = 0  # W, signed
     remote_active_power_is_32bit: bool = False
 
-    # Energy totals (daily/lifetime)
+    # Energy totals (daily)
     charge_energy_today: int = 0
     discharge_energy_today: int = 0
+    energy_is_32bit: bool = False     # H3-Pro/Smart: 32-bit energy registers
+    energy_gain: int = 10             # H1/H3/KH: 0.1 kWh (gain=10); H3-Pro/Smart: 0.01 kWh (gain=100)
 
     # Scaling factors for power registers (varies by model)
     # H1/H3/KH: all registers use gain=1000 (scale 0.001)
@@ -235,8 +237,10 @@ REGISTER_MAPS: dict[FoxESSModelFamily, FoxESSRegisterMap] = {
         remote_timeout=46002,
         remote_active_power=46003,  # 32-bit: 46003 + 46004
         remote_active_power_is_32bit=True,
-        charge_energy_today=37120,
-        discharge_energy_today=37121,
+        charge_energy_today=39608,    # 32-bit: [39608, 39607], scale 0.01
+        discharge_energy_today=39612, # 32-bit: [39612, 39611], scale 0.01
+        energy_is_32bit=True,
+        energy_gain=100,              # 0.01 kWh resolution
         supports_bms=True,
         supports_energy_totals=True,
         supports_work_mode_rw=True,
@@ -275,8 +279,10 @@ REGISTER_MAPS: dict[FoxESSModelFamily, FoxESSRegisterMap] = {
         remote_timeout=46002,
         remote_active_power=46003,
         remote_active_power_is_32bit=True,
-        charge_energy_today=37120,
-        discharge_energy_today=37121,
+        charge_energy_today=39608,    # 32-bit: [39608, 39607], scale 0.01
+        discharge_energy_today=39612, # 32-bit: [39612, 39611], scale 0.01
+        energy_is_32bit=True,
+        energy_gain=100,              # 0.01 kWh resolution
         supports_bms=True,
         supports_energy_totals=True,
         supports_work_mode_rw=True,
@@ -657,14 +663,20 @@ class FoxESSController(InverterController):
             # CT2 power (AC-coupled inverter meter)
             ct2_power_kw = 0.0
             if reg.ct2_power:
+                ct2_raw = None
                 if reg.ct2_power_is_32bit:
                     ct2_raw = await self._read_holding_registers(reg.ct2_power - 1, 2)
                     if ct2_raw and len(ct2_raw) == 2:
                         ct2_power_kw = self._to_signed32(ct2_raw[0], ct2_raw[1]) / grid_gain
+                    else:
+                        _LOGGER.debug("FoxESS CT2 read failed: reg=%d, raw=%s", reg.ct2_power, ct2_raw)
                 else:
                     ct2_raw = await self._read_data_register(reg.ct2_power, 1)
                     if ct2_raw:
                         ct2_power_kw = self._to_signed16(ct2_raw[0]) / grid_gain
+                _LOGGER.debug("FoxESS CT2 raw: reg=%d raw=%s ct2=%.3f kW, gain=%d, 32bit=%s",
+                              reg.ct2_power, list(ct2_raw) if ct2_raw else None, ct2_power_kw,
+                              grid_gain, reg.ct2_power_is_32bit)
                 # CT2 on same meter board — same sign convention as grid CT
                 if reg.grid_sign_inverted:
                     ct2_power_kw = -ct2_power_kw
@@ -962,18 +974,33 @@ class FoxESSController(InverterController):
             return None
 
         reg = self._register_map
+        gain = reg.energy_gain  # Per-model gain (10 for H1/H3/KH, 100 for H3-Pro/Smart)
         result: dict[str, float] = {}
 
         if reg.charge_energy_today:
-            raw = await self._read_data_register(reg.charge_energy_today, 1)
-            if raw:
-                result["charge_today_kwh"] = raw[0] / GAIN_ENERGY
+            if reg.energy_is_32bit:
+                # 32-bit: low word at register address, high word at address-1
+                raw = await self._read_holding_registers(reg.charge_energy_today - 1, 2)
+                if raw and len(raw) == 2:
+                    val = (raw[0] << 16) | raw[1]  # unsigned 32-bit
+                    result["charge_today_kwh"] = val / gain
+            else:
+                raw = await self._read_data_register(reg.charge_energy_today, 1)
+                if raw:
+                    result["charge_today_kwh"] = raw[0] / gain
 
         if reg.discharge_energy_today:
-            raw = await self._read_data_register(reg.discharge_energy_today, 1)
-            if raw:
-                result["discharge_today_kwh"] = raw[0] / GAIN_ENERGY
+            if reg.energy_is_32bit:
+                raw = await self._read_holding_registers(reg.discharge_energy_today - 1, 2)
+                if raw and len(raw) == 2:
+                    val = (raw[0] << 16) | raw[1]  # unsigned 32-bit
+                    result["discharge_today_kwh"] = val / gain
+            else:
+                raw = await self._read_data_register(reg.discharge_energy_today, 1)
+                if raw:
+                    result["discharge_today_kwh"] = raw[0] / gain
 
+        _LOGGER.debug("FoxESS energy summary: %s (gain=%d, 32bit=%s)", result, gain, reg.energy_is_32bit)
         return result if result else None
 
     # ---- Battery data for connection test ----
