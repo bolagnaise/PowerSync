@@ -332,6 +332,19 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
         if not is_tesla_vehicle:
             continue
 
+        # Check if vehicle is at home — skip vehicles that are away
+        skip_vehicle = False
+        for entity in entity_registry.entities.values():
+            if entity.device_id != device.id:
+                continue
+            if entity.domain == "device_tracker" and "_location" in entity.entity_id.lower():
+                loc_state = hass.states.get(entity.entity_id)
+                if loc_state and loc_state.state == "not_home":
+                    skip_vehicle = True
+                    break
+        if skip_vehicle:
+            continue
+
         for entity in entity_registry.entities.values():
             if entity.device_id != device.id:
                 continue

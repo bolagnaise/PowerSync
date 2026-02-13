@@ -5,6 +5,7 @@ Tracks charging sessions with detailed energy, cost, and source breakdown.
 Supports solar surplus vs grid charging attribution.
 """
 
+import asyncio
 import logging
 import uuid
 import json
@@ -302,6 +303,7 @@ class ChargingSessionManager:
         self.hass = hass
         self.active_sessions: Dict[str, ChargingSession] = {}
         self._storage_path = storage_path
+        self._session_lock = asyncio.Lock()
 
         # Load existing sessions on init
         self._sessions_cache: List[ChargingSession] = []
@@ -377,25 +379,26 @@ class ChargingSessionManager:
         Returns:
             New ChargingSession instance
         """
-        await self._load_sessions()
+        async with self._session_lock:
+            await self._load_sessions()
 
-        # End any existing session for this vehicle
-        if vehicle_id in self.active_sessions:
-            await self.end_session(vehicle_id, "new_session_started")
+            # End any existing session for this vehicle
+            if vehicle_id in self.active_sessions:
+                await self._end_session_unlocked(vehicle_id, "new_session_started")
 
-        session = ChargingSession(
-            id=str(uuid.uuid4()),
-            vehicle_id=vehicle_id,
-            start_time=datetime.now().isoformat(),
-            mode=mode,
-            start_soc=start_soc,
-            target_soc=target_soc,
-        )
+            session = ChargingSession(
+                id=str(uuid.uuid4()),
+                vehicle_id=vehicle_id,
+                start_time=datetime.now().isoformat(),
+                mode=mode,
+                start_soc=start_soc,
+                target_soc=target_soc,
+            )
 
-        self.active_sessions[vehicle_id] = session
-        _LOGGER.info(f"Started charging session {session.id} for {vehicle_id} (mode={mode})")
+            self.active_sessions[vehicle_id] = session
+            _LOGGER.info(f"Started charging session {session.id} for {vehicle_id} (mode={mode})")
 
-        return session
+            return session
 
     async def update_session(
         self,
@@ -464,6 +467,16 @@ class ChargingSessionManager:
         Returns:
             Completed session or None if no active session
         """
+        async with self._session_lock:
+            return await self._end_session_unlocked(vehicle_id, reason, end_soc)
+
+    async def _end_session_unlocked(
+        self,
+        vehicle_id: str,
+        reason: str,
+        end_soc: Optional[int] = None,
+    ) -> Optional[ChargingSession]:
+        """End a charging session (caller must hold _session_lock)."""
         session = self.active_sessions.pop(vehicle_id, None)
         if not session:
             return None

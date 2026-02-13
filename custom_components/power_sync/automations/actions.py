@@ -1700,6 +1700,9 @@ async def _action_set_ev_charging_amps(
 # Structure: { entry_id: { vehicle_id: { state... }, ... }, ... }
 _dynamic_ev_state: Dict[str, Dict[str, Dict[str, Any]]] = {}
 
+# Lock to prevent duplicate dynamic EV charging sessions from concurrent triggers
+_start_dynamic_lock = asyncio.Lock()
+
 # Global storage for regular EV charging scheduled stop (for stop_outside_window)
 _ev_scheduled_stop: Dict[str, Any] = {}
 
@@ -2796,18 +2799,33 @@ async def _action_start_ev_charging_dynamic(
     """
     from ..const import DOMAIN
 
+    async with _start_dynamic_lock:
+        return await _action_start_ev_charging_dynamic_locked(
+            hass, config_entry, params, context
+        )
+
+
+async def _action_start_ev_charging_dynamic_locked(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    params: Dict[str, Any],
+    context: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Inner implementation of dynamic EV charging start (caller holds _start_dynamic_lock)."""
+    from ..const import DOMAIN
+
     entry_id = config_entry.entry_id
     vehicle_id = params.get("vehicle_vin") or params.get("vehicle_id") or DEFAULT_VEHICLE_ID
 
     # Determine mode
     dynamic_mode = params.get("dynamic_mode", "battery_target")
 
-    # Prevent duplicate solar surplus sessions for the same entry
-    if dynamic_mode == "solar_surplus":
-        entry_vehicles = _dynamic_ev_state.get(entry_id, {})
-        for vid, v_state in entry_vehicles.items():
-            if v_state.get("active") and v_state.get("params", {}).get("dynamic_mode") == "solar_surplus":
-                _LOGGER.debug(f"Solar surplus session already active for vehicle {vid}, skipping duplicate")
+    # Prevent duplicate sessions for the same vehicle/mode
+    entry_vehicles = _dynamic_ev_state.get(entry_id, {})
+    for vid, v_state in entry_vehicles.items():
+        if v_state.get("active") and v_state.get("params", {}).get("dynamic_mode") == dynamic_mode:
+            if vid == vehicle_id or dynamic_mode == "solar_surplus":
+                _LOGGER.debug(f"Dynamic session ({dynamic_mode}) already active for vehicle {vid}, skipping duplicate")
                 return True
 
     # Get common parameters with defaults
