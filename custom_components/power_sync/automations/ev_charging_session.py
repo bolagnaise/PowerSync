@@ -83,6 +83,9 @@ class ChargingSession:
     # Detailed segments
     segments: List[ChargingSegment] = field(default_factory=list)
 
+    # Timestamp of last reading for elapsed time calculation
+    last_reading_time: Optional[str] = None
+
     # Running totals for segment tracking
     _current_segment_start: Optional[str] = field(default=None, repr=False)
     _current_segment_source: Optional[str] = field(default=None, repr=False)
@@ -109,6 +112,7 @@ class ChargingSession:
             "mode": self.mode,
             "completed": self.completed,
             "stopped_reason": self.stopped_reason,
+            "last_reading_time": self.last_reading_time,
             "segments": [s.to_dict() if isinstance(s, ChargingSegment) else s for s in self.segments],
         }
         return data
@@ -139,18 +143,22 @@ class ChargingSession:
             mode=data.get("mode", "solar_surplus"),
             completed=data.get("completed", False),
             stopped_reason=data.get("stopped_reason"),
+            last_reading_time=data.get("last_reading_time"),
             segments=segments,
         )
 
     @property
     def duration_minutes(self) -> float:
         """Calculate session duration in minutes."""
-        if not self.end_time:
-            end = datetime.now()
-        else:
-            end = datetime.fromisoformat(self.end_time.replace("Z", "+00:00"))
-        start = datetime.fromisoformat(self.start_time.replace("Z", "+00:00"))
-        return (end - start).total_seconds() / 60
+        try:
+            if not self.end_time:
+                end = datetime.now()
+            else:
+                end = datetime.fromisoformat(self.end_time.replace("Z", "+00:00"))
+            start = datetime.fromisoformat(self.start_time.replace("Z", "+00:00"))
+            return (end - start).total_seconds() / 60
+        except (ValueError, TypeError):
+            return 0.0
 
     def start_segment(self, source: str) -> None:
         """Start a new charging segment."""
@@ -169,7 +177,6 @@ class ChargingSession:
         is_solar: bool,
         import_price_cents: float,
         export_price_cents: float,
-        interval_seconds: float = 30,
     ) -> None:
         """Add a power reading to the current segment.
 
@@ -179,12 +186,29 @@ class ChargingSession:
             is_solar: True if this power is from solar surplus
             import_price_cents: Grid import price in cents/kWh
             export_price_cents: Feed-in tariff in cents/kWh
-            interval_seconds: Time since last reading
         """
+        # Clamp negative power values (sensor glitches)
+        power_kw = max(0.0, power_kw)
+
         if not self._current_segment_start:
             # Auto-start a segment
             source = ChargingSource.SOLAR_SURPLUS.value if is_solar else ChargingSource.GRID_PEAK.value
             self.start_segment(source)
+
+        # Calculate elapsed time from last reading
+        now = datetime.now()
+        if self.last_reading_time:
+            try:
+                last = datetime.fromisoformat(self.last_reading_time)
+                interval_seconds = (now - last).total_seconds()
+                # Cap at 120s to avoid huge energy spikes from delayed readings
+                interval_seconds = min(interval_seconds, 120.0)
+            except (ValueError, TypeError):
+                interval_seconds = 30.0
+        else:
+            # First reading — default to 30s
+            interval_seconds = 30.0
+        self.last_reading_time = now.isoformat()
 
         # Calculate energy for this interval
         energy_kwh = (power_kw * interval_seconds) / 3600
@@ -420,7 +444,6 @@ class ChargingSessionManager:
             is_solar=is_solar,
             import_price_cents=import_price_cents,
             export_price_cents=export_price_cents,
-            interval_seconds=30,
         )
 
         return session

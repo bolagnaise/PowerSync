@@ -1759,6 +1759,75 @@ def _calculate_solar_surplus(live_status: dict, current_ev_power_kw: float, conf
     return max(0, surplus - buffer_kw)
 
 
+def _is_ev_charging_from_solar(grid_power_kw: float, ev_power_kw: float) -> bool:
+    """Determine if EV is charging primarily from solar.
+
+    If less than 20% of EV power is coming from the grid, consider it solar.
+    """
+    if ev_power_kw <= 0:
+        return False
+    return grid_power_kw < (ev_power_kw * 0.2)
+
+
+def _get_current_ev_prices(hass, entry_id: str) -> tuple:
+    """Get current import/export prices with multi-source fallback.
+
+    Returns:
+        (import_price_cents, export_price_cents) tuple with defaults of (30.0, 8.0)
+    """
+    import_price = 30.0
+    export_price = 8.0
+
+    entry_data = hass.data.get(DOMAIN, {}).get(entry_id, {})
+
+    # Try Amber coordinator first
+    amber_coordinator = entry_data.get("amber_coordinator")
+    if amber_coordinator and amber_coordinator.data:
+        current_prices = amber_coordinator.data.get("current", [])
+        for price in current_prices:
+            if price.get("channelType") == "general":
+                import_price = price.get("perKwh", 30.0)
+            elif price.get("channelType") == "feedIn":
+                export_price = abs(price.get("perKwh", 8.0))
+        return import_price, export_price
+
+    # Fallback to tariff_schedule (for Globird/AEMO VPP users)
+    if entry_data.get("tariff_schedule"):
+        tariff_schedule = entry_data.get("tariff_schedule", {})
+        import_price = tariff_schedule.get("buy_price", 30.0)
+        export_price = tariff_schedule.get("sell_price", 8.0)
+        return import_price, export_price
+
+    # Fallback to Sigenergy tariff (for Sigenergy users with Amber)
+    if entry_data.get("sigenergy_tariff"):
+        sigenergy_tariff = entry_data.get("sigenergy_tariff", {})
+        buy_prices = sigenergy_tariff.get("buy_prices", [])
+        sell_prices = sigenergy_tariff.get("sell_prices", [])
+        if buy_prices:
+            now = datetime.now()
+            current_time = f"{now.hour:02d}:{30 if now.minute >= 30 else 0:02d}"
+            for slot in buy_prices:
+                if slot.get("timeRange", "").startswith(current_time):
+                    import_price = slot.get("price", 30.0)
+                    break
+        if sell_prices:
+            now = datetime.now()
+            current_time = f"{now.hour:02d}:{30 if now.minute >= 30 else 0:02d}"
+            for slot in sell_prices:
+                if slot.get("timeRange", "").startswith(current_time):
+                    export_price = slot.get("price", 8.0)
+                    break
+        return import_price, export_price
+
+    # Fallback to stored current_prices
+    price_data = entry_data.get("current_prices", {})
+    if price_data:
+        import_price = price_data.get("import_cents", 30.0)
+        export_price = price_data.get("export_cents", 8.0)
+
+    return import_price, export_price
+
+
 def get_price_recommendation(
     import_price_cents: float,
     export_price_cents: float,
@@ -2430,58 +2499,11 @@ async def _dynamic_ev_update_surplus(
             from .ev_charging_session import get_session_manager
             session_manager = get_session_manager()
             if session_manager:
-                # Determine if we're charging from solar
-                is_solar = my_surplus_kw >= (current_ev_kw * 0.8)  # 80%+ from solar counts as solar
+                # Determine if we're charging from solar using grid import
+                grid_power_kw = (live_status.get("grid_power") or 0) / 1000
+                is_solar = _is_ev_charging_from_solar(grid_power_kw, current_ev_kw)
 
-                # Get current prices (default values if not available)
-                import_price = 30.0  # Default 30c/kWh
-                export_price = 8.0   # Default 8c/kWh FiT
-
-                # Try to get actual prices from config entry data
-                entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
-
-                # Try Amber coordinator first
-                amber_coordinator = entry_data.get("amber_coordinator")
-                if amber_coordinator and amber_coordinator.data:
-                    current_prices = amber_coordinator.data.get("current", [])
-                    for price in current_prices:
-                        if price.get("channelType") == "general":
-                            import_price = price.get("perKwh", 30.0)
-                        elif price.get("channelType") == "feedIn":
-                            export_price = abs(price.get("perKwh", 8.0))
-
-                # Fallback to tariff_schedule (for Globird/AEMO VPP users)
-                elif entry_data.get("tariff_schedule"):
-                    tariff_schedule = entry_data.get("tariff_schedule", {})
-                    import_price = tariff_schedule.get("buy_price", 30.0)
-                    export_price = tariff_schedule.get("sell_price", 8.0)
-
-                # Fallback to Sigenergy tariff (for Sigenergy users with Amber)
-                elif entry_data.get("sigenergy_tariff"):
-                    sigenergy_tariff = entry_data.get("sigenergy_tariff", {})
-                    buy_prices = sigenergy_tariff.get("buy_prices", [])
-                    sell_prices = sigenergy_tariff.get("sell_prices", [])
-                    if buy_prices:
-                        now = datetime.now()
-                        current_time = f"{now.hour:02d}:{30 if now.minute >= 30 else 0:02d}"
-                        for slot in buy_prices:
-                            if slot.get("timeRange", "").startswith(current_time):
-                                import_price = slot.get("price", 30.0)
-                                break
-                    if sell_prices:
-                        now = datetime.now()
-                        current_time = f"{now.hour:02d}:{30 if now.minute >= 30 else 0:02d}"
-                        for slot in sell_prices:
-                            if slot.get("timeRange", "").startswith(current_time):
-                                export_price = slot.get("price", 8.0)
-                                break
-
-                # Fallback to stored current_prices
-                else:
-                    price_data = entry_data.get("current_prices", {})
-                    if price_data:
-                        import_price = price_data.get("import_cents", 30.0)
-                        export_price = price_data.get("export_cents", 8.0)
+                import_price, export_price = _get_current_ev_prices(hass, config_entry.entry_id)
 
                 await session_manager.update_session(
                     vehicle_id=vehicle_id,
@@ -2700,17 +2722,8 @@ async def _dynamic_ev_update(
         if session_manager:
             if current_amps > 0 and new_amps > 0:
                 # Session update - still charging
-                # In battery target mode, determine if using solar based on grid import
-                # If grid import is low relative to EV power, we're mostly on solar
-                is_solar = grid_power_kw < (current_ev_power_kw * 0.3)
-
-                # Get price info if available
-                import_price = 0.0
-                export_price = 0.0
-                price_data = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("price_data", {})
-                if price_data:
-                    import_price = price_data.get("import_price_cents", 0.0)
-                    export_price = price_data.get("export_price_cents", 0.0)
+                is_solar = _is_ev_charging_from_solar(grid_power_kw, current_ev_power_kw)
+                import_price, export_price = _get_current_ev_prices(hass, entry_id)
 
                 await session_manager.update_session(
                     vehicle_id=vehicle_id,

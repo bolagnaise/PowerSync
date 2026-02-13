@@ -7168,18 +7168,17 @@ class EVWidgetDataView(HomeAssistantView):
                     "surplus_kw": round(surplus_kw, 2),
                 })
 
-            # If no PowerSync-managed EV sessions, check external chargers
-            if not widget_data:
-                # Check Zaptec standalone charger
-                zaptec_cached = entry_data.get("zaptec_cached_state")
-                if zaptec_cached and zaptec_cached.get("charger_operation_mode") == "charging":
-                    power_w = zaptec_cached.get("total_charge_power_w", 0)
-                    power_kw = power_w / 1000
-                    # Determine source: if surplus > 80% of charge power, it's solar
-                    if surplus_kw >= power_kw * 0.8 and power_kw > 0:
+            # Always check external chargers (Zaptec, OCPP) regardless of dynamic EV state
+            # This ensures standalone chargers appear even when idle vehicles exist
+            zaptec_cached = entry_data.get("zaptec_cached_state")
+            if zaptec_cached and zaptec_cached.get("charger_operation_mode") == "charging":
+                power_w = zaptec_cached.get("total_charge_power_w", 0)
+                power_kw = power_w / 1000
+                if power_kw > 0.05:
+                    if surplus_kw >= power_kw * 0.8:
                         zaptec_source = "solar"
-                    elif surplus_kw > 0 and power_kw > 0:
-                        zaptec_source = "grid"  # mixed, but grid-dominant
+                    elif surplus_kw > 0:
+                        zaptec_source = "grid"
                     else:
                         zaptec_source = "grid"
                     widget_data.append({
@@ -7193,36 +7192,38 @@ class EVWidgetDataView(HomeAssistantView):
                         "surplus_kw": round(surplus_kw, 2),
                     })
 
-                # Check OCPP chargers
-                if not widget_data:
-                    ocpp_server = entry_data.get("ocpp_server")
-                    if ocpp_server:
-                        try:
-                            for cp_id, cp in ocpp_server.charge_points.items():
-                                if hasattr(cp, 'active_transaction') and cp.active_transaction:
-                                    meter_w = getattr(cp, 'meter_power_w', 0) or 0
-                                    power_kw = meter_w / 1000
-                                    if power_kw > 0.05:
-                                        if surplus_kw >= power_kw * 0.8:
-                                            ocpp_source = "solar"
-                                        else:
-                                            ocpp_source = "grid"
-                                        widget_data.append({
-                                            "vehicle_name": f"OCPP {cp_id[:8]}",
-                                            "is_charging": True,
-                                            "current_soc": 0,
-                                            "target_soc": 80,
-                                            "current_power_kw": round(power_kw, 2),
-                                            "source": ocpp_source,
-                                            "eta_minutes": None,
-                                            "surplus_kw": round(surplus_kw, 2),
-                                        })
-                        except Exception as e:
-                            _LOGGER.debug(f"Error checking OCPP chargers for widget: {e}")
+            # Check OCPP chargers
+            ocpp_server = entry_data.get("ocpp_server")
+            if ocpp_server:
+                try:
+                    for cp_id, cp in ocpp_server.charge_points.items():
+                        if hasattr(cp, 'active_transaction') and cp.active_transaction:
+                            meter_w = getattr(cp, 'meter_power_w', 0) or 0
+                            power_kw = meter_w / 1000
+                            if power_kw > 0.05:
+                                if surplus_kw >= power_kw * 0.8:
+                                    ocpp_source = "solar"
+                                else:
+                                    ocpp_source = "grid"
+                                widget_data.append({
+                                    "vehicle_name": f"OCPP {cp_id[:8]}",
+                                    "is_charging": True,
+                                    "current_soc": 0,
+                                    "target_soc": 80,
+                                    "current_power_kw": round(power_kw, 2),
+                                    "source": ocpp_source,
+                                    "eta_minutes": None,
+                                    "surplus_kw": round(surplus_kw, 2),
+                                })
+                except Exception as e:
+                    _LOGGER.debug(f"Error checking OCPP chargers for widget: {e}")
 
-            # If still no active vehicles, return idle status
-            if not widget_data:
-                widget_data.append({
+            # Filter out idle vehicles — only keep entries that are actively charging
+            active_widget_data = [w for w in widget_data if w["is_charging"] and w["current_power_kw"] > 0]
+
+            # If no actively charging vehicles, return idle status
+            if not active_widget_data:
+                active_widget_data.append({
                     "vehicle_name": "No Active Vehicle",
                     "is_charging": False,
                     "current_soc": 0,
@@ -7235,7 +7236,7 @@ class EVWidgetDataView(HomeAssistantView):
 
             return web.json_response({
                 "success": True,
-                "widgets": widget_data,
+                "widgets": active_widget_data,
             })
 
         except Exception as e:
@@ -15114,6 +15115,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if automation_cancel := entry_data.get("automation_cancel"):
         automation_cancel()
         _LOGGER.debug("Cancelled automation evaluation timer")
+
+    # Flush active EV charging sessions so they're not lost
+    if session_manager := entry_data.get("session_manager"):
+        for vehicle_id in list(session_manager.active_sessions.keys()):
+            try:
+                await session_manager.end_session(vehicle_id, "ha_restart")
+                _LOGGER.info(f"Flushed EV charging session for {vehicle_id} on unload")
+            except Exception as e:
+                _LOGGER.debug(f"Could not flush session for {vehicle_id}: {e}")
 
     # Stop optimization coordinator if it exists
     if opt_coordinator := entry_data.get("optimization_coordinator"):
