@@ -216,6 +216,7 @@ from .const import (
     TESLA_BLE_SENSOR_CHARGE_LEVEL,
     TESLA_BLE_SENSOR_CHARGING_STATE,
     TESLA_BLE_SENSOR_CHARGE_LIMIT,
+    TESLA_BLE_SENSOR_CHARGE_POWER,
     TESLA_BLE_BINARY_ASLEEP,
     TESLA_BLE_BINARY_STATUS,
     TESLA_BLE_SWITCH_CHARGER,
@@ -281,6 +282,64 @@ def _resolve_ble_prefix(hass, config: dict) -> str:
             return detected
 
     return prefix
+
+
+def _get_ev_charger_power_kw(hass, entry) -> float:
+    """Get EV charging power from Tesla vehicle sensors (Fleet API + BLE).
+
+    Checks both Teslemetry/Fleet API sensors (e.g. sensor.tessy_charger_power)
+    and Tesla BLE sensors (e.g. sensor.teslable_charge_power).
+
+    Returns:
+        EV charging power in kW, or 0.0 if not charging or not available.
+    """
+    ev_power_kw = 0.0
+
+    # Check Tesla BLE charge_power sensor
+    config = {**entry.data, **entry.options}
+    prefix = _resolve_ble_prefix(hass, config)
+    ble_power_entity = TESLA_BLE_SENSOR_CHARGE_POWER.format(prefix=prefix)
+    ble_state = hass.states.get(ble_power_entity)
+    if ble_state and ble_state.state not in ("unknown", "unavailable"):
+        try:
+            val = float(ble_state.state)
+            if val > 0:
+                ev_power_kw = max(ev_power_kw, val)
+        except (ValueError, TypeError):
+            pass
+
+    # Check Fleet API vehicle sensors (charger_power, charging_power)
+    # These are discovered by entity_id pattern matching across Tesla devices
+    entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
+    for device in device_registry.devices.values():
+        is_tesla_vehicle = False
+        for identifier in device.identifiers:
+            if identifier[0] in TESLA_INTEGRATIONS:
+                potential_vin = str(identifier[1])
+                if len(potential_vin) == 17 and not potential_vin.isdigit():
+                    is_tesla_vehicle = True
+                break
+        if not is_tesla_vehicle:
+            continue
+
+        for entity in entity_registry.entities.values():
+            if entity.device_id != device.id:
+                continue
+            eid = entity.entity_id.lower()
+            if not entity.entity_id.startswith("sensor."):
+                continue
+            if "charger_power" in eid or "charging_power" in eid or "charge_power" in eid:
+                state = hass.states.get(entity.entity_id)
+                if state and state.state not in ("unknown", "unavailable"):
+                    try:
+                        val = float(state.state)
+                        if val > 0:
+                            ev_power_kw = max(ev_power_kw, val)
+                    except (ValueError, TypeError):
+                        pass
+
+    return ev_power_kw
 
 
 class SensitiveDataFilter(logging.Filter):
@@ -5400,12 +5459,23 @@ class EVVehiclesView(HomeAssistantView):
         if charge_flap_state and charge_flap_state.state == "on":
             is_plugged_in = True
 
+        # Get charge power
+        charger_power = None
+        charge_power_entity = TESLA_BLE_SENSOR_CHARGE_POWER.format(prefix=prefix)
+        charge_power_state = self._hass.states.get(charge_power_entity)
+        if charge_power_state and charge_power_state.state not in ("unknown", "unavailable"):
+            try:
+                charger_power = float(charge_power_state.state)
+            except (ValueError, TypeError):
+                pass
+
         # Check BLE connection status
         is_online = status_state.state == "on"
 
         _LOGGER.debug(
             f"EV BLE: Found vehicle via BLE - battery={battery_level}, "
-            f"charging={charging_state}, limit={charge_limit}, online={is_online}"
+            f"charging={charging_state}, limit={charge_limit}, "
+            f"power={charger_power}, online={is_online}"
         )
 
         return {
@@ -5418,7 +5488,7 @@ class EVVehiclesView(HomeAssistantView):
             "charging_state": charging_state,
             "charge_limit_soc": charge_limit,
             "is_plugged_in": is_plugged_in,
-            "charger_power": None,
+            "charger_power": charger_power,
             "is_online": is_online,
             "data_updated_at": datetime.now().isoformat(),
             "source": "tesla_ble",
@@ -6310,12 +6380,13 @@ class SolarSurplusStatusView(HomeAssistantView):
                         "charging_started": state.get("charging_started", False),
                     })
 
-            # Get EV power from coordinator (Tesla Wall Connector or other sources)
-            ev_power_kw = 0.0
-            if tesla_coordinator and tesla_coordinator.data:
+            # Get EV power — prefer vehicle sensor (e.g. sensor.tessy_charger_power),
+            # fall back to Wall Connector data from coordinator
+            ev_power_kw = _get_ev_charger_power_kw(self._hass, entry)
+            if ev_power_kw <= 0 and tesla_coordinator and tesla_coordinator.data:
                 ev_power_kw = tesla_coordinator.data.get("ev_power", 0)
 
-            # If no dynamic vehicles but Wall Connector is charging, include it
+            # If no dynamic vehicles but EV is charging, include it
             if not vehicles_state and ev_power_kw > 0.05:
                 vehicles_state.append({
                     "vehicle_id": "wall_connector",
@@ -7242,32 +7313,33 @@ class EVWidgetDataView(HomeAssistantView):
                 except Exception as e:
                     _LOGGER.debug(f"Error checking OCPP chargers for widget: {e}")
 
-            # Check Tesla Wall Connector power from coordinator data
-            # This catches native Tesla EV charging not managed by PowerSync dynamic modes
-            if tesla_coordinator and tesla_coordinator.data:
-                wc_power_kw = tesla_coordinator.data.get("ev_power", 0)
-                if wc_power_kw > 0.05:
-                    # Only add if no other source already covers this charging
-                    # (dynamic EV state already tracks PowerSync-managed sessions)
-                    already_covered = any(
-                        w["is_charging"] and w["current_power_kw"] > 0
-                        for w in widget_data
-                    )
-                    if not already_covered:
-                        if surplus_kw >= wc_power_kw * 0.8:
-                            wc_source = "solar"
-                        else:
-                            wc_source = "grid"
-                        widget_data.append({
-                            "vehicle_name": "Tesla Wall Connector",
-                            "is_charging": True,
-                            "current_soc": 0,
-                            "target_soc": 80,
-                            "current_power_kw": round(wc_power_kw, 2),
-                            "source": wc_source,
-                            "eta_minutes": None,
-                            "surplus_kw": round(surplus_kw, 2),
-                        })
+            # Check Tesla EV charging power — prefer vehicle sensor (e.g. sensor.tessy_charger_power),
+            # fall back to Wall Connector data from coordinator
+            ev_sensor_kw = _get_ev_charger_power_kw(self._hass, self._config_entry)
+            if ev_sensor_kw <= 0 and tesla_coordinator and tesla_coordinator.data:
+                ev_sensor_kw = tesla_coordinator.data.get("ev_power", 0)
+            if ev_sensor_kw > 0.05:
+                # Only add if no other source already covers this charging
+                # (dynamic EV state already tracks PowerSync-managed sessions)
+                already_covered = any(
+                    w["is_charging"] and w["current_power_kw"] > 0
+                    for w in widget_data
+                )
+                if not already_covered:
+                    if surplus_kw >= ev_sensor_kw * 0.8:
+                        ev_source = "solar"
+                    else:
+                        ev_source = "grid"
+                    widget_data.append({
+                        "vehicle_name": "Tesla EV",
+                        "is_charging": True,
+                        "current_soc": 0,
+                        "target_soc": 80,
+                        "current_power_kw": round(ev_sensor_kw, 2),
+                        "source": ev_source,
+                        "eta_minutes": None,
+                        "surplus_kw": round(surplus_kw, 2),
+                    })
 
             # Filter out idle vehicles — only keep entries that are actively charging
             active_widget_data = [w for w in widget_data if w["is_charging"] and w["current_power_kw"] > 0]
