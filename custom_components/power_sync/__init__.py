@@ -284,20 +284,22 @@ def _resolve_ble_prefix(hass, config: dict) -> str:
     return prefix
 
 
-def _get_ev_charger_power_kw(hass, entry) -> float:
-    """Get EV charging power from Tesla vehicle sensors (Fleet API + BLE).
+def _get_ev_vehicle_status(hass, entry) -> dict:
+    """Get EV charging status from Tesla vehicle sensors (Fleet API + BLE).
 
     Checks both Teslemetry/Fleet API sensors (e.g. sensor.tessy_charger_power)
-    and Tesla BLE sensors (e.g. sensor.teslable_charge_power).
+    and Tesla BLE sensors (e.g. sensor.teslable_charge_power, charge_level).
 
     Returns:
-        EV charging power in kW, or 0.0 if not charging or not available.
+        Dict with ev_power_kw (float) and ev_soc (int or None).
     """
     ev_power_kw = 0.0
+    ev_soc = None
 
-    # Check Tesla BLE charge_power sensor
+    # Check Tesla BLE sensors
     config = {**entry.data, **entry.options}
     prefix = _resolve_ble_prefix(hass, config)
+
     ble_power_entity = TESLA_BLE_SENSOR_CHARGE_POWER.format(prefix=prefix)
     ble_state = hass.states.get(ble_power_entity)
     if ble_state and ble_state.state not in ("unknown", "unavailable"):
@@ -308,8 +310,15 @@ def _get_ev_charger_power_kw(hass, entry) -> float:
         except (ValueError, TypeError):
             pass
 
-    # Check Fleet API vehicle sensors (charger_power, charging_power)
-    # These are discovered by entity_id pattern matching across Tesla devices
+    ble_soc_entity = TESLA_BLE_SENSOR_CHARGE_LEVEL.format(prefix=prefix)
+    ble_soc_state = hass.states.get(ble_soc_entity)
+    if ble_soc_state and ble_soc_state.state not in ("unknown", "unavailable"):
+        try:
+            ev_soc = int(float(ble_soc_state.state))
+        except (ValueError, TypeError):
+            pass
+
+    # Check Fleet API vehicle sensors (charger_power, battery level)
     entity_registry = er.async_get(hass)
     device_registry = dr.async_get(hass)
     for device in device_registry.devices.values():
@@ -329,17 +338,28 @@ def _get_ev_charger_power_kw(hass, entry) -> float:
             eid = entity.entity_id.lower()
             if not entity.entity_id.startswith("sensor."):
                 continue
-            if "charger_power" in eid or "charging_power" in eid or "charge_power" in eid:
-                state = hass.states.get(entity.entity_id)
-                if state and state.state not in ("unknown", "unavailable"):
-                    try:
-                        val = float(state.state)
-                        if val > 0:
-                            ev_power_kw = max(ev_power_kw, val)
-                    except (ValueError, TypeError):
-                        pass
+            state = hass.states.get(entity.entity_id)
+            if not state or state.state in ("unknown", "unavailable"):
+                continue
 
-    return ev_power_kw
+            if "charger_power" in eid or "charging_power" in eid or "charge_power" in eid:
+                try:
+                    val = float(state.state)
+                    if val > 0:
+                        ev_power_kw = max(ev_power_kw, val)
+                except (ValueError, TypeError):
+                    pass
+
+            # Read battery level (e.g. sensor.tessy_battery_level)
+            if ev_soc is None and "battery" in eid and "range" not in eid and "heater" not in eid:
+                try:
+                    val = float(state.state)
+                    if 0 <= val <= 100:
+                        ev_soc = int(val)
+                except (ValueError, TypeError):
+                    pass
+
+    return {"ev_power_kw": ev_power_kw, "ev_soc": ev_soc}
 
 
 class SensitiveDataFilter(logging.Filter):
@@ -6380,9 +6400,11 @@ class SolarSurplusStatusView(HomeAssistantView):
                         "charging_started": state.get("charging_started", False),
                     })
 
-            # Get EV power — prefer vehicle sensor (e.g. sensor.tessy_charger_power),
+            # Get EV power and SoC — prefer vehicle sensor (e.g. sensor.tessy_charger_power),
             # fall back to Wall Connector data from coordinator
-            ev_power_kw = _get_ev_charger_power_kw(self._hass, entry)
+            ev_status = _get_ev_vehicle_status(self._hass, entry)
+            ev_power_kw = ev_status["ev_power_kw"]
+            ev_soc = ev_status["ev_soc"]
             if ev_power_kw <= 0 and tesla_coordinator and tesla_coordinator.data:
                 ev_power_kw = tesla_coordinator.data.get("ev_power", 0)
 
@@ -6390,7 +6412,7 @@ class SolarSurplusStatusView(HomeAssistantView):
             if not vehicles_state and ev_power_kw > 0.05:
                 vehicles_state.append({
                     "vehicle_id": "wall_connector",
-                    "vehicle_name": "Tesla Wall Connector",
+                    "vehicle_name": "Tesla EV",
                     "active": True,
                     "mode": "native",
                     "current_amps": 0,
@@ -6402,6 +6424,7 @@ class SolarSurplusStatusView(HomeAssistantView):
                     "priority": 1,
                     "charging_started": True,
                     "current_power_kw": round(ev_power_kw, 2),
+                    "current_soc": ev_soc,
                 })
 
             return web.json_response({
@@ -7315,7 +7338,9 @@ class EVWidgetDataView(HomeAssistantView):
 
             # Check Tesla EV charging power — prefer vehicle sensor (e.g. sensor.tessy_charger_power),
             # fall back to Wall Connector data from coordinator
-            ev_sensor_kw = _get_ev_charger_power_kw(self._hass, self._config_entry)
+            ev_status = _get_ev_vehicle_status(self._hass, self._config_entry)
+            ev_sensor_kw = ev_status["ev_power_kw"]
+            ev_soc = ev_status["ev_soc"]
             if ev_sensor_kw <= 0 and tesla_coordinator and tesla_coordinator.data:
                 ev_sensor_kw = tesla_coordinator.data.get("ev_power", 0)
             if ev_sensor_kw > 0.05:
@@ -7333,7 +7358,7 @@ class EVWidgetDataView(HomeAssistantView):
                     widget_data.append({
                         "vehicle_name": "Tesla EV",
                         "is_charging": True,
-                        "current_soc": 0,
+                        "current_soc": ev_soc,
                         "target_soc": 80,
                         "current_power_kw": round(ev_sensor_kw, 2),
                         "source": ev_source,
