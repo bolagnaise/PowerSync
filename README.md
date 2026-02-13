@@ -174,15 +174,24 @@ Remote monitoring and control via iOS and Android.
 ### Features
 
 - **Dashboard** — Live pricing, power flow, energy summary
-- **Controls** — Force charge/discharge, solar curtailment, backup reserve, smart optimization
-- **Automations** — Scheduled automations and EV charging
-- **Solar** — Generation history with forecast overlay
-- **Settings** — Battery, EV, provider, and health configuration
+- **Smart Optimization** — 24-hour battery schedule, action plan, cost tracking
+- **EV Charging** — Smart scheduling, solar surplus, price-level charging
+- **Settings** — Battery, EV, provider, and optimization configuration
 
 <p align="center">
   <img src="docs/images/app-dashboard.png" alt="Dashboard" width="200"/>
-  <img src="docs/images/app-controls.png" alt="Controls" width="200"/>
-  <img src="docs/images/app-automations.png" alt="Automations" width="200"/>
+  <img src="docs/images/app-dashboard-flow.png" alt="Power Flow" width="200"/>
+  <img src="docs/images/app-optimization.png" alt="Smart Optimization" width="200"/>
+</p>
+<p align="center">
+  <img src="docs/images/app-optimization-schedule.png" alt="24-Hour Schedule" width="200"/>
+  <img src="docs/images/app-optimization-plan.png" alt="Action Plan" width="200"/>
+  <img src="docs/images/app-ev-charging.png" alt="EV Charging" width="200"/>
+</p>
+<p align="center">
+  <img src="docs/images/app-settings.png" alt="Settings" width="200"/>
+  <img src="docs/images/app-provider.png" alt="Provider Settings" width="200"/>
+  <img src="docs/images/app-provider-optimization.png" alt="Optimization Settings" width="200"/>
 </p>
 
 ---

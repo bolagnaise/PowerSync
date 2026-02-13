@@ -15,6 +15,7 @@ from homeassistant.helpers.event import async_track_time_interval
 from .const import (
     DOMAIN,
     CONF_AUTO_SYNC_ENABLED,
+    CONF_ELECTRICITY_PROVIDER,
     SWITCH_TYPE_AUTO_SYNC,
     SWITCH_TYPE_FORCE_DISCHARGE,
     SWITCH_TYPE_FORCE_CHARGE,
@@ -22,6 +23,10 @@ from .const import (
     ATTR_LAST_SYNC,
     ATTR_SYNC_STATUS,
 )
+
+# Providers that use TOU schedule syncing (Amber, Octopus, Flow Power)
+# GloBird and AEMO VPP use spike detection only — no TOU sync
+PROVIDERS_WITH_TOU_SYNC = {"amber", "octopus", "flow_power"}
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -39,19 +44,31 @@ async def async_setup_entry(
         entry.data.get(CONF_TESLA_ENERGY_SITE_ID, "")
     )
     is_tesla = bool(tesla_site_id)
-    _LOGGER.info(f"🔋 Switch setup: tesla_site_id='{tesla_site_id}', is_tesla={is_tesla}")
 
-    entities = [
-        AutoSyncSwitch(
-            hass=hass,
-            entry=entry,
-            description=SwitchEntityDescription(
-                key=SWITCH_TYPE_AUTO_SYNC,
-                name="Auto-Sync TOU Schedule",
-                icon="mdi:sync",
+    # Detect electricity provider for TOU sync relevance
+    electricity_provider = entry.options.get(
+        CONF_ELECTRICITY_PROVIDER,
+        entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
+    )
+    has_tou_sync = electricity_provider in PROVIDERS_WITH_TOU_SYNC
+
+    _LOGGER.info(f"🔋 Switch setup: is_tesla={is_tesla}, provider={electricity_provider}, has_tou_sync={has_tou_sync}")
+
+    entities = []
+
+    # Only add auto-sync switch for providers that actually sync TOU schedules
+    if has_tou_sync:
+        entities.append(
+            AutoSyncSwitch(
+                hass=hass,
+                entry=entry,
+                description=SwitchEntityDescription(
+                    key=SWITCH_TYPE_AUTO_SYNC,
+                    name="Auto-Sync TOU Schedule",
+                    icon="mdi:sync",
+                ),
             ),
-        ),
-    ]
+        )
 
     # Add Tesla-specific switches only if Tesla is selected as battery system
     if is_tesla:
