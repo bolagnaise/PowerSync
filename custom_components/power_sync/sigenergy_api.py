@@ -73,7 +73,7 @@ class SigenergyAPIClient:
         Args:
             username: Sigenergy account email
             pass_enc: Encrypted password (from browser dev tools)
-            device_id: 13-digit device identifier
+            device_id: Optional device identifier (13 digits, no longer required by Sigenergy)
             access_token: OAuth access token (if already authenticated)
             refresh_token: OAuth refresh token (for token refresh)
             token_expires_at: Token expiration datetime (if known)

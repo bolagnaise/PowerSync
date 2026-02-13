@@ -485,7 +485,7 @@
           "sigenergy_username": "Sigenergy Cloud Email",
           "sigenergy_password": "Password",
           "sigenergy_pass_enc": "Encrypted Password (Advanced)",
-          "sigenergy_device_id": "Device ID",
+          "sigenergy_device_id": "Device ID (optional)",
           "sigenergy_station_id": "Station ID"
         },
         "data_description": {
@@ -494,7 +494,7 @@
           "sigenergy_username": "Your Sigenergy Cloud account email address",
           "sigenergy_password": "Your Sigenergy account password (leave blank to keep existing)",
           "sigenergy_pass_enc": "Pre-encoded password - leave blank unless you know what this is",
-          "sigenergy_device_id": "13-digit device identifier from browser dev tools",
+          "sigenergy_device_id": "Optional — leave blank unless authentication fails without it",
           "sigenergy_station_id": "Your Sigenergy station ID (numeric)"
         },
         "submit_button": "Next"

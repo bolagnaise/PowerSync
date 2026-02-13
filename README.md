@@ -100,8 +100,9 @@ OEM rebrands using identical hardware are also supported — the model family is
 
 Requires both Cloud API (for tariff sync) and Modbus TCP (for real-time data + DC curtailment).
 
-- Modbus TCP Server must be enabled on your inverter (configured by installer)
-- See the [wiki](https://github.com/bolagnaise/PowerSync/wiki) for credential setup details
+- **Cloud API:** Enter your Sigenergy email and password. Device ID is no longer required — leave it blank.
+- **Station ID:** Selected automatically after login, or ask SigenAI "Tell me my StationID" in the Sigenergy app.
+- **Modbus TCP:** Must be enabled on your inverter (configured by installer). Default port 502, slave ID 247.
 
 ### Sungrow SH-series
 
