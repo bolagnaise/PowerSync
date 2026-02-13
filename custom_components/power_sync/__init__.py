@@ -6310,12 +6310,36 @@ class SolarSurplusStatusView(HomeAssistantView):
                         "charging_started": state.get("charging_started", False),
                     })
 
+            # Get EV power from coordinator (Tesla Wall Connector or other sources)
+            ev_power_kw = 0.0
+            if tesla_coordinator and tesla_coordinator.data:
+                ev_power_kw = tesla_coordinator.data.get("ev_power", 0)
+
+            # If no dynamic vehicles but Wall Connector is charging, include it
+            if not vehicles_state and ev_power_kw > 0.05:
+                vehicles_state.append({
+                    "vehicle_id": "wall_connector",
+                    "vehicle_name": "Tesla Wall Connector",
+                    "active": True,
+                    "mode": "native",
+                    "current_amps": 0,
+                    "target_amps": 0,
+                    "allocated_surplus_kw": 0,
+                    "reason": "Charging via Tesla Wall Connector",
+                    "paused": False,
+                    "paused_reason": None,
+                    "priority": 1,
+                    "charging_started": True,
+                    "current_power_kw": round(ev_power_kw, 2),
+                })
+
             return web.json_response({
                 "success": True,
                 "surplus_kw": round(surplus_kw, 2),
                 "battery_soc": round(battery_soc, 1),
                 "solar_power_kw": round(solar_power_kw, 2),
                 "grid_power_kw": round(grid_power_kw, 2),
+                "ev_power_kw": round(ev_power_kw, 2),
                 "vehicles": vehicles_state,
             })
 
@@ -7217,6 +7241,33 @@ class EVWidgetDataView(HomeAssistantView):
                                 })
                 except Exception as e:
                     _LOGGER.debug(f"Error checking OCPP chargers for widget: {e}")
+
+            # Check Tesla Wall Connector power from coordinator data
+            # This catches native Tesla EV charging not managed by PowerSync dynamic modes
+            if tesla_coordinator and tesla_coordinator.data:
+                wc_power_kw = tesla_coordinator.data.get("ev_power", 0)
+                if wc_power_kw > 0.05:
+                    # Only add if no other source already covers this charging
+                    # (dynamic EV state already tracks PowerSync-managed sessions)
+                    already_covered = any(
+                        w["is_charging"] and w["current_power_kw"] > 0
+                        for w in widget_data
+                    )
+                    if not already_covered:
+                        if surplus_kw >= wc_power_kw * 0.8:
+                            wc_source = "solar"
+                        else:
+                            wc_source = "grid"
+                        widget_data.append({
+                            "vehicle_name": "Tesla Wall Connector",
+                            "is_charging": True,
+                            "current_soc": 0,
+                            "target_soc": 80,
+                            "current_power_kw": round(wc_power_kw, 2),
+                            "source": wc_source,
+                            "eta_minutes": None,
+                            "surplus_kw": round(surplus_kw, 2),
+                        })
 
             # Filter out idle vehicles — only keep entries that are actively charging
             active_widget_data = [w for w in widget_data if w["is_charging"] and w["current_power_kw"] > 0]

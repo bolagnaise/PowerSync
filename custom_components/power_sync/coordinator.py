@@ -625,6 +625,24 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             live_status = data.get("response", {})
             _LOGGER.debug("Tesla API live_status response: %s", live_status)
 
+            # Extract EV charging power from Tesla Wall Connectors
+            ev_power_kw = 0.0
+            wall_connectors_raw = live_status.get("wall_connectors")
+            if wall_connectors_raw:
+                try:
+                    # wall_connectors can be a JSON string or a list
+                    if isinstance(wall_connectors_raw, str):
+                        import ast
+                        wall_connectors = ast.literal_eval(wall_connectors_raw)
+                    else:
+                        wall_connectors = wall_connectors_raw
+                    for wc in wall_connectors:
+                        wc_power = wc.get("wall_connector_power", 0) or 0
+                        if wc_power > 0:
+                            ev_power_kw += wc_power / 1000
+                except Exception:
+                    pass
+
             # Map Teslemetry API response to our data structure
             energy_data = {
                 "solar_power": live_status.get("solar_power", 0) / 1000,  # Convert W to kW
@@ -632,6 +650,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 "battery_power": live_status.get("battery_power", 0) / 1000,
                 "load_power": live_status.get("load_power", 0) / 1000,
                 "battery_level": live_status.get("percentage_charged", 0),
+                "ev_power": ev_power_kw,
                 "last_update": dt_util.utcnow(),
             }
 
