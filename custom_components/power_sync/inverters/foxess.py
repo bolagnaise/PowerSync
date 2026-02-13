@@ -677,9 +677,9 @@ class FoxESSController(InverterController):
                 _LOGGER.debug("FoxESS CT2 raw: reg=%d raw=%s ct2=%.3f kW, gain=%d, 32bit=%s",
                               reg.ct2_power, list(ct2_raw) if ct2_raw else None, ct2_power_kw,
                               grid_gain, reg.ct2_power_is_32bit)
-                # CT2 on same meter board — same sign convention as grid CT
-                if reg.grid_sign_inverted:
-                    ct2_power_kw = -ct2_power_kw
+                # CT2 measures AC-coupled inverter generation — positive = generating.
+                # Do NOT apply grid_sign_inverted: grid CT sign is about import/export
+                # direction, but CT2 is unidirectional generation measurement.
             attrs["ct2_power_kw"] = ct2_power_kw
 
             # Load/home power
