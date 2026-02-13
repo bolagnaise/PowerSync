@@ -766,39 +766,47 @@
       },
       "ev_charging_setup": {
         "title": "EV Charging & OCPP",
-        "description": "Configure EV charging and OCPP charger management.\n\n**EV Charging:** Control Tesla vehicles via Fleet API/Teslemetry or Tesla BLE (ESPHome).\n\n**OCPP:** Connect OCPP 1.6-compliant chargers.",
+        "description": "Configure EV charging and OCPP charger management.\n\n**EV Charging:** Control Tesla vehicles via Fleet API/Teslemetry or Tesla BLE (ESPHome).\n\n**OCPP:** Connect OCPP 1.6-compliant chargers.\n\n**Zaptec:** Connect Zaptec chargers (requires custom-components/zaptec HA integration).",
         "data": {
           "ev_charging_enabled": "Enable EV Charging Control",
           "ev_provider": "EV Control Provider",
           "tesla_ble_entity_prefix": "Tesla BLE Entity Prefix",
           "ocpp_enabled": "Enable OCPP Central System",
-          "ocpp_port": "OCPP WebSocket Port"
+          "ocpp_port": "OCPP WebSocket Port",
+          "zaptec_charger_entity": "Zaptec Charger Entity",
+          "zaptec_installation_id": "Zaptec Installation ID"
         },
         "data_description": {
           "ev_charging_enabled": "Allow automations to control Tesla vehicle charging (start/stop, set charge limits, set amps).",
           "ev_provider": "Choose how to control your Tesla: **Fleet API/Teslemetry** uses cloud API (requires HA Tesla Fleet or Teslemetry integration), **Tesla BLE** uses local Bluetooth via ESPHome (requires esphome-tesla-ble), **Both** uses BLE for control with Fleet API fallback.",
           "tesla_ble_entity_prefix": "Entity prefix for Tesla BLE entities (default: tesla_ble). Must match the ESPHome device name. Example: if your entities are sensor.my_tesla_charge_level, enter 'my_tesla'.",
           "ocpp_enabled": "Run an OCPP 1.6J WebSocket server for connecting OCPP-compliant EV chargers. Chargers connect to ws://server:port/{charger_id}",
-          "ocpp_port": "Port for OCPP WebSocket server (default: 9000). Chargers will connect to this port."
+          "ocpp_port": "Port for OCPP WebSocket server (default: 9000). Chargers will connect to this port.",
+          "zaptec_charger_entity": "Entity ID of your Zaptec charger (e.g. switch.zaptec_charger). Leave blank if not using Zaptec. Requires the custom-components/zaptec HA integration.",
+          "zaptec_installation_id": "Zaptec installation device ID for current limiting. Found in the Zaptec integration's device list. Leave blank to auto-detect."
         },
         "submit_button": "Submit"
       },
       "ev_charging": {
         "title": "EV Charging & OCPP",
-        "description": "Configure EV charging and OCPP charger management.\n\n**EV Charging:** Control Tesla vehicles via Fleet API/Teslemetry or Tesla BLE (ESPHome).\n\n**OCPP:** Connect OCPP 1.6-compliant chargers.",
+        "description": "Configure EV charging and OCPP charger management.\n\n**EV Charging:** Control Tesla vehicles via Fleet API/Teslemetry or Tesla BLE (ESPHome).\n\n**OCPP:** Connect OCPP 1.6-compliant chargers.\n\n**Zaptec:** Connect Zaptec chargers (requires custom-components/zaptec HA integration).",
         "data": {
           "ev_charging_enabled": "Enable EV Charging Control",
           "ev_provider": "EV Control Provider",
           "tesla_ble_entity_prefix": "Tesla BLE Entity Prefix",
           "ocpp_enabled": "Enable OCPP Central System",
-          "ocpp_port": "OCPP WebSocket Port"
+          "ocpp_port": "OCPP WebSocket Port",
+          "zaptec_charger_entity": "Zaptec Charger Entity",
+          "zaptec_installation_id": "Zaptec Installation ID"
         },
         "data_description": {
           "ev_charging_enabled": "Allow automations to control Tesla vehicle charging (start/stop, set charge limits, set amps).",
           "ev_provider": "Choose how to control your Tesla: **Fleet API/Teslemetry** uses cloud API (requires HA Tesla Fleet or Teslemetry integration), **Tesla BLE** uses local Bluetooth via ESPHome (requires esphome-tesla-ble), **Both** uses BLE for control with Fleet API fallback.",
           "tesla_ble_entity_prefix": "Entity prefix for Tesla BLE entities (default: tesla_ble). Must match the ESPHome device name. Example: if your entities are sensor.my_tesla_charge_level, enter 'my_tesla'.",
           "ocpp_enabled": "Run an OCPP 1.6J WebSocket server for connecting OCPP-compliant EV chargers. Chargers connect to ws://server:port/{charger_id}",
-          "ocpp_port": "Port for OCPP WebSocket server (default: 9000). Chargers will connect to this port."
+          "ocpp_port": "Port for OCPP WebSocket server (default: 9000). Chargers will connect to this port.",
+          "zaptec_charger_entity": "Entity ID of your Zaptec charger (e.g. switch.zaptec_charger). Leave blank if not using Zaptec. Requires the custom-components/zaptec HA integration.",
+          "zaptec_installation_id": "Zaptec installation device ID for current limiting. Found in the Zaptec integration's device list. Leave blank to auto-detect."
         },
         "submit_button": "Submit"
       },

@@ -224,6 +224,9 @@ from .const import (
     TESLA_BLE_BUTTON_WAKE_UP,
     # Tesla integrations for device discovery
     TESLA_INTEGRATIONS,
+    # Zaptec EV charger configuration
+    CONF_ZAPTEC_CHARGER_ENTITY,
+    CONF_ZAPTEC_INSTALLATION_ID,
     # Smart Optimization configuration
     CONF_OPTIMIZATION_PROVIDER,
     CONF_OPTIMIZATION_ENABLED,
@@ -5142,6 +5145,71 @@ class EVStatusView(HomeAssistantView):
 
         return {"available": False, "configured": True, "entity_prefix": prefix}
 
+    def _get_zaptec_status(self) -> dict:
+        """Check if Zaptec charger entities are available."""
+        config = self._get_powersync_config()
+        configured_entity = config.get(CONF_ZAPTEC_CHARGER_ENTITY, "")
+        installation_id = config.get(CONF_ZAPTEC_INSTALLATION_ID, "")
+
+        # Check if zaptec integration is loaded
+        zaptec_available = "zaptec" in self._hass.config_entries.async_domains()
+
+        if not zaptec_available:
+            return {"available": False, "configured": bool(configured_entity)}
+
+        # Auto-detect Zaptec charger entities if not explicitly configured
+        detected_entities = []
+        try:
+            entity_registry = er.async_get(self._hass)
+            for entity in entity_registry.entities.values():
+                if (entity.platform == "zaptec" and
+                        entity.entity_id.startswith("switch.") and
+                        "charger" in entity.entity_id.lower()):
+                    state = self._hass.states.get(entity.entity_id)
+                    detected_entities.append({
+                        "entity_id": entity.entity_id,
+                        "name": entity.name or entity.original_name or entity.entity_id,
+                        "state": state.state if state else "unknown",
+                    })
+        except Exception as e:
+            _LOGGER.debug(f"Error scanning for Zaptec entities: {e}")
+
+        # Auto-detect installation device
+        detected_installation_id = installation_id
+        if not detected_installation_id:
+            try:
+                device_registry = dr.async_get(self._hass)
+                for device in device_registry.devices.values():
+                    for identifier in device.identifiers:
+                        if identifier[0] == "zaptec" and "installation" in str(identifier[1]).lower():
+                            detected_installation_id = device.id
+                            break
+                    if detected_installation_id:
+                        break
+            except Exception as e:
+                _LOGGER.debug(f"Error scanning for Zaptec installation: {e}")
+
+        # Get current charger status if configured
+        charger_status = None
+        active_entity = configured_entity or (detected_entities[0]["entity_id"] if detected_entities else "")
+        if active_entity:
+            state = self._hass.states.get(active_entity)
+            if state:
+                charger_status = {
+                    "entity_id": active_entity,
+                    "state": state.state,
+                    "attributes": dict(state.attributes),
+                }
+
+        return {
+            "available": zaptec_available,
+            "configured": bool(configured_entity),
+            "charger_entity": configured_entity,
+            "installation_id": detected_installation_id,
+            "detected_entities": detected_entities,
+            "charger_status": charger_status,
+        }
+
     async def get(self, request: web.Request) -> web.Response:
         """Handle GET request for EV status."""
         try:
@@ -5188,8 +5256,15 @@ class EVStatusView(HomeAssistantView):
             if ble_status.get("available") and vehicle_count == 0:
                 vehicle_count = 1
 
+            # Check Zaptec status
+            zaptec_status = self._get_zaptec_status()
+
             # Determine overall configured status
-            is_configured = has_credentials or ble_status.get("available", False)
+            is_configured = (
+                has_credentials
+                or ble_status.get("available", False)
+                or zaptec_status.get("available", False)
+            )
 
             return web.json_response({
                 "success": True,
@@ -5201,6 +5276,7 @@ class EVStatusView(HomeAssistantView):
                 "integration": active_integration,
                 "ev_provider": ev_provider,
                 "tesla_ble": ble_status,
+                "zaptec": zaptec_status,
             })
 
         except Exception as e:

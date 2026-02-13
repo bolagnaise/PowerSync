@@ -1152,6 +1152,10 @@ DEFAULT_EV_TARGET_SOC = 0.8          # 80%
 DEFAULT_EV_DEPARTURE_TIME = "07:00"
 DEFAULT_EV_PRICE_THRESHOLD = 0.15    # $0.15/kWh
 
+# Zaptec EV charger configuration
+CONF_ZAPTEC_CHARGER_ENTITY = "zaptec_charger_entity"
+CONF_ZAPTEC_INSTALLATION_ID = "zaptec_installation_id"
+
 # EV sensor types
 SENSOR_TYPE_EV_CHARGING_STATUS = "ev_charging_status"
 SENSOR_TYPE_EV_NEXT_CHARGE_WINDOW = "ev_next_charge_window"

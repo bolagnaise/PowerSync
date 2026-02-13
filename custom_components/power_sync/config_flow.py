@@ -172,6 +172,9 @@ from .const import (
     CONF_OCPP_ENABLED,
     CONF_OCPP_PORT,
     DEFAULT_OCPP_PORT,
+    # Zaptec EV charger configuration
+    CONF_ZAPTEC_CHARGER_ENTITY,
+    CONF_ZAPTEC_INSTALLATION_ID,
     # Solcast Solar Forecast configuration
     CONF_SOLCAST_ENABLED,
     CONF_SOLCAST_API_KEY,
@@ -2353,6 +2356,14 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data[CONF_OCPP_ENABLED] = user_input.get(CONF_OCPP_ENABLED, False)
             data[CONF_OCPP_PORT] = user_input.get(CONF_OCPP_PORT, DEFAULT_OCPP_PORT)
 
+            # Add Zaptec settings
+            zaptec_entity = user_input.get(CONF_ZAPTEC_CHARGER_ENTITY, "")
+            if zaptec_entity:
+                data[CONF_ZAPTEC_CHARGER_ENTITY] = zaptec_entity
+            data[CONF_ZAPTEC_INSTALLATION_ID] = user_input.get(
+                CONF_ZAPTEC_INSTALLATION_ID, ""
+            )
+
             # Set appropriate title based on provider
             if self._aemo_only_mode:
                 title = "PowerSync Globird"
@@ -2387,6 +2398,14 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_OCPP_PORT,
                     default=DEFAULT_OCPP_PORT,
                 ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
+                vol.Optional(
+                    CONF_ZAPTEC_CHARGER_ENTITY,
+                    default="",
+                ): str,
+                vol.Optional(
+                    CONF_ZAPTEC_INSTALLATION_ID,
+                    default="",
+                ): str,
             }),
         )
 
@@ -3522,6 +3541,14 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_OCPP_PORT, DEFAULT_OCPP_PORT
             )
 
+            # Add Zaptec settings
+            zaptec_entity = user_input.get(CONF_ZAPTEC_CHARGER_ENTITY, "")
+            if zaptec_entity:
+                final_data[CONF_ZAPTEC_CHARGER_ENTITY] = zaptec_entity
+            final_data[CONF_ZAPTEC_INSTALLATION_ID] = user_input.get(
+                CONF_ZAPTEC_INSTALLATION_ID, ""
+            )
+
             return self.async_create_entry(title="", data=final_data)
 
         # Build schema for EV and OCPP options
@@ -3553,6 +3580,15 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_OCPP_PORT,
                 default=self._get_option(CONF_OCPP_PORT, DEFAULT_OCPP_PORT),
             ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
+            # Zaptec settings
+            vol.Optional(
+                CONF_ZAPTEC_CHARGER_ENTITY,
+                default=self._get_option(CONF_ZAPTEC_CHARGER_ENTITY, ""),
+            ): str,
+            vol.Optional(
+                CONF_ZAPTEC_INSTALLATION_ID,
+                default=self._get_option(CONF_ZAPTEC_INSTALLATION_ID, ""),
+            ): str,
         }
 
         return self.async_show_form(

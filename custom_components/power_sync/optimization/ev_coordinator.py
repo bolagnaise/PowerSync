@@ -579,9 +579,10 @@ class EVCoordinator:
                     "switch", "turn_on",
                     {"entity_id": entity_id}
                 )
-            elif domain in ("ev_charger", "ocpp", "wallbox", "easee"):
+            elif domain in ("ev_charger", "ocpp", "wallbox", "easee", "zaptec"):
+                service = "resume_charging" if domain == "zaptec" else "start_charging"
                 await self.hass.services.async_call(
-                    domain, "start_charging",
+                    domain, service,
                     {"entity_id": entity_id}
                 )
             else:
@@ -653,7 +654,21 @@ class EVCoordinator:
             except Exception as e:
                 _LOGGER.debug(f"Failed to set Easee amps: {e}")
 
-        # 5. Generic number entity (common pattern: entity_id + "_amps" or "_current")
+        # 5. Zaptec charger (uses installation-level current limit)
+        if domain == "zaptec":
+            zaptec_installation_id = self._get_zaptec_installation_id(entity_id)
+            if zaptec_installation_id:
+                try:
+                    await self.hass.services.async_call(
+                        "zaptec", "limit_current",
+                        {"device_id": zaptec_installation_id, "available_current": amps}
+                    )
+                    _LOGGER.debug(f"Set Zaptec charging amps to {amps}A")
+                    return
+                except Exception as e:
+                    _LOGGER.debug(f"Failed to set Zaptec amps: {e}")
+
+        # 6. Generic number entity (common pattern: entity_id + "_amps" or "_current")
         for suffix in ["_amps", "_charging_amps", "_current", "_charging_current"]:
             number_entity = entity_id.replace("switch.", "number.") + suffix
             if self.hass.states.get(number_entity):
@@ -682,7 +697,7 @@ class EVCoordinator:
                     "switch", "turn_off",
                     {"entity_id": entity_id}
                 )
-            elif domain in ("ev_charger", "ocpp", "wallbox", "easee"):
+            elif domain in ("ev_charger", "ocpp", "wallbox", "easee", "zaptec"):
                 await self.hass.services.async_call(
                     domain, "stop_charging",
                     {"entity_id": entity_id}
@@ -701,6 +716,34 @@ class EVCoordinator:
             status = self._ev_statuses.get(config.entity_id)
             if status and status.connected and not status.charging:
                 await self._start_charging(config)
+
+    def _get_zaptec_installation_id(self, charger_entity_id: str) -> str | None:
+        """Get the Zaptec installation device_id from config or device registry.
+
+        The installation ID is needed because zaptec.limit_current targets the
+        installation device, not the individual charger.
+        """
+        # Check if installation ID is stored in any PowerSync config entry
+        for entry in self.hass.config_entries.async_entries("power_sync"):
+            installation_id = entry.options.get(
+                "zaptec_installation_id",
+                entry.data.get("zaptec_installation_id"),
+            )
+            if installation_id:
+                return installation_id
+
+        # Fallback: scan device registry for a zaptec installation device
+        try:
+            from homeassistant.helpers import device_registry as dr
+            device_registry = dr.async_get(self.hass)
+            for device in device_registry.devices.values():
+                for identifier in device.identifiers:
+                    if identifier[0] == "zaptec" and "installation" in str(identifier[1]).lower():
+                        return device.id
+        except Exception as e:
+            _LOGGER.debug(f"Failed to look up Zaptec installation: {e}")
+
+        return None
 
     def get_status(self) -> dict[str, Any]:
         """Get EV coordination status for API."""
