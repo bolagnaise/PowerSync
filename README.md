@@ -61,6 +61,10 @@
 
 ### Steps
 
+[![Add Repository to HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=bolagnaise&repository=PowerSync&category=integration)
+
+Or manually:
+
 1. Open HACS > three dots > Custom repositories
 2. Add `https://github.com/bolagnaise/PowerSync` (Category: Integration)
 3. Download PowerSync and restart Home Assistant
