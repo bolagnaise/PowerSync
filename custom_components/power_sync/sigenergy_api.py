@@ -82,7 +82,7 @@ class SigenergyAPIClient:
         """
         self.username = username
         self.pass_enc = pass_enc
-        self.device_id = device_id or "1756353655250"  # Default device ID
+        self.device_id = device_id  # Optional — Sigenergy may no longer require it
         self.access_token = access_token
         self.refresh_token = refresh_token
         self.token_expires_at = token_expires_at
@@ -122,10 +122,12 @@ class SigenergyAPIClient:
         data = {
             "username": self.username,
             "password": self.pass_enc,
-            "scope": "server",
             "grant_type": "password",
-            "userDeviceId": self.device_id,
+            "agree": True,
         }
+        # Only include userDeviceId if provided (no longer required by Sigenergy)
+        if self.device_id:
+            data["userDeviceId"] = self.device_id
 
         try:
             session = await self._get_session()

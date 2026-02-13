@@ -243,11 +243,11 @@
       },
       "sigenergy_credentials": {
         "title": "Sigenergy Credentials",
-        "description": "Enter your Sigenergy Cloud API credentials.\n\n**Password:** Enter your Sigenergy account password.\n\n**Device ID:** To find this:\n1. Open browser dev tools (F12)\n2. Go to Network tab\n3. Login to web-aus.sigencloud.com\n4. Find 'token' request → userDeviceId",
+        "description": "Enter your Sigenergy Cloud API credentials.\n\n**Password:** Enter your Sigenergy account password.\n\n**Device ID (optional):** Usually not needed. Only required if authentication fails without it. To find it, open browser dev tools (F12), go to Network tab, login to web-aus.sigencloud.com, find the 'token' request payload → userDeviceId.",
         "data": {
           "sigenergy_username": "Sigenergy Email",
           "sigenergy_password": "Password",
-          "sigenergy_device_id": "Device ID (13 digits)",
+          "sigenergy_device_id": "Device ID (optional)",
           "sigenergy_pass_enc": "Encrypted Password (Advanced)"
         },
         "data_description": {
@@ -432,8 +432,8 @@
       "no_token_provided": "Please provide a Teslemetry API token.",
       "aemo_region_required": "Please select an AEMO NEM region when spike detection is enabled.",
       "aemo_required_in_aemo_mode": "AEMO spike detection is recommended for Globird/VPP plans that include spike export payments. Disable if your plan does not include this feature.",
-      "missing_credentials": "Please provide all Sigenergy credentials (email, password, and device ID).",
-      "invalid_device_id": "Device ID must be exactly 13 digits.",
+      "missing_credentials": "Please provide your Sigenergy email and password.",
+      "invalid_device_id": "Device ID must be exactly 13 digits (leave blank if not required).",
       "no_stations": "No Sigenergy stations found for this account.",
       "no_station_selected": "Please select a Sigenergy station.",
       "modbus_host_required": "Sigenergy IP address is required for energy data.",

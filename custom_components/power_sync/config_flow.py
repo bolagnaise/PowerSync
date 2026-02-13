@@ -1011,9 +1011,9 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             else:
                 final_pass_enc = ""
 
-            if not username or not final_pass_enc or not device_id:
+            if not username or not final_pass_enc:
                 errors["base"] = "missing_credentials"
-            elif len(device_id) != 13 or not device_id.isdigit():
+            elif device_id and (len(device_id) != 13 or not device_id.isdigit()):
                 errors["base"] = "invalid_device_id"
             else:
                 # Validate credentials
@@ -1040,7 +1040,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema({
                 vol.Required(CONF_SIGENERGY_USERNAME): str,
                 vol.Required(CONF_SIGENERGY_PASSWORD): str,
-                vol.Required(CONF_SIGENERGY_DEVICE_ID): str,
+                vol.Optional(CONF_SIGENERGY_DEVICE_ID, default=""): str,
                 vol.Optional(CONF_SIGENERGY_PASS_ENC): str,  # Advanced: pre-encoded
             }),
             errors=errors,
