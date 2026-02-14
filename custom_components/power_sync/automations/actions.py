@@ -1402,13 +1402,19 @@ async def _action_start_ev_charging(
             _LOGGER.info(f"Started EV charging via {charge_switch_entity}")
             charging_started = True
         except Exception as e:
-            _LOGGER.error(f"Failed to start EV charging: {e}")
+            err_str = str(e).lower()
+            # If the car is already charging, treat as success
+            if "is_charging" in err_str or "already" in err_str:
+                _LOGGER.info(f"EV is already charging — proceeding with session")
+                charging_started = True
+            else:
+                _LOGGER.error(f"Failed to start EV charging: {e}")
 
-            # Check if this is a credit/payment error
-            if _is_api_credit_error(str(e)):
-                _mark_api_credits_exhausted("teslemetry")
+                # Check if this is a credit/payment error
+                if _is_api_credit_error(str(e)):
+                    _mark_api_credits_exhausted("teslemetry")
 
-            return False
+                return False
 
     if not charging_started:
         return False
