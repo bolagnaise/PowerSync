@@ -4768,6 +4768,92 @@ class AutomationToggleView(HomeAssistantView):
             )
 
 
+class AutomationPauseView(HomeAssistantView):
+    """HTTP view to pause an automation."""
+
+    url = "/api/power_sync/automations/{automation_id}/pause"
+    name = "api:power_sync:automation_pause"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    def _get_store(self):
+        """Get the automation store from hass.data."""
+        if DOMAIN not in self._hass.data:
+            return None
+        return self._hass.data[DOMAIN].get("automation_store")
+
+    async def post(self, request: web.Request, automation_id: str) -> web.Response:
+        """Handle POST request - pause automation."""
+        store = self._get_store()
+        if not store:
+            return web.json_response(
+                {"success": False, "error": "Automation store not initialized"},
+                status=503
+            )
+
+        try:
+            success = store.pause(int(automation_id))
+            if not success:
+                return web.json_response(
+                    {"success": False, "error": "Automation not found"},
+                    status=404
+                )
+            await store.async_save()
+            return web.json_response({"success": True})
+        except Exception as e:
+            _LOGGER.error(f"Error pausing automation: {e}", exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500
+            )
+
+
+class AutomationResumeView(HomeAssistantView):
+    """HTTP view to resume a paused automation."""
+
+    url = "/api/power_sync/automations/{automation_id}/resume"
+    name = "api:power_sync:automation_resume"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    def _get_store(self):
+        """Get the automation store from hass.data."""
+        if DOMAIN not in self._hass.data:
+            return None
+        return self._hass.data[DOMAIN].get("automation_store")
+
+    async def post(self, request: web.Request, automation_id: str) -> web.Response:
+        """Handle POST request - resume automation."""
+        store = self._get_store()
+        if not store:
+            return web.json_response(
+                {"success": False, "error": "Automation store not initialized"},
+                status=503
+            )
+
+        try:
+            success = store.resume(int(automation_id))
+            if not success:
+                return web.json_response(
+                    {"success": False, "error": "Automation not found"},
+                    status=404
+                )
+            await store.async_save()
+            return web.json_response({"success": True})
+        except Exception as e:
+            _LOGGER.error(f"Error resuming automation: {e}", exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500
+            )
+
+
 class AutomationGroupsView(HomeAssistantView):
     """HTTP view to get automation groups."""
 
@@ -13739,6 +13825,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.http.register_view(AutomationsView(hass))
     hass.http.register_view(AutomationDetailView(hass))
     hass.http.register_view(AutomationToggleView(hass))
+    hass.http.register_view(AutomationPauseView(hass))
+    hass.http.register_view(AutomationResumeView(hass))
     hass.http.register_view(AutomationGroupsView(hass))
     _LOGGER.info("⚡ Automations HTTP endpoints registered at /api/power_sync/automations")
 

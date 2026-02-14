@@ -648,7 +648,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 "solar_power": live_status.get("solar_power", 0) / 1000,  # Convert W to kW
                 "grid_power": live_status.get("grid_power", 0) / 1000,
                 "battery_power": live_status.get("battery_power", 0) / 1000,
-                "load_power": live_status.get("load_power", 0) / 1000,
+                "load_power": (live_status.get("load_power", 0) / 1000) - ev_power_kw,
                 "battery_level": live_status.get("percentage_charged", 0),
                 "ev_power": ev_power_kw,
                 "last_update": dt_util.utcnow(),
