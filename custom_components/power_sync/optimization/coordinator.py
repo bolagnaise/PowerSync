@@ -1552,7 +1552,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             data = self.energy_coordinator.data
             soc_value = data.get("battery_level")
             if soc_value is not None:
-                soc = soc_value / 100 if soc_value > 1 else soc_value
+                # battery_level is always 0-100 percentage from all coordinators
+                # (Tesla, Sigenergy, FoxESS, Sungrow). Previous heuristic
+                # (>1 means %, <=1 means fraction) broke when SOC was genuinely
+                # below 1% — e.g. 0.6% was misread as 60%.
+                soc = max(0.0, min(1.0, soc_value / 100))
 
         return soc, capacity
 
@@ -1658,6 +1662,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self._actual_baseline_today,
                     self._actual_baseline_today - self._actual_cost_today,
                 )
+                # Record baseline to Amber usage coordinator for savings tracking
+                try:
+                    from ..const import DOMAIN
+                    usage_coord = self.hass.data.get(DOMAIN, {}).get(
+                        self.entry_id, {}
+                    ).get("amber_usage_coordinator")
+                    if usage_coord:
+                        usage_coord.record_baseline(
+                            date_str=self._last_cost_date,
+                            baseline_cost=self._actual_baseline_today,
+                        )
+                except Exception as e:
+                    _LOGGER.debug("Could not record baseline to usage coordinator: %s", e)
             self._actual_cost_today = 0.0
             self._actual_baseline_today = 0.0
             self._actual_import_kwh_today = 0.0
@@ -2059,6 +2076,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "baseline_cost": daily_cost + daily_savings,
                 "savings": daily_savings,
             }
+
+            # Add Amber usage data (actual metered costs) if available
+            try:
+                from ..const import DOMAIN as _DOMAIN
+                usage_coord = self.hass.data.get(_DOMAIN, {}).get(
+                    self.entry_id, {}
+                ).get("amber_usage_coordinator")
+                if usage_coord:
+                    data["amber_usage"] = {
+                        "yesterday": usage_coord.get_savings_summary("yesterday"),
+                        "week": usage_coord.get_savings_summary("week"),
+                        "month": usage_coord.get_savings_summary("month"),
+                        "last_fetch": usage_coord.last_fetch_iso,
+                    }
+            except Exception:
+                pass  # Non-critical — don't break API response
+
             # Consolidate schedule into action ranges for the next 24h
             # e.g. [self_consumption 16:00-17:00, export 17:00-21:00, ...]
             intervals_24h = min(
