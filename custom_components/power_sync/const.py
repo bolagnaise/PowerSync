@@ -39,12 +39,14 @@ CONF_EV_CHARGING_ENABLED = "ev_charging_enabled"
 CONF_EV_PROVIDER = "ev_provider"
 EV_PROVIDER_FLEET_API = "fleet_api"  # Tesla Fleet API / Teslemetry
 EV_PROVIDER_TESLA_BLE = "tesla_ble"  # ESPHome Tesla BLE
-EV_PROVIDER_BOTH = "both"  # Use both providers
+EV_PROVIDER_TESLEMETRY_BT = "teslemetry_bt"  # Teslemetry Bluetooth (native HA)
+EV_PROVIDER_BOTH = "both"  # Use both providers (any local BLE/BT + Fleet API fallback)
 
 EV_PROVIDERS = {
     EV_PROVIDER_FLEET_API: "Tesla Fleet API / Teslemetry",
     EV_PROVIDER_TESLA_BLE: "Tesla BLE (ESPHome)",
-    EV_PROVIDER_BOTH: "Both (Fleet API + BLE)",
+    EV_PROVIDER_TESLEMETRY_BT: "Teslemetry Bluetooth",
+    EV_PROVIDER_BOTH: "Both (Fleet API + local BLE/BT)",
 }
 
 # Tesla BLE configuration (ESPHome Tesla BLE integration)
@@ -70,6 +72,15 @@ TESLA_BLE_NUMBER_CHARGING_AMPS = "number.{prefix}_charging_amps"
 TESLA_BLE_NUMBER_CHARGING_LIMIT = "number.{prefix}_charging_limit"
 TESLA_BLE_BUTTON_WAKE_UP = "button.{prefix}_wake_up"
 TESLA_BLE_BUTTON_UNLOCK_CHARGE_PORT = "button.{prefix}_unlock_charge_port"
+
+# Teslemetry Bluetooth entity patterns (prefix = VIN)
+# Integration: https://github.com/Teslemetry/hass-tesla-bluetooth (domain: tesla_bluetooth)
+TESLEMETRY_BT_SWITCH_CHARGE = "switch.{prefix}_charge"
+TESLEMETRY_BT_NUMBER_CHARGE_AMPS = "number.{prefix}_charge_current_request"
+TESLEMETRY_BT_SENSOR_CHARGER_POWER = "sensor.{prefix}_charger_power"
+TESLEMETRY_BT_SENSOR_BATTERY_LEVEL = "sensor.{prefix}_battery_level"
+TESLEMETRY_BT_SENSOR_CHARGING_STATE = "sensor.{prefix}_charging_state"
+TESLEMETRY_BT_DEVICE_TRACKER_LOCATION = "device_tracker.{prefix}_location"
 
 # OCPP Central System configuration
 CONF_OCPP_ENABLED = "ocpp_enabled"

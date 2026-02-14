@@ -143,6 +143,24 @@ async def get_ev_location(
 
     location = "unknown"
 
+    # Method 0: Teslemetry Bluetooth - has real device_tracker with location
+    import re
+    for state in hass.states.async_all():
+        match = re.match(r"sensor\.(\w+)_charging_state$", state.entity_id)
+        if match:
+            candidate = match.group(1)
+            if len(candidate) == 17 and candidate.isalnum():
+                if hass.states.get(f"switch.{candidate}_charge") is not None:
+                    # Found Teslemetry BT prefix — check location
+                    if vehicle_vin is not None and candidate.upper() != vehicle_vin.upper():
+                        continue
+                    loc_entity = f"device_tracker.{candidate}_location"
+                    loc_state = hass.states.get(loc_entity)
+                    if loc_state and loc_state.state not in ("unavailable", "unknown", "None", None):
+                        location = loc_state.state.lower()
+                        _LOGGER.debug(f"Teslemetry BT location from {loc_entity}: {location}")
+                        return location
+
     # Method 1: Tesla BLE - if available, vehicle is nearby (assume "home")
     # Note: BLE doesn't provide VIN filtering, so only use for non-VIN-specific queries
     if vehicle_vin is None:
@@ -270,6 +288,21 @@ async def is_ev_plugged_in(
         DEFAULT_TESLA_BLE_ENTITY_PREFIX,
     )
     from homeassistant.helpers import entity_registry as er, device_registry as dr
+
+    # Method 0: Teslemetry Bluetooth — check sensor.*_charging_state
+    import re as _re
+    for state in hass.states.async_all():
+        match = _re.match(r"sensor\.(\w+)_charging_state$", state.entity_id)
+        if match:
+            candidate = match.group(1)
+            if len(candidate) == 17 and candidate.isalnum():
+                if hass.states.get(f"switch.{candidate}_charge") is not None:
+                    if vehicle_vin is not None and candidate.upper() != vehicle_vin.upper():
+                        continue
+                    cs = hass.states.get(f"sensor.{candidate}_charging_state")
+                    if cs and cs.state not in ("unavailable", "unknown", "Disconnected", "None", None):
+                        _LOGGER.debug(f"Teslemetry BT: vehicle plugged in (state={cs.state})")
+                        return True
 
     # Method 1: Tesla BLE (only applies if no specific VIN or BLE matches)
     # Note: BLE doesn't provide VIN filtering, so only use for non-VIN-specific queries
@@ -4174,7 +4207,7 @@ class PriceLevelChargingExecutor:
                     if len(identifier) >= 2:
                         domain = identifier[0]
                         id_str = str(identifier[1])
-                        if domain in TESLA_INTEGRATIONS or domain == "tesla_ble":
+                        if domain in TESLA_INTEGRATIONS or domain in ("tesla_ble", "tesla_bluetooth"):
                             # Check if identifier is a VIN (17 chars, not all digits)
                             if len(id_str) == 17 and not id_str.isdigit():
                                 tesla_device_map[device.id] = id_str

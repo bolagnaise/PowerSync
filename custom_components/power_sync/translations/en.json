@@ -768,7 +768,7 @@
       },
       "ev_charging_setup": {
         "title": "EV Charging & OCPP",
-        "description": "Configure EV charging and OCPP charger management.\n\n**EV Charging:** Control Tesla vehicles via Fleet API/Teslemetry or Tesla BLE (ESPHome).\n\n**OCPP:** Connect OCPP 1.6-compliant chargers.\n\n**Zaptec:** Connect Zaptec chargers via HA integration or standalone (direct Zaptec Cloud API).",
+        "description": "Configure EV charging and OCPP charger management.\n\n**EV Charging:** Control Tesla vehicles via Fleet API/Teslemetry, Tesla BLE (ESPHome), or Teslemetry Bluetooth.\n\n**OCPP:** Connect OCPP 1.6-compliant chargers.\n\n**Zaptec:** Connect Zaptec chargers via HA integration or standalone (direct Zaptec Cloud API).",
         "data": {
           "ev_charging_enabled": "Enable EV Charging Control",
           "ev_provider": "EV Control Provider",
@@ -781,7 +781,7 @@
         },
         "data_description": {
           "ev_charging_enabled": "Allow automations to control Tesla vehicle charging (start/stop, set charge limits, set amps).",
-          "ev_provider": "Choose how to control your Tesla: **Fleet API/Teslemetry** uses cloud API (requires HA Tesla Fleet or Teslemetry integration), **Tesla BLE** uses local Bluetooth via ESPHome (requires esphome-tesla-ble), **Both** uses BLE for control with Fleet API fallback.",
+          "ev_provider": "Choose how to control your Tesla: **Fleet API/Teslemetry** uses cloud API, **Tesla BLE** uses local Bluetooth via ESPHome, **Teslemetry Bluetooth** uses native HA Teslemetry Bluetooth integration, **Both** uses local BLE/BT for control with Fleet API fallback.",
           "tesla_ble_entity_prefix": "Entity prefix for Tesla BLE entities (default: tesla_ble). Must match the ESPHome device name. Example: if your entities are sensor.my_tesla_charge_level, enter 'my_tesla'.",
           "ocpp_enabled": "Run an OCPP 1.6J WebSocket server for connecting OCPP-compliant EV chargers. Chargers connect to ws://server:port/'{charger_id}'",
           "ocpp_port": "Port for OCPP WebSocket server (default: 9000). Chargers will connect to this port.",
@@ -806,7 +806,7 @@
       },
       "ev_charging": {
         "title": "EV Charging & OCPP",
-        "description": "Configure EV charging and OCPP charger management.\n\n**EV Charging:** Control Tesla vehicles via Fleet API/Teslemetry or Tesla BLE (ESPHome).\n\n**OCPP:** Connect OCPP 1.6-compliant chargers.\n\n**Zaptec:** Connect Zaptec chargers via HA integration or standalone (direct Zaptec Cloud API).",
+        "description": "Configure EV charging and OCPP charger management.\n\n**EV Charging:** Control Tesla vehicles via Fleet API/Teslemetry, Tesla BLE (ESPHome), or Teslemetry Bluetooth.\n\n**OCPP:** Connect OCPP 1.6-compliant chargers.\n\n**Zaptec:** Connect Zaptec chargers via HA integration or standalone (direct Zaptec Cloud API).",
         "data": {
           "ev_charging_enabled": "Enable EV Charging Control",
           "ev_provider": "EV Control Provider",
@@ -819,7 +819,7 @@
         },
         "data_description": {
           "ev_charging_enabled": "Allow automations to control Tesla vehicle charging (start/stop, set charge limits, set amps).",
-          "ev_provider": "Choose how to control your Tesla: **Fleet API/Teslemetry** uses cloud API (requires HA Tesla Fleet or Teslemetry integration), **Tesla BLE** uses local Bluetooth via ESPHome (requires esphome-tesla-ble), **Both** uses BLE for control with Fleet API fallback.",
+          "ev_provider": "Choose how to control your Tesla: **Fleet API/Teslemetry** uses cloud API, **Tesla BLE** uses local Bluetooth via ESPHome, **Teslemetry Bluetooth** uses native HA Teslemetry Bluetooth integration, **Both** uses local BLE/BT for control with Fleet API fallback.",
           "tesla_ble_entity_prefix": "Entity prefix for Tesla BLE entities (default: tesla_ble). Must match the ESPHome device name. Example: if your entities are sensor.my_tesla_charge_level, enter 'my_tesla'.",
           "ocpp_enabled": "Run an OCPP 1.6J WebSocket server for connecting OCPP-compliant EV chargers. Chargers connect to ws://server:port/'{charger_id}'",
           "ocpp_port": "Port for OCPP WebSocket server (default: 9000). Chargers will connect to this port.",

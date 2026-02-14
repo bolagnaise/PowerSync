@@ -41,6 +41,7 @@ from ..const import (
     CONF_EV_PROVIDER,
     EV_PROVIDER_FLEET_API,
     EV_PROVIDER_TESLA_BLE,
+    EV_PROVIDER_TESLEMETRY_BT,
     EV_PROVIDER_BOTH,
     CONF_TESLA_BLE_ENTITY_PREFIX,
     DEFAULT_TESLA_BLE_ENTITY_PREFIX,
@@ -50,6 +51,8 @@ from ..const import (
     TESLA_BLE_BUTTON_WAKE_UP,
     TESLA_BLE_BINARY_ASLEEP,
     TESLA_BLE_BINARY_STATUS,
+    TESLEMETRY_BT_SWITCH_CHARGE,
+    TESLEMETRY_BT_NUMBER_CHARGE_AMPS,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -609,6 +612,103 @@ async def _set_ev_charging_amps_ble(
         return True
     except Exception as e:
         _LOGGER.error(f"Failed to set EV charging amps via BLE: {e}")
+        return False
+
+
+# =============================================================================
+# Teslemetry Bluetooth helpers (native HA integration: tesla_bluetooth)
+# =============================================================================
+
+
+def _resolve_teslemetry_bt_prefix(hass: HomeAssistant) -> str | None:
+    """Auto-detect Teslemetry Bluetooth entity prefix (VIN).
+
+    Scans for sensor.*_charging_state entities where the prefix is a 17-char
+    alphanumeric VIN (distinguishes from ESPHome BLE which contains 'ble').
+    """
+    import re
+    for state in hass.states.async_all():
+        match = re.match(r"sensor\.(\w+)_charging_state$", state.entity_id)
+        if match:
+            candidate = match.group(1)
+            if len(candidate) == 17 and candidate.isalnum():
+                charge_switch = f"switch.{candidate}_charge"
+                if hass.states.get(charge_switch) is not None:
+                    return candidate
+    return None
+
+
+def _is_teslemetry_bt_available(hass: HomeAssistant, tbt_prefix: str | None) -> bool:
+    """Check if Teslemetry Bluetooth entities are available."""
+    if not tbt_prefix:
+        return False
+    charge_entity = TESLEMETRY_BT_SWITCH_CHARGE.format(prefix=tbt_prefix)
+    state = hass.states.get(charge_entity)
+    return state is not None
+
+
+async def _start_ev_charging_teslemetry_bt(hass: HomeAssistant, tbt_prefix: str) -> bool:
+    """Start EV charging via Teslemetry Bluetooth."""
+    entity_id = TESLEMETRY_BT_SWITCH_CHARGE.format(prefix=tbt_prefix)
+    if hass.states.get(entity_id) is None:
+        _LOGGER.error(f"Teslemetry BT charge entity not found: {entity_id}")
+        return False
+    try:
+        await hass.services.async_call(
+            "switch", "turn_on",
+            {"entity_id": entity_id},
+            blocking=True,
+        )
+        _LOGGER.info(f"Started EV charging via Teslemetry BT: {entity_id}")
+        return True
+    except Exception as e:
+        _LOGGER.error(f"Failed to start EV charging via Teslemetry BT: {e}")
+        return False
+
+
+async def _stop_ev_charging_teslemetry_bt(hass: HomeAssistant, tbt_prefix: str) -> bool:
+    """Stop EV charging via Teslemetry Bluetooth."""
+    entity_id = TESLEMETRY_BT_SWITCH_CHARGE.format(prefix=tbt_prefix)
+    if hass.states.get(entity_id) is None:
+        _LOGGER.error(f"Teslemetry BT charge entity not found: {entity_id}")
+        return False
+    try:
+        await hass.services.async_call(
+            "switch", "turn_off",
+            {"entity_id": entity_id},
+            blocking=True,
+        )
+        _LOGGER.info(f"Stopped EV charging via Teslemetry BT: {entity_id}")
+        return True
+    except Exception as e:
+        _LOGGER.error(f"Failed to stop EV charging via Teslemetry BT: {e}")
+        return False
+
+
+async def _set_ev_charging_amps_teslemetry_bt(
+    hass: HomeAssistant, tbt_prefix: str, amps: int
+) -> bool:
+    """Set EV charging amps via Teslemetry Bluetooth."""
+    entity_id = TESLEMETRY_BT_NUMBER_CHARGE_AMPS.format(prefix=tbt_prefix)
+    state = hass.states.get(entity_id)
+    if state is None:
+        _LOGGER.error(f"Teslemetry BT charge amps entity not found: {entity_id}")
+        return False
+    min_val = float(state.attributes.get("min", 0))
+    max_val = float(state.attributes.get("max", 32))
+    capped = max(int(min_val), min(int(max_val), int(amps)))
+    if capped != amps:
+        _LOGGER.debug(f"Teslemetry BT amps capped from {amps}A to {capped}A (range: {min_val}-{max_val})")
+    try:
+        await hass.services.async_call(
+            "number", "set_value",
+            {"entity_id": entity_id, "value": capped},
+            blocking=True,
+        )
+        _LOGGER.info(f"Set EV charging amps to {capped}A via Teslemetry BT: {entity_id}")
+        return True
+    except Exception as e:
+        _LOGGER.error(f"Failed to set EV charging amps via Teslemetry BT: {e}")
         return False
 
 
@@ -1359,15 +1459,24 @@ async def _action_start_ev_charging(
 
     charging_started = False
 
-    # Try BLE first if configured
-    if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+    # Try Teslemetry Bluetooth first if configured
+    if ev_provider in (EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
+        tbt_prefix = _resolve_teslemetry_bt_prefix(hass)
+        if _is_teslemetry_bt_available(hass, tbt_prefix):
+            result = await _start_ev_charging_teslemetry_bt(hass, tbt_prefix)
+            if result:
+                charging_started = True
+            elif ev_provider == EV_PROVIDER_TESLEMETRY_BT:
+                return False
+
+    # Try ESPHome BLE if configured
+    if not charging_started and ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         if _is_ble_available(hass, ble_prefix):
             result = await _start_ev_charging_ble(hass, ble_prefix)
             if result:
                 charging_started = True
             elif ev_provider == EV_PROVIDER_TESLA_BLE:
                 return False
-            # Fall through to Fleet API if BLE failed and both are configured
 
     # Use Fleet API
     if not charging_started and ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
@@ -1486,7 +1595,15 @@ async def _action_stop_ev_charging(
     ble_prefix = ev_config["ble_prefix"]
     vehicle_vin = params.get("vehicle_vin")
 
-    # Try BLE first if configured
+    # Try Teslemetry Bluetooth first if configured
+    if ev_provider in (EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
+        tbt_prefix = _resolve_teslemetry_bt_prefix(hass)
+        if _is_teslemetry_bt_available(hass, tbt_prefix):
+            result = await _stop_ev_charging_teslemetry_bt(hass, tbt_prefix)
+            if result or ev_provider == EV_PROVIDER_TESLEMETRY_BT:
+                return result
+
+    # Try ESPHome BLE if configured
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         if _is_ble_available(hass, ble_prefix):
             result = await _stop_ev_charging_ble(hass, ble_prefix)
@@ -1559,15 +1676,17 @@ async def _action_set_ev_charge_limit(
     # Clamp to valid range (50-100%)
     percent = max(50, min(100, int(percent)))
 
-    # Try BLE first if configured
+    # Teslemetry BT doesn't support charge limit — skip to BLE/Fleet API
+
+    # Try ESPHome BLE if configured
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         if _is_ble_available(hass, ble_prefix):
             result = await _set_ev_charge_limit_ble(hass, ble_prefix, percent)
             if result or ev_provider == EV_PROVIDER_TESLA_BLE:
                 return result
 
-    # Use Fleet API
-    if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+    # Use Fleet API (also fallback for Teslemetry BT which lacks charge limit)
+    if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
         # Check API credits before attempting
         if not _is_api_credit_available("teslemetry"):
             _LOGGER.debug("Skipping set EV charge limit - API credits exhausted, in cooldown period")
@@ -1633,7 +1752,15 @@ async def _action_set_ev_charging_amps(
     # Tesla BLE supports same 5-32A range as cloud API
     amps = max(5, min(80, int(amps)))
 
-    # Try BLE first if configured (BLE supports same 5-32A range as cloud API)
+    # Try Teslemetry Bluetooth first if configured
+    if ev_provider in (EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
+        tbt_prefix = _resolve_teslemetry_bt_prefix(hass)
+        if _is_teslemetry_bt_available(hass, tbt_prefix):
+            result = await _set_ev_charging_amps_teslemetry_bt(hass, tbt_prefix, amps)
+            if result or ev_provider == EV_PROVIDER_TESLEMETRY_BT:
+                return result
+
+    # Try ESPHome BLE if configured (BLE supports same 5-32A range as cloud API)
     ble_amps = amps
     if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
         if _is_ble_available(hass, ble_prefix):
