@@ -8,6 +8,7 @@ from typing import Any
 
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
@@ -101,6 +102,7 @@ class AutoSyncSwitch(SwitchEntity):
     """Switch to enable/disable automatic TOU schedule syncing."""
 
     _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(
         self,
@@ -190,6 +192,7 @@ class ForceDischargeSwitch(SwitchEntity):
     """Switch to manually force battery discharge mode."""
 
     _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(
         self,
@@ -326,6 +329,7 @@ class ForceChargeSwitch(SwitchEntity):
     """Switch to manually force battery charge mode."""
 
     _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(
         self,
