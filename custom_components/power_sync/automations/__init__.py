@@ -77,6 +77,10 @@ class AutomationStore:
         if conditions:
             _LOGGER.debug(f"Creating automation with {len(conditions)} condition(s)")
 
+        if_conditions = automation_data.get("if_conditions", [])
+        if if_conditions:
+            _LOGGER.debug(f"Creating automation with {len(if_conditions)} IF condition(s)")
+
         automation = {
             "id": automation_id,
             "name": automation_data.get("name", "Unnamed Automation"),
@@ -87,6 +91,7 @@ class AutomationStore:
             "paused": automation_data.get("paused", False),
             "notification_only": automation_data.get("notification_only", False),
             "trigger": automation_data.get("trigger", {}),
+            "if_conditions": if_conditions,
             "conditions": conditions,
             "actions": actions,
             "created_at": datetime.utcnow().isoformat() + "Z",
@@ -130,6 +135,9 @@ class AutomationStore:
                 if "conditions" in automation_data:
                     _LOGGER.debug(f"Updating automation {automation_id} with {len(automation_data.get('conditions', []))} condition(s)")
                     auto["conditions"] = automation_data["conditions"]
+                if "if_conditions" in automation_data:
+                    _LOGGER.debug(f"Updating automation {automation_id} with {len(automation_data.get('if_conditions', []))} IF condition(s)")
+                    auto["if_conditions"] = automation_data["if_conditions"]
 
                 auto["updated_at"] = datetime.utcnow().isoformat() + "Z"
                 self._data["automations"][i] = auto
@@ -360,6 +368,17 @@ class AutomationEngine:
                     _LOGGER.info(
                         f"Automation '{automation.get('name')}' (id={automation.get('id')}) triggered: {result.reason}"
                     )
+
+                    # Check IF conditions first (if any)
+                    if_conditions = automation.get("if_conditions", [])
+                    if if_conditions:
+                        if_result = evaluate_conditions(if_conditions, current_state)
+                        if not if_result.triggered:
+                            _LOGGER.info(
+                                f"Automation '{automation.get('name')}' IF conditions not met: {if_result.reason}"
+                            )
+                            continue
+                        _LOGGER.debug(f"Automation '{automation.get('name')}' IF conditions passed")
 
                     # Check conditions (if any)
                     conditions = automation.get("conditions", [])

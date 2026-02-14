@@ -1041,6 +1041,8 @@ def _evaluate_single_condition(
         return _evaluate_ev_condition(condition, current_state)
     elif condition_type == "solar_forecast":
         return _evaluate_solar_forecast_condition(condition, current_state)
+    elif condition_type == "time":
+        return _evaluate_time_condition(condition, current_state)
     else:
         return TriggerResult(triggered=False, reason=f"Unknown condition type: {condition_type}")
 
@@ -1236,3 +1238,47 @@ def _evaluate_solar_forecast_condition(condition: Dict[str, Any], current_state:
         if forecast_value <= threshold:
             return TriggerResult(triggered=True, reason=f"{period} forecast {forecast_value:.0f} kWh (<= {threshold} kWh)")
         return TriggerResult(triggered=False, reason=f"{period} forecast {forecast_value:.0f} kWh (> {threshold} kWh)")
+
+
+def _evaluate_time_condition(condition: Dict[str, Any], current_state: Dict[str, Any]) -> TriggerResult:
+    """Evaluate time condition (before/after/between, weekday filter)."""
+    current_datetime = current_state.get("current_time", datetime.now())
+    current_time = current_datetime.time()
+
+    # Weekday check (Sun=0..Sat=6)
+    weekdays = condition.get("time_weekdays")  # list of ints
+    if weekdays:
+        current_weekday = (current_datetime.weekday() + 1) % 7  # Python Mon=0 → Sun=0
+        if current_weekday not in weekdays:
+            return TriggerResult(triggered=False, reason=f"Weekday {current_weekday} not in {weekdays}")
+
+    # Time mode: "before", "after", "between"
+    time_mode = condition.get("time_mode", "between")
+    time_after = condition.get("time_after")   # "HH:MM"
+    time_before = condition.get("time_before")  # "HH:MM"
+
+    if time_mode == "after" and time_after:
+        after = datetime.strptime(time_after, "%H:%M").time()
+        if current_time >= after:
+            return TriggerResult(triggered=True, reason=f"Time {current_time:%H:%M} is after {time_after}")
+        return TriggerResult(triggered=False, reason=f"Time {current_time:%H:%M} is before {time_after}")
+
+    elif time_mode == "before" and time_before:
+        before = datetime.strptime(time_before, "%H:%M").time()
+        if current_time <= before:
+            return TriggerResult(triggered=True, reason=f"Time {current_time:%H:%M} is before {time_before}")
+        return TriggerResult(triggered=False, reason=f"Time {current_time:%H:%M} is after {time_before}")
+
+    elif time_mode == "between" and time_after and time_before:
+        after = datetime.strptime(time_after, "%H:%M").time()
+        before = datetime.strptime(time_before, "%H:%M").time()
+        if after <= before:
+            is_within = after <= current_time <= before
+        else:
+            # Overnight window (e.g., 22:00 - 06:00)
+            is_within = current_time >= after or current_time <= before
+        if is_within:
+            return TriggerResult(triggered=True, reason=f"Time {current_time:%H:%M} is between {time_after}-{time_before}")
+        return TriggerResult(triggered=False, reason=f"Time {current_time:%H:%M} is not between {time_after}-{time_before}")
+
+    return TriggerResult(triggered=True, reason="No time constraint specified")
