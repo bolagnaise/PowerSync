@@ -250,11 +250,11 @@ def _get_vehicle_name_from_vin(hass: HomeAssistant, vehicle_vin: str) -> str:
             if domain in TESLA_EV_INTEGRATIONS:
                 id_str = str(identifier_value)
                 # VIN is 17 chars, not all numeric
-                if len(id_str) == 17 and not id_str.isdigit() and id_str == vehicle_vin:
-                    return device.name or vehicle_vin[:8]
+                if len(id_str) == 17 and not id_str.isdigit():
+                    if id_str == vehicle_vin or vehicle_vin == DEFAULT_VEHICLE_ID:
+                        return device.name or id_str[:8]
 
-    # Fallback to truncated VIN
-    return vehicle_vin[:8] if len(vehicle_vin) > 8 else vehicle_vin
+    return ""
 
 
 async def _wake_tesla_ev(
@@ -2354,7 +2354,7 @@ async def _dynamic_ev_update_surplus(
                         if not vehicle_name and vehicle_id:
                             vehicle_name = _get_vehicle_name_from_vin(hass, vehicle_id)
                         if not vehicle_name:
-                            vehicle_name = vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id
+                            vehicle_name = (vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id) if vehicle_id and vehicle_id != DEFAULT_VEHICLE_ID else "EV"
                         await _send_expo_push(
                             hass,
                             "EV Charging",
@@ -2394,7 +2394,7 @@ async def _dynamic_ev_update_surplus(
                         if not vehicle_name and vehicle_id:
                             vehicle_name = _get_vehicle_name_from_vin(hass, vehicle_id)
                         if not vehicle_name:
-                            vehicle_name = vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id
+                            vehicle_name = (vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id) if vehicle_id and vehicle_id != DEFAULT_VEHICLE_ID else "EV"
                         await _send_expo_push(
                             hass,
                             "EV Charging",
@@ -2481,7 +2481,7 @@ async def _dynamic_ev_update_surplus(
                         if not vehicle_name and vehicle_id:
                             vehicle_name = _get_vehicle_name_from_vin(hass, vehicle_id)
                         if not vehicle_name:
-                            vehicle_name = vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id
+                            vehicle_name = (vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id) if vehicle_id and vehicle_id != DEFAULT_VEHICLE_ID else "EV"
                         await _send_expo_push(
                             hass,
                             "EV Charging",
@@ -3015,7 +3015,7 @@ async def _action_start_ev_charging_dynamic_locked(
             if not vehicle_name and vehicle_id:
                 vehicle_name = _get_vehicle_name_from_vin(hass, vehicle_id)
             if not vehicle_name:
-                vehicle_name = vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id
+                vehicle_name = (vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id) if vehicle_id and vehicle_id != DEFAULT_VEHICLE_ID else "EV"
             await _send_expo_push(
                 hass,
                 "EV Charging",
