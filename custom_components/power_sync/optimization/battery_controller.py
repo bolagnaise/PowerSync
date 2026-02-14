@@ -148,6 +148,32 @@ class BatteryControllerWrapper:
             _LOGGER.error(f"Set self-consumption mode failed: {e}", exc_info=True)
             return False
 
+    async def set_autonomous_mode(self) -> bool:
+        """
+        Set battery to autonomous (TOU) mode.
+
+        In autonomous mode, Tesla respects backup_reserve as a hard floor and
+        makes charge/discharge decisions based on TOU rates. This is required
+        for IDLE to work correctly — backup_reserve alone is not enough in
+        self_consumption mode.
+
+        Returns:
+            True if command was sent successfully
+        """
+        try:
+            _LOGGER.info("🔋 Optimizer: Setting autonomous (TOU) mode")
+
+            await self.hass.services.async_call(
+                "power_sync", "set_autonomous",
+                {},
+                blocking=True,
+            )
+            return True
+
+        except Exception as e:
+            _LOGGER.error(f"Set autonomous mode failed: {e}", exc_info=True)
+            return False
+
     async def set_backup_reserve(self, percent: int) -> bool:
         """
         Set battery backup reserve percentage.

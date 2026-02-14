@@ -13279,6 +13279,54 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.error(f"Error setting self-consumption mode: {e}", exc_info=True)
 
+    async def handle_set_autonomous(call: ServiceCall) -> None:
+        """Set battery to autonomous (TOU) mode.
+
+        Used by optimizer for IDLE action — Tesla needs autonomous mode for
+        backup_reserve to act as a hard floor that prevents discharge.
+        In self_consumption mode, backup_reserve alone is not reliably enforced.
+        """
+        _LOGGER.info("Optimizer: Setting autonomous (TOU) mode")
+
+        # Non-Tesla systems: autonomous is the default, nothing to do
+        is_foxess = bool(entry.data.get(CONF_FOXESS_HOST) or entry.data.get(CONF_FOXESS_SERIAL_PORT))
+        is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
+        is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
+        if is_foxess or is_sungrow or is_sigenergy:
+            _LOGGER.debug("Non-Tesla system — autonomous mode is implicit, skipping")
+            return
+
+        # Tesla Powerwall
+        try:
+            current_token, provider = get_tesla_api_token(hass, entry)
+
+            site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+            if not site_id or not current_token:
+                _LOGGER.error("Missing Tesla site ID or token for autonomous mode")
+                return
+
+            session = async_get_clientsession(hass)
+            headers = {
+                "Authorization": f"Bearer {current_token}",
+                "Content-Type": "application/json",
+            }
+            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+            async with session.post(
+                f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                headers=headers,
+                json={"default_real_mode": "autonomous"},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status == 200:
+                    _LOGGER.info("✅ Tesla set to autonomous (TOU) mode")
+                else:
+                    text = await response.text()
+                    _LOGGER.warning(f"Could not set autonomous mode: {response.status} - {text}")
+
+        except Exception as e:
+            _LOGGER.error(f"Error setting autonomous mode: {e}", exc_info=True)
+
     # ======================================================================
     # POWERWALL SETTINGS SERVICES (for mobile app Controls)
     # ======================================================================
@@ -13577,6 +13625,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.services.async_register(DOMAIN, SERVICE_FORCE_CHARGE, handle_force_charge)
     hass.services.async_register(DOMAIN, SERVICE_RESTORE_NORMAL, handle_restore_normal)
     hass.services.async_register(DOMAIN, "set_self_consumption", handle_set_self_consumption)
+    hass.services.async_register(DOMAIN, "set_autonomous", handle_set_autonomous)
 
     # Now that handle_restore_normal is defined, schedule expired force mode restore
     if persisted_force_state:

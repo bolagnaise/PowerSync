@@ -677,9 +677,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         soc_pct,
                     )
                 elif hasattr(battery, "set_backup_reserve"):
+                    # Tesla requires autonomous (TOU) mode for backup_reserve
+                    # to act as a hard floor. In self_consumption mode, the
+                    # Powerwall may still discharge below the reserve.
+                    if hasattr(battery, "set_autonomous_mode"):
+                        await battery.set_autonomous_mode()
                     await battery.set_backup_reserve(soc_pct)
                     _LOGGER.info(
-                        "Optimizer: IDLE — holding SOC at %d%% (backup reserve=%d%%)",
+                        "Optimizer: IDLE — holding SOC at %d%% (autonomous + backup reserve=%d%%)",
                         soc_pct, soc_pct,
                     )
                 elif hasattr(battery, "set_self_consumption_mode"):
