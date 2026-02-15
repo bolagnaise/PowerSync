@@ -7590,11 +7590,14 @@ class EVWidgetDataView(HomeAssistantView):
                 else:
                     source = "grid"
 
-                # Get vehicle SoC if available
+                # Get vehicle SoC from BLE/Fleet sensors
                 current_soc = 0
                 target_soc = params.get("target_soc", 80)
-                if live_status:
-                    current_soc = live_status.get("ev_state_of_charge", 0) or 0
+                try:
+                    ev_status = _get_ev_vehicle_status(self._hass, self._config_entry)
+                    current_soc = ev_status.get("ev_soc") or 0
+                except Exception:
+                    pass
 
                 # Estimate ETA (rough calculation)
                 eta_minutes = None
