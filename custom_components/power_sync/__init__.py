@@ -233,6 +233,8 @@ from .const import (
     TESLEMETRY_BT_DEVICE_TRACKER_LOCATION,
     # Tesla integrations for device discovery
     TESLA_INTEGRATIONS,
+    # BYD vehicle integration
+    BYD_INTEGRATION,
     # Zaptec EV charger configuration
     CONF_ZAPTEC_CHARGER_ENTITY,
     CONF_ZAPTEC_INSTALLATION_ID,
@@ -5844,6 +5846,17 @@ class EVStatusView(HomeAssistantView):
             if (ble_status.get("available") or tbt_status.get("available")) and vehicle_count == 0:
                 vehicle_count = 1
 
+            # Count BYD vehicles
+            byd_count = 0
+            byd_available = BYD_INTEGRATION in self._hass.config_entries.async_domains()
+            if byd_available:
+                device_registry = dr.async_get(self._hass)
+                for device in device_registry.devices.values():
+                    for identifier in device.identifiers:
+                        if identifier[0] == BYD_INTEGRATION:
+                            byd_count += 1
+                            break
+
             # Check Zaptec status
             zaptec_status = self._get_zaptec_status()
 
@@ -5853,6 +5866,7 @@ class EVStatusView(HomeAssistantView):
                 or ble_status.get("available", False)
                 or tbt_status.get("available", False)
                 or zaptec_status.get("available", False)
+                or byd_available
             )
 
             return web.json_response({
@@ -5861,12 +5875,13 @@ class EVStatusView(HomeAssistantView):
                 "linked": is_configured,
                 "has_access_token": has_credentials,
                 "token_expires_at": None,
-                "vehicle_count": vehicle_count,
+                "vehicle_count": vehicle_count + byd_count,
                 "integration": active_integration,
                 "ev_provider": ev_provider,
                 "tesla_ble": ble_status,
                 "teslemetry_bt": tbt_status,
                 "zaptec": zaptec_status,
+                "byd": {"available": byd_available, "vehicle_count": byd_count},
             })
 
         except Exception as e:
@@ -5983,7 +5998,111 @@ class EVVehiclesView(HomeAssistantView):
             "is_online": is_online,
             "data_updated_at": datetime.now().isoformat(),
             "source": "tesla_ble",
+            "brand": "tesla",
         }
+
+    def _get_byd_vehicles(self, start_id: int = 1) -> list[dict]:
+        """Get BYD vehicles from hass-byd-vehicle integration."""
+        if BYD_INTEGRATION not in self._hass.config_entries.async_domains():
+            return []
+
+        device_registry = dr.async_get(self._hass)
+        entity_registry = er.async_get(self._hass)
+        vehicles = []
+        vehicle_id = start_id
+
+        for device in device_registry.devices.values():
+            is_byd = False
+            for identifier in device.identifiers:
+                if identifier[0] == BYD_INTEGRATION:
+                    is_byd = True
+                    break
+            if not is_byd:
+                continue
+
+            battery_level = None
+            charging_state = None
+            is_plugged_in = False
+            is_online = False
+            battery_range = None
+            time_to_full = None
+
+            for entity in entity_registry.entities.values():
+                if entity.device_id != device.id:
+                    continue
+
+                state = self._hass.states.get(entity.entity_id)
+                if not state or state.state in ("unknown", "unavailable"):
+                    continue
+
+                eid = entity.entity_id.lower()
+
+                # Battery level: sensor.*_battery_level
+                if eid.startswith("sensor.") and "battery_level" in eid:
+                    try:
+                        val = float(state.state)
+                        if 0 <= val <= 100:
+                            battery_level = int(val)
+                    except (ValueError, TypeError):
+                        pass
+
+                # Charging: binary_sensor.*_charging (not charger_connected)
+                if eid.startswith("binary_sensor.") and "charging" in eid and "charger" not in eid:
+                    if state.state == "on":
+                        charging_state = "Charging"
+
+                # Charger connected: binary_sensor.*_charger_connected
+                if eid.startswith("binary_sensor.") and "charger_connected" in eid:
+                    if state.state == "on":
+                        is_plugged_in = True
+
+                # Online: binary_sensor.*_online
+                if eid.startswith("binary_sensor.") and "online" in eid:
+                    is_online = state.state == "on"
+
+                # Range: sensor.*_range
+                if eid.startswith("sensor.") and "range" in eid and "battery" not in eid:
+                    try:
+                        battery_range = float(state.state)
+                    except (ValueError, TypeError):
+                        pass
+
+                # Time to full: sensor.*_time_to_full
+                if eid.startswith("sensor.") and "time_to_full" in eid:
+                    try:
+                        time_to_full = float(state.state)
+                    except (ValueError, TypeError):
+                        pass
+
+            # Derive charging state if not already set
+            if charging_state is None:
+                if is_plugged_in:
+                    charging_state = "Stopped"
+                else:
+                    charging_state = "Disconnected"
+
+            vehicles.append({
+                "id": vehicle_id,
+                "vehicle_id": f"byd_{device.id}",
+                "vin": None,
+                "display_name": device.name or f"BYD Vehicle {vehicle_id}",
+                "model": device.model,
+                "battery_level": battery_level,
+                "battery_range": battery_range,
+                "charging_state": charging_state,
+                "charge_limit_soc": None,
+                "is_plugged_in": is_plugged_in,
+                "charger_power": None,
+                "time_to_full_charge": time_to_full,
+                "is_online": is_online,
+                "data_updated_at": datetime.now().isoformat(),
+                "source": "byd_cloud",
+                "brand": "byd",
+            })
+            vehicle_id += 1
+
+        _LOGGER.debug(f"EV BYD: Found {len(vehicles)} BYD vehicle(s)")
+        return vehicles
 
     async def get(self, request: web.Request) -> web.Response:
         """Handle GET request for vehicle list."""
@@ -6119,6 +6238,7 @@ class EVVehiclesView(HomeAssistantView):
                             "is_online": True,
                             "data_updated_at": datetime.now().isoformat(),
                             "source": "fleet_api",
+                            "brand": "tesla",
                         })
 
             # Get/supplement with Tesla BLE data
@@ -6141,8 +6261,12 @@ class EVVehiclesView(HomeAssistantView):
                         # No Fleet API vehicles, use BLE as primary
                         vehicles.append(ble_vehicle)
 
+            # Discover BYD vehicles from hass-byd-vehicle integration
+            byd_vehicles = self._get_byd_vehicles(start_id=len(vehicles) + 1)
+            vehicles.extend(byd_vehicles)
+
             if not vehicles:
-                message = "No Tesla vehicles found"
+                message = "No vehicles found"
                 if ev_provider == EV_PROVIDER_FLEET_API:
                     message = "No Tesla integration installed (tesla_fleet or teslemetry)"
                 elif ev_provider == EV_PROVIDER_TESLA_BLE:
@@ -7914,8 +8038,44 @@ class EVWidgetDataView(HomeAssistantView):
                         "surplus_kw": round(surplus_kw, 2),
                     })
 
+            # Check BYD vehicles
+            if BYD_INTEGRATION in self._hass.config_entries.async_domains():
+                byd_device_registry = dr.async_get(self._hass)
+                byd_entity_registry = er.async_get(self._hass)
+                for byd_device in byd_device_registry.devices.values():
+                    is_byd = any(i[0] == BYD_INTEGRATION for i in byd_device.identifiers)
+                    if not is_byd:
+                        continue
+                    byd_soc = 0
+                    byd_charging = False
+                    for byd_entity in byd_entity_registry.entities.values():
+                        if byd_entity.device_id != byd_device.id:
+                            continue
+                        byd_state = self._hass.states.get(byd_entity.entity_id)
+                        if not byd_state or byd_state.state in ("unknown", "unavailable"):
+                            continue
+                        eid = byd_entity.entity_id.lower()
+                        if eid.startswith("sensor.") and "battery_level" in eid:
+                            try:
+                                byd_soc = int(float(byd_state.state))
+                            except (ValueError, TypeError):
+                                pass
+                        if eid.startswith("binary_sensor.") and "charging" in eid and "charger" not in eid:
+                            byd_charging = byd_state.state == "on"
+                    if byd_charging:
+                        widget_data.append({
+                            "vehicle_name": byd_device.name or "BYD Vehicle",
+                            "is_charging": True,
+                            "current_soc": byd_soc,
+                            "target_soc": 100,
+                            "current_power_kw": 0,
+                            "source": "grid",
+                            "eta_minutes": None,
+                            "surplus_kw": round(surplus_kw, 2),
+                        })
+
             # Filter out idle vehicles — only keep entries that are actively charging
-            active_widget_data = [w for w in widget_data if w["is_charging"] and w["current_power_kw"] > 0]
+            active_widget_data = [w for w in widget_data if w["is_charging"]]
 
             # If no actively charging vehicles, return idle status
             if not active_widget_data:

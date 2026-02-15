@@ -215,6 +215,9 @@ TESLA_INTEGRATIONS = [
     "tesla",          # Older Tesla integration
 ]
 
+# BYD vehicle integration (hass-byd-vehicle)
+BYD_INTEGRATION = "byd_vehicle"
+
 # Fleet API configuration (direct Tesla API)
 CONF_FLEET_API_ACCESS_TOKEN = "fleet_api_access_token"
 CONF_FLEET_API_REFRESH_TOKEN = "fleet_api_refresh_token"
