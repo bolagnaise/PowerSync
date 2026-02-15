@@ -424,6 +424,7 @@ class ZaptecCloudClient:
         # Operation mode
         op_mode_raw = state.get(120, state.get("120", ""))
         op_modes = {
+            "0": "charging_paused",
             "1": "disconnected",
             "2": "connected_waiting",
             "3": "charging",
