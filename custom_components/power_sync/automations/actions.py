@@ -2795,7 +2795,15 @@ async def _dynamic_ev_update(
         # - grid_reactive: reactive adjustment based on actual grid flow
         available_power_kw = min(inverter_headroom_kw, grid_reactive_kw + current_ev_power_kw) - current_ev_power_kw
     elif battery_deficit_kw > 0.1:
+        # Battery has surplus beyond target — available for EV
         available_power_kw = battery_deficit_kw
+    elif battery_deficit_kw < -0.2:
+        # Battery is NOT meeting its charge target — EV is consuming too much.
+        # Reduce EV amps by accounting for both the battery shortfall and grid headroom.
+        # deficit is negative (e.g. -1.4kW means battery needs 1.4kW more),
+        # grid_headroom is positive (e.g. 0.2kW still available on grid).
+        # Net: if deficit=-1.4 and headroom=0.2, available = -1.4 + 0.2 = -1.2kW → reduce EV
+        available_power_kw = battery_deficit_kw + grid_headroom_kw
     else:
         available_power_kw = grid_headroom_kw
 
@@ -3039,11 +3047,20 @@ async def _action_start_ev_charging_dynamic_locked(
     async def periodic_update(now) -> None:
         await _dynamic_ev_update(hass, config_entry, entry_id, vehicle_id)
 
-    # Schedule the periodic update (every 30 seconds)
+    # Use faster update interval for BLE (no API rate limits) vs Fleet API
+    ev_config = _get_ev_config(config_entry)
+    ble_prefix = ev_config.get("ble_prefix", "")
+    use_ble = _is_ble_available(hass, ble_prefix) if ble_prefix else False
+    tbt_prefix = _resolve_teslemetry_bt_prefix(hass)
+    use_tbt = _is_teslemetry_bt_available(hass, tbt_prefix)
+    use_bt = use_ble or use_tbt
+    update_interval = 10 if use_bt else 30
+    _LOGGER.debug(f"Dynamic EV update interval: {update_interval}s (BLE={use_ble}, teslemetry_bt={use_tbt})")
+
     cancel_timer = async_track_time_interval(
         hass,
         periodic_update,
-        timedelta(seconds=30),
+        timedelta(seconds=update_interval),
     )
 
     # Build full params dict
