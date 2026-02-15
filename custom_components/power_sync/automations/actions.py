@@ -260,6 +260,34 @@ def _get_vehicle_name_from_vin(hass: HomeAssistant, vehicle_vin: str) -> str:
     return ""
 
 
+def _is_vehicle_charge_complete(hass: HomeAssistant, vehicle_vin: str) -> bool:
+    """
+    Check if a Tesla vehicle has reached its charge target (charging state is 'complete').
+
+    Args:
+        hass: Home Assistant instance
+        vehicle_vin: The vehicle's VIN
+
+    Returns:
+        True if the vehicle's charging state is 'complete'
+    """
+    import re
+
+    if not vehicle_vin or vehicle_vin == DEFAULT_VEHICLE_ID:
+        return False
+
+    # Check Teslemetry/Fleet sensor.*_charging_state
+    for state in hass.states.async_all():
+        match = re.match(r"sensor\.(\w+)_charging_state$", state.entity_id)
+        if match:
+            candidate = match.group(1)
+            # Match by VIN (case-insensitive)
+            if candidate.upper() == vehicle_vin.upper():
+                if state.state and state.state.lower() in ("complete", "stopped"):
+                    return True
+    return False
+
+
 async def _wake_tesla_ev(
     hass: HomeAssistant,
     vehicle_vin: Optional[str] = None,
@@ -530,7 +558,11 @@ async def _start_ev_charging_ble(hass: HomeAssistant, ble_prefix: str) -> bool:
         _LOGGER.info(f"Started EV charging via Tesla BLE: {charger_entity}")
         return True
     except Exception as e:
-        _LOGGER.error(f"Failed to start EV charging via BLE: {e}")
+        err_str = str(e).lower()
+        if "complete" in err_str:
+            _LOGGER.info(f"EV charging is complete (at target SOC) via BLE — skipping start")
+        else:
+            _LOGGER.error(f"Failed to start EV charging via BLE: {e}")
         return False
 
 
@@ -662,7 +694,11 @@ async def _start_ev_charging_teslemetry_bt(hass: HomeAssistant, tbt_prefix: str)
         _LOGGER.info(f"Started EV charging via Teslemetry BT: {entity_id}")
         return True
     except Exception as e:
-        _LOGGER.error(f"Failed to start EV charging via Teslemetry BT: {e}")
+        err_str = str(e).lower()
+        if "complete" in err_str:
+            _LOGGER.info(f"EV charging is complete (at target SOC) via Teslemetry BT — skipping start")
+        else:
+            _LOGGER.error(f"Failed to start EV charging via Teslemetry BT: {e}")
         return False
 
 
@@ -1516,6 +1552,10 @@ async def _action_start_ev_charging(
             if "is_charging" in err_str or "already" in err_str:
                 _LOGGER.info(f"EV is already charging — proceeding with session")
                 charging_started = True
+            elif "complete" in err_str:
+                # Vehicle has reached its charge limit — not an error
+                _LOGGER.info(f"EV charging is complete (at target SOC) — skipping start")
+                return False
             else:
                 _LOGGER.error(f"Failed to start EV charging: {e}")
 
@@ -2109,6 +2149,87 @@ def _distribute_surplus(entry_id: str, vehicle_id: str, total_surplus_kw: float,
     return allocated
 
 
+async def _solar_surplus_switch_to_next_vehicle(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    entry_id: str,
+    completed_vehicle_id: str,
+    current_params: Dict[str, Any],
+) -> None:
+    """
+    When a vehicle finishes charging in solar surplus mode, stop its session
+    and try to start surplus charging on the next available vehicle.
+    """
+    from .ev_charging_planner import discover_all_tesla_vehicles, is_ev_plugged_in
+
+    completed_name = _get_vehicle_name_from_vin(hass, completed_vehicle_id) or completed_vehicle_id[:8]
+
+    # Stop the completed vehicle's dynamic session (don't send stop command — it's already done)
+    await _action_stop_ev_charging_dynamic(
+        hass, config_entry,
+        {
+            "vehicle_id": completed_vehicle_id,
+            "stop_charging": False,
+            "stop_reason": f"charge complete",
+        }
+    )
+
+    # Send notification about completion
+    try:
+        await _send_expo_push(
+            hass, "EV Charging",
+            f"{completed_name} charge complete — checking other vehicles"
+        )
+    except Exception:
+        pass
+
+    # Discover all Tesla vehicles and find one that's plugged in and not complete
+    try:
+        all_vehicles = await discover_all_tesla_vehicles(hass, config_entry)
+    except Exception as e:
+        _LOGGER.warning(f"Solar surplus: Could not discover vehicles for fallback: {e}")
+        return
+
+    for vehicle in all_vehicles:
+        vin = vehicle["vin"]
+        name = vehicle["name"]
+
+        # Skip the completed vehicle
+        if vin == completed_vehicle_id:
+            continue
+
+        # Check if plugged in
+        plugged_in = await is_ev_plugged_in(hass, config_entry, vehicle_vin=vin)
+        if not plugged_in:
+            _LOGGER.debug(f"Solar surplus fallback: {name} ({vin[:8]}...) not plugged in, skipping")
+            continue
+
+        # Check if charge is already complete
+        if _is_vehicle_charge_complete(hass, vin):
+            _LOGGER.debug(f"Solar surplus fallback: {name} ({vin[:8]}...) already complete, skipping")
+            continue
+
+        # Found a candidate — start surplus charging with same params but new VIN
+        _LOGGER.info(
+            f"⚡ Solar surplus EV: Switching from {completed_name} to {name} ({vin[:8]}...)"
+        )
+        new_params = dict(current_params)
+        new_params["vehicle_vin"] = vin
+        new_params["vehicle_name"] = name
+
+        try:
+            await _action_start_ev_charging_dynamic(hass, config_entry, new_params, context=None)
+            await _send_expo_push(
+                hass, "EV Charging",
+                f"Solar surplus switching to {name}"
+            )
+        except Exception as e:
+            _LOGGER.error(f"Solar surplus fallback: Failed to start {name}: {e}")
+        return
+
+    _LOGGER.info(f"⚡ Solar surplus EV: No other vehicles available for charging")
+
+
 async def _set_vehicle_amps(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -2592,10 +2713,31 @@ async def _dynamic_ev_update_surplus(
                 # Start charging after sustained surplus
                 _LOGGER.info(f"⚡ Solar surplus EV: Starting - sustained surplus for {sustained_minutes} min")
 
+                # Check if this vehicle's charge is already complete before trying
+                if _is_vehicle_charge_complete(hass, vehicle_id):
+                    _LOGGER.info(
+                        f"⚡ Solar surplus EV: {vehicle_id[:8]}... is charge complete — "
+                        f"looking for next vehicle"
+                    )
+                    await _solar_surplus_switch_to_next_vehicle(
+                        hass, config_entry, entry_id, vehicle_id, params
+                    )
+                    return
+
                 # Send the actual start-charging command to the vehicle
                 start_success = await _action_start_ev_charging(hass, config_entry, params, context=None)
                 if not start_success:
-                    _LOGGER.warning("⚡ Solar surplus EV: Failed to send start charging command")
+                    # Check if failure was due to charge complete
+                    if _is_vehicle_charge_complete(hass, vehicle_id):
+                        _LOGGER.info(
+                            f"⚡ Solar surplus EV: {vehicle_id[:8]}... charge complete — "
+                            f"looking for next vehicle"
+                        )
+                        await _solar_surplus_switch_to_next_vehicle(
+                            hass, config_entry, entry_id, vehicle_id, params
+                        )
+                    else:
+                        _LOGGER.warning("⚡ Solar surplus EV: Failed to send start charging command")
                     return
 
                 state["charging_started"] = True
