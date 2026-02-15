@@ -67,6 +67,10 @@ from .const import (
     SENSOR_TYPE_LP_LOAD_FORECAST,
     SENSOR_TYPE_LP_IMPORT_PRICE_FORECAST,
     SENSOR_TYPE_LP_EXPORT_PRICE_FORECAST,
+    SENSOR_TYPE_AMBER_USAGE_YESTERDAY_COST,
+    SENSOR_TYPE_AMBER_USAGE_YESTERDAY_SAVINGS,
+    SENSOR_TYPE_AMBER_USAGE_MONTH_COST,
+    SENSOR_TYPE_AMBER_USAGE_MONTH_SAVINGS,
     BATTERY_MODE_STATE_NORMAL,
     BATTERY_MODE_STATE_FORCE_CHARGE,
     BATTERY_MODE_STATE_FORCE_DISCHARGE,
@@ -523,6 +527,27 @@ async def async_setup_entry(
                 )
             )
 
+    # Add Amber usage sensors if usage coordinator exists
+    amber_usage_coordinator = domain_data.get("amber_usage_coordinator")
+    if amber_usage_coordinator:
+        _LOGGER.info("Amber usage tracking active - adding metered cost sensors")
+        sensor_names = {
+            SENSOR_TYPE_AMBER_USAGE_YESTERDAY_COST: "Yesterday Billed Cost",
+            SENSOR_TYPE_AMBER_USAGE_YESTERDAY_SAVINGS: "Yesterday Battery Savings",
+            SENSOR_TYPE_AMBER_USAGE_MONTH_COST: "Month To Date Billed Cost",
+            SENSOR_TYPE_AMBER_USAGE_MONTH_SAVINGS: "Month To Date Battery Savings",
+        }
+        for sensor_type, period, value_key in AMBER_USAGE_SENSORS:
+            entities.append(
+                AmberUsageSensor(
+                    entry=entry,
+                    sensor_type=sensor_type,
+                    name=sensor_names[sensor_type],
+                    period=period,
+                    value_key=value_key,
+                )
+            )
+
     # Add tariff schedule sensor (always added for visualization)
     entities.append(
         TariffScheduleSensor(
@@ -843,6 +868,15 @@ LP_FORECAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
             "price_values": data.get("export_prices"),
         } if data and data.get("available") else {},
     ),
+)
+
+
+# Amber Usage sensors — actual metered cost data from NEM
+AMBER_USAGE_SENSORS = (
+    (SENSOR_TYPE_AMBER_USAGE_YESTERDAY_COST, "yesterday", "net_cost"),
+    (SENSOR_TYPE_AMBER_USAGE_YESTERDAY_SAVINGS, "yesterday", "savings"),
+    (SENSOR_TYPE_AMBER_USAGE_MONTH_COST, "month", "net_cost"),
+    (SENSOR_TYPE_AMBER_USAGE_MONTH_SAVINGS, "month", "savings"),
 )
 
 
@@ -2025,3 +2059,100 @@ class BatteryModeSensor(SensorEntity):
             attributes["description"] = "Battery operating in normal self-consumption mode"
 
         return attributes
+
+
+class AmberUsageSensor(SensorEntity):
+    """Sensor for actual metered usage/cost data from Amber Usage API.
+
+    Reads from AmberUsageCoordinator via hass.data. Refreshes hourly.
+    """
+
+    _attr_has_entity_name = True
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_native_unit_of_measurement = CURRENCY_DOLLAR
+    _attr_state_class = SensorStateClass.TOTAL
+    _attr_icon = "mdi:cash-check"
+
+    def __init__(
+        self,
+        entry: ConfigEntry,
+        sensor_type: str,
+        name: str,
+        period: str,
+        value_key: str,
+    ) -> None:
+        """Initialize the sensor."""
+        self._entry = entry
+        self._sensor_type = sensor_type
+        self._period = period
+        self._value_key = value_key
+        self._attr_name = name
+        self._attr_unique_id = f"{entry.entry_id}_{sensor_type}"
+        self._attr_suggested_object_id = f"power_sync_{sensor_type}"
+        self._unsub_interval: Any = None
+
+    async def async_added_to_hass(self) -> None:
+        """Start periodic updates when added to HA."""
+        @callback
+        def _periodic_update(_now=None) -> None:
+            self.async_write_ha_state()
+
+        self._unsub_interval = async_track_time_interval(
+            self.hass,
+            _periodic_update,
+            timedelta(hours=1),
+        )
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Cancel the update timer."""
+        if self._unsub_interval:
+            self._unsub_interval()
+            self._unsub_interval = None
+
+    def _get_usage_coordinator(self):
+        """Get the AmberUsageCoordinator from hass.data."""
+        return (
+            self.hass.data.get(DOMAIN, {})
+            .get(self._entry.entry_id, {})
+            .get("amber_usage_coordinator")
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the sensor value."""
+        coord = self._get_usage_coordinator()
+        if not coord:
+            return None
+        summary = coord.get_savings_summary(self._period)
+        val = summary.get(self._value_key)
+        if val is None:
+            return None
+        return round(val, 2)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return additional attributes."""
+        coord = self._get_usage_coordinator()
+        if not coord:
+            return {"source": "amber_usage_api"}
+        summary = coord.get_savings_summary(self._period)
+        attrs = {
+            "import_kwh": summary.get("import_kwh"),
+            "export_kwh": summary.get("export_kwh"),
+            "supply_charge": summary.get("supply_charge"),
+            "quality": summary.get("quality"),
+            "days_count": summary.get("days_count"),
+            "source": "amber_usage_api",
+            "last_fetch": coord.last_fetch_iso,
+        }
+        if self._value_key == "savings":
+            attrs["baseline_cost"] = summary.get("baseline_cost")
+            attrs["net_cost"] = summary.get("net_cost")
+        return attrs
+
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }

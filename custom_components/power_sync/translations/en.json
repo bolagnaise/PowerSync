@@ -924,6 +924,18 @@
       },
       "solcast_current_estimate": {
         "name": "Solar Current Estimate"
+      },
+      "amber_usage_yesterday_cost": {
+        "name": "Yesterday Billed Cost"
+      },
+      "amber_usage_yesterday_savings": {
+        "name": "Yesterday Battery Savings"
+      },
+      "amber_usage_month_cost": {
+        "name": "Month To Date Billed Cost"
+      },
+      "amber_usage_month_savings": {
+        "name": "Month To Date Battery Savings"
       }
     },
     "switch": {

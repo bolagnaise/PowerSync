@@ -1,7 +1,8 @@
 """Data update coordinators for PowerSync with improved error handling."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from dataclasses import dataclass, asdict
+from datetime import datetime, timedelta, date
 import logging
 import re
 from typing import Any
@@ -12,6 +13,7 @@ import aiohttp
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
@@ -538,6 +540,450 @@ class AmberPriceCoordinator(DataUpdateCoordinator):
             raise  # Re-raise UpdateFailed exceptions
         except Exception as err:
             raise UpdateFailed(f"Unexpected error fetching Amber data: {err}") from err
+
+
+# ============================================================
+# Amber Usage API — actual metered cost data from NEM
+# ============================================================
+
+USAGE_FETCH_INTERVAL = timedelta(hours=4)
+USAGE_STORAGE_VERSION = 1
+USAGE_STORAGE_KEY = "power_sync.amber_usage"
+USAGE_MAX_DAYS = 365
+AMBER_DEFAULT_MONTHLY_SUPPLY_FEE = 25.0  # Amber's standard $25/month supply charge
+
+# Quality ranking for deciding whether to overwrite existing data
+_QUALITY_RANK = {"estimated": 0, "mixed": 1, "billable": 2}
+
+
+@dataclass
+class DayUsage:
+    """Actual metered usage and cost for a single day from Amber."""
+
+    date: str                   # "YYYY-MM-DD"
+    import_kwh: float           # general channel total
+    export_kwh: float           # feedIn channel (absolute)
+    controlled_load_kwh: float
+    import_cost: float          # $ gross import
+    export_earnings: float      # $ gross export earnings
+    net_cost: float             # import_cost - export_earnings
+    quality: str                # "estimated", "billable", or "mixed"
+
+
+class AmberUsageCoordinator:
+    """Fetches actual metered usage/cost from the Amber Usage API.
+
+    Not a DataUpdateCoordinator — usage data updates infrequently (every 4h).
+    Uses HA Store for persistence across restarts.
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        api_token: str,
+        site_id: str,
+        entry_id: str,
+        monthly_supply_fee: float = AMBER_DEFAULT_MONTHLY_SUPPLY_FEE,
+    ) -> None:
+        """Initialize the Amber usage coordinator."""
+        self.hass = hass
+        self._api_token = api_token
+        self._site_id = site_id
+        self._entry_id = entry_id
+        self._monthly_supply_fee = monthly_supply_fee
+        self._session = async_get_clientsession(hass)
+        self._store = Store(hass, USAGE_STORAGE_VERSION, f"{USAGE_STORAGE_KEY}.{entry_id}")
+
+        # In-memory state
+        self._days: dict[str, DayUsage] = {}
+        self._baselines: dict[str, float] = {}  # date → baseline_cost from optimizer
+        self._last_fetch: datetime | None = None
+        self._cancel_timer: Any = None
+        self._cancel_initial: Any = None
+
+    @property
+    def last_fetch_iso(self) -> str | None:
+        """Return the last fetch time as ISO string."""
+        return self._last_fetch.isoformat() if self._last_fetch else None
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    async def async_start(self) -> None:
+        """Load stored data and schedule periodic fetches."""
+        await self._load_store()
+        # Delay initial fetch 30-90s to avoid competing with price coordinator
+        # at startup for Amber API rate limit budget
+        import random
+        delay = 30 + random.randint(0, 60)
+        _LOGGER.info("Amber usage: first fetch in %ds (avoiding startup rate limit contention)", delay)
+        self._cancel_initial = self.hass.loop.call_later(
+            delay, lambda: self.hass.async_create_task(self._fetch_usage())
+        )
+        from homeassistant.helpers.event import async_track_time_interval
+        self._cancel_timer = async_track_time_interval(
+            self.hass, self._scheduled_fetch, USAGE_FETCH_INTERVAL
+        )
+
+    async def async_stop(self) -> None:
+        """Cancel the periodic timer and any pending initial fetch."""
+        if self._cancel_initial:
+            self._cancel_initial.cancel()
+            self._cancel_initial = None
+        if self._cancel_timer:
+            self._cancel_timer()
+            self._cancel_timer = None
+
+    async def _scheduled_fetch(self, _now=None) -> None:
+        """Timer callback for periodic fetch."""
+        await self._fetch_usage()
+
+    # ------------------------------------------------------------------
+    # Storage
+    # ------------------------------------------------------------------
+
+    async def _load_store(self) -> None:
+        """Load persisted usage data from HA Store."""
+        stored = await self._store.async_load()
+        if not stored:
+            return
+        for day_dict in stored.get("days", []):
+            try:
+                du = DayUsage(**day_dict)
+                self._days[du.date] = du
+            except (TypeError, KeyError):
+                continue
+        self._baselines = stored.get("baselines", {})
+        last_ts = stored.get("last_fetch")
+        if last_ts:
+            try:
+                self._last_fetch = datetime.fromisoformat(last_ts)
+            except (ValueError, TypeError):
+                pass
+        _LOGGER.info("Amber usage: restored %d days from store", len(self._days))
+
+    def _save_store(self) -> None:
+        """Persist current data to HA Store (delayed write)."""
+        data = {
+            "days": [asdict(du) for du in self._days.values()],
+            "baselines": self._baselines,
+            "last_fetch": self._last_fetch.isoformat() if self._last_fetch else None,
+        }
+        self._store.async_delay_save(lambda: data, 60)
+
+    # ------------------------------------------------------------------
+    # API fetch
+    # ------------------------------------------------------------------
+
+    async def _fetch_usage(self) -> None:
+        """Fetch usage data from Amber API.
+
+        Uses _fetch_with_retry for consistent 429/retry handling with the
+        price coordinator. Checks RateLimit-Remaining header proactively
+        and skips the fetch if the budget is low, to avoid starving the
+        more important real-time price fetches.
+        """
+        now = dt_util.now()
+        today = now.date()
+
+        # Determine date range
+        if not self._days:
+            # First run — fetch 90 days of history
+            start_date = today - timedelta(days=90)
+        else:
+            # Subsequent runs — re-fetch last 3 days for quality upgrades
+            start_date = today - timedelta(days=3)
+
+        end_date = today
+
+        headers = {"Authorization": f"Bearer {self._api_token}"}
+        url = f"{AMBER_API_BASE_URL}/sites/{self._site_id}/usage"
+        params = {
+            "startDate": start_date.isoformat(),
+            "endDate": end_date.isoformat(),
+            "resolution": "30",
+        }
+
+        try:
+            # Pre-flight: probe rate limit budget with a lightweight HEAD-style
+            # check. If RateLimit-Remaining is low, skip this non-critical fetch
+            # to preserve budget for the real-time price coordinator.
+            try:
+                async with self._session.get(
+                    f"{AMBER_API_BASE_URL}/sites/{self._site_id}/prices/current",
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as probe_resp:
+                    remaining = probe_resp.headers.get("RateLimit-Remaining")
+                    if remaining is not None:
+                        try:
+                            remaining_int = int(remaining)
+                            if remaining_int < 10:
+                                _LOGGER.info(
+                                    "Amber usage: skipping fetch — only %d API calls remaining "
+                                    "(preserving budget for price updates)",
+                                    remaining_int,
+                                )
+                                return
+                        except (ValueError, TypeError):
+                            pass
+            except Exception:
+                pass  # Probe failed — proceed with fetch anyway
+
+            intervals = await _fetch_with_retry(
+                self._session,
+                url,
+                headers,
+                max_retries=2,
+                timeout_seconds=30,
+                params=params,
+            )
+        except UpdateFailed as err:
+            _LOGGER.warning("Amber usage fetch failed: %s", err)
+            return
+        except Exception as err:
+            _LOGGER.warning("Amber usage fetch failed unexpectedly: %s", err)
+            return
+
+        updated = self._process_intervals(intervals)
+        self._last_fetch = now
+        self._prune_old_days()
+        self._save_store()
+        _LOGGER.info("Amber usage fetched: %d days updated (range %s to %s)", updated, start_date, end_date)
+
+    def _process_intervals(self, intervals: list[dict]) -> int:
+        """Aggregate 30-min intervals into daily DayUsage records.
+
+        Returns count of days updated.
+        """
+        # Group by date and channel
+        day_buckets: dict[str, dict[str, list[dict]]] = {}
+        for iv in intervals:
+            dt_str = iv.get("nemTime") or iv.get("startTime") or ""
+            try:
+                day_key = dt_str[:10]  # "YYYY-MM-DD"
+                # Validate it's a real date
+                date.fromisoformat(day_key)
+            except (ValueError, IndexError):
+                continue
+            channel = iv.get("channelType", "general")
+            day_buckets.setdefault(day_key, {}).setdefault(channel, []).append(iv)
+
+        updated = 0
+        for day_key, channels in day_buckets.items():
+            import_kwh = 0.0
+            export_kwh = 0.0
+            controlled_kwh = 0.0
+            import_cost = 0.0
+            export_earnings = 0.0
+            qualities: set[str] = set()
+
+            for iv in channels.get("general", []):
+                kwh = abs(iv.get("kwh", 0))
+                import_kwh += kwh
+                import_cost += iv.get("cost", 0)
+                qualities.add(iv.get("quality", "estimated"))
+
+            for iv in channels.get("feedIn", []):
+                kwh = abs(iv.get("kwh", 0))
+                export_kwh += kwh
+                # Amber cost for feedIn is negative when earning
+                export_earnings += abs(iv.get("cost", 0))
+                qualities.add(iv.get("quality", "estimated"))
+
+            for iv in channels.get("controlledLoad", []):
+                kwh = abs(iv.get("kwh", 0))
+                controlled_kwh += kwh
+                import_cost += iv.get("cost", 0)
+                qualities.add(iv.get("quality", "estimated"))
+
+            if "billable" in qualities and "estimated" in qualities:
+                quality = "mixed"
+            elif "billable" in qualities:
+                quality = "billable"
+            else:
+                quality = "estimated"
+
+            new_du = DayUsage(
+                date=day_key,
+                import_kwh=round(import_kwh, 3),
+                export_kwh=round(export_kwh, 3),
+                controlled_load_kwh=round(controlled_kwh, 3),
+                import_cost=round(import_cost, 4),
+                export_earnings=round(export_earnings, 4),
+                net_cost=round(import_cost - export_earnings, 4),
+                quality=quality,
+            )
+
+            # Only overwrite if new data is same or better quality
+            existing = self._days.get(day_key)
+            if existing:
+                existing_rank = _QUALITY_RANK.get(existing.quality, 0)
+                new_rank = _QUALITY_RANK.get(quality, 0)
+                if new_rank < existing_rank:
+                    continue  # Don't downgrade quality
+
+            self._days[day_key] = new_du
+            updated += 1
+
+        return updated
+
+    def _prune_old_days(self) -> None:
+        """Remove days older than USAGE_MAX_DAYS to limit storage."""
+        cutoff = (dt_util.now().date() - timedelta(days=USAGE_MAX_DAYS)).isoformat()
+        old_keys = [k for k in self._days if k < cutoff]
+        for k in old_keys:
+            del self._days[k]
+        # Also prune baselines
+        old_baselines = [k for k in self._baselines if k < cutoff]
+        for k in old_baselines:
+            del self._baselines[k]
+
+    # ------------------------------------------------------------------
+    # Baseline recording (called from optimization coordinator at midnight)
+    # ------------------------------------------------------------------
+
+    def record_baseline(self, date_str: str, baseline_cost: float) -> None:
+        """Record the optimizer's baseline cost for a completed day."""
+        self._baselines[date_str] = round(baseline_cost, 4)
+        self._save_store()
+        _LOGGER.info("Amber usage: recorded baseline $%.2f for %s", baseline_cost, date_str)
+
+    # ------------------------------------------------------------------
+    # Aggregation
+    # ------------------------------------------------------------------
+
+    def get_summary(self, period: str) -> dict[str, Any]:
+        """Get aggregated usage for a period.
+
+        period: 'yesterday', 'week' (last 7 complete days), 'month' (calendar month to yesterday), 'last_month'
+        """
+        days = self._get_days_for_period(period)
+        return self._aggregate(days)
+
+    def get_savings_summary(self, period: str) -> dict[str, Any]:
+        """Get aggregated usage with baseline and savings for a period."""
+        days = self._get_days_for_period(period)
+        result = self._aggregate(days)
+
+        # Add baseline and savings.
+        # Savings = baseline_energy - actual_energy (supply charge excluded
+        # from savings calc since it's a fixed cost with or without battery).
+        # Baseline includes supply charge so it reflects true "no battery" cost.
+        baseline_total = 0.0
+        baseline_days = 0
+        supply_total = sum(self._daily_supply_fee(du.date) for du in days)
+        for du in days:
+            bl = self._baselines.get(du.date)
+            if bl is not None:
+                baseline_total += bl
+                baseline_days += 1
+
+        result["baseline_cost"] = round(baseline_total + supply_total, 2) if baseline_days > 0 else None
+        result["savings"] = round(baseline_total - (result["net_cost"] - result["supply_charge"]), 2) if baseline_days > 0 else None
+        result["baseline_days"] = baseline_days
+        return result
+
+    def get_range(self, start_date: str, end_date: str) -> list[dict[str, Any]]:
+        """Get day-by-day data for a custom date range."""
+        result = []
+        for day_key in sorted(self._days.keys()):
+            if start_date <= day_key <= end_date:
+                du = self._days[day_key]
+                d = asdict(du)
+                daily_fee = self._daily_supply_fee(day_key)
+                d["supply_charge"] = round(daily_fee, 2)
+                d["net_cost"] = round(du.net_cost + daily_fee, 2)
+                bl = self._baselines.get(day_key)
+                d["baseline_cost"] = bl
+                d["savings"] = round(bl - d["net_cost"], 2) if bl is not None else None
+                result.append(d)
+        return result
+
+    def _get_days_for_period(self, period: str) -> list[DayUsage]:
+        """Return list of DayUsage records for the given period."""
+        today = dt_util.now().date()
+        yesterday = today - timedelta(days=1)
+
+        if period == "yesterday":
+            key = yesterday.isoformat()
+            du = self._days.get(key)
+            return [du] if du else []
+        elif period == "week":
+            start = (today - timedelta(days=7)).isoformat()
+            end = yesterday.isoformat()
+        elif period == "month":
+            start = today.replace(day=1).isoformat()
+            end = yesterday.isoformat()
+        elif period == "last_month":
+            first_this_month = today.replace(day=1)
+            last_day_prev = first_this_month - timedelta(days=1)
+            start = last_day_prev.replace(day=1).isoformat()
+            end = last_day_prev.isoformat()
+        else:
+            return []
+
+        return [
+            self._days[k] for k in sorted(self._days.keys())
+            if start <= k <= end
+        ]
+
+    def _daily_supply_fee(self, date_str: str) -> float:
+        """Calculate the daily supply fee for a given date.
+
+        Pro-rates the monthly fee by the actual number of days in that month
+        so monthly totals always sum to exactly the monthly fee.
+        """
+        if self._monthly_supply_fee <= 0:
+            return 0.0
+        import calendar
+        try:
+            d = date.fromisoformat(date_str)
+            days_in_month = calendar.monthrange(d.year, d.month)[1]
+            return self._monthly_supply_fee / days_in_month
+        except (ValueError, TypeError):
+            return self._monthly_supply_fee / 30.0
+
+    def _aggregate(self, days: list[DayUsage]) -> dict[str, Any]:
+        """Aggregate a list of DayUsage into a summary dict.
+
+        Includes the daily supply fee (pro-rated from monthly) in the totals.
+        """
+        if not days:
+            return {
+                "import_kwh": 0,
+                "export_kwh": 0,
+                "controlled_load_kwh": 0,
+                "import_cost": 0,
+                "export_earnings": 0,
+                "supply_charge": 0,
+                "net_cost": 0,
+                "quality": "no_data",
+                "days_count": 0,
+            }
+        qualities = set(du.quality for du in days)
+        if len(qualities) == 1:
+            quality = qualities.pop()
+        elif "billable" in qualities and "estimated" in qualities:
+            quality = "mixed"
+        else:
+            quality = "mixed"
+
+        energy_cost = sum(du.net_cost for du in days)
+        supply_charge = sum(self._daily_supply_fee(du.date) for du in days)
+
+        return {
+            "import_kwh": round(sum(du.import_kwh for du in days), 2),
+            "export_kwh": round(sum(du.export_kwh for du in days), 2),
+            "controlled_load_kwh": round(sum(du.controlled_load_kwh for du in days), 2),
+            "import_cost": round(sum(du.import_cost for du in days), 2),
+            "export_earnings": round(sum(du.export_earnings for du in days), 2),
+            "supply_charge": round(supply_charge, 2),
+            "net_cost": round(energy_cost + supply_charge, 2),
+            "quality": quality,
+            "days_count": len(days),
+        }
 
 
 class TeslaEnergyCoordinator(DataUpdateCoordinator):

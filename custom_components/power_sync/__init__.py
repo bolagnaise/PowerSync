@@ -255,6 +255,7 @@ from .inverters import get_inverter_controller
 from .optimization.coordinator import OptimizationCoordinator
 from .coordinator import (
     AmberPriceCoordinator,
+    AmberUsageCoordinator,
     TeslaEnergyCoordinator,
     SigenergyEnergyCoordinator,
     SungrowEnergyCoordinator,
@@ -3173,6 +3174,83 @@ class AEMOSpikeView(HomeAssistantView):
             return web.json_response(
                 {"success": False, "error": str(e)},
                 status=500
+            )
+
+
+class AmberUsageView(HomeAssistantView):
+    """HTTP view for actual metered usage and cost data from Amber.
+
+    GET ?period=yesterday|week|month|last_month — aggregated summary with savings
+    GET ?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD — custom range with daily breakdown
+    """
+
+    url = "/api/power_sync/amber_usage"
+    name = "api:power_sync:amber_usage"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request for Amber usage data."""
+        # Find the power_sync entry
+        entry = None
+        for config_entry in self._hass.config_entries.async_entries(DOMAIN):
+            entry = config_entry
+            break
+
+        if not entry:
+            return web.json_response(
+                {"success": False, "error": "PowerSync not configured"},
+                status=503,
+            )
+
+        entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        usage_coord = entry_data.get("amber_usage_coordinator")
+        if not usage_coord:
+            return web.json_response(
+                {"success": False, "error": "Amber usage tracking not available"},
+                status=404,
+            )
+
+        try:
+            period = request.query.get("period")
+            start_date = request.query.get("start_date")
+            end_date = request.query.get("end_date")
+
+            if start_date and end_date:
+                # Custom date range — return daily breakdown
+                days = usage_coord.get_range(start_date, end_date)
+                return web.json_response({
+                    "success": True,
+                    "range": {"start_date": start_date, "end_date": end_date},
+                    "days": days,
+                    "last_fetch": usage_coord.last_fetch_iso,
+                })
+
+            if not period:
+                period = "yesterday"
+
+            if period not in ("yesterday", "week", "month", "last_month"):
+                return web.json_response(
+                    {"success": False, "error": f"Invalid period: {period}"},
+                    status=400,
+                )
+
+            summary = usage_coord.get_savings_summary(period)
+            return web.json_response({
+                "success": True,
+                "period": period,
+                **summary,
+                "last_fetch": usage_coord.last_fetch_iso,
+            })
+
+        except Exception as e:
+            _LOGGER.error("Error fetching Amber usage: %s", e, exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500,
             )
 
 
@@ -8642,6 +8720,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ws_client=ws_client,  # Pass WebSocket client to coordinator
         )
 
+    # Initialize Amber Usage coordinator for actual metered cost data
+    amber_usage_coordinator = None
+    if has_amber and amber_site_id:
+        try:
+            # Use configured monthly supply charge, default to Amber's $25/month
+            monthly_supply_fee = entry.options.get(
+                CONF_MONTHLY_SUPPLY_CHARGE,
+                entry.data.get(CONF_MONTHLY_SUPPLY_CHARGE, 25.0),
+            )
+            amber_usage_coordinator = AmberUsageCoordinator(
+                hass,
+                entry.data[CONF_AMBER_API_TOKEN],
+                amber_site_id,
+                entry.entry_id,
+                monthly_supply_fee=monthly_supply_fee,
+            )
+            await amber_usage_coordinator.async_start()
+            _LOGGER.info("Amber usage coordinator started (metered cost tracking)")
+        except Exception as e:
+            _LOGGER.warning("Failed to start Amber usage coordinator: %s", e)
+            amber_usage_coordinator = None
+
     # Check if this is a Sigenergy, Sungrow, or FoxESS setup (no Tesla needed)
     is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
     is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
@@ -9069,6 +9169,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "is_sungrow": is_sungrow,  # Track if Sungrow battery system
         "is_foxess": is_foxess,  # Track if FoxESS battery system
         "foxess_curtailment_state": "normal",  # Track FoxESS DC curtailment state
+        "amber_usage_coordinator": amber_usage_coordinator,  # For actual metered cost data
     }
 
     # Early initialization of tariff_schedule for non-Amber providers
@@ -14006,6 +14107,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.http.register_view(AEMOSpikeView(hass))
     _LOGGER.info("⚡ AEMO spike HTTP endpoint registered at /api/power_sync/aemo_spike")
 
+    # Register HTTP endpoint for Amber usage data (actual metered costs)
+    hass.http.register_view(AmberUsageView(hass))
+    _LOGGER.info("Amber usage HTTP endpoint registered at /api/power_sync/amber_usage")
+
     # Register HTTP endpoint for Config (for mobile app auto-detection)
     config_view = ConfigView(hass)
     hass.http.register_view(config_view)
@@ -15575,6 +15680,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.info(f"Flushed EV charging session for {vehicle_id} on unload")
             except Exception as e:
                 _LOGGER.debug(f"Could not flush session for {vehicle_id}: {e}")
+
+    # Stop Amber usage coordinator if it exists
+    if usage_coord := entry_data.get("amber_usage_coordinator"):
+        try:
+            await usage_coord.async_stop()
+            _LOGGER.info("Amber usage coordinator stopped")
+        except Exception as e:
+            _LOGGER.debug(f"Error stopping Amber usage coordinator: {e}")
 
     # Stop optimization coordinator if it exists
     if opt_coordinator := entry_data.get("optimization_coordinator"):

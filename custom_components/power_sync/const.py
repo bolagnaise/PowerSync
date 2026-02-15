@@ -1178,3 +1178,9 @@ CONF_ZAPTEC_INSTALLATION_ID_CLOUD = "zaptec_installation_id_cloud"  # API instal
 # EV sensor types
 SENSOR_TYPE_EV_CHARGING_STATUS = "ev_charging_status"
 SENSOR_TYPE_EV_NEXT_CHARGE_WINDOW = "ev_next_charge_window"
+
+# Amber Usage API sensors (actual metered cost data)
+SENSOR_TYPE_AMBER_USAGE_YESTERDAY_COST = "amber_usage_yesterday_cost"
+SENSOR_TYPE_AMBER_USAGE_YESTERDAY_SAVINGS = "amber_usage_yesterday_savings"
+SENSOR_TYPE_AMBER_USAGE_MONTH_COST = "amber_usage_month_cost"
+SENSOR_TYPE_AMBER_USAGE_MONTH_SAVINGS = "amber_usage_month_savings"
