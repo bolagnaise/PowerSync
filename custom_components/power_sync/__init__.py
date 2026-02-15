@@ -1749,6 +1749,194 @@ def get_tesla_api_token(hass: HomeAssistant, entry: ConfigEntry) -> tuple[str | 
     return None, TESLA_PROVIDER_TESLEMETRY
 
 
+def _calculate_cost_from_tariff(tariff_schedule: dict, time_series: list) -> dict | None:
+    """Calculate import/export costs from tariff schedule and time_series energy data.
+
+    For hourly entries (Tesla day period): matches each entry's timestamp to a TOU period
+    and looks up the corresponding buy/sell rate.
+
+    For daily entries (Sungrow/FoxESS, or Tesla week/month/year): uses weighted average
+    rates across TOU periods for that day's season.
+
+    Returns cost summary dict or None if calculation fails.
+    """
+    from datetime import datetime as dt
+
+    try:
+        buy_rates = tariff_schedule.get("buy_rates", {})
+        sell_rates = tariff_schedule.get("sell_rates", {})
+        seasons = tariff_schedule.get("seasons", {})
+        tou_periods = tariff_schedule.get("tou_periods", {})
+
+        if not buy_rates:
+            return None
+
+        def _parse_ts(ts_str: str) -> dt | None:
+            """Parse ISO timestamp, handling Z suffix."""
+            try:
+                return dt.fromisoformat(ts_str.replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                return None
+
+        # Detect hourly vs daily: >7 entries for what would be a single day = hourly
+        is_hourly = len(time_series) > 7
+
+        total_import_cost = 0.0
+        total_export_earnings = 0.0
+
+        if is_hourly:
+            # Hourly entries: match each timestamp to a TOU period
+            for entry in time_series:
+                ts_str = entry.get("timestamp", "")
+                if not ts_str:
+                    continue
+                ts = _parse_ts(ts_str)
+                if ts is None:
+                    continue
+
+                hour = ts.hour
+                dow = ts.weekday()  # 0=Monday
+                tesla_dow = (dow + 1) % 7  # 0=Sunday
+                month = ts.month
+
+                # Find season for this entry's month
+                entry_season = _find_season_for_month(seasons, month)
+                # Get TOU periods for that season
+                season_tou = seasons.get(entry_season, {}).get("tou_periods", tou_periods)
+
+                # Match to TOU period
+                matched_period = _match_tou_period(season_tou, hour, tesla_dow)
+
+                buy_rate = buy_rates.get(matched_period, buy_rates.get("ALL", buy_rates.get("OFF_PEAK", 0)))
+                sell_rate = sell_rates.get(matched_period, sell_rates.get("ALL", 0))
+
+                grid_import_wh = entry.get("grid_import", 0)
+                grid_export_wh = entry.get("grid_export", 0)
+
+                total_import_cost += (grid_import_wh / 1000.0) * buy_rate
+                total_export_earnings += (grid_export_wh / 1000.0) * sell_rate
+        else:
+            # Daily entries: use weighted average rate for each day
+            for entry in time_series:
+                ts_str = entry.get("timestamp", "")
+                if not ts_str:
+                    continue
+                ts = _parse_ts(ts_str)
+                if ts is None:
+                    continue
+
+                month = ts.month
+                entry_season = _find_season_for_month(seasons, month)
+                season_tou = seasons.get(entry_season, {}).get("tou_periods", tou_periods)
+
+                avg_buy, avg_sell = _weighted_avg_rates(season_tou, buy_rates, sell_rates)
+
+                grid_import_wh = entry.get("grid_import", 0)
+                grid_export_wh = entry.get("grid_export", 0)
+
+                total_import_cost += (grid_import_wh / 1000.0) * avg_buy
+                total_export_earnings += (grid_export_wh / 1000.0) * avg_sell
+
+        return {
+            "import_cost": round(total_import_cost, 2),
+            "export_earnings": round(total_export_earnings, 2),
+            "net_cost": round(total_import_cost - total_export_earnings, 2),
+            "estimated": True,
+        }
+
+    except Exception as e:
+        _LOGGER.error(f"Error calculating cost from tariff: {e}", exc_info=True)
+        return None
+
+
+def _find_season_for_month(seasons: dict, month: int) -> str:
+    """Find the season name for a given month."""
+    for season_name, season_data in seasons.items():
+        from_month = season_data.get("fromMonth", 1)
+        to_month = season_data.get("toMonth", 12)
+        if from_month <= to_month:
+            if from_month <= month <= to_month:
+                return season_name
+        else:
+            if month >= from_month or month <= to_month:
+                return season_name
+    return "All Year" if "All Year" in seasons else next(iter(seasons.keys()), "All Year")
+
+
+def _match_tou_period(tou_periods: dict, hour: int, tesla_dow: int) -> str:
+    """Match an hour and day-of-week to a TOU period name.
+
+    Uses priority order: SUPER_OFF_PEAK > ON_PEAK > PEAK > PARTIAL_PEAK > SHOULDER > OFF_PEAK
+    """
+    period_priority = ["SUPER_OFF_PEAK", "ON_PEAK", "PEAK", "PARTIAL_PEAK", "SHOULDER", "OFF_PEAK"]
+    for period_name in period_priority:
+        if period_name not in tou_periods:
+            continue
+        period_data = tou_periods[period_name]
+        if isinstance(period_data, dict) and "periods" in period_data:
+            periods_list = period_data["periods"]
+        elif isinstance(period_data, list):
+            periods_list = period_data
+        else:
+            continue
+        for p in periods_list:
+            from_dow = p.get("fromDayOfWeek", 0)
+            to_dow = p.get("toDayOfWeek", 6)
+            from_hour = p.get("fromHour", 0)
+            to_hour = p.get("toHour", 24)
+            if from_dow <= tesla_dow <= to_dow:
+                if from_hour <= to_hour:
+                    if from_hour <= hour < to_hour:
+                        return period_name
+                else:
+                    if hour >= from_hour or hour < to_hour:
+                        return period_name
+    return "OFF_PEAK"
+
+
+def _weighted_avg_rates(tou_periods: dict, buy_rates: dict, sell_rates: dict) -> tuple[float, float]:
+    """Calculate weighted average buy/sell rates across all TOU periods for a full day.
+
+    Weights each period by the number of hours it covers (averaged across all 7 days).
+    """
+    period_hours: dict[str, float] = {}
+    total_hours = 0.0
+
+    for period_name, period_data in tou_periods.items():
+        if isinstance(period_data, dict) and "periods" in period_data:
+            periods_list = period_data["periods"]
+        elif isinstance(period_data, list):
+            periods_list = period_data
+        else:
+            continue
+        for p in periods_list:
+            from_hour = p.get("fromHour", 0)
+            to_hour = p.get("toHour", 24)
+            from_dow = p.get("fromDayOfWeek", 0)
+            to_dow = p.get("toDayOfWeek", 6)
+            num_days = to_dow - from_dow + 1
+            if from_hour <= to_hour:
+                hours = (to_hour - from_hour) * num_days / 7.0
+            else:
+                hours = (24 - from_hour + to_hour) * num_days / 7.0
+            period_hours[period_name] = period_hours.get(period_name, 0) + hours
+            total_hours += hours
+
+    if total_hours == 0:
+        fallback_buy = buy_rates.get("ALL", buy_rates.get("OFF_PEAK", 0))
+        fallback_sell = sell_rates.get("ALL", 0)
+        return fallback_buy, fallback_sell
+
+    avg_buy = 0.0
+    avg_sell = 0.0
+    for period_name, hours in period_hours.items():
+        weight = hours / total_hours
+        avg_buy += buy_rates.get(period_name, buy_rates.get("ALL", buy_rates.get("OFF_PEAK", 0))) * weight
+        avg_sell += sell_rates.get(period_name, sell_rates.get("ALL", 0)) * weight
+
+    return avg_buy, avg_sell
+
+
 class CalendarHistoryView(HomeAssistantView):
     """HTTP view to get calendar history for mobile app."""
 
@@ -1811,6 +1999,15 @@ class CalendarHistoryView(HomeAssistantView):
                 status=200  # Return 200 with error in body so mobile app handles gracefully
             )
 
+        # Look up tariff schedule for cost calculation (shared across all battery types)
+        tariff_schedule = None
+        for _eid, _data in self._hass.data.get(DOMAIN, {}).items():
+            if isinstance(_data, dict):
+                ts = _data.get("tariff_schedule")
+                if ts and ts.get("buy_rates"):
+                    tariff_schedule = ts
+                    break
+
         if is_sungrow and not tesla_coordinator:
             # Sungrow: return accumulated daily energy from coordinator
             from homeassistant.util import dt as dt_util
@@ -1835,13 +2032,18 @@ class CalendarHistoryView(HomeAssistantView):
                 "home_consumption": energy_data.get("load_today_kwh", 0) * 1000,
             }]
 
-            return web.json_response({
+            result = {
                 "success": True,
                 "period": period,
                 "time_series": time_series,
                 "serial_number": None,
                 "installation_date": None,
-            })
+            }
+            if tariff_schedule:
+                cost_summary = _calculate_cost_from_tariff(tariff_schedule, time_series)
+                if cost_summary:
+                    result["cost_summary"] = cost_summary
+            return web.json_response(result)
 
         if is_foxess and foxess_coordinator:
             # FoxESS: return daily energy from Modbus registers
@@ -1861,13 +2063,18 @@ class CalendarHistoryView(HomeAssistantView):
                 "home_consumption": energy_data.get("load_today_kwh", 0) * 1000,
             }]
 
-            return web.json_response({
+            result = {
                 "success": True,
                 "period": period,
                 "time_series": time_series,
                 "serial_number": None,
                 "installation_date": None,
-            })
+            }
+            if tariff_schedule:
+                cost_summary = _calculate_cost_from_tariff(tariff_schedule, time_series)
+                if cost_summary:
+                    result["cost_summary"] = cost_summary
+            return web.json_response(result)
 
         if not tesla_coordinator:
             # Check if we have ANY power_sync entries - if yes, system might still be loading
@@ -1942,6 +2149,10 @@ class CalendarHistoryView(HomeAssistantView):
             "serial_number": history.get("serial_number"),
             "installation_date": history.get("installation_date"),
         }
+        if tariff_schedule:
+            cost_summary = _calculate_cost_from_tariff(tariff_schedule, time_series)
+            if cost_summary:
+                result["cost_summary"] = cost_summary
 
         _LOGGER.info(f"✅ Calendar history HTTP response: {len(time_series)} records for period '{period}'")
         return web.json_response(result)
