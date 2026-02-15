@@ -645,8 +645,13 @@ class AmberUsageCoordinator:
 
     async def _load_store(self) -> None:
         """Load persisted usage data from HA Store."""
-        stored = await self._store.async_load()
+        try:
+            stored = await self._store.async_load()
+        except Exception as e:
+            _LOGGER.warning("Amber usage: store load failed (will re-fetch): %s", e)
+            stored = None
         if not stored:
+            _LOGGER.info("Amber usage: no stored data (fresh start or version upgrade)")
             return
         for day_dict in stored.get("days", []):
             try:
