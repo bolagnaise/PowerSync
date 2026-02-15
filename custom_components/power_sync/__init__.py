@@ -5699,7 +5699,12 @@ class EVStatusView(HomeAssistantView):
         2. HA integration (custom-components/zaptec) — uses HA entities
         Standalone takes priority if configured.
         """
-        config = self._get_powersync_config()
+        # Merge data + options to get all config (charger_id may be in either)
+        entries = self._hass.config_entries.async_entries(DOMAIN)
+        if entries:
+            config = {**entries[0].data, **entries[0].options}
+        else:
+            config = {}
         configured_entity = config.get(CONF_ZAPTEC_CHARGER_ENTITY, "")
         installation_id = config.get(CONF_ZAPTEC_INSTALLATION_ID, "")
         standalone_enabled = config.get(CONF_ZAPTEC_STANDALONE_ENABLED, False)
@@ -5709,11 +5714,10 @@ class EVStatusView(HomeAssistantView):
             charger_id = config.get(CONF_ZAPTEC_CHARGER_ID, "")
             cloud_installation_id = config.get(CONF_ZAPTEC_INSTALLATION_ID_CLOUD, "")
 
-            # Get cached client from hass.data
+            # Get cached state from hass.data
             cloud_status = None
-            for entry in self._hass.config_entries.async_entries(DOMAIN):
+            for entry in entries:
                 entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-                zaptec_client = entry_data.get("zaptec_client")
                 zaptec_cached_state = entry_data.get("zaptec_cached_state")
                 if zaptec_cached_state:
                     cloud_status = zaptec_cached_state
@@ -14381,13 +14385,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             """Poll Zaptec charger state and cache it."""
             charger_id = all_opts.get(CONF_ZAPTEC_CHARGER_ID, "")
             if not charger_id:
+                _LOGGER.warning("Zaptec state poll skipped: no charger_id configured")
                 return
             try:
                 raw_state = await zaptec_client.get_charger_state(charger_id)
                 parsed = zaptec_client.parse_charger_state(raw_state)
                 hass.data[DOMAIN][entry.entry_id]["zaptec_cached_state"] = parsed
+                _LOGGER.debug(f"Zaptec state poll OK: mode={parsed.get('charger_operation_mode')}, power={parsed.get('total_charge_power_w')}W")
             except Exception as e:
-                _LOGGER.debug(f"Zaptec state poll error: {e}")
+                _LOGGER.warning(f"Zaptec state poll error: {e}")
 
         # Poll immediately, then every 60s
         from homeassistant.helpers.event import async_track_time_interval
