@@ -424,7 +424,7 @@ class ZaptecCloudClient:
         # Operation mode
         op_mode_raw = state.get(120, state.get("120", ""))
         op_modes = {
-            "0": "charging_paused",
+            "0": "unknown",  # Autonomous/unknown — NOT paused (mode 0 = charger self-managed)
             "1": "disconnected",
             "2": "connected_waiting",
             "3": "charging",
@@ -433,6 +433,10 @@ class ZaptecCloudClient:
         parsed["charger_operation_mode"] = op_modes.get(
             str(op_mode_raw), f"unknown_{op_mode_raw}"
         )
+
+        # IsCharging (StateId 507) — secondary signal from charger
+        is_charging_raw = state.get(507, state.get("507", ""))
+        parsed["is_charging"] = str(is_charging_raw).lower() in ("1", "true")
 
         # Power
         try:
@@ -459,5 +463,12 @@ class ZaptecCloudClient:
 
         # Firmware
         parsed["firmware_version"] = state.get(710, state.get("710", ""))
+
+        # Power-based mode override: mode 0 (unknown/autonomous) with significant power
+        # means the charger is actually charging (started from Zaptec app, not cloud API)
+        if parsed["charger_operation_mode"] in ("unknown", "unknown_0") and parsed["total_charge_power_w"] > 50:
+            parsed["charger_operation_mode"] = "charging"
+        elif parsed["charger_operation_mode"] in ("unknown", "unknown_0") and parsed["is_charging"]:
+            parsed["charger_operation_mode"] = "charging"
 
         return parsed

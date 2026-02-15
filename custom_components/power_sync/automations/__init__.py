@@ -912,6 +912,20 @@ class AutomationEngine:
 
         if not vehicle_prefix:
             _LOGGER.debug("No Tesla EV charging sensor found (sensor.*_charging or sensor.*_charging_state)")
+            # No Tesla EV found — check Zaptec standalone cached state
+            from ..const import DOMAIN
+            for entry in self._hass.config_entries.async_entries(DOMAIN):
+                entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                zaptec_cached = entry_data.get("zaptec_cached_state")
+                if zaptec_cached:
+                    mode = zaptec_cached.get("charger_operation_mode", "")
+                    power_w = zaptec_cached.get("total_charge_power_w", 0)
+                    ev_state["is_charging"] = mode == "charging" or power_w > 50
+                    ev_state["is_plugged_in"] = mode in ("charging", "connected_waiting") or power_w > 50
+                    ev_state["charging_state"] = mode
+                    ev_state["location"] = "home"
+                    _LOGGER.debug("EV state from Zaptec standalone: %s", ev_state)
+                    break
             return ev_state
 
         # Check if this is a BLE integration (prefix contains "ble")

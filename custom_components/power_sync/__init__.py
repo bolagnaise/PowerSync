@@ -7961,7 +7961,10 @@ class EVWidgetDataView(HomeAssistantView):
             # Always check external chargers (Zaptec, OCPP) regardless of dynamic EV state
             # This ensures standalone chargers appear even when idle vehicles exist
             zaptec_cached = entry_data.get("zaptec_cached_state")
-            if zaptec_cached and zaptec_cached.get("charger_operation_mode") == "charging":
+            if zaptec_cached and (
+                zaptec_cached.get("charger_operation_mode") == "charging"
+                or zaptec_cached.get("total_charge_power_w", 0) > 50
+            ):
                 power_w = zaptec_cached.get("total_charge_power_w", 0)
                 power_kw = power_w / 1000
                 if power_kw > 0.05:
@@ -14551,7 +14554,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 raw_state = await zaptec_client.get_charger_state(charger_id)
                 parsed = zaptec_client.parse_charger_state(raw_state)
                 hass.data[DOMAIN][entry.entry_id]["zaptec_cached_state"] = parsed
-                _LOGGER.debug(f"Zaptec state poll OK: mode={parsed.get('charger_operation_mode')}, power={parsed.get('total_charge_power_w')}W")
+                _LOGGER.debug(
+                    "Zaptec state poll OK: mode=%s (raw=%s), power=%sW, is_charging=%s",
+                    parsed.get('charger_operation_mode'),
+                    raw_state.get(120, raw_state.get('120', '?')),
+                    parsed.get('total_charge_power_w'),
+                    parsed.get('is_charging'),
+                )
             except Exception as e:
                 _LOGGER.warning(f"Zaptec state poll error: {e}")
 
