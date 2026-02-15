@@ -547,7 +547,7 @@ class AmberPriceCoordinator(DataUpdateCoordinator):
 # ============================================================
 
 USAGE_FETCH_INTERVAL = timedelta(hours=4)
-USAGE_STORAGE_VERSION = 1
+USAGE_STORAGE_VERSION = 2  # v2: costs in dollars (v1 had cents-as-dollars bug)
 USAGE_STORAGE_KEY = "power_sync.amber_usage"
 USAGE_MAX_DAYS = 365
 AMBER_DEFAULT_MONTHLY_SUPPLY_FEE = 25.0  # Amber's standard $25/month supply charge
@@ -797,20 +797,21 @@ class AmberUsageCoordinator:
             for iv in channels.get("general", []):
                 kwh = abs(iv.get("kwh", 0))
                 import_kwh += kwh
-                import_cost += iv.get("cost", 0)
+                # Amber API returns cost in cents — convert to dollars
+                import_cost += iv.get("cost", 0) / 100
                 qualities.add(iv.get("quality", "estimated"))
 
             for iv in channels.get("feedIn", []):
                 kwh = abs(iv.get("kwh", 0))
                 export_kwh += kwh
-                # Amber cost for feedIn is negative when earning
-                export_earnings += abs(iv.get("cost", 0))
+                # Amber cost for feedIn is negative when earning (cents → dollars)
+                export_earnings += abs(iv.get("cost", 0)) / 100
                 qualities.add(iv.get("quality", "estimated"))
 
             for iv in channels.get("controlledLoad", []):
                 kwh = abs(iv.get("kwh", 0))
                 controlled_kwh += kwh
-                import_cost += iv.get("cost", 0)
+                import_cost += iv.get("cost", 0) / 100
                 qualities.add(iv.get("quality", "estimated"))
 
             if "billable" in qualities and "estimated" in qualities:
