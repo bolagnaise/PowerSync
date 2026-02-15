@@ -683,6 +683,9 @@ class AmberUsageCoordinator:
         price coordinator. Checks RateLimit-Remaining header proactively
         and skips the fetch if the budget is low, to avoid starving the
         more important real-time price fetches.
+
+        Amber Usage API has a 7-day max range per request, so large
+        back-fills are batched into 7-day chunks.
         """
         now = dt_util.now()
         today = now.date()
@@ -698,59 +701,71 @@ class AmberUsageCoordinator:
         end_date = today
 
         headers = {"Authorization": f"Bearer {self._api_token}"}
-        url = f"{AMBER_API_BASE_URL}/sites/{self._site_id}/usage"
-        params = {
-            "startDate": start_date.isoformat(),
-            "endDate": end_date.isoformat(),
-            "resolution": "30",
-        }
 
+        # Pre-flight: probe rate limit budget with a lightweight check.
+        # If RateLimit-Remaining is low, skip this non-critical fetch
+        # to preserve budget for the real-time price coordinator.
         try:
-            # Pre-flight: probe rate limit budget with a lightweight HEAD-style
-            # check. If RateLimit-Remaining is low, skip this non-critical fetch
-            # to preserve budget for the real-time price coordinator.
+            async with self._session.get(
+                f"{AMBER_API_BASE_URL}/sites/{self._site_id}/prices/current",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as probe_resp:
+                remaining = probe_resp.headers.get("RateLimit-Remaining")
+                if remaining is not None:
+                    try:
+                        remaining_int = int(remaining)
+                        if remaining_int < 10:
+                            _LOGGER.info(
+                                "Amber usage: skipping fetch — only %d API calls remaining "
+                                "(preserving budget for price updates)",
+                                remaining_int,
+                            )
+                            return
+                    except (ValueError, TypeError):
+                        pass
+        except Exception:
+            pass  # Probe failed — proceed with fetch anyway
+
+        # Amber Usage API allows max 7-day range per request — batch accordingly
+        total_updated = 0
+        chunk_start = start_date
+        url = f"{AMBER_API_BASE_URL}/sites/{self._site_id}/usage"
+
+        while chunk_start <= end_date:
+            chunk_end = min(chunk_start + timedelta(days=6), end_date)
+            params = {
+                "startDate": chunk_start.isoformat(),
+                "endDate": chunk_end.isoformat(),
+                "resolution": "30",
+            }
+
             try:
-                async with self._session.get(
-                    f"{AMBER_API_BASE_URL}/sites/{self._site_id}/prices/current",
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as probe_resp:
-                    remaining = probe_resp.headers.get("RateLimit-Remaining")
-                    if remaining is not None:
-                        try:
-                            remaining_int = int(remaining)
-                            if remaining_int < 10:
-                                _LOGGER.info(
-                                    "Amber usage: skipping fetch — only %d API calls remaining "
-                                    "(preserving budget for price updates)",
-                                    remaining_int,
-                                )
-                                return
-                        except (ValueError, TypeError):
-                            pass
-            except Exception:
-                pass  # Probe failed — proceed with fetch anyway
+                intervals = await _fetch_with_retry(
+                    self._session,
+                    url,
+                    headers,
+                    max_retries=2,
+                    timeout_seconds=30,
+                    params=params,
+                )
+                updated = self._process_intervals(intervals)
+                total_updated += updated
+                _LOGGER.debug(
+                    "Amber usage chunk %s to %s: %d days updated",
+                    chunk_start, chunk_end, updated,
+                )
+            except UpdateFailed as err:
+                _LOGGER.warning("Amber usage fetch failed for %s to %s: %s", chunk_start, chunk_end, err)
+            except Exception as err:
+                _LOGGER.warning("Amber usage fetch failed unexpectedly for %s to %s: %s", chunk_start, chunk_end, err)
 
-            intervals = await _fetch_with_retry(
-                self._session,
-                url,
-                headers,
-                max_retries=2,
-                timeout_seconds=30,
-                params=params,
-            )
-        except UpdateFailed as err:
-            _LOGGER.warning("Amber usage fetch failed: %s", err)
-            return
-        except Exception as err:
-            _LOGGER.warning("Amber usage fetch failed unexpectedly: %s", err)
-            return
+            chunk_start = chunk_end + timedelta(days=1)
 
-        updated = self._process_intervals(intervals)
         self._last_fetch = now
         self._prune_old_days()
         self._save_store()
-        _LOGGER.info("Amber usage fetched: %d days updated (range %s to %s)", updated, start_date, end_date)
+        _LOGGER.info("Amber usage fetched: %d days updated (range %s to %s)", total_updated, start_date, end_date)
 
     def _process_intervals(self, intervals: list[dict]) -> int:
         """Aggregate 30-min intervals into daily DayUsage records.
