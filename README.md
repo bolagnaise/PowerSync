@@ -15,7 +15,7 @@
 
 </div>
 
-> **Disclaimer:** This is an unofficial integration and is not affiliated with or endorsed by Tesla, Sigenergy, Sungrow, FoxESS, Amber Electric, or Octopus Energy. Use at your own risk.
+> **Disclaimer:** This is an unofficial integration and is not affiliated with or endorsed by Tesla, Sigenergy, Sungrow, FoxESS, GoodWe, Amber Electric, or Octopus Energy. Use at your own risk.
 
 ---
 
@@ -28,6 +28,7 @@
 | **Tesla Powerwall** | Fleet API or Teslemetry | TOU tariff sync, force charge/discharge, export rules |
 | **FoxESS** (H1, H3, H3-Pro, H3 Smart, KH + OEM rebrands) | Modbus TCP or RS485 | Work mode, force charge/discharge, backup reserve |
 | **Sigenergy** | Cloud API + Modbus TCP | Tariff sync, DC solar curtailment |
+| **GoodWe** (ET, EH, BT, BH, ES, EM, BP) | UDP or TCP (local) | Force charge/discharge, backup reserve, export limit |
 | **Sungrow SH-series** | Modbus TCP | Force charge/discharge, rate limiting, export control |
 
 ### Electricity Providers
@@ -108,6 +109,14 @@ Requires both Cloud API (for tariff sync) and Modbus TCP (for real-time data + D
 - **Station ID:** Selected automatically after login, or ask SigenAI "Tell me my StationID" in the Sigenergy app.
 - **Modbus TCP:** Must be enabled on your inverter (configured by installer). Default port 502, slave ID 247.
 
+### GoodWe
+
+Supports **ET, EH, BT, BH** (3-phase hybrid) and **ES, EM, BP** (single-phase hybrid) series. Local connection only — no cloud API required.
+
+- **UDP (default):** Port 8899 via WiFi dongle — works with most GoodWe inverters
+- **TCP:** Port 502 via LAN dongle (WLA0000-01-00P V2.0)
+- Model family is auto-detected during setup. DT/MS/XS (grid-only) inverters are not supported.
+
 ### Sungrow SH-series
 
 Direct Modbus TCP — no cloud API required. Supports SH-series hybrid inverters.
@@ -152,7 +161,7 @@ Coordinates EV charging alongside battery optimization with dynamic power sharin
 
 | Feature | Description |
 |---------|-------------|
-| **AEMO Spike Detection** | Auto-discharge during price spikes for VPP participation (Tesla & Sungrow) |
+| **AEMO Spike Detection** | Auto-discharge during price spikes for VPP participation (Tesla, Sungrow, GoodWe) |
 | **Solar Curtailment** | Prevents paying to export during negative prices (Tesla export rules, Sigenergy/FoxESS Modbus) |
 | **AC Inverter Curtailment** | Control AC-coupled inverters (Sungrow, Fronius, GoodWe, Huawei, Enphase, Zeversolar, FoxESS) |
 | **Spike Protection** | Prevents grid charging during Amber price spikes |
@@ -206,6 +215,7 @@ Remote monitoring and control via iOS and Android.
 |-------|----------|
 | No sensors appearing | Check integration is enabled in Settings > Devices & Services |
 | Cannot connect (FoxESS) | Verify IP (H3 Smart = "espressif" on network), firmware is current, port 502 open |
+| Cannot connect (GoodWe) | Verify IP, check port 8899 (UDP) or 502 (TCP). Ensure WiFi/LAN dongle is online |
 | Cannot connect (Sungrow) | Check IP, port 502, slave ID. Ensure Modbus is enabled on inverter |
 | Cannot connect (Sigenergy) | Modbus TCP Server must be enabled by installer |
 | TOU sync failing | Check logs: `custom_components.power_sync` |
