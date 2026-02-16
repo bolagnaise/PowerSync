@@ -996,6 +996,34 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return (decayed_import, decayed_export)
 
+    @staticmethod
+    def _get_entry_start_time(e: dict) -> str:
+        """Get the start time of a price entry across all provider formats.
+
+        Octopus entries have valid_from. Amber/AEMO entries have nemTime
+        (interval end) and duration (minutes) — start = nemTime - duration.
+
+        Returns:
+            ISO format start time string, or "" if indeterminate
+        """
+        # Octopus format
+        vf = e.get("valid_from")
+        if vf:
+            return vf
+
+        # Amber/AEMO format: nemTime is the interval END
+        nem = e.get("nemTime")
+        dur = e.get("duration")
+        if nem and dur:
+            try:
+                end = datetime.fromisoformat(nem.replace("Z", "+00:00"))
+                start = end - timedelta(minutes=int(dur))
+                return start.isoformat()
+            except (ValueError, TypeError):
+                pass
+
+        return ""
+
     async def _get_price_forecast(self) -> tuple[list[float], list[float]] | None:
         """Get price forecasts for optimizer.
 
@@ -1016,13 +1044,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     general = [e for e in all_entries if e.get("channelType") == "general"]
                     feed_in = [e for e in all_entries if e.get("channelType") == "feedIn"]
 
-                    # Sort by startTime if available
+                    # Sort by start time (works for Octopus, Amber, and AEMO)
                     for lst in (general, feed_in):
-                        lst.sort(key=lambda e: e.get("startTime", ""))
+                        lst.sort(key=lambda e: self._get_entry_start_time(e))
 
-                    # Filter out past entries — Amber API returns
-                    # ActualInterval entries from midnight, but the LP
-                    # needs prices starting from the current interval.
+                    # Filter out past entries — providers return
+                    # historical entries, but the LP needs prices
+                    # starting from the current interval.
                     now = dt_util.now()
                     current_window = now.replace(
                         minute=(now.minute // 30) * 30,
@@ -1032,7 +1060,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         original_len = len(lst)
                         filtered = []
                         for e in lst:
-                            st = e.get("startTime")
+                            st = self._get_entry_start_time(e)
                             if st:
                                 try:
                                     entry_time = datetime.fromisoformat(
@@ -1046,7 +1074,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         lst[:] = filtered
                         if len(lst) < original_len:
                             _LOGGER.debug(
-                                "Filtered %d past Amber entries (before %s), "
+                                "Filtered %d past price entries (before %s), "
                                 "%d remaining",
                                 original_len - len(lst),
                                 current_window.isoformat(),

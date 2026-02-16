@@ -103,7 +103,7 @@
       },
       "octopus": {
         "title": "Octopus Energy UK Configuration",
-        "description": "Configure your Octopus Energy tariff. Select your product and GSP region.\n\n**Agile Octopus**: Dynamic half-hourly pricing based on wholesale rates.\n**Octopus Go**: EV tariff with cheap overnight rates (00:30-05:30).\n**Octopus Flux**: Solar/battery optimized export tariff.\n**Tracker**: Daily price tracking based on wholesale rates.\n\nFind your GSP region on your Octopus bill or at {octopus_url}",
+        "description": "Configure your Octopus Energy tariff. Select your product and GSP region.\n\n**Agile Octopus**: Dynamic half-hourly pricing based on wholesale rates.\n**Octopus Go**: EV tariff with cheap overnight rates (00:30-05:30).\n**Intelligent Octopus Go**: Smart EV/battery tariff with optimised overnight rates.\n**Octopus Flux**: Solar/battery optimised import/export tariff.\n**Intelligent Octopus Flux**: Smart battery optimised import/export tariff.\n**Tracker**: Daily price tracking based on wholesale rates.\n\nFind your GSP region on your Octopus bill or at {octopus_url}",
         "data": {
           "octopus_product": "Octopus Product",
           "octopus_region": "GSP Region"
@@ -641,7 +641,7 @@
       },
       "octopus_options": {
         "title": "Octopus Energy UK Options",
-        "description": "Configure your Octopus Energy tariff settings.\n\n**Product**: Select your Octopus tariff product.\n**GSP Region**: Your Grid Supply Point region (A-P).\n\nFind your GSP region on your Octopus bill or at {octopus_url}",
+        "description": "Configure your Octopus Energy tariff settings.\n\n**Product**: Select your Octopus tariff product (Agile, Go, Intelligent Go, Flux, Intelligent Flux, or Tracker).\n**GSP Region**: Your Grid Supply Point region (A-P).\n\nFind your GSP region on your Octopus bill or at {octopus_url}",
         "data": {
           "octopus_product": "Octopus Product",
           "octopus_region": "GSP Region",

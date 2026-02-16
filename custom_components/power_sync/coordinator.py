@@ -2708,6 +2708,55 @@ class OctopusPriceCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(minutes=30),  # Octopus updates less frequently than Amber
         )
 
+    @staticmethod
+    def _expand_to_half_hourly(rates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Expand block rates into individual 30-minute entries.
+
+        Agile rates (already 30-min) pass through unchanged. Go rates (2 blocks/day)
+        and Tracker rates (1 block/day) are split into 30-min chunks so the LP
+        optimizer sees 48 price points instead of 1-2.
+
+        Args:
+            rates: List of rate dicts with valid_from, valid_to, and price fields
+
+        Returns:
+            List of rate dicts, each covering exactly 30 minutes
+        """
+        expanded: list[dict[str, Any]] = []
+
+        for rate in rates:
+            valid_from_str = rate.get("valid_from", "")
+            valid_to_str = rate.get("valid_to", "")
+
+            if not valid_from_str or not valid_to_str:
+                expanded.append(rate)
+                continue
+
+            try:
+                vf = datetime.fromisoformat(valid_from_str.replace("Z", "+00:00"))
+                vt = datetime.fromisoformat(valid_to_str.replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                expanded.append(rate)
+                continue
+
+            duration = vt - vf
+            if duration <= timedelta(minutes=30):
+                # Already 30-min or shorter — pass through
+                expanded.append(rate)
+                continue
+
+            # Split into 30-min chunks
+            chunk_start = vf
+            while chunk_start < vt:
+                chunk_end = min(chunk_start + timedelta(minutes=30), vt)
+                chunk = dict(rate)
+                chunk["valid_from"] = chunk_start.isoformat()
+                chunk["valid_to"] = chunk_end.isoformat()
+                expanded.append(chunk)
+                chunk_start = chunk_end
+
+        return expanded
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from Octopus API and convert to Amber-compatible format.
 
@@ -2732,6 +2781,9 @@ class OctopusPriceCoordinator(DataUpdateCoordinator):
                 page_size=200,  # 48 hours = 96 periods, add buffer
             )
 
+            # Expand block rates (Go/Tracker) into half-hourly entries
+            import_rates = self._expand_to_half_hourly(import_rates)
+
             if not import_rates:
                 raise UpdateFailed(
                     f"No import rates returned from Octopus API for {self.tariff_code}"
@@ -2747,6 +2799,7 @@ class OctopusPriceCoordinator(DataUpdateCoordinator):
                     period_to=period_to,
                     page_size=200,
                 )
+                export_rates = self._expand_to_half_hourly(export_rates)
 
             # Convert to Amber-compatible format
             current_prices = []

@@ -325,7 +325,9 @@ OCTOPUS_API_BASE_URL = "https://api.octopus.energy/v1"
 OCTOPUS_PRODUCTS = {
     "agile": "Agile Octopus (dynamic half-hourly)",
     "go": "Octopus Go (EV tariff)",
+    "intelligent_go": "Intelligent Octopus Go (smart EV/battery)",
     "flux": "Octopus Flux (solar/battery)",
+    "intelligent_flux": "Intelligent Octopus Flux (smart battery)",
     "tracker": "Octopus Tracker (daily price)",
 }
 
@@ -333,14 +335,17 @@ OCTOPUS_PRODUCTS = {
 OCTOPUS_PRODUCT_CODES = {
     "agile": "AGILE-24-10-01",
     "go": "GO-VAR-22-10-14",
+    "intelligent_go": "INTELLI-VAR-24-10-29",
     "flux": "FLUX-IMPORT-23-02-14",
-    "tracker": "SILVER-FLEX-BB-23-02-08",
+    "intelligent_flux": "INTELLI-FLUX-IMPORT-23-07-14",
+    "tracker": "SILVER-FLEX-BB-23-02-08",  # Fallback — dynamically discovered at setup
 }
 
 # Octopus export product codes
 OCTOPUS_EXPORT_PRODUCT_CODES = {
     "agile": "AGILE-OUTGOING-19-05-13",  # Agile Outgoing for dynamic export
     "flux": "FLUX-EXPORT-23-02-14",  # Flux export tariff
+    "intelligent_flux": "INTELLI-FLUX-EXPORT-23-07-14",  # Intelligent Flux export
 }
 
 # UK Grid Supply Points (GSP) - Octopus regional pricing

@@ -680,17 +680,28 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             # Map product selection to actual product codes
             product_code = OCTOPUS_PRODUCT_CODES.get(product_key, OCTOPUS_PRODUCT_CODES["agile"])
-            tariff_code = f"E-1R-{product_code}-{region}"
-
-            # Get export product/tariff codes if available
-            export_product_code = OCTOPUS_EXPORT_PRODUCT_CODES.get(product_key)
-            export_tariff_code = f"E-1R-{export_product_code}-{region}" if export_product_code else None
 
             # Validate by fetching current prices
             try:
                 from .octopus_api import OctopusAPIClient
 
                 client = OctopusAPIClient(async_get_clientsession(self.hass))
+
+                # Dynamically discover current Tracker product code
+                if product_key == "tracker":
+                    try:
+                        discovered = await client.discover_tracker_product()
+                        if discovered:
+                            product_code = discovered
+                    except Exception:
+                        pass  # Fall back to hardcoded
+
+                tariff_code = f"E-1R-{product_code}-{region}"
+
+                # Get export product/tariff codes if available
+                export_product_code = OCTOPUS_EXPORT_PRODUCT_CODES.get(product_key)
+                export_tariff_code = f"E-1R-{export_product_code}-{region}" if export_product_code else None
+
                 rates = await client.get_current_rates(product_code, tariff_code, page_size=5)
 
                 if not rates:
@@ -3965,17 +3976,28 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
 
             # Map product selection to actual product codes
             product_code = OCTOPUS_PRODUCT_CODES.get(product_key, OCTOPUS_PRODUCT_CODES["agile"])
-            tariff_code = f"E-1R-{product_code}-{region}"
-
-            # Get export product/tariff codes if available
-            export_product_code = OCTOPUS_EXPORT_PRODUCT_CODES.get(product_key)
-            export_tariff_code = f"E-1R-{export_product_code}-{region}" if export_product_code else None
 
             # Validate by fetching current prices
             try:
                 from .octopus_api import OctopusAPIClient
 
                 client = OctopusAPIClient(async_get_clientsession(self.hass))
+
+                # Dynamically discover current Tracker product code
+                if product_key == "tracker":
+                    try:
+                        discovered = await client.discover_tracker_product()
+                        if discovered:
+                            product_code = discovered
+                    except Exception:
+                        pass  # Fall back to hardcoded
+
+                tariff_code = f"E-1R-{product_code}-{region}"
+
+                # Get export product/tariff codes if available
+                export_product_code = OCTOPUS_EXPORT_PRODUCT_CODES.get(product_key)
+                export_tariff_code = f"E-1R-{export_product_code}-{region}" if export_product_code else None
+
                 rates = await client.get_current_rates(product_code, tariff_code, page_size=5)
 
                 if not rates:

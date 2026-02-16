@@ -17,7 +17,7 @@ Note: Price endpoints do not require authentication.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import aiohttp
@@ -213,6 +213,50 @@ class OctopusAPIClient:
 
         return None
 
+    async def discover_tracker_product(self) -> str | None:
+        """Discover the latest Tracker product code from the Octopus API.
+
+        Searches the products list for Tracker tariffs (product codes starting
+        with "SILVER" or display names containing "Tracker"). Returns the most
+        recently available product code.
+
+        Returns:
+            Latest Tracker product code, or None if not found
+        """
+        all_products: list[dict[str, Any]] = []
+
+        for page in range(1, 3):  # Check up to 2 pages
+            data = await self._get("/products/", params={"page": page})
+            if not data:
+                break
+            results = data.get("results", [])
+            if not results:
+                break
+            all_products.extend(results)
+            if not data.get("next"):
+                break
+
+        # Filter for Tracker products
+        tracker_products = [
+            p for p in all_products
+            if (p.get("code", "").startswith("SILVER")
+                or "Tracker" in p.get("display_name", ""))
+        ]
+
+        if not tracker_products:
+            return None
+
+        # Sort by available_from descending to get the most recent
+        tracker_products.sort(
+            key=lambda p: p.get("available_from", ""),
+            reverse=True,
+        )
+
+        code = tracker_products[0].get("code")
+        if code:
+            _LOGGER.debug("Discovered Tracker product code: %s", code)
+        return code
+
     async def validate_tariff(
         self,
         product_code: str,
@@ -303,7 +347,7 @@ async def get_agile_rates(
     tariff_code = build_tariff_code(product_code, gsp_region)
 
     # Calculate period range
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     period_from = now - timedelta(hours=1)  # Include some past data
     period_to = now + timedelta(hours=hours_ahead)
 
@@ -335,7 +379,7 @@ async def get_agile_export_rates(
     tariff_code = build_export_tariff_code(product_code, gsp_region)
 
     # Calculate period range
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     period_from = now - timedelta(hours=1)
     period_to = now + timedelta(hours=hours_ahead)
 
