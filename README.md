@@ -246,4 +246,4 @@ See the [wiki](https://github.com/bolagnaise/PowerSync/wiki) for the full servic
 
 ## License
 
-MIT License
+[PolyForm Noncommercial 1.0.0](LICENSE) — free for personal and noncommercial use. Commercial use requires separate permission from the author.
