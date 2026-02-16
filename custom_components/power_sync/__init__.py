@@ -11473,14 +11473,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         current_state = entry_data.get("foxess_curtailment_state", "normal")
 
-        # Get prices from Amber if not provided
-        if feedin_price is None and amber_coordinator and amber_coordinator.data:
-            current_prices = amber_coordinator.data.get("current", [])
-            for price_data in current_prices:
-                if price_data.get("channelType") == "feedIn":
-                    feedin_price = price_data.get("perKwh", 0)
-                elif price_data.get("channelType") == "general":
-                    import_price = price_data.get("perKwh", 0)
+        # Get prices from any available price coordinator if not provided
+        if feedin_price is None:
+            _price_coord = amber_coordinator or aemo_sensor_coordinator or octopus_coordinator
+            if _price_coord and _price_coord.data:
+                current_prices = _price_coord.data.get("current", [])
+                for price_data in current_prices:
+                    if price_data.get("channelType") == "feedIn":
+                        feedin_price = price_data.get("perKwh", 0)
+                    elif price_data.get("channelType") == "general":
+                        import_price = price_data.get("perKwh", 0)
 
         if feedin_price is None:
             _LOGGER.warning("FoxESS curtailment: no feed-in price available")
@@ -11528,11 +11530,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def handle_solar_curtailment_check(call: ServiceCall = None) -> None:
         """
-        Check Amber export prices and curtail solar export when price is below 1c/kWh.
+        Check export prices and curtail solar export when price is below 1c/kWh.
+
+        Works with any price coordinator (Amber, AEMO, Octopus).
 
         Flow:
         1. Check if curtailment is enabled for this entry
-        2. Get feed-in price from Amber coordinator
+        2. Get feed-in price from available price coordinator
         3. If export price < 1c: Set grid export rule to 'never'
         4. If export price >= 1c: Restore normal export ('battery_ok')
         """
@@ -11557,23 +11561,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await handle_foxess_curtailment()
             return
 
-        # Skip if no Amber coordinator (AEMO-only mode) - curtailment requires Amber prices
-        if not amber_coordinator:
-            _LOGGER.debug("Solar curtailment skipped - no Amber coordinator (AEMO-only mode)")
+        # Find an available price coordinator (Amber, AEMO, or Octopus)
+        _price_coord = amber_coordinator or aemo_sensor_coordinator or octopus_coordinator
+        if not _price_coord:
+            _LOGGER.debug("Solar curtailment skipped - no price coordinator available")
             return
 
         _LOGGER.info("=== Starting solar curtailment check ===")
 
         try:
-            # Refresh Amber prices to get latest feed-in price
-            await amber_coordinator.async_request_refresh()
+            # Refresh prices to get latest feed-in price
+            await _price_coord.async_request_refresh()
 
-            if not amber_coordinator.data:
-                _LOGGER.error("No Amber price data available for curtailment check")
+            if not _price_coord.data:
+                _LOGGER.error("No price data available for curtailment check")
                 return
 
             # Get feed-in (export) price from current prices
-            current_prices = amber_coordinator.data.get("current", [])
+            current_prices = _price_coord.data.get("current", [])
             if not current_prices:
                 _LOGGER.warning("No current price data available for curtailment check")
                 return
@@ -11587,7 +11592,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     import_price = price_data.get("perKwh", 0)
 
             if feedin_price is None:
-                _LOGGER.warning("No feed-in price found in Amber data")
+                _LOGGER.warning("No feed-in price found in price data")
                 return
 
             # Amber returns feed-in prices as NEGATIVE when you're paid to export
