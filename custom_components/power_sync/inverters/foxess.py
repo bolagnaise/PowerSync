@@ -874,6 +874,64 @@ class FoxESSController(InverterController):
 
         return success
 
+    async def set_backup_mode(self) -> bool:
+        """Set FoxESS to Backup mode for IDLE (prevents self-consumption discharge).
+
+        In Self Use mode, min_soc is only a passive floor — the battery still
+        discharges to serve home load until it reaches min_soc. In Backup mode,
+        the battery does NOT discharge for self-consumption at all (only for
+        grid outages), making it the FoxESS equivalent of Tesla's autonomous
+        mode for holding SOC.
+
+        Saves current work mode and min_soc for later restoration.
+        """
+        if not self._register_map:
+            return False
+
+        reg = self._register_map
+
+        # Save current work mode for restore (only on first call, not re-entry)
+        if self._original_work_mode is None and reg.work_mode and reg.supports_work_mode_rw:
+            wm_raw = await self._read_holding_registers(reg.work_mode, 1)
+            if wm_raw:
+                self._original_work_mode = wm_raw[0]
+
+        # Save current min_soc for restore (only on first call)
+        if self._original_min_soc is None and reg.min_soc and reg.supports_work_mode_rw:
+            ms_raw = await self._read_holding_registers(reg.min_soc, 1)
+            if ms_raw:
+                self._original_min_soc = ms_raw[0]
+
+        success = await self.set_work_mode(reg.work_mode_backup)
+        if success:
+            _LOGGER.info("FoxESS set to Backup mode (IDLE hold)")
+        return success
+
+    async def restore_work_mode_from_idle(self) -> bool:
+        """Restore work mode to Self Use after IDLE Backup mode.
+
+        Unlike restore_normal(), this only changes work mode and does not
+        touch remote control registers. The optimizer manages min_soc
+        separately via set_backup_reserve.
+        """
+        if not self._register_map:
+            return False
+
+        target_mode = (
+            self._original_work_mode
+            if self._original_work_mode is not None
+            else self._register_map.work_mode_self_use
+        )
+        success = await self.set_work_mode(target_mode)
+
+        # Clear saved state
+        self._original_work_mode = None
+        self._original_min_soc = None
+
+        if success:
+            _LOGGER.info("FoxESS restored from IDLE Backup mode (mode %d)", target_mode)
+        return success
+
     async def set_backup_reserve(self, percent: int) -> bool:
         """Set minimum SOC (backup reserve).
 

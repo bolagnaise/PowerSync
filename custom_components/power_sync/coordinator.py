@@ -2107,6 +2107,16 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
         async with self._controller:
             return await self._controller.set_backup_reserve(percent)
 
+    async def set_backup_mode(self) -> bool:
+        """Set FoxESS to Backup mode (IDLE — prevents self-consumption discharge)."""
+        async with self._controller:
+            return await self._controller.set_backup_mode()
+
+    async def restore_work_mode_from_idle(self) -> bool:
+        """Restore work mode to Self Use after IDLE Backup mode."""
+        async with self._controller:
+            return await self._controller.restore_work_mode_from_idle()
+
     async def set_work_mode(self, mode: int) -> bool:
         """Set FoxESS work mode."""
         async with self._controller:

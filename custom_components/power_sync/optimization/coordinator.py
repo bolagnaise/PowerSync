@@ -385,9 +385,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._enabled = True
         _LOGGER.info("Optimization enabled (built-in LP)")
 
-        # Safety: restore backup_reserve to configured value on enable.
-        # Handles HA restart during IDLE where backup_reserve was set to
-        # current SOC% but _last_executed_action was lost (in-memory only).
+        # Safety: restore backup_reserve and work mode to configured values on
+        # enable. Handles HA restart during IDLE where backup_reserve was set to
+        # current SOC% and FoxESS was in Backup mode, but _last_executed_action
+        # was lost (in-memory only).
         if self.battery_controller and hasattr(self.battery_controller, "set_backup_reserve"):
             configured_reserve_pct = int(self._config.backup_reserve * 100)
             try:
@@ -401,6 +402,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     _LOGGER.warning("Optimizer startup: set_backup_reserve returned failure")
             except Exception as e:
                 _LOGGER.warning("Failed to restore backup reserve on enable: %s", e)
+        # FoxESS: ensure work mode is Self Use on startup (may have been left
+        # in Backup mode if HA restarted during IDLE)
+        if (
+            self.battery_system == "foxess"
+            and self.energy_coordinator
+            and hasattr(self.energy_coordinator, "restore_work_mode_from_idle")
+        ):
+            try:
+                await self.energy_coordinator.restore_work_mode_from_idle()
+                _LOGGER.info("Optimizer startup: ensured FoxESS work mode is Self Use")
+            except Exception as e:
+                _LOGGER.warning("Failed to restore FoxESS work mode on enable: %s", e)
         self._last_executed_action = None
 
         # Run initial optimization and start polling loop as background tasks
@@ -426,23 +439,34 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not self._enabled:
             return
 
-        # Safety: if IDLE was the last action, restore backup_reserve to
-        # configured value before shutting down. Otherwise the battery
-        # stays locked at the IDLE-elevated backup_reserve.
-        if (
-            self._last_executed_action == "idle"
-            and self.battery_controller
-            and hasattr(self.battery_controller, "set_backup_reserve")
-        ):
-            configured_reserve_pct = int(self._config.backup_reserve * 100)
-            try:
-                await self.battery_controller.set_backup_reserve(configured_reserve_pct)
-                _LOGGER.info(
-                    "Optimizer disable: restored backup reserve from IDLE to %d%%",
-                    configured_reserve_pct,
-                )
-            except Exception as e:
-                _LOGGER.warning("Failed to restore backup reserve on disable: %s", e)
+        # Safety: if IDLE was the last action, restore backup_reserve and
+        # work mode before shutting down. Otherwise the battery stays locked
+        # at the IDLE-elevated backup_reserve (and Backup mode for FoxESS).
+        if self._last_executed_action == "idle":
+            if (
+                self.battery_controller
+                and hasattr(self.battery_controller, "set_backup_reserve")
+            ):
+                configured_reserve_pct = int(self._config.backup_reserve * 100)
+                try:
+                    await self.battery_controller.set_backup_reserve(configured_reserve_pct)
+                    _LOGGER.info(
+                        "Optimizer disable: restored backup reserve from IDLE to %d%%",
+                        configured_reserve_pct,
+                    )
+                except Exception as e:
+                    _LOGGER.warning("Failed to restore backup reserve on disable: %s", e)
+            # FoxESS: restore from Backup mode to original work mode
+            if (
+                self.battery_system == "foxess"
+                and self.energy_coordinator
+                and hasattr(self.energy_coordinator, "restore_work_mode_from_idle")
+            ):
+                try:
+                    await self.energy_coordinator.restore_work_mode_from_idle()
+                    _LOGGER.info("Optimizer disable: restored FoxESS work mode from IDLE")
+                except Exception as e:
+                    _LOGGER.warning("Failed to restore FoxESS work mode on disable: %s", e)
         self._last_executed_action = None
 
         if self._price_listener_unsub:
@@ -625,13 +649,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if (
                 self._last_executed_action == "idle"
                 and action.action != "idle"
-                and hasattr(battery, "set_backup_reserve")
             ):
-                configured_reserve_pct = int(self._config.backup_reserve * 100)
-                await battery.set_backup_reserve(configured_reserve_pct)
+                if hasattr(battery, "set_backup_reserve"):
+                    configured_reserve_pct = int(self._config.backup_reserve * 100)
+                    await battery.set_backup_reserve(configured_reserve_pct)
+                # FoxESS: restore from Backup mode to original work mode
+                if (
+                    self.battery_system == "foxess"
+                    and self.energy_coordinator
+                    and hasattr(self.energy_coordinator, "restore_work_mode_from_idle")
+                ):
+                    await self.energy_coordinator.restore_work_mode_from_idle()
                 _LOGGER.info(
-                    "Optimizer: Exiting IDLE — restored backup reserve to %d%%",
-                    configured_reserve_pct,
+                    "Optimizer: Exiting IDLE — restored backup reserve and work mode",
                 )
 
             if action.action == "charge":
@@ -653,20 +683,35 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # to current percentage. This prevents discharge while grid
                 # serves the home load. Useful for Amber when prices are cheap
                 # and the battery should hold charge for an upcoming spike.
-                #
-                # Tesla constraint (July 2025): backup_reserve only accepts
-                # 0-80% or 100%. Values 81-99% are rejected and clamped to 80%.
-                # When SOC > 80%, we CANNOT set backup_reserve to the actual SOC.
-                # Setting 100% causes the Powerwall to charge FROM GRID to reach
-                # 100% (especially when a TOU tariff shows cheap buy / expensive
-                # sell). Instead, use self_consumption mode with backup_reserve=80%
-                # — the Powerwall won't charge from grid in self_consumption mode,
-                # and the 80% floor limits discharge. Minor SOC decline from home
-                # load is acceptable as the LP re-evaluates every 5 minutes.
                 soc, _ = await self._get_battery_state()
                 soc_pct = int(soc * 100)
-                if soc_pct > 80:
-                    # Self_consumption mode prevents TOU-driven grid charging
+
+                # FoxESS: Use Backup mode for IDLE. In Self Use mode, min_soc
+                # is only a passive floor — the battery still discharges to
+                # serve home load and the optimizer chases SOC downward.
+                # Backup mode prevents all self-consumption discharge.
+                if (
+                    self.battery_system == "foxess"
+                    and self.energy_coordinator
+                    and hasattr(self.energy_coordinator, "set_backup_mode")
+                ):
+                    await self.energy_coordinator.set_backup_mode()
+                    if hasattr(battery, "set_backup_reserve"):
+                        await battery.set_backup_reserve(soc_pct)
+                    _LOGGER.info(
+                        "Optimizer: IDLE — holding SOC at %d%% (FoxESS backup mode + min_soc=%d%%)",
+                        soc_pct, soc_pct,
+                    )
+                elif soc_pct > 80:
+                    # Tesla constraint (July 2025): backup_reserve only accepts
+                    # 0-80% or 100%. Values 81-99% are rejected and clamped to 80%.
+                    # When SOC > 80%, we CANNOT set backup_reserve to the actual SOC.
+                    # Setting 100% causes the Powerwall to charge FROM GRID to reach
+                    # 100% (especially when a TOU tariff shows cheap buy / expensive
+                    # sell). Instead, use self_consumption mode with backup_reserve=80%
+                    # — the Powerwall won't charge from grid in self_consumption mode,
+                    # and the 80% floor limits discharge. Minor SOC decline from home
+                    # load is acceptable as the LP re-evaluates every 5 minutes.
                     if hasattr(battery, "set_self_consumption_mode"):
                         await battery.set_self_consumption_mode()
                     if hasattr(battery, "set_backup_reserve"):
