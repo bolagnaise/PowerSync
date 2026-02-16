@@ -2127,6 +2127,115 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
         await self._controller.disconnect()
 
 
+class GoodWeEnergyCoordinator(DataUpdateCoordinator):
+    """Coordinator to fetch GoodWe battery system data via goodwe library.
+
+    Polls the GoodWe inverter to get real-time power data (solar, battery,
+    grid, load), battery SOC, and provides battery control.
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        host: str,
+        port: int = 8899,
+        comm_addr: int = 0,
+    ) -> None:
+        """Initialize the coordinator."""
+        from .inverters.goodwe_battery import GoodWeBatteryController
+
+        self.host = host
+        self.port = port
+        self._controller = GoodWeBatteryController(
+            host=host, port=port, comm_addr=comm_addr
+        )
+        self._connected = False
+
+        super().__init__(
+            hass,
+            _LOGGER,
+            name="GoodWe Energy",
+            update_interval=timedelta(seconds=30),
+        )
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Fetch data from GoodWe inverter."""
+        try:
+            if not self._connected:
+                await self._controller.connect()
+                self._connected = True
+
+            data = await self._controller.get_runtime_data()
+
+            energy_data = {
+                "solar_power": data["solar_power"],
+                "grid_power": data["grid_power"],
+                "battery_power": data["battery_power"],
+                "load_power": data["load_power"],
+                "battery_level": data["battery_level"],
+                "last_update": dt_util.utcnow(),
+                # GoodWe-specific
+                "battery_temperature": data.get("battery_temperature"),
+                "battery_soh": data.get("battery_soh"),
+                "model_name": data.get("model_name"),
+                "serial_number": data.get("serial_number"),
+                "rated_power_w": data.get("rated_power_w"),
+            }
+
+            _LOGGER.debug(
+                "GoodWe data: solar=%.2f kW, grid=%.2f kW, battery=%.2f kW (%.0f%%), load=%.2f kW",
+                energy_data["solar_power"],
+                energy_data["grid_power"],
+                energy_data["battery_power"],
+                energy_data["battery_level"],
+                energy_data["load_power"],
+            )
+
+            return energy_data
+
+        except Exception as err:
+            self._connected = False
+            raise UpdateFailed(f"Error fetching GoodWe data: {err}") from err
+
+    async def force_charge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
+        """Set GoodWe to force charge mode via ECO_CHARGE."""
+        if not self._connected:
+            await self._controller.connect()
+            self._connected = True
+        # Convert power_w to percentage of rated power
+        rated = (self.data or {}).get("rated_power_w", 5000)
+        pct = min(100, max(10, int((power_w / rated) * 100))) if power_w > 0 else 100
+        return await self._controller.force_charge(power_pct=pct)
+
+    async def force_discharge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
+        """Set GoodWe to force discharge mode via ECO_DISCHARGE."""
+        if not self._connected:
+            await self._controller.connect()
+            self._connected = True
+        rated = (self.data or {}).get("rated_power_w", 5000)
+        pct = min(100, max(10, int((power_w / rated) * 100))) if power_w > 0 else 100
+        return await self._controller.force_discharge(power_pct=pct)
+
+    async def restore_normal(self) -> bool:
+        """Restore GoodWe to normal (GENERAL) operation."""
+        if not self._connected:
+            await self._controller.connect()
+            self._connected = True
+        return await self._controller.restore_normal()
+
+    async def set_backup_reserve(self, percent: int) -> bool:
+        """Set minimum SOC (backup reserve) via DOD."""
+        if not self._connected:
+            await self._controller.connect()
+            self._connected = True
+        return await self._controller.set_backup_reserve(percent)
+
+    async def async_shutdown(self) -> None:
+        """Disconnect from GoodWe system on shutdown."""
+        await self._controller.disconnect()
+        self._connected = False
+
+
 class SolcastForecastCoordinator(DataUpdateCoordinator):
     """Coordinator to fetch Solcast solar production forecasts.
 

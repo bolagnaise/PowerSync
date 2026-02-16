@@ -94,12 +94,14 @@ BATTERY_SYSTEM_SIGENERGY = "sigenergy"
 BATTERY_SYSTEM_SUNGROW = "sungrow"
 
 BATTERY_SYSTEM_FOXESS = "foxess"
+BATTERY_SYSTEM_GOODWE = "goodwe"
 
 BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_TESLA: "Tesla Powerwall",
     BATTERY_SYSTEM_SIGENERGY: "Sigenergy",
     BATTERY_SYSTEM_SUNGROW: "Sungrow SH-series",
     BATTERY_SYSTEM_FOXESS: "FoxESS",
+    BATTERY_SYSTEM_GOODWE: "GoodWe",
 }
 
 # Sungrow SH-series Battery System Configuration (Modbus TCP)
@@ -188,6 +190,15 @@ FOXESS_WORK_MODES = {
     1: "Feed-in First",
     2: "Backup",
 }
+
+# GoodWe Battery System Configuration (goodwe PyPI library)
+# Hybrid inverters: ET/EH/BT/BH (3-phase), ES/EM/BP (single-phase)
+# Reference: https://github.com/marcelblijleven/goodwe
+CONF_GOODWE_HOST = "goodwe_host"
+CONF_GOODWE_PORT = "goodwe_port"
+CONF_GOODWE_PROTOCOL = "goodwe_protocol"  # "udp" or "tcp"
+DEFAULT_GOODWE_PORT_UDP = 8899
+DEFAULT_GOODWE_PORT_TCP = 502
 
 # Sungrow Command Values
 SUNGROW_CMD_CHARGE = 0xAA
@@ -1079,6 +1090,7 @@ OPTIMIZATION_PROVIDER_NATIVE_NAMES = {
     BATTERY_SYSTEM_SIGENERGY: "Sigenergy",
     BATTERY_SYSTEM_SUNGROW: "Sungrow",
     BATTERY_SYSTEM_FOXESS: "FoxESS",
+    BATTERY_SYSTEM_GOODWE: "GoodWe",
 }
 
 OPTIMIZATION_PROVIDERS = {
@@ -1115,6 +1127,7 @@ BATTERY_CAPACITY_DEFAULTS = {
     BATTERY_SYSTEM_SIGENERGY: 10000,  # Varies, default 10 kWh
     BATTERY_SYSTEM_SUNGROW: 10000,    # Varies, default 10 kWh
     BATTERY_SYSTEM_FOXESS: 10000,     # Varies, default 10 kWh
+    BATTERY_SYSTEM_GOODWE: 10000,     # Varies, default 10 kWh
 }
 
 # Max charge/discharge power defaults by system (W)
@@ -1123,6 +1136,7 @@ BATTERY_POWER_DEFAULTS = {
     BATTERY_SYSTEM_SIGENERGY: 5000,   # Varies
     BATTERY_SYSTEM_SUNGROW: 5000,     # Varies
     BATTERY_SYSTEM_FOXESS: 5000,      # Varies by model
+    BATTERY_SYSTEM_GOODWE: 5000,      # Varies by model
 }
 
 # Optimization service

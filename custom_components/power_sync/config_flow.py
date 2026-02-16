@@ -234,6 +234,13 @@ from .const import (
     FOXESS_CONNECTION_SERIAL,
     FOXESS_MODEL_H3_PRO,
     FOXESS_MODEL_H3_SMART,
+    # GoodWe battery system configuration
+    CONF_GOODWE_HOST,
+    CONF_GOODWE_PORT,
+    CONF_GOODWE_PROTOCOL,
+    DEFAULT_GOODWE_PORT_UDP,
+    DEFAULT_GOODWE_PORT_TCP,
+    BATTERY_SYSTEM_GOODWE,
 )
 
 # Combined network tariff key for config flow
@@ -484,6 +491,31 @@ async def test_foxess_connection(
         return {"success": False, "error": "cannot_connect"}
 
 
+async def test_goodwe_connection(
+    hass: HomeAssistant,
+    host: str,
+    port: int = 8899,
+) -> dict[str, Any]:
+    """Test GoodWe connection and return inverter info."""
+    import goodwe
+
+    try:
+        inverter = await goodwe.connect(host=host, port=port, timeout=5, retries=2)
+        await inverter.read_device_info()
+        # Check if battery-capable (ET/ES family has set_ongrid_battery_dod)
+        has_battery = hasattr(inverter, "set_ongrid_battery_dod")
+        return {
+            "success": True,
+            "model_name": inverter.model_name,
+            "serial_number": inverter.serial_number,
+            "rated_power": inverter.rated_power,
+            "has_battery": has_battery,
+        }
+    except Exception as err:
+        _LOGGER.error("GoodWe connection test failed: %s", err)
+        return {"success": False, "error": str(err)}
+
+
 class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for PowerSync."""
 
@@ -505,6 +537,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._sigenergy_stations: list[dict[str, Any]] = []
         self._sungrow_data: dict[str, Any] = {}  # Sungrow Modbus configuration
         self._foxess_data: dict[str, Any] = {}  # FoxESS Modbus configuration
+        self._goodwe_data: dict[str, Any] = {}  # GoodWe configuration
         self._aemo_only_mode: bool = False  # True if using AEMO spike only (no Amber)
         self._aemo_data: dict[str, Any] = {}
         self._flow_power_data: dict[str, Any] = {}
@@ -604,6 +637,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     return await self.async_step_sungrow()
                 elif self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
                     return await self.async_step_foxess_connection()
+                elif self._selected_battery_system == BATTERY_SYSTEM_GOODWE:
+                    return await self.async_step_goodwe_connection()
                 else:
                     return await self.async_step_tesla_provider()
             else:
@@ -737,6 +772,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     return await self.async_step_sungrow()
                 elif self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
                     return await self.async_step_foxess_connection()
+                elif self._selected_battery_system == BATTERY_SYSTEM_GOODWE:
+                    return await self.async_step_goodwe_connection()
                 else:
                     return await self.async_step_tesla_provider()
 
@@ -870,6 +907,21 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     }
                     _LOGGER.info(f"Auto-selected Amber site for FoxESS: {amber_site_id}")
                 return await self.async_step_foxess_connection()
+            elif self._selected_battery_system == BATTERY_SYSTEM_GOODWE:
+                # Auto-select Amber site for GoodWe
+                if self._amber_sites:
+                    active_sites = [s for s in self._amber_sites if s.get("status") == "active"]
+                    if active_sites:
+                        amber_site_id = active_sites[0]["id"]
+                    else:
+                        amber_site_id = self._amber_sites[0]["id"]
+                    self._site_data = {
+                        CONF_AMBER_SITE_ID: amber_site_id,
+                        CONF_AUTO_SYNC_ENABLED: True,
+                        CONF_AMBER_FORECAST_TYPE: "predicted",
+                    }
+                    _LOGGER.info(f"Auto-selected Amber site for GoodWe: {amber_site_id}")
+                return await self.async_step_goodwe_connection()
             else:
                 return await self.async_step_tesla_provider()
 
@@ -1529,6 +1581,91 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data=final_data,
         )
 
+    async def async_step_goodwe_connection(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure GoodWe inverter connection."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            host = user_input.get(CONF_GOODWE_HOST, "").strip()
+            protocol = user_input.get(CONF_GOODWE_PROTOCOL, "udp")
+            port = user_input.get(
+                CONF_GOODWE_PORT,
+                DEFAULT_GOODWE_PORT_UDP if protocol == "udp" else DEFAULT_GOODWE_PORT_TCP,
+            )
+
+            if not host:
+                errors["base"] = "goodwe_connect_failed"
+            else:
+                # Test connection
+                result = await test_goodwe_connection(self.hass, host, port)
+
+                if result.get("success"):
+                    if not result.get("has_battery"):
+                        errors["base"] = "goodwe_no_battery"
+                    else:
+                        self._goodwe_data = {
+                            CONF_GOODWE_HOST: host,
+                            CONF_GOODWE_PORT: port,
+                            CONF_GOODWE_PROTOCOL: protocol,
+                        }
+                        _LOGGER.info(
+                            "GoodWe connection successful: %s (SN: %s, %sW)",
+                            result.get("model_name"),
+                            result.get("serial_number"),
+                            result.get("rated_power"),
+                        )
+                        return await self.async_step_demand_charges()
+                else:
+                    errors["base"] = "goodwe_connect_failed"
+
+        return self.async_show_form(
+            step_id="goodwe_connection",
+            data_schema=vol.Schema({
+                vol.Required(CONF_GOODWE_HOST): str,
+                vol.Required(CONF_GOODWE_PROTOCOL, default="udp"): vol.In({
+                    "udp": "UDP (WiFi dongle, port 8899)",
+                    "tcp": "TCP (LAN dongle, port 502)",
+                }),
+                vol.Required(CONF_GOODWE_PORT, default=DEFAULT_GOODWE_PORT_UDP): int,
+            }),
+            errors=errors,
+        )
+
+    async def async_step_finish_goodwe(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Finish GoodWe setup and create config entry."""
+        final_data = {
+            CONF_BATTERY_SYSTEM: BATTERY_SYSTEM_GOODWE,
+            CONF_AUTO_SYNC_ENABLED: True,
+            **self._amber_data,
+            **self._site_data,
+            **self._flow_power_data,
+            **self._octopus_data,
+            **self._goodwe_data,
+            **self._aemo_data,
+            **getattr(self, '_demand_data', {}),
+        }
+
+        if self._selected_electricity_provider:
+            final_data[CONF_ELECTRICITY_PROVIDER] = self._selected_electricity_provider
+
+        if self._custom_tariff_data:
+            final_data["initial_custom_tariff"] = self._custom_tariff_data
+
+        final_data[CONF_OPTIMIZATION_PROVIDER] = self._optimization_provider
+        if self._optimization_provider == OPT_PROVIDER_POWERSYNC and self._ml_options:
+            final_data.update(self._ml_options)
+
+        title = "PowerSync - GoodWe"
+
+        return self.async_create_entry(
+            title=title,
+            data=final_data,
+        )
+
     async def async_step_tesla_provider(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -1680,6 +1817,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         return await self.async_step_sungrow()
                     elif self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
                         return await self.async_step_foxess_connection()
+                    elif self._selected_battery_system == BATTERY_SYSTEM_GOODWE:
+                        return await self.async_step_goodwe_connection()
                     else:
                         return await self.async_step_tesla_provider()
             else:
@@ -1698,6 +1837,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     return await self.async_step_sungrow()
                 elif self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
                     return await self.async_step_foxess_connection()
+                elif self._selected_battery_system == BATTERY_SYSTEM_GOODWE:
+                    return await self.async_step_goodwe_connection()
                 else:
                     return await self.async_step_tesla_provider()
 
@@ -1856,6 +1997,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_sungrow()
             elif self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
                 return await self.async_step_foxess_connection()
+            elif self._selected_battery_system == BATTERY_SYSTEM_GOODWE:
+                return await self.async_step_goodwe_connection()
             else:
                 return await self.async_step_tesla_provider()
 
@@ -2297,6 +2440,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # Route based on battery system
             if self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
                 return await self.async_step_finish_foxess()
+            elif self._selected_battery_system == BATTERY_SYSTEM_GOODWE:
+                return await self.async_step_finish_goodwe()
             elif self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
                 return await self.async_step_finish_sigenergy()
             elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
@@ -2593,6 +2738,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             return await self.async_step_init_sungrow(user_input)
         elif battery_system == BATTERY_SYSTEM_FOXESS:
             return await self.async_step_init_foxess(user_input)
+        elif battery_system == BATTERY_SYSTEM_GOODWE:
+            return await self.async_step_init_goodwe(user_input)
         else:
             return await self.async_step_init_tesla(user_input)
 
@@ -3053,6 +3200,101 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_FOXESS_SERIAL_BAUDRATE,
                         default=current_baudrate,
+                    ): int,
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_init_goodwe(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step 1 for GoodWe users: Configure connection and optimization settings."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            goodwe_host = user_input.get(CONF_GOODWE_HOST, "").strip()
+
+            if not goodwe_host:
+                errors["base"] = "goodwe_connect_failed"
+            else:
+                self._provider = user_input.get(CONF_ELECTRICITY_PROVIDER, "amber")
+
+                # Update config entry data with GoodWe settings
+                new_data = dict(self.config_entry.data)
+                new_data[CONF_GOODWE_HOST] = goodwe_host
+                new_data[CONF_GOODWE_PORT] = user_input.get(
+                    CONF_GOODWE_PORT, DEFAULT_GOODWE_PORT_UDP
+                )
+                new_data[CONF_GOODWE_PROTOCOL] = user_input.get(
+                    CONF_GOODWE_PROTOCOL, "udp"
+                )
+
+                # Optimization provider settings
+                optimization_provider = user_input.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
+                new_data[CONF_OPTIMIZATION_PROVIDER] = optimization_provider
+                if optimization_provider == OPT_PROVIDER_POWERSYNC:
+                    new_data[CONF_OPTIMIZATION_COST_FUNCTION] = COST_FUNCTION_COST
+                    new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = user_input.get(
+                        CONF_OPTIMIZATION_BACKUP_RESERVE, int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100)
+                    ) / 100.0
+
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data=new_data
+                )
+
+                # Route to provider-specific step
+                if self._provider == "amber":
+                    return await self.async_step_amber_options()
+                elif self._provider == "flow_power":
+                    return await self.async_step_flow_power_options()
+                elif self._provider in ("globird", "aemo_vpp"):
+                    return await self.async_step_globird_options()
+                elif self._provider == "octopus":
+                    return await self.async_step_octopus_options()
+
+        current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
+        current_host = self._get_option(CONF_GOODWE_HOST, "")
+        current_port = self._get_option(CONF_GOODWE_PORT, DEFAULT_GOODWE_PORT_UDP)
+        current_protocol = self._get_option(CONF_GOODWE_PROTOCOL, "udp")
+        current_opt_provider = self.config_entry.data.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
+        current_backup_reserve = self.config_entry.data.get(CONF_OPTIMIZATION_BACKUP_RESERVE, DEFAULT_OPTIMIZATION_BACKUP_RESERVE)
+
+        opt_providers = {
+            OPT_PROVIDER_NATIVE: "GoodWe built-in optimization",
+            OPT_PROVIDER_POWERSYNC: "Smart Optimization (Built-in LP)",
+        }
+
+        return self.async_show_form(
+            step_id="init_goodwe",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_ELECTRICITY_PROVIDER,
+                        default=current_provider,
+                    ): vol.In(ELECTRICITY_PROVIDERS),
+                    vol.Required(
+                        CONF_OPTIMIZATION_PROVIDER,
+                        default=current_opt_provider,
+                    ): vol.In(opt_providers),
+                    vol.Optional(
+                        CONF_OPTIMIZATION_BACKUP_RESERVE,
+                        default=int(current_backup_reserve * 100) if current_backup_reserve < 1 else int(current_backup_reserve),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=0, max=100)),
+                    vol.Required(
+                        CONF_GOODWE_HOST,
+                        default=current_host,
+                    ): str,
+                    vol.Required(
+                        CONF_GOODWE_PROTOCOL,
+                        default=current_protocol,
+                    ): vol.In({
+                        "udp": "UDP (WiFi dongle, port 8899)",
+                        "tcp": "TCP (LAN dongle, port 502)",
+                    }),
+                    vol.Optional(
+                        CONF_GOODWE_PORT,
+                        default=current_port,
                     ): int,
                 }
             ),

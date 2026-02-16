@@ -199,6 +199,13 @@ from .const import (
     FOXESS_CONNECTION_TCP,
     FOXESS_CONNECTION_SERIAL,
     FOXESS_WORK_MODES,
+    # GoodWe battery system configuration
+    BATTERY_SYSTEM_GOODWE,
+    CONF_GOODWE_HOST,
+    CONF_GOODWE_PORT,
+    CONF_GOODWE_PROTOCOL,
+    DEFAULT_GOODWE_PORT_UDP,
+    DEFAULT_GOODWE_PORT_TCP,
     # Octopus Energy UK configuration
     CONF_OCTOPUS_PRODUCT_CODE,
     CONF_OCTOPUS_TARIFF_CODE,
@@ -263,6 +270,7 @@ from .coordinator import (
     SigenergyEnergyCoordinator,
     SungrowEnergyCoordinator,
     FoxESSEnergyCoordinator,
+    GoodWeEnergyCoordinator,
     DemandChargeCoordinator,
     AEMOSensorCoordinator,
     OctopusPriceCoordinator,
@@ -1974,7 +1982,9 @@ class CalendarHistoryView(HomeAssistantView):
         is_sigenergy = False
         is_sungrow = False
         is_foxess = False
+        is_goodwe = False
         foxess_coordinator = None
+        goodwe_coordinator = None
         for entry_id, data in self._hass.data.get(DOMAIN, {}).items():
             if isinstance(data, dict):
                 # Check battery system types
@@ -1985,6 +1995,9 @@ class CalendarHistoryView(HomeAssistantView):
                 if data.get("foxess_coordinator") is not None:
                     is_foxess = True
                     foxess_coordinator = data["foxess_coordinator"]
+                if data.get("goodwe_coordinator") is not None:
+                    is_goodwe = True
+                    goodwe_coordinator = data["goodwe_coordinator"]
                 # Look for Tesla coordinator (this is the main data source for calendar history)
                 if "tesla_coordinator" in data and data["tesla_coordinator"] is not None:
                     tesla_coordinator = data["tesla_coordinator"]
@@ -2064,6 +2077,33 @@ class CalendarHistoryView(HomeAssistantView):
                 "grid_import": energy_data.get("grid_import_today_kwh", 0) * 1000,
                 "grid_export": energy_data.get("grid_export_today_kwh", 0) * 1000,
                 "home_consumption": energy_data.get("load_today_kwh", 0) * 1000,
+            }]
+
+            result = {
+                "success": True,
+                "period": period,
+                "time_series": time_series,
+                "serial_number": None,
+                "installation_date": None,
+            }
+            if tariff_schedule:
+                cost_summary = _calculate_cost_from_tariff(tariff_schedule, time_series)
+                if cost_summary:
+                    result["cost_summary"] = cost_summary
+            return web.json_response(result)
+
+        if is_goodwe and goodwe_coordinator:
+            # GoodWe: return current snapshot (no historical registers available)
+            from homeassistant.util import dt as dt_util
+
+            time_series = [{
+                "timestamp": dt_util.utcnow().isoformat(),
+                "solar_generation": 0,
+                "battery_discharge": 0,
+                "battery_charge": 0,
+                "grid_import": 0,
+                "grid_export": 0,
+                "home_consumption": 0,
             }]
 
             result = {
@@ -2188,10 +2228,20 @@ class PowerwallSettingsView(HomeAssistantView):
                 status=503
             )
 
-        # Check if this is a Sigenergy, Sungrow, or FoxESS setup - Powerwall settings not applicable
+        # Check if this is a Sigenergy, Sungrow, FoxESS, or GoodWe setup - Powerwall settings not applicable
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
         is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
         is_foxess = bool(entry.data.get(CONF_FOXESS_HOST) or entry.data.get(CONF_FOXESS_SERIAL_PORT))
+        is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
+        if is_goodwe:
+            return web.json_response(
+                {
+                    "success": False,
+                    "error": "Powerwall settings are not available for GoodWe battery systems",
+                    "reason": "goodwe_not_supported"
+                },
+                status=200
+            )
         if is_foxess:
             _LOGGER.info("Powerwall settings not available for FoxESS battery systems")
             return web.json_response(
@@ -3221,6 +3271,139 @@ class FoxESSSettingsView(HomeAssistantView):
             )
 
 
+class GoodWeSettingsView(HomeAssistantView):
+    """HTTP view to get/set GoodWe battery settings for mobile app Controls."""
+
+    url = "/api/power_sync/goodwe_settings"
+    name = "api:power_sync:goodwe_settings"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request for GoodWe settings."""
+        entry = None
+        for config_entry in self._hass.config_entries.async_entries(DOMAIN):
+            entry = config_entry
+            break
+
+        if not entry:
+            return web.json_response(
+                {"success": False, "error": "PowerSync not configured"},
+                status=503
+            )
+
+        is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
+        if not is_goodwe:
+            return web.json_response(
+                {"success": False, "error": "Not a GoodWe battery system", "reason": "not_goodwe"},
+                status=200
+            )
+
+        try:
+            entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            goodwe_coordinator = entry_data.get("goodwe_coordinator")
+
+            if not goodwe_coordinator or not goodwe_coordinator.data:
+                return web.json_response(
+                    {"success": False, "error": "GoodWe data not available"},
+                    status=503
+                )
+
+            data = goodwe_coordinator.data
+            result = {
+                "success": True,
+                "battery_soc": data.get("battery_level"),
+                "battery_power": data.get("battery_power"),
+                "solar_power": data.get("solar_power"),
+                "grid_power": data.get("grid_power"),
+                "load_power": data.get("load_power"),
+                "model_name": data.get("model_name"),
+                "serial_number": data.get("serial_number"),
+                "rated_power_w": data.get("rated_power_w"),
+                "battery_temperature": data.get("battery_temperature"),
+                "battery_soh": data.get("battery_soh"),
+            }
+            return web.json_response(result)
+
+        except Exception as e:
+            _LOGGER.error(f"Error fetching GoodWe settings: {e}", exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500
+            )
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Handle POST request to update GoodWe settings."""
+        entry = None
+        for config_entry in self._hass.config_entries.async_entries(DOMAIN):
+            entry = config_entry
+            break
+
+        if not entry:
+            return web.json_response(
+                {"success": False, "error": "PowerSync not configured"},
+                status=503
+            )
+
+        is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
+        if not is_goodwe:
+            return web.json_response(
+                {"success": False, "error": "Not a GoodWe battery system"},
+                status=400
+            )
+
+        try:
+            body = await request.json()
+            entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            goodwe_coordinator = entry_data.get("goodwe_coordinator")
+
+            if not goodwe_coordinator:
+                return web.json_response(
+                    {"success": False, "error": "GoodWe coordinator not available"},
+                    status=503
+                )
+
+            action = body.get("action")
+            if action == "force_charge":
+                duration = body.get("duration", 30)
+                await self._hass.services.async_call(
+                    DOMAIN, "force_charge", {"duration": duration}, blocking=True
+                )
+                return web.json_response({"success": True, "action": "force_charge"})
+            elif action == "force_discharge":
+                duration = body.get("duration", 30)
+                await self._hass.services.async_call(
+                    DOMAIN, "force_discharge", {"duration": duration}, blocking=True
+                )
+                return web.json_response({"success": True, "action": "force_discharge"})
+            elif action == "restore_normal":
+                await self._hass.services.async_call(
+                    DOMAIN, "restore_normal", {}, blocking=True
+                )
+                return web.json_response({"success": True, "action": "restore_normal"})
+            elif action == "set_backup_reserve":
+                percent = body.get("percent", 20)
+                await self._hass.services.async_call(
+                    DOMAIN, "set_backup_reserve", {"percent": percent}, blocking=True
+                )
+                return web.json_response({"success": True, "action": "set_backup_reserve"})
+            else:
+                return web.json_response(
+                    {"success": False, "error": f"Unknown action: {action}"},
+                    status=400
+                )
+
+        except Exception as e:
+            _LOGGER.error(f"Error in GoodWe settings POST: {e}", exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500
+            )
+
+
 class AEMOSpikeView(HomeAssistantView):
     """HTTP view to manage AEMO spike detection for all battery systems.
 
@@ -3282,6 +3465,8 @@ class AEMOSpikeView(HomeAssistantView):
                     battery_system = "sungrow"
                 elif entry.data.get(CONF_FOXESS_HOST) or entry.data.get(CONF_FOXESS_SERIAL_PORT):
                     battery_system = "foxess"
+                elif entry.data.get(CONF_GOODWE_HOST):
+                    battery_system = "goodwe"
 
                 status = {
                     "enabled": enabled,
@@ -3586,6 +3771,19 @@ class ConfigView(HomeAssistantView):
                     "connection_type": entry.data.get(CONF_FOXESS_CONNECTION_TYPE, FOXESS_CONNECTION_TCP),
                 }
 
+            # Add GoodWe-specific info if applicable
+            goodwe_config = None
+            if battery_system == "goodwe":
+                goodwe_host = entry.options.get(
+                    CONF_GOODWE_HOST,
+                    entry.data.get(CONF_GOODWE_HOST)
+                )
+                goodwe_config = {
+                    "host": goodwe_host,
+                    "model_name": "auto-detected",
+                    "modbus_enabled": bool(goodwe_host),
+                }
+
             # Get EV provider configuration
             ev_provider = entry.options.get(
                 CONF_EV_PROVIDER,
@@ -3619,6 +3817,7 @@ class ConfigView(HomeAssistantView):
                 "sigenergy": sigenergy_config,
                 "sungrow": sungrow_config,
                 "foxess": foxess_config,
+                "goodwe": goodwe_config,
             }
 
             _LOGGER.info(f"✅ Config response: battery_system={battery_system}, provider={electricity_provider}")
@@ -9124,14 +9323,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("Failed to start Amber usage coordinator: %s", e)
             amber_usage_coordinator = None
 
-    # Check if this is a Sigenergy, Sungrow, or FoxESS setup (no Tesla needed)
+    # Check if this is a Sigenergy, Sungrow, FoxESS, or GoodWe setup (no Tesla needed)
     is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
     is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
     is_foxess = bool(entry.data.get(CONF_FOXESS_HOST) or entry.data.get(CONF_FOXESS_SERIAL_PORT))
+    is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
     tesla_coordinator = None
     sigenergy_coordinator = None
     sungrow_coordinator = None
     foxess_coordinator = None
+    goodwe_coordinator = None
     token_getter = None  # Will be set for Tesla users
 
     if is_sigenergy:
@@ -9217,6 +9418,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             baudrate=foxess_baudrate,
             model_family=foxess_model_family,
         )
+    elif is_goodwe:
+        _LOGGER.info("Running in GoodWe mode - Tesla credentials not required")
+
+        goodwe_host = entry.options.get(CONF_GOODWE_HOST, entry.data.get(CONF_GOODWE_HOST))
+        goodwe_port = entry.options.get(CONF_GOODWE_PORT, entry.data.get(CONF_GOODWE_PORT, DEFAULT_GOODWE_PORT_UDP))
+
+        _LOGGER.info("Initializing GoodWe coordinator: %s:%s", goodwe_host, goodwe_port)
+        goodwe_coordinator = GoodWeEnergyCoordinator(
+            hass,
+            goodwe_host,
+            port=goodwe_port,
+        )
     else:
         # Get initial Tesla API token and provider
         # Use get_tesla_api_token() which fetches fresh from tesla_fleet if available
@@ -9276,6 +9489,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("FoxESS Modbus coordinator failed to initialize: %s", e)
             # Don't fail the entire setup - allow other features to work
             foxess_coordinator = None
+    if goodwe_coordinator:
+        try:
+            await goodwe_coordinator.async_config_entry_first_refresh()
+            _LOGGER.info("GoodWe coordinator initialized successfully")
+        except Exception as e:
+            _LOGGER.warning("GoodWe coordinator failed to initialize: %s", e)
+            goodwe_coordinator = None
 
     # Initialize demand charge coordinator if enabled (any battery system with grid power data)
     demand_charge_coordinator = None
@@ -9283,7 +9503,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_DEMAND_CHARGE_ENABLED,
         entry.data.get(CONF_DEMAND_CHARGE_ENABLED, False)
     )
-    energy_coord_for_demand = tesla_coordinator or foxess_coordinator or sigenergy_coordinator or sungrow_coordinator
+    energy_coord_for_demand = tesla_coordinator or foxess_coordinator or goodwe_coordinator or sigenergy_coordinator or sungrow_coordinator
     if demand_charge_enabled and energy_coord_for_demand:
         demand_charge_rate = entry.options.get(
             CONF_DEMAND_CHARGE_RATE,
@@ -9342,7 +9562,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     # Tesla AEMO Spike Manager (tariff-based) — only for Tesla
-    if aemo_spike_enabled and has_tesla_site and not is_sigenergy and not is_sungrow and not is_foxess:
+    if aemo_spike_enabled and has_tesla_site and not is_sigenergy and not is_sungrow and not is_foxess and not is_goodwe:
         aemo_region = entry.options.get(
             CONF_AEMO_REGION,
             entry.data.get(CONF_AEMO_REGION)
@@ -9383,7 +9603,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
         if aemo_region:
-            battery_type = "sigenergy" if is_sigenergy else "sungrow" if is_sungrow else "foxess"
+            battery_type = "sigenergy" if is_sigenergy else "sungrow" if is_sungrow else "goodwe" if is_goodwe else "foxess"
             generic_aemo_spike_manager = GenericAEMOSpikeManager(
                 hass=hass,
                 entry=entry,
@@ -9529,6 +9749,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "sigenergy_coordinator": sigenergy_coordinator,  # For Sigenergy Modbus energy data
         "sungrow_coordinator": sungrow_coordinator,  # For Sungrow Modbus energy/battery data
         "foxess_coordinator": foxess_coordinator,  # For FoxESS Modbus energy/battery data
+        "goodwe_coordinator": goodwe_coordinator,  # For GoodWe energy/battery data
         "demand_charge_coordinator": demand_charge_coordinator,
         "aemo_spike_manager": aemo_spike_manager,
         "generic_aemo_spike_manager": generic_aemo_spike_manager,  # For non-Tesla AEMO spike detection
@@ -9554,6 +9775,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "is_sigenergy": is_sigenergy,  # Track battery system type
         "is_sungrow": is_sungrow,  # Track if Sungrow battery system
         "is_foxess": is_foxess,  # Track if FoxESS battery system
+        "is_goodwe": is_goodwe,  # Track if GoodWe battery system
         "foxess_curtailment_state": "normal",  # Track FoxESS DC curtailment state
         "amber_usage_coordinator": amber_usage_coordinator,  # For actual metered cost data
     }
@@ -12453,6 +12675,50 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error in FoxESS force discharge: {e}", exc_info=True)
                 return
 
+        # Check if this is a GoodWe system
+        is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
+        if is_goodwe:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                goodwe_coord = entry_data.get("goodwe_coordinator")
+                if not goodwe_coord:
+                    _LOGGER.error("Force discharge: GoodWe coordinator not available")
+                    return
+
+                discharge_result = await goodwe_coord.force_discharge(duration)
+
+                if discharge_result:
+                    force_discharge_state["active"] = True
+                    force_discharge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
+                    _LOGGER.info(f"GoodWe FORCE DISCHARGE ACTIVE for {duration} minutes")
+
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                        "active": True,
+                        "expires_at": force_discharge_state["expires_at"].isoformat(),
+                        "duration": duration,
+                    })
+
+                    if force_discharge_state.get("cancel_expiry_timer"):
+                        force_discharge_state["cancel_expiry_timer"]()
+
+                    async def auto_restore_discharge_goodwe(_now):
+                        if force_discharge_state["active"]:
+                            _LOGGER.info("GoodWe force discharge expired, auto-restoring")
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+
+                    force_discharge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass,
+                        auto_restore_discharge_goodwe,
+                        force_discharge_state["expires_at"],
+                    )
+                    await persist_force_mode_state()
+                else:
+                    _LOGGER.error("GoodWe force discharge failed")
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error in GoodWe force discharge: {e}", exc_info=True)
+                return
+
         try:
             # Get current token and provider using helper function
             current_token, provider = get_tesla_api_token(hass, entry)
@@ -12947,6 +13213,59 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error in FoxESS force charge: {e}", exc_info=True)
                 return
 
+        # Check if this is a GoodWe system
+        is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
+        if is_goodwe:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                goodwe_coord = entry_data.get("goodwe_coordinator")
+                if not goodwe_coord:
+                    _LOGGER.error("Force charge: GoodWe coordinator not available")
+                    return
+
+                # Cancel active discharge mode if switching to charge
+                if force_discharge_state["active"]:
+                    _LOGGER.info("Canceling active discharge mode to enable charge mode")
+                    if force_discharge_state.get("cancel_expiry_timer"):
+                        force_discharge_state["cancel_expiry_timer"]()
+                        force_discharge_state["cancel_expiry_timer"] = None
+                    force_discharge_state["active"] = False
+                    force_discharge_state["expires_at"] = None
+
+                charge_result = await goodwe_coord.force_charge(duration)
+
+                if charge_result:
+                    force_charge_state["active"] = True
+                    force_charge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
+                    _LOGGER.info(f"GoodWe FORCE CHARGE ACTIVE for {duration} minutes")
+
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
+                        "active": True,
+                        "expires_at": force_charge_state["expires_at"].isoformat(),
+                        "duration": duration,
+                    })
+
+                    if force_charge_state.get("cancel_expiry_timer"):
+                        force_charge_state["cancel_expiry_timer"]()
+
+                    async def auto_restore_charge_goodwe(_now):
+                        if force_charge_state["active"]:
+                            _LOGGER.info("GoodWe force charge expired, auto-restoring")
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+
+                    force_charge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass,
+                        auto_restore_charge_goodwe,
+                        force_charge_state["expires_at"],
+                    )
+                    await persist_force_mode_state()
+                else:
+                    _LOGGER.error("GoodWe force charge failed")
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error in GoodWe force charge: {e}", exc_info=True)
+                return
+
         try:
             # Get current token and provider using helper function
             current_token, provider = get_tesla_api_token(hass, entry)
@@ -13416,6 +13735,41 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error in FoxESS restore normal: {e}", exc_info=True)
                 return
 
+        # Check if this is a GoodWe system
+        is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
+        if is_goodwe:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                goodwe_coord = entry_data.get("goodwe_coordinator")
+                if goodwe_coord:
+                    await goodwe_coord.restore_normal()
+
+                force_charge_state["active"] = False
+                force_discharge_state["active"] = False
+                force_charge_state["expires_at"] = None
+                force_discharge_state["expires_at"] = None
+
+                _LOGGER.info("GoodWe NORMAL OPERATION RESTORED")
+
+                try:
+                    from .automations.actions import _send_expo_push
+                    await _send_expo_push(hass, "Battery", "Normal operation restored")
+                except Exception as notify_err:
+                    _LOGGER.debug(f"Could not send success notification: {notify_err}")
+
+                async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                    "active": False, "expires_at": None, "duration": 0,
+                })
+                async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
+                    "active": False, "expires_at": None, "duration": 0,
+                })
+
+                await persist_force_mode_state()
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error in GoodWe restore normal: {e}", exc_info=True)
+                return
+
         # Guard: if no force mode is active and no saved state exists, there's
         # nothing to restore. Skip to avoid false "tariff not restored" warnings,
         # wrong mode switches (autonomous instead of self_consumption), and
@@ -13703,6 +14057,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error setting FoxESS self-consumption: {e}", exc_info=True)
                 return
 
+        # Check if this is a GoodWe system
+        is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
+        if is_goodwe:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                goodwe_coord = entry_data.get("goodwe_coordinator")
+                if not goodwe_coord:
+                    _LOGGER.error("Self-consumption: GoodWe coordinator not available")
+                    return
+
+                success = await goodwe_coord.restore_normal()
+                if success:
+                    _LOGGER.info("GoodWe self-consumption mode set (GENERAL)")
+                else:
+                    _LOGGER.error("Failed to set GoodWe self-consumption mode")
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error setting GoodWe self-consumption: {e}", exc_info=True)
+                return
+
         # Check if this is a Sungrow system
         is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
         if is_sungrow:
@@ -13817,7 +14191,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         is_foxess = bool(entry.data.get(CONF_FOXESS_HOST) or entry.data.get(CONF_FOXESS_SERIAL_PORT))
         is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
-        if is_foxess or is_sungrow or is_sigenergy:
+        is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
+        if is_foxess or is_sungrow or is_sigenergy or is_goodwe:
             _LOGGER.debug("Non-Tesla system — autonomous mode is implicit, skipping")
             return
 
@@ -13884,8 +14259,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         is_foxess = bool(entry.data.get(CONF_FOXESS_HOST) or entry.data.get(CONF_FOXESS_SERIAL_PORT))
         # Check if this is a Sungrow system
         is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
+        # Check if this is a GoodWe system
+        is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
 
-        if is_foxess:
+        if is_goodwe:
+            # GoodWe via goodwe library (DOD)
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                goodwe_coord = entry_data.get("goodwe_coordinator")
+                if not goodwe_coord:
+                    _LOGGER.error("GoodWe coordinator not available for set_backup_reserve")
+                    return
+
+                success = await goodwe_coord.set_backup_reserve(percent)
+                if success:
+                    _LOGGER.info(f"GoodWe backup reserve set to {percent}%%")
+                else:
+                    _LOGGER.error("Failed to set GoodWe backup reserve")
+
+            except Exception as e:
+                _LOGGER.error(f"Error setting GoodWe backup reserve: {e}", exc_info=True)
+        elif is_foxess:
             # FoxESS via Modbus
             try:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
@@ -14526,6 +14920,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register HTTP endpoint for FoxESS settings (for mobile app Controls)
     hass.http.register_view(FoxESSSettingsView(hass))
     _LOGGER.info("⚙️ FoxESS settings HTTP endpoint registered at /api/power_sync/foxess_settings")
+
+    # Register HTTP endpoint for GoodWe settings (for mobile app Controls)
+    hass.http.register_view(GoodWeSettingsView(hass))
+    _LOGGER.info("GoodWe settings HTTP endpoint registered at /api/power_sync/goodwe_settings")
 
     # Register HTTP endpoint for AEMO spike settings (for mobile app - all battery systems)
     hass.http.register_view(AEMOSpikeView(hass))
@@ -15604,6 +16002,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             elif is_foxess:
                 battery_system = "foxess"
                 energy_coordinator = foxess_coordinator
+            elif is_goodwe:
+                battery_system = "goodwe"
+                energy_coordinator = goodwe_coordinator
             else:
                 battery_system = "tesla"
                 energy_coordinator = tesla_coordinator

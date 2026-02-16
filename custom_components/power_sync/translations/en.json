@@ -142,7 +142,7 @@
       },
       "battery_system": {
         "title": "Select Battery System",
-        "description": "Choose your battery storage system:\n\n**Tesla Powerwall**: Connect via Fleet API or Teslemetry.\n\n**Sigenergy**: Connect via Sigenergy Cloud API.\n\n**Sungrow SH-series**: Connect via Modbus TCP.\n\n**FoxESS**: Connect via Modbus TCP or RS485 serial.",
+        "description": "Choose your battery storage system:\n\n**Tesla Powerwall**: Connect via Fleet API or Teslemetry.\n\n**Sigenergy**: Connect via Sigenergy Cloud API.\n\n**Sungrow SH-series**: Connect via Modbus TCP.\n\n**FoxESS**: Connect via Modbus TCP or RS485 serial.\n\n**GoodWe**: Connect via UDP/TCP (ET/EH/ES/EM series hybrid inverters).",
         "data": {
           "battery_system": "Battery System"
         },
@@ -240,6 +240,16 @@
           "foxess_cloud_device_sn": "Inverter serial number from FoxESS Cloud (optional)"
         },
         "submit_button": "Next"
+      },
+      "goodwe_connection": {
+        "title": "GoodWe Connection",
+        "description": "Connect to your GoodWe hybrid inverter. The inverter model will be auto-detected.\n\n**UDP (default):** Port 8899 via WiFi dongle — works with most GoodWe inverters.\n**TCP:** Port 502 via LAN dongle.",
+        "data": {
+          "goodwe_host": "Inverter IP Address",
+          "goodwe_port": "Port",
+          "goodwe_protocol": "Protocol"
+        },
+        "submit_button": "Test Connection"
       },
       "sigenergy_credentials": {
         "title": "Sigenergy Credentials",
@@ -446,6 +456,8 @@
       "foxess_serial_required": "Serial port path is required for RS485 connection.",
       "foxess_cloud_auth_failed": "FoxESS Cloud API key validation failed. Check your API key is correct and your account has API access enabled.",
       "foxess_cloud_connection_error": "Unable to connect to FoxESS Cloud. Check your internet connection and try again.",
+      "goodwe_connect_failed": "Cannot connect to GoodWe inverter. Check IP address and ensure the inverter is online.",
+      "goodwe_no_battery": "This GoodWe inverter does not have battery support (DT/MS/XS series are grid-only).",
       "zaptec_auth_failed": "Zaptec Cloud authentication failed. Check your email and password are correct.",
       "zaptec_missing_credentials": "Please provide both your Zaptec email and password.",
       "no_prices": "No Octopus prices found for this tariff and region. Check your product and GSP region are correct.",
@@ -545,6 +557,26 @@
           "foxess_slave_id": "Modbus slave ID (default: 247)",
           "foxess_serial_port": "Serial device path (e.g., /dev/ttyUSB0) — only for RS485",
           "foxess_serial_baudrate": "Serial baud rate (default: 9600) — only for RS485"
+        },
+        "submit_button": "Next"
+      },
+      "init_goodwe": {
+        "title": "PowerSync Settings",
+        "description": "Configure your electricity provider, optimization settings, and GoodWe connection.\n\n**Connection is required** to read real-time energy data and control battery settings.",
+        "data": {
+          "electricity_provider": "Electricity Provider",
+          "optimization_provider": "Optimization Provider",
+          "optimization_backup_reserve": "Backup Reserve (%)",
+          "goodwe_host": "GoodWe IP Address",
+          "goodwe_protocol": "Protocol",
+          "goodwe_port": "Port"
+        },
+        "data_description": {
+          "optimization_provider": "Choose between GoodWe built-in scheduling or Smart Optimization (Built-in LP)",
+          "optimization_backup_reserve": "Minimum battery charge level to maintain (only applies to Smart Optimization)",
+          "goodwe_host": "Local IP address of your GoodWe inverter (e.g., 192.168.1.100)",
+          "goodwe_protocol": "UDP (WiFi dongle, port 8899) or TCP (LAN dongle, port 502)",
+          "goodwe_port": "Connection port (default: 8899 for UDP, 502 for TCP)"
         },
         "submit_button": "Next"
       },
