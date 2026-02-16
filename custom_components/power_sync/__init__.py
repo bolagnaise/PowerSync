@@ -44,6 +44,7 @@ from .const import (
     CONF_DEMAND_CHARGE_BILLING_DAY,
     CONF_DEMAND_CHARGE_APPLY_TO,
     CONF_DEMAND_ARTIFICIAL_PRICE,
+    CONF_DEMAND_ALLOW_GRID_CHARGING,
     CONF_DAILY_SUPPLY_CHARGE,
     CONF_MONTHLY_SUPPLY_CHARGE,
     CONF_BATTERY_CURTAILMENT_ENABLED,
@@ -9541,6 +9542,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "generic_aemo_spike_cancel": None,  # Will store the generic AEMO spike check cancel function
         "demand_charging_cancel": None,  # Will store the demand period grid charging cancel function
         "grid_charging_disabled_for_demand": False,  # Track if grid charging is disabled for demand period
+        "demand_allow_grid_charging": entry.options.get(
+            CONF_DEMAND_ALLOW_GRID_CHARGING,
+            entry.data.get(CONF_DEMAND_ALLOW_GRID_CHARGING, False)
+        ),  # Allow grid charging during demand peak periods
         "cached_export_rule": cached_export_rule,  # Restored from persistent storage
         "battery_health": battery_health,  # Restored from persistent storage (from mobile app TEDAPI scans)
         "force_mode_state": force_mode_state,  # Restored force charge/discharge state
@@ -11422,7 +11427,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Enforce grid charging setting after TOU sync (counteracts VPP overrides)
             entry_data = hass.data[DOMAIN].get(entry.entry_id, {})
             dc_coordinator = entry_data.get("demand_charge_coordinator")
-            if dc_coordinator and dc_coordinator.enabled:
+            if dc_coordinator and dc_coordinator.enabled and not entry_data.get("demand_allow_grid_charging", False):
                 from homeassistant.util import dt as dt_util
                 current_time = dt_util.now()
                 in_peak = dc_coordinator._is_in_peak_period(current_time)
@@ -12795,6 +12800,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         _LOGGER.info(f"🔌 FORCE CHARGE: Activating for {duration} minutes")
 
+        # Block force charge during demand peak periods (grid charging must stay off)
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        dc_coordinator = entry_data.get("demand_charge_coordinator")
+        if dc_coordinator and not entry_data.get("demand_allow_grid_charging", False):
+            current_time = dt_util.now()
+            if dc_coordinator._is_in_peak_period(current_time):
+                _LOGGER.warning(
+                    "Force charge DENIED: currently in demand peak period (%s-%s). "
+                    "Grid charging is disabled to protect demand charges.",
+                    dc_coordinator.start_time, dc_coordinator.end_time,
+                )
+                return
+
         # Check if this is a Sigenergy system
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
         if is_sigenergy:
@@ -13264,6 +13282,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def handle_restore_normal(call: ServiceCall) -> None:
         """Restore normal operation - restore saved tariff or trigger Amber sync."""
+        from homeassistant.util import dt as dt_util
         # Log call context for debugging (helps identify if called by automation)
         context = call.context
         _LOGGER.info(f"🔄 Restore normal service called (context: user_id={context.user_id}, parent_id={context.parent_id})")
@@ -13581,6 +13600,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 _LOGGER.debug(f"Could not send notification: {notify_err}")
             else:
                 _LOGGER.warning("Could not determine backup reserve to restore")
+
+            # Explicitly re-enable grid charging unless still in a demand peak period
+            entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            dc_coordinator = entry_data.get("demand_charge_coordinator")
+            ts_coordinator = entry_data.get("tesla_coordinator")
+            if ts_coordinator:
+                in_peak = False
+                if dc_coordinator and not entry_data.get("demand_allow_grid_charging", False):
+                    in_peak = dc_coordinator._is_in_peak_period(dt_util.now())
+                if in_peak:
+                    _LOGGER.info("Restore normal: still in demand peak period — keeping grid charging disabled")
+                    hass.data[DOMAIN][entry.entry_id]["grid_charging_disabled_for_demand"] = True
+                else:
+                    success = await ts_coordinator.set_grid_charging_enabled(True)
+                    if success:
+                        hass.data[DOMAIN][entry.entry_id]["grid_charging_disabled_for_demand"] = False
+                        _LOGGER.info("Grid charging re-enabled after restore normal")
+                    else:
+                        _LOGGER.warning("Failed to re-enable grid charging during restore normal")
 
             # Clear discharge state
             force_discharge_state["active"] = False
@@ -15132,6 +15170,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ts_coordinator = entry_data.get("tesla_coordinator")
 
                 if not dc_coordinator or not ts_coordinator:
+                    return
+
+                # Skip grid charging control if user allows grid charging during demand windows
+                if entry_data.get("demand_allow_grid_charging", False):
                     return
 
                 # Check if we're in peak period using the coordinator's method

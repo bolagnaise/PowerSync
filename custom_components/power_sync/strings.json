@@ -348,10 +348,12 @@
           "demand_charge_enabled": "Enable Demand Charge Tracking",
           "demand_charge_rate": "Demand Charge Rate ($/kW)",
           "demand_charge_start_time": "Peak Period Start Time (HH:MM)",
-          "demand_charge_end_time": "Peak Period End Time (HH:MM)"
+          "demand_charge_end_time": "Peak Period End Time (HH:MM)",
+          "demand_allow_grid_charging": "Allow Grid Charging During Demand Windows"
         },
         "data_description": {
-          "demand_charge_enabled": "Track your peak grid draw during demand charge periods and calculate monthly capacity fees based on your highest 30-minute average"
+          "demand_charge_enabled": "Track your peak grid draw during demand charge periods and calculate monthly capacity fees based on your highest 30-minute average",
+          "demand_allow_grid_charging": "Allow the battery to charge from grid during demand peak periods. When disabled, grid charging is blocked during peak to protect against demand charges."
         },
         "submit_button": "Next"
       },
@@ -750,6 +752,7 @@
           "demand_charge_billing_day": "Billing Cycle Reset Day",
           "demand_charge_apply_to": "Apply Demand Charge To",
           "demand_artificial_price_enabled": "Apply Artificial Price During Demand Peak",
+          "demand_allow_grid_charging": "Allow Grid Charging During Demand Windows",
           "daily_supply_charge": "Daily Supply Charge ($)",
           "monthly_supply_charge": "Monthly Supply Charge ($)"
         },
@@ -762,6 +765,7 @@
           "demand_charge_billing_day": "Day of month when the billing cycle resets (1-28)",
           "demand_charge_apply_to": "Whether demand charges apply to grid imports, exports, or both",
           "demand_artificial_price_enabled": "Add an artificial price component during demand peak periods to discourage grid draw",
+          "demand_allow_grid_charging": "Allow the battery to charge from grid during demand peak periods. When disabled, grid charging is blocked during peak to protect against demand charges.",
           "daily_supply_charge": "Your daily electricity supply charge for cost tracking",
           "monthly_supply_charge": "Your monthly electricity supply charge for cost tracking"
         },

@@ -31,6 +31,7 @@ from .const import (
     CONF_DEMAND_CHARGE_BILLING_DAY,
     CONF_DEMAND_CHARGE_APPLY_TO,
     CONF_DEMAND_ARTIFICIAL_PRICE,
+    CONF_DEMAND_ALLOW_GRID_CHARGING,
     CONF_DAILY_SUPPLY_CHARGE,
     CONF_MONTHLY_SUPPLY_CHARGE,
     CONF_TESLA_API_PROVIDER,
@@ -2273,6 +2274,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_DEMAND_CHARGE_BILLING_DAY: user_input[CONF_DEMAND_CHARGE_BILLING_DAY],
                     CONF_DEMAND_CHARGE_APPLY_TO: user_input[CONF_DEMAND_CHARGE_APPLY_TO],
                     CONF_DEMAND_ARTIFICIAL_PRICE: user_input.get(CONF_DEMAND_ARTIFICIAL_PRICE, False),
+                    CONF_DEMAND_ALLOW_GRID_CHARGING: user_input.get(CONF_DEMAND_ALLOW_GRID_CHARGING, False),
                 })
             else:
                 self._demand_data[CONF_DEMAND_CHARGE_ENABLED] = False
@@ -2309,6 +2311,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ["Buy Only", "Sell Only", "Both"]
                 ),
                 vol.Optional(CONF_DEMAND_ARTIFICIAL_PRICE, default=False): bool,
+                vol.Optional(CONF_DEMAND_ALLOW_GRID_CHARGING, default=False): bool,
                 vol.Optional(CONF_DAILY_SUPPLY_CHARGE, default=0.0): vol.Coerce(float),
                 vol.Optional(CONF_MONTHLY_SUPPLY_CHARGE, default=0.0): vol.Coerce(float),
             }
@@ -3250,6 +3253,10 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 vol.Optional(
                     CONF_DEMAND_ARTIFICIAL_PRICE,
                     default=self._get_option(CONF_DEMAND_ARTIFICIAL_PRICE, False),
+                ): bool,
+                vol.Optional(
+                    CONF_DEMAND_ALLOW_GRID_CHARGING,
+                    default=self._get_option(CONF_DEMAND_ALLOW_GRID_CHARGING, False),
                 ): bool,
                 vol.Optional(
                     CONF_DAILY_SUPPLY_CHARGE,

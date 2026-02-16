@@ -261,6 +261,7 @@ CONF_DEMAND_CHARGE_DAYS = "demand_charge_days"
 CONF_DEMAND_CHARGE_BILLING_DAY = "demand_charge_billing_day"
 CONF_DEMAND_CHARGE_APPLY_TO = "demand_charge_apply_to"
 CONF_DEMAND_ARTIFICIAL_PRICE = "demand_artificial_price_enabled"
+CONF_DEMAND_ALLOW_GRID_CHARGING = "demand_allow_grid_charging"
 
 # Daily supply charge configuration
 CONF_DAILY_SUPPLY_CHARGE = "daily_supply_charge"
