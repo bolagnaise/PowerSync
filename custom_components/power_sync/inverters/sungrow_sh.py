@@ -596,6 +596,50 @@ class SungrowSHController(InverterController):
             _LOGGER.error(f"Error restoring normal mode: {e}")
             return False
 
+    async def set_idle_mode(self) -> bool:
+        """Set Sungrow to Forced + Stop for IDLE (prevents self-consumption discharge).
+
+        In self-consumption mode, backup_reserve is only a passive floor — the
+        battery still discharges to serve home load until it reaches the reserve.
+        Using EMS_FORCED + CMD_STOP halts all battery activity so the grid
+        serves the home load instead. This is the Sungrow equivalent of
+        FoxESS Backup mode or Tesla autonomous mode for holding SOC.
+
+        Returns:
+            True if successful, False otherwise
+        """
+        _LOGGER.info(f"Setting Sungrow SH at {self.host} to Forced+Stop (IDLE hold)")
+        try:
+            if not await self.connect():
+                return False
+
+            # Set EMS to forced mode
+            success = await self._write_register(self.REG_EMS_MODE, self.EMS_FORCED)
+            if not success:
+                _LOGGER.error("Failed to set EMS to forced mode for IDLE")
+                return False
+
+            # Send stop command — halts all charge/discharge
+            success = await self._write_register(self.REG_CHARGE_CMD, self.CMD_STOP)
+            if not success:
+                _LOGGER.error("Failed to send stop command for IDLE")
+                return False
+
+            _LOGGER.info(f"Sungrow SH at {self.host} now in Forced+Stop (IDLE hold)")
+            return True
+
+        except Exception as e:
+            _LOGGER.error(f"Error setting IDLE mode: {e}")
+            return False
+
+    async def restore_from_idle(self) -> bool:
+        """Restore self-consumption mode after IDLE.
+
+        Returns:
+            True if successful, False otherwise
+        """
+        return await self.restore_normal()
+
     async def set_backup_reserve(self, percent: int) -> bool:
         """Set backup reserve percentage.
 

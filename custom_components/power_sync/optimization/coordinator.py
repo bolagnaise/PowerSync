@@ -402,18 +402,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     _LOGGER.warning("Optimizer startup: set_backup_reserve returned failure")
             except Exception as e:
                 _LOGGER.warning("Failed to restore backup reserve on enable: %s", e)
-        # FoxESS: ensure work mode is Self Use on startup (may have been left
-        # in Backup mode if HA restarted during IDLE)
+        # FoxESS/Sungrow: ensure normal operation mode on startup (may have been
+        # left in IDLE hold mode if HA restarted during IDLE)
         if (
-            self.battery_system == "foxess"
-            and self.energy_coordinator
+            self.energy_coordinator
             and hasattr(self.energy_coordinator, "restore_work_mode_from_idle")
         ):
             try:
                 await self.energy_coordinator.restore_work_mode_from_idle()
-                _LOGGER.info("Optimizer startup: ensured FoxESS work mode is Self Use")
+                _LOGGER.info("Optimizer startup: ensured normal operation mode")
             except Exception as e:
-                _LOGGER.warning("Failed to restore FoxESS work mode on enable: %s", e)
+                _LOGGER.warning("Failed to restore work mode on enable: %s", e)
         self._last_executed_action = None
 
         # Run initial optimization and start polling loop as background tasks
@@ -456,17 +455,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                 except Exception as e:
                     _LOGGER.warning("Failed to restore backup reserve on disable: %s", e)
-            # FoxESS: restore from Backup mode to original work mode
+            # FoxESS/Sungrow: restore from IDLE hold mode to normal operation
             if (
-                self.battery_system == "foxess"
-                and self.energy_coordinator
+                self.energy_coordinator
                 and hasattr(self.energy_coordinator, "restore_work_mode_from_idle")
             ):
                 try:
                     await self.energy_coordinator.restore_work_mode_from_idle()
-                    _LOGGER.info("Optimizer disable: restored FoxESS work mode from IDLE")
+                    _LOGGER.info("Optimizer disable: restored work mode from IDLE")
                 except Exception as e:
-                    _LOGGER.warning("Failed to restore FoxESS work mode on disable: %s", e)
+                    _LOGGER.warning("Failed to restore work mode on disable: %s", e)
         self._last_executed_action = None
 
         if self._price_listener_unsub:
@@ -653,10 +651,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if hasattr(battery, "set_backup_reserve"):
                     configured_reserve_pct = int(self._config.backup_reserve * 100)
                     await battery.set_backup_reserve(configured_reserve_pct)
-                # FoxESS: restore from Backup mode to original work mode
+                # FoxESS/Sungrow: restore from IDLE hold mode to normal operation
                 if (
-                    self.battery_system == "foxess"
-                    and self.energy_coordinator
+                    self.energy_coordinator
                     and hasattr(self.energy_coordinator, "restore_work_mode_from_idle")
                 ):
                     await self.energy_coordinator.restore_work_mode_from_idle()
@@ -686,20 +683,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 soc, _ = await self._get_battery_state()
                 soc_pct = int(soc * 100)
 
-                # FoxESS: Use Backup mode for IDLE. In Self Use mode, min_soc
-                # is only a passive floor — the battery still discharges to
-                # serve home load and the optimizer chases SOC downward.
-                # Backup mode prevents all self-consumption discharge.
+                # FoxESS/Sungrow: Use a hold mode for IDLE. In normal
+                # self-consumption mode, min_soc/backup_reserve is only a
+                # passive floor — the battery still discharges to serve home
+                # load and the optimizer chases SOC downward. Switching to a
+                # hold mode (FoxESS: Backup, Sungrow: Forced+Stop) prevents
+                # all self-consumption discharge so the grid serves load.
                 if (
-                    self.battery_system == "foxess"
-                    and self.energy_coordinator
+                    self.energy_coordinator
                     and hasattr(self.energy_coordinator, "set_backup_mode")
                 ):
                     await self.energy_coordinator.set_backup_mode()
                     if hasattr(battery, "set_backup_reserve"):
                         await battery.set_backup_reserve(soc_pct)
                     _LOGGER.info(
-                        "Optimizer: IDLE — holding SOC at %d%% (FoxESS backup mode + min_soc=%d%%)",
+                        "Optimizer: IDLE — holding SOC at %d%% (hold mode + min_soc=%d%%)",
                         soc_pct, soc_pct,
                     )
                 elif soc_pct > 80:

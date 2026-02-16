@@ -1910,6 +1910,16 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         async with self._controller:
             return await self._controller.set_backup_reserve(percent)
 
+    async def set_backup_mode(self) -> bool:
+        """Set Sungrow to Forced+Stop for IDLE (prevents self-consumption discharge)."""
+        async with self._controller:
+            return await self._controller.set_idle_mode()
+
+    async def restore_work_mode_from_idle(self) -> bool:
+        """Restore self-consumption mode after IDLE."""
+        async with self._controller:
+            return await self._controller.restore_from_idle()
+
     async def set_charge_rate_limit(self, kw: float) -> bool:
         """Set maximum charge rate in kW.
 
