@@ -596,7 +596,7 @@ async def async_setup_entry(
     )
     if electricity_provider == "flow_power":
         # Get the price coordinator (Amber or AEMO)
-        price_coordinator = amber_coordinator or domain_data.get("aemo_coordinator")
+        price_coordinator = amber_coordinator or domain_data.get("aemo_sensor_coordinator")
         if price_coordinator:
             # Add import price sensor
             entities.append(
