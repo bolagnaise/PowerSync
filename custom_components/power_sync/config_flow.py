@@ -2418,7 +2418,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ["All Days", "Weekdays Only", "Weekends Only"]
                 ),
                 vol.Optional(CONF_DEMAND_CHARGE_BILLING_DAY, default=1): vol.All(
-                    vol.Coerce(int), vol.Range(min=1, max=28)
+                    vol.Coerce(int), vol.Range(min=1, max=31)
                 ),
                 vol.Optional(CONF_DEMAND_CHARGE_APPLY_TO, default="Buy Only"): vol.In(
                     ["Buy Only", "Sell Only", "Both"]
@@ -3455,7 +3455,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 vol.Optional(
                     CONF_DEMAND_CHARGE_BILLING_DAY,
                     default=self._get_option(CONF_DEMAND_CHARGE_BILLING_DAY, 1),
-                ): vol.All(vol.Coerce(int), vol.Range(min=1, max=28)),
+                ): vol.All(vol.Coerce(int), vol.Range(min=1, max=31)),
                 vol.Optional(
                     CONF_DEMAND_CHARGE_APPLY_TO,
                     default=self._get_option(CONF_DEMAND_CHARGE_APPLY_TO, "Buy Only"),
@@ -3992,8 +3992,14 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             # Remove combined key before storing
             user_input.pop(CONF_NETWORK_TARIFF_COMBINED, None)
 
-            # Store main options temporarily, continue to network/advanced step
+            # Store main options temporarily
             self._flow_power_main_options = user_input
+
+            # If switching to Amber and no token exists, collect it first
+            price_source = user_input.get(CONF_FLOW_POWER_PRICE_SOURCE, "aemo")
+            if price_source == "amber" and not self.config_entry.data.get(CONF_AMBER_API_TOKEN):
+                return await self.async_step_flow_power_amber_token()
+
             return await self.async_step_flow_power_network_options()
 
         # Build current combined tariff value from stored options
@@ -4012,6 +4018,10 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_FLOW_POWER_STATE,
                         default=self._get_option(CONF_FLOW_POWER_STATE, "NSW1"),
                     ): vol.In(FLOW_POWER_STATES),
+                    vol.Required(
+                        CONF_FLOW_POWER_PRICE_SOURCE,
+                        default=self._get_option(CONF_FLOW_POWER_PRICE_SOURCE, "aemo"),
+                    ): vol.In(FLOW_POWER_PRICE_SOURCES),
                     vol.Required(
                         CONF_NETWORK_TARIFF_COMBINED,
                         default=current_combined,
@@ -4032,6 +4042,39 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             ),
         )
 
+    async def async_step_flow_power_amber_token(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Collect Amber API token when Flow Power user switches to Amber pricing."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            validation_result = await validate_amber_token(
+                self.hass, user_input[CONF_AMBER_API_TOKEN]
+            )
+
+            if validation_result["success"]:
+                # Store token in config entry data
+                new_data = {**self.config_entry.data}
+                new_data[CONF_AMBER_API_TOKEN] = user_input[CONF_AMBER_API_TOKEN]
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data=new_data
+                )
+                return await self.async_step_flow_power_network_options()
+            else:
+                errors["base"] = validation_result.get("error", "unknown")
+
+        return self.async_show_form(
+            step_id="flow_power_amber_token",
+            data_schema=vol.Schema({
+                vol.Required(CONF_AMBER_API_TOKEN): str,
+            }),
+            errors=errors,
+            description_placeholders={
+                "amber_url": "https://app.amber.com.au/developers",
+            },
+        )
+
     async def async_step_flow_power_network_options(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -4050,10 +4093,6 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             step_id="flow_power_network_options",
             data_schema=vol.Schema(
                 {
-                    vol.Required(
-                        CONF_FLOW_POWER_PRICE_SOURCE,
-                        default=self._get_option(CONF_FLOW_POWER_PRICE_SOURCE, "aemo"),
-                    ): vol.In(FLOW_POWER_PRICE_SOURCES),
                     vol.Optional(
                         CONF_PEA_CUSTOM_VALUE,
                         default=self._get_option(CONF_PEA_CUSTOM_VALUE, None),
