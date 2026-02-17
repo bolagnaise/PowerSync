@@ -894,6 +894,50 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return result
 
+    def _apply_flow_power_export(
+        self, export_prices: list[float]
+    ) -> list[float]:
+        """Replace export prices with Flow Power Happy Hour schedule.
+
+        Flow Power: 0c export except Happy Hour (17:30-19:30) at 45c/35c.
+        """
+        if not self._entry:
+            return export_prices
+
+        from ..const import (
+            CONF_ELECTRICITY_PROVIDER,
+            CONF_FLOW_POWER_STATE,
+            FLOW_POWER_EXPORT_RATES,
+        )
+
+        provider = self._entry.options.get(
+            CONF_ELECTRICITY_PROVIDER,
+            self._entry.data.get(CONF_ELECTRICITY_PROVIDER, ""),
+        )
+        if provider != "flow_power":
+            return export_prices
+
+        state = self._entry.options.get(
+            CONF_FLOW_POWER_STATE,
+            self._entry.data.get(CONF_FLOW_POWER_STATE, ""),
+        )
+        if not state:
+            return export_prices
+
+        happy_rate = FLOW_POWER_EXPORT_RATES.get(state, 0.45)
+        happy_start = 17 * 60 + 30  # 17:30
+        happy_end = 19 * 60 + 30    # 19:30
+        interval = self._config.interval_minutes
+        now = dt_util.now()
+
+        result = []
+        for i in range(len(export_prices)):
+            slot = now + timedelta(minutes=i * interval)
+            mins = slot.hour * 60 + slot.minute
+            result.append(happy_rate if happy_start <= mins < happy_end else 0.0)
+
+        return result
+
     def _apply_demand_charge_penalty(
         self, import_prices: list[float]
     ) -> list[float]:
@@ -1129,9 +1173,56 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     expand = 30 // interval  # 6
                     n_steps = int(self._config.horizon_hours * 60) // interval  # 576
 
+                    # Detect Flow Power for price adjustment
+                    is_flow_power = False
+                    fp_base_rate = 34.0
+                    fp_pea_enabled = True
+                    fp_custom_pea = None
+                    if self._entry:
+                        from ..const import (
+                            CONF_ELECTRICITY_PROVIDER,
+                            CONF_PEA_ENABLED,
+                            CONF_FLOW_POWER_BASE_RATE,
+                            CONF_PEA_CUSTOM_VALUE,
+                            FLOW_POWER_PEA_OFFSET,
+                            FLOW_POWER_DEFAULT_BASE_RATE,
+                        )
+                        _provider = self._entry.options.get(
+                            CONF_ELECTRICITY_PROVIDER,
+                            self._entry.data.get(CONF_ELECTRICITY_PROVIDER, ""),
+                        )
+                        is_flow_power = _provider == "flow_power"
+                        if is_flow_power:
+                            fp_pea_enabled = self._entry.options.get(
+                                CONF_PEA_ENABLED, True
+                            )
+                            fp_base_rate = self._entry.options.get(
+                                CONF_FLOW_POWER_BASE_RATE,
+                                FLOW_POWER_DEFAULT_BASE_RATE,
+                            )
+                            fp_custom_pea = self._entry.options.get(
+                                CONF_PEA_CUSTOM_VALUE
+                            )
+
                     import_prices = []
                     for e in general:
-                        price_dollar = e.get("perKwh", 0) / 100  # cents → $/kWh
+                        if is_flow_power:
+                            if fp_custom_pea is not None:
+                                price_dollar = max(
+                                    0, (fp_base_rate + fp_custom_pea) / 100
+                                )
+                            elif fp_pea_enabled:
+                                wholesale_cents = e.get("wholesaleKWHPrice")
+                                if wholesale_cents is None:
+                                    wholesale_cents = e.get("perKwh", 0)
+                                pea = wholesale_cents - FLOW_POWER_PEA_OFFSET
+                                price_dollar = max(
+                                    0, (fp_base_rate + pea) / 100
+                                )
+                            else:
+                                price_dollar = max(0, fp_base_rate / 100)
+                        else:
+                            price_dollar = e.get("perKwh", 0) / 100
                         import_prices.extend([price_dollar] * expand)
 
                     export_prices = []
@@ -1187,7 +1278,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                         )
 
                     if import_prices:
-                        # Store actual Amber prices for UI display BEFORE LP adjustments
+                        # Apply Flow Power export schedule before display storage
+                        export_prices = self._apply_flow_power_export(export_prices)
+
+                        # Store prices for UI display BEFORE LP adjustments
                         self._last_display_import_prices = list(import_prices)
                         self._last_display_export_prices = list(export_prices)
 
@@ -1203,9 +1297,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             import_prices, export_prices
                         )
 
+                        _price_label = "Flow Power" if is_flow_power else "Dynamic"
                         _LOGGER.debug(
-                            "Amber prices: %d steps, display %.1fc-%.1fc, "
+                            "%s prices: %d steps, display %.1fc-%.1fc, "
                             "LP (decayed) %.1fc-%.1fc",
+                            _price_label,
                             len(import_prices),
                             min(self._last_display_import_prices) * 100,
                             max(self._last_display_import_prices) * 100,
