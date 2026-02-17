@@ -6802,9 +6802,46 @@ class EVVehicleCommandView(HomeAssistantView):
                 return state.state.lower()
         return ""
 
+    def _get_zaptec_standalone(self) -> tuple | None:
+        """Get Zaptec standalone client, charger_id, and cached state if configured.
+
+        Returns (client, charger_id, cached_state) or None if not configured.
+        """
+        entries = self._hass.config_entries.async_entries(DOMAIN)
+        for entry in entries:
+            opts = {**entry.data, **entry.options}
+            if opts.get(CONF_ZAPTEC_STANDALONE_ENABLED) and opts.get(CONF_ZAPTEC_USERNAME):
+                entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                client = entry_data.get("zaptec_client")
+                charger_id = opts.get(CONF_ZAPTEC_CHARGER_ID, "")
+                cached_state = entry_data.get("zaptec_cached_state", {})
+                if client and charger_id:
+                    return client, charger_id, cached_state
+        return None
+
     async def _start_charging(self, vehicle_vin: str | None = None) -> tuple[bool, str]:
         """Start charging. Returns (success, message)."""
-        # Check preconditions
+        # Zaptec standalone path — check before Tesla preconditions
+        zaptec = self._get_zaptec_standalone()
+        if zaptec:
+            client, charger_id, cached_state = zaptec
+            mode = cached_state.get("charger_operation_mode", "")
+            if mode == "charging":
+                return True, "Zaptec charger is already charging"
+            if mode not in ("connected_waiting", "charging") and cached_state.get("total_charge_power_w", 0) <= 50:
+                if not cached_state.get("cable_locked"):
+                    msg = "Vehicle is not plugged in (Zaptec cable not locked)"
+                    _LOGGER.warning(msg)
+                    return False, msg
+            try:
+                await client.resume_charging(charger_id)
+                _LOGGER.info("Started charging via Zaptec Cloud API")
+                return True, "Charging started via Zaptec"
+            except Exception as e:
+                _LOGGER.error(f"Zaptec start charging failed: {e}")
+                return False, f"Failed to start Zaptec charging: {e}"
+
+        # Check preconditions (Tesla path)
         if not await self._is_vehicle_at_home(vehicle_vin):
             msg = "Vehicle is not at home"
             _LOGGER.warning(msg)
@@ -6890,7 +6927,25 @@ class EVVehicleCommandView(HomeAssistantView):
 
     async def _stop_charging(self, vehicle_vin: str | None = None) -> tuple[bool, str]:
         """Stop charging. Returns (success, message)."""
-        # Check if actually charging
+        # Zaptec standalone path — check before Tesla preconditions
+        zaptec = self._get_zaptec_standalone()
+        if zaptec:
+            client, charger_id, cached_state = zaptec
+            mode = cached_state.get("charger_operation_mode", "")
+            power_w = cached_state.get("total_charge_power_w", 0)
+            if mode != "charging" and power_w <= 50:
+                msg = f"Zaptec charger is not charging (state: {mode})"
+                _LOGGER.info(msg)
+                return True, msg
+            try:
+                await client.stop_charging(charger_id)
+                _LOGGER.info("Stopped charging via Zaptec Cloud API")
+                return True, "Charging stopped via Zaptec"
+            except Exception as e:
+                _LOGGER.error(f"Zaptec stop charging failed: {e}")
+                return False, f"Failed to stop Zaptec charging: {e}"
+
+        # Check if actually charging (Tesla path)
         charging_state = await self._get_vehicle_charging_state(vehicle_vin)
         if charging_state and charging_state != "charging":
             msg = f"Vehicle is not charging (state: {charging_state})"
@@ -14996,11 +15051,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 parsed = zaptec_client.parse_charger_state(raw_state)
                 hass.data[DOMAIN][entry.entry_id]["zaptec_cached_state"] = parsed
                 _LOGGER.debug(
-                    "Zaptec state poll OK: mode=%s (raw=%s), power=%sW, is_charging=%s",
+                    "Zaptec state poll OK: mode=%s (raw=%s), power=%sW, is_charging=%s, cable_locked=%s",
                     parsed.get('charger_operation_mode'),
                     raw_state.get(120, raw_state.get('120', '?')),
                     parsed.get('total_charge_power_w'),
                     parsed.get('is_charging'),
+                    parsed.get('cable_locked'),
                 )
             except Exception as e:
                 _LOGGER.warning(f"Zaptec state poll error: {e}")
@@ -16344,6 +16400,7 @@ class OptimizationSettingsView(HomeAssistantView):
                 "enabled": False,
                 "cost_function": "cost",
                 "backup_reserve": int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
+                "ev_integration": False,
             })
 
         return web.json_response({
@@ -16351,6 +16408,7 @@ class OptimizationSettingsView(HomeAssistantView):
             "enabled": opt_coordinator.enabled,
             "optimiser_available": opt_coordinator.optimiser_available,
             "cost_function": opt_coordinator._cost_function.value,
+            "ev_integration": opt_coordinator._ev_integration_enabled,
             "config": {
                 "battery_capacity_wh": opt_coordinator._config.battery_capacity_wh,
                 "max_charge_w": opt_coordinator._config.max_charge_w,

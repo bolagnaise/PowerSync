@@ -4938,6 +4938,26 @@ class EVChargingModeCoordinator:
 
     async def _start_charging(self, modes: List[str], reason: str) -> bool:
         """Start EV charging."""
+        # Zaptec standalone path — use Cloud API directly
+        from ..const import CONF_ZAPTEC_STANDALONE_ENABLED, CONF_ZAPTEC_USERNAME, CONF_ZAPTEC_CHARGER_ID
+        opts = {**self.config_entry.data, **self.config_entry.options}
+        if opts.get(CONF_ZAPTEC_STANDALONE_ENABLED) and opts.get(CONF_ZAPTEC_USERNAME):
+            entry_data = self.hass.data.get(self._domain, {}).get(self.config_entry.entry_id, {})
+            client = entry_data.get("zaptec_client")
+            charger_id = opts.get(CONF_ZAPTEC_CHARGER_ID, "")
+            if client and charger_id:
+                try:
+                    await client.resume_charging(charger_id)
+                    self._is_charging = True
+                    self._active_modes = modes
+                    self._last_reason = reason
+                    _LOGGER.info(f"EV Coordinator: Started Zaptec charging - modes: {modes}, reason: {reason}")
+                    return True
+                except Exception as e:
+                    _LOGGER.error(f"EV Coordinator: Zaptec start charging failed: {e}")
+                    return False
+
+        # Tesla path
         from .actions import _action_start_ev_charging_dynamic
 
         params = {
@@ -4971,6 +4991,26 @@ class EVChargingModeCoordinator:
 
     async def _stop_charging(self, reason: str) -> bool:
         """Stop EV charging."""
+        # Zaptec standalone path — use Cloud API directly
+        from ..const import CONF_ZAPTEC_STANDALONE_ENABLED, CONF_ZAPTEC_USERNAME, CONF_ZAPTEC_CHARGER_ID
+        opts = {**self.config_entry.data, **self.config_entry.options}
+        if opts.get(CONF_ZAPTEC_STANDALONE_ENABLED) and opts.get(CONF_ZAPTEC_USERNAME):
+            entry_data = self.hass.data.get(self._domain, {}).get(self.config_entry.entry_id, {})
+            client = entry_data.get("zaptec_client")
+            charger_id = opts.get(CONF_ZAPTEC_CHARGER_ID, "")
+            if client and charger_id:
+                try:
+                    await client.stop_charging(charger_id)
+                    self._is_charging = False
+                    self._active_modes = []
+                    self._last_reason = reason
+                    _LOGGER.info(f"EV Coordinator: Stopped Zaptec charging - {reason}")
+                    return True
+                except Exception as e:
+                    _LOGGER.error(f"EV Coordinator: Zaptec stop charging failed: {e}")
+                    return False
+
+        # Tesla path
         from .actions import _action_stop_ev_charging_dynamic
 
         params = {"vehicle_id": None}
