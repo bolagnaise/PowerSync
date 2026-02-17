@@ -607,7 +607,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_flow_power_setup(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle Flow Power specific setup - region, price source, network tariff, PEA."""
+        """Handle Flow Power setup - essentials only (region, tariff, base rate)."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -620,86 +620,43 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # Remove combined key before storing
             user_input.pop(CONF_NETWORK_TARIFF_COMBINED, None)
 
+            # Apply sensible defaults for fields not shown during initial setup
+            user_input[CONF_FLOW_POWER_PRICE_SOURCE] = "aemo"
+            user_input[CONF_PEA_ENABLED] = True
+            user_input[CONF_PEA_CUSTOM_VALUE] = None
+            user_input[CONF_NETWORK_USE_MANUAL_RATES] = False
+            user_input[CONF_AUTO_SYNC_ENABLED] = True
+            user_input[CONF_BATTERY_CURTAILMENT_ENABLED] = False
+
             # Store Flow Power configuration
             self._flow_power_data = user_input
 
-            # Check if using AEMO as price source (no Amber needed)
-            price_source = user_input.get(CONF_FLOW_POWER_PRICE_SOURCE, "amber")
+            # AEMO Direct is the default - no Amber API needed
+            self._amber_data = {}
+            self._aemo_only_mode = False
 
-            if price_source == "aemo":
-                # AEMO wholesale - no Amber API needed
-                self._amber_data = {}
-                self._aemo_only_mode = False  # Not spike-only, just using AEMO for pricing
-                # Route based on battery system selection
-                if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
-                    return await self.async_step_sigenergy_credentials()
-                elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
-                    return await self.async_step_sungrow()
-                elif self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
-                    return await self.async_step_foxess_connection()
-                elif self._selected_battery_system == BATTERY_SYSTEM_GOODWE:
-                    return await self.async_step_goodwe_connection()
-                else:
-                    return await self.async_step_tesla_provider()
+            # Route based on battery system selection
+            if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
+                return await self.async_step_sigenergy_credentials()
+            elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
+                return await self.async_step_sungrow()
+            elif self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
+                return await self.async_step_foxess_connection()
+            elif self._selected_battery_system == BATTERY_SYSTEM_GOODWE:
+                return await self.async_step_goodwe_connection()
             else:
-                # Using Amber API for pricing - need Amber token
-                return await self.async_step_amber()
+                return await self.async_step_tesla_provider()
 
         return self.async_show_form(
             step_id="flow_power_setup",
             data_schema=vol.Schema({
                 vol.Required(CONF_FLOW_POWER_STATE, default="QLD1"): vol.In(FLOW_POWER_STATES),
-                vol.Required(CONF_FLOW_POWER_PRICE_SOURCE, default="aemo"): vol.In(FLOW_POWER_PRICE_SOURCES),
-                # Network Tariff - Combined dropdown with all distributors and tariffs
                 vol.Required(CONF_NETWORK_TARIFF_COMBINED, default="energex:6900"): vol.In(ALL_NETWORK_TARIFFS),
-                # Manual override - enable to enter rates manually instead of using library
-                vol.Optional(CONF_NETWORK_USE_MANUAL_RATES, default=False): bool,
-                # Manual rate entry (used when use_manual_rates=True)
-                vol.Optional(CONF_NETWORK_TARIFF_TYPE, default="flat"): vol.In(NETWORK_TARIFF_TYPES),
-                vol.Optional(CONF_NETWORK_FLAT_RATE, default=8.0): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.0, max=50.0)
-                ),
-                vol.Optional(CONF_NETWORK_PEAK_RATE, default=15.0): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.0, max=50.0)
-                ),
-                vol.Optional(CONF_NETWORK_SHOULDER_RATE, default=5.0): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.0, max=50.0)
-                ),
-                vol.Optional(CONF_NETWORK_OFFPEAK_RATE, default=2.0): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.0, max=50.0)
-                ),
-                vol.Optional(CONF_NETWORK_PEAK_START, default="16:00"): vol.In(
-                    {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}
-                ),
-                vol.Optional(CONF_NETWORK_PEAK_END, default="21:00"): vol.In(
-                    {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}
-                ),
-                vol.Optional(CONF_NETWORK_OFFPEAK_START, default="10:00"): vol.In(
-                    {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}
-                ),
-                vol.Optional(CONF_NETWORK_OFFPEAK_END, default="15:00"): vol.In(
-                    {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}
-                ),
-                vol.Optional(CONF_NETWORK_OTHER_FEES, default=1.5): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.0, max=20.0)
-                ),
-                vol.Optional(CONF_NETWORK_INCLUDE_GST, default=True): bool,
-                # Flow Power PEA (Price Efficiency Adjustment)
-                vol.Optional(CONF_PEA_ENABLED, default=True): bool,
-                vol.Optional(CONF_FLOW_POWER_BASE_RATE, default=FLOW_POWER_DEFAULT_BASE_RATE): vol.All(
+                vol.Required(CONF_FLOW_POWER_BASE_RATE, default=FLOW_POWER_DEFAULT_BASE_RATE): vol.All(
                     vol.Coerce(float), vol.Range(min=0.0, max=100.0)
                 ),
-                vol.Optional(CONF_PEA_CUSTOM_VALUE, default=None): vol.Any(
-                    None, vol.All(vol.Coerce(float), vol.Range(min=-50.0, max=50.0))
-                ),
-                # Sync and other settings
-                vol.Optional(CONF_AUTO_SYNC_ENABLED, default=True): bool,
-                vol.Optional(CONF_BATTERY_CURTAILMENT_ENABLED, default=False): bool,
             }),
             errors=errors,
-            description_placeholders={
-                "rate_hint": "Select your network tariff from the dropdown",
-            },
         )
 
     async def async_step_octopus(
@@ -4024,7 +3981,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
     async def async_step_flow_power_options(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step 2b: Flow Power specific options."""
+        """Step 2b: Flow Power main settings (region, tariff, base rate, PEA, sync)."""
         if user_input is not None:
             # Parse combined tariff selection (format: "distributor:code")
             combined = user_input.get(CONF_NETWORK_TARIFF_COMBINED)
@@ -4035,22 +3992,9 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             # Remove combined key before storing
             user_input.pop(CONF_NETWORK_TARIFF_COMBINED, None)
 
-            # Auto-generate AEMO sensor entity names if using AEMO sensor source
-            if user_input.get(CONF_FLOW_POWER_PRICE_SOURCE) == "aemo_sensor":
-                region = user_input.get(CONF_FLOW_POWER_STATE, "NSW1").lower()
-                user_input[CONF_AEMO_SENSOR_5MIN] = AEMO_SENSOR_5MIN_PATTERN.format(region=region)
-                user_input[CONF_AEMO_SENSOR_30MIN] = AEMO_SENSOR_30MIN_PATTERN.format(region=region)
-                _LOGGER.info(
-                    "Auto-generated AEMO sensor entities for %s: 5min=%s, 30min=%s",
-                    region.upper(),
-                    user_input[CONF_AEMO_SENSOR_5MIN],
-                    user_input[CONF_AEMO_SENSOR_30MIN]
-                )
-
-            # Store flow power options and route to demand charge page
-            user_input[CONF_ELECTRICITY_PROVIDER] = "flow_power"
-            self._amber_options = user_input
-            return await self.async_step_demand_charge_options()
+            # Store main options temporarily, continue to network/advanced step
+            self._flow_power_main_options = user_input
+            return await self.async_step_flow_power_network_options()
 
         # Build current combined tariff value from stored options
         current_distributor = self._get_option(CONF_NETWORK_DISTRIBUTOR, "energex")
@@ -4069,19 +4013,55 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         default=self._get_option(CONF_FLOW_POWER_STATE, "NSW1"),
                     ): vol.In(FLOW_POWER_STATES),
                     vol.Required(
-                        CONF_FLOW_POWER_PRICE_SOURCE,
-                        default=self._get_option(CONF_FLOW_POWER_PRICE_SOURCE, "amber"),
-                    ): vol.In(FLOW_POWER_PRICE_SOURCES),
-                    # Network Tariff - Combined dropdown with all distributors and tariffs
-                    vol.Optional(
                         CONF_NETWORK_TARIFF_COMBINED,
                         default=current_combined,
                     ): vol.In(ALL_NETWORK_TARIFFS),
+                    vol.Required(
+                        CONF_FLOW_POWER_BASE_RATE,
+                        default=self._get_option(CONF_FLOW_POWER_BASE_RATE, FLOW_POWER_DEFAULT_BASE_RATE),
+                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
+                    vol.Optional(
+                        CONF_PEA_ENABLED,
+                        default=self._get_option(CONF_PEA_ENABLED, True),
+                    ): bool,
+                    vol.Optional(
+                        CONF_AUTO_SYNC_ENABLED,
+                        default=self._get_option(CONF_AUTO_SYNC_ENABLED, True),
+                    ): bool,
+                }
+            ),
+        )
+
+    async def async_step_flow_power_network_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step 2b-2: Flow Power network & advanced settings."""
+        if user_input is not None:
+            # Merge main options from previous step with network/advanced options
+            merged = {**self._flow_power_main_options, **user_input}
+            self._flow_power_main_options = {}
+
+            # Store flow power options and route to demand charge page
+            merged[CONF_ELECTRICITY_PROVIDER] = "flow_power"
+            self._amber_options = merged
+            return await self.async_step_demand_charge_options()
+
+        return self.async_show_form(
+            step_id="flow_power_network_options",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_FLOW_POWER_PRICE_SOURCE,
+                        default=self._get_option(CONF_FLOW_POWER_PRICE_SOURCE, "aemo"),
+                    ): vol.In(FLOW_POWER_PRICE_SOURCES),
+                    vol.Optional(
+                        CONF_PEA_CUSTOM_VALUE,
+                        default=self._get_option(CONF_PEA_CUSTOM_VALUE, None),
+                    ): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=-50.0, max=50.0))),
                     vol.Optional(
                         CONF_NETWORK_USE_MANUAL_RATES,
                         default=self._get_option(CONF_NETWORK_USE_MANUAL_RATES, False),
                     ): bool,
-                    # Network Tariff - Fallback: Manual rate entry (used when use_manual_rates=True)
                     vol.Optional(
                         CONF_NETWORK_TARIFF_TYPE,
                         default=self._get_option(CONF_NETWORK_TARIFF_TYPE, "flat"),
@@ -4125,26 +4105,6 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_NETWORK_INCLUDE_GST,
                         default=self._get_option(CONF_NETWORK_INCLUDE_GST, True),
-                    ): bool,
-                    # End Network Tariff
-                    # Flow Power PEA (Price Efficiency Adjustment)
-                    # When enabled, uses Flow Power's actual billing model: Base Rate + PEA
-                    vol.Optional(
-                        CONF_PEA_ENABLED,
-                        default=self._get_option(CONF_PEA_ENABLED, True),
-                    ): bool,
-                    vol.Optional(
-                        CONF_FLOW_POWER_BASE_RATE,
-                        default=self._get_option(CONF_FLOW_POWER_BASE_RATE, FLOW_POWER_DEFAULT_BASE_RATE),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
-                    vol.Optional(
-                        CONF_PEA_CUSTOM_VALUE,
-                        default=self._get_option(CONF_PEA_CUSTOM_VALUE, None),
-                    ): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=-50.0, max=50.0))),
-                    # End PEA Configuration
-                    vol.Optional(
-                        CONF_AUTO_SYNC_ENABLED,
-                        default=self._get_option(CONF_AUTO_SYNC_ENABLED, True),
                     ): bool,
                 }
             ),

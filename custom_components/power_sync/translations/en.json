@@ -15,33 +15,12 @@
         "submit_button": "Next"
       },
       "flow_power_setup": {
-        "title": "Flow Power Configuration",
-        "description": "Configure your Flow Power settings.\n\nPEA (Price Efficiency Adjustment) uses Flow Power's actual billing model: Final Rate = Base Rate + (Wholesale - 9.7c).\n\nSelect your network tariff from the dropdown for fallback rates when PEA is disabled.",
+        "title": "Flow Power",
+        "description": "Enter your Flow Power details. You can find your base rate and network tariff on your Flow Power bill.",
         "data": {
-          "flow_power_state": "State / NEM Region",
-          "flow_power_price_source": "Price Source",
+          "flow_power_state": "NEM Region",
           "network_tariff_combined": "Network Tariff",
-          "network_use_manual_rates": "Use manual rates instead of automatic lookup",
-          "network_tariff_type": "Network Tariff Type",
-          "network_flat_rate": "Flat Network Rate (c/kWh)",
-          "network_peak_rate": "Peak Rate (c/kWh)",
-          "network_shoulder_rate": "Shoulder Rate (c/kWh)",
-          "network_offpeak_rate": "Off-Peak Rate (c/kWh)",
-          "network_peak_start": "Peak Start Time",
-          "network_peak_end": "Peak End Time",
-          "network_offpeak_start": "Off-Peak Start Time",
-          "network_offpeak_end": "Off-Peak End Time",
-          "network_other_fees": "Other Fees (c/kWh)",
-          "network_include_gst": "Include GST (10%)",
-          "pea_enabled": "Enable PEA Pricing (Recommended)",
-          "flow_power_base_rate": "Base Rate (c/kWh)",
-          "pea_custom_value": "Custom PEA Override (c/kWh, leave empty for auto)",
-          "auto_sync_enabled": "Enable automatic TOU schedule syncing",
-          "battery_curtailment_enabled": "Enable DC Solar Curtailment (stop export at negative prices)"
-        },
-        "data_description": {
-          "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices",
-          "battery_curtailment_enabled": "Automatically stop battery exports and DC solar production when feed-in prices go negative to avoid paying to export"
+          "flow_power_base_rate": "Base Rate (c/kWh)"
         },
         "submit_button": "Next"
       },
@@ -637,22 +616,39 @@
         "submit_button": "Next"
       },
       "flow_power_options": {
-        "title": "Flow Power Options",
-        "description": "Configure Flow Power wholesale electricity with Happy Hour export rates (5:30pm-7:30pm: 45c NSW/QLD/SA, 35c VIC).\n\nPEA (Price Efficiency Adjustment) uses Flow Power's actual billing: Final Rate = Base Rate + (Wholesale - 9.7c).\n\nNetwork tariff is used when PEA is disabled.",
+        "title": "Flow Power Settings",
+        "description": "Core Flow Power configuration.",
         "data": {
-          "flow_power_state": "State / NEM Region",
-          "flow_power_price_source": "Import Price Source",
+          "flow_power_state": "NEM Region",
           "network_tariff_combined": "Network Tariff",
-          "network_use_manual_rates": "Use manual rates instead of automatic lookup",
-          "pea_enabled": "Enable PEA Pricing (Recommended)",
           "flow_power_base_rate": "Base Rate (c/kWh)",
-          "pea_custom_value": "Custom PEA Override (c/kWh, leave empty for auto)",
-          "auto_sync_enabled": "Enable automatic TOU schedule syncing",
-          "battery_curtailment_enabled": "Enable DC Solar Curtailment (stop export at negative prices)"
+          "pea_enabled": "Enable PEA Pricing (Recommended)",
+          "auto_sync_enabled": "Enable automatic TOU schedule syncing"
         },
         "data_description": {
-          "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices",
-          "battery_curtailment_enabled": "Automatically stop battery exports and DC solar production when feed-in prices go negative to avoid paying to export"
+          "pea_enabled": "Uses Flow Power's actual billing model: Final Rate = Base Rate + (Wholesale - 9.7c)",
+          "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices"
+        },
+        "submit_button": "Next"
+      },
+      "flow_power_network_options": {
+        "title": "Network & Advanced",
+        "description": "Advanced settings for power users. Most users can skip this page.",
+        "data": {
+          "flow_power_price_source": "Price Source",
+          "pea_custom_value": "Custom PEA Override (c/kWh, leave empty for auto)",
+          "network_use_manual_rates": "Use manual network rates",
+          "network_tariff_type": "Network Tariff Type",
+          "network_flat_rate": "Flat Rate (c/kWh)",
+          "network_peak_rate": "Peak Rate (c/kWh)",
+          "network_shoulder_rate": "Shoulder Rate (c/kWh)",
+          "network_offpeak_rate": "Off-Peak Rate (c/kWh)",
+          "network_peak_start": "Peak Start Time",
+          "network_peak_end": "Peak End Time",
+          "network_offpeak_start": "Off-Peak Start Time",
+          "network_offpeak_end": "Off-Peak End Time",
+          "network_other_fees": "Other Fees (c/kWh)",
+          "network_include_gst": "Include GST (10%)"
         },
         "submit_button": "Next"
       },

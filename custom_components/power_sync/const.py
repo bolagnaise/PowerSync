@@ -390,7 +390,6 @@ FLOW_POWER_STATES = {
 FLOW_POWER_PRICE_SOURCES = {
     "amber": "Amber API",
     "aemo": "AEMO Direct (NEMWeb)",
-    "aemo_sensor": "AEMO NEM Data Sensor (Legacy)",  # Kept for backwards compatibility
 }
 
 # Network Tariff configuration (for Flow Power + AEMO)
