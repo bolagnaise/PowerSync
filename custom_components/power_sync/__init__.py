@@ -11250,64 +11250,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 discrepancy_result = compare_forecast_types(forecast_data, threshold=discrepancy_threshold)
                 has_forecast_discrepancy = discrepancy_result.get("has_discrepancy", False)
 
-            # Check 2: Compare current forecast vs actual settled price (always runs)
-            actual_vs_forecast_diff = None
-            actual_price = None
-            current_forecast = None
-            try:
-                from .tariff_converter import get_actual_prices
-                actual_prices = get_actual_prices(forecast_data)
-                if actual_prices and actual_prices.get("general"):
-                    actual_general = actual_prices["general"]
-                    actual_price = actual_general.get("perKwh", 0)
-
-                    # Find current forecast price for comparison
-                    for point in forecast_data:
-                        if point.get("type") == "CurrentInterval" and point.get("channelType") == "general":
-                            current_forecast = point.get("perKwh", 0)
-                            break
-
-                    if current_forecast is not None and actual_price is not None:
-                        actual_vs_forecast_diff = abs(current_forecast - actual_price)
-                        if actual_vs_forecast_diff > discrepancy_threshold:
-                            _LOGGER.warning(
-                                "Forecast vs Actual discrepancy: forecast=%.1fc, actual=%.1fc, diff=%.1fc",
-                                current_forecast, actual_price, actual_vs_forecast_diff
-                            )
-            except Exception as actual_err:
-                _LOGGER.debug(f"Could not compare forecast vs actual: {actual_err}")
-
-            # Determine if we should alert
-            has_actual_discrepancy = actual_vs_forecast_diff is not None and actual_vs_forecast_diff > discrepancy_threshold
-
-            if (has_forecast_discrepancy or has_actual_discrepancy) and cooldown_passed and daily_limit_ok:
+            if has_forecast_discrepancy and cooldown_passed and daily_limit_ok:
                 avg_diff = discrepancy_result.get("avg_difference", 0)
                 max_diff = discrepancy_result.get("max_difference", 0)
 
                 # Build user-friendly notification body
-                if has_actual_discrepancy and has_forecast_discrepancy:
-                    notif_body = (
-                        f"Forecast off by {actual_vs_forecast_diff:.0f}c/kWh "
-                        f"(predicted {current_forecast:.0f}c, actual {actual_price:.0f}c). "
-                        f"{'Prices are volatile.' if is_on_conservative else 'Try conservative forecast mode.'}"
-                    )
-                elif has_actual_discrepancy:
-                    notif_body = (
-                        f"Price forecast off by {actual_vs_forecast_diff:.0f}c/kWh "
-                        f"(predicted {current_forecast:.0f}c, actual {actual_price:.0f}c)"
-                    )
-                else:
-                    notif_body = (
-                        f"Predicted vs conservative forecasts differ by avg {avg_diff:.0f}c/kWh. "
-                        f"{'Prices are volatile.' if is_on_conservative else 'Try conservative forecast mode.'}"
-                    )
+                notif_body = (
+                    f"Predicted vs conservative forecasts differ by avg {avg_diff:.0f}c/kWh. "
+                    f"{'Prices are volatile.' if is_on_conservative else 'Try conservative forecast mode.'}"
+                )
 
                 # Log detail
-                alert_parts = []
-                if has_forecast_discrepancy:
-                    alert_parts.append(f"predicted vs conservative avg {avg_diff:.0f}c (max {max_diff:.0f}c)")
-                if has_actual_discrepancy:
-                    alert_parts.append(f"forecast {current_forecast:.0f}c vs actual {actual_price:.0f}c (diff {actual_vs_forecast_diff:.0f}c)")
+                alert_parts = [f"predicted vs conservative avg {avg_diff:.0f}c (max {max_diff:.0f}c)"]
                 _LOGGER.warning(
                     "Amber forecast discrepancy: %s",
                     ", ".join(alert_parts),

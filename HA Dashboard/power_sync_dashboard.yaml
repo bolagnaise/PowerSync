@@ -342,7 +342,7 @@ views:
                     return val.toFixed(0) + '¢';
                   }
         series:
-          - entity: sensor.tariff_schedule
+          - entity: sensor.tou_schedule
             name: Buy Price
             type: line
             color: '#FF9800'
@@ -422,7 +422,7 @@ views:
               }
 
               return [];
-          - entity: sensor.tariff_schedule
+          - entity: sensor.tou_schedule
             name: Sell Price
             type: line
             color: '#4CAF50'
