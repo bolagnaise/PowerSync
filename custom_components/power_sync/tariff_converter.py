@@ -1619,21 +1619,19 @@ def apply_flow_power_pea(
     base_rate: float = FLOW_POWER_DEFAULT_BASE_RATE,
     custom_pea: float | None = None,
     twap: float | None = None,
+    tariff_rate_lookup: dict[str, float] | None = None,
+    avg_daily_tariff: float | None = None,
 ) -> dict[str, Any]:
     """
     Apply Flow Power base rate + PEA (Price Efficiency Adjustment) pricing model.
 
-    REPLACES network tariff calculation with Flow Power's actual billing model:
-    Final Rate = Base Rate + PEA
-               = Base Rate + (wholesale - TWAP - 1.7)
+    V2 formula (when tariff_rate_lookup and avg_daily_tariff provided):
+        PEA = GST*Spot + Tariff - GST*TWAP - AvgDailyTariff - BPEA
+        Final = Base + PEA
 
-    When a dynamic 30-day TWAP is available, it replaces the hardcoded 8.0 c/kWh
-    market average for more accurate PEA calculation.
-
-    PEA adjusts your rate based on wholesale prices when you consume:
-    - Cheap/negative wholesale → negative PEA → pay less than base rate
-    - Average wholesale (TWAP) → PEA ≈ -1.7c → pay slightly less than base rate
-    - Expensive wholesale → positive PEA → pay more than base rate
+    Legacy formula (no tariff data):
+        PEA = Spot - TWAP - BPEA
+        Final = Base + PEA
 
     Args:
         tariff: Tesla tariff structure with wholesale prices in energy_charges
@@ -1641,6 +1639,8 @@ def apply_flow_power_pea(
         base_rate: Flow Power base rate in c/kWh (from your plan, default 34c)
         custom_pea: Optional fixed PEA override in c/kWh (from bills)
         twap: Dynamic 30-day rolling TWAP in c/kWh, or None for 8.0c fallback
+        tariff_rate_lookup: Dict mapping PERIOD_HH_MM to network tariff rate in c/kWh (v2)
+        avg_daily_tariff: 24h average of network tariff rates in c/kWh (v2)
 
     Returns:
         Modified tariff with Flow Power pricing applied to buy prices
@@ -1650,17 +1650,24 @@ def apply_flow_power_pea(
         return tariff
 
     market_avg = twap if twap is not None else FLOW_POWER_MARKET_AVG
+    has_tariff = tariff_rate_lookup is not None and avg_daily_tariff is not None
+    formula = "v2" if has_tariff else "v1"
+
     _LOGGER.info(
-        "Applying Flow Power PEA: base_rate=%.1fc/kWh, custom_pea=%s, twap=%.2fc (%s)",
+        "Applying Flow Power PEA (%s): base_rate=%.1fc/kWh, custom_pea=%s, twap=%.2fc (%s)%s",
+        formula,
         base_rate,
         f"{custom_pea:.1f}c" if custom_pea is not None else "auto",
         market_avg,
         "dynamic" if twap is not None else "fallback",
+        f", avg_daily_tariff=%.2fc" % avg_daily_tariff if avg_daily_tariff is not None else "",
     )
 
     # Track statistics for logging
     pea_values = []
     final_prices = []
+
+    gst = 1.1  # GST multiplier
 
     # Apply to Summer season buy rates (energy_charges)
     for season in ["Summer"]:
@@ -1675,11 +1682,23 @@ def apply_flow_power_pea(
                 # User override - apply fixed PEA from bills
                 pea = custom_pea
             else:
-                # Calculate PEA from wholesale price
                 # Get wholesale price for this period ($/kWh -> c/kWh)
                 wholesale_dollars = wholesale_prices.get(period, 0.08)  # Default 8c if missing
                 wholesale_cents = wholesale_dollars * 100
-                pea = wholesale_cents - market_avg - FLOW_POWER_BENCHMARK
+
+                if has_tariff:
+                    # V2 formula: GST*Spot + Tariff - GST*TWAP - AvgDailyTariff - BPEA
+                    period_tariff = tariff_rate_lookup.get(period, avg_daily_tariff)
+                    pea = (
+                        gst * wholesale_cents
+                        + period_tariff
+                        - gst * market_avg
+                        - avg_daily_tariff
+                        - FLOW_POWER_BENCHMARK
+                    )
+                else:
+                    # Legacy formula: Spot - TWAP - BPEA
+                    pea = wholesale_cents - market_avg - FLOW_POWER_BENCHMARK
 
             pea_values.append(pea)
 
@@ -1711,8 +1730,8 @@ def apply_flow_power_pea(
         avg_final = sum(final_prices) / len(final_prices)
 
         _LOGGER.info(
-            "Flow Power PEA summary: avg_pea=%.1fc, range=[%.1fc to %.1fc], avg_final=%.1fc/kWh",
-            avg_pea, min_pea, max_pea, avg_final
+            "Flow Power PEA summary (%s): avg_pea=%.1fc, range=[%.1fc to %.1fc], avg_final=%.1fc/kWh",
+            formula, avg_pea, min_pea, max_pea, avg_final
         )
 
     return tariff

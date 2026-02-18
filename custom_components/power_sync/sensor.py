@@ -61,6 +61,15 @@ from .const import (
     SENSOR_TYPE_FLOW_POWER_PRICE,
     SENSOR_TYPE_FLOW_POWER_EXPORT_PRICE,
     SENSOR_TYPE_FLOW_POWER_TWAP,
+    SENSOR_TYPE_NETWORK_TARIFF,
+    SENSOR_TYPE_AMBER_COMPARISON,
+    CONF_FP_NETWORK,
+    CONF_FP_TARIFF_CODE,
+    CONF_FP_TWAP_OVERRIDE,
+    CONF_FP_AMBER_MARKUP,
+    FLOW_POWER_GST,
+    NETWORK_API_NAME,
+    DEFAULT_FP_AMBER_MARKUP,
     SENSOR_TYPE_BATTERY_HEALTH,
     SENSOR_TYPE_INVERTER_STATUS,
     SENSOR_TYPE_BATTERY_MODE,
@@ -623,6 +632,30 @@ async def async_setup_entry(
                     entry=entry,
                 )
             )
+
+            # Add tariff-dependent sensors if network tariff is configured
+            fp_network = entry.options.get(
+                CONF_FP_NETWORK, entry.data.get(CONF_FP_NETWORK)
+            )
+            fp_tariff_code = entry.options.get(
+                CONF_FP_TARIFF_CODE, entry.data.get(CONF_FP_TARIFF_CODE)
+            )
+            if fp_network and fp_tariff_code:
+                entities.append(
+                    FlowPowerNetworkTariffSensor(
+                        hass=hass,
+                        entry=entry,
+                    )
+                )
+                entities.append(
+                    FlowPowerAmberComparisonSensor(
+                        hass=hass,
+                        entry=entry,
+                        coordinator=price_coordinator,
+                    )
+                )
+                _LOGGER.info("Flow Power tariff sensors added (network tariff + Amber comparison)")
+
             _LOGGER.info("Flow Power price sensors added (import, export, and TWAP)")
 
     # Always add battery health sensor (receives data from mobile app)
@@ -1725,8 +1758,34 @@ class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):
             return tracker.twap
         return FLOW_POWER_MARKET_AVG
 
+    def _get_tariff_data(self) -> tuple[float | None, float | None]:
+        """Get tariff_rate and avg_daily_tariff from hass.data if available."""
+        domain_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        tariff_rate = domain_data.get("fp_tariff_rate")
+        avg_daily_tariff = domain_data.get("fp_avg_daily_tariff")
+        return tariff_rate, avg_daily_tariff
+
+    def _get_effective_twap(self) -> float:
+        """Get effective TWAP: override if set, else dynamic, else fallback."""
+        override = self._get_config_value(CONF_FP_TWAP_OVERRIDE)
+        if override is not None and override != "":
+            try:
+                return float(override)
+            except (ValueError, TypeError):
+                pass
+        return self._get_market_avg()
+
     def _calculate_import_price(self) -> float | None:
-        """Calculate Flow Power import price with PEA in $/kWh."""
+        """Calculate Flow Power import price with PEA in $/kWh.
+
+        V2 formula (when tariff configured):
+            PEA = GST*Spot + Tariff - GST*TWAP - AvgDailyTariff - BPEA
+            Final = Base + PEA
+
+        Legacy formula (no tariff configured):
+            PEA = Spot - TWAP - BPEA
+            Final = Base + PEA
+        """
         wholesale_cents = self._get_wholesale_price_cents()
         if wholesale_cents is None:
             return None
@@ -1741,11 +1800,9 @@ class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):
                 try:
                     pea = float(custom_pea)
                 except (ValueError, TypeError):
-                    market_avg = self._get_market_avg()
-                    pea = wholesale_cents - market_avg - FLOW_POWER_BENCHMARK
+                    pea = self._calculate_pea_auto(wholesale_cents)
             else:
-                market_avg = self._get_market_avg()
-                pea = wholesale_cents - market_avg - FLOW_POWER_BENCHMARK
+                pea = self._calculate_pea_auto(wholesale_cents)
 
             # Final rate = base_rate + PEA (in c/kWh)
             final_cents = base_rate + pea
@@ -1755,6 +1812,24 @@ class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):
 
         # Convert to $/kWh and clamp to 0 (no negative prices)
         return max(0, final_cents / 100)
+
+    def _calculate_pea_auto(self, wholesale_cents: float) -> float:
+        """Calculate PEA automatically using v2 or legacy formula."""
+        twap = self._get_effective_twap()
+        tariff_rate, avg_daily_tariff = self._get_tariff_data()
+
+        if tariff_rate is not None and avg_daily_tariff is not None:
+            # V2 formula: GST*Spot + Tariff - GST*TWAP - AvgDailyTariff - BPEA
+            return (
+                FLOW_POWER_GST * wholesale_cents
+                + tariff_rate
+                - FLOW_POWER_GST * twap
+                - avg_daily_tariff
+                - FLOW_POWER_BENCHMARK
+            )
+        else:
+            # Legacy formula: Spot - TWAP - BPEA
+            return wholesale_cents - twap - FLOW_POWER_BENCHMARK
 
     def _calculate_export_price(self) -> float:
         """Calculate Flow Power export price in $/kWh."""
@@ -1793,9 +1868,24 @@ class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):
         if self._sensor_type == SENSOR_TYPE_FLOW_POWER_PRICE:
             # Import price attributes
             tracker = self._get_twap_tracker()
-            market_avg = self._get_market_avg()
-            attributes["twap_used"] = round(market_avg, 2)
+            twap = self._get_effective_twap()
+            attributes["twap_used"] = round(twap, 2)
             attributes["twap_source"] = "dynamic" if (tracker and not tracker.using_fallback) else "fallback"
+
+            # TWAP override info
+            override = self._get_config_value(CONF_FP_TWAP_OVERRIDE)
+            if override is not None and override != "":
+                attributes["twap_override"] = override
+
+            # Tariff info
+            tariff_rate, avg_daily_tariff = self._get_tariff_data()
+            has_tariff = tariff_rate is not None and avg_daily_tariff is not None
+            attributes["formula_version"] = "v2" if has_tariff else "v1"
+
+            if has_tariff:
+                attributes["network_cents"] = round(tariff_rate, 2)
+                attributes["avg_daily_tariff"] = round(avg_daily_tariff, 2)
+                attributes["gst_multiplier"] = FLOW_POWER_GST
 
             if wholesale_cents is not None:
                 attributes["wholesale_cents"] = round(wholesale_cents, 2)
@@ -1805,9 +1895,9 @@ class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):
                         try:
                             pea = float(custom_pea)
                         except (ValueError, TypeError):
-                            pea = wholesale_cents - market_avg - FLOW_POWER_BENCHMARK
+                            pea = self._calculate_pea_auto(wholesale_cents)
                     else:
-                        pea = wholesale_cents - market_avg - FLOW_POWER_BENCHMARK
+                        pea = self._calculate_pea_auto(wholesale_cents)
 
                     attributes["pea_cents"] = round(pea, 2)
                     attributes["final_rate_cents"] = round(base_rate + pea, 2)
@@ -1842,6 +1932,10 @@ class FlowPowerTWAPSensor(SensorEntity):
         self._attr_native_unit_of_measurement = "c/kWh"
         self._attr_suggested_display_precision = 2
 
+    def _get_config_value(self, key: str, default=None):
+        """Get config value from options first, then data."""
+        return self._entry.options.get(key, self._entry.data.get(key, default))
+
     def _get_tracker(self):
         """Get the FlowPowerTWAPTracker from hass.data."""
         domain_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
@@ -1859,20 +1953,173 @@ class FlowPowerTWAPSensor(SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return TWAP tracking attributes."""
         tracker = self._get_tracker()
+        override = self._get_config_value(CONF_FP_TWAP_OVERRIDE)
+
+        attrs = {}
+        if override is not None and override != "":
+            attrs["twap_override"] = override
+
         if tracker:
             twap_value = tracker.twap if tracker.twap is not None else FLOW_POWER_MARKET_AVG
-            return {
+            attrs.update({
                 "days_of_data": tracker.twap_days,
                 "sample_count": tracker.sample_count,
                 "using_fallback": tracker.using_fallback,
                 "twap_dollars": round(twap_value / 100, 4),
-            }
-        return {
-            "days_of_data": 0,
-            "sample_count": 0,
-            "using_fallback": True,
-            "twap_dollars": round(FLOW_POWER_MARKET_AVG / 100, 4),
+            })
+        else:
+            attrs.update({
+                "days_of_data": 0,
+                "sample_count": 0,
+                "using_fallback": True,
+                "twap_dollars": round(FLOW_POWER_MARKET_AVG / 100, 4),
+            })
+        return attrs
+
+
+class FlowPowerNetworkTariffSensor(SensorEntity):
+    """Sensor showing the current TOU network tariff rate.
+
+    Displays the network charge component from the aemo_to_tariff library
+    for the configured DNSP and tariff code. Updates via hass.data populated
+    by the coordinator/init.
+    """
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        """Initialize the network tariff sensor."""
+        self.hass = hass
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_{SENSOR_TYPE_NETWORK_TARIFF}"
+        self._attr_has_entity_name = True
+        self._attr_suggested_object_id = f"power_sync_{SENSOR_TYPE_NETWORK_TARIFF}"
+        self._attr_name = "Flow Power Network Tariff"
+        self._attr_icon = "mdi:transmission-tower"
+        self._attr_native_unit_of_measurement = "c/kWh"
+        self._attr_suggested_display_precision = 2
+
+    def _get_config_value(self, key: str, default=None):
+        """Get config value from options first, then data."""
+        return self._entry.options.get(key, self._entry.data.get(key, default))
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the current network tariff rate in c/kWh."""
+        domain_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        rate = domain_data.get("fp_tariff_rate")
+        if rate is not None:
+            return round(rate, 2)
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return tariff details."""
+        domain_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        network = self._get_config_value(CONF_FP_NETWORK, "")
+        tariff_code = self._get_config_value(CONF_FP_TARIFF_CODE, "")
+        avg_daily = domain_data.get("fp_avg_daily_tariff")
+
+        attrs = {
+            "network": network,
+            "tariff_code": tariff_code,
         }
+        if avg_daily is not None:
+            attrs["avg_daily_tariff"] = round(avg_daily, 2)
+        return attrs
+
+
+class FlowPowerAmberComparisonSensor(SensorEntity):
+    """Sensor showing what the current price would be on Amber Electric.
+
+    Calculates: 1.1 * Spot + Tariff + Markup
+    Useful for comparing Flow Power vs Amber pricing.
+    Only available when tariff is configured (needs network charge component).
+    """
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, coordinator) -> None:
+        """Initialize the Amber comparison sensor."""
+        self.hass = hass
+        self._entry = entry
+        self._coordinator = coordinator
+        self._attr_unique_id = f"{entry.entry_id}_{SENSOR_TYPE_AMBER_COMPARISON}"
+        self._attr_has_entity_name = True
+        self._attr_suggested_object_id = f"power_sync_{SENSOR_TYPE_AMBER_COMPARISON}"
+        self._attr_name = "Flow Power Amber Comparison"
+        self._attr_icon = "mdi:compare-horizontal"
+        self._attr_native_unit_of_measurement = f"{CURRENCY_DOLLAR}/{UnitOfEnergy.KILO_WATT_HOUR}"
+        self._attr_device_class = SensorDeviceClass.MONETARY
+        self._attr_suggested_display_precision = 4
+
+    def _get_config_value(self, key: str, default=None):
+        """Get config value from options first, then data."""
+        return self._entry.options.get(key, self._entry.data.get(key, default))
+
+    def _get_wholesale_price_cents(self) -> float | None:
+        """Extract current wholesale price in cents from coordinator data."""
+        if not self._coordinator or not self._coordinator.data:
+            return None
+        current_prices = self._coordinator.data.get("current", [])
+        for price in current_prices:
+            if price.get("channelType") == "general":
+                wholesale = price.get("wholesaleKWHPrice")
+                if wholesale is not None:
+                    return wholesale
+                return price.get("perKwh", 0)
+        return None
+
+    @property
+    def native_value(self) -> float | None:
+        """Return Amber-equivalent price in $/kWh."""
+        wholesale_cents = self._get_wholesale_price_cents()
+        if wholesale_cents is None:
+            return None
+
+        domain_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        tariff_rate = domain_data.get("fp_tariff_rate")
+        if tariff_rate is None:
+            return None
+
+        state = self._get_config_value(CONF_FLOW_POWER_STATE, "QLD1")
+        markup = self._get_config_value(CONF_FP_AMBER_MARKUP)
+        if markup is None or markup == "":
+            markup = DEFAULT_FP_AMBER_MARKUP.get(state, 4.0)
+        else:
+            try:
+                markup = float(markup)
+            except (ValueError, TypeError):
+                markup = DEFAULT_FP_AMBER_MARKUP.get(state, 4.0)
+
+        # Amber comparison: GST*Spot + Tariff + Markup (all in c/kWh)
+        amber_cents = FLOW_POWER_GST * wholesale_cents + tariff_rate + markup
+        return max(0, amber_cents / 100)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return breakdown of the Amber comparison price."""
+        wholesale_cents = self._get_wholesale_price_cents()
+        domain_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        tariff_rate = domain_data.get("fp_tariff_rate")
+        state = self._get_config_value(CONF_FLOW_POWER_STATE, "QLD1")
+
+        markup = self._get_config_value(CONF_FP_AMBER_MARKUP)
+        if markup is None or markup == "":
+            markup = DEFAULT_FP_AMBER_MARKUP.get(state, 4.0)
+        else:
+            try:
+                markup = float(markup)
+            except (ValueError, TypeError):
+                markup = DEFAULT_FP_AMBER_MARKUP.get(state, 4.0)
+
+        attrs = {"markup_cents": markup}
+
+        if wholesale_cents is not None:
+            attrs["wholesale_cents"] = round(wholesale_cents, 2)
+        if tariff_rate is not None:
+            attrs["tariff_rate_cents"] = round(tariff_rate, 2)
+        if wholesale_cents is not None and tariff_rate is not None:
+            amber_cents = FLOW_POWER_GST * wholesale_cents + tariff_rate + markup
+            attrs["price_cents"] = round(amber_cents, 2)
+
+        return attrs
 
 
 class BatteryHealthSensor(SensorEntity):

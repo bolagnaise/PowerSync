@@ -24,6 +24,20 @@
         },
         "submit_button": "Next"
       },
+      "flow_power_tariff": {
+        "title": "Flow Power Tariff (v2)",
+        "description": "Optional: Configure your DNSP network tariff for the corrected PEA formula.\n\nThe v2 formula includes GST, network charges, and daily tariff averaging for accurate pricing.\n\nSelect your network distributor and tariff code from your electricity bill, or tick **Skip** to use the legacy formula.",
+        "data": {
+          "skip_tariff": "Skip (use legacy formula)",
+          "fp_network": "Network Distributor (DNSP)",
+          "fp_tariff_code": "Tariff Code"
+        },
+        "data_description": {
+          "fp_network": "Your local network distributor (DNSP). Filtered by your NEM region.",
+          "fp_tariff_code": "The tariff code from your electricity bill (e.g. RESELE, 6900)."
+        },
+        "submit_button": "Next"
+      },
       "amber": {
         "title": "Amber Electric Configuration",
         "description": "Enter your Amber Electric API token. You can get this from {amber_url}",
@@ -441,6 +455,7 @@
       "zaptec_missing_credentials": "Please provide both your Zaptec email and password.",
       "no_prices": "No Octopus prices found for this tariff and region. Check your product and GSP region are correct.",
       "optimizer_not_installed": "Smart Optimization requires scipy. Check Home Assistant logs for installation details.",
+      "invalid_tariff": "Could not validate this tariff code for the selected network. Check that the tariff code matches your electricity bill.",
       "unknown": "An unexpected error occurred. Please try again."
     },
     "abort": {
@@ -625,12 +640,20 @@
           "network_tariff_combined": "Network Tariff",
           "flow_power_base_rate": "Base Rate (c/kWh)",
           "pea_enabled": "Enable PEA Pricing (Recommended)",
-          "auto_sync_enabled": "Enable automatic TOU schedule syncing"
+          "auto_sync_enabled": "Enable automatic TOU schedule syncing",
+          "fp_network": "V2 Tariff: Network Distributor",
+          "fp_tariff_code": "V2 Tariff: Tariff Code",
+          "fp_twap_override": "TWAP Override (c/kWh)",
+          "fp_amber_markup": "Amber Comparison Markup (c/kWh)"
         },
         "data_description": {
           "flow_power_price_source": "AEMO Direct fetches wholesale prices from NEMWeb (no API key needed). Amber API uses your Amber Electric account for pricing.",
           "pea_enabled": "PEA reflects how Flow Power actually bills you: your final rate moves with wholesale prices. Final Rate = Base Rate + (Wholesale - 9.7c). Disable only if you want flat network tariff rates instead.",
-          "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices"
+          "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices",
+          "fp_network": "Select your DNSP for the v2 PEA formula (includes GST and network charges). Leave as None to use the legacy formula.",
+          "fp_tariff_code": "Your tariff code from your electricity bill. Must match the selected network distributor.",
+          "fp_twap_override": "Override the dynamic 30-day TWAP with a fixed value. Leave empty to use the rolling average. Useful when the 30-day average is skewed by price spikes.",
+          "fp_amber_markup": "Retailer margin used for the Amber comparison sensor. Leave empty for the regional default (~4 c/kWh)."
         },
         "submit_button": "Next"
       },
@@ -963,6 +986,12 @@
       },
       "flow_power_twap": {
         "name": "Flow Power TWAP 30-Day Average"
+      },
+      "flow_power_network_tariff": {
+        "name": "Flow Power Network Tariff"
+      },
+      "flow_power_amber_comparison": {
+        "name": "Flow Power Amber Comparison"
       },
       "inverter_status": {
         "name": "Inverter Status"

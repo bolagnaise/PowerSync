@@ -599,16 +599,76 @@ FLOW_POWER_HAPPY_HOUR_PERIODS = [
 
 # Flow Power PEA (Price Efficiency Adjustment) configuration
 # PEA adjusts pricing based on wholesale market efficiency
-# Formula: PEA = wholesale - market_avg - benchmark = wholesale - 9.7c
+# Legacy formula: PEA = wholesale - TWAP - BPEA
+# V2 formula: PEA = GST*Spot + Tariff - GST*TWAP - AvgDailyTariff - BPEA
 CONF_PEA_ENABLED = "pea_enabled"
 CONF_FLOW_POWER_BASE_RATE = "flow_power_base_rate"
 CONF_PEA_CUSTOM_VALUE = "pea_custom_value"
 
+# Flow Power v2 tariff configuration (optional — enables corrected formula)
+CONF_FP_NETWORK = "fp_network"                # DNSP display name (e.g. "SAPN")
+CONF_FP_TARIFF_CODE = "fp_tariff_code"        # Tariff code (e.g. "RESELE")
+CONF_FP_TWAP_OVERRIDE = "fp_twap_override"    # Manual TWAP override (c/kWh)
+CONF_FP_AMBER_MARKUP = "fp_amber_markup"      # Amber comparison markup (c/kWh)
+
 # PEA Constants
-FLOW_POWER_MARKET_AVG = 8.0       # Market TWAP average (c/kWh)
+FLOW_POWER_GST = 1.1              # GST multiplier (10%)
+FLOW_POWER_MARKET_AVG = 8.0       # Market TWAP average (c/kWh) — fallback only
 FLOW_POWER_BENCHMARK = 1.7       # BPEA - benchmark customer performance (c/kWh)
 FLOW_POWER_PEA_OFFSET = 9.7      # Combined: MARKET_AVG + BENCHMARK (c/kWh)
 FLOW_POWER_DEFAULT_BASE_RATE = 34.0  # Default Flow Power base rate (c/kWh)
+
+# Default Amber comparison markup by region (c/kWh)
+# Approximate retailer margin + hedging costs
+DEFAULT_FP_AMBER_MARKUP = {
+    "NSW1": 4.2,
+    "QLD1": 4.0,
+    "SA1": 4.2,
+    "VIC1": 4.0,
+}
+
+# Region → list of DNSP display names
+REGION_NETWORKS = {
+    "NSW1": ["Ausgrid", "Endeavour", "Essential"],
+    "QLD1": ["Energex", "Ergon"],
+    "SA1": ["SAPN"],
+    "VIC1": ["Powercor", "CitiPower", "AusNet", "Jemena", "United"],
+    "TAS1": ["TasNetworks"],
+}
+
+# Display name → aemo_to_tariff network parameter (for spot_to_tariff() calls)
+NETWORK_API_NAME = {
+    "Ausgrid": "ausgrid",
+    "Endeavour": "endeavour",
+    "Essential": "essential",
+    "Energex": "energex",
+    "Ergon": "ergon",
+    "SAPN": "sapn",
+    "Powercor": "powercor",
+    "CitiPower": "victoria",
+    "AusNet": "ausnet",
+    "Jemena": "jemena",
+    "United": "victoria",
+    "TasNetworks": "tasnetworks",
+    "Evoenergy": "evoenergy",
+}
+
+# Display name → aemo_to_tariff module name (for importlib imports)
+NETWORK_MODULE_NAME = {
+    "Ausgrid": "ausgrid",
+    "Endeavour": "endeavour",
+    "Essential": "essential",
+    "Energex": "energex",
+    "Ergon": "ergon",
+    "SAPN": "sapower",
+    "Powercor": "powercor",
+    "CitiPower": "victoria",
+    "AusNet": "ausnet",
+    "Jemena": "jemena",
+    "United": "victoria",
+    "TasNetworks": "tasnetworks",
+    "Evoenergy": "evoenergy",
+}
 
 # TWAP (Time Weighted Average Price) Settings
 DEFAULT_TWAP_WINDOW_DAYS = 30     # Rolling window for TWAP calculation
@@ -722,6 +782,8 @@ SENSOR_TYPE_SOLAR_CURTAILMENT = "solar_curtailment"
 SENSOR_TYPE_FLOW_POWER_PRICE = "flow_power_price"
 SENSOR_TYPE_FLOW_POWER_EXPORT_PRICE = "flow_power_export_price"
 SENSOR_TYPE_FLOW_POWER_TWAP = "flow_power_twap"
+SENSOR_TYPE_NETWORK_TARIFF = "flow_power_network_tariff"
+SENSOR_TYPE_AMBER_COMPARISON = "flow_power_amber_comparison"
 
 # Battery health sensor (from mobile app TEDAPI scans)
 SENSOR_TYPE_BATTERY_HEALTH = "battery_health"

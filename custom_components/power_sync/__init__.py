@@ -106,6 +106,11 @@ from .const import (
     CONF_FLOW_POWER_BASE_RATE,
     CONF_PEA_CUSTOM_VALUE,
     FLOW_POWER_DEFAULT_BASE_RATE,
+    # Flow Power v2 tariff configuration
+    CONF_FP_NETWORK,
+    CONF_FP_TARIFF_CODE,
+    CONF_FP_TWAP_OVERRIDE,
+    CONF_FP_AMBER_MARKUP,
     # Export price boost configuration
     CONF_EXPORT_BOOST_ENABLED,
     CONF_EXPORT_PRICE_OFFSET,
@@ -1520,6 +1525,15 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         )
 
         _LOGGER.info("Migration to version 3 complete")
+
+    if config_entry.version == 3:
+        # Migrate from version 3 to version 4
+        # Flow Power v2 tariff integration — no data changes needed.
+        # Missing CONF_FP_NETWORK/CONF_FP_TARIFF_CODE keys = legacy formula.
+        hass.config_entries.async_update_entry(
+            config_entry, version=4
+        )
+        _LOGGER.info("Migration to version 4 complete (Flow Power v2 tariff support)")
 
     # Within-version migration: foxess_cloud_password → foxess_cloud_api_key
     if "foxess_cloud_password" in config_entry.data and "foxess_cloud_api_key" not in config_entry.data:
@@ -9707,10 +9721,48 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Initialize Flow Power TWAP tracker for dynamic PEA pricing
     flow_power_twap_tracker = None
+    fp_tariff_rate = None
+    fp_avg_daily_tariff = None
     if electricity_provider == "flow_power":
         from .coordinator import FlowPowerTWAPTracker
         flow_power_twap_tracker = FlowPowerTWAPTracker(hass, flow_power_state, entry.entry_id)
         await flow_power_twap_tracker.async_load()
+
+        # Initialize v2 tariff data if configured
+        fp_network = entry.options.get(
+            CONF_FP_NETWORK, entry.data.get(CONF_FP_NETWORK)
+        )
+        fp_tariff_code = entry.options.get(
+            CONF_FP_TARIFF_CODE, entry.data.get(CONF_FP_TARIFF_CODE)
+        )
+        if fp_network and fp_tariff_code:
+            from .tariff_utils import get_network_tariff_rate, compute_avg_daily_tariff
+            from .const import NETWORK_API_NAME
+            api_name = NETWORK_API_NAME.get(fp_network, fp_network.lower())
+
+            # Compute avg daily tariff in executor thread (48 sync calls)
+            fp_avg_daily_tariff = await hass.async_add_executor_job(
+                compute_avg_daily_tariff, api_name, fp_tariff_code
+            )
+            if fp_avg_daily_tariff is not None:
+                _LOGGER.info(
+                    "Flow Power v2 tariff initialized: network=%s, tariff=%s, avg_daily=%.2fc/kWh",
+                    fp_network, fp_tariff_code, fp_avg_daily_tariff,
+                )
+            else:
+                _LOGGER.warning(
+                    "Failed to compute avg daily tariff for %s/%s — using legacy formula",
+                    fp_network, fp_tariff_code,
+                )
+
+            # Get current tariff rate
+            import datetime as _dt
+            now_aest = _dt.datetime.now(tz=_dt.timezone(_dt.timedelta(hours=10)))
+            fp_tariff_rate = await hass.async_add_executor_job(
+                get_network_tariff_rate, now_aest, api_name, fp_tariff_code
+            )
+            if fp_tariff_rate is not None:
+                _LOGGER.info("Current network tariff rate: %.2fc/kWh", fp_tariff_rate)
 
     # Initialize Solcast Solar Forecast Coordinator if enabled
     # Skip if the Solcast Solar integration is already installed (avoid double-polling API)
@@ -9841,6 +9893,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "foxess_curtailment_state": "normal",  # Track FoxESS DC curtailment state
         "amber_usage_coordinator": amber_usage_coordinator,  # For actual metered cost data
         "flow_power_twap_tracker": flow_power_twap_tracker,  # For dynamic PEA pricing
+        "fp_tariff_rate": fp_tariff_rate,  # Current network tariff rate (c/kWh) — v2
+        "fp_avg_daily_tariff": fp_avg_daily_tariff,  # 24h avg network tariff (c/kWh) — v2
     }
 
     # Early initialization of tariff_schedule for non-Amber providers
@@ -11595,8 +11649,37 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # get_wholesale_lookup() handles both AEMO and Amber data formats
                 wholesale_prices = get_wholesale_lookup(forecast_data)
 
-                # Get dynamic TWAP for PEA calculation
-                twap_value = fp_tracker.twap if fp_tracker else None
+                # Get dynamic TWAP or use override
+                twap_override = entry.options.get(CONF_FP_TWAP_OVERRIDE)
+                if twap_override is not None and twap_override != "":
+                    try:
+                        twap_value = float(twap_override)
+                    except (ValueError, TypeError):
+                        twap_value = fp_tracker.twap if fp_tracker else None
+                else:
+                    twap_value = fp_tracker.twap if fp_tracker else None
+
+                # Build per-period tariff rate lookup for v2 formula
+                fp_tariff_rate_lookup = None
+                fp_avg_daily = hass.data[DOMAIN][entry.entry_id].get("fp_avg_daily_tariff")
+                fp_network_name = entry.options.get(CONF_FP_NETWORK, entry.data.get(CONF_FP_NETWORK))
+                fp_tc = entry.options.get(CONF_FP_TARIFF_CODE, entry.data.get(CONF_FP_TARIFF_CODE))
+
+                if fp_network_name and fp_tc and fp_avg_daily is not None:
+                    from .const import NETWORK_API_NAME
+                    from .tariff_utils import get_network_tariff_rate as _gnt
+                    import datetime as _dt
+                    _api = NETWORK_API_NAME.get(fp_network_name, fp_network_name.lower())
+                    fp_tariff_rate_lookup = {}
+                    base_dt = _dt.datetime.now(tz=_dt.timezone(_dt.timedelta(hours=10)))
+                    base_dt = base_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+                    for slot in range(48):
+                        slot_dt = base_dt + _dt.timedelta(minutes=slot * 30)
+                        h, m = slot_dt.hour, slot_dt.minute
+                        period_key = f"PERIOD_{h:02d}_{m:02d}"
+                        rate = _gnt(slot_dt, _api, fp_tc)
+                        if rate is not None:
+                            fp_tariff_rate_lookup[period_key] = rate
 
                 _LOGGER.info(
                     "Applying Flow Power PEA (%s): base_rate=%.1fc, custom_pea=%s, twap=%s",
@@ -11605,7 +11688,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     f"{custom_pea:.1f}c" if custom_pea is not None else "auto",
                     f"{twap_value:.2f}c" if twap_value is not None else "fallback (8.0c)",
                 )
-                tariff = apply_flow_power_pea(tariff, wholesale_prices, base_rate, custom_pea, twap=twap_value)
+                tariff = apply_flow_power_pea(
+                    tariff, wholesale_prices, base_rate, custom_pea, twap=twap_value,
+                    tariff_rate_lookup=fp_tariff_rate_lookup,
+                    avg_daily_tariff=fp_avg_daily,
+                )
             elif flow_power_price_source in ("aemo_sensor", "aemo"):
                 # PEA disabled + AEMO: fall back to network tariff calculation
                 # (Amber prices already include network fees, no fallback needed)
@@ -15691,6 +15778,52 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN][entry.entry_id]["curtailment_cancel"] = curtailment_cancel_timer
     _LOGGER.info("Solar curtailment check scheduled every 5 minutes at :01 (same as TOU sync)")
 
+    # Set up Flow Power v2 tariff rate refresh (every 5 minutes + midnight avg recalc)
+    fp_network_cfg = entry.options.get(CONF_FP_NETWORK, entry.data.get(CONF_FP_NETWORK))
+    fp_tariff_code_cfg = entry.options.get(CONF_FP_TARIFF_CODE, entry.data.get(CONF_FP_TARIFF_CODE))
+    if electricity_provider == "flow_power" and fp_network_cfg and fp_tariff_code_cfg:
+        from .tariff_utils import get_network_tariff_rate as _get_ntr, compute_avg_daily_tariff as _compute_adt
+        from .const import NETWORK_API_NAME as _NAPI
+        _fp_api_name = _NAPI.get(fp_network_cfg, fp_network_cfg.lower())
+
+        async def _refresh_fp_tariff_rate(now):
+            """Refresh the current network tariff rate."""
+            import datetime as _dt
+            now_aest = _dt.datetime.now(tz=_dt.timezone(_dt.timedelta(hours=10)))
+            rate = await hass.async_add_executor_job(
+                _get_ntr, now_aest, _fp_api_name, fp_tariff_code_cfg
+            )
+            if rate is not None:
+                hass.data[DOMAIN][entry.entry_id]["fp_tariff_rate"] = rate
+
+        async def _refresh_fp_avg_daily_tariff(now):
+            """Recompute avg daily tariff at midnight for seasonal tariff changes."""
+            avg = await hass.async_add_executor_job(
+                _compute_adt, _fp_api_name, fp_tariff_code_cfg
+            )
+            if avg is not None:
+                hass.data[DOMAIN][entry.entry_id]["fp_avg_daily_tariff"] = avg
+                _LOGGER.info(
+                    "Flow Power avg daily tariff recomputed: %.2fc/kWh", avg
+                )
+
+        fp_tariff_cancel = async_track_utc_time_change(
+            hass,
+            _refresh_fp_tariff_rate,
+            minute=[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55],
+            second=5,
+        )
+        fp_midnight_cancel = async_track_utc_time_change(
+            hass,
+            _refresh_fp_avg_daily_tariff,
+            hour=14,  # 00:05 AEST = 14:05 UTC
+            minute=5,
+            second=0,
+        )
+        hass.data[DOMAIN][entry.entry_id]["fp_tariff_cancel"] = fp_tariff_cancel
+        hass.data[DOMAIN][entry.entry_id]["fp_midnight_cancel"] = fp_midnight_cancel
+        _LOGGER.info("Flow Power v2 tariff refresh scheduled (every 5min + midnight recalc)")
+
     # Set up fast load-following update (every 30 seconds) for responsive power limiting
     # This only updates the power limit when already in load-following mode, doesn't change curtail/restore decisions
     async def fast_load_following_update(now):
@@ -16750,6 +16883,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if load_following_cancel := entry_data.get("load_following_cancel"):
         load_following_cancel()
         _LOGGER.debug("Cancelled load-following timer")
+
+    # Cancel Flow Power v2 tariff timers
+    if fp_cancel := entry_data.get("fp_tariff_cancel"):
+        fp_cancel()
+        _LOGGER.debug("Cancelled Flow Power tariff refresh timer")
+    if fp_mid_cancel := entry_data.get("fp_midnight_cancel"):
+        fp_mid_cancel()
+        _LOGGER.debug("Cancelled Flow Power midnight tariff recalc timer")
 
     # Cancel Zaptec state polling and close client
     if unsub_zaptec := entry_data.get("unsub_zaptec_poll"):

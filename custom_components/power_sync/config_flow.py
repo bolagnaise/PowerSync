@@ -158,6 +158,13 @@ from .const import (
     NETWORK_TARIFF_TYPES,
     NETWORK_DISTRIBUTORS,
     ALL_NETWORK_TARIFFS,
+    # Flow Power v2 tariff
+    CONF_FP_NETWORK,
+    CONF_FP_TARIFF_CODE,
+    CONF_FP_TWAP_OVERRIDE,
+    CONF_FP_AMBER_MARKUP,
+    REGION_NETWORKS,
+    DEFAULT_FP_AMBER_MARKUP,
     # Automations - OpenWeatherMap API for weather triggers
     CONF_OPENWEATHERMAP_API_KEY,
     CONF_WEATHER_LOCATION,
@@ -519,7 +526,7 @@ async def test_goodwe_connection(
 class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for PowerSync."""
 
-    VERSION = 3
+    VERSION = 4
 
     def __init__(self) -> None:
         """Initialize the config flow."""
@@ -635,17 +642,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._amber_data = {}
             self._aemo_only_mode = False
 
-            # Route based on battery system selection
-            if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
-                return await self.async_step_sigenergy_credentials()
-            elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
-                return await self.async_step_sungrow()
-            elif self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
-                return await self.async_step_foxess_connection()
-            elif self._selected_battery_system == BATTERY_SYSTEM_GOODWE:
-                return await self.async_step_goodwe_connection()
-            else:
-                return await self.async_step_tesla_provider()
+            # Route to v2 tariff step
+            return await self.async_step_flow_power_tariff()
 
         return self.async_show_form(
             step_id="flow_power_setup",
@@ -656,6 +654,85 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Coerce(float), vol.Range(min=0.0, max=100.0)
                 ),
             }),
+            errors=errors,
+        )
+
+    async def async_step_flow_power_tariff(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle Flow Power v2 tariff configuration (optional).
+
+        Collects DNSP network and tariff code for the corrected PEA formula.
+        Users can skip this to use the legacy formula.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            skip = user_input.pop("skip_tariff", False)
+
+            if not skip:
+                fp_network = user_input.get(CONF_FP_NETWORK)
+                fp_tariff_code = user_input.get(CONF_FP_TARIFF_CODE)
+
+                if fp_network and fp_tariff_code:
+                    # Validate by test-calling the tariff lookup
+                    from .tariff_utils import get_network_tariff_rate
+                    from .const import NETWORK_API_NAME
+                    import datetime as _dt
+
+                    api_name = NETWORK_API_NAME.get(fp_network, fp_network.lower())
+                    now_aest = _dt.datetime.now(tz=_dt.timezone(_dt.timedelta(hours=10)))
+                    test_rate = await self.hass.async_add_executor_job(
+                        get_network_tariff_rate, now_aest, api_name, fp_tariff_code
+                    )
+                    if test_rate is None:
+                        errors["base"] = "invalid_tariff"
+                    else:
+                        self._flow_power_data[CONF_FP_NETWORK] = fp_network
+                        self._flow_power_data[CONF_FP_TARIFF_CODE] = fp_tariff_code
+                else:
+                    errors["base"] = "invalid_tariff"
+
+            if not errors:
+                # Route based on battery system selection
+                if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
+                    return await self.async_step_sigenergy_credentials()
+                elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
+                    return await self.async_step_sungrow()
+                elif self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
+                    return await self.async_step_foxess_connection()
+                elif self._selected_battery_system == BATTERY_SYSTEM_GOODWE:
+                    return await self.async_step_goodwe_connection()
+                else:
+                    return await self.async_step_tesla_provider()
+
+        # Build network options based on selected region
+        selected_region = self._flow_power_data.get(CONF_FLOW_POWER_STATE, "QLD1")
+        networks = REGION_NETWORKS.get(selected_region, [])
+        network_options = {n: n for n in networks}
+
+        # Build tariff code options — start with first network
+        tariff_options = {}
+        if networks:
+            from .tariff_utils import get_tariff_codes_for_network
+            first_network = networks[0]
+            codes = await self.hass.async_add_executor_job(
+                get_tariff_codes_for_network, first_network
+            )
+            tariff_options = {c: c for c in codes}
+
+        schema = {
+            vol.Optional("skip_tariff", default=False): bool,
+        }
+        if network_options:
+            schema[vol.Optional(CONF_FP_NETWORK, default=networks[0])] = vol.In(network_options)
+        if tariff_options:
+            first_code = list(tariff_options.keys())[0] if tariff_options else ""
+            schema[vol.Optional(CONF_FP_TARIFF_CODE, default=first_code)] = vol.In(tariff_options)
+
+        return self.async_show_form(
+            step_id="flow_power_tariff",
+            data_schema=vol.Schema(schema),
             errors=errors,
         )
 
@@ -3992,6 +4069,16 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             # Remove combined key before storing
             user_input.pop(CONF_NETWORK_TARIFF_COMBINED, None)
 
+            # Handle empty TWAP override (store None for "auto")
+            twap_val = user_input.get(CONF_FP_TWAP_OVERRIDE)
+            if twap_val is not None and twap_val == "":
+                user_input[CONF_FP_TWAP_OVERRIDE] = None
+
+            # Handle empty Amber markup (store None for "default")
+            markup_val = user_input.get(CONF_FP_AMBER_MARKUP)
+            if markup_val is not None and markup_val == "":
+                user_input[CONF_FP_AMBER_MARKUP] = None
+
             # Store main options temporarily
             self._flow_power_main_options = user_input
 
@@ -4010,36 +4097,71 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         if current_combined not in ALL_NETWORK_TARIFFS:
             current_combined = "energex:6900"
 
+        # Build network options for v2 tariff
+        current_region = self._get_option(CONF_FLOW_POWER_STATE, "NSW1")
+        networks = REGION_NETWORKS.get(current_region, [])
+        network_options = {n: n for n in networks} if networks else {"": "None"}
+
+        # Build tariff code options for current v2 network
+        current_fp_network = self._get_option(CONF_FP_NETWORK, "")
+        tariff_code_options = {"": "None (legacy formula)"}
+        if current_fp_network:
+            from .tariff_utils import get_tariff_codes_for_network
+            codes = await self.hass.async_add_executor_job(
+                get_tariff_codes_for_network, current_fp_network
+            )
+            if codes:
+                tariff_code_options = {c: c for c in codes}
+
+        # Default Amber markup for region
+        default_markup = DEFAULT_FP_AMBER_MARKUP.get(current_region, 4.0)
+
+        schema = {
+            vol.Required(
+                CONF_FLOW_POWER_STATE,
+                default=self._get_option(CONF_FLOW_POWER_STATE, "NSW1"),
+            ): vol.In(FLOW_POWER_STATES),
+            vol.Required(
+                CONF_FLOW_POWER_PRICE_SOURCE,
+                default=self._get_option(CONF_FLOW_POWER_PRICE_SOURCE, "aemo"),
+            ): vol.In(FLOW_POWER_PRICE_SOURCES),
+            vol.Required(
+                CONF_NETWORK_TARIFF_COMBINED,
+                default=current_combined,
+            ): vol.In(ALL_NETWORK_TARIFFS),
+            vol.Required(
+                CONF_FLOW_POWER_BASE_RATE,
+                default=self._get_option(CONF_FLOW_POWER_BASE_RATE, FLOW_POWER_DEFAULT_BASE_RATE),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
+            vol.Optional(
+                CONF_PEA_ENABLED,
+                default=self._get_option(CONF_PEA_ENABLED, True),
+            ): bool,
+            vol.Optional(
+                CONF_AUTO_SYNC_ENABLED,
+                default=self._get_option(CONF_AUTO_SYNC_ENABLED, True),
+            ): bool,
+            vol.Optional(
+                CONF_FP_NETWORK,
+                default=self._get_option(CONF_FP_NETWORK, ""),
+            ): vol.In({"": "None (legacy formula)", **network_options}),
+            vol.Optional(
+                CONF_FP_TARIFF_CODE,
+                default=self._get_option(CONF_FP_TARIFF_CODE, ""),
+            ): vol.In(tariff_code_options),
+            vol.Optional(
+                CONF_FP_TWAP_OVERRIDE,
+                default=self._get_option(CONF_FP_TWAP_OVERRIDE, None),
+            ): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0))),
+            vol.Optional(
+                CONF_FP_AMBER_MARKUP,
+                default=self._get_option(CONF_FP_AMBER_MARKUP, None),
+            ): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=0.0, max=20.0))),
+        }
+
         return self.async_show_form(
             step_id="flow_power_options",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_FLOW_POWER_STATE,
-                        default=self._get_option(CONF_FLOW_POWER_STATE, "NSW1"),
-                    ): vol.In(FLOW_POWER_STATES),
-                    vol.Required(
-                        CONF_FLOW_POWER_PRICE_SOURCE,
-                        default=self._get_option(CONF_FLOW_POWER_PRICE_SOURCE, "aemo"),
-                    ): vol.In(FLOW_POWER_PRICE_SOURCES),
-                    vol.Required(
-                        CONF_NETWORK_TARIFF_COMBINED,
-                        default=current_combined,
-                    ): vol.In(ALL_NETWORK_TARIFFS),
-                    vol.Required(
-                        CONF_FLOW_POWER_BASE_RATE,
-                        default=self._get_option(CONF_FLOW_POWER_BASE_RATE, FLOW_POWER_DEFAULT_BASE_RATE),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
-                    vol.Optional(
-                        CONF_PEA_ENABLED,
-                        default=self._get_option(CONF_PEA_ENABLED, True),
-                    ): bool,
-                    vol.Optional(
-                        CONF_AUTO_SYNC_ENABLED,
-                        default=self._get_option(CONF_AUTO_SYNC_ENABLED, True),
-                    ): bool,
-                }
-            ),
+            data_schema=vol.Schema(schema),
         )
 
     async def async_step_flow_power_amber_token(
