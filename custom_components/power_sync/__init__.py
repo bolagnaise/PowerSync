@@ -16480,6 +16480,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.data[DOMAIN][entry.entry_id]["optimization_coordinator"] = optimization_coordinator
             _LOGGER.info("Smart Optimization coordinator initialized and enabled")
 
+            # Add LP forecast sensors (deferred from sensor platform setup).
+            # Sensor platform is set up before the optimizer, so sensor.py stores
+            # the async_add_entities callback for us to call here.
+            sensor_add_entities = hass.data[DOMAIN][entry.entry_id].pop("sensor_async_add_entities", None)
+            if sensor_add_entities:
+                from .sensor import LP_FORECAST_SENSORS, LPForecastSensor
+                lp_sensors = [
+                    LPForecastSensor(
+                        coordinator=optimization_coordinator,
+                        description=desc,
+                        entry=entry,
+                    )
+                    for desc in LP_FORECAST_SENSORS
+                ]
+                sensor_add_entities(lp_sensors)
+                _LOGGER.info("LP optimizer active - adding forecast sensors (deferred)")
+
             # If using Globird/AEMO VPP provider, set up AEMO price fetching and spike response
             # This handles Globird VPP spike detection - discharge at $3000/MWh
             electricity_provider_for_vpp = entry.options.get(

@@ -529,7 +529,10 @@ async def async_setup_entry(
                 )
             )
 
-    # Add LP forecast sensors if optimization coordinator exists
+    # Add LP forecast sensors if optimization coordinator exists.
+    # The optimizer is initialized AFTER sensor platform setup, so the coordinator
+    # usually won't exist yet. Store the callback so __init__.py can add these
+    # sensors later when the optimizer is ready.
     optimization_coordinator = domain_data.get("optimization_coordinator")
     if optimization_coordinator:
         _LOGGER.info("LP optimizer active - adding forecast sensors")
@@ -541,6 +544,9 @@ async def async_setup_entry(
                     entry=entry,
                 )
             )
+    else:
+        # Store callback for deferred LP forecast sensor creation
+        domain_data["sensor_async_add_entities"] = async_add_entities
 
     # Add Amber usage sensors if usage coordinator exists
     amber_usage_coordinator = domain_data.get("amber_usage_coordinator")
