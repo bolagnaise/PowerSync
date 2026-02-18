@@ -961,6 +961,9 @@
       "flow_power_export_price": {
         "name": "Flow Power Export Price"
       },
+      "flow_power_twap": {
+        "name": "Flow Power TWAP 30-Day Average"
+      },
       "inverter_status": {
         "name": "Inverter Status"
       },

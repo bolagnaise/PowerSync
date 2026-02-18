@@ -1184,8 +1184,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             CONF_PEA_ENABLED,
                             CONF_FLOW_POWER_BASE_RATE,
                             CONF_PEA_CUSTOM_VALUE,
-                            FLOW_POWER_PEA_OFFSET,
+                            FLOW_POWER_MARKET_AVG,
+                            FLOW_POWER_BENCHMARK,
                             FLOW_POWER_DEFAULT_BASE_RATE,
+                            DOMAIN as _DOMAIN,
                         )
                         _provider = self._entry.options.get(
                             CONF_ELECTRICITY_PROVIDER,
@@ -1215,7 +1217,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 wholesale_cents = e.get("wholesaleKWHPrice")
                                 if wholesale_cents is None:
                                     wholesale_cents = e.get("perKwh", 0)
-                                pea = wholesale_cents - FLOW_POWER_PEA_OFFSET
+                                # Use dynamic TWAP if available
+                                fp_twap_tracker = self.hass.data.get(
+                                    _DOMAIN, {}
+                                ).get(self._entry.entry_id, {}).get(
+                                    "flow_power_twap_tracker"
+                                )
+                                fp_market_avg = (
+                                    fp_twap_tracker.twap
+                                    if fp_twap_tracker and fp_twap_tracker.twap is not None
+                                    else FLOW_POWER_MARKET_AVG
+                                )
+                                pea = wholesale_cents - fp_market_avg - FLOW_POWER_BENCHMARK
                                 price_dollar = max(
                                     0, (fp_base_rate + pea) / 100
                                 )

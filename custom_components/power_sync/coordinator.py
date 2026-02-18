@@ -5,6 +5,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timedelta, date
 import logging
 import re
+import time
 from typing import Any
 import asyncio
 
@@ -26,6 +27,9 @@ from .const import (
     TESLA_PROVIDER_TESLEMETRY,
     TESLA_PROVIDER_FLEET_API,
     POWER_SYNC_USER_AGENT,
+    DEFAULT_TWAP_WINDOW_DAYS,
+    MIN_TWAP_SAMPLES,
+    FLOW_POWER_MARKET_AVG,
 )
 
 
@@ -3095,3 +3099,104 @@ class OctopusPriceCoordinator(DataUpdateCoordinator):
             raise
         except Exception as err:
             raise UpdateFailed(f"Error fetching Octopus data: {err}") from err
+
+
+class FlowPowerTWAPTracker:
+    """Tracks wholesale prices and calculates rolling 30-day TWAP.
+
+    The TWAP (Time Weighted Average Price) replaces the hardcoded 8.0 c/kWh
+    market average in the PEA formula with an actual rolling 30-day average.
+
+    Formula: PEA = wholesale - TWAP - 1.7 (benchmark)
+    Fallback: PEA = wholesale - 8.0 - 1.7 when < 12 samples available
+    """
+
+    def __init__(self, hass: HomeAssistant, region: str, entry_id: str) -> None:
+        self.hass = hass
+        self.region = region
+        self._price_history: list[dict] = []
+        self._store = Store(hass, 1, f"power_sync.flow_power_twap.{entry_id}")
+        self._last_store_save: float | None = None
+        self._twap: float | None = None
+        self._loaded = False
+
+    async def async_load(self) -> None:
+        """Load price history from persistent storage."""
+        stored = await self._store.async_load()
+        if stored and isinstance(stored.get("price_history"), list):
+            self._price_history = stored["price_history"]
+            self._prune_history()
+            self._twap = self._calculate_twap()
+            _LOGGER.info(
+                "Loaded TWAP history: %d samples over %.1f days, TWAP=%.2f c/kWh%s",
+                len(self._price_history),
+                self.twap_days,
+                self._twap if self._twap is not None else FLOW_POWER_MARKET_AVG,
+                " (fallback)" if self.using_fallback else "",
+            )
+        self._loaded = True
+
+    def record_price(self, wholesale_cents: float) -> None:
+        """Record a wholesale price sample with 4-minute deduplication."""
+        now = time.time()
+        if self._price_history:
+            if now - self._price_history[-1]["ts"] < 240:
+                return
+        self._price_history.append({"ts": round(now), "price": round(wholesale_cents, 2)})
+        self._prune_history()
+        self._twap = self._calculate_twap()
+        # Save periodically (every 10 minutes)
+        if self._last_store_save is None or now - self._last_store_save > 600:
+            self.hass.async_create_task(self._async_save())
+            self._last_store_save = now
+
+    def _prune_history(self) -> None:
+        """Remove entries older than the TWAP window."""
+        cutoff = time.time() - (DEFAULT_TWAP_WINDOW_DAYS * 86400)
+        self._price_history = [
+            entry for entry in self._price_history if entry["ts"] > cutoff
+        ]
+
+    def _calculate_twap(self) -> float | None:
+        """Calculate TWAP from price history. Returns None if insufficient data."""
+        if len(self._price_history) < MIN_TWAP_SAMPLES:
+            return None
+        total = sum(entry["price"] for entry in self._price_history)
+        return round(total / len(self._price_history), 2)
+
+    async def _async_save(self) -> None:
+        """Save price history to persistent storage."""
+        try:
+            await self._store.async_save({
+                "price_history": self._price_history,
+                "region": self.region,
+            })
+        except Exception as err:
+            _LOGGER.warning("Failed to save TWAP history: %s", err)
+
+    async def async_save(self) -> None:
+        """Public save for use on unload."""
+        await self._async_save()
+
+    @property
+    def twap(self) -> float | None:
+        """Return the current TWAP value, or None if insufficient data."""
+        return self._twap
+
+    @property
+    def twap_days(self) -> float:
+        """Return how many days of price data we have."""
+        if not self._price_history:
+            return 0.0
+        oldest = self._price_history[0]["ts"]
+        return round((time.time() - oldest) / 86400, 1)
+
+    @property
+    def sample_count(self) -> int:
+        """Return the number of price samples."""
+        return len(self._price_history)
+
+    @property
+    def using_fallback(self) -> bool:
+        """Return True if we're using the hardcoded fallback instead of dynamic TWAP."""
+        return self._twap is None

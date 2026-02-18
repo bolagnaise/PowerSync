@@ -1608,7 +1608,8 @@ def _apply_network_tariff_manual(
 
 # Flow Power PEA (Price Efficiency Adjustment) Constants
 # These are also defined in const.py but duplicated here for tariff_converter independence
-FLOW_POWER_PEA_OFFSET = 9.7      # Combined: MARKET_AVG + BENCHMARK (c/kWh)
+FLOW_POWER_MARKET_AVG = 8.0       # Fallback market TWAP average (c/kWh)
+FLOW_POWER_BENCHMARK = 1.7        # BPEA - benchmark customer performance (c/kWh)
 FLOW_POWER_DEFAULT_BASE_RATE = 34.0  # Default Flow Power base rate (c/kWh)
 
 
@@ -1616,30 +1617,30 @@ def apply_flow_power_pea(
     tariff: dict[str, Any],
     wholesale_prices: dict[str, float],
     base_rate: float = FLOW_POWER_DEFAULT_BASE_RATE,
-    custom_pea: float | None = None
+    custom_pea: float | None = None,
+    twap: float | None = None,
 ) -> dict[str, Any]:
     """
     Apply Flow Power base rate + PEA (Price Efficiency Adjustment) pricing model.
 
     REPLACES network tariff calculation with Flow Power's actual billing model:
     Final Rate = Base Rate + PEA
-               = Base Rate + (wholesale - 9.7)
+               = Base Rate + (wholesale - TWAP - 1.7)
+
+    When a dynamic 30-day TWAP is available, it replaces the hardcoded 8.0 c/kWh
+    market average for more accurate PEA calculation.
 
     PEA adjusts your rate based on wholesale prices when you consume:
     - Cheap/negative wholesale → negative PEA → pay less than base rate
-    - Average wholesale (8c) → PEA ≈ -1.7c → pay slightly less than base rate
+    - Average wholesale (TWAP) → PEA ≈ -1.7c → pay slightly less than base rate
     - Expensive wholesale → positive PEA → pay more than base rate
-
-    Examples:
-    - Wholesale -0.5c: Final = 34 + (-0.5 - 9.7) = 34 - 10.2 = 23.8c/kWh
-    - Wholesale 8c:    Final = 34 + (8 - 9.7) = 34 - 1.7 = 32.3c/kWh
-    - Wholesale 15c:   Final = 34 + (15 - 9.7) = 34 + 5.3 = 39.3c/kWh
 
     Args:
         tariff: Tesla tariff structure with wholesale prices in energy_charges
         wholesale_prices: Dict mapping PERIOD_HH_MM to wholesale price in $/kWh
         base_rate: Flow Power base rate in c/kWh (from your plan, default 34c)
         custom_pea: Optional fixed PEA override in c/kWh (from bills)
+        twap: Dynamic 30-day rolling TWAP in c/kWh, or None for 8.0c fallback
 
     Returns:
         Modified tariff with Flow Power pricing applied to buy prices
@@ -1648,10 +1649,13 @@ def apply_flow_power_pea(
         _LOGGER.warning("No tariff provided for Flow Power PEA adjustment")
         return tariff
 
+    market_avg = twap if twap is not None else FLOW_POWER_MARKET_AVG
     _LOGGER.info(
-        "Applying Flow Power PEA: base_rate=%.1fc/kWh, custom_pea=%s",
+        "Applying Flow Power PEA: base_rate=%.1fc/kWh, custom_pea=%s, twap=%.2fc (%s)",
         base_rate,
-        f"{custom_pea:.1f}c" if custom_pea is not None else "auto"
+        f"{custom_pea:.1f}c" if custom_pea is not None else "auto",
+        market_avg,
+        "dynamic" if twap is not None else "fallback",
     )
 
     # Track statistics for logging
@@ -1675,7 +1679,7 @@ def apply_flow_power_pea(
                 # Get wholesale price for this period ($/kWh -> c/kWh)
                 wholesale_dollars = wholesale_prices.get(period, 0.08)  # Default 8c if missing
                 wholesale_cents = wholesale_dollars * 100
-                pea = wholesale_cents - FLOW_POWER_PEA_OFFSET  # wholesale - 9.7
+                pea = wholesale_cents - market_avg - FLOW_POWER_BENCHMARK
 
             pea_values.append(pea)
 

@@ -60,6 +60,7 @@ from .const import (
     SENSOR_TYPE_SOLAR_CURTAILMENT,
     SENSOR_TYPE_FLOW_POWER_PRICE,
     SENSOR_TYPE_FLOW_POWER_EXPORT_PRICE,
+    SENSOR_TYPE_FLOW_POWER_TWAP,
     SENSOR_TYPE_BATTERY_HEALTH,
     SENSOR_TYPE_INVERTER_STATUS,
     SENSOR_TYPE_BATTERY_MODE,
@@ -101,7 +102,8 @@ from .const import (
     CONF_PEA_ENABLED,
     CONF_FLOW_POWER_BASE_RATE,
     CONF_PEA_CUSTOM_VALUE,
-    FLOW_POWER_PEA_OFFSET,
+    FLOW_POWER_MARKET_AVG,
+    FLOW_POWER_BENCHMARK,
     FLOW_POWER_DEFAULT_BASE_RATE,
     FLOW_POWER_EXPORT_RATES,
     FLOW_POWER_HAPPY_HOUR_PERIODS,
@@ -614,7 +616,14 @@ async def async_setup_entry(
                     sensor_type=SENSOR_TYPE_FLOW_POWER_EXPORT_PRICE,
                 )
             )
-            _LOGGER.info("Flow Power price sensors added (import and export)")
+            # Add TWAP sensor
+            entities.append(
+                FlowPowerTWAPSensor(
+                    hass=hass,
+                    entry=entry,
+                )
+            )
+            _LOGGER.info("Flow Power price sensors added (import, export, and TWAP)")
 
     # Always add battery health sensor (receives data from mobile app)
     entities.append(BatteryHealthSensor(entry=entry))
@@ -1704,6 +1713,18 @@ class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):
         current_period = f"PERIOD_{hour:02d}_{(minute // 30) * 30:02d}"
         return current_period in FLOW_POWER_HAPPY_HOUR_PERIODS
 
+    def _get_twap_tracker(self):
+        """Get the FlowPowerTWAPTracker from hass.data if available."""
+        domain_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        return domain_data.get("flow_power_twap_tracker")
+
+    def _get_market_avg(self) -> float:
+        """Get the market average (dynamic TWAP or fallback)."""
+        tracker = self._get_twap_tracker()
+        if tracker and tracker.twap is not None:
+            return tracker.twap
+        return FLOW_POWER_MARKET_AVG
+
     def _calculate_import_price(self) -> float | None:
         """Calculate Flow Power import price with PEA in $/kWh."""
         wholesale_cents = self._get_wholesale_price_cents()
@@ -1716,14 +1737,15 @@ class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):
         custom_pea = self._get_config_value(CONF_PEA_CUSTOM_VALUE)
 
         if pea_enabled:
-            # PEA = wholesale - 9.7c
             if custom_pea is not None and custom_pea != "":
                 try:
                     pea = float(custom_pea)
                 except (ValueError, TypeError):
-                    pea = wholesale_cents - FLOW_POWER_PEA_OFFSET
+                    market_avg = self._get_market_avg()
+                    pea = wholesale_cents - market_avg - FLOW_POWER_BENCHMARK
             else:
-                pea = wholesale_cents - FLOW_POWER_PEA_OFFSET
+                market_avg = self._get_market_avg()
+                pea = wholesale_cents - market_avg - FLOW_POWER_BENCHMARK
 
             # Final rate = base_rate + PEA (in c/kWh)
             final_cents = base_rate + pea
@@ -1770,6 +1792,11 @@ class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):
 
         if self._sensor_type == SENSOR_TYPE_FLOW_POWER_PRICE:
             # Import price attributes
+            tracker = self._get_twap_tracker()
+            market_avg = self._get_market_avg()
+            attributes["twap_used"] = round(market_avg, 2)
+            attributes["twap_source"] = "dynamic" if (tracker and not tracker.using_fallback) else "fallback"
+
             if wholesale_cents is not None:
                 attributes["wholesale_cents"] = round(wholesale_cents, 2)
 
@@ -1778,9 +1805,9 @@ class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):
                         try:
                             pea = float(custom_pea)
                         except (ValueError, TypeError):
-                            pea = wholesale_cents - FLOW_POWER_PEA_OFFSET
+                            pea = wholesale_cents - market_avg - FLOW_POWER_BENCHMARK
                     else:
-                        pea = wholesale_cents - FLOW_POWER_PEA_OFFSET
+                        pea = wholesale_cents - market_avg - FLOW_POWER_BENCHMARK
 
                     attributes["pea_cents"] = round(pea, 2)
                     attributes["final_rate_cents"] = round(base_rate + pea, 2)
@@ -1793,6 +1820,59 @@ class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):
             attributes["happy_hour_rate"] = FLOW_POWER_EXPORT_RATES.get(state, 0.45)
 
         return attributes
+
+
+class FlowPowerTWAPSensor(SensorEntity):
+    """Sensor exposing the 30-day rolling TWAP used in PEA calculation.
+
+    Shows the dynamic Time Weighted Average Price that replaces the
+    hardcoded 8.0 c/kWh in the PEA formula. Falls back to 8.0 when
+    insufficient data is available (< 12 samples).
+    """
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        """Initialize the TWAP sensor."""
+        self.hass = hass
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_{SENSOR_TYPE_FLOW_POWER_TWAP}"
+        self._attr_has_entity_name = True
+        self._attr_suggested_object_id = f"power_sync_{SENSOR_TYPE_FLOW_POWER_TWAP}"
+        self._attr_name = "Flow Power TWAP 30-Day Average"
+        self._attr_icon = "mdi:chart-line"
+        self._attr_native_unit_of_measurement = "c/kWh"
+        self._attr_suggested_display_precision = 2
+
+    def _get_tracker(self):
+        """Get the FlowPowerTWAPTracker from hass.data."""
+        domain_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        return domain_data.get("flow_power_twap_tracker")
+
+    @property
+    def native_value(self) -> float | None:
+        """Return the current TWAP value (or fallback)."""
+        tracker = self._get_tracker()
+        if tracker and tracker.twap is not None:
+            return tracker.twap
+        return FLOW_POWER_MARKET_AVG
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return TWAP tracking attributes."""
+        tracker = self._get_tracker()
+        if tracker:
+            twap_value = tracker.twap if tracker.twap is not None else FLOW_POWER_MARKET_AVG
+            return {
+                "days_of_data": tracker.twap_days,
+                "sample_count": tracker.sample_count,
+                "using_fallback": tracker.using_fallback,
+                "twap_dollars": round(twap_value / 100, 4),
+            }
+        return {
+            "days_of_data": 0,
+            "sample_count": 0,
+            "using_fallback": True,
+            "twap_dollars": round(FLOW_POWER_MARKET_AVG / 100, 4),
+        }
 
 
 class BatteryHealthSensor(SensorEntity):

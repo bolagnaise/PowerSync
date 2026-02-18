@@ -610,6 +610,10 @@ FLOW_POWER_BENCHMARK = 1.7       # BPEA - benchmark customer performance (c/kWh)
 FLOW_POWER_PEA_OFFSET = 9.7      # Combined: MARKET_AVG + BENCHMARK (c/kWh)
 FLOW_POWER_DEFAULT_BASE_RATE = 34.0  # Default Flow Power base rate (c/kWh)
 
+# TWAP (Time Weighted Average Price) Settings
+DEFAULT_TWAP_WINDOW_DAYS = 30     # Rolling window for TWAP calculation
+MIN_TWAP_SAMPLES = 12            # Minimum samples (~1 hour) before using dynamic TWAP
+
 # Data coordinator update intervals
 UPDATE_INTERVAL_PRICES = timedelta(minutes=5)  # Amber updates every 5 minutes
 UPDATE_INTERVAL_ENERGY = timedelta(minutes=1)  # Tesla energy data every minute
@@ -717,6 +721,7 @@ SENSOR_TYPE_SOLAR_CURTAILMENT = "solar_curtailment"
 # Flow Power price sensors
 SENSOR_TYPE_FLOW_POWER_PRICE = "flow_power_price"
 SENSOR_TYPE_FLOW_POWER_EXPORT_PRICE = "flow_power_export_price"
+SENSOR_TYPE_FLOW_POWER_TWAP = "flow_power_twap"
 
 # Battery health sensor (from mobile app TEDAPI scans)
 SENSOR_TYPE_BATTERY_HEALTH = "battery_health"

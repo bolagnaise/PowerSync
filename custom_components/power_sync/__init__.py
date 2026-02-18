@@ -9705,6 +9705,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     elif use_aemo_pricing and not flow_power_state:
         _LOGGER.warning("AEMO price source selected but no region configured")
 
+    # Initialize Flow Power TWAP tracker for dynamic PEA pricing
+    flow_power_twap_tracker = None
+    if electricity_provider == "flow_power":
+        from .coordinator import FlowPowerTWAPTracker
+        flow_power_twap_tracker = FlowPowerTWAPTracker(hass, flow_power_state, entry.entry_id)
+        await flow_power_twap_tracker.async_load()
+
     # Initialize Solcast Solar Forecast Coordinator if enabled
     # Skip if the Solcast Solar integration is already installed (avoid double-polling API)
     solcast_coordinator = None
@@ -9833,6 +9840,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "is_goodwe": is_goodwe,  # Track if GoodWe battery system
         "foxess_curtailment_state": "normal",  # Track FoxESS DC curtailment state
         "amber_usage_coordinator": amber_usage_coordinator,  # For actual metered cost data
+        "flow_power_twap_tracker": flow_power_twap_tracker,  # For dynamic PEA pricing
     }
 
     # Early initialization of tariff_schedule for non-Amber providers
@@ -11567,6 +11575,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Apply Flow Power PEA pricing (works with both AEMO and Amber price sources)
         if electricity_provider == "flow_power":
+            # Record current wholesale price for TWAP tracking
+            fp_tracker = hass.data[DOMAIN][entry.entry_id].get("flow_power_twap_tracker")
+            if fp_tracker and general_price is not None:
+                fp_tracker.record_price(general_price)
+
             # Check if PEA (Price Efficiency Adjustment) is enabled
             pea_enabled = entry.options.get(CONF_PEA_ENABLED, True)  # Default True for Flow Power
 
@@ -11582,13 +11595,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # get_wholesale_lookup() handles both AEMO and Amber data formats
                 wholesale_prices = get_wholesale_lookup(forecast_data)
 
+                # Get dynamic TWAP for PEA calculation
+                twap_value = fp_tracker.twap if fp_tracker else None
+
                 _LOGGER.info(
-                    "Applying Flow Power PEA (%s): base_rate=%.1fc, custom_pea=%s",
+                    "Applying Flow Power PEA (%s): base_rate=%.1fc, custom_pea=%s, twap=%s",
                     flow_power_price_source,
                     base_rate,
-                    f"{custom_pea:.1f}c" if custom_pea is not None else "auto"
+                    f"{custom_pea:.1f}c" if custom_pea is not None else "auto",
+                    f"{twap_value:.2f}c" if twap_value is not None else "fallback (8.0c)",
                 )
-                tariff = apply_flow_power_pea(tariff, wholesale_prices, base_rate, custom_pea)
+                tariff = apply_flow_power_pea(tariff, wholesale_prices, base_rate, custom_pea, twap=twap_value)
             elif flow_power_price_source in ("aemo_sensor", "aemo"):
                 # PEA disabled + AEMO: fall back to network tariff calculation
                 # (Amber prices already include network fees, no fallback needed)
@@ -16770,6 +16787,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.info(f"Flushed EV charging session for {vehicle_id} on unload")
             except Exception as e:
                 _LOGGER.debug(f"Could not flush session for {vehicle_id}: {e}")
+
+    # Save Flow Power TWAP history on unload
+    if twap_tracker := entry_data.get("flow_power_twap_tracker"):
+        try:
+            await twap_tracker.async_save()
+            _LOGGER.debug("Saved Flow Power TWAP history")
+        except Exception as e:
+            _LOGGER.debug(f"Error saving TWAP history: {e}")
 
     # Stop Amber usage coordinator if it exists
     if usage_coord := entry_data.get("amber_usage_coordinator"):
