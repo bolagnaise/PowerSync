@@ -11435,20 +11435,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 except Exception as notify_err:
                     _LOGGER.debug(f"Could not send export spike notification: {notify_err}")
 
-        # Fetch Powerwall timezone from site_info
+        # Fetch Powerwall timezone from site_info (Tesla only)
         # This ensures correct timezone handling for TOU schedule alignment
         powerwall_timezone = None
         site_info = None
         if tesla_coordinator:
             site_info = await tesla_coordinator.async_get_site_info()
-        if site_info:
-            powerwall_timezone = site_info.get("installation_time_zone")
-            if powerwall_timezone:
-                _LOGGER.info(f"Using Powerwall timezone: {powerwall_timezone}")
+            if site_info:
+                powerwall_timezone = site_info.get("installation_time_zone")
+                if powerwall_timezone:
+                    _LOGGER.info(f"Using Powerwall timezone: {powerwall_timezone}")
+                else:
+                    _LOGGER.warning("No installation_time_zone in site_info, will auto-detect from price data")
             else:
-                _LOGGER.warning("No installation_time_zone in site_info, will auto-detect from Amber data")
+                _LOGGER.warning("Failed to fetch Tesla site_info, will auto-detect timezone from price data")
         else:
-            _LOGGER.warning("Failed to fetch site_info, will auto-detect timezone from Amber data")
+            _LOGGER.debug("Non-Tesla battery system — timezone will be auto-detected from price data")
 
         # Get demand charge configuration from options (if set) or data (from initial config)
         demand_charge_enabled = entry.options.get(

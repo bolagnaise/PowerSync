@@ -487,11 +487,11 @@ def convert_amber_to_tesla_tariff(
         _LOGGER.warning("No forecast data provided")
         return None
 
-    _LOGGER.info("Converting %d Amber forecast points to Tesla tariff", len(forecast_data))
+    _LOGGER.info("Converting %d forecast points to tariff schedule", len(forecast_data))
 
     # Timezone handling:
-    # 1. Prefer Powerwall timezone from site_info (most accurate)
-    # 2. Fall back to auto-detection from Amber data
+    # 1. Prefer Powerwall timezone from site_info (most accurate, Tesla only)
+    # 2. Fall back to auto-detection from price data timestamps
     detected_tz = None
     if powerwall_timezone:
         from zoneinfo import ZoneInfo
@@ -507,14 +507,14 @@ def convert_amber_to_tesla_tariff(
 
     if not detected_tz:
         # Auto-detect timezone from first Amber timestamp
-        # Amber timestamps include timezone info: "2025-11-11T16:05:00+10:00"
+        # Price timestamps include timezone info: "2025-11-11T16:05:00+10:00"
         for point in forecast_data:
             nem_time = point.get("nemTime", "")
             if nem_time:
                 try:
                     timestamp = datetime.fromisoformat(nem_time.replace("Z", "+00:00"))
                     detected_tz = timestamp.tzinfo
-                    _LOGGER.info("Auto-detected timezone from Amber data: %s", detected_tz)
+                    _LOGGER.info("Auto-detected timezone from price data: %s", detected_tz)
                     break
                 except Exception:
                     continue
