@@ -11073,6 +11073,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Determine price source: AEMO API, Octopus, or Amber
         # Support both "aemo_sensor" (legacy) and "aemo" (new) price source names
+        flow_power_price_source = entry.options.get(
+            CONF_FLOW_POWER_PRICE_SOURCE,
+            entry.data.get(CONF_FLOW_POWER_PRICE_SOURCE, "amber")
+        )
         use_aemo_sensor = (
             aemo_sensor_coordinator is not None and
             flow_power_price_source in ("aemo_sensor", "aemo")
