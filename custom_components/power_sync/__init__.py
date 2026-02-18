@@ -9904,6 +9904,195 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         return None
 
+    async def _tesla_charge_kick(reason: str) -> None:
+        """Mode-bounce PW3 to force it to act on backup_reserve=100%.
+
+        PW3 firmware can delay up to ~2 hours before acting on a
+        backup_reserve=100% API command despite HTTP 200.  A quick
+        self_consumption → autonomous bounce forces it to re-read its
+        configuration and start charging immediately.
+
+        Args:
+            reason: Short label for log messages (e.g. "force_charge", "backup_reserve_100").
+        """
+        try:
+            # --- Pre-check: already charging? ---
+            status = await get_live_status()
+            if status and status.get("battery_power") is not None:
+                bp = status["battery_power"]
+                if bp < -200:
+                    _LOGGER.info(
+                        "Charge kick (%s): already charging (%dW), skipping",
+                        reason, abs(int(bp)),
+                    )
+                    return
+
+            current_token, current_provider = token_getter()
+            if not current_token:
+                _LOGGER.warning("Charge kick (%s): no Tesla API token", reason)
+                return
+
+            site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+            if not site_id:
+                _LOGGER.warning("Charge kick (%s): no energy site ID", reason)
+                return
+
+            session = async_get_clientsession(hass)
+            api_base = (
+                TESLEMETRY_API_BASE_URL
+                if current_provider == TESLA_PROVIDER_TESLEMETRY
+                else FLEET_API_BASE_URL
+            )
+            headers = {
+                "Authorization": f"Bearer {current_token}",
+                "Content-Type": "application/json",
+            }
+
+            async def _mode_bounce() -> bool:
+                """Execute self_consumption → 5s → autonomous bounce.
+
+                Returns True if autonomous mode was verified.
+                """
+                # Switch to self_consumption
+                async with session.post(
+                    f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                    headers=headers,
+                    json={"default_real_mode": "self_consumption"},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status == 200:
+                        _LOGGER.info("Charge kick (%s): switched to self_consumption", reason)
+                    else:
+                        text = await resp.text()
+                        _LOGGER.warning(
+                            "Charge kick (%s): self_consumption POST failed %s - %s",
+                            reason, resp.status, text,
+                        )
+                        return False
+
+                await asyncio.sleep(5)
+
+                # Switch back to autonomous (3 retries with verification)
+                for attempt in range(3):
+                    try:
+                        async with session.post(
+                            f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                            headers=headers,
+                            json={"default_real_mode": "autonomous"},
+                            timeout=aiohttp.ClientTimeout(total=30),
+                        ) as resp:
+                            if resp.status != 200:
+                                text = await resp.text()
+                                _LOGGER.warning(
+                                    "Charge kick (%s): autonomous POST failed %s - %s (attempt %d/3)",
+                                    reason, resp.status, text, attempt + 1,
+                                )
+                                if attempt < 2:
+                                    await asyncio.sleep(3)
+                                continue
+
+                        # Verify mode actually changed
+                        await asyncio.sleep(2)
+                        async with session.get(
+                            f"{api_base}/api/1/energy_sites/{site_id}/site_info",
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=10),
+                        ) as verify_resp:
+                            if verify_resp.status == 200:
+                                data = await verify_resp.json()
+                                mode = data.get("response", {}).get("default_real_mode")
+                                if mode == "autonomous":
+                                    _LOGGER.info("Charge kick (%s): switched back to autonomous", reason)
+                                    return True
+                                _LOGGER.warning(
+                                    "Charge kick (%s): mode is '%s' not 'autonomous' (attempt %d/3)",
+                                    reason, mode, attempt + 1,
+                                )
+                            else:
+                                # Can't verify — assume success
+                                _LOGGER.warning(
+                                    "Charge kick (%s): couldn't verify mode (status %s), assuming success",
+                                    reason, verify_resp.status,
+                                )
+                                return True
+                    except Exception as e:
+                        _LOGGER.warning(
+                            "Charge kick (%s): autonomous attempt %d/3 error: %s",
+                            reason, attempt + 1, e,
+                        )
+
+                    if attempt < 2:
+                        await asyncio.sleep(3)
+
+                return False
+
+            # --- Execute the initial mode bounce ---
+            _LOGGER.info("Charge kick (%s): mode bounce starting", reason)
+            bounce_ok = await _mode_bounce()
+            if not bounce_ok:
+                _LOGGER.error(
+                    "Charge kick (%s): failed to restore autonomous mode after bounce",
+                    reason,
+                )
+                try:
+                    from .automations.actions import _send_expo_push
+                    await _send_expo_push(
+                        hass,
+                        "Battery Alert",
+                        f"Charge kick ({reason}): failed to restore autonomous mode - check settings",
+                    )
+                except Exception:
+                    pass
+                return
+
+            # --- Background verification task ---
+            async def _verify_charging() -> None:
+                """Poll live_status every 60s for up to 5 min to confirm charging started."""
+                retry_bounce_done = False
+                for poll in range(5):
+                    await asyncio.sleep(60)
+                    try:
+                        poll_status = await get_live_status()
+                        if poll_status and poll_status.get("battery_power") is not None:
+                            bp = poll_status["battery_power"]
+                            if bp < -200:
+                                _LOGGER.info(
+                                    "Charge kick verification (%s): charging confirmed (%dW) after %ds",
+                                    reason, abs(int(bp)), (poll + 1) * 60,
+                                )
+                                return
+
+                        # At the 120s mark (poll index 1), retry bounce once
+                        if poll == 1 and not retry_bounce_done:
+                            _LOGGER.info(
+                                "Charge kick verification (%s): not charging after 120s, retrying bounce",
+                                reason,
+                            )
+                            retry_bounce_done = True
+                            await _mode_bounce()
+
+                    except Exception as e:
+                        _LOGGER.debug("Charge kick verification poll error: %s", e)
+
+                _LOGGER.error(
+                    "Charge kick verification (%s): battery did NOT start charging within 5 minutes",
+                    reason,
+                )
+                try:
+                    from .automations.actions import _send_expo_push
+                    await _send_expo_push(
+                        hass,
+                        "Battery Alert",
+                        f"Charge kick ({reason}): Powerwall did not start charging within 5 minutes",
+                    )
+                except Exception:
+                    pass
+
+            hass.async_create_task(_verify_charging())
+
+        except Exception as e:
+            _LOGGER.warning("Charge kick (%s) failed: %s", reason, e)
+
     # Smart AC-coupled curtailment check
     async def should_curtail_ac_coupled(import_price: float | None, export_earnings: float | None) -> bool:
         """Smart curtailment logic for AC-coupled solar systems.
@@ -13456,6 +13645,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 force_charge_state["expires_at"] = actual_expiry.astimezone(dt_util.UTC)
                 _LOGGER.info(f"✅ FORCE CHARGE ACTIVE: Tariff uploaded for {duration} min, expires at {actual_expiry.strftime('%H:%M')}")
 
+                # Kick PW3 to ensure it starts charging immediately
+                hass.async_create_task(_tesla_charge_kick("force_charge"))
+
                 # Dispatch event for UI
                 async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
                     "active": True,
@@ -14440,6 +14632,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ) as response:
                     if response.status == 200:
                         _LOGGER.info(f"✅ Tesla backup reserve set to {percent}%")
+                        if percent == 100:
+                            # Kick PW3 to ensure it starts charging immediately
+                            hass.async_create_task(_tesla_charge_kick("backup_reserve_100"))
                     else:
                         text = await response.text()
                         _LOGGER.error(f"Failed to set Tesla backup reserve: {response.status} - {text}")
