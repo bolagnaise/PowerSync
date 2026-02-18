@@ -923,8 +923,8 @@ class AEMOSpikeManager:
         self._last_price: float | None = None
         self._last_check: datetime | None = None
 
-        # Create AEMO client
-        from .aemo_client import AEMOAPIClient
+        # Create AEMO client (uses NEMWEB dispatch ZIP with JSON fallback)
+        from .aemo_api import AEMOAPIClient
         session = async_get_clientsession(hass)
         self._aemo_client = AEMOAPIClient(session)
 
@@ -1312,8 +1312,8 @@ class GenericAEMOSpikeManager:
         self._last_price: float | None = None
         self._last_check: datetime | None = None
 
-        # Create AEMO client
-        from .aemo_client import AEMOAPIClient
+        # Create AEMO client (uses NEMWEB dispatch ZIP with JSON fallback)
+        from .aemo_api import AEMOAPIClient
         session = async_get_clientsession(hass)
         self._aemo_client = AEMOAPIClient(session)
 
@@ -16497,7 +16497,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 async def check_aemo_spike_for_vpp(now):
                     """Check AEMO prices and respond to spikes (Globird VPP)."""
                     try:
-                        from .aemo_client import AEMOAPIClient
+                        from .aemo_api import AEMOAPIClient
                         from homeassistant.helpers.aiohttp_client import async_get_clientsession
                         from homeassistant.util import dt as dt_util
 

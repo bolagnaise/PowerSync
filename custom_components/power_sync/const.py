@@ -681,9 +681,6 @@ UPDATE_INTERVAL_ENERGY = timedelta(minutes=1)  # Tesla energy data every minute
 # Amber API
 AMBER_API_BASE_URL = "https://api.amber.com.au/v1"
 
-# AEMO API
-AEMO_API_BASE_URL = "https://visualisations.aemo.com.au/aemo/apps/api/report/ELEC_NEM_SUMMARY"
-
 # Teslemetry API
 TESLEMETRY_API_BASE_URL = "https://api.teslemetry.com"
 

@@ -30,6 +30,7 @@ class AEMOAPIClient:
     """
 
     BASE_URL = "https://visualisations.aemo.com.au/aemo/apps/api/report/ELEC_NEM_SUMMARY"
+    DISPATCH_URL = "https://nemweb.com.au/Reports/Current/DispatchIS_Reports/"
     PREDISPATCH_URL = "https://nemweb.com.au/Reports/Current/Predispatch_Reports/"
 
     # NEM Regions
@@ -56,6 +57,7 @@ class AEMOAPIClient:
             session: Optional aiohttp session. If not provided, creates one per request.
         """
         self._session = session
+        self._last_dispatch_file: str | None = None
         _LOGGER.info("AEMOAPIClient initialized")
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -67,6 +69,8 @@ class AEMOAPIClient:
     async def get_current_prices(self) -> dict[str, dict[str, Any]] | None:
         """Get current 5-minute dispatch prices for all NEM regions.
 
+        Fetches from NEMWEB dispatch ZIP files (primary) with JSON API fallback.
+
         Returns:
             dict: Price data for all regions or None on error
             Example: {
@@ -76,14 +80,131 @@ class AEMOAPIClient:
             }
         """
         try:
-            _LOGGER.info("Fetching current AEMO NEM prices")
+            session = await self._get_session()
+
+            # Step 1: Get directory listing from NEMWEB dispatch reports
+            async with session.get(
+                self.DISPATCH_URL, timeout=aiohttp.ClientTimeout(total=15)
+            ) as response:
+                response.raise_for_status()
+                index_html = await response.text()
+
+            # Step 2: Find latest dispatch ZIP file
+            files = re.findall(r"PUBLIC_DISPATCHIS_\d{12}_\d+\.zip", index_html)
+            if not files:
+                _LOGGER.warning("No dispatch files found in NEMWEB directory, using JSON fallback")
+                return await self._get_current_prices_json_fallback()
+
+            latest_file = sorted(files)[-1]
+
+            # Skip re-download if we already processed this file
+            if latest_file == self._last_dispatch_file:
+                _LOGGER.debug("NEMWEB dispatch file unchanged: %s", latest_file)
+
+            # Step 3: Download the ZIP
+            file_url = f"{self.DISPATCH_URL}{latest_file}"
+            async with session.get(
+                file_url, timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
+                response.raise_for_status()
+                zip_content = await response.read()
+
+            # Step 4: Parse dispatch prices from ZIP
+            prices = self._parse_dispatch_zip(zip_content)
+            if not prices:
+                _LOGGER.warning("No prices parsed from NEMWEB dispatch ZIP, using JSON fallback")
+                return await self._get_current_prices_json_fallback()
+
+            self._last_dispatch_file = latest_file
+            _LOGGER.info("NEMWEB dispatch: %s -> %d regions", latest_file, len(prices))
+            _LOGGER.debug("NEMWEB dispatch data: %s", prices)
+            return prices
+
+        except Exception as err:
+            _LOGGER.warning("NEMWEB dispatch fetch failed (%s), using JSON fallback", err)
+            return await self._get_current_prices_json_fallback()
+
+    def _parse_dispatch_zip(self, content: bytes) -> dict[str, dict[str, Any]] | None:
+        """Parse a NEMWEB DispatchIS ZIP file to extract current prices.
+
+        Args:
+            content: Raw bytes of the ZIP file.
+
+        Returns:
+            dict: Price data keyed by region, or None if parsing fails.
+        """
+        prices: dict[str, dict[str, Any]] = {}
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as zf:
+                csv_files = [f for f in zf.namelist() if f.upper().endswith(".CSV")]
+                if not csv_files:
+                    _LOGGER.warning("No CSV file in dispatch ZIP: %s", zf.namelist())
+                    return None
+
+                with zf.open(csv_files[0]) as f:
+                    reader = csv.reader(io.TextIOWrapper(f, encoding="utf-8"))
+
+                    for row in reader:
+                        # Dispatch CSV PRICE table format:
+                        # row[0]: Record type ("D" = data)
+                        # row[1]: "DISPATCH"
+                        # row[2]: "PRICE"
+                        # row[4]: Settlement date (YYYY/MM/DD HH:MM:SS)
+                        # row[6]: Region ID
+                        # row[8]: Intervention flag (0 = normal)
+                        # row[9]: RRP in $/MWh
+                        if len(row) < 10 or row[0] != "D":
+                            continue
+
+                        if row[1] != "DISPATCH" or row[2] != "PRICE":
+                            continue
+
+                        # Skip intervention pricing
+                        try:
+                            if int(row[8]) != 0:
+                                continue
+                        except (ValueError, IndexError):
+                            continue
+
+                        region = row[6]
+                        if region not in self.REGIONS:
+                            continue
+
+                        try:
+                            rrp = float(row[9])
+                            timestamp = row[4]
+
+                            prices[region] = {
+                                "price": rrp,
+                                "timestamp": timestamp,
+                                "status": "FIRM",
+                                "region_name": self.REGIONS[region],
+                            }
+                        except (ValueError, IndexError) as err:
+                            _LOGGER.debug("Skipping dispatch row: %s", err)
+                            continue
+
+        except zipfile.BadZipFile as err:
+            _LOGGER.warning("Invalid dispatch ZIP: %s", err)
+            return None
+
+        return prices if prices else None
+
+    async def _get_current_prices_json_fallback(self) -> dict[str, dict[str, Any]] | None:
+        """Get current prices from AEMO JSON API (fallback).
+
+        Returns:
+            dict: Price data for all regions or None on error.
+        """
+        try:
+            _LOGGER.info("Fetching current AEMO NEM prices via JSON API fallback")
             session = await self._get_session()
 
             async with session.get(self.BASE_URL, timeout=aiohttp.ClientTimeout(total=15)) as response:
                 response.raise_for_status()
                 data = await response.json()
 
-            # Extract regional prices from the ELEC_NEM_SUMMARY data
             prices: dict[str, dict[str, Any]] = {}
 
             if "ELEC_NEM_SUMMARY" in data:
@@ -91,22 +212,21 @@ class AEMOAPIClient:
                     region = item.get("REGIONID")
                     if region in self.REGIONS:
                         prices[region] = {
-                            "price": float(item.get("PRICE", 0)),  # Wholesale price in $/MWh
+                            "price": float(item.get("PRICE", 0)),
                             "timestamp": item.get("SETTLEMENTDATE"),
                             "status": item.get("PRICE_STATUS", "UNKNOWN"),
                             "demand": float(item.get("TOTALDEMAND", 0)),
                             "region_name": self.REGIONS[region],
                         }
 
-            _LOGGER.info("Successfully fetched AEMO prices for %d regions", len(prices))
-            _LOGGER.debug("AEMO price data: %s", prices)
+            _LOGGER.info("JSON fallback fetched AEMO prices for %d regions", len(prices))
             return prices
 
         except aiohttp.ClientError as err:
-            _LOGGER.error("Error fetching AEMO prices: %s", err)
+            _LOGGER.error("Error fetching AEMO prices (JSON fallback): %s", err)
             return None
         except (KeyError, ValueError) as err:
-            _LOGGER.error("Error parsing AEMO data: %s", err)
+            _LOGGER.error("Error parsing AEMO data (JSON fallback): %s", err)
             return None
 
     async def get_region_price(self, region: str) -> dict[str, Any] | None:
