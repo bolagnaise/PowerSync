@@ -526,7 +526,7 @@ async def test_goodwe_connection(
 class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for PowerSync."""
 
-    VERSION = 5
+    VERSION = 6
 
     def __init__(self) -> None:
         """Initialize the config flow."""

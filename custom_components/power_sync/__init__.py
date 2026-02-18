@@ -1550,6 +1550,21 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         )
         _LOGGER.info("Migration to version 5 complete")
 
+    if config_entry.version == 5:
+        # Migrate from version 5 to version 6
+        # v4→v5 only set the key when missing, but some entries already had it
+        # set to "native" from older config flow defaults. Upgrade those too,
+        # unless the user explicitly disabled optimization via the app toggle.
+        new_data = {**config_entry.data}
+        user_disabled = config_entry.options.get(CONF_OPTIMIZATION_ENABLED) is False
+        if new_data.get(CONF_OPTIMIZATION_PROVIDER) == OPT_PROVIDER_NATIVE and not user_disabled:
+            new_data[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_POWERSYNC
+            _LOGGER.info("Migration v5→v6: upgraded native → Smart Optimization")
+        hass.config_entries.async_update_entry(
+            config_entry, data=new_data, version=6
+        )
+        _LOGGER.info("Migration to version 6 complete")
+
     # Within-version migration: foxess_cloud_password → foxess_cloud_api_key
     if "foxess_cloud_password" in config_entry.data and "foxess_cloud_api_key" not in config_entry.data:
         new_data = {**config_entry.data}
