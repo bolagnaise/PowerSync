@@ -1535,6 +1535,21 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         )
         _LOGGER.info("Migration to version 4 complete (Flow Power v2 tariff support)")
 
+    if config_entry.version == 4:
+        # Migrate from version 4 to version 5
+        # Auto-enable Smart Optimization for existing entries that pre-date the
+        # optimization_provider config step. New configs default to powersync_ml
+        # (config_flow line 1059), but old entries lack the key entirely and
+        # fell through to OPT_PROVIDER_NATIVE, silently disabling the optimizer.
+        new_data = {**config_entry.data}
+        if CONF_OPTIMIZATION_PROVIDER not in new_data:
+            new_data[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_POWERSYNC
+            _LOGGER.info("Migration v4→v5: enabled Smart Optimization (was missing from config)")
+        hass.config_entries.async_update_entry(
+            config_entry, data=new_data, version=5
+        )
+        _LOGGER.info("Migration to version 5 complete")
+
     # Within-version migration: foxess_cloud_password → foxess_cloud_api_key
     if "foxess_cloud_password" in config_entry.data and "foxess_cloud_api_key" not in config_entry.data:
         new_data = {**config_entry.data}
