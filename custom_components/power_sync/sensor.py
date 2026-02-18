@@ -434,15 +434,15 @@ async def async_setup_entry(
                 )
             )
     else:
-        # For non-Amber TOU providers (Globird, etc.), always create TariffPriceSensor.
+        # For non-Amber providers (Globird, Flow Power, etc.), always create TariffPriceSensor.
         # The sensor handles missing tariff_schedule gracefully (returns None until
-        # the Tesla tariff is fetched later during setup). This avoids a race condition
+        # the tariff is fetched later during setup). This avoids a race condition
         # where sensors were skipped because tariff_schedule hadn't been fetched yet.
         electricity_provider = entry.options.get(
             CONF_ELECTRICITY_PROVIDER,
             entry.data.get(CONF_ELECTRICITY_PROVIDER, ""),
         )
-        tou_providers = ("globird", "aemo_vpp", "other", "tou_only", "octopus")
+        tou_providers = ("globird", "aemo_vpp", "other", "tou_only", "octopus", "flow_power")
         tariff_schedule = domain_data.get("tariff_schedule")
         if tariff_schedule or electricity_provider in tou_providers:
             _LOGGER.info(
@@ -466,7 +466,7 @@ async def async_setup_entry(
                 )
             )
         else:
-            _LOGGER.debug("No amber_coordinator or TOU provider - skipping price sensors")
+            _LOGGER.debug("No price coordinator or known provider - skipping price sensors")
 
     # Add energy sensors - select the correct coordinator for battery system type
     # All coordinators return data with same field names (solar_power, grid_power, etc.)
