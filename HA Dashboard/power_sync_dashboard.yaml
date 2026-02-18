@@ -525,19 +525,19 @@ views:
       - type: horizontal-stack
         cards:
           - type: entity
-            entity: sensor.power_sync_lp_solar_forecast
+            entity: sensor.solar_forecast
             name: Solar Forecast
             icon: mdi:solar-power-variant
           - type: entity
-            entity: sensor.power_sync_lp_load_forecast
+            entity: sensor.load_forecast
             name: Load Forecast
             icon: mdi:home-lightning-bolt
           - type: entity
-            entity: sensor.power_sync_lp_import_price_forecast
+            entity: sensor.import_price_forecast
             name: Import Price Avg
             icon: mdi:cash-clock
           - type: entity
-            entity: sensor.power_sync_lp_export_price_forecast
+            entity: sensor.export_price_forecast
             name: Export Price Avg
             icon: mdi:cash-clock
       - type: custom:apexcharts-card
@@ -559,7 +559,7 @@ views:
                     return val.toFixed(1) + ' kW';
                   }
         series:
-          - entity: sensor.power_sync_lp_solar_forecast
+          - entity: sensor.solar_forecast
             name: Solar Forecast
             type: area
             color: '#FFD700'
@@ -575,7 +575,7 @@ views:
               const interval = 5 * 60 * 1000;
               const start = new Date(Math.floor(now.getTime() / interval) * interval);
               return values.map((v, i) => [start.getTime() + i * interval, v]);
-          - entity: sensor.power_sync_lp_load_forecast
+          - entity: sensor.load_forecast
             name: Load Forecast
             type: line
             color: '#9C27B0'
@@ -626,7 +626,7 @@ views:
                     return (val * 100).toFixed(0) + '¢';
                   }
         series:
-          - entity: sensor.power_sync_lp_import_price_forecast
+          - entity: sensor.import_price_forecast
             name: Import Price
             type: line
             color: '#FF9800'
@@ -641,7 +641,7 @@ views:
               const interval = 5 * 60 * 1000;
               const start = new Date(Math.floor(now.getTime() / interval) * interval);
               return values.map((v, i) => [start.getTime() + i * interval, v]);
-          - entity: sensor.power_sync_lp_export_price_forecast
+          - entity: sensor.export_price_forecast
             name: Export Price
             type: line
             color: '#4CAF50'
