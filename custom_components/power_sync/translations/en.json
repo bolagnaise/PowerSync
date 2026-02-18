@@ -109,7 +109,7 @@
       },
       "custom_tariff": {
         "title": "Custom Tariff Configuration",
-        "description": "Configure your electricity tariff rates for EV charging price decisions.\n\n{info}\n\n{skip_hint}",
+        "description": "Configure your electricity tariff rates for battery optimisation, price sensors, and EV charging.\n\n{info}\n\n{skip_hint}",
         "data": {
           "skip_tariff": "Skip tariff configuration",
           "plan_name": "Plan Name (optional)",
@@ -701,7 +701,7 @@
         },
         "data_description": {
           "aemo_spike_enabled": "Enable if your Globird plan includes payments for exporting during AEMO price spikes. Not all plans include this feature.",
-          "configure_custom_tariff": "Enable to configure your TOU rates for EV charging price decisions"
+          "configure_custom_tariff": "Recommended: your TOU rates are needed for accurate price sensors, battery optimisation, and EV charging"
         },
         "submit_button": "Next"
       },
@@ -724,7 +724,7 @@
       },
       "custom_tariff_options": {
         "title": "Custom Tariff Configuration",
-        "description": "Configure your electricity tariff rates for EV charging price decisions.\n\n{info}",
+        "description": "Configure your electricity tariff rates for battery optimisation, price sensors, and EV charging.\n\n{info}",
         "data": {
           "plan_name": "Plan Name (optional)",
           "tariff_type": "Tariff Type",

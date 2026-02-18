@@ -4299,30 +4299,35 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         region_choices = {"": "Select Region..."}
         region_choices.update(AEMO_REGIONS)
 
+        is_tesla = self.config_entry.data.get(CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA) == BATTERY_SYSTEM_TESLA
+
+        schema_fields: dict[Any, Any] = {
+            vol.Optional(
+                CONF_AEMO_SPIKE_ENABLED,
+                default=self._get_option(CONF_AEMO_SPIKE_ENABLED, False),
+            ): bool,
+            vol.Optional(
+                CONF_AEMO_REGION,
+                default=self._get_option(CONF_AEMO_REGION, ""),
+            ): vol.In(region_choices),
+            vol.Optional(
+                CONF_AEMO_SPIKE_THRESHOLD,
+                default=self._get_option(CONF_AEMO_SPIKE_THRESHOLD, 3000.0),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=20000.0)),
+        }
+
+        # Tesla users get tariff from the Tesla API — no need for manual configuration
+        if not is_tesla:
+            schema_fields[vol.Optional("configure_custom_tariff", default=False)] = bool
+            tariff_hint = "**Custom Tariff (recommended):** Enable 'Configure Custom Tariff' to set your TOU rates. These are needed for accurate price sensors, battery optimisation, and EV charging."
+        else:
+            tariff_hint = "Tariff rates are automatically synced from your Tesla Powerwall."
+
         return self.async_show_form(
             step_id="globird_options",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(
-                        CONF_AEMO_SPIKE_ENABLED,
-                        default=self._get_option(CONF_AEMO_SPIKE_ENABLED, False),
-                    ): bool,
-                    vol.Optional(
-                        CONF_AEMO_REGION,
-                        default=self._get_option(CONF_AEMO_REGION, ""),
-                    ): vol.In(region_choices),
-                    vol.Optional(
-                        CONF_AEMO_SPIKE_THRESHOLD,
-                        default=self._get_option(CONF_AEMO_SPIKE_THRESHOLD, 3000.0),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=20000.0)),
-                    vol.Optional(
-                        "configure_custom_tariff",
-                        default=False,
-                    ): bool,
-                }
-            ),
+            data_schema=vol.Schema(schema_fields),
             description_placeholders={
-                "tariff_hint": "Enable 'Configure Custom Tariff' to set your TOU rates for EV charging",
+                "tariff_hint": tariff_hint,
             },
         )
 
