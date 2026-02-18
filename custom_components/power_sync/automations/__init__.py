@@ -934,11 +934,8 @@ class AutomationEngine:
             return ev_state
 
         # Check if this is a BLE integration (prefix contains "ble")
+        # Location will be deferred to after the second pass so Teslemetry device_tracker takes priority
         is_ble = "ble" in vehicle_prefix.lower()
-        if is_ble:
-            # BLE only works when car is nearby, so assume "home" location
-            ev_state["location"] = "home"
-            _LOGGER.debug(f"Tesla BLE detected (prefix={vehicle_prefix}), assuming location=home")
 
         # Second pass: find related sensors using the vehicle prefix
         # Support Tesla Fleet, Teslemetry, and Tesla BLE naming conventions
@@ -992,6 +989,12 @@ class AutomationEngine:
                 if state_value.lower() == "on" and ev_state["location"] != "home":
                     ev_state["location"] = "work"
                     _LOGGER.debug(f"EV at work from {entity_id}: {state_value}")
+
+        # BLE fallback: if no authoritative location found in the second pass,
+        # assume "home" since BLE only works when car is nearby
+        if is_ble and ev_state["location"] == "unknown":
+            ev_state["location"] = "home"
+            _LOGGER.debug(f"Tesla BLE detected (prefix={vehicle_prefix}), no Teslemetry location found, assuming location=home")
 
         # Infer plugged in from charging state if not already determined
         # If car is charging/stopped/complete, it must be plugged in

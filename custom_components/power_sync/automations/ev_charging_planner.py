@@ -178,20 +178,7 @@ async def get_ev_location(
                         _LOGGER.debug(f"Teslemetry BT location from {loc_entity}: {location}")
                         return location
 
-    # Method 1: Tesla BLE - if available, vehicle is nearby (assume "home")
-    # Note: BLE doesn't provide VIN filtering, so only use for non-VIN-specific queries
-    if vehicle_vin is None:
-        config = dict(config_entry.options) if config_entry else {}
-        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
-        ble_charger_entity = f"switch.{ble_prefix}_charger"
-        ble_state = hass.states.get(ble_charger_entity)
-
-        if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
-            location = "home"
-            _LOGGER.debug(f"Tesla BLE detected, assuming location=home")
-            return location
-
-    # Method 2: Check Tesla Fleet/Teslemetry device_tracker entities
+    # Method 1: Check Tesla Fleet/Teslemetry device_tracker entities
     entity_registry = er.async_get(hass)
     device_registry = dr.async_get(hass)
 
@@ -238,6 +225,18 @@ async def get_ev_location(
                     location = "home"
                     _LOGGER.debug(f"Found EV at home from {entity_id} (VIN: {device_vin})")
                     break
+
+    # Method 2 (fallback): Tesla BLE - if available, vehicle is nearby (assume "home")
+    # Only used if no authoritative location found above (e.g. BLE-only users without Teslemetry)
+    if location == "unknown" and vehicle_vin is None:
+        config = dict(config_entry.options) if config_entry else {}
+        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+        ble_charger_entity = f"switch.{ble_prefix}_charger"
+        ble_state = hass.states.get(ble_charger_entity)
+
+        if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
+            location = "home"
+            _LOGGER.debug(f"Tesla BLE detected (fallback), assuming location=home")
 
     return location
 
@@ -359,18 +358,7 @@ async def is_ev_plugged_in(
                         _LOGGER.debug(f"Teslemetry BT: vehicle plugged in (state={cs.state})")
                         return True
 
-    # Method 1: Tesla BLE (only applies if no specific VIN or BLE matches)
-    # Note: BLE doesn't provide VIN filtering, so only use for non-VIN-specific queries
-    if vehicle_vin is None:
-        config = dict(config_entry.options) if config_entry else {}
-        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
-        ble_charger_entity = f"switch.{ble_prefix}_charger"
-        ble_state = hass.states.get(ble_charger_entity)
-
-        if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
-            return True
-
-    # Method 2: Check Tesla Fleet/Teslemetry entities
+    # Method 1: Check Tesla Fleet/Teslemetry entities
     entity_registry = er.async_get(hass)
     device_registry = dr.async_get(hass)
 
@@ -423,6 +411,17 @@ async def is_ev_plugged_in(
                     if state.state.lower() in ("charging", "complete", "stopped"):
                         _LOGGER.debug(f"EV plugged in (charging state: {state.state}, VIN: {device_vin})")
                         return True
+
+    # Method 2 (fallback): Tesla BLE — only if no authoritative sensor found above
+    if vehicle_vin is None:
+        config = dict(config_entry.options) if config_entry else {}
+        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+        ble_charger_entity = f"switch.{ble_prefix}_charger"
+        ble_state = hass.states.get(ble_charger_entity)
+
+        if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
+            _LOGGER.debug(f"Tesla BLE detected (fallback), assuming plugged in")
+            return True
 
     return False
 
@@ -2985,23 +2984,7 @@ class AutoScheduleExecutor:
 
         location = "unknown"
 
-        # Method 1: Tesla BLE - if available, vehicle is nearby (assume "home")
-        config = {}
-        entries = self.hass.config_entries.async_entries(DOMAIN)
-        if entries:
-            config = dict(entries[0].options)
-
-        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
-        ble_charger_entity = f"switch.{ble_prefix}_charger"
-        ble_state = self.hass.states.get(ble_charger_entity)
-
-        if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
-            # BLE only works when car is nearby - assume home
-            location = "home"
-            _LOGGER.debug(f"Tesla BLE detected, assuming location=home")
-            return location
-
-        # Method 2: Check Tesla Fleet/Teslemetry device_tracker entities
+        # Method 1: Check Tesla Fleet/Teslemetry device_tracker entities
         entity_registry = er.async_get(self.hass)
         device_registry = dr.async_get(self.hass)
 
@@ -3057,6 +3040,22 @@ class AutoScheduleExecutor:
                         _LOGGER.debug(f"Found vehicle at work from {entity_id}")
                         break
 
+        # Method 2 (fallback): Tesla BLE - if available, vehicle is nearby (assume "home")
+        # Only used if no authoritative location found above (e.g. BLE-only users without Teslemetry)
+        if location == "unknown":
+            config = {}
+            entries = self.hass.config_entries.async_entries(DOMAIN)
+            if entries:
+                config = dict(entries[0].options)
+
+            ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+            ble_charger_entity = f"switch.{ble_prefix}_charger"
+            ble_state = self.hass.states.get(ble_charger_entity)
+
+            if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
+                location = "home"
+                _LOGGER.debug(f"Tesla BLE detected (fallback), assuming location=home")
+
         return location
 
     async def _is_vehicle_plugged_in(self, vehicle_id: str) -> bool:
@@ -3075,21 +3074,7 @@ class AutoScheduleExecutor:
         )
         from homeassistant.helpers import entity_registry as er, device_registry as dr
 
-        # Method 1: Tesla BLE
-        config = {}
-        entries = self.hass.config_entries.async_entries(DOMAIN)
-        if entries:
-            config = dict(entries[0].options)
-
-        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
-        ble_charger_entity = f"switch.{ble_prefix}_charger"
-        ble_state = self.hass.states.get(ble_charger_entity)
-
-        if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
-            # If BLE charger entity is available, vehicle is likely plugged in at home
-            return True
-
-        # Method 2: Check Tesla Fleet/Teslemetry entities
+        # Method 1: Check Tesla Fleet/Teslemetry entities
         entity_registry = er.async_get(self.hass)
         device_registry = dr.async_get(self.hass)
 
@@ -3140,6 +3125,20 @@ class AutoScheduleExecutor:
                         if state.state.lower() in ("charging", "complete", "stopped"):
                             _LOGGER.debug(f"Vehicle plugged in (charging state: {state.state})")
                             return True
+
+        # Method 2 (fallback): Tesla BLE — only if no authoritative sensor found above
+        config = {}
+        entries = self.hass.config_entries.async_entries(DOMAIN)
+        if entries:
+            config = dict(entries[0].options)
+
+        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+        ble_charger_entity = f"switch.{ble_prefix}_charger"
+        ble_state = self.hass.states.get(ble_charger_entity)
+
+        if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
+            _LOGGER.debug(f"Tesla BLE detected (fallback), assuming plugged in")
+            return True
 
         return False
 
