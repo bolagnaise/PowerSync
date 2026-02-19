@@ -78,7 +78,9 @@ class SungrowSHController(InverterController):
 
     # Energy accounting
     REG_DAILY_IMPORT = 13034           # 13035 - Daily imported energy (kWh * 0.1)
+    REG_TOTAL_IMPORT = 13035           # 13036-13037 - Total imported energy (kWh * 0.1, U32)
     REG_DAILY_EXPORT = 13043           # 13044 - Daily exported energy (kWh * 0.1)
+    REG_TOTAL_EXPORT = 13044           # 13045-13046 - Total exported energy (kWh * 0.1, U32)
 
     # Temperature
     REG_INVERTER_TEMP = 5006           # 5007 - Inverter temperature (°C * 0.1, signed)
@@ -94,9 +96,11 @@ class SungrowSHController(InverterController):
     CMD_CHARGE = 0xAA                  # 170 - Force charge
     CMD_DISCHARGE = 0xBB               # 187 - Force discharge
     CMD_STOP = 0xCC                    # 204 - Stop forced mode
-    EMS_SELF_CONSUMPTION = 0
+    EMS_AI = 0                         # AI mode (iHM docs)
+    EMS_SELF_CONSUMPTION = 0           # Self-consumption (same as AI on non-iHM)
     EMS_FORCED = 2
     EMS_EXTERNAL = 3
+    EMS_VPP = 4                        # Virtual power plant mode
 
     # SOC Limits
     REG_MAX_SOC = 13057                # 13058 - Maximum SOC limit (% * 10)
@@ -113,8 +117,8 @@ class SungrowSHController(InverterController):
     # Backup Reserve
     REG_BACKUP_RESERVE = 13099         # 13100 - Reserved SOC for backup (% * 10)
 
-    # Default battery voltage for kW to Amp conversion
-    BATTERY_VOLTAGE_DEFAULT = 48       # Typical LFP battery pack voltage
+    # Fallback battery voltage for kW to Amp conversion (used until real voltage is read)
+    BATTERY_VOLTAGE_FALLBACK = 48      # Typical LFP battery pack voltage
 
     # Timeout for Modbus operations
     TIMEOUT_SECONDS = 10.0
@@ -137,6 +141,8 @@ class SungrowSHController(InverterController):
         super().__init__(host, port, slave_id, model)
         self._client: Optional[AsyncModbusTcpClient] = None
         self._lock = asyncio.Lock()
+        self._battery_voltage: float = self.BATTERY_VOLTAGE_FALLBACK
+        self._original_ems_mode: Optional[int] = None
 
     async def connect(self) -> bool:
         """Connect to the Sungrow SH inverter via Modbus TCP."""
@@ -268,7 +274,10 @@ class SungrowSHController(InverterController):
             # Read battery registers (13019-13025) in one batch
             battery_regs = await self._read_register(self.REG_BATTERY_VOLTAGE, 7)
             if battery_regs and len(battery_regs) >= 7:
-                attrs["battery_voltage"] = round(battery_regs[0] * 0.1, 1)
+                voltage = round(battery_regs[0] * 0.1, 1)
+                attrs["battery_voltage"] = voltage
+                if voltage > 0:
+                    self._battery_voltage = voltage
                 attrs["battery_current"] = round(self._to_signed16(battery_regs[1]) * 0.1, 1)
                 attrs["battery_power"] = self._to_signed16(battery_regs[2])
                 attrs["battery_level"] = round(battery_regs[3] * 0.1, 1)
@@ -306,9 +315,19 @@ class SungrowSHController(InverterController):
             if daily_import:
                 attrs["daily_import"] = round(daily_import[0] * 0.1, 2)
 
+            # Read total (lifetime) import energy (32-bit unsigned)
+            total_import = await self._read_register(self.REG_TOTAL_IMPORT, 2)
+            if total_import and len(total_import) >= 2:
+                attrs["total_import"] = round(self._to_unsigned32(total_import[0], total_import[1]) * 0.1, 1)
+
             daily_export = await self._read_register(self.REG_DAILY_EXPORT, 1)
             if daily_export:
                 attrs["daily_export"] = round(daily_export[0] * 0.1, 2)
+
+            # Read total (lifetime) export energy (32-bit unsigned)
+            total_export = await self._read_register(self.REG_TOTAL_EXPORT, 2)
+            if total_export and len(total_export) >= 2:
+                attrs["total_export"] = round(self._to_unsigned32(total_export[0], total_export[1]) * 0.1, 1)
 
             # Read daily battery charge
             daily_charge = await self._read_register(self.REG_DAILY_BATTERY_CHARGE, 1)
@@ -520,6 +539,12 @@ class SungrowSHController(InverterController):
                 if not await self.connect():
                     return False
 
+                # Save current EMS mode for restore (only on first attempt)
+                if attempt == 1 and self._original_ems_mode is None:
+                    ems_raw = await self._read_register(self.REG_EMS_MODE, 1)
+                    if ems_raw:
+                        self._original_ems_mode = ems_raw[0]
+
                 success = await self._write_register(self.REG_EMS_MODE, self.EMS_FORCED)
                 if not success:
                     _LOGGER.warning("Sungrow %s: EMS mode write failed (attempt %d/%d)", label, attempt, max_attempts)
@@ -576,12 +601,14 @@ class SungrowSHController(InverterController):
         return await self._write_forced_mode(self.CMD_DISCHARGE, "force discharge")
 
     async def restore_normal(self) -> bool:
-        """Restore self-consumption mode.
+        """Restore to the EMS mode that was active before force charge/discharge.
 
         Returns:
             True if successful, False otherwise
         """
-        _LOGGER.info(f"Restoring Sungrow SH at {self.host} to self-consumption mode")
+        target_mode = self._original_ems_mode if self._original_ems_mode is not None else self.EMS_SELF_CONSUMPTION
+        mode_name = {0: "self-consumption", 2: "forced", 3: "external EMS", 4: "VPP"}.get(target_mode, f"mode {target_mode}")
+        _LOGGER.info("Restoring Sungrow SH at %s to %s", self.host, mode_name)
         try:
             if not await self.connect():
                 return False
@@ -591,17 +618,18 @@ class SungrowSHController(InverterController):
             if not success:
                 _LOGGER.warning("Failed to send stop command")
 
-            # Set EMS to self-consumption mode
-            success = await self._write_register(self.REG_EMS_MODE, self.EMS_SELF_CONSUMPTION)
+            # Restore original EMS mode
+            success = await self._write_register(self.REG_EMS_MODE, target_mode)
             if not success:
-                _LOGGER.error("Failed to set EMS to self-consumption mode")
+                _LOGGER.error("Failed to set EMS to %s", mode_name)
                 return False
 
-            _LOGGER.info(f"Sungrow SH at {self.host} restored to self-consumption mode")
+            self._original_ems_mode = None
+            _LOGGER.info("Sungrow SH at %s restored to %s", self.host, mode_name)
             return True
 
         except Exception as e:
-            _LOGGER.error(f"Error restoring normal mode: {e}")
+            _LOGGER.error("Error restoring normal mode: %s", e)
             return False
 
     async def set_idle_mode(self) -> bool:
@@ -707,65 +735,53 @@ class SungrowSHController(InverterController):
     async def set_charge_rate_limit(self, kw: float) -> bool:
         """Set maximum charge rate in kW.
 
-        Internally converts kW to Amps using default battery voltage.
-
-        Args:
-            kw: Maximum charge rate in kW
-
-        Returns:
-            True if successful, False otherwise
+        Converts kW to Amps using the actual battery voltage (read from
+        register 13019), falling back to 48V if not yet available.
         """
-        _LOGGER.info(f"Setting Sungrow SH at {self.host} charge rate limit to {kw} kW")
+        voltage = self._battery_voltage
+        _LOGGER.info("Setting Sungrow SH at %s charge rate limit to %s kW (using %.1fV)", self.host, kw, voltage)
         try:
             if not await self.connect():
                 return False
 
-            # Convert kW to Amps: A = kW * 1000 / V
-            amps = kw * 1000 / self.BATTERY_VOLTAGE_DEFAULT
-            # Register value is Amps * 1000 (milliamps scale)
+            amps = kw * 1000 / voltage
             value = int(amps * 1000)
             success = await self._write_register(self.REG_MAX_CHARGE_CURRENT, value)
             if not success:
                 _LOGGER.error("Failed to set charge rate limit")
                 return False
 
-            _LOGGER.info(f"Sungrow SH charge rate limit set to {kw} kW ({amps:.1f} A)")
+            _LOGGER.info("Sungrow SH charge rate limit set to %s kW (%.1f A @ %.1fV)", kw, amps, voltage)
             return True
 
         except Exception as e:
-            _LOGGER.error(f"Error setting charge rate limit: {e}")
+            _LOGGER.error("Error setting charge rate limit: %s", e)
             return False
 
     async def set_discharge_rate_limit(self, kw: float) -> bool:
         """Set maximum discharge rate in kW.
 
-        Internally converts kW to Amps using default battery voltage.
-
-        Args:
-            kw: Maximum discharge rate in kW
-
-        Returns:
-            True if successful, False otherwise
+        Converts kW to Amps using the actual battery voltage (read from
+        register 13019), falling back to 48V if not yet available.
         """
-        _LOGGER.info(f"Setting Sungrow SH at {self.host} discharge rate limit to {kw} kW")
+        voltage = self._battery_voltage
+        _LOGGER.info("Setting Sungrow SH at %s discharge rate limit to %s kW (using %.1fV)", self.host, kw, voltage)
         try:
             if not await self.connect():
                 return False
 
-            # Convert kW to Amps: A = kW * 1000 / V
-            amps = kw * 1000 / self.BATTERY_VOLTAGE_DEFAULT
-            # Register value is Amps * 1000 (milliamps scale)
+            amps = kw * 1000 / voltage
             value = int(amps * 1000)
             success = await self._write_register(self.REG_MAX_DISCHARGE_CURRENT, value)
             if not success:
                 _LOGGER.error("Failed to set discharge rate limit")
                 return False
 
-            _LOGGER.info(f"Sungrow SH discharge rate limit set to {kw} kW ({amps:.1f} A)")
+            _LOGGER.info("Sungrow SH discharge rate limit set to %s kW (%.1f A @ %.1fV)", kw, amps, voltage)
             return True
 
         except Exception as e:
-            _LOGGER.error(f"Error setting discharge rate limit: {e}")
+            _LOGGER.error("Error setting discharge rate limit: %s", e)
             return False
 
     async def set_export_limit(self, watts: Optional[int]) -> bool:
@@ -813,7 +829,10 @@ class SungrowSHController(InverterController):
             # Read battery state registers (13018-13024)
             battery_regs = await self._read_register(self.REG_BATTERY_VOLTAGE, 7)
             if battery_regs and len(battery_regs) >= 7:
-                data["battery_voltage"] = round(battery_regs[0] * 0.1, 1)
+                voltage = round(battery_regs[0] * 0.1, 1)
+                data["battery_voltage"] = voltage
+                if voltage > 0:
+                    self._battery_voltage = voltage
                 data["battery_current"] = round(self._to_signed16(battery_regs[1]) * 0.1, 1)
                 data["battery_power"] = self._to_signed16(battery_regs[2])
                 data["battery_soc"] = round(battery_regs[3] * 0.1, 1)
@@ -844,6 +863,7 @@ class SungrowSHController(InverterController):
                     0: "self_consumption",
                     2: "forced",
                     3: "external_ems",
+                    4: "vpp",
                 }.get(ems_mode[0], "unknown")
 
             # Read charge command state
@@ -865,16 +885,16 @@ class SungrowSHController(InverterController):
             if backup_reserve:
                 data["backup_reserve"] = round(backup_reserve[0] * 0.1, 1)
 
-            # Read charge/discharge current limits and convert to kW
+            # Read charge/discharge current limits and convert to kW using actual voltage
             max_charge_current = await self._read_register(self.REG_MAX_CHARGE_CURRENT, 1)
             if max_charge_current:
                 amps = max_charge_current[0] / 1000  # Convert from milliamps
-                data["charge_rate_limit_kw"] = round(amps * self.BATTERY_VOLTAGE_DEFAULT / 1000, 2)
+                data["charge_rate_limit_kw"] = round(amps * self._battery_voltage / 1000, 2)
 
             max_discharge_current = await self._read_register(self.REG_MAX_DISCHARGE_CURRENT, 1)
             if max_discharge_current:
                 amps = max_discharge_current[0] / 1000  # Convert from milliamps
-                data["discharge_rate_limit_kw"] = round(amps * self.BATTERY_VOLTAGE_DEFAULT / 1000, 2)
+                data["discharge_rate_limit_kw"] = round(amps * self._battery_voltage / 1000, 2)
 
             # Read export limit
             export_limit = await self._read_register(self.REG_EXPORT_LIMIT_SETTING, 1)
