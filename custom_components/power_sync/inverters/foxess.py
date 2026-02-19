@@ -766,6 +766,69 @@ class FoxESSController(InverterController):
 
         return await self._write_holding_register(self._register_map.work_mode, mode)
 
+    async def _write_remote_control(self, reg: 'FoxESSRegisterMap', power_val: int,
+                                    duration_minutes: int, timeout_seconds: int,
+                                    label: str) -> bool:
+        """Write remote control registers and verify they took effect.
+
+        Writes remote_enable, remote_timeout, and remote_active_power, then
+        reads back remote_enable to confirm. Retries once on verification
+        failure (covers silent Modbus collisions from concurrent integrations).
+        """
+        max_attempts = 2
+        for attempt in range(1, max_attempts + 1):
+            # Enable remote control
+            if reg.remote_enable:
+                await self._write_holding_register(reg.remote_enable, 1)
+                if reg.remote_timeout:
+                    await self._write_holding_register(reg.remote_timeout, timeout_seconds)
+
+            # Write active power
+            write_val = power_val
+            if reg.remote_active_power_is_32bit:
+                if write_val < 0:
+                    write_val = write_val + 0x100000000
+                high = (write_val >> 16) & 0xFFFF
+                low = write_val & 0xFFFF
+                success = await self._write_holding_registers(reg.remote_active_power, [high, low])
+            else:
+                raw = write_val & 0xFFFF
+                success = await self._write_holding_register(reg.remote_active_power, raw)
+
+            if not success:
+                _LOGGER.warning("FoxESS %s write failed on attempt %d/%d", label, attempt, max_attempts)
+                if attempt < max_attempts:
+                    await asyncio.sleep(1)
+                    continue
+                return False
+
+            # Verify: read back remote_enable to confirm the inverter accepted it
+            if reg.remote_enable:
+                await asyncio.sleep(0.5)
+                verify = await self._read_holding_registers(reg.remote_enable, 1)
+                if verify and verify[0] == 1:
+                    _LOGGER.info(
+                        "FoxESS %s activated for %d minutes (timeout %ds)%s",
+                        label, duration_minutes, timeout_seconds,
+                        "" if attempt == 1 else f" (attempt {attempt})",
+                    )
+                    return True
+                else:
+                    _LOGGER.warning(
+                        "FoxESS %s verify failed: remote_enable=%s (attempt %d/%d)",
+                        label, verify, attempt, max_attempts,
+                    )
+                    if attempt < max_attempts:
+                        await asyncio.sleep(1)
+                        continue
+                    return False
+            else:
+                # No remote_enable register to verify — trust the write
+                _LOGGER.info("FoxESS %s activated for %d minutes (timeout %ds)", label, duration_minutes, timeout_seconds)
+                return True
+
+        return False
+
     async def force_charge(self, duration_minutes: int = 60, power_w: float = 5000) -> bool:
         """Force battery to charge from grid via remote control registers."""
         if not self._register_map:
@@ -785,28 +848,9 @@ class FoxESSController(InverterController):
             if ms_raw:
                 self._original_min_soc = ms_raw[0]
 
-        # Enable remote control and set active power to charge (negative)
         timeout_seconds = max(duration_minutes * 60, 600)
-        if reg.remote_enable:
-            await self._write_holding_register(reg.remote_enable, 1)
-            if reg.remote_timeout:
-                await self._write_holding_register(reg.remote_timeout, timeout_seconds)
-
         power_val = -int(abs(power_w))
-        if reg.remote_active_power_is_32bit:
-            if power_val < 0:
-                power_val = power_val + 0x100000000
-            high = (power_val >> 16) & 0xFFFF
-            low = power_val & 0xFFFF
-            success = await self._write_holding_registers(reg.remote_active_power, [high, low])
-        else:
-            raw = power_val & 0xFFFF
-            success = await self._write_holding_register(reg.remote_active_power, raw)
-
-        if success:
-            _LOGGER.info("FoxESS force charge activated for %d minutes (timeout %ds)", duration_minutes, timeout_seconds)
-
-        return success
+        return await self._write_remote_control(reg, power_val, duration_minutes, timeout_seconds, "force charge")
 
     async def force_discharge(self, duration_minutes: int = 60, power_w: float = 5000) -> bool:
         """Force battery to discharge/export via remote control registers."""
@@ -827,25 +871,9 @@ class FoxESSController(InverterController):
             if ms_raw:
                 self._original_min_soc = ms_raw[0]
 
-        # Enable remote control and set active power to discharge (positive)
         timeout_seconds = max(duration_minutes * 60, 600)
-        if reg.remote_enable:
-            await self._write_holding_register(reg.remote_enable, 1)
-            if reg.remote_timeout:
-                await self._write_holding_register(reg.remote_timeout, timeout_seconds)
-
         power_val = int(abs(power_w))
-        if reg.remote_active_power_is_32bit:
-            high = (power_val >> 16) & 0xFFFF
-            low = power_val & 0xFFFF
-            success = await self._write_holding_registers(reg.remote_active_power, [high, low])
-        else:
-            success = await self._write_holding_register(reg.remote_active_power, power_val & 0xFFFF)
-
-        if success:
-            _LOGGER.info("FoxESS force discharge activated for %d minutes (timeout %ds)", duration_minutes, timeout_seconds)
-
-        return success
+        return await self._write_remote_control(reg, power_val, duration_minutes, timeout_seconds, "force discharge")
 
     async def restore_normal(self) -> bool:
         """Restore normal operation (Self Use mode)."""
