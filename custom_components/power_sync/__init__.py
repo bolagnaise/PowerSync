@@ -13953,6 +13953,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info(f"🔄 Restore normal service called (context: user_id={context.user_id}, parent_id={context.parent_id})")
         _LOGGER.info("🔄 RESTORE NORMAL: Restoring normal operation")
 
+        # Check if optimizer is active — suppress routine notifications
+        # (optimizer transitions between force modes frequently; AEMO spikes have their own notification)
+        suppress_notification = False
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        opt_coordinator = entry_data.get("optimization_coordinator")
+        if opt_coordinator and getattr(opt_coordinator, '_enabled', False):
+            suppress_notification = True
+
         # Cancel any pending expiry timers (discharge and charge)
         if force_discharge_state.get("cancel_expiry_timer"):
             force_discharge_state["cancel_expiry_timer"]()
@@ -14013,15 +14021,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.info("✅ SIGENERGY NORMAL OPERATION RESTORED")
 
                 # Send push notification for successful restore
-                try:
-                    from .automations.actions import _send_expo_push
-                    await _send_expo_push(
-                        hass,
-                        "Battery",
-                        "Normal operation restored"
-                    )
-                except Exception as notify_err:
-                    _LOGGER.debug(f"Could not send success notification: {notify_err}")
+                if not suppress_notification:
+                    try:
+                        from .automations.actions import _send_expo_push
+                        await _send_expo_push(
+                            hass,
+                            "Battery",
+                            "Normal operation restored"
+                        )
+                    except Exception as notify_err:
+                        _LOGGER.debug(f"Could not send success notification: {notify_err}")
 
                 # Dispatch events for UI
                 async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
@@ -14057,11 +14066,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 _LOGGER.info("FoxESS NORMAL OPERATION RESTORED")
 
-                try:
-                    from .automations.actions import _send_expo_push
-                    await _send_expo_push(hass, "Battery", "Normal operation restored")
-                except Exception as notify_err:
-                    _LOGGER.debug(f"Could not send success notification: {notify_err}")
+                if not suppress_notification:
+                    try:
+                        from .automations.actions import _send_expo_push
+                        await _send_expo_push(hass, "Battery", "Normal operation restored")
+                    except Exception as notify_err:
+                        _LOGGER.debug(f"Could not send success notification: {notify_err}")
 
                 async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
                     "active": False, "expires_at": None, "duration": 0,
@@ -14092,11 +14102,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
                 _LOGGER.info("GoodWe NORMAL OPERATION RESTORED")
 
-                try:
-                    from .automations.actions import _send_expo_push
-                    await _send_expo_push(hass, "Battery", "Normal operation restored")
-                except Exception as notify_err:
-                    _LOGGER.debug(f"Could not send success notification: {notify_err}")
+                if not suppress_notification:
+                    try:
+                        from .automations.actions import _send_expo_push
+                        await _send_expo_push(hass, "Battery", "Normal operation restored")
+                    except Exception as notify_err:
+                        _LOGGER.debug(f"Could not send success notification: {notify_err}")
 
                 async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
                     "active": False, "expires_at": None, "duration": 0,
@@ -14337,15 +14348,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info("✅ NORMAL OPERATION RESTORED")
 
             # Send push notification for successful restore
-            try:
-                from .automations.actions import _send_expo_push
-                await _send_expo_push(
-                    hass,
-                    "Battery",
-                    "Normal operation restored"
-                )
-            except Exception as notify_err:
-                _LOGGER.debug(f"Could not send success notification: {notify_err}")
+            if not suppress_notification:
+                try:
+                    from .automations.actions import _send_expo_push
+                    await _send_expo_push(
+                        hass,
+                        "Battery",
+                        "Normal operation restored"
+                    )
+                except Exception as notify_err:
+                    _LOGGER.debug(f"Could not send success notification: {notify_err}")
 
             # Dispatch events for UI
             async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
