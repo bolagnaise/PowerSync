@@ -507,65 +507,73 @@ class SungrowSHController(InverterController):
 
     # ===== Battery Control Methods (for use as battery system) =====
 
-    async def force_charge(self) -> bool:
-        """Set EMS to forced charge mode.
+    async def _write_forced_mode(self, cmd: int, label: str) -> bool:
+        """Set EMS to forced mode with a charge/discharge command and verify.
 
-        Returns:
-            True if successful, False otherwise
+        Writes REG_EMS_MODE and REG_CHARGE_CMD, then reads back both registers
+        to confirm the inverter accepted them. Retries once on verification
+        failure (covers silent Modbus collisions).
         """
-        _LOGGER.info(f"Setting Sungrow SH at {self.host} to forced charge mode")
-        try:
-            if not await self.connect():
+        max_attempts = 2
+        for attempt in range(1, max_attempts + 1):
+            try:
+                if not await self.connect():
+                    return False
+
+                success = await self._write_register(self.REG_EMS_MODE, self.EMS_FORCED)
+                if not success:
+                    _LOGGER.warning("Sungrow %s: EMS mode write failed (attempt %d/%d)", label, attempt, max_attempts)
+                    if attempt < max_attempts:
+                        await asyncio.sleep(1)
+                        continue
+                    return False
+
+                success = await self._write_register(self.REG_CHARGE_CMD, cmd)
+                if not success:
+                    _LOGGER.warning("Sungrow %s: charge cmd write failed (attempt %d/%d)", label, attempt, max_attempts)
+                    if attempt < max_attempts:
+                        await asyncio.sleep(1)
+                        continue
+                    return False
+
+                # Verify: read back EMS mode to confirm inverter accepted it
+                await asyncio.sleep(0.5)
+                ems_check = await self._read_register(self.REG_EMS_MODE, 1)
+                if ems_check and ems_check[0] == self.EMS_FORCED:
+                    _LOGGER.info(
+                        "Sungrow SH at %s now in %s mode%s",
+                        self.host, label,
+                        "" if attempt == 1 else f" (attempt {attempt})",
+                    )
+                    return True
+                else:
+                    _LOGGER.warning(
+                        "Sungrow %s verify failed: EMS mode=%s (attempt %d/%d)",
+                        label, ems_check, attempt, max_attempts,
+                    )
+                    if attempt < max_attempts:
+                        await asyncio.sleep(1)
+                        continue
+                    return False
+
+            except Exception as e:
+                _LOGGER.error("Error setting %s: %s", label, e)
+                if attempt < max_attempts:
+                    await asyncio.sleep(1)
+                    continue
                 return False
 
-            # Set EMS to forced mode
-            success = await self._write_register(self.REG_EMS_MODE, self.EMS_FORCED)
-            if not success:
-                _LOGGER.error("Failed to set EMS to forced mode")
-                return False
+        return False
 
-            # Set charge command
-            success = await self._write_register(self.REG_CHARGE_CMD, self.CMD_CHARGE)
-            if not success:
-                _LOGGER.error("Failed to send charge command")
-                return False
-
-            _LOGGER.info(f"Sungrow SH at {self.host} now in forced charge mode")
-            return True
-
-        except Exception as e:
-            _LOGGER.error(f"Error setting force charge: {e}")
-            return False
+    async def force_charge(self) -> bool:
+        """Set EMS to forced charge mode."""
+        _LOGGER.info("Setting Sungrow SH at %s to forced charge mode", self.host)
+        return await self._write_forced_mode(self.CMD_CHARGE, "force charge")
 
     async def force_discharge(self) -> bool:
-        """Set EMS to forced discharge mode.
-
-        Returns:
-            True if successful, False otherwise
-        """
-        _LOGGER.info(f"Setting Sungrow SH at {self.host} to forced discharge mode")
-        try:
-            if not await self.connect():
-                return False
-
-            # Set EMS to forced mode
-            success = await self._write_register(self.REG_EMS_MODE, self.EMS_FORCED)
-            if not success:
-                _LOGGER.error("Failed to set EMS to forced mode")
-                return False
-
-            # Set discharge command
-            success = await self._write_register(self.REG_CHARGE_CMD, self.CMD_DISCHARGE)
-            if not success:
-                _LOGGER.error("Failed to send discharge command")
-                return False
-
-            _LOGGER.info(f"Sungrow SH at {self.host} now in forced discharge mode")
-            return True
-
-        except Exception as e:
-            _LOGGER.error(f"Error setting force discharge: {e}")
-            return False
+        """Set EMS to forced discharge mode."""
+        _LOGGER.info("Setting Sungrow SH at %s to forced discharge mode", self.host)
+        return await self._write_forced_mode(self.CMD_DISCHARGE, "force discharge")
 
     async def restore_normal(self) -> bool:
         """Restore self-consumption mode.
