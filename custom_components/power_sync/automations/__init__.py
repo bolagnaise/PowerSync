@@ -446,7 +446,7 @@ class AutomationEngine:
                             got_timezone_from_site_info = True
                             _LOGGER.debug(f"Using timezone from Tesla site info: {user_timezone}")
                 except Exception as e:
-                    _LOGGER.warning(f"Could not get timezone from site info: {e}")
+                    _LOGGER.debug("Could not get timezone from site info: %s", e)
 
         # Fallback: Try to get timezone from NEM region (for Sigenergy/AEMO users)
         if not got_timezone_from_site_info:

@@ -1038,6 +1038,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         self.api_provider = api_provider
         self.session = async_get_clientsession(hass)
         self._site_info_cache = None  # Cache site_info since timezone doesn't change
+        self._site_info_fetch_failed = False  # Negative cache to avoid retrying on every sync cycle
 
         # Determine API base URL based on provider
         if api_provider == TESLA_PROVIDER_FLEET_API:
@@ -1147,6 +1148,10 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Returning cached site_info")
             return self._site_info_cache
 
+        # Don't retry if a previous fetch already failed (avoids spamming logs every sync cycle)
+        if self._site_info_fetch_failed:
+            return None
+
         current_token = self._get_current_token()
         headers = {
             "Authorization": f"Bearer {current_token}",
@@ -1195,10 +1200,12 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             return site_info
 
         except UpdateFailed as err:
-            _LOGGER.error(f"Failed to fetch site_info: {err}")
+            _LOGGER.warning("Failed to fetch site_info: %s (will not retry until next restart)", err)
+            self._site_info_fetch_failed = True
             return None
         except Exception as err:
-            _LOGGER.error(f"Unexpected error fetching site_info: {err}")
+            _LOGGER.warning("Unexpected error fetching site_info: %s (will not retry until next restart)", err)
+            self._site_info_fetch_failed = True
             return None
 
     async def set_grid_charging_enabled(self, enabled: bool) -> bool:

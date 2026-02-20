@@ -11489,11 +11489,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if site_info:
                 powerwall_timezone = site_info.get("installation_time_zone")
                 if powerwall_timezone:
-                    _LOGGER.info(f"Using Powerwall timezone: {powerwall_timezone}")
+                    _LOGGER.debug("Using Powerwall timezone: %s", powerwall_timezone)
                 else:
-                    _LOGGER.warning("No installation_time_zone in site_info, will auto-detect from price data")
+                    _LOGGER.debug("No installation_time_zone in site_info, will auto-detect from price data")
             else:
-                _LOGGER.warning("Failed to fetch Tesla site_info, will auto-detect timezone from price data")
+                _LOGGER.debug("site_info not available, will auto-detect timezone from price data")
         else:
             _LOGGER.debug("Non-Tesla battery system — timezone will be auto-detected from price data")
 
