@@ -8843,8 +8843,22 @@ class AutoScheduleStatusView(HomeAssistantView):
                     "departure_time": legacy_departure_time,
                     "departure_days": legacy_departure_days,
                     "departure_times": {str(k): v for k, v in vehicle_settings.departure_times.items()},
-                    "home_battery_minimum": vehicle_settings.home_battery_minimum,
-                    "no_grid_import": vehicle_settings.no_grid_import,
+                    "departure_priorities": {str(k): v for k, v in vehicle_settings.departure_priorities.items()},
+                    # New per-day constraint fields
+                    "departure_min_battery_to_start": {str(k): v for k, v in vehicle_settings.departure_min_battery_to_start.items()},
+                    "departure_consume_battery_level": {str(k): v for k, v in vehicle_settings.departure_consume_battery_level.items()},
+                    "departure_stop_at_battery_floor": {str(k): v for k, v in vehicle_settings.departure_stop_at_battery_floor.items()},
+                    "departure_limit_grid_import": {str(k): v for k, v in vehicle_settings.departure_limit_grid_import.items()},
+                    # New field names
+                    "min_battery_to_start": vehicle_settings.min_battery_to_start,
+                    "consume_battery_level": vehicle_settings.consume_battery_level,
+                    "stop_at_battery_floor": vehicle_settings.stop_at_battery_floor,
+                    "limit_grid_import": vehicle_settings.limit_grid_import,
+                    # Backward compat aliases for older mobile clients
+                    "home_battery_minimum": vehicle_settings.min_battery_to_start,
+                    "no_grid_import": vehicle_settings.limit_grid_import,
+                    "departure_no_grid_import": {str(k): v for k, v in vehicle_settings.departure_limit_grid_import.items()},
+                    "departure_home_battery_min": {str(k): v for k, v in vehicle_settings.departure_min_battery_to_start.items()},
                 }
 
             return web.json_response({

@@ -2614,12 +2614,19 @@ async def _dynamic_ev_update_surplus(
 
     # Resume logic
     if state.get("paused"):
+        stop_at_floor = params.get("stop_at_battery_floor", True)
         can_resume = False
         if battery_soc >= min_soc:
-            # Battery recovered - switch to normal mode
+            # Battery recovered above start threshold - always resume
             can_resume = True
             state["parallel_charging_mode"] = False
             _LOGGER.info(f"⚡ Solar surplus EV: Resuming - battery at {battery_soc:.0f}%")
+        elif stop_at_floor and battery_soc < pause_soc:
+            # stop_at_battery_floor=True: don't resume until battery recovers above min_soc
+            _LOGGER.debug(
+                f"Solar surplus EV: Not resuming - stop_at_floor=True, "
+                f"battery {battery_soc:.0f}% < floor {pause_soc}%"
+            )
         elif state.get("parallel_charging_mode") and raw_surplus_kw > max_battery_charge_kw:
             # Parallel mode: surplus recovered
             can_resume = True

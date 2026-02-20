@@ -2362,11 +2362,20 @@ class AutoScheduleSettings:
 
     # Priority mode
     priority: ChargingPriority = ChargingPriority.COST_OPTIMIZED
+    departure_priorities: Dict[int, str] = field(default_factory=dict)  # {day_index: "priority"} e.g. {0: "time_critical", 5: "solar_only"}
 
-    # Battery constraints (new unified naming)
-    home_battery_minimum: int = 20  # Don't START EV charging unless home battery >= this %
-    max_grid_price_cents: float = 25.0  # Don't charge from grid above this price
-    no_grid_import: bool = False  # Prevent grid imports during EV charging
+    # Battery constraints
+    min_battery_to_start: int = 20  # Don't START EV charging unless home battery >= this %
+    consume_battery_level: int = 0  # Discharge home battery to X% for EV (0 = disabled)
+    stop_at_battery_floor: bool = True  # When battery hits consume level, stop EV (no grid fallback)
+    limit_grid_import: bool = False  # Dynamically adjust EV charge amps to match inverter capacity
+    max_grid_price_cents: float = 25.0  # Don't charge from grid above this price (backend only, not in mobile UI)
+
+    # Per-day constraint overrides (days without entries fall back to global settings above)
+    departure_min_battery_to_start: Dict[int, int] = field(default_factory=dict)  # {day_index: percent}
+    departure_consume_battery_level: Dict[int, int] = field(default_factory=dict)  # {day_index: percent}
+    departure_stop_at_battery_floor: Dict[int, bool] = field(default_factory=dict)  # {day_index: True/False}
+    departure_limit_grid_import: Dict[int, bool] = field(default_factory=dict)  # {day_index: True/False}
 
     # Charger settings
     charger_type: str = "tesla"  # tesla, ocpp, generic
@@ -2383,6 +2392,43 @@ class AutoScheduleSettings:
         - Three phase: 5A × 230V × 3 = 3.45kW
         """
         return (self.min_charge_amps * self.voltage * self.phases) / 1000
+
+    def get_effective_priority(self, weekday: int) -> "ChargingPriority":
+        """Get the effective priority for a given weekday, falling back to global priority."""
+        if weekday in self.departure_priorities:
+            try:
+                return ChargingPriority(self.departure_priorities[weekday])
+            except ValueError:
+                pass
+        return self.priority
+
+    def get_effective_limit_grid_import(self, weekday: int) -> bool:
+        """Get the effective limit_grid_import for a given weekday."""
+        if weekday in self.departure_limit_grid_import:
+            return self.departure_limit_grid_import[weekday]
+        return self.limit_grid_import
+
+    def get_effective_min_battery_to_start(self, weekday: int) -> int:
+        """Get the effective min_battery_to_start for a given weekday."""
+        if weekday in self.departure_min_battery_to_start:
+            return self.departure_min_battery_to_start[weekday]
+        return self.min_battery_to_start
+
+    def get_effective_consume_battery_level(self, weekday: int) -> int:
+        """Get the effective consume_battery_level for a given weekday."""
+        if weekday in self.departure_consume_battery_level:
+            return self.departure_consume_battery_level[weekday]
+        return self.consume_battery_level
+
+    def get_effective_stop_at_battery_floor(self, weekday: int) -> bool:
+        """Get the effective stop_at_battery_floor for a given weekday."""
+        if weekday in self.departure_stop_at_battery_floor:
+            return self.departure_stop_at_battery_floor[weekday]
+        return self.stop_at_battery_floor
+
+    def get_effective_max_grid_price(self, weekday: int) -> float:
+        """Get the effective max_grid_price_cents for a given weekday."""
+        return self.max_grid_price_cents
 
     # Optional entity overrides for generic chargers
     charger_switch_entity: Optional[str] = None
@@ -2406,10 +2452,20 @@ class AutoScheduleSettings:
             "departure_time": legacy_departure_time,
             "departure_days": legacy_departure_days,
             "departure_times": {str(k): v for k, v in self.departure_times.items()},
+            "departure_priorities": {str(k): v for k, v in self.departure_priorities.items()},
+            "departure_min_battery_to_start": {str(k): v for k, v in self.departure_min_battery_to_start.items()},
+            "departure_consume_battery_level": {str(k): v for k, v in self.departure_consume_battery_level.items()},
+            "departure_stop_at_battery_floor": {str(k): v for k, v in self.departure_stop_at_battery_floor.items()},
+            "departure_limit_grid_import": {str(k): v for k, v in self.departure_limit_grid_import.items()},
             "priority": self.priority.value,
-            "home_battery_minimum": self.home_battery_minimum,
+            "min_battery_to_start": self.min_battery_to_start,
+            "consume_battery_level": self.consume_battery_level,
+            "stop_at_battery_floor": self.stop_at_battery_floor,
+            "limit_grid_import": self.limit_grid_import,
             "max_grid_price_cents": self.max_grid_price_cents,
-            "no_grid_import": self.no_grid_import,
+            # Backward compat aliases for older mobile clients
+            "home_battery_minimum": self.min_battery_to_start,
+            "no_grid_import": self.limit_grid_import,
             "charger_type": self.charger_type,
             "min_charge_amps": self.min_charge_amps,
             "max_charge_amps": self.max_charge_amps,
@@ -2430,10 +2486,46 @@ class AutoScheduleSettings:
         except ValueError:
             priority = ChargingPriority.COST_OPTIMIZED
 
-        # Backward compatibility: map old min_battery_soc to new names
-        # Guard: old min_battery_soc > 30 was likely the EV target_soc (e.g. 80%), not home battery
+        # Backward compatibility: map old field names to new names
+        # min_battery_soc → home_battery_minimum → min_battery_to_start
         old_min_battery = data.get("min_battery_soc", 20)
-        home_battery_minimum = data.get("home_battery_minimum", old_min_battery if old_min_battery <= 30 else 20)
+        legacy_home_battery_min = data.get("home_battery_minimum", old_min_battery if old_min_battery <= 30 else 20)
+        min_battery_to_start = data.get("min_battery_to_start", legacy_home_battery_min)
+
+        # no_grid_import → limit_grid_import
+        legacy_no_grid = data.get("no_grid_import", False)
+        limit_grid_import = data.get("limit_grid_import", legacy_no_grid)
+
+        # New fields with defaults
+        consume_battery_level = data.get("consume_battery_level", 0)
+        stop_at_battery_floor = data.get("stop_at_battery_floor", True)
+
+        # Handle departure_priorities (per-day strategy overrides)
+        departure_priorities: Dict[int, str] = {}
+        raw_departure_priorities = data.get("departure_priorities")
+        if raw_departure_priorities and isinstance(raw_departure_priorities, dict):
+            departure_priorities = {int(k): v for k, v in raw_departure_priorities.items()}
+
+        # Handle per-day constraint overrides (new names, with backward compat from old names)
+        departure_min_battery_to_start: Dict[int, int] = {}
+        raw_dmbts = data.get("departure_min_battery_to_start") or data.get("departure_home_battery_min")
+        if raw_dmbts and isinstance(raw_dmbts, dict):
+            departure_min_battery_to_start = {int(k): int(v) for k, v in raw_dmbts.items()}
+
+        departure_limit_grid_import: Dict[int, bool] = {}
+        raw_dlgi = data.get("departure_limit_grid_import") or data.get("departure_no_grid_import")
+        if raw_dlgi and isinstance(raw_dlgi, dict):
+            departure_limit_grid_import = {int(k): bool(v) for k, v in raw_dlgi.items()}
+
+        departure_consume_battery_level: Dict[int, int] = {}
+        raw_dcbl = data.get("departure_consume_battery_level")
+        if raw_dcbl and isinstance(raw_dcbl, dict):
+            departure_consume_battery_level = {int(k): int(v) for k, v in raw_dcbl.items()}
+
+        departure_stop_at_battery_floor: Dict[int, bool] = {}
+        raw_dsabf = data.get("departure_stop_at_battery_floor")
+        if raw_dsabf and isinstance(raw_dsabf, dict):
+            departure_stop_at_battery_floor = {int(k): bool(v) for k, v in raw_dsabf.items()}
 
         # Handle departure_times migration from legacy format
         departure_times: Dict[int, str] = {}
@@ -2456,10 +2548,17 @@ class AutoScheduleSettings:
             departure_time=data.get("departure_time"),
             departure_days=data.get("departure_days", [0, 1, 2, 3, 4]),
             departure_times=departure_times,
+            departure_priorities=departure_priorities,
+            departure_min_battery_to_start=departure_min_battery_to_start,
+            departure_consume_battery_level=departure_consume_battery_level,
+            departure_stop_at_battery_floor=departure_stop_at_battery_floor,
+            departure_limit_grid_import=departure_limit_grid_import,
             priority=priority,
-            home_battery_minimum=home_battery_minimum,
+            min_battery_to_start=min_battery_to_start,
+            consume_battery_level=consume_battery_level,
+            stop_at_battery_floor=stop_at_battery_floor,
+            limit_grid_import=limit_grid_import,
             max_grid_price_cents=data.get("max_grid_price_cents", 25.0),
-            no_grid_import=data.get("no_grid_import", False),
             charger_type=data.get("charger_type", "tesla"),
             min_charge_amps=data.get("min_charge_amps", 5),
             max_charge_amps=data.get("max_charge_amps", 32),
@@ -2781,6 +2880,28 @@ class AutoScheduleExecutor:
             if key == "departure_times" and isinstance(value, dict):
                 # Convert string keys from JSON to int day indices
                 value = {int(k): v for k, v in value.items()}
+            if key == "departure_priorities" and isinstance(value, dict):
+                # Convert string keys from JSON to int day indices
+                value = {int(k): v for k, v in value.items()}
+            if key == "departure_limit_grid_import" and isinstance(value, dict):
+                value = {int(k): bool(v) for k, v in value.items()}
+            if key == "departure_min_battery_to_start" and isinstance(value, dict):
+                value = {int(k): int(v) for k, v in value.items()}
+            if key == "departure_consume_battery_level" and isinstance(value, dict):
+                value = {int(k): int(v) for k, v in value.items()}
+            if key == "departure_stop_at_battery_floor" and isinstance(value, dict):
+                value = {int(k): bool(v) for k, v in value.items()}
+            # Backward compat: map old field names to new ones
+            if key == "home_battery_minimum":
+                key = "min_battery_to_start"
+            if key == "no_grid_import":
+                key = "limit_grid_import"
+            if key == "departure_no_grid_import" and isinstance(value, dict):
+                key = "departure_limit_grid_import"
+                value = {int(k): bool(v) for k, v in value.items()}
+            if key == "departure_home_battery_min" and isinstance(value, dict):
+                key = "departure_min_battery_to_start"
+                value = {int(k): int(v) for k, v in value.items()}
             if hasattr(settings, key):
                 setattr(settings, key, value)
 
@@ -3340,7 +3461,30 @@ class AutoScheduleExecutor:
         # Note: min_battery_soc affects surplus calculation (prevents discharge),
         # but does NOT block EV charging from solar or grid.
         # The Powerwall's own backup reserve handles discharge protection.
-        is_time_critical = settings.priority == ChargingPriority.TIME_CRITICAL
+        weekday = datetime.now().weekday()
+        effective_priority = settings.get_effective_priority(weekday)
+        effective_limit_grid = settings.get_effective_limit_grid_import(weekday)
+        effective_max_price = settings.get_effective_max_grid_price(weekday)
+        effective_home_min = settings.get_effective_min_battery_to_start(weekday)
+        effective_consume_level = settings.get_effective_consume_battery_level(weekday)
+        effective_stop_at_floor = settings.get_effective_stop_at_battery_floor(weekday)
+        is_time_critical = effective_priority == ChargingPriority.TIME_CRITICAL
+
+        # Consume battery logic: if consume_battery_level > 0, allow charging while
+        # battery is above the consume level. When battery hits the floor:
+        # - stop_at_battery_floor=True: block charging entirely
+        # - stop_at_battery_floor=False: allow grid charging (planner proceeds normally)
+        if effective_consume_level > 0 and battery_soc <= effective_consume_level:
+            if effective_stop_at_floor:
+                reason = (
+                    f"Battery {battery_soc:.0f}% at consume floor {effective_consume_level}% — "
+                    f"EV charging stopped (stop at floor enabled)"
+                )
+                if state.is_charging:
+                    await self._stop_charging(vehicle_id, settings, state)
+                state.last_decision = "waiting"
+                state.last_decision_reason = reason
+                return
 
         # Use planner's should_charge_now logic
         should_charge, reason, source = await self.planner.should_charge_now(
@@ -3349,24 +3493,19 @@ class AutoScheduleExecutor:
             current_surplus_kw=current_surplus_kw,
             current_price_cents=current_price_cents,
             battery_soc=battery_soc,
-            min_battery_soc=settings.home_battery_minimum,
+            min_battery_soc=effective_home_min,
             is_time_critical=is_time_critical,
         )
 
         # Apply additional constraints based on priority mode
         if should_charge and source.startswith("grid"):
-            # Enforce no_grid_import constraint
-            if settings.no_grid_import:
-                should_charge = False
-                reason = "No grid import enabled — waiting for solar/battery surplus"
-
             # Check price constraint (but not for time_critical - deadline takes priority)
-            elif current_price_cents > settings.max_grid_price_cents and not is_time_critical:
+            if current_price_cents > effective_max_price and not is_time_critical:
                 should_charge = False
-                reason = f"Grid price {current_price_cents:.0f}c > max {settings.max_grid_price_cents:.0f}c"
+                reason = f"Grid price {current_price_cents:.0f}c > max {effective_max_price:.0f}c"
 
             # Solar-only mode doesn't allow grid
-            elif settings.priority == ChargingPriority.SOLAR_ONLY:
+            elif effective_priority == ChargingPriority.SOLAR_ONLY:
                 should_charge = False
                 reason = "Solar-only mode - no grid charging"
 
@@ -3518,12 +3657,16 @@ class AutoScheduleExecutor:
         current_soc = await self._get_vehicle_soc(vehicle_id)
 
         try:
+            # Use per-day priority based on the target departure day
+            effective_priority = settings.get_effective_priority(
+                target_time.weekday() if target_time else now.weekday()
+            )
             plan = await self.planner.plan_charging(
                 vehicle_id=vehicle_id,
                 current_soc=current_soc,
                 target_soc=settings.target_soc,
                 target_time=target_time,
-                priority=settings.priority,
+                priority=effective_priority,
                 charger_power_kw=(settings.max_charge_amps * settings.voltage) / 1000,
             )
 
@@ -4098,12 +4241,17 @@ class AutoScheduleExecutor:
             "max_charge_amps": settings.max_charge_amps,
             "voltage": settings.voltage,
             "charger_type": settings.charger_type,
-            "min_battery_soc": settings.home_battery_minimum,
-            "pause_below_soc": max(0, settings.home_battery_minimum - 10),
+            "min_battery_soc": settings.get_effective_min_battery_to_start(datetime.now().weekday()),
+            "pause_below_soc": (
+                settings.get_effective_consume_battery_level(datetime.now().weekday())
+                if settings.get_effective_consume_battery_level(datetime.now().weekday()) > 0
+                else max(0, settings.get_effective_min_battery_to_start(datetime.now().weekday()) - 10)
+            ),
+            "stop_at_battery_floor": settings.get_effective_stop_at_battery_floor(datetime.now().weekday()),
             "charger_switch_entity": settings.charger_switch_entity,
             "charger_amps_entity": settings.charger_amps_entity,
             "ocpp_charger_id": settings.ocpp_charger_id,
-            "no_grid_import": settings.no_grid_import,
+            "no_grid_import": settings.get_effective_limit_grid_import(datetime.now().weekday()),
         }
 
         try:
@@ -4213,7 +4361,8 @@ class PriceLevelChargingExecutor:
             "recovery_price_cents": 30,
             "opportunity_price_cents": 10,
             "no_grid_import": False,
-            "home_battery_minimum": 20,  # Don't charge EV if home battery below this %
+            "min_battery_to_start": 20,  # Don't charge EV if home battery below this %
+            "home_battery_minimum": 20,  # Backward compat alias
         }
 
         if store:
