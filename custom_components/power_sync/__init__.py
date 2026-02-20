@@ -6204,10 +6204,34 @@ class EVVehiclesView(HomeAssistantView):
 
         # Check if plugged in (charge flap open is a proxy)
         is_plugged_in = False
+        plugged_in_definitive = False  # True when charge_flap has a real reading (on/off)
         charge_flap_entity = f"binary_sensor.{prefix}_charge_flap"
         charge_flap_state = self._hass.states.get(charge_flap_entity)
-        if charge_flap_state and charge_flap_state.state == "on":
-            is_plugged_in = True
+        if charge_flap_state:
+            if charge_flap_state.state == "on":
+                is_plugged_in = True
+                plugged_in_definitive = True
+            elif charge_flap_state.state == "off":
+                is_plugged_in = False
+                plugged_in_definitive = True
+            # "unavailable"/"unknown" → not definitive, check cache below
+
+        # Cache definitive BLE readings so they survive BLE disconnects.
+        # When BLE loses connection, charge_flap goes "unavailable" — we use
+        # the cached value (max 2h) to avoid falling back to stale Fleet API data.
+        from homeassistant.util import dt as dt_util
+        now_utc = dt_util.utcnow()
+        ble_plug_cache_key = f"ev_ble_plug_cache_{prefix}"
+        if plugged_in_definitive:
+            self._hass.data.setdefault(DOMAIN, {}).setdefault("_ev_cache", {})[ble_plug_cache_key] = {
+                "is_plugged_in": is_plugged_in,
+                "cached_at": now_utc,
+            }
+        elif not plugged_in_definitive:
+            cached = self._hass.data.get(DOMAIN, {}).get("_ev_cache", {}).get(ble_plug_cache_key)
+            if cached and (now_utc - cached["cached_at"]).total_seconds() < 7200:
+                is_plugged_in = cached["is_plugged_in"]
+                plugged_in_definitive = True  # treat cached as definitive
 
         # Get charge power
         charger_power = None
@@ -6222,10 +6246,18 @@ class EVVehiclesView(HomeAssistantView):
         # Check BLE connection status
         is_online = status_state.state == "on"
 
+        # Use the most recent entity update time for data freshness
+        data_updated_at = status_state.last_updated if hasattr(status_state, 'last_updated') else None
+        for check_state in (charging_state_state, charge_level_state, charge_flap_state):
+            if check_state and hasattr(check_state, 'last_updated') and check_state.last_updated:
+                if data_updated_at is None or check_state.last_updated > data_updated_at:
+                    data_updated_at = check_state.last_updated
+
         _LOGGER.debug(
             f"EV BLE: Found vehicle via BLE - battery={battery_level}, "
             f"charging={charging_state}, limit={charge_limit}, "
-            f"power={charger_power}, online={is_online}"
+            f"power={charger_power}, online={is_online}, "
+            f"plugged_in={is_plugged_in} (definitive={plugged_in_definitive})"
         )
 
         return {
@@ -6238,9 +6270,10 @@ class EVVehiclesView(HomeAssistantView):
             "charging_state": charging_state,
             "charge_limit_soc": charge_limit,
             "is_plugged_in": is_plugged_in,
+            "plugged_in_definitive": plugged_in_definitive,
             "charger_power": charger_power,
             "is_online": is_online,
-            "data_updated_at": datetime.now().isoformat(),
+            "data_updated_at": data_updated_at.isoformat() if data_updated_at else datetime.now().isoformat(),
             "source": "tesla_ble",
             "brand": "tesla",
         }
@@ -6400,6 +6433,7 @@ class EVVehiclesView(HomeAssistantView):
                         charge_limit = None
                         is_plugged_in = False
                         charger_power = None
+                        latest_entity_update = None
 
                         device_entities = []
                         sensor_entities = []
@@ -6466,8 +6500,14 @@ class EVVehiclesView(HomeAssistantView):
                                     except (ValueError, TypeError):
                                         pass
 
+                            # Track most recent entity update for data freshness
+                            if hasattr(state, 'last_updated') and state.last_updated:
+                                if latest_entity_update is None or state.last_updated > latest_entity_update:
+                                    latest_entity_update = state.last_updated
+
                         _LOGGER.debug(f"EV: Device {device.name} has {len(device_entities)} entities")
 
+                        fleet_updated_at = latest_entity_update.isoformat() if latest_entity_update else datetime.now().isoformat()
                         vehicles.append({
                             "id": vehicle_id,
                             "vehicle_id": vin or str(device.id),
@@ -6480,7 +6520,7 @@ class EVVehiclesView(HomeAssistantView):
                             "is_plugged_in": is_plugged_in,
                             "charger_power": charger_power,
                             "is_online": True,
-                            "data_updated_at": datetime.now().isoformat(),
+                            "data_updated_at": fleet_updated_at,
                             "source": "fleet_api",
                             "brand": "tesla",
                         })
@@ -6493,14 +6533,35 @@ class EVVehiclesView(HomeAssistantView):
                     if ev_provider == EV_PROVIDER_BOTH and vehicles:
                         # Supplement existing Fleet API vehicle with BLE data if available
                         # BLE data is more real-time, so prefer it when available
+                        ble_online = ble_vehicle.get("is_online", False)
                         for v in vehicles:
                             if ble_vehicle.get("battery_level") is not None:
                                 v["battery_level"] = ble_vehicle["battery_level"]
-                            if ble_vehicle.get("charging_state") and ble_vehicle["charging_state"] != "Unknown":
-                                v["charging_state"] = ble_vehicle["charging_state"]
+                            ble_cs = ble_vehicle.get("charging_state")
+                            if ble_cs and ble_cs not in ("Unknown", "Asleep"):
+                                v["charging_state"] = ble_cs
                             if ble_vehicle.get("charge_limit_soc") is not None:
                                 v["charge_limit_soc"] = ble_vehicle["charge_limit_soc"]
-                            v["ble_connected"] = ble_vehicle.get("is_online", False)
+                            # Sync is_plugged_in from BLE when it has a definitive
+                            # reading (charge_flap is "on" or "off", not "unavailable").
+                            # Prevents stale Fleet API data showing "connected" for hours
+                            # after the car is unplugged and goes to sleep.
+                            if ble_vehicle.get("plugged_in_definitive"):
+                                v["is_plugged_in"] = ble_vehicle["is_plugged_in"]
+                                # When BLE definitively says unplugged, also fix
+                                # charging_state — charge_flap=off is more reliable
+                                # than the charging_state sensor when car is asleep
+                                if not ble_vehicle["is_plugged_in"]:
+                                    v["charging_state"] = "Disconnected"
+                            # Sync charger_power from BLE (more real-time than Fleet API)
+                            if ble_vehicle.get("charger_power") is not None:
+                                v["charger_power"] = ble_vehicle["charger_power"]
+                            # Use BLE timestamp if it's fresher than Fleet API
+                            ble_ts = ble_vehicle.get("data_updated_at", "")
+                            fleet_ts = v.get("data_updated_at", "")
+                            if ble_ts > fleet_ts:
+                                v["data_updated_at"] = ble_ts
+                            v["ble_connected"] = ble_online
                     elif not vehicles:
                         # No Fleet API vehicles, use BLE as primary
                         vehicles.append(ble_vehicle)
