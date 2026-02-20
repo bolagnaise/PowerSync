@@ -2356,8 +2356,9 @@ class AutoScheduleSettings:
 
     # Target settings
     target_soc: int = 80
-    departure_time: Optional[str] = None  # HH:MM format
-    departure_days: List[int] = field(default_factory=lambda: [0, 1, 2, 3, 4])  # Mon-Fri
+    departure_time: Optional[str] = None  # HH:MM format (legacy, kept for backward compat)
+    departure_days: List[int] = field(default_factory=lambda: [0, 1, 2, 3, 4])  # Mon-Fri (legacy)
+    departure_times: Dict[int, str] = field(default_factory=dict)  # {day_index: "HH:MM"} e.g. {0: "07:30", 4: "07:30"}
 
     # Priority mode
     priority: ChargingPriority = ChargingPriority.COST_OPTIMIZED
@@ -2390,13 +2391,21 @@ class AutoScheduleSettings:
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
+        # Derive legacy fields from departure_times for backward compat
+        legacy_departure_time = None
+        legacy_departure_days = []
+        if self.departure_times:
+            legacy_departure_days = sorted(self.departure_times.keys())
+            # Use first found time as legacy departure_time
+            legacy_departure_time = next(iter(self.departure_times.values()), None)
         return {
             "enabled": self.enabled,
             "vehicle_id": self.vehicle_id,
             "display_name": self.display_name,
             "target_soc": self.target_soc,
-            "departure_time": self.departure_time,
-            "departure_days": self.departure_days,
+            "departure_time": legacy_departure_time,
+            "departure_days": legacy_departure_days,
+            "departure_times": {str(k): v for k, v in self.departure_times.items()},
             "priority": self.priority.value,
             "home_battery_minimum": self.home_battery_minimum,
             "max_grid_price_cents": self.max_grid_price_cents,
@@ -2426,6 +2435,19 @@ class AutoScheduleSettings:
         old_min_battery = data.get("min_battery_soc", 20)
         home_battery_minimum = data.get("home_battery_minimum", old_min_battery if old_min_battery <= 30 else 20)
 
+        # Handle departure_times migration from legacy format
+        departure_times: Dict[int, str] = {}
+        raw_departure_times = data.get("departure_times")
+        if raw_departure_times and isinstance(raw_departure_times, dict):
+            # New format: {"0": "07:30", "4": "07:30"} or {0: "07:30"}
+            departure_times = {int(k): v for k, v in raw_departure_times.items()}
+        else:
+            # Legacy format: departure_time + departure_days → build departure_times dict
+            legacy_time = data.get("departure_time")
+            legacy_days = data.get("departure_days", [0, 1, 2, 3, 4])
+            if legacy_time:
+                departure_times = {day: legacy_time for day in legacy_days}
+
         return cls(
             enabled=data.get("enabled", False),
             vehicle_id=data.get("vehicle_id", "_default"),
@@ -2433,6 +2455,7 @@ class AutoScheduleSettings:
             target_soc=data.get("target_soc", 80),
             departure_time=data.get("departure_time"),
             departure_days=data.get("departure_days", [0, 1, 2, 3, 4]),
+            departure_times=departure_times,
             priority=priority,
             home_battery_minimum=home_battery_minimum,
             max_grid_price_cents=data.get("max_grid_price_cents", 25.0),
@@ -2755,6 +2778,9 @@ class AutoScheduleExecutor:
                     value = ChargingPriority(value)
                 except ValueError:
                     continue
+            if key == "departure_times" and isinstance(value, dict):
+                # Convert string keys from JSON to int day indices
+                value = {int(k): v for k, v in value.items()}
             if hasattr(settings, key):
                 setattr(settings, key, value)
 
@@ -3329,13 +3355,18 @@ class AutoScheduleExecutor:
 
         # Apply additional constraints based on priority mode
         if should_charge and source.startswith("grid"):
+            # Enforce no_grid_import constraint
+            if settings.no_grid_import:
+                should_charge = False
+                reason = "No grid import enabled — waiting for solar/battery surplus"
+
             # Check price constraint (but not for time_critical - deadline takes priority)
-            if current_price_cents > settings.max_grid_price_cents and not is_time_critical:
+            elif current_price_cents > settings.max_grid_price_cents and not is_time_critical:
                 should_charge = False
                 reason = f"Grid price {current_price_cents:.0f}c > max {settings.max_grid_price_cents:.0f}c"
 
             # Solar-only mode doesn't allow grid
-            if settings.priority == ChargingPriority.SOLAR_ONLY:
+            elif settings.priority == ChargingPriority.SOLAR_ONLY:
                 should_charge = False
                 reason = "Solar-only mode - no grid charging"
 
@@ -3450,10 +3481,25 @@ class AutoScheduleExecutor:
         """Regenerate the charging plan based on current forecasts."""
         now = datetime.now()
 
-        # Determine target time
+        # Determine target time from per-day departure_times
         target_time = None
-        if settings.departure_time:
-            # Parse departure time
+        if settings.departure_times:
+            # Find next applicable departure by walking forward through days
+            for days_ahead in range(8):  # Check up to 7 days ahead
+                check_time = now + timedelta(days=days_ahead)
+                weekday = check_time.weekday()
+                if weekday in settings.departure_times:
+                    dep_str = settings.departure_times[weekday]
+                    try:
+                        dep_hour, dep_min = map(int, dep_str.split(":"))
+                        candidate = check_time.replace(hour=dep_hour, minute=dep_min, second=0, microsecond=0)
+                        if candidate > now:
+                            target_time = candidate
+                            break
+                    except ValueError:
+                        _LOGGER.warning(f"Invalid departure time format for day {weekday}: {dep_str}")
+        elif settings.departure_time:
+            # Legacy fallback: single departure_time + departure_days
             try:
                 dep_hour, dep_min = map(int, settings.departure_time.split(":"))
                 target_time = now.replace(hour=dep_hour, minute=dep_min, second=0, microsecond=0)

@@ -8830,12 +8830,19 @@ class AutoScheduleStatusView(HomeAssistantView):
             states = executor.get_all_states()
             settings = {}
             for vehicle_id, vehicle_settings in executor._settings.items():
+                # Derive legacy fields from departure_times for backward compat
+                legacy_departure_time = None
+                legacy_departure_days = []
+                if vehicle_settings.departure_times:
+                    legacy_departure_days = sorted(vehicle_settings.departure_times.keys())
+                    legacy_departure_time = next(iter(vehicle_settings.departure_times.values()), None)
                 settings[vehicle_id] = {
                     "enabled": vehicle_settings.enabled,
                     "priority": vehicle_settings.priority.value,
                     "target_soc": vehicle_settings.target_soc,
-                    "departure_time": vehicle_settings.departure_time,
-                    "departure_days": vehicle_settings.departure_days,
+                    "departure_time": legacy_departure_time,
+                    "departure_days": legacy_departure_days,
+                    "departure_times": {str(k): v for k, v in vehicle_settings.departure_times.items()},
                     "home_battery_minimum": vehicle_settings.home_battery_minimum,
                     "no_grid_import": vehicle_settings.no_grid_import,
                 }
