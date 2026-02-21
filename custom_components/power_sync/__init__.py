@@ -9353,6 +9353,44 @@ class HomePowerSettingsView(HomeAssistantView):
             }, status=500)
 
 
+def _migrate_entity_ids(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Migrate legacy bare entity IDs to power_sync_ prefixed IDs.
+
+    Old installs created entities like sensor.current_import_price instead of
+    sensor.power_sync_current_import_price.  This renames them in the entity
+    registry so all installs use a consistent naming convention.
+    """
+    ent_reg = er.async_get(hass)
+    migrated = 0
+
+    for entity_entry in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
+        old_id = entity_entry.entity_id
+        # Extract domain and object_id  (e.g. "sensor", "current_import_price")
+        domain, _, object_id = old_id.partition(".")
+        if not object_id:
+            continue
+
+        # Skip if already prefixed
+        if object_id.startswith("power_sync_"):
+            continue
+
+        new_id = f"{domain}.power_sync_{object_id}"
+
+        # Don't overwrite an existing entity
+        if ent_reg.async_get(new_id):
+            _LOGGER.debug(
+                "Skipping migration %s -> %s (target already exists)", old_id, new_id
+            )
+            continue
+
+        ent_reg.async_update_entity(old_id, new_entity_id=new_id)
+        migrated += 1
+        _LOGGER.info("Migrated entity ID: %s -> %s", old_id, new_id)
+
+    if migrated:
+        _LOGGER.info("Entity ID migration complete: %d entities renamed", migrated)
+
+
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up the PowerSync integration (global, runs once)."""
     # Register static path for the dashboard strategy JS
@@ -10699,6 +10737,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.error(f"Error controlling inverter: {e}", exc_info=True)
             return False
+
+    # Migrate legacy entity IDs to power_sync_ prefix
+    _migrate_entity_ids(hass, entry)
 
     # Set up platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
