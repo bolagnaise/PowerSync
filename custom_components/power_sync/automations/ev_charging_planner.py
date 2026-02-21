@@ -4508,34 +4508,34 @@ class PriceLevelChargingExecutor:
         except Exception as e:
             _LOGGER.debug(f"Error searching for EV battery sensor: {e}")
 
-        # Method 3: Broader search for non-Tesla EV battery sensors (BYD, etc.)
-        # BYD uses sensor.*_elec_percent; other integrations use *_battery_level, *_soc
+        # Method 3: Search known EV integration platforms for battery sensors
+        # Uses entity registry platform field to only match real EV integrations
+        EV_PLATFORMS = ("byd_vehicle", "kia_uvo", "hyundai_kia_connect", "bmw_connected_drive",
+                        "volkswagencarnet", "mbapi2020", "polestar", "rivian", "myskoda")
+        EV_BATTERY_KEYS = ("_elec_percent", "_battery_level", "_charge_level", "_soc", "_battery")
         try:
-            for state in self.hass.states.async_all():
-                entity_id = state.entity_id
-                if not entity_id.startswith("sensor."):
+            for entity in entity_reg.entities.values():
+                if entity.platform not in EV_PLATFORMS:
                     continue
-                entity_lower = entity_id.lower()
-                # Match common EV battery patterns, skip Tesla (already checked above)
-                # and skip home battery sensors (powerwall, battery_power, etc.)
-                if any(p in entity_lower for p in ("_elec_percent", "_battery_level", "_charge_level", "_soc")):
-                    # Skip known non-EV sensors
-                    if any(skip in entity_lower for skip in (
-                        "powerwall", "power_sync", "battery_power", "battery_range",
-                        "phone", "tablet", "laptop", "watch",
-                        "macbook", "ipad", "iphone", "apple_watch", "airpods", "imac",
-                    )):
+                if not entity.entity_id.startswith("sensor."):
+                    continue
+                entity_lower = entity.entity_id.lower()
+                if not any(k in entity_lower for k in EV_BATTERY_KEYS):
+                    continue
+                # Skip power/range sensors
+                if "power" in entity_lower or "range" in entity_lower:
+                    continue
+                state = self.hass.states.get(entity.entity_id)
+                if state and state.state not in ("unavailable", "unknown", "None", None):
+                    try:
+                        level = float(state.state)
+                        if 0 <= level <= 100:
+                            _LOGGER.debug(f"Found EV battery level from {entity.platform} sensor {entity.entity_id}: {level}%")
+                            return int(level)
+                    except (ValueError, TypeError):
                         continue
-                    if state.state not in ("unavailable", "unknown", "None", None):
-                        try:
-                            level = float(state.state)
-                            if 0 <= level <= 100:
-                                _LOGGER.debug(f"Found EV battery level from generic sensor {entity_id}: {level}%")
-                                return int(level)
-                        except (ValueError, TypeError):
-                            continue
         except Exception as e:
-            _LOGGER.debug(f"Error in generic EV battery sensor search: {e}")
+            _LOGGER.debug(f"Error in EV platform battery sensor search: {e}")
 
         _LOGGER.warning(f"Could not find EV battery level from any source (VIN: {vehicle_vin})")
         return None
