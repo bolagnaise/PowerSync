@@ -9356,12 +9356,11 @@ class HomePowerSettingsView(HomeAssistantView):
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up the PowerSync integration (global, runs once)."""
     # Register static path for the dashboard strategy JS
+    from homeassistant.components.http import StaticPathConfig
     frontend_dir = pathlib.Path(__file__).parent / "frontend"
-    hass.http.register_static_path(
-        "/power_sync/frontend",
-        str(frontend_dir),
-        cache_headers=True,
-    )
+    await hass.http.async_register_static_paths([
+        StaticPathConfig("/power_sync/frontend", str(frontend_dir), True),
+    ])
 
     # Auto-register the Lovelace resource (storage mode only)
     try:
