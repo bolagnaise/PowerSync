@@ -125,6 +125,13 @@ class AutoSyncSwitch(SwitchEntity):
         )
 
     @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
+
+    @property
     def is_on(self) -> bool:
         """Return True if the switch is on."""
         return self._attr_is_on
@@ -211,6 +218,13 @@ class ForceDischargeSwitch(SwitchEntity):
         self._discharge_expires_at: datetime | None = None
         self._duration_minutes: int = DEFAULT_DISCHARGE_DURATION
         self._cancel_expiry_timer = None
+
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
 
     @property
     def is_on(self) -> bool:
@@ -348,6 +362,13 @@ class ForceChargeSwitch(SwitchEntity):
         self._charge_expires_at: datetime | None = None
         self._duration_minutes: int = DEFAULT_DISCHARGE_DURATION  # Reuse same default
         self._cancel_expiry_timer = None
+
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
 
     @property
     def is_on(self) -> bool:

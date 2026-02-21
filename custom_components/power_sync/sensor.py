@@ -813,7 +813,15 @@ class AmberPriceSensor(CoordinatorEntity, SensorEntity):
         self._attr_has_entity_name = True
         # HA 2026.2.0+ requires lowercase suggested_object_id
         self._attr_suggested_object_id = f"power_sync_{description.key}"
+        self._entry = entry
         _LOGGER.debug("AmberPriceSensor initialized: %s (unique_id=%s)", description.key, self._attr_unique_id)
+
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
 
     @property
     def native_value(self) -> Any:
@@ -850,6 +858,14 @@ class TeslaEnergySensor(CoordinatorEntity, SensorEntity):
         self._attr_has_entity_name = True
         # HA 2026.2.0+ requires lowercase suggested_object_id
         self._attr_suggested_object_id = f"power_sync_{description.key}"
+        self._entry = entry
+
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
 
     @property
     def native_value(self) -> Any:
@@ -921,6 +937,13 @@ class DemandChargeSensor(CoordinatorEntity, SensorEntity):
         self._entry = entry
 
     @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
+
+    @property
     def native_value(self) -> Any:
         """Return the state of the sensor (uses coordinator data)."""
         if self.entity_description.value_fn:
@@ -972,6 +995,14 @@ class AEMOSpikeSensor(SensorEntity):
         self._attr_has_entity_name = True
         # HA 2026.2.0+ requires lowercase suggested_object_id
         self._attr_suggested_object_id = f"power_sync_{description.key}"
+        self._entry = entry
+
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
 
     @property
     def native_value(self) -> Any:
@@ -1006,6 +1037,14 @@ class SolcastForecastSensor(CoordinatorEntity, SensorEntity):
         self._attr_has_entity_name = True
         # HA 2026.2.0+ requires lowercase suggested_object_id
         self._attr_suggested_object_id = f"power_sync_{description.key}"
+        self._entry = entry
+
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
 
     @property
     def native_value(self) -> Any:
@@ -1113,6 +1152,14 @@ class LPForecastSensor(CoordinatorEntity, SensorEntity):
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_has_entity_name = True
+        self._entry = entry
+
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
 
     @property
     def _forecast_data(self) -> dict[str, Any]:
@@ -1158,6 +1205,13 @@ class TariffScheduleSensor(SensorEntity):
         self._attr_icon = "mdi:calendar-clock"
         self._unsub_dispatcher = None
         self._unsub_time_interval = None
+
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
 
     async def async_added_to_hass(self) -> None:
         """Run when entity is added to hass."""
@@ -1347,6 +1401,13 @@ class TariffPriceSensor(SensorEntity):
         self._unsub_time_interval = None
         self._current_period = None
 
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
+
     async def async_added_to_hass(self) -> None:
         """Run when entity is added to hass."""
         await super().async_added_to_hass()
@@ -1453,6 +1514,13 @@ class SolarCurtailmentSensor(SensorEntity):
         self._attr_suggested_object_id = f"power_sync_{SENSOR_TYPE_SOLAR_CURTAILMENT}"
         self._attr_icon = "mdi:solar-power-variant"
         self._unsub_dispatcher = None
+
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
 
     async def async_added_to_hass(self) -> None:
         """Run when entity is added to hass."""
@@ -1576,6 +1644,13 @@ class InverterStatusSensor(SensorEntity):
         self._cached_state = None
         self._cached_attrs = {}
         self._controller = None  # Cached controller to preserve state (e.g., JWT token timestamp)
+
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
 
     async def async_added_to_hass(self) -> None:
         """Run when entity is added to hass."""
@@ -1882,6 +1957,13 @@ class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):
         self._attr_device_class = SensorDeviceClass.MONETARY
         self._attr_suggested_display_precision = 4
 
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
+
     def _get_config_value(self, key: str, default=None):
         """Get config value from options first, then data."""
         return self._entry.options.get(key, self._entry.data.get(key, default))
@@ -2098,6 +2180,13 @@ class FlowPowerTWAPSensor(SensorEntity):
         self._attr_native_unit_of_measurement = "c/kWh"
         self._attr_suggested_display_precision = 2
 
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
+
     def _get_config_value(self, key: str, default=None):
         """Get config value from options first, then data."""
         return self._entry.options.get(key, self._entry.data.get(key, default))
@@ -2163,6 +2252,13 @@ class FlowPowerNetworkTariffSensor(SensorEntity):
         self._attr_native_unit_of_measurement = "c/kWh"
         self._attr_suggested_display_precision = 2
 
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
+
     def _get_config_value(self, key: str, default=None):
         """Get config value from options first, then data."""
         return self._entry.options.get(key, self._entry.data.get(key, default))
@@ -2214,6 +2310,13 @@ class FlowPowerAmberComparisonSensor(SensorEntity):
         self._attr_native_unit_of_measurement = f"{CURRENCY_DOLLAR}/{UnitOfEnergy.KILO_WATT_HOUR}"
         self._attr_device_class = SensorDeviceClass.MONETARY
         self._attr_suggested_display_precision = 4
+
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
 
     def _get_config_value(self, key: str, default=None):
         """Get config value from options first, then data."""
@@ -2322,6 +2425,13 @@ class BatteryHealthSensor(SensorEntity):
         self._battery_count: int | None = None
         self._scanned_at: str | None = None
         self._individual_batteries: list | None = None
+
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
 
     async def async_added_to_hass(self) -> None:
         """Subscribe to battery health updates when added to hass."""
@@ -2460,6 +2570,13 @@ class BatteryModeSensor(SensorEntity):
         self._unsub_force_charge = None
         self._unsub_force_discharge = None
 
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
+
     async def async_added_to_hass(self) -> None:
         """Run when entity is added to hass."""
         await super().async_added_to_hass()
@@ -2588,6 +2705,13 @@ class AmberUsageSensor(SensorEntity):
         self._attr_suggested_object_id = f"power_sync_{sensor_type}"
         self._unsub_interval: Any = None
 
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
+
     async def async_added_to_hass(self) -> None:
         """Start periodic updates when added to HA."""
         @callback
@@ -2646,10 +2770,3 @@ class AmberUsageSensor(SensorEntity):
             attrs["baseline_cost"] = summary.get("baseline_cost")
             attrs["net_cost"] = summary.get("net_cost")
         return attrs
-
-    @property
-    def device_info(self):
-        """Return device info to link to the PowerSync device."""
-        return {
-            "identifiers": {(DOMAIN, self._entry.entry_id)},
-        }

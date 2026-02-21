@@ -8,6 +8,7 @@ from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
+    DOMAIN,
     CONF_FORCE_CHARGE_DURATION,
     CONF_FORCE_DISCHARGE_DURATION,
     DEFAULT_DISCHARGE_DURATION,
@@ -97,6 +98,13 @@ class PowerSyncDurationSelect(SelectEntity):
 
         # SelectEntity options must be strings
         self._attr_options = [str(x) for x in DISCHARGE_DURATIONS]
+
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry_id)},
+        }
 
     def _get_entry(self) -> ConfigEntry | None:
         """Get the current config entry (not a stale reference)."""
