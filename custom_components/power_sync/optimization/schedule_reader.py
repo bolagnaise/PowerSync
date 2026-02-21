@@ -61,7 +61,7 @@ class OptimizationSchedule:
     @property
     def soc(self) -> list[float]:
         """Get SOC schedule (0-1 scale)."""
-        return [a.soc or 0.5 for a in self.actions]
+        return [a.soc if a.soc is not None else 0.5 for a in self.actions]
 
     def to_executor_schedule(self) -> list[dict[str, Any]]:
         """Convert to executor-compatible format."""
