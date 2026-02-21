@@ -2050,6 +2050,8 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
             energy_data = {
                 "solar_power": max(0, total_solar_kw),
                 "ct2_power": ct2_kw,
+                "pv1_power": attrs.get("pv1_power_kw", 0) or 0,
+                "pv2_power": attrs.get("pv2_power_kw", 0) or 0,
                 "grid_power": grid_kw,
                 "battery_power": battery_kw,
                 "load_power": load_kw,

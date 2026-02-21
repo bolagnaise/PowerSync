@@ -703,6 +703,16 @@ SENSOR_TYPE_GRID_POWER = "grid_power"
 SENSOR_TYPE_BATTERY_POWER = "battery_power"
 SENSOR_TYPE_HOME_LOAD = "home_load"
 SENSOR_TYPE_BATTERY_LEVEL = "battery_level"
+
+# FoxESS-specific sensor types
+SENSOR_TYPE_PV1_POWER = "pv1_power"
+SENSOR_TYPE_PV2_POWER = "pv2_power"
+SENSOR_TYPE_CT2_POWER = "ct2_power"
+SENSOR_TYPE_WORK_MODE = "work_mode"
+SENSOR_TYPE_MIN_SOC = "min_soc"
+SENSOR_TYPE_DAILY_BATTERY_CHARGE_FOXESS = "daily_battery_charge_foxess"
+SENSOR_TYPE_DAILY_BATTERY_DISCHARGE_FOXESS = "daily_battery_discharge_foxess"
+
 SENSOR_TYPE_DAILY_SOLAR_ENERGY = "daily_solar_energy"
 SENSOR_TYPE_DAILY_GRID_IMPORT = "daily_grid_import"
 SENSOR_TYPE_DAILY_GRID_EXPORT = "daily_grid_export"

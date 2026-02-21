@@ -73,6 +73,15 @@ from .const import (
     SENSOR_TYPE_BATTERY_HEALTH,
     SENSOR_TYPE_INVERTER_STATUS,
     SENSOR_TYPE_BATTERY_MODE,
+    SENSOR_TYPE_PV1_POWER,
+    SENSOR_TYPE_PV2_POWER,
+    SENSOR_TYPE_CT2_POWER,
+    SENSOR_TYPE_WORK_MODE,
+    SENSOR_TYPE_MIN_SOC,
+    SENSOR_TYPE_DAILY_BATTERY_CHARGE_FOXESS,
+    SENSOR_TYPE_DAILY_BATTERY_DISCHARGE_FOXESS,
+    SENSOR_TYPE_OPTIMIZATION_STATUS,
+    SENSOR_TYPE_OPTIMIZATION_NEXT_ACTION,
     SENSOR_TYPE_LP_SOLAR_FORECAST,
     SENSOR_TYPE_LP_LOAD_FORECAST,
     SENSOR_TYPE_LP_IMPORT_PRICE_FORECAST,
@@ -267,6 +276,96 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=1,
         value_fn=lambda data: data.get("battery_level") if data else None,
+    ),
+)
+
+FOXESS_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_PV1_POWER,
+        name="PV1 Power",
+        native_unit_of_measurement=UnitOfPower.KILO_WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=3,
+        icon="mdi:solar-panel",
+        value_fn=lambda data: data.get("pv1_power") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_PV2_POWER,
+        name="PV2 Power",
+        native_unit_of_measurement=UnitOfPower.KILO_WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=3,
+        icon="mdi:solar-panel",
+        value_fn=lambda data: data.get("pv2_power") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_CT2_POWER,
+        name="CT2 Power",
+        native_unit_of_measurement=UnitOfPower.KILO_WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=3,
+        icon="mdi:current-ac",
+        value_fn=lambda data: data.get("ct2_power") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_WORK_MODE,
+        name="Inverter Work Mode",
+        icon="mdi:cog",
+        value_fn=lambda data: data.get("work_mode_name") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_MIN_SOC,
+        name="Minimum SOC",
+        native_unit_of_measurement=PERCENTAGE,
+        icon="mdi:battery-low",
+        suggested_display_precision=0,
+        value_fn=lambda data: data.get("min_soc") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_DAILY_BATTERY_CHARGE_FOXESS,
+        name="Daily Battery Charge",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        suggested_display_precision=2,
+        icon="mdi:battery-charging",
+        value_fn=lambda data: data.get("energy_summary", {}).get("charge_today_kwh") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_DAILY_BATTERY_DISCHARGE_FOXESS,
+        name="Daily Battery Discharge",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        suggested_display_precision=2,
+        icon="mdi:battery-arrow-down",
+        value_fn=lambda data: data.get("energy_summary", {}).get("discharge_today_kwh") if data else None,
+    ),
+)
+
+OPTIMIZER_ACTION_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_OPTIMIZATION_STATUS,
+        name="Optimizer Current Action",
+        icon="mdi:battery-sync",
+        value_fn=lambda data: data.get("current_action") if data else None,
+        attr_fn=lambda data: {
+            "power_w": data.get("current_power_w"),
+            "status": data.get("status"),
+        } if data else {},
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_OPTIMIZATION_NEXT_ACTION,
+        name="Optimizer Next Action",
+        icon="mdi:clock-fast",
+        value_fn=lambda data: data.get("next_action") if data else None,
+        attr_fn=lambda data: {
+            "time": data.get("next_action_time"),
+            "power_w": data.get("next_action_power_w"),
+        } if data else {},
     ),
 )
 
@@ -492,6 +591,18 @@ async def async_setup_entry(
     else:
         _LOGGER.warning("No energy coordinator available - energy sensors will not be created")
 
+    # Add FoxESS-specific sensors (PV strings, CT2, work mode, etc.)
+    if is_foxess and energy_coordinator:
+        for description in FOXESS_SENSORS:
+            entities.append(
+                TeslaEnergySensor(
+                    coordinator=energy_coordinator,
+                    description=description,
+                    entry=entry,
+                )
+            )
+        _LOGGER.info("FoxESS-specific sensors added (PV1, PV2, CT2, work mode, min SOC, daily energy)")
+
     # Add demand charge sensors if enabled and coordinator exists
     if demand_charge_coordinator and demand_charge_coordinator.enabled:
         _LOGGER.info("Demand charge tracking enabled - adding sensors")
@@ -544,8 +655,17 @@ async def async_setup_entry(
                     entry=entry,
                 )
             )
+        for description in OPTIMIZER_ACTION_SENSORS:
+            entities.append(
+                OptimizerActionSensor(
+                    coordinator=optimization_coordinator,
+                    description=description,
+                    entry=entry,
+                )
+            )
+        _LOGGER.info("Optimizer action sensors added (current action, next action)")
     else:
-        # Store callback for deferred LP forecast sensor creation
+        # Store callback for deferred LP forecast + optimizer action sensor creation
         domain_data["sensor_async_add_entities"] = async_add_entities
 
     # Add Amber usage sensors if usage coordinator exists
@@ -737,6 +857,39 @@ class TeslaEnergySensor(CoordinatorEntity, SensorEntity):
         if self.entity_description.value_fn:
             return self.entity_description.value_fn(self.coordinator.data)
         return None
+
+
+class OptimizerActionSensor(CoordinatorEntity, SensorEntity):
+    """Sensor for optimizer current/next action (reads from OptimizationCoordinator.data)."""
+
+    entity_description: PowerSyncSensorEntityDescription
+
+    def __init__(
+        self,
+        coordinator,
+        description: PowerSyncSensorEntityDescription,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator)
+        self.entity_description = description
+        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        self._attr_has_entity_name = True
+        self._attr_suggested_object_id = f"power_sync_{description.key}"
+
+    @property
+    def native_value(self) -> Any:
+        """Return the state of the sensor."""
+        if self.entity_description.value_fn:
+            return self.entity_description.value_fn(self.coordinator.data)
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return additional attributes."""
+        if self.entity_description.attr_fn:
+            return self.entity_description.attr_fn(self.coordinator.data)
+        return {}
 
 
 class DemandChargeSensor(CoordinatorEntity, SensorEntity):

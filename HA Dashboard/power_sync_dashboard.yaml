@@ -234,6 +234,85 @@ views:
                   service: power_sync.restore_normal
                   confirmation:
                     text: Restore normal battery operation?
+      - type: custom:button-card
+        entity: sensor.power_sync_optimization_status
+        name: Optimizer
+        show_icon: true
+        show_name: true
+        show_label: true
+        label: |-
+          [[[
+            const current = states['sensor.power_sync_optimization_status'];
+            const next = states['sensor.power_sync_optimization_next_action'];
+            if (!current || current.state === 'unavailable' || current.state === 'unknown')
+              return 'Not available';
+
+            const action = (current.state || 'idle').replace('_', ' ');
+            const powerW = Number(current.attributes?.power_w ?? 0);
+            const powerStr = Math.abs(powerW) >= 1000
+              ? (powerW / 1000).toFixed(1) + ' kW'
+              : Math.round(powerW) + ' W';
+
+            let line1 = action.charAt(0).toUpperCase() + action.slice(1);
+            if (powerW) line1 += ' @ ' + powerStr;
+
+            if (next && next.state && next.state !== 'unknown' && next.state !== 'unavailable') {
+              const nextAction = (next.state || '').replace('_', ' ');
+              const nextTime = next.attributes?.time;
+              if (nextAction && nextTime) {
+                const d = new Date(nextTime);
+                const timeStr = d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+                return line1 + '  →  ' + nextAction + ' at ' + timeStr;
+              }
+            }
+            return line1;
+          ]]]
+        icon: |-
+          [[[
+            const s = states['sensor.power_sync_optimization_status']?.state;
+            if (s === 'charge') return 'mdi:battery-charging';
+            if (s === 'discharge' || s === 'export') return 'mdi:battery-arrow-down';
+            if (s === 'self_consumption') return 'mdi:home-battery';
+            return 'mdi:battery-sync';
+          ]]]
+        styles:
+          card:
+            - border-radius: 16px
+            - padding: 12px
+            - background: |-
+                [[[
+                  const s = states['sensor.power_sync_optimization_status']?.state;
+                  if (s === 'charge') return 'linear-gradient(135deg, rgba(33, 150, 243, 0.15) 0%, rgba(33, 150, 243, 0.05) 100%)';
+                  if (s === 'discharge' || s === 'export') return 'linear-gradient(135deg, rgba(255, 152, 0, 0.15) 0%, rgba(255, 152, 0, 0.05) 100%)';
+                  if (s === 'self_consumption') return 'linear-gradient(135deg, rgba(76, 175, 80, 0.15) 0%, rgba(76, 175, 80, 0.05) 100%)';
+                  return 'linear-gradient(135deg, rgba(158, 158, 158, 0.10) 0%, rgba(158, 158, 158, 0.05) 100%)';
+                ]]]
+          grid:
+            - grid-template-areas: '"i n" "i l"'
+            - grid-template-columns: min-content 1fr
+            - column-gap: 10px
+            - row-gap: 2px
+            - align-items: center
+          icon:
+            - width: 28px
+            - color: |-
+                [[[
+                  const s = states['sensor.power_sync_optimization_status']?.state;
+                  if (s === 'charge') return 'var(--blue-color, #2196F3)';
+                  if (s === 'discharge' || s === 'export') return 'var(--orange-color, #FF9800)';
+                  if (s === 'self_consumption') return 'var(--green-color, #4CAF50)';
+                  return 'var(--disabled-text-color)';
+                ]]]
+          name:
+            - justify-self: start
+            - font-weight: 700
+            - font-size: 16px
+          label:
+            - justify-self: start
+            - opacity: 0.85
+            - font-size: 14px
+        tap_action:
+          action: more-info
       - type: custom:power-flow-card-plus
         entities:
           battery:
