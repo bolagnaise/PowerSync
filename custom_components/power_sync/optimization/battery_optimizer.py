@@ -597,6 +597,8 @@ class BatteryOptimizer:
                 action=action,
                 power_w=round(power_w, 1),
                 soc=round(soc, 4),
+                battery_charge_w=round(charge_kw * 1000, 1),
+                battery_discharge_w=round(discharge_kw * 1000, 1),
             ))
 
         return OptimizationSchedule(

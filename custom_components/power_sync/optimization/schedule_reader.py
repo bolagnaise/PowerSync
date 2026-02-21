@@ -18,6 +18,8 @@ class ScheduleAction:
     action: str  # "idle", "charge", "discharge", "consume", "export", "self_consumption"
     power_w: float
     soc: float | None = None
+    battery_charge_w: float = 0.0
+    battery_discharge_w: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for API response."""
@@ -44,19 +46,13 @@ class OptimizationSchedule:
 
     @property
     def charge_w(self) -> list[float]:
-        """Get charge power schedule (positive = charging)."""
-        return [
-            a.power_w if a.action == "charge" else 0.0
-            for a in self.actions
-        ]
+        """Get battery charge power schedule (positive = charging)."""
+        return [a.battery_charge_w for a in self.actions]
 
     @property
     def discharge_w(self) -> list[float]:
-        """Get discharge power schedule (positive = discharging)."""
-        return [
-            a.power_w if a.action in ("discharge", "consume", "export") else 0.0
-            for a in self.actions
-        ]
+        """Get battery discharge power schedule (positive = discharging)."""
+        return [a.battery_discharge_w for a in self.actions]
 
     @property
     def soc(self) -> list[float]:
