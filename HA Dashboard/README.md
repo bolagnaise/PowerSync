@@ -7,6 +7,7 @@ A pre-built Lovelace dashboard for visualizing your battery system and energy da
 The dashboard includes:
 - **Price Gauges** - Compact gauges for import price, export price, and battery level
 - **Battery Control** - Force charge, force discharge, and restore normal buttons with duration selectors
+- **Optimizer Status** - Combined current action + next action card with color-coded state and power display
 - **Power Flow Card** - Real-time energy flow visualization
 - **Price Charts** - Amber/Flow Power prices and TOU schedule sent to battery
 - **LP Forecast Charts** - 48-hour solar, load, and price forecasts from the built-in optimizer
@@ -81,6 +82,8 @@ The dashboard uses these default entity names. If your entities have different n
 | `sensor.dc_solar_curtailment` | DC solar curtailment status (Tesla) |
 | `sensor.inverter_status` | AC-coupled inverter status |
 | `sensor.battery_health` | Battery health from mobile app TEDAPI scan |
+| `sensor.power_sync_optimization_status` | Optimizer current action (idle/charge/discharge/export) |
+| `sensor.power_sync_optimization_next_action` | Optimizer next scheduled action + time |
 
 ### Chart Heights
 

@@ -100,6 +100,8 @@ OEM rebrands using identical hardware are also supported — the model family is
 - **All models:** Default port 502, slave ID 247. Model family is auto-detected during setup — no manual selection needed for rebrands.
 - **Cloud API key** is optional — sync Amber/Octopus prices as time-based schedules on the inverter. Get your key from [foxesscloud.com](https://www.foxesscloud.com) > User Profile > API Management.
 
+> **Important: Do not run other Modbus integrations alongside PowerSync.** FoxESS inverters only support a single Modbus TCP connection. Running a second integration (e.g. foxess_modbus, foxess-ha) on the same IP will cause connection contention — register writes fail, force charge commands are delayed by minutes, and both integrations become unreliable. PowerSync already exposes all commonly-needed data as HA sensors (see [Sensors](#sensors) below), so the external integration is not needed.
+
 ### Sigenergy
 
 Requires both Cloud API (for tariff sync) and Modbus TCP (for real-time data + DC curtailment).
@@ -168,6 +170,43 @@ Coordinates EV charging alongside battery optimization with dynamic power sharin
 | **Chip Mode** | Suppress overnight exports unless price exceeds threshold |
 
 See the [wiki](https://github.com/bolagnaise/PowerSync/wiki) for configuration details.
+
+---
+
+## Sensors
+
+PowerSync automatically creates sensor entities for energy monitoring. **All battery systems** get the core energy sensors:
+
+| Sensor | Entity ID | Unit | Description |
+|--------|-----------|------|-------------|
+| Solar Power | `sensor.power_sync_solar_power` | kW | Total solar generation |
+| Grid Power | `sensor.power_sync_grid_power` | kW | Grid import (+) / export (-) |
+| Battery Power | `sensor.power_sync_battery_power` | kW | Charge (+) / discharge (-) |
+| Home Load | `sensor.power_sync_home_load` | kW | Home consumption |
+| Battery Level | `sensor.power_sync_battery_level` | % | State of charge |
+
+### FoxESS Sensors
+
+FoxESS users get additional sensors from the Modbus data PowerSync already reads. These replace the need for a separate Modbus integration:
+
+| Sensor | Entity ID | Unit | Description |
+|--------|-----------|------|-------------|
+| PV1 Power | `sensor.power_sync_pv1_power` | kW | DC string 1 power |
+| PV2 Power | `sensor.power_sync_pv2_power` | kW | DC string 2 power |
+| CT2 Power | `sensor.power_sync_ct2_power` | kW | AC-coupled inverter (e.g. Solis behind FoxESS) |
+| Inverter Work Mode | `sensor.power_sync_work_mode` | — | Self Use / Feed-in / Backup |
+| Minimum SOC | `sensor.power_sync_min_soc` | % | Backup reserve setting |
+| Daily Battery Charge | `sensor.power_sync_daily_battery_charge_foxess` | kWh | Today's charge energy |
+| Daily Battery Discharge | `sensor.power_sync_daily_battery_discharge_foxess` | kWh | Today's discharge energy |
+
+### Optimizer Sensors
+
+When Smart Optimization is enabled, these sensors are created for **all battery systems**:
+
+| Sensor | Entity ID | Description |
+|--------|-----------|-------------|
+| Optimizer Current Action | `sensor.power_sync_optimization_status` | Current action: idle, charge, discharge, export, self_consumption. Attributes: `power_w`, `status` |
+| Optimizer Next Action | `sensor.power_sync_optimization_next_action` | Next scheduled action. Attributes: `time` (ISO timestamp), `power_w` |
 
 ---
 
