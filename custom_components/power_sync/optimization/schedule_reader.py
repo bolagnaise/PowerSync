@@ -47,12 +47,12 @@ class OptimizationSchedule:
     @property
     def charge_w(self) -> list[float]:
         """Get battery charge power schedule (positive = charging)."""
-        return [a.battery_charge_w for a in self.actions]
+        return [a.battery_charge_w if a.action == "charge" else 0.0 for a in self.actions]
 
     @property
     def discharge_w(self) -> list[float]:
         """Get battery discharge power schedule (positive = discharging)."""
-        return [a.battery_discharge_w for a in self.actions]
+        return [a.battery_discharge_w if a.action in ("discharge", "export") else 0.0 for a in self.actions]
 
     @property
     def soc(self) -> list[float]:
