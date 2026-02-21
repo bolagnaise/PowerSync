@@ -630,7 +630,21 @@ class EVCoordinator:
                 if client and charger_id:
                     await self._set_charging_amps(config, target_amps)
                     self._current_charge_amps[entity_id] = target_amps
-                    await client.resume_charging(charger_id)
+                    # State-aware start: check charger operation mode
+                    cached_state = {}
+                    for entry in self.hass.config_entries.async_entries(DOMAIN):
+                        ed = self.hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                        cached_state = ed.get("zaptec_cached_state", {})
+                        if cached_state:
+                            break
+                    charger_mode = cached_state.get("charger_operation_mode", "")
+                    if charger_mode == "charging":
+                        _LOGGER.info("Zaptec already charging, skipping Resume")
+                    elif charger_mode == "connected_waiting":
+                        # Car just plugged in — MaxCurrent already set by _set_charging_amps
+                        _LOGGER.info("Zaptec in connected_waiting: MaxCurrent set, skipping Resume")
+                    else:
+                        await client.resume_charging(charger_id)
                     _LOGGER.info(f"Started Zaptec standalone charging: {charger_id}")
                     return
                 else:

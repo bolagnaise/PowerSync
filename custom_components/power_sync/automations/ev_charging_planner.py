@@ -11,6 +11,7 @@ Plans optimal charging windows based on:
 
 import logging
 import statistics
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, time as dt_time
 from typing import Optional, List, Dict, Any, Tuple
@@ -4327,6 +4328,13 @@ class PriceLevelChargingState:
     last_decision: str = "idle"
     last_decision_reason: str = ""
     charging_mode: str = ""  # "recovery" or "opportunity"
+    # Circuit breaker for Zaptec API failures
+    consecutive_start_failures: int = 0
+    start_cooldown_until: float = 0.0
+    consecutive_stop_failures: int = 0
+    stop_cooldown_until: float = 0.0
+    # Track whether PowerSync has paused the charger
+    managed_by_powersync: bool = False
 
 
 class PriceLevelChargingExecutor:
@@ -4515,6 +4523,7 @@ class PriceLevelChargingExecutor:
                     if any(skip in entity_lower for skip in (
                         "powerwall", "power_sync", "battery_power", "battery_range",
                         "phone", "tablet", "laptop", "watch",
+                        "macbook", "ipad", "iphone", "apple_watch", "airpods", "imac",
                     )):
                         continue
                     if state.state not in ("unavailable", "unknown", "None", None):
@@ -4551,15 +4560,39 @@ class PriceLevelChargingExecutor:
             vehicle_vin: Optional VIN for specific vehicle. If None, uses default.
         """
         # Zaptec standalone path — use Cloud API directly
-        from ..const import CONF_ZAPTEC_STANDALONE_ENABLED, CONF_ZAPTEC_USERNAME, CONF_ZAPTEC_CHARGER_ID, CONF_OCPP_ENABLED
+        from ..const import CONF_ZAPTEC_STANDALONE_ENABLED, CONF_ZAPTEC_USERNAME, CONF_ZAPTEC_CHARGER_ID, CONF_OCPP_ENABLED, CONF_ZAPTEC_INSTALLATION_ID_CLOUD
         opts = {**self.config_entry.data, **self.config_entry.options}
         if opts.get(CONF_ZAPTEC_STANDALONE_ENABLED) and opts.get(CONF_ZAPTEC_USERNAME):
             entry_data = self.hass.data.get(self._domain, {}).get(self.config_entry.entry_id, {})
             client = entry_data.get("zaptec_client")
             charger_id = opts.get(CONF_ZAPTEC_CHARGER_ID, "")
             if client and charger_id:
+                # Circuit breaker — skip if in cooldown
+                zaptec_state = self._get_or_create_vehicle_state("zaptec_standalone")
+                if time.time() < zaptec_state.start_cooldown_until:
+                    _LOGGER.debug("Zaptec start in cooldown (%.0fs remaining)", zaptec_state.start_cooldown_until - time.time())
+                    return False
                 try:
-                    await client.resume_charging(charger_id)
+                    # State-aware start: check charger operation mode
+                    cached_state = entry_data.get("zaptec_cached_state", {})
+                    charger_mode = cached_state.get("charger_operation_mode", "")
+
+                    if charger_mode == "charging":
+                        _LOGGER.info("Zaptec already charging, updating state")
+                    elif charger_mode == "connected_waiting":
+                        # Car just plugged in — Resume (507) won't work.
+                        # Set MaxCurrent to allow car to start drawing.
+                        installation_id = opts.get(CONF_ZAPTEC_INSTALLATION_ID_CLOUD, "")
+                        if installation_id:
+                            await client.set_installation_current(installation_id, 16)
+                            _LOGGER.info("Zaptec in connected_waiting: set MaxCurrent=16A to allow charging")
+                        else:
+                            _LOGGER.warning("Zaptec in connected_waiting but no installation_id configured")
+                            return False
+                    else:
+                        # Paused or unknown — send Resume as before
+                        await client.resume_charging(charger_id)
+
                     # Update state
                     if vehicle_vin:
                         state = self._get_or_create_vehicle_state(vehicle_vin)
@@ -4572,10 +4605,18 @@ class PriceLevelChargingExecutor:
                         self._state.charging_mode = mode
                         self._state.last_decision = "started"
                         self._state.last_decision_reason = reason
+                    zaptec_state.consecutive_start_failures = 0
+                    zaptec_state.start_cooldown_until = 0.0
+                    zaptec_state.managed_by_powersync = False
                     _LOGGER.info(f"Price-level charging: Started Zaptec ({mode}) - {reason}")
                     return True
                 except Exception as e:
-                    _LOGGER.error(f"Price-level charging: Zaptec start failed: {e}")
+                    zaptec_state.consecutive_start_failures += 1
+                    if zaptec_state.consecutive_start_failures >= 3:
+                        zaptec_state.start_cooldown_until = time.time() + 300
+                        _LOGGER.warning("Zaptec start failed %d times, cooling down 5min: %s", zaptec_state.consecutive_start_failures, e)
+                    else:
+                        _LOGGER.error(f"Price-level charging: Zaptec start failed: {e}")
                     return False
 
         # Determine charger type — OCPP or Tesla
@@ -4638,6 +4679,11 @@ class PriceLevelChargingExecutor:
             client = entry_data.get("zaptec_client")
             charger_id = opts.get(CONF_ZAPTEC_CHARGER_ID, "")
             if client and charger_id:
+                # Circuit breaker — skip if in cooldown
+                zaptec_state = self._get_or_create_vehicle_state("zaptec_standalone")
+                if time.time() < zaptec_state.stop_cooldown_until:
+                    _LOGGER.debug("Zaptec stop in cooldown (%.0fs remaining)", zaptec_state.stop_cooldown_until - time.time())
+                    return False
                 try:
                     await client.stop_charging(charger_id)
                     if vehicle_vin:
@@ -4651,10 +4697,18 @@ class PriceLevelChargingExecutor:
                         self._state.charging_mode = ""
                         self._state.last_decision = "stopped"
                         self._state.last_decision_reason = reason
+                    zaptec_state.consecutive_stop_failures = 0
+                    zaptec_state.stop_cooldown_until = 0.0
+                    zaptec_state.managed_by_powersync = True
                     _LOGGER.info(f"Price-level charging: Stopped Zaptec - {reason}")
                     return True
                 except Exception as e:
-                    _LOGGER.error(f"Price-level charging: Zaptec stop failed: {e}")
+                    zaptec_state.consecutive_stop_failures += 1
+                    if zaptec_state.consecutive_stop_failures >= 3:
+                        zaptec_state.stop_cooldown_until = time.time() + 300
+                        _LOGGER.warning("Zaptec stop failed %d times, cooling down 5min: %s", zaptec_state.consecutive_stop_failures, e)
+                    else:
+                        _LOGGER.error(f"Price-level charging: Zaptec stop failed: {e}")
                     return False
 
         # Tesla path
@@ -4920,6 +4974,28 @@ class PriceLevelChargingExecutor:
                 _LOGGER.debug(
                     f"Zaptec standalone decision: should_charge={should_charge}, reason={reason}"
                 )
+
+                # Release charger when price-level charging is disabled
+                if not should_charge and reason == "Price-level charging is disabled":
+                    if vehicle_state.managed_by_powersync:
+                        from ..const import CONF_ZAPTEC_CHARGER_ID, CONF_ZAPTEC_INSTALLATION_ID_CLOUD
+                        entry_data = self.hass.data.get(self._domain, {}).get(self.config_entry.entry_id, {})
+                        client = entry_data.get("zaptec_client")
+                        charger_id = opts.get(CONF_ZAPTEC_CHARGER_ID, "")
+                        if client and charger_id:
+                            try:
+                                await client.resume_charging(charger_id)
+                            except Exception:
+                                try:
+                                    installation_id = opts.get(CONF_ZAPTEC_INSTALLATION_ID_CLOUD, "")
+                                    if installation_id:
+                                        await client.set_installation_current(installation_id, 16)
+                                except Exception:
+                                    pass
+                        vehicle_state.managed_by_powersync = False
+                        vehicle_state.is_charging = False
+                        _LOGGER.info("Price-level disabled: released Zaptec charger control")
+                    return results
 
                 if should_charge and not vehicle_state.is_charging:
                     await self._start_charging(mode, reason)
