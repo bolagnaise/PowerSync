@@ -873,9 +873,17 @@ class OptimizerActionSensor(CoordinatorEntity, SensorEntity):
         """Initialize the sensor."""
         super().__init__(coordinator)
         self.entity_description = description
+        self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_has_entity_name = True
         self._attr_suggested_object_id = f"power_sync_{description.key}"
+
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
 
     @property
     def native_value(self) -> Any:
