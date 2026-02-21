@@ -700,35 +700,26 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "Optimizer: IDLE — holding SOC at %d%% (hold mode + min_soc=%d%%)",
                         soc_pct, soc_pct,
                     )
-                elif soc_pct > 80:
-                    # Tesla constraint (July 2025): backup_reserve only accepts
-                    # 0-80% or 100%. Values 81-99% are rejected and clamped to 80%.
-                    # When SOC > 80%, we CANNOT set backup_reserve to the actual SOC.
-                    # Setting 100% causes the Powerwall to charge FROM GRID to reach
-                    # 100% (especially when a TOU tariff shows cheap buy / expensive
-                    # sell). Instead, use self_consumption mode with backup_reserve=80%
-                    # — the Powerwall won't charge from grid in self_consumption mode,
-                    # and the 80% floor limits discharge. Minor SOC decline from home
-                    # load is acceptable as the LP re-evaluates every 5 minutes.
+                elif hasattr(battery, "set_backup_reserve"):
+                    # Tesla IDLE: always use self_consumption mode.
+                    # Autonomous (TOU) mode with grid_charging enabled and
+                    # a TOU tariff showing cheap overnight / expensive peak
+                    # causes Tesla firmware to charge from grid at 5kW
+                    # independently — the optimizer wants HOLD but Tesla
+                    # sees arbitrage and charges. Self_consumption mode
+                    # prevents TOU-based grid charging entirely.
+                    # backup_reserve acts as a soft floor (minor SOC drift
+                    # is acceptable — LP re-evaluates every 5 minutes).
+                    # Tesla API constraint: backup_reserve accepts 0-80%
+                    # or 100%. Values 81-99% are clamped to 80%.
+                    reserve = min(soc_pct, 80)
                     if hasattr(battery, "set_self_consumption_mode"):
                         await battery.set_self_consumption_mode()
-                    if hasattr(battery, "set_backup_reserve"):
-                        await battery.set_backup_reserve(80)
+                    await battery.set_backup_reserve(reserve)
                     _LOGGER.info(
                         "Optimizer: IDLE — holding SOC at %d%% via self_consumption "
-                        "(backup reserve=80%%, Tesla 81-99%% constraint)",
-                        soc_pct,
-                    )
-                elif hasattr(battery, "set_backup_reserve"):
-                    # Tesla requires autonomous (TOU) mode for backup_reserve
-                    # to act as a hard floor. In self_consumption mode, the
-                    # Powerwall may still discharge below the reserve.
-                    if hasattr(battery, "set_autonomous_mode"):
-                        await battery.set_autonomous_mode()
-                    await battery.set_backup_reserve(soc_pct)
-                    _LOGGER.info(
-                        "Optimizer: IDLE — holding SOC at %d%% (autonomous + backup reserve=%d%%)",
-                        soc_pct, soc_pct,
+                        "(backup reserve=%d%%)",
+                        soc_pct, reserve,
                     )
                 elif hasattr(battery, "set_self_consumption_mode"):
                     await battery.set_self_consumption_mode()
