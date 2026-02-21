@@ -17,71 +17,72 @@
 
 class PowerSyncStrategy {
   static async generate(config, hass) {
+    // Entity resolver — tries power_sync_ prefixed first, then bare name.
+    // Handles mixed installs where some entities have the prefix and others don't.
+    const e = (name) => {
+      const prefixed = `sensor.power_sync_${name}`;
+      if (hass.states[prefixed]) return prefixed;
+      const bare = `sensor.${name}`;
+      if (hass.states[bare]) return bare;
+      // Default to prefixed (modern convention)
+      return prefixed;
+    };
+
     // Entity existence + availability helper
     const has = (id) => {
       const s = hass.states[id];
       return s && s.state !== 'unavailable';
     };
 
-    // Check if entity exists (even if unavailable)
-    const exists = (id) => !!hass.states[id];
-
-    // Auto-detect entity prefix: check for power_sync_ prefixed entities first,
-    // fall back to bare names for legacy installs
-    const prefix = config.entity_prefix || _detectPrefix(hass);
-
-    // Entity ID builder — handles prefix mapping
-    const e = (name) => `sensor.${prefix}${name}`;
-
-    // Select entity (always power_sync_ prefixed since they're auto-created)
-    const sel = (name) => `select.power_sync_${name}`;
+    // Shorthand: resolve then check
+    const hasE = (name) => has(e(name));
 
     const cards = [];
 
     // --- Price Gauges ---
-    if (has(e('current_import_price'))) {
+    if (hasE('current_import_price')) {
       cards.push(_priceGauges(e));
     }
 
     // --- Battery Controls (always show if integration has battery sensors) ---
-    if (has(e('battery_level')) || has(e('battery_power'))) {
+    if (hasE('battery_level') || hasE('battery_power')) {
       cards.push(_batteryControls());
     }
 
     // --- Optimizer Status ---
-    if (has(e('optimization_status'))) {
+    if (hasE('optimization_status')) {
       cards.push(_optimizerStatus(e));
     }
 
     // --- Power Flow ---
-    if (has(e('solar_power'))) {
+    if (hasE('solar_power')) {
       cards.push(_powerFlow(e));
     }
 
     // --- Price Chart (Amber/Octopus 24h) ---
-    if (has(e('current_import_price'))) {
+    if (hasE('current_import_price')) {
       cards.push(_priceChart(e));
     }
 
     // --- TOU Schedule ---
-    if (has(e('tou_schedule'))) {
+    if (hasE('tou_schedule')) {
       cards.push(_touSchedule(e));
     }
 
     // --- LP Forecast Summary ---
-    if (has(e('lp_solar_forecast'))) {
+    if (hasE('lp_solar_forecast')) {
       cards.push(_lpForecastSummary(e));
     }
 
     // --- LP Forecast Charts ---
-    if (has(e('lp_solar_forecast'))) {
+    if (hasE('lp_solar_forecast')) {
       cards.push(_lpSolarLoadChart(e));
       cards.push(_lpPriceChart(e));
     }
 
     // --- Curtailment Status ---
-    const hasDC = has(e('dc_solar_curtailment'));
-    const hasAC = has(e('inverter_status'));
+    const hasDC = hasE('dc_solar_curtailment');
+    const hasAC = hasE('inverter_status');
     if (hasDC || hasAC) {
       cards.push(_curtailmentStatus(e, hasDC, hasAC));
     }
@@ -92,37 +93,37 @@ class PowerSyncStrategy {
     }
 
     // --- FoxESS Sensors ---
-    if (has(e('pv1_power'))) {
+    if (hasE('pv1_power')) {
       cards.push(_foxessSensors(e));
     }
 
     // --- Battery Health ---
-    if (has(e('battery_health'))) {
+    if (hasE('battery_health')) {
       cards.push(_batteryHealth(e));
     }
 
     // --- Energy Charts ---
-    if (has(e('solar_power'))) {
+    if (hasE('solar_power')) {
       cards.push(_energyChart('Solar', e('solar_power'), '#FFD700', { yaxis: { min: 0 } }));
       cards.push(_energyChart('Battery', e('battery_power'), '#2196F3', {}));
       cards.push(_energyChart('Grid', e('grid_power'), '#F44336', {}));
     }
-    if (has(e('home_load'))) {
+    if (hasE('home_load')) {
       cards.push(_energyChart('Home', e('home_load'), '#9C27B0', { yaxis: { min: 0 } }));
     }
 
     // --- Demand Charge ---
-    if (has(e('in_demand_charge_period'))) {
+    if (hasE('in_demand_charge_period')) {
       cards.push(_demandCharge(e));
     }
 
     // --- AEMO Spike ---
-    if (has(e('aemo_price'))) {
+    if (hasE('aemo_price')) {
       cards.push(_aemoSpike(e));
     }
 
     // --- Flow Power ---
-    if (has(e('flow_power_price'))) {
+    if (hasE('flow_power_price')) {
       cards.push(_flowPower(e));
     }
 
@@ -138,23 +139,6 @@ class PowerSyncStrategy {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────
-
-function _detectPrefix(hass) {
-  // Check for power_sync_ prefixed entities (modern installs)
-  if (hass.states['sensor.power_sync_current_import_price'] ||
-      hass.states['sensor.power_sync_battery_level'] ||
-      hass.states['sensor.power_sync_solar_power']) {
-    return 'power_sync_';
-  }
-  // Bare entity names (legacy)
-  if (hass.states['sensor.current_import_price'] ||
-      hass.states['sensor.battery_level'] ||
-      hass.states['sensor.solar_power']) {
-    return '';
-  }
-  // Default to prefixed
-  return 'power_sync_';
-}
 
 // ─── Section Builders ────────────────────────────────────────
 
