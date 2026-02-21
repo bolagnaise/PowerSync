@@ -5,6 +5,7 @@ import aiohttp
 import asyncio
 import json
 import logging
+import pathlib
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -9350,6 +9351,44 @@ class HomePowerSettingsView(HomeAssistantView):
                 "success": False,
                 "error": str(e)
             }, status=500)
+
+
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    """Set up the PowerSync integration (global, runs once)."""
+    # Register static path for the dashboard strategy JS
+    frontend_dir = pathlib.Path(__file__).parent / "frontend"
+    hass.http.register_static_path(
+        "/power_sync/frontend",
+        str(frontend_dir),
+        cache_headers=True,
+    )
+
+    # Auto-register the Lovelace resource (storage mode only)
+    try:
+        resources = hass.data.get("lovelace", {})
+        if hasattr(resources, "resources"):
+            res_collection = resources.resources
+            url = "/power_sync/frontend/power-sync-strategy.js"
+
+            # Check if already registered
+            existing = [
+                r for r in res_collection.async_items()
+                if r.get("url", "") == url
+            ]
+            if not existing:
+                await res_collection.async_create_item({
+                    "res_type": "module",
+                    "url": url,
+                })
+                _LOGGER.info("PowerSync dashboard strategy registered as Lovelace resource")
+            else:
+                _LOGGER.debug("PowerSync dashboard strategy already registered")
+    except Exception:
+        # YAML mode dashboards don't have the resources API — that's fine,
+        # users register the resource manually in lovelace.yaml
+        _LOGGER.debug("Could not auto-register Lovelace resource (YAML mode?)")
+
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

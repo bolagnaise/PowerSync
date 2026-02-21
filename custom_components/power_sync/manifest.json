@@ -3,7 +3,7 @@
   "name": "PowerSync",
   "codeowners": ["@benboller"],
   "config_flow": true,
-  "dependencies": [],
+  "dependencies": ["frontend", "http"],
   "after_dependencies": ["tesla_fleet"],
   "documentation": "https://github.com/bolagnaise/PowerSync",
   "integration_type": "hub",
