@@ -848,6 +848,11 @@ class FoxESSController(InverterController):
             if ms_raw:
                 self._original_min_soc = ms_raw[0]
 
+        # Set work mode to Backup before enabling remote control — the inverter
+        # requires a compatible work mode for remote control to take effect
+        if reg.work_mode and reg.supports_work_mode_rw:
+            await self.set_work_mode(reg.work_mode_backup)
+
         timeout_seconds = max(duration_minutes * 60, 600)
         power_val = -int(abs(power_w))
         return await self._write_remote_control(reg, power_val, duration_minutes, timeout_seconds, "force charge")
@@ -870,6 +875,11 @@ class FoxESSController(InverterController):
             ms_raw = await self._read_holding_registers(reg.min_soc, 1)
             if ms_raw:
                 self._original_min_soc = ms_raw[0]
+
+        # Set work mode to Feed-in before enabling remote control — the inverter
+        # requires a compatible work mode for remote control to take effect
+        if reg.work_mode and reg.supports_work_mode_rw:
+            await self.set_work_mode(reg.work_mode_feed_in)
 
         timeout_seconds = max(duration_minutes * 60, 600)
         power_val = int(abs(power_w))
