@@ -3852,6 +3852,24 @@ class ConfigView(HomeAssistantView):
                     "last_scan": health_data.get("scanned_at"),
                 }
 
+            # Look up actual entity_ids from the entity registry
+            # (HA derives entity_ids from device name, not our suggested_object_id)
+            ent_reg = er.async_get(self._hass)
+            sensor_keys = [
+                "solar_power", "battery_power", "grid_power", "home_load",
+                "battery_level", "current_import_price", "current_export_price",
+                "tariff_schedule", "battery_health", "battery_mode",
+                "aemo_spike_status",
+                "solcast_today_forecast", "solcast_tomorrow_forecast",
+                "solcast_current_estimate",
+            ]
+            entity_ids = {}
+            for key in sensor_keys:
+                unique_id = f"{entry.entry_id}_{key}"
+                eid = ent_reg.async_get_entity_id("sensor", DOMAIN, unique_id)
+                if eid:
+                    entity_ids[key] = eid
+
             result = {
                 "success": True,
                 "battery_system": battery_system,
@@ -3859,6 +3877,7 @@ class ConfigView(HomeAssistantView):
                 "ev_provider": ev_provider,  # Tesla (fleet_api/tesla_ble/both) or None for OCPP-only
                 "features": features,
                 "battery_health": battery_health,
+                "entity_ids": entity_ids,
                 "sigenergy": sigenergy_config,
                 "sungrow": sungrow_config,
                 "foxess": foxess_config,
