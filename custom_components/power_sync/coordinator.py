@@ -2005,10 +2005,14 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
         coord1: SungrowEnergyCoordinator,
         coord2: SungrowEnergyCoordinator,
         soc_cap: int = 100,
+        cap1_kwh: float = 25.6,
+        cap2_kwh: float = 25.6,
     ) -> None:
         self._coord1 = coord1  # Primary (grid-facing)
         self._coord2 = coord2  # Secondary (on backup port)
         self._soc_cap = soc_cap  # Max SOC for grid-forming inverter (100 = disabled)
+        self._cap1 = cap1_kwh
+        self._cap2 = cap2_kwh
         super().__init__(
             hass,
             _LOGGER,
@@ -2030,22 +2034,24 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
         soc1 = (self._coord1.data or {}).get("battery_level", 50) or 50
         soc2 = (self._coord2.data or {}).get("battery_level", 50) or 50
 
+        total_cap = self._cap1 + self._cap2
+
         if abs(soc1 - soc2) < 2:
-            return total_kw / 2, total_kw / 2
+            return total_kw * self._cap1 / total_cap, total_kw * self._cap2 / total_cap
 
         if prefer_lower_soc:
-            w1 = max(1, 100 - soc1)
-            w2 = max(1, 100 - soc2)
+            w1 = max(1, 100 - soc1) * self._cap1
+            w2 = max(1, 100 - soc2) * self._cap2
         else:
-            w1 = max(1, soc1)
-            w2 = max(1, soc2)
+            w1 = max(1, soc1) * self._cap1
+            w2 = max(1, soc2) * self._cap2
 
         total_w = w1 + w2
         p1 = total_kw * w1 / total_w
         p2 = total_kw * w2 / total_w
         _LOGGER.debug(
-            "Split %.2f kW: inv1=%.2f kW (soc=%.0f%%), inv2=%.2f kW (soc=%.0f%%), prefer_lower=%s",
-            total_kw, p1, soc1, p2, soc2, prefer_lower_soc,
+            "Split %.2f kW: inv1=%.2f kW (soc=%.0f%%, cap=%.1f), inv2=%.2f kW (soc=%.0f%%, cap=%.1f), prefer_lower=%s",
+            total_kw, p1, soc1, self._cap1, p2, soc2, self._cap2, prefer_lower_soc,
         )
         return p1, p2
 
@@ -2068,10 +2074,10 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
         # Grid: use primary only (it's the grid-facing inverter)
         grid = d1.get("grid_power", 0) or 0
 
-        # Capacity-weighted SOC (equal weights for identical stacks)
+        # Capacity-weighted SOC
         soc1 = d1.get("battery_level", 0) or 0
         soc2 = d2.get("battery_level", 0) or 0
-        combined_soc = (soc1 + soc2) / 2  # Equal weight for V1
+        combined_soc = (soc1 * self._cap1 + soc2 * self._cap2) / (self._cap1 + self._cap2)
 
         # SOC divergence warning
         if abs(soc1 - soc2) > 5:

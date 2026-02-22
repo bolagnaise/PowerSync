@@ -193,6 +193,9 @@ from .const import (
     CONF_SUNGROW_SLAVE_ID_2,
     CONF_SUNGROW_GRID_INVERTER_SOC_CAP,
     DEFAULT_SUNGROW_GRID_INVERTER_SOC_CAP,
+    CONF_SUNGROW_BATTERY_CAPACITY_1,
+    CONF_SUNGROW_BATTERY_CAPACITY_2,
+    DEFAULT_SUNGROW_BATTERY_CAPACITY,
     # FoxESS battery system configuration
     BATTERY_SYSTEM_FOXESS,
     CONF_FOXESS_HOST,
@@ -9889,9 +9892,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     CONF_SUNGROW_GRID_INVERTER_SOC_CAP,
                     DEFAULT_SUNGROW_GRID_INVERTER_SOC_CAP,
                 )
+                cap1 = entry.data.get(CONF_SUNGROW_BATTERY_CAPACITY_1, DEFAULT_SUNGROW_BATTERY_CAPACITY)
+                cap2 = entry.data.get(CONF_SUNGROW_BATTERY_CAPACITY_2, DEFAULT_SUNGROW_BATTERY_CAPACITY)
                 sungrow_coordinator = DualSungrowCoordinator(
                     hass, sungrow_coordinator, sungrow_coordinator_2,
-                    soc_cap=soc_cap,
+                    soc_cap=soc_cap, cap1_kwh=cap1, cap2_kwh=cap2,
                 )
                 await sungrow_coordinator.async_config_entry_first_refresh()
                 _LOGGER.info("Dual Sungrow coordinator active")

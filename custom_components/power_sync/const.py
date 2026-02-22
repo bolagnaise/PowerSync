@@ -121,6 +121,11 @@ CONF_SUNGROW_SLAVE_ID_2 = "sungrow_slave_id_2"
 CONF_SUNGROW_GRID_INVERTER_SOC_CAP = "sungrow_grid_inverter_soc_cap"
 DEFAULT_SUNGROW_GRID_INVERTER_SOC_CAP = 100  # disabled by default
 
+# Dual Sungrow battery capacity weights
+CONF_SUNGROW_BATTERY_CAPACITY_1 = "sungrow_battery_capacity_1"
+CONF_SUNGROW_BATTERY_CAPACITY_2 = "sungrow_battery_capacity_2"
+DEFAULT_SUNGROW_BATTERY_CAPACITY = 25.6  # kWh — one SBR256 unit
+
 # Sungrow Modbus Register Addresses (Battery Control)
 # Reference: https://github.com/mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant
 # Read Registers (Input/Holding)
