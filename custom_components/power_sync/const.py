@@ -112,6 +112,11 @@ CONF_SUNGROW_SLAVE_ID = "sungrow_slave_id"
 DEFAULT_SUNGROW_PORT = 502
 DEFAULT_SUNGROW_SLAVE_ID = 1
 
+# Dual Sungrow (secondary inverter, optional)
+CONF_SUNGROW_HOST_2 = "sungrow_host_2"
+CONF_SUNGROW_PORT_2 = "sungrow_port_2"
+CONF_SUNGROW_SLAVE_ID_2 = "sungrow_slave_id_2"
+
 # Sungrow Modbus Register Addresses (Battery Control)
 # Reference: https://github.com/mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant
 # Read Registers (Input/Holding)

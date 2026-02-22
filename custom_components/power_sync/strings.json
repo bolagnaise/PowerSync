@@ -175,6 +175,21 @@
         },
         "submit_button": "Next"
       },
+      "sungrow_secondary": {
+        "title": "Secondary Sungrow Inverter (Optional)",
+        "description": "If you have a second Sungrow SH inverter (e.g., connected to the primary's backup port), enter its connection details below.\n\nLeave the IP address blank to skip.",
+        "data": {
+          "sungrow_host_2": "Secondary Sungrow IP Address",
+          "sungrow_port_2": "Modbus Port",
+          "sungrow_slave_id_2": "Modbus Slave ID"
+        },
+        "data_description": {
+          "sungrow_host_2": "Local IP address of your second Sungrow inverter or WiNet-S dongle (leave blank to skip)",
+          "sungrow_port_2": "Modbus TCP port (default: 502)",
+          "sungrow_slave_id_2": "Modbus slave ID (default: 1)"
+        },
+        "submit_button": "Next"
+      },
       "foxess_connection": {
         "title": "FoxESS Connection Type",
         "description": "Choose how to connect to your FoxESS inverter.\n\n**Modbus TCP**: Connect over your local network (LAN/Wi-Fi).\n\n**RS485 Serial**: Direct serial connection for full register access.",
@@ -518,14 +533,20 @@
           "optimization_backup_reserve": "Backup Reserve (%)",
           "sungrow_host": "Sungrow IP Address",
           "sungrow_port": "Modbus Port",
-          "sungrow_slave_id": "Modbus Slave ID"
+          "sungrow_slave_id": "Modbus Slave ID",
+          "sungrow_host_2": "Secondary Sungrow IP Address (Optional)",
+          "sungrow_port_2": "Secondary Modbus Port",
+          "sungrow_slave_id_2": "Secondary Modbus Slave ID"
         },
         "data_description": {
           "optimization_provider": "Choose between Sungrow's built-in scheduling or Smart Optimization (Built-in LP)",
           "optimization_backup_reserve": "Minimum battery charge level to maintain (only applies to Smart Optimization)",
           "sungrow_host": "Local IP address of your Sungrow inverter or WiNet-S dongle (e.g., 192.168.1.100)",
           "sungrow_port": "Modbus TCP port (default: 502)",
-          "sungrow_slave_id": "Modbus slave ID (default: 1)"
+          "sungrow_slave_id": "Modbus slave ID (default: 1)",
+          "sungrow_host_2": "IP address of a second Sungrow inverter (leave blank if not applicable)",
+          "sungrow_port_2": "Modbus TCP port for secondary inverter (default: 502)",
+          "sungrow_slave_id_2": "Modbus slave ID for secondary inverter (default: 1)"
         },
         "submit_button": "Next"
       },

@@ -1972,6 +1972,165 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         await self._controller.disconnect()
 
 
+class DualSungrowCoordinator(DataUpdateCoordinator):
+    """Coordinator that aggregates two Sungrow SH inverters.
+
+    Wraps two SungrowEnergyCoordinator instances (primary = grid-facing,
+    secondary = on primary's backup port) and presents a single coordinator
+    interface to the optimizer.  Power values are summed, SOC is
+    capacity-weighted, and commands are split across both inverters.
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        coord1: SungrowEnergyCoordinator,
+        coord2: SungrowEnergyCoordinator,
+    ) -> None:
+        self._coord1 = coord1  # Primary (grid-facing)
+        self._coord2 = coord2  # Secondary (on backup port)
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_sungrow_dual",
+            update_interval=timedelta(seconds=30),
+        )
+
+    # ------------------------------------------------------------------
+    # Data aggregation
+    # ------------------------------------------------------------------
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Aggregate data from both sub-coordinators."""
+        d1 = self._coord1.data or {}
+        d2 = self._coord2.data or {}
+
+        if not d1 and not d2:
+            raise UpdateFailed("No data from either Sungrow inverter")
+
+        # Sum power values (kW)
+        solar = (d1.get("solar_power", 0) or 0) + (d2.get("solar_power", 0) or 0)
+        battery = (d1.get("battery_power", 0) or 0) + (d2.get("battery_power", 0) or 0)
+        load = (d1.get("load_power", 0) or 0) + (d2.get("load_power", 0) or 0)
+        # Grid: use primary only (it's the grid-facing inverter)
+        grid = d1.get("grid_power", 0) or 0
+
+        # Capacity-weighted SOC (equal weights for identical stacks)
+        soc1 = d1.get("battery_level", 0) or 0
+        soc2 = d2.get("battery_level", 0) or 0
+        combined_soc = (soc1 + soc2) / 2  # Equal weight for V1
+
+        # SOC divergence warning
+        if abs(soc1 - soc2) > 5:
+            _LOGGER.info(
+                "Sungrow dual SOC divergence: inv1=%.1f%%, inv2=%.1f%% (delta=%.1f%%)",
+                soc1, soc2, abs(soc1 - soc2),
+            )
+
+        # Combine energy summaries
+        es1 = d1.get("energy_summary", {}) or {}
+        es2 = d2.get("energy_summary", {}) or {}
+        combined_energy = {}
+        for key in (
+            "pv_today_kwh", "grid_import_today_kwh", "grid_export_today_kwh",
+            "charge_today_kwh", "discharge_today_kwh", "load_today_kwh",
+        ):
+            combined_energy[key] = round(
+                (es1.get(key, 0) or 0) + (es2.get(key, 0) or 0), 3
+            )
+
+        return {
+            "solar_power": max(0, solar),
+            "grid_power": grid,
+            "battery_power": battery,
+            "load_power": load,
+            "battery_level": combined_soc,
+            "last_update": dt_util.utcnow(),
+            # Use primary's Sungrow-specific fields
+            "battery_soh": d1.get("battery_soh"),
+            "battery_voltage": d1.get("battery_voltage"),
+            "battery_current": d1.get("battery_current"),
+            "battery_temp": d1.get("battery_temp"),
+            "ems_mode": d1.get("ems_mode"),
+            "ems_mode_name": d1.get("ems_mode_name"),
+            "charge_cmd": d1.get("charge_cmd"),
+            "min_soc": d1.get("min_soc"),
+            "max_soc": d1.get("max_soc"),
+            "backup_reserve": d1.get("backup_reserve"),
+            "charge_rate_limit_kw": d1.get("charge_rate_limit_kw"),
+            "discharge_rate_limit_kw": d1.get("discharge_rate_limit_kw"),
+            "export_limit_w": d1.get("export_limit_w"),
+            "export_limit_enabled": d1.get("export_limit_enabled"),
+            "energy_summary": combined_energy,
+            # Per-inverter SOC for monitoring
+            "battery_level_1": soc1,
+            "battery_level_2": soc2,
+        }
+
+    # ------------------------------------------------------------------
+    # Command splitting — delegate to both sub-coordinators
+    # ------------------------------------------------------------------
+
+    async def force_charge(self, duration_minutes: int = 30) -> bool:
+        """Force charge on both inverters."""
+        r1 = await self._coord1.force_charge(duration_minutes)
+        r2 = await self._coord2.force_charge(duration_minutes)
+        return r1 and r2
+
+    async def force_discharge(self, duration_minutes: int = 30) -> bool:
+        """Force discharge on both inverters."""
+        r1 = await self._coord1.force_discharge(duration_minutes)
+        r2 = await self._coord2.force_discharge(duration_minutes)
+        return r1 and r2
+
+    async def restore_normal(self) -> bool:
+        """Restore self-consumption on both inverters."""
+        r1 = await self._coord1.restore_normal()
+        r2 = await self._coord2.restore_normal()
+        return r1 and r2
+
+    async def set_backup_reserve(self, percent: int) -> bool:
+        """Set backup reserve on both inverters."""
+        r1 = await self._coord1.set_backup_reserve(percent)
+        r2 = await self._coord2.set_backup_reserve(percent)
+        return r1 and r2
+
+    async def set_backup_mode(self) -> bool:
+        """Set idle/backup mode on both inverters."""
+        r1 = await self._coord1.set_backup_mode()
+        r2 = await self._coord2.set_backup_mode()
+        return r1 and r2
+
+    async def restore_work_mode_from_idle(self) -> bool:
+        """Restore work mode from idle on both inverters."""
+        r1 = await self._coord1.restore_work_mode_from_idle()
+        r2 = await self._coord2.restore_work_mode_from_idle()
+        return r1 and r2
+
+    async def set_charge_rate_limit(self, kw: float) -> bool:
+        """Split charge rate equally between both inverters."""
+        half = kw / 2
+        r1 = await self._coord1.set_charge_rate_limit(half)
+        r2 = await self._coord2.set_charge_rate_limit(half)
+        return r1 and r2
+
+    async def set_discharge_rate_limit(self, kw: float) -> bool:
+        """Split discharge rate equally between both inverters."""
+        half = kw / 2
+        r1 = await self._coord1.set_discharge_rate_limit(half)
+        r2 = await self._coord2.set_discharge_rate_limit(half)
+        return r1 and r2
+
+    async def set_export_limit(self, watts: int | None) -> bool:
+        """Set export limit on primary only (it's grid-facing)."""
+        return await self._coord1.set_export_limit(watts)
+
+    async def async_shutdown(self) -> None:
+        """Shutdown both sub-coordinators."""
+        await self._coord1.async_shutdown()
+        await self._coord2.async_shutdown()
+
+
 class FoxESSEnergyCoordinator(DataUpdateCoordinator):
     """Coordinator to fetch FoxESS battery system data via Modbus.
 

@@ -28,7 +28,7 @@
 | **FoxESS** (H1, H3, H3-Pro, H3 Smart, KH + OEM rebrands) | Modbus TCP or RS485 | Work mode, force charge/discharge, backup reserve |
 | **Sigenergy** | Cloud API + Modbus TCP | Tariff sync, DC solar curtailment |
 | **GoodWe** (ET, EH, BT, BH, ES, EM, BP) | UDP or TCP (local) | Force charge/discharge, backup reserve, export limit |
-| **Sungrow SH-series** | Modbus TCP | Force charge/discharge, rate limiting, export control |
+| **Sungrow SH-series** | Modbus TCP | Force charge/discharge, rate limiting, export control, dual inverter |
 
 ### Electricity Providers
 
@@ -123,6 +123,7 @@ Supports **ET, EH, BT, BH** (3-phase hybrid) and **ES, EM, BP** (single-phase hy
 Direct Modbus TCP — no cloud API required. Supports SH-series hybrid inverters.
 
 - Default port 502, slave ID 1
+- **Dual inverter support** — optionally add a second SH inverter (e.g. on the primary's backup port) for combined monitoring and control
 - Also supports AC-coupled SG-series for solar curtailment only
 
 ---

@@ -53,6 +53,9 @@ from .const import (
     CONF_SUNGROW_SLAVE_ID,
     DEFAULT_SUNGROW_PORT,
     DEFAULT_SUNGROW_SLAVE_ID,
+    CONF_SUNGROW_HOST_2,
+    CONF_SUNGROW_PORT_2,
+    CONF_SUNGROW_SLAVE_ID_2,
     # Sigenergy configuration
     CONF_SIGENERGY_USERNAME,
     CONF_SIGENERGY_PASSWORD,
@@ -1330,7 +1333,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         test_result.get("battery_soc", 0),
                         test_result.get("battery_soh", 0),
                     )
-                    return await self.async_step_demand_charges()
+                    return await self.async_step_sungrow_secondary()
                 else:
                     errors["base"] = "cannot_connect"
 
@@ -1340,6 +1343,47 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required(CONF_SUNGROW_HOST): str,
                 vol.Optional(CONF_SUNGROW_PORT, default=DEFAULT_SUNGROW_PORT): int,
                 vol.Optional(CONF_SUNGROW_SLAVE_ID, default=DEFAULT_SUNGROW_SLAVE_ID): int,
+            }),
+            errors=errors,
+        )
+
+    async def async_step_sungrow_secondary(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Optional: configure a second Sungrow inverter."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            host2 = user_input.get(CONF_SUNGROW_HOST_2, "").strip()
+            if not host2:
+                # User left it blank — skip secondary
+                return await self.async_step_demand_charges()
+
+            port2 = user_input.get(CONF_SUNGROW_PORT_2, DEFAULT_SUNGROW_PORT)
+            slave_id2 = user_input.get(CONF_SUNGROW_SLAVE_ID_2, DEFAULT_SUNGROW_SLAVE_ID)
+
+            # Test connection to secondary inverter
+            test_result = await test_sungrow_connection(self.hass, host2, port2, slave_id2)
+
+            if test_result["success"]:
+                self._sungrow_data[CONF_SUNGROW_HOST_2] = host2
+                self._sungrow_data[CONF_SUNGROW_PORT_2] = port2
+                self._sungrow_data[CONF_SUNGROW_SLAVE_ID_2] = slave_id2
+                _LOGGER.info(
+                    "Secondary Sungrow connection successful: host=%s, SOC=%.1f%%",
+                    host2,
+                    test_result.get("battery_soc", 0),
+                )
+                return await self.async_step_demand_charges()
+            else:
+                errors["base"] = "cannot_connect"
+
+        return self.async_show_form(
+            step_id="sungrow_secondary",
+            data_schema=vol.Schema({
+                vol.Optional(CONF_SUNGROW_HOST_2, default=""): str,
+                vol.Optional(CONF_SUNGROW_PORT_2, default=DEFAULT_SUNGROW_PORT): int,
+                vol.Optional(CONF_SUNGROW_SLAVE_ID_2, default=DEFAULT_SUNGROW_SLAVE_ID): int,
             }),
             errors=errors,
         )
@@ -3055,6 +3099,22 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID
                 )
 
+                # Secondary inverter (optional — blank host means remove)
+                host2 = user_input.get(CONF_SUNGROW_HOST_2, "").strip()
+                if host2:
+                    new_data[CONF_SUNGROW_HOST_2] = host2
+                    new_data[CONF_SUNGROW_PORT_2] = user_input.get(
+                        CONF_SUNGROW_PORT_2, DEFAULT_SUNGROW_PORT
+                    )
+                    new_data[CONF_SUNGROW_SLAVE_ID_2] = user_input.get(
+                        CONF_SUNGROW_SLAVE_ID_2, DEFAULT_SUNGROW_SLAVE_ID
+                    )
+                else:
+                    # Remove secondary if previously configured
+                    new_data.pop(CONF_SUNGROW_HOST_2, None)
+                    new_data.pop(CONF_SUNGROW_PORT_2, None)
+                    new_data.pop(CONF_SUNGROW_SLAVE_ID_2, None)
+
                 # Optimization provider settings
                 optimization_provider = user_input.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
                 new_data[CONF_OPTIMIZATION_PROVIDER] = optimization_provider
@@ -3082,6 +3142,9 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         current_host = self._get_option(CONF_SUNGROW_HOST, "")
         current_port = self._get_option(CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT)
         current_slave_id = self._get_option(CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID)
+        current_host_2 = self._get_option(CONF_SUNGROW_HOST_2, "")
+        current_port_2 = self._get_option(CONF_SUNGROW_PORT_2, DEFAULT_SUNGROW_PORT)
+        current_slave_id_2 = self._get_option(CONF_SUNGROW_SLAVE_ID_2, DEFAULT_SUNGROW_SLAVE_ID)
         current_opt_provider = self.config_entry.data.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
         current_backup_reserve = self.config_entry.data.get(CONF_OPTIMIZATION_BACKUP_RESERVE, DEFAULT_OPTIMIZATION_BACKUP_RESERVE)
 
@@ -3118,6 +3181,18 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_SUNGROW_SLAVE_ID,
                         default=current_slave_id,
+                    ): int,
+                    vol.Optional(
+                        CONF_SUNGROW_HOST_2,
+                        default=current_host_2,
+                    ): str,
+                    vol.Optional(
+                        CONF_SUNGROW_PORT_2,
+                        default=current_port_2,
+                    ): int,
+                    vol.Optional(
+                        CONF_SUNGROW_SLAVE_ID_2,
+                        default=current_slave_id_2,
                     ): int,
                 }
             ),
