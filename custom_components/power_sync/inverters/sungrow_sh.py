@@ -784,6 +784,25 @@ class SungrowSHController(InverterController):
             _LOGGER.error("Error setting discharge rate limit: %s", e)
             return False
 
+    async def set_max_soc(self, percent: int) -> bool:
+        """Set maximum battery SOC percentage (0-100%).
+
+        Args:
+            percent: Maximum SOC limit (e.g. 90 for 90%)
+
+        Returns:
+            True if successful
+        """
+        _LOGGER.info("Setting Sungrow SH at %s max SOC to %d%%", self.host, percent)
+        try:
+            if not await self.connect():
+                return False
+            value = int(percent * 10)  # 0.1% scale
+            return await self._write_register(self.REG_MAX_SOC, value)
+        except Exception as e:
+            _LOGGER.error("Error setting max SOC: %s", e)
+            return False
+
     async def set_export_limit(self, watts: Optional[int]) -> bool:
         """Set export power limit in watts.
 

@@ -1876,28 +1876,34 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(f"Error fetching Sungrow energy data: {err}") from err
 
     # Battery control methods - delegate to controller
-    async def force_charge(self, duration_minutes: int = 30) -> bool:
+    async def force_charge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
         """Set Sungrow to forced charge mode.
 
         Args:
             duration_minutes: Duration in minutes (not used by Sungrow - charge until manually stopped)
+            power_w: Target charge power in watts. If >0, sets charge rate limit first.
 
         Returns:
             True if successful
         """
         async with self._controller:
+            if power_w > 0:
+                await self._controller.set_charge_rate_limit(power_w / 1000)
             return await self._controller.force_charge()
 
-    async def force_discharge(self, duration_minutes: int = 30) -> bool:
+    async def force_discharge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
         """Set Sungrow to forced discharge mode.
 
         Args:
             duration_minutes: Duration in minutes (not used by Sungrow - discharge until manually stopped)
+            power_w: Target discharge power in watts. If >0, sets discharge rate limit first.
 
         Returns:
             True if successful
         """
         async with self._controller:
+            if power_w > 0:
+                await self._controller.set_discharge_rate_limit(power_w / 1000)
             return await self._controller.force_discharge()
 
     async def restore_normal(self) -> bool:
@@ -1908,6 +1914,18 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         """
         async with self._controller:
             return await self._controller.restore_normal()
+
+    async def set_max_soc(self, percent: int) -> bool:
+        """Set maximum battery SOC percentage.
+
+        Args:
+            percent: Maximum SOC percentage (0-100)
+
+        Returns:
+            True if successful
+        """
+        async with self._controller:
+            return await self._controller.set_max_soc(percent)
 
     async def set_backup_reserve(self, percent: int) -> bool:
         """Set backup reserve percentage.
@@ -1986,15 +2004,50 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
         hass: HomeAssistant,
         coord1: SungrowEnergyCoordinator,
         coord2: SungrowEnergyCoordinator,
+        soc_cap: int = 100,
     ) -> None:
         self._coord1 = coord1  # Primary (grid-facing)
         self._coord2 = coord2  # Secondary (on backup port)
+        self._soc_cap = soc_cap  # Max SOC for grid-forming inverter (100 = disabled)
         super().__init__(
             hass,
             _LOGGER,
             name=f"{DOMAIN}_sungrow_dual",
             update_interval=timedelta(seconds=30),
         )
+
+    # ------------------------------------------------------------------
+    # SOC-proportional power splitting
+    # ------------------------------------------------------------------
+
+    async def _split_power(self, total_kw: float, prefer_lower_soc: bool) -> tuple[float, float]:
+        """Split power between inverters proportionally to SOC.
+
+        prefer_lower_soc=True for charging (fill the emptier one faster).
+        prefer_lower_soc=False for discharging (drain the fuller one faster).
+        Returns (power_kw_for_coord1, power_kw_for_coord2).
+        """
+        soc1 = (self._coord1.data or {}).get("battery_level", 50) or 50
+        soc2 = (self._coord2.data or {}).get("battery_level", 50) or 50
+
+        if abs(soc1 - soc2) < 2:
+            return total_kw / 2, total_kw / 2
+
+        if prefer_lower_soc:
+            w1 = max(1, 100 - soc1)
+            w2 = max(1, 100 - soc2)
+        else:
+            w1 = max(1, soc1)
+            w2 = max(1, soc2)
+
+        total_w = w1 + w2
+        p1 = total_kw * w1 / total_w
+        p2 = total_kw * w2 / total_w
+        _LOGGER.debug(
+            "Split %.2f kW: inv1=%.2f kW (soc=%.0f%%), inv2=%.2f kW (soc=%.0f%%), prefer_lower=%s",
+            total_kw, p1, soc1, p2, soc2, prefer_lower_soc,
+        )
+        return p1, p2
 
     # ------------------------------------------------------------------
     # Data aggregation
@@ -2026,6 +2079,16 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
                 "Sungrow dual SOC divergence: inv1=%.1f%%, inv2=%.1f%% (delta=%.1f%%)",
                 soc1, soc2, abs(soc1 - soc2),
             )
+
+        # Enforce grid-forming inverter SOC cap
+        if self._soc_cap < 100:
+            max_soc1 = d1.get("max_soc")
+            if max_soc1 is None or abs(max_soc1 - self._soc_cap) > 1:
+                _LOGGER.info(
+                    "Enforcing SOC cap: setting inv1 max_soc to %d%% (current register: %s)",
+                    self._soc_cap, max_soc1,
+                )
+                await self._coord1.set_max_soc(self._soc_cap)
 
         # Combine energy summaries
         es1 = d1.get("energy_summary", {}) or {}
@@ -2071,16 +2134,26 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
     # Command splitting — delegate to both sub-coordinators
     # ------------------------------------------------------------------
 
-    async def force_charge(self, duration_minutes: int = 30) -> bool:
-        """Force charge on both inverters."""
-        r1 = await self._coord1.force_charge(duration_minutes)
-        r2 = await self._coord2.force_charge(duration_minutes)
+    async def force_charge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
+        """Force charge on both inverters with SOC-proportional power split."""
+        if power_w > 0:
+            p1, p2 = await self._split_power(power_w / 1000, prefer_lower_soc=True)
+            r1 = await self._coord1.force_charge(duration_minutes, power_w=p1 * 1000)
+            r2 = await self._coord2.force_charge(duration_minutes, power_w=p2 * 1000)
+        else:
+            r1 = await self._coord1.force_charge(duration_minutes)
+            r2 = await self._coord2.force_charge(duration_minutes)
         return r1 and r2
 
-    async def force_discharge(self, duration_minutes: int = 30) -> bool:
-        """Force discharge on both inverters."""
-        r1 = await self._coord1.force_discharge(duration_minutes)
-        r2 = await self._coord2.force_discharge(duration_minutes)
+    async def force_discharge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
+        """Force discharge on both inverters with SOC-proportional power split."""
+        if power_w > 0:
+            p1, p2 = await self._split_power(power_w / 1000, prefer_lower_soc=False)
+            r1 = await self._coord1.force_discharge(duration_minutes, power_w=p1 * 1000)
+            r2 = await self._coord2.force_discharge(duration_minutes, power_w=p2 * 1000)
+        else:
+            r1 = await self._coord1.force_discharge(duration_minutes)
+            r2 = await self._coord2.force_discharge(duration_minutes)
         return r1 and r2
 
     async def restore_normal(self) -> bool:
@@ -2108,18 +2181,22 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
         return r1 and r2
 
     async def set_charge_rate_limit(self, kw: float) -> bool:
-        """Split charge rate equally between both inverters."""
-        half = kw / 2
-        r1 = await self._coord1.set_charge_rate_limit(half)
-        r2 = await self._coord2.set_charge_rate_limit(half)
+        """Split charge rate proportionally between both inverters."""
+        p1, p2 = await self._split_power(kw, prefer_lower_soc=True)
+        r1 = await self._coord1.set_charge_rate_limit(p1)
+        r2 = await self._coord2.set_charge_rate_limit(p2)
         return r1 and r2
 
     async def set_discharge_rate_limit(self, kw: float) -> bool:
-        """Split discharge rate equally between both inverters."""
-        half = kw / 2
-        r1 = await self._coord1.set_discharge_rate_limit(half)
-        r2 = await self._coord2.set_discharge_rate_limit(half)
+        """Split discharge rate proportionally between both inverters."""
+        p1, p2 = await self._split_power(kw, prefer_lower_soc=False)
+        r1 = await self._coord1.set_discharge_rate_limit(p1)
+        r2 = await self._coord2.set_discharge_rate_limit(p2)
         return r1 and r2
+
+    async def set_max_soc(self, percent: int) -> bool:
+        """Set max SOC on primary (grid-forming) inverter only."""
+        return await self._coord1.set_max_soc(percent)
 
     async def set_export_limit(self, watts: int | None) -> bool:
         """Set export limit on primary only (it's grid-facing)."""

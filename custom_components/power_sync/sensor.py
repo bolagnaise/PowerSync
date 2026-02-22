@@ -80,6 +80,8 @@ from .const import (
     SENSOR_TYPE_MIN_SOC,
     SENSOR_TYPE_DAILY_BATTERY_CHARGE_FOXESS,
     SENSOR_TYPE_DAILY_BATTERY_DISCHARGE_FOXESS,
+    SENSOR_TYPE_BATTERY_LEVEL_1,
+    SENSOR_TYPE_BATTERY_LEVEL_2,
     SENSOR_TYPE_OPTIMIZATION_STATUS,
     SENSOR_TYPE_OPTIMIZATION_NEXT_ACTION,
     SENSOR_TYPE_LP_SOLAR_FORECAST,
@@ -346,6 +348,27 @@ FOXESS_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     ),
 )
 
+DUAL_SUNGROW_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_BATTERY_LEVEL_1,
+        name="Battery Level (Inverter 1)",
+        native_unit_of_measurement=PERCENTAGE,
+        device_class=SensorDeviceClass.BATTERY,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=lambda data: data.get("battery_level_1") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_BATTERY_LEVEL_2,
+        name="Battery Level (Inverter 2)",
+        native_unit_of_measurement=PERCENTAGE,
+        device_class=SensorDeviceClass.BATTERY,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=lambda data: data.get("battery_level_2") if data else None,
+    ),
+)
+
 OPTIMIZER_ACTION_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_OPTIMIZATION_STATUS,
@@ -602,6 +625,18 @@ async def async_setup_entry(
                 )
             )
         _LOGGER.info("FoxESS-specific sensors added (PV1, PV2, CT2, work mode, min SOC, daily energy)")
+
+    # Add dual Sungrow per-inverter SOC sensors
+    if is_sungrow and energy_coordinator and hasattr(energy_coordinator, '_coord2'):
+        for description in DUAL_SUNGROW_SENSORS:
+            entities.append(
+                TeslaEnergySensor(
+                    coordinator=energy_coordinator,
+                    description=description,
+                    entry=entry,
+                )
+            )
+        _LOGGER.info("Dual Sungrow per-inverter SOC sensors added")
 
     # Add demand charge sensors if enabled and coordinator exists
     if demand_charge_coordinator and demand_charge_coordinator.enabled:

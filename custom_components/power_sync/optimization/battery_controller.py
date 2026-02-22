@@ -57,7 +57,7 @@ class BatteryControllerWrapper:
 
             await self.hass.services.async_call(
                 "power_sync", "force_charge",
-                {"duration": duration_minutes},
+                {"duration": duration_minutes, "power_w": power_w},
                 blocking=True,
             )
             return True
@@ -85,7 +85,7 @@ class BatteryControllerWrapper:
 
             await self.hass.services.async_call(
                 "power_sync", "force_discharge",
-                {"duration": duration_minutes},
+                {"duration": duration_minutes, "power_w": power_w},
                 blocking=True,
             )
             return True

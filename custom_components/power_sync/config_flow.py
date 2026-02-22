@@ -56,6 +56,8 @@ from .const import (
     CONF_SUNGROW_HOST_2,
     CONF_SUNGROW_PORT_2,
     CONF_SUNGROW_SLAVE_ID_2,
+    CONF_SUNGROW_GRID_INVERTER_SOC_CAP,
+    DEFAULT_SUNGROW_GRID_INVERTER_SOC_CAP,
     # Sigenergy configuration
     CONF_SIGENERGY_USERNAME,
     CONF_SIGENERGY_PASSWORD,
@@ -3115,6 +3117,11 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     new_data.pop(CONF_SUNGROW_PORT_2, None)
                     new_data.pop(CONF_SUNGROW_SLAVE_ID_2, None)
 
+                # Grid-forming inverter SOC cap (dual setups)
+                new_data[CONF_SUNGROW_GRID_INVERTER_SOC_CAP] = user_input.get(
+                    CONF_SUNGROW_GRID_INVERTER_SOC_CAP, DEFAULT_SUNGROW_GRID_INVERTER_SOC_CAP
+                )
+
                 # Optimization provider settings
                 optimization_provider = user_input.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
                 new_data[CONF_OPTIMIZATION_PROVIDER] = optimization_provider
@@ -3145,6 +3152,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         current_host_2 = self._get_option(CONF_SUNGROW_HOST_2, "")
         current_port_2 = self._get_option(CONF_SUNGROW_PORT_2, DEFAULT_SUNGROW_PORT)
         current_slave_id_2 = self._get_option(CONF_SUNGROW_SLAVE_ID_2, DEFAULT_SUNGROW_SLAVE_ID)
+        current_soc_cap = self._get_option(CONF_SUNGROW_GRID_INVERTER_SOC_CAP, DEFAULT_SUNGROW_GRID_INVERTER_SOC_CAP)
         current_opt_provider = self.config_entry.data.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
         current_backup_reserve = self.config_entry.data.get(CONF_OPTIMIZATION_BACKUP_RESERVE, DEFAULT_OPTIMIZATION_BACKUP_RESERVE)
 
@@ -3194,6 +3202,10 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_SUNGROW_SLAVE_ID_2,
                         default=current_slave_id_2,
                     ): int,
+                    vol.Optional(
+                        CONF_SUNGROW_GRID_INVERTER_SOC_CAP,
+                        default=current_soc_cap,
+                    ): vol.All(vol.Coerce(int), vol.Range(min=50, max=100)),
                 }
             ),
             errors=errors,

@@ -117,6 +117,10 @@ CONF_SUNGROW_HOST_2 = "sungrow_host_2"
 CONF_SUNGROW_PORT_2 = "sungrow_port_2"
 CONF_SUNGROW_SLAVE_ID_2 = "sungrow_slave_id_2"
 
+# Dual Sungrow grid-forming inverter SOC cap
+CONF_SUNGROW_GRID_INVERTER_SOC_CAP = "sungrow_grid_inverter_soc_cap"
+DEFAULT_SUNGROW_GRID_INVERTER_SOC_CAP = 100  # disabled by default
+
 # Sungrow Modbus Register Addresses (Battery Control)
 # Reference: https://github.com/mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant
 # Read Registers (Input/Holding)
@@ -708,6 +712,10 @@ SENSOR_TYPE_GRID_POWER = "grid_power"
 SENSOR_TYPE_BATTERY_POWER = "battery_power"
 SENSOR_TYPE_HOME_LOAD = "home_load"
 SENSOR_TYPE_BATTERY_LEVEL = "battery_level"
+
+# Dual Sungrow per-inverter sensor types
+SENSOR_TYPE_BATTERY_LEVEL_1 = "battery_level_1"
+SENSOR_TYPE_BATTERY_LEVEL_2 = "battery_level_2"
 
 # FoxESS-specific sensor types
 SENSOR_TYPE_PV1_POWER = "pv1_power"

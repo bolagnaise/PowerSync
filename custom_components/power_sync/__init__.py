@@ -191,6 +191,8 @@ from .const import (
     CONF_SUNGROW_HOST_2,
     CONF_SUNGROW_PORT_2,
     CONF_SUNGROW_SLAVE_ID_2,
+    CONF_SUNGROW_GRID_INVERTER_SOC_CAP,
+    DEFAULT_SUNGROW_GRID_INVERTER_SOC_CAP,
     # FoxESS battery system configuration
     BATTERY_SYSTEM_FOXESS,
     CONF_FOXESS_HOST,
@@ -9883,8 +9885,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             try:
                 await sungrow_coordinator_2.async_config_entry_first_refresh()
                 _LOGGER.info("Secondary Sungrow coordinator initialized successfully")
+                soc_cap = entry.data.get(
+                    CONF_SUNGROW_GRID_INVERTER_SOC_CAP,
+                    DEFAULT_SUNGROW_GRID_INVERTER_SOC_CAP,
+                )
                 sungrow_coordinator = DualSungrowCoordinator(
-                    hass, sungrow_coordinator, sungrow_coordinator_2
+                    hass, sungrow_coordinator, sungrow_coordinator_2,
+                    soc_cap=soc_cap,
                 )
                 await sungrow_coordinator.async_config_entry_first_refresh()
                 _LOGGER.info("Dual Sungrow coordinator active")
@@ -13375,6 +13382,51 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error in GoodWe force discharge: {e}", exc_info=True)
                 return
 
+        # Check if this is a Sungrow system
+        is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
+        if is_sungrow:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                sungrow_coord = entry_data.get("sungrow_coordinator")
+                if not sungrow_coord:
+                    _LOGGER.error("Force discharge: Sungrow coordinator not available")
+                    return
+
+                power_w = call.data.get("power_w", 0)
+                discharge_result = await sungrow_coord.force_discharge(duration, power_w=power_w)
+
+                if discharge_result:
+                    force_discharge_state["active"] = True
+                    force_discharge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
+                    _LOGGER.info(f"Sungrow FORCE DISCHARGE ACTIVE for {duration} minutes (power_w={power_w})")
+
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                        "active": True,
+                        "expires_at": force_discharge_state["expires_at"].isoformat(),
+                        "duration": duration,
+                    })
+
+                    if force_discharge_state.get("cancel_expiry_timer"):
+                        force_discharge_state["cancel_expiry_timer"]()
+
+                    async def auto_restore_discharge_sungrow(_now):
+                        if force_discharge_state["active"]:
+                            _LOGGER.info("Sungrow force discharge expired, auto-restoring")
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+
+                    force_discharge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass,
+                        auto_restore_discharge_sungrow,
+                        force_discharge_state["expires_at"],
+                    )
+                    await persist_force_mode_state()
+                else:
+                    _LOGGER.error("Sungrow force discharge failed")
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error in Sungrow force discharge: {e}", exc_info=True)
+                return
+
         try:
             # Get current token and provider using helper function
             current_token, provider = get_tesla_api_token(hass, entry)
@@ -13922,6 +13974,60 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error in GoodWe force charge: {e}", exc_info=True)
                 return
 
+        # Check if this is a Sungrow system
+        is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
+        if is_sungrow:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                sungrow_coord = entry_data.get("sungrow_coordinator")
+                if not sungrow_coord:
+                    _LOGGER.error("Force charge: Sungrow coordinator not available")
+                    return
+
+                # Cancel active discharge mode if switching to charge
+                if force_discharge_state["active"]:
+                    _LOGGER.info("Canceling active discharge mode to enable charge mode")
+                    if force_discharge_state.get("cancel_expiry_timer"):
+                        force_discharge_state["cancel_expiry_timer"]()
+                        force_discharge_state["cancel_expiry_timer"] = None
+                    force_discharge_state["active"] = False
+                    force_discharge_state["expires_at"] = None
+
+                power_w = call.data.get("power_w", 0)
+                charge_result = await sungrow_coord.force_charge(duration, power_w=power_w)
+
+                if charge_result:
+                    force_charge_state["active"] = True
+                    force_charge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
+                    _LOGGER.info(f"Sungrow FORCE CHARGE ACTIVE for {duration} minutes (power_w={power_w})")
+
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
+                        "active": True,
+                        "expires_at": force_charge_state["expires_at"].isoformat(),
+                        "duration": duration,
+                    })
+
+                    if force_charge_state.get("cancel_expiry_timer"):
+                        force_charge_state["cancel_expiry_timer"]()
+
+                    async def auto_restore_charge_sungrow(_now):
+                        if force_charge_state["active"]:
+                            _LOGGER.info("Sungrow force charge expired, auto-restoring")
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+
+                    force_charge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass,
+                        auto_restore_charge_sungrow,
+                        force_charge_state["expires_at"],
+                    )
+                    await persist_force_mode_state()
+                else:
+                    _LOGGER.error("Sungrow force charge failed")
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error in Sungrow force charge: {e}", exc_info=True)
+                return
+
         try:
             # Get current token and provider using helper function
             current_token, provider = get_tesla_api_token(hass, entry)
@@ -14438,6 +14544,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
             except Exception as e:
                 _LOGGER.error(f"Error in GoodWe restore normal: {e}", exc_info=True)
+                return
+
+        # Check if this is a Sungrow system
+        is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
+        if is_sungrow:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                sungrow_coord = entry_data.get("sungrow_coordinator")
+                if sungrow_coord:
+                    await sungrow_coord.restore_normal()
+
+                force_charge_state["active"] = False
+                force_discharge_state["active"] = False
+                force_charge_state["expires_at"] = None
+                force_discharge_state["expires_at"] = None
+
+                _LOGGER.info("Sungrow NORMAL OPERATION RESTORED")
+
+                if not suppress_notification:
+                    try:
+                        from .automations.actions import _send_expo_push
+                        await _send_expo_push(hass, "Battery", "Normal operation restored")
+                    except Exception as notify_err:
+                        _LOGGER.debug(f"Could not send success notification: {notify_err}")
+
+                async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                    "active": False, "expires_at": None, "duration": 0,
+                })
+                async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
+                    "active": False, "expires_at": None, "duration": 0,
+                })
+
+                await persist_force_mode_state()
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error in Sungrow restore normal: {e}", exc_info=True)
                 return
 
         # Guard: if no force mode is active and no saved state exists, there's
