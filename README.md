@@ -47,7 +47,7 @@
 2. **Add Integration** — Settings > Devices & Services > Add Integration > "PowerSync"
 3. **Pick your electricity provider** and enter API credentials if required
 4. **Connect your battery system** and enter connection details
-5. **Done!** Sensors appear automatically. Enable [Smart Optimization](#smart-optimization) for automated scheduling, or install the [Mobile App](#mobile-app) for remote control.
+5. **Done!** Sensors appear automatically and a **PowerSync dashboard** is auto-created in your sidebar. Enable [Smart Optimization](#smart-optimization) for automated scheduling, or install the [Mobile App](#mobile-app) for remote control.
 
 ---
 

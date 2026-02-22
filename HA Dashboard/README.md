@@ -35,30 +35,11 @@ Install these from HACS (Frontend) before setting up the dashboard:
 
 ## Installation
 
-### Step 1: Install the Integration
+### Automatic (Recommended)
 
-The dashboard strategy JS is bundled with the PowerSync integration and auto-registers on startup. No manual Lovelace resource setup needed.
+The dashboard is **auto-created** when PowerSync starts. After installing the integration, a **"PowerSync"** dashboard appears in your sidebar automatically — no manual setup required.
 
-### Step 2: Create the Dashboard
-
-1. In Home Assistant, go to **Settings > Dashboards**
-2. Click **+ Add Dashboard**
-3. Choose **New dashboard from scratch**
-4. Give it a name (e.g., "PowerSync")
-5. Click **Create**
-6. Open the new dashboard and click the three dots menu > **Edit Dashboard**
-7. Click the three dots menu again > **Raw configuration editor**
-8. Delete any existing content and paste:
-
-```yaml
-strategy:
-  type: custom:power-sync-strategy
-views: []
-```
-
-9. Click **Save**
-
-That's it! The strategy will automatically generate the right cards for your setup.
+If you previously created a dashboard manually, the auto-created "PowerSync" dashboard will appear alongside it. You can delete your old manual dashboard from **Settings > Dashboards**.
 
 ### YAML Mode Dashboards
 
@@ -69,6 +50,14 @@ lovelace:
   resources:
     - url: /power_sync/frontend/power-sync-strategy.js
       type: module
+```
+
+Then create a dashboard with this config:
+
+```yaml
+strategy:
+  type: custom:power-sync-strategy
+views: []
 ```
 
 ## Configuration Options

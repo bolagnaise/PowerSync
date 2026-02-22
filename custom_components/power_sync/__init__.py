@@ -9417,6 +9417,76 @@ def _migrate_entity_ids(hass: HomeAssistant, entry: ConfigEntry) -> None:
         _LOGGER.info("Entity ID migration complete: %d entities renamed", migrated)
 
 
+async def _ensure_powersync_dashboard(hass: HomeAssistant) -> None:
+    """Auto-create the PowerSync dashboard if it doesn't exist."""
+    try:
+        from homeassistant.components.lovelace.dashboard import LovelaceStorage
+        from homeassistant.components.lovelace.const import MODE_STORAGE
+        from homeassistant.components import frontend
+    except ImportError:
+        _LOGGER.debug("Lovelace imports not available, skipping dashboard auto-creation")
+        return
+
+    try:
+        lovelace_data = hass.data.get("lovelace")
+        if lovelace_data is None:
+            _LOGGER.debug("Lovelace data not available, skipping dashboard auto-creation")
+            return
+
+        # Check if dashboard already exists in the running system
+        if "power-sync" in lovelace_data.dashboards:
+            _LOGGER.debug("PowerSync dashboard already exists")
+            return
+
+        _LOGGER.info("Auto-creating PowerSync dashboard...")
+
+        dashboard_item = {
+            "id": "power-sync",
+            "url_path": "power-sync",
+            "title": "PowerSync",
+            "icon": "mdi:battery-charging",
+            "show_in_sidebar": True,
+            "require_admin": False,
+            "mode": "storage",
+        }
+
+        # Persist to lovelace_dashboards store so it survives HA restarts.
+        # On next restart, HA's lovelace component will load this from the store
+        # and register the dashboard automatically via DashboardsCollection.
+        store = Store(hass, 1, "lovelace_dashboards")
+        data = await store.async_load()
+        items = data.get("items", []) if data else []
+
+        if not any(item.get("url_path") == "power-sync" for item in items):
+            items.append(dashboard_item)
+            await store.async_save({"items": items})
+
+        # Create LovelaceStorage and register panel for immediate use
+        # (without requiring HA restart)
+        lovelace_store = LovelaceStorage(hass, dashboard_item)
+        lovelace_data.dashboards["power-sync"] = lovelace_store
+
+        frontend.async_register_built_in_panel(
+            hass,
+            "lovelace",
+            frontend_url_path="power-sync",
+            sidebar_title="PowerSync",
+            sidebar_icon="mdi:battery-charging",
+            config={"mode": MODE_STORAGE},
+            require_admin=False,
+        )
+
+        # Save the strategy config (persists to .storage/lovelace.power-sync)
+        await lovelace_store.async_save({
+            "strategy": {"type": "custom:power-sync-strategy"}
+        })
+
+        _LOGGER.info("PowerSync dashboard auto-created successfully")
+
+    except Exception:
+        _LOGGER.debug("Could not auto-create PowerSync dashboard", exc_info=True)
+
+
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up the PowerSync integration (global, runs once)."""
     # Register static path for the dashboard strategy JS
@@ -9454,6 +9524,15 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         # YAML mode dashboards don't have the resources API — that's fine,
         # users register the resource manually in lovelace.yaml
         _LOGGER.debug("Could not auto-register Lovelace resource (YAML mode?)")
+
+    # Auto-create the PowerSync dashboard after HA is fully started
+    # (ensures lovelace component is fully initialized)
+    from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+
+    async def _on_ha_started(event):
+        await _ensure_powersync_dashboard(hass)
+
+    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_ha_started)
 
     return True
 
