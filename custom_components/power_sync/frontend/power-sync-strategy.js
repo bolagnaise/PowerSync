@@ -17,6 +17,33 @@
 
 class PowerSyncStrategy {
   static async generate(config, hass) {
+    // Check for required HACS frontend dependencies
+    const requiredCards = [
+      { element: 'button-card', name: 'button-card', hacs: 'custom-button-card' },
+      { element: 'apexcharts-card', name: 'apexcharts-card', hacs: 'apexcharts-card' },
+      { element: 'power-flow-card-plus', name: 'power-flow-card-plus', hacs: 'power-flow-card-plus' },
+    ];
+    const missing = requiredCards.filter(c => !customElements.get(c.element));
+    if (missing.length > 0) {
+      return {
+        views: [{
+          title: 'Energy Dashboard',
+          path: 'energy',
+          icon: 'mdi:lightning-bolt',
+          cards: [{
+            type: 'markdown',
+            title: 'PowerSync Dashboard — Missing Dependencies',
+            content:
+              '## Required HACS Frontend Cards\n\n' +
+              'The PowerSync dashboard requires these custom cards to be installed via [HACS](https://hacs.xyz/):\n\n' +
+              missing.map(c => `- **${c.name}** — search "${c.hacs}" in HACS Frontend`).join('\n') + '\n\n' +
+              'Also recommended: **card-mod** (for styling)\n\n' +
+              'After installing, **refresh your browser** (Ctrl+Shift+R / Cmd+Shift+R).',
+          }],
+        }],
+      };
+    }
+
     // Entity resolver — tries power_sync_ prefixed first, then bare name.
     // Handles mixed installs where some entities have the prefix and others don't.
     const e = (name) => {
