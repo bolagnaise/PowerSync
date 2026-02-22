@@ -65,7 +65,7 @@ class PowerSyncStrategy {
     }
 
     // --- TOU Schedule ---
-    if (hasE('tou_schedule')) {
+    if (hasE('tariff_schedule')) {
       cards.push(_touSchedule(e));
     }
 
@@ -81,7 +81,7 @@ class PowerSyncStrategy {
     }
 
     // --- Curtailment Status ---
-    const hasDC = hasE('dc_solar_curtailment');
+    const hasDC = hasE('solar_curtailment');
     const hasAC = hasE('inverter_status');
     if (hasDC || hasAC) {
       cards.push(_curtailmentStatus(e, hasDC, hasAC));
@@ -509,7 +509,7 @@ function _priceChart(e) {
 }
 
 function _touSchedule(e) {
-  const touEntity = e('tou_schedule');
+  const touEntity = e('tariff_schedule');
   return {
     type: 'custom:apexcharts-card',
     header: { show: true, title: 'TOU Schedule', show_states: false },
@@ -762,7 +762,7 @@ function _lpPriceChart(e) {
 
 function _curtailmentStatus(e, hasDC, hasAC) {
   const cards = [];
-  const dcEntity = e('dc_solar_curtailment');
+  const dcEntity = e('solar_curtailment');
   const acEntity = e('inverter_status');
 
   if (hasDC) {
