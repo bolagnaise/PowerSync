@@ -1143,7 +1143,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return current_min >= start_min or current_min < end_min
         return start_min <= current_min < end_min
 
-    def _get_demand_window_config(self) -> dict[str, str] | None:
+    def _get_demand_window_config(self) -> dict[str, Any] | None:
         """Get demand window configuration for API response, or None if disabled."""
         if not self._entry:
             return None
@@ -1153,6 +1153,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             CONF_DEMAND_CHARGE_START_TIME,
             CONF_DEMAND_CHARGE_END_TIME,
             CONF_DEMAND_CHARGE_DAYS,
+            CONF_DEMAND_ARTIFICIAL_PRICE,
         )
 
         enabled = self._entry.options.get(
@@ -1161,6 +1162,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         if not enabled:
             return None
+
+        # The artificial price uplift baked into TOU prices ($/kWh).
+        # Currently hardcoded at $2/kWh in tariff_converter.py.
+        artificial_enabled = self._entry.options.get(
+            CONF_DEMAND_ARTIFICIAL_PRICE,
+            self._entry.data.get(CONF_DEMAND_ARTIFICIAL_PRICE, False),
+        )
+        uplift_kwh = 2.0 if artificial_enabled else 0.0
 
         return {
             "start_time": self._entry.options.get(
@@ -1175,6 +1184,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 CONF_DEMAND_CHARGE_DAYS,
                 self._entry.data.get(CONF_DEMAND_CHARGE_DAYS, "All Days"),
             ),
+            "artificial_uplift_kwh": uplift_kwh,
         }
 
     def _apply_confidence_decay(
