@@ -921,12 +921,19 @@ class FoxESSController(InverterController):
         grid outages), making it the FoxESS equivalent of Tesla's autonomous
         mode for holding SOC.
 
-        Saves current work mode and min_soc for later restoration.
+        Disables remote control first (if active from a prior force_charge/
+        force_discharge), then saves current state for later restoration.
         """
         if not self._register_map:
             return False
 
         reg = self._register_map
+
+        # Disable remote control if previously enabled — the inverter may
+        # reject work_mode and min_soc writes while remote control is active.
+        # Matches nathanmarlor/foxess_modbus: _disable_remote_control(BACK_UP).
+        if reg.remote_enable:
+            await self._write_holding_register(reg.remote_enable, 0)
 
         # Save current work mode for restore (only on first call, not re-entry)
         if self._original_work_mode is None and reg.work_mode and reg.supports_work_mode_rw:
@@ -942,7 +949,7 @@ class FoxESSController(InverterController):
 
         success = await self.set_work_mode(reg.work_mode_backup)
         if success:
-            _LOGGER.info("FoxESS set to Backup mode (IDLE hold)")
+            _LOGGER.info("FoxESS set to Backup mode (IDLE hold, remote control disabled)")
         return success
 
     async def restore_work_mode_from_idle(self) -> bool:

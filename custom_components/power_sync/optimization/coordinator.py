@@ -641,12 +641,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return
 
         try:
+            # During demand charge windows, override IDLE → self_consumption.
+            # IDLE holds the battery and lets grid serve load, which increases
+            # peak demand — the opposite of what demand charge avoidance wants.
+            # Self-consumption lets the battery discharge to cover home load,
+            # minimizing grid import during the demand window.
+            effective_action = action.action
+            if effective_action == "idle" and self._is_in_demand_window():
+                _LOGGER.info(
+                    "Optimizer: Overriding IDLE → self_consumption during demand charge window"
+                )
+                effective_action = "self_consumption"
+
             # When transitioning from IDLE to any other action, restore backup
             # reserve to the user's configured value. IDLE sets backup_reserve
             # to current SOC% to prevent discharge; we must undo that.
             if (
                 self._last_executed_action == "idle"
-                and action.action != "idle"
+                and effective_action != "idle"
             ):
                 if hasattr(battery, "set_backup_reserve"):
                     configured_reserve_pct = int(self._config.backup_reserve * 100)
@@ -661,21 +673,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "Optimizer: Exiting IDLE — restored backup reserve and work mode",
                 )
 
-            if action.action == "charge":
+            if effective_action == "charge":
                 if hasattr(battery, "force_charge"):
                     await battery.force_charge(
                         duration_minutes=self._config.interval_minutes + 5,
                         power_w=action.power_w,
                     )
                     _LOGGER.info("Optimizer: Charging at %.0fW", action.power_w)
-            elif action.action in ("discharge", "export"):
+            elif effective_action in ("discharge", "export"):
                 if hasattr(battery, "force_discharge"):
                     await battery.force_discharge(
                         duration_minutes=self._config.interval_minutes + 5,
                         power_w=action.power_w,
                     )
                     _LOGGER.info("Optimizer: Discharging/exporting at %.0fW", action.power_w)
-            elif action.action == "idle":
+            elif effective_action == "idle":
                 # IDLE: Hold battery at current SOC by setting backup reserve
                 # to current percentage. This prevents discharge while grid
                 # serves the home load. Useful for Amber when prices are cheap
@@ -732,9 +744,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     await battery.set_self_consumption_mode()
                 elif hasattr(battery, "restore_normal"):
                     await battery.restore_normal()
-                _LOGGER.debug("Optimizer: Self-consumption mode (action=%s)", action.action)
+                _LOGGER.debug("Optimizer: Self-consumption mode (action=%s)", effective_action)
 
-            self._last_executed_action = action.action
+            self._last_executed_action = effective_action
 
         except Exception as e:
             _LOGGER.error("Failed to execute optimizer action: %s", e)
@@ -1023,6 +1035,60 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
 
         return adjusted
+
+    def _is_in_demand_window(self) -> bool:
+        """Check if the current time is within a demand charge window."""
+        if not self._entry:
+            return False
+
+        from ..const import (
+            CONF_DEMAND_CHARGE_ENABLED,
+            CONF_DEMAND_CHARGE_START_TIME,
+            CONF_DEMAND_CHARGE_END_TIME,
+            CONF_DEMAND_CHARGE_DAYS,
+        )
+
+        enabled = self._entry.options.get(
+            CONF_DEMAND_CHARGE_ENABLED,
+            self._entry.data.get(CONF_DEMAND_CHARGE_ENABLED, False),
+        )
+        if not enabled:
+            return False
+
+        start_str = self._entry.options.get(
+            CONF_DEMAND_CHARGE_START_TIME,
+            self._entry.data.get(CONF_DEMAND_CHARGE_START_TIME, "14:00"),
+        )
+        end_str = self._entry.options.get(
+            CONF_DEMAND_CHARGE_END_TIME,
+            self._entry.data.get(CONF_DEMAND_CHARGE_END_TIME, "20:00"),
+        )
+        days = self._entry.options.get(
+            CONF_DEMAND_CHARGE_DAYS,
+            self._entry.data.get(CONF_DEMAND_CHARGE_DAYS, "All Days"),
+        )
+
+        try:
+            s_parts = start_str.split(":")
+            start_min = int(s_parts[0]) * 60 + int(s_parts[1])
+            e_parts = end_str.split(":")
+            end_min = int(e_parts[0]) * 60 + int(e_parts[1])
+        except (ValueError, IndexError):
+            return False
+
+        now = dt_util.now()
+        weekday = now.weekday()
+
+        if days == "Weekdays Only" and weekday >= 5:
+            return False
+        if days == "Weekends Only" and weekday < 5:
+            return False
+
+        current_min = now.hour * 60 + now.minute
+
+        if end_min <= start_min:
+            return current_min >= start_min or current_min < end_min
+        return start_min <= current_min < end_min
 
     def _apply_confidence_decay(
         self,
