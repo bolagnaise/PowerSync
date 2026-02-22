@@ -2483,29 +2483,35 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return await self.async_step_ev_charging_setup()
 
         # Build the form schema
-        data_schema = vol.Schema(
-            {
-                vol.Optional(CONF_DEMAND_CHARGE_ENABLED, default=False): bool,
-                vol.Optional(CONF_DEMAND_CHARGE_RATE, default=10.0): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.0, max=100.0)
-                ),
-                vol.Optional(CONF_DEMAND_CHARGE_START_TIME, default="14:00"): str,
-                vol.Optional(CONF_DEMAND_CHARGE_END_TIME, default="20:00"): str,
-                vol.Optional(CONF_DEMAND_CHARGE_DAYS, default="All Days"): vol.In(
-                    ["All Days", "Weekdays Only", "Weekends Only"]
-                ),
-                vol.Optional(CONF_DEMAND_CHARGE_BILLING_DAY, default=1): vol.All(
-                    vol.Coerce(int), vol.Range(min=1, max=31)
-                ),
-                vol.Optional(CONF_DEMAND_CHARGE_APPLY_TO, default="Buy Only"): vol.In(
-                    ["Buy Only", "Sell Only", "Both"]
-                ),
-                vol.Optional(CONF_DEMAND_ARTIFICIAL_PRICE, default=False): bool,
-                vol.Optional(CONF_DEMAND_ALLOW_GRID_CHARGING, default=False): bool,
-                vol.Optional(CONF_DAILY_SUPPLY_CHARGE, default=0.0): vol.Coerce(float),
-                vol.Optional(CONF_MONTHLY_SUPPLY_CHARGE, default=0.0): vol.Coerce(float),
-            }
-        )
+        schema_dict = {
+            vol.Optional(CONF_DEMAND_CHARGE_ENABLED, default=False): bool,
+            vol.Optional(CONF_DEMAND_CHARGE_RATE, default=10.0): vol.All(
+                vol.Coerce(float), vol.Range(min=0.0, max=100.0)
+            ),
+            vol.Optional(CONF_DEMAND_CHARGE_START_TIME, default="14:00"): str,
+            vol.Optional(CONF_DEMAND_CHARGE_END_TIME, default="20:00"): str,
+            vol.Optional(CONF_DEMAND_CHARGE_DAYS, default="All Days"): vol.In(
+                ["All Days", "Weekdays Only", "Weekends Only"]
+            ),
+            vol.Optional(CONF_DEMAND_CHARGE_BILLING_DAY, default=1): vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=31)
+            ),
+            vol.Optional(CONF_DEMAND_CHARGE_APPLY_TO, default="Buy Only"): vol.In(
+                ["Buy Only", "Sell Only", "Both"]
+            ),
+        }
+
+        # Only show artificial price increase for Tesla (Tesla-specific TOU feature)
+        if self._selected_battery_system == BATTERY_SYSTEM_TESLA:
+            schema_dict[vol.Optional(CONF_DEMAND_ARTIFICIAL_PRICE, default=False)] = bool
+
+        schema_dict.update({
+            vol.Optional(CONF_DEMAND_ALLOW_GRID_CHARGING, default=False): bool,
+            vol.Optional(CONF_DAILY_SUPPLY_CHARGE, default=0.0): vol.Coerce(float),
+            vol.Optional(CONF_MONTHLY_SUPPLY_CHARGE, default=0.0): vol.Coerce(float),
+        })
+
+        data_schema = vol.Schema(schema_dict)
 
         return self.async_show_form(
             step_id="demand_charges",
@@ -3506,54 +3512,64 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             # Route to curtailment options
             return await self.async_step_curtailment_options()
 
+        battery_system = self.config_entry.data.get(CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA)
+
+        schema_dict = {
+            vol.Optional(
+                CONF_DEMAND_CHARGE_ENABLED,
+                default=self._get_option(CONF_DEMAND_CHARGE_ENABLED, False),
+            ): bool,
+            vol.Optional(
+                CONF_DEMAND_CHARGE_RATE,
+                default=self._get_option(CONF_DEMAND_CHARGE_RATE, 10.0),
+            ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
+            vol.Optional(
+                CONF_DEMAND_CHARGE_START_TIME,
+                default=self._get_option(CONF_DEMAND_CHARGE_START_TIME, "14:00"),
+            ): str,
+            vol.Optional(
+                CONF_DEMAND_CHARGE_END_TIME,
+                default=self._get_option(CONF_DEMAND_CHARGE_END_TIME, "20:00"),
+            ): str,
+            vol.Optional(
+                CONF_DEMAND_CHARGE_DAYS,
+                default=self._get_option(CONF_DEMAND_CHARGE_DAYS, "All Days"),
+            ): vol.In(["All Days", "Weekdays Only", "Weekends Only"]),
+            vol.Optional(
+                CONF_DEMAND_CHARGE_BILLING_DAY,
+                default=self._get_option(CONF_DEMAND_CHARGE_BILLING_DAY, 1),
+            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=31)),
+            vol.Optional(
+                CONF_DEMAND_CHARGE_APPLY_TO,
+                default=self._get_option(CONF_DEMAND_CHARGE_APPLY_TO, "Buy Only"),
+            ): vol.In(["Buy Only", "Sell Only", "Both"]),
+        }
+
+        # Only show artificial price increase for Tesla (Tesla-specific TOU feature)
+        if battery_system == BATTERY_SYSTEM_TESLA:
+            schema_dict[vol.Optional(
+                CONF_DEMAND_ARTIFICIAL_PRICE,
+                default=self._get_option(CONF_DEMAND_ARTIFICIAL_PRICE, False),
+            )] = bool
+
+        schema_dict.update({
+            vol.Optional(
+                CONF_DEMAND_ALLOW_GRID_CHARGING,
+                default=self._get_option(CONF_DEMAND_ALLOW_GRID_CHARGING, False),
+            ): bool,
+            vol.Optional(
+                CONF_DAILY_SUPPLY_CHARGE,
+                default=self._get_option(CONF_DAILY_SUPPLY_CHARGE, 0.0),
+            ): vol.Coerce(float),
+            vol.Optional(
+                CONF_MONTHLY_SUPPLY_CHARGE,
+                default=self._get_option(CONF_MONTHLY_SUPPLY_CHARGE, 0.0),
+            ): vol.Coerce(float),
+        })
+
         return self.async_show_form(
             step_id="demand_charge_options",
-            data_schema=vol.Schema({
-                vol.Optional(
-                    CONF_DEMAND_CHARGE_ENABLED,
-                    default=self._get_option(CONF_DEMAND_CHARGE_ENABLED, False),
-                ): bool,
-                vol.Optional(
-                    CONF_DEMAND_CHARGE_RATE,
-                    default=self._get_option(CONF_DEMAND_CHARGE_RATE, 10.0),
-                ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
-                vol.Optional(
-                    CONF_DEMAND_CHARGE_START_TIME,
-                    default=self._get_option(CONF_DEMAND_CHARGE_START_TIME, "14:00"),
-                ): str,
-                vol.Optional(
-                    CONF_DEMAND_CHARGE_END_TIME,
-                    default=self._get_option(CONF_DEMAND_CHARGE_END_TIME, "20:00"),
-                ): str,
-                vol.Optional(
-                    CONF_DEMAND_CHARGE_DAYS,
-                    default=self._get_option(CONF_DEMAND_CHARGE_DAYS, "All Days"),
-                ): vol.In(["All Days", "Weekdays Only", "Weekends Only"]),
-                vol.Optional(
-                    CONF_DEMAND_CHARGE_BILLING_DAY,
-                    default=self._get_option(CONF_DEMAND_CHARGE_BILLING_DAY, 1),
-                ): vol.All(vol.Coerce(int), vol.Range(min=1, max=31)),
-                vol.Optional(
-                    CONF_DEMAND_CHARGE_APPLY_TO,
-                    default=self._get_option(CONF_DEMAND_CHARGE_APPLY_TO, "Buy Only"),
-                ): vol.In(["Buy Only", "Sell Only", "Both"]),
-                vol.Optional(
-                    CONF_DEMAND_ARTIFICIAL_PRICE,
-                    default=self._get_option(CONF_DEMAND_ARTIFICIAL_PRICE, False),
-                ): bool,
-                vol.Optional(
-                    CONF_DEMAND_ALLOW_GRID_CHARGING,
-                    default=self._get_option(CONF_DEMAND_ALLOW_GRID_CHARGING, False),
-                ): bool,
-                vol.Optional(
-                    CONF_DAILY_SUPPLY_CHARGE,
-                    default=self._get_option(CONF_DAILY_SUPPLY_CHARGE, 0.0),
-                ): vol.Coerce(float),
-                vol.Optional(
-                    CONF_MONTHLY_SUPPLY_CHARGE,
-                    default=self._get_option(CONF_MONTHLY_SUPPLY_CHARGE, 0.0),
-                ): vol.Coerce(float),
-            }),
+            data_schema=vol.Schema(schema_dict),
         )
 
     async def async_step_curtailment_options(

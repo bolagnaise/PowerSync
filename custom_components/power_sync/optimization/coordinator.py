@@ -1090,6 +1090,93 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return current_min >= start_min or current_min < end_min
         return start_min <= current_min < end_min
 
+    def _is_in_demand_window_at(self, ts: datetime) -> bool:
+        """Check if a given timestamp falls within a demand charge window."""
+        if not self._entry:
+            return False
+
+        from ..const import (
+            CONF_DEMAND_CHARGE_ENABLED,
+            CONF_DEMAND_CHARGE_START_TIME,
+            CONF_DEMAND_CHARGE_END_TIME,
+            CONF_DEMAND_CHARGE_DAYS,
+        )
+
+        enabled = self._entry.options.get(
+            CONF_DEMAND_CHARGE_ENABLED,
+            self._entry.data.get(CONF_DEMAND_CHARGE_ENABLED, False),
+        )
+        if not enabled:
+            return False
+
+        start_str = self._entry.options.get(
+            CONF_DEMAND_CHARGE_START_TIME,
+            self._entry.data.get(CONF_DEMAND_CHARGE_START_TIME, "14:00"),
+        )
+        end_str = self._entry.options.get(
+            CONF_DEMAND_CHARGE_END_TIME,
+            self._entry.data.get(CONF_DEMAND_CHARGE_END_TIME, "20:00"),
+        )
+        days = self._entry.options.get(
+            CONF_DEMAND_CHARGE_DAYS,
+            self._entry.data.get(CONF_DEMAND_CHARGE_DAYS, "All Days"),
+        )
+
+        try:
+            s_parts = start_str.split(":")
+            start_min = int(s_parts[0]) * 60 + int(s_parts[1])
+            e_parts = end_str.split(":")
+            end_min = int(e_parts[0]) * 60 + int(e_parts[1])
+        except (ValueError, IndexError):
+            return False
+
+        weekday = ts.weekday()
+
+        if days == "Weekdays Only" and weekday >= 5:
+            return False
+        if days == "Weekends Only" and weekday < 5:
+            return False
+
+        current_min = ts.hour * 60 + ts.minute
+
+        if end_min <= start_min:
+            return current_min >= start_min or current_min < end_min
+        return start_min <= current_min < end_min
+
+    def _get_demand_window_config(self) -> dict[str, str] | None:
+        """Get demand window configuration for API response, or None if disabled."""
+        if not self._entry:
+            return None
+
+        from ..const import (
+            CONF_DEMAND_CHARGE_ENABLED,
+            CONF_DEMAND_CHARGE_START_TIME,
+            CONF_DEMAND_CHARGE_END_TIME,
+            CONF_DEMAND_CHARGE_DAYS,
+        )
+
+        enabled = self._entry.options.get(
+            CONF_DEMAND_CHARGE_ENABLED,
+            self._entry.data.get(CONF_DEMAND_CHARGE_ENABLED, False),
+        )
+        if not enabled:
+            return None
+
+        return {
+            "start_time": self._entry.options.get(
+                CONF_DEMAND_CHARGE_START_TIME,
+                self._entry.data.get(CONF_DEMAND_CHARGE_START_TIME, "14:00"),
+            ),
+            "end_time": self._entry.options.get(
+                CONF_DEMAND_CHARGE_END_TIME,
+                self._entry.data.get(CONF_DEMAND_CHARGE_END_TIME, "20:00"),
+            ),
+            "days": self._entry.options.get(
+                CONF_DEMAND_CHARGE_DAYS,
+                self._entry.data.get(CONF_DEMAND_CHARGE_DAYS, "All Days"),
+            ),
+        }
+
     def _apply_confidence_decay(
         self,
         import_prices: list[float],
@@ -2330,6 +2417,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception:
                 pass  # Non-critical — don't break API response
 
+            # Add demand window config for chart overlay
+            demand_window = self._get_demand_window_config()
+            if demand_window:
+                data["demand_window"] = demand_window
+
             # Consolidate schedule into action ranges for the next 24h
             # e.g. [self_consumption 16:00-17:00, export 17:00-21:00, ...]
             intervals_24h = min(
@@ -2339,6 +2431,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             action_ranges: list[dict[str, Any]] = []
             for a in self._current_schedule.actions[:intervals_24h]:
                 ad = a.to_dict()
+                # Match executor behavior: override idle → self_consumption
+                # during demand windows (executor does this at runtime)
+                if ad["action"] == "idle" and self._is_in_demand_window_at(a.timestamp):
+                    ad["action"] = "self_consumption"
                 if (
                     action_ranges
                     and action_ranges[-1]["action"] == ad["action"]
