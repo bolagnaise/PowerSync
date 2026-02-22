@@ -1398,6 +1398,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         price_dollar = abs(e.get("perKwh", 0)) / 100
                         export_prices.extend([price_dollar] * expand)
 
+                    # Track actual forecast length before padding
+                    actual_price_intervals = len(import_prices)
+
                     # Pad or trim to n_steps
                     if import_prices:
                         if len(import_prices) < n_steps:
@@ -1448,9 +1451,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         # Apply Flow Power export schedule before display storage
                         export_prices = self._apply_flow_power_export(export_prices)
 
-                        # Store prices for UI display BEFORE LP adjustments
-                        self._last_display_import_prices = list(import_prices)
-                        self._last_display_export_prices = list(export_prices)
+                        # Store prices for UI display BEFORE LP adjustments.
+                        # Clip to actual forecast length so the app chart doesn't
+                        # show flat-line padding where the forecast ran out.
+                        self._last_display_import_prices = list(import_prices[:actual_price_intervals])
+                        self._last_display_export_prices = list(export_prices[:actual_price_intervals])
 
                         # Apply export boost and chip mode to LP export prices
                         export_prices = self._apply_export_boost(export_prices)
