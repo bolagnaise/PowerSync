@@ -9354,38 +9354,45 @@ class HomePowerSettingsView(HomeAssistantView):
 
 
 def _migrate_entity_ids(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Migrate legacy bare entity IDs to power_sync_ prefixed IDs.
+    """Migrate entity IDs to canonical power_sync_<key> format.
 
-    Old installs created entities like sensor.current_import_price instead of
-    sensor.power_sync_current_import_price.  This renames them in the entity
-    registry so all installs use a consistent naming convention.
+    Uses the unique_id (which contains the sensor key) to compute the
+    correct entity ID, so entities like sensor.optimizer_current_action
+    get renamed to sensor.power_sync_optimization_status (matching the key).
     """
     ent_reg = er.async_get(hass)
+    entry_prefix = f"{entry.entry_id}_"
     migrated = 0
 
     for entity_entry in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
-        old_id = entity_entry.entity_id
-        # Extract domain and object_id  (e.g. "sensor", "current_import_price")
-        domain, _, object_id = old_id.partition(".")
-        if not object_id:
+        uid = entity_entry.unique_id or ""
+        if not uid.startswith(entry_prefix):
             continue
 
-        # Skip if already prefixed
-        if object_id.startswith("power_sync_"):
+        # Extract the sensor key from unique_id: "{entry_id}_{key}" → "key"
+        key = uid[len(entry_prefix):]
+        if not key:
             continue
 
-        new_id = f"{domain}.power_sync_{object_id}"
+        domain = entity_entry.entity_id.partition(".")[0]
+        canonical_id = f"{domain}.power_sync_{key}"
+
+        if entity_entry.entity_id == canonical_id:
+            continue
 
         # Don't overwrite an existing entity
-        if ent_reg.async_get(new_id):
+        if ent_reg.async_get(canonical_id):
             _LOGGER.debug(
-                "Skipping migration %s -> %s (target already exists)", old_id, new_id
+                "Skipping migration %s -> %s (target already exists)",
+                entity_entry.entity_id, canonical_id,
             )
             continue
 
-        ent_reg.async_update_entity(old_id, new_entity_id=new_id)
+        ent_reg.async_update_entity(
+            entity_entry.entity_id, new_entity_id=canonical_id
+        )
         migrated += 1
-        _LOGGER.info("Migrated entity ID: %s -> %s", old_id, new_id)
+        _LOGGER.info("Migrated entity ID: %s -> %s", entity_entry.entity_id, canonical_id)
 
     if migrated:
         _LOGGER.info("Entity ID migration complete: %d entities renamed", migrated)
@@ -16814,6 +16821,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.info("Smart Optimization is configured but DISABLED by user toggle")
         else:
             _LOGGER.info("Using battery's native optimization (Smart Optimization not configured)")
+
+        # Clean up stale optimizer/LP forecast entities from the registry
+        _optimizer_sensor_keys = {
+            "optimization_status", "optimization_next_action", "optimization_savings",
+            "lp_solar_forecast", "lp_load_forecast",
+            "lp_import_price_forecast", "lp_export_price_forecast",
+        }
+        ent_reg = er.async_get(hass)
+        for entity_entry in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
+            uid = entity_entry.unique_id or ""
+            key = uid.removeprefix(f"{entry.entry_id}_")
+            if key in _optimizer_sensor_keys:
+                ent_reg.async_remove(entity_entry.entity_id)
+                _LOGGER.info("Removed stale optimizer entity: %s", entity_entry.entity_id)
 
     # Register HTTP endpoints for Smart Optimization
     hass.http.register_view(OptimizationView(hass))
