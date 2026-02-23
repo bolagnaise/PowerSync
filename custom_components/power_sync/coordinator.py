@@ -33,14 +33,19 @@ from .const import (
 )
 
 
+ENERGY_ACC_STORE_VERSION = 1
+ENERGY_ACC_SAVE_DELAY = 300  # Flush at most every 5 minutes
+
+
 class EnergyAccumulator:
     """Accumulates daily energy totals from instantaneous power readings.
 
     Integrates power (kW) over time to estimate daily energy (kWh).
-    Resets at local midnight. Data is approximate and lost on restart.
+    Resets at local midnight. Persisted via HA Store to survive restarts.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, hass: HomeAssistant | None = None, store_key: str = "") -> None:
+        self._hass = hass
         self._last_update: datetime | None = None
         self._last_date: Any = None
         self.solar_kwh: float = 0.0
@@ -49,6 +54,67 @@ class EnergyAccumulator:
         self.battery_charge_kwh: float = 0.0
         self.battery_discharge_kwh: float = 0.0
         self.load_kwh: float = 0.0
+        self._store: Store | None = None
+        if hass and store_key:
+            self._store = Store(
+                hass,
+                ENERGY_ACC_STORE_VERSION,
+                f"power_sync.energy_acc.{store_key}",
+            )
+
+    async def async_restore(self) -> None:
+        """Restore accumulated energy from persistent storage."""
+        if not self._store:
+            return
+        try:
+            data = await self._store.async_load()
+        except Exception as e:
+            _LOGGER.warning("Failed to load persisted energy accumulator: %s", e)
+            return
+        if not data:
+            return
+        stored_date = data.get("date")
+        today = dt_util.now().strftime("%Y-%m-%d")
+        if stored_date == today:
+            self.solar_kwh = float(data.get("solar_kwh", 0.0))
+            self.grid_import_kwh = float(data.get("grid_import_kwh", 0.0))
+            self.grid_export_kwh = float(data.get("grid_export_kwh", 0.0))
+            self.battery_charge_kwh = float(data.get("battery_charge_kwh", 0.0))
+            self.battery_discharge_kwh = float(data.get("battery_discharge_kwh", 0.0))
+            self.load_kwh = float(data.get("load_kwh", 0.0))
+            _LOGGER.info(
+                "Restored energy accumulator: solar=%.2f grid_in=%.2f grid_out=%.2f "
+                "charge=%.2f discharge=%.2f load=%.2f kWh (date=%s)",
+                self.solar_kwh, self.grid_import_kwh, self.grid_export_kwh,
+                self.battery_charge_kwh, self.battery_discharge_kwh, self.load_kwh,
+                stored_date,
+            )
+        else:
+            _LOGGER.debug(
+                "Energy accumulator data from %s (today=%s), starting fresh",
+                stored_date, today,
+            )
+
+    def _schedule_save(self) -> None:
+        """Schedule a coalesced write of energy data to persistent storage."""
+        if not self._store:
+            return
+        self._store.async_delay_save(
+            self._data_to_save,
+            ENERGY_ACC_SAVE_DELAY,
+        )
+
+    def _data_to_save(self) -> dict:
+        """Return energy data dict for Store serialization."""
+        return {
+            "date": dt_util.now().strftime("%Y-%m-%d"),
+            "solar_kwh": round(self.solar_kwh, 4),
+            "grid_import_kwh": round(self.grid_import_kwh, 4),
+            "grid_export_kwh": round(self.grid_export_kwh, 4),
+            "battery_charge_kwh": round(self.battery_charge_kwh, 4),
+            "battery_discharge_kwh": round(self.battery_discharge_kwh, 4),
+            "load_kwh": round(self.load_kwh, 4),
+        }
 
     def update(
         self,
@@ -92,6 +158,7 @@ class EnergyAccumulator:
                 self.battery_charge_kwh += max(0, -battery_kw) * delta_h
                 self.battery_discharge_kwh += max(0, battery_kw) * delta_h
                 self.load_kwh += max(0, load_kw) * delta_h
+                self._schedule_save()
 
         self._last_update = now
         self._last_date = now.date()
@@ -1807,7 +1874,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         self.port = port
         self.slave_id = slave_id
         self._controller = SungrowSHController(host, port, slave_id)
-        self._energy_acc = EnergyAccumulator()
+        self._energy_acc = EnergyAccumulator(hass, "sungrow")
 
         super().__init__(
             hass,
@@ -1818,6 +1885,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from Sungrow system via Modbus."""
+        if not self._energy_acc._last_update:
+            await self._energy_acc.async_restore()
         try:
             data = await self._controller.get_battery_data()
 
@@ -2250,7 +2319,7 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
             model_family=model_family,
         )
 
-        self._energy_acc = EnergyAccumulator()
+        self._energy_acc = EnergyAccumulator(hass, "foxess")
 
         super().__init__(
             hass,
@@ -2261,6 +2330,8 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from FoxESS system via Modbus."""
+        if not self._energy_acc._last_update:
+            await self._energy_acc.async_restore()
         try:
             async with self._controller:
                 status = await self._controller.get_status()
