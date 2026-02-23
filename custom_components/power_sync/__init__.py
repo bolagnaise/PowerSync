@@ -16970,8 +16970,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if current_price is None:
                 tariff_schedule = entry_data.get("tariff_schedule", {})
                 if tariff_schedule:
-                    # buy_price is already in cents from fetch_tesla_tariff_schedule
-                    current_price = tariff_schedule.get("buy_price")
+                    # Use real-time TOU calculation so price updates when periods change
+                    if tariff_schedule.get("tou_periods"):
+                        current_price, _, _ = get_current_price_from_tariff_schedule(tariff_schedule)
+                    else:
+                        current_price = tariff_schedule.get("buy_price")
 
             # Fallback to Sigenergy tariff (for Sigenergy users with Amber)
             if current_price is None:
