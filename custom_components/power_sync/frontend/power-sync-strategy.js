@@ -354,7 +354,7 @@ class PowerSyncStrategy {
     // Wait for HACS custom elements (async loading race condition fix).
     // Instead of synchronous customElements.get(), we use whenDefined() with timeout.
     const requiredCards = [
-      { element: 'button-card', name: 'button-card', hacs: 'custom-button-card' },
+      { element: 'button-card', name: 'button-card', hacs: 'button-card' },
       { element: 'apexcharts-card', name: 'apexcharts-card', hacs: 'apexcharts-card' },
       { element: 'power-flow-card-plus', name: 'power-flow-card-plus', hacs: 'power-flow-card-plus' },
     ];
