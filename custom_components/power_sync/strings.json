@@ -880,7 +880,7 @@
         "data_description": {
           "ev_charging_enabled": "Enable smart charging control for Tesla vehicles. Not required for OCPP or Zaptec chargers.",
           "ev_provider": "Fleet API/Teslemetry uses cloud API. Tesla BLE uses local Bluetooth via ESPHome. Teslemetry Bluetooth uses native HA integration. Both uses local BLE with Fleet API fallback.",
-          "tesla_ble_entity_prefix": "Must match your ESPHome device name. Example: if your entities are sensor.my_tesla_charge_level, enter 'my_tesla'. Default: tesla_ble.",
+          "tesla_ble_entity_prefix": "Must match your ESPHome device name(s). For multiple vehicles, separate with commas: my_tesla, wifes_tesla. Default: tesla_ble.",
           "ocpp_enabled": "Run an OCPP 1.6J WebSocket server. Independent of Tesla — enable this for OCPP-compatible chargers. Chargers connect to ws://your-ha-ip:port/charger_id",
           "ocpp_port": "Port for OCPP WebSocket server. Default: 9000.",
           "zaptec_charger_entity": "Entity ID from the Zaptec HA integration (e.g. switch.zaptec_charger). Leave blank if not using Zaptec or if using standalone mode.",
@@ -918,7 +918,7 @@
         "data_description": {
           "ev_charging_enabled": "Enable smart charging control for Tesla vehicles. Not required for OCPP or Zaptec chargers.",
           "ev_provider": "Fleet API/Teslemetry uses cloud API. Tesla BLE uses local Bluetooth via ESPHome. Teslemetry Bluetooth uses native HA integration. Both uses local BLE with Fleet API fallback.",
-          "tesla_ble_entity_prefix": "Must match your ESPHome device name. Example: if your entities are sensor.my_tesla_charge_level, enter 'my_tesla'. Default: tesla_ble.",
+          "tesla_ble_entity_prefix": "Must match your ESPHome device name(s). For multiple vehicles, separate with commas: my_tesla, wifes_tesla. Default: tesla_ble.",
           "ocpp_enabled": "Run an OCPP 1.6J WebSocket server. Independent of Tesla — enable this for OCPP-compatible chargers. Chargers connect to ws://your-ha-ip:port/charger_id",
           "ocpp_port": "Port for OCPP WebSocket server. Default: 9000.",
           "zaptec_charger_entity": "Entity ID from the Zaptec HA integration (e.g. switch.zaptec_charger). Leave blank if not using Zaptec or if using standalone mode.",

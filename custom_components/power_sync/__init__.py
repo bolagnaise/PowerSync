@@ -241,6 +241,7 @@ from .const import (
     TESLA_BLE_SENSOR_CHARGE_LIMIT,
     TESLA_BLE_SENSOR_CHARGE_POWER,
     TESLA_BLE_BINARY_ASLEEP,
+    TESLA_BLE_BINARY_CHARGE_FLAP,
     TESLA_BLE_BINARY_STATUS,
     TESLA_BLE_SWITCH_CHARGER,
     TESLA_BLE_NUMBER_CHARGING_AMPS,
@@ -293,30 +294,55 @@ from .coordinator import (
 import re
 
 
-def _resolve_ble_prefix(hass, config: dict) -> str:
-    """Resolve Tesla BLE entity prefix with auto-detection fallback.
+def _resolve_ble_prefixes(hass, config: dict) -> list[str]:
+    """Resolve Tesla BLE entity prefixes with auto-detection fallback.
 
-    If the configured prefix doesn't find a BLE status entity, scan for
+    Supports comma-separated prefixes for multiple BLE vehicles.
+    If a single configured prefix doesn't find a BLE status entity, scan for
     a *_charging_state sensor whose prefix contains 'ble' and use that instead.
     """
-    prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+    raw = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+    prefixes = [p.strip() for p in raw.split(",") if p.strip()]
+    if not prefixes:
+        prefixes = [DEFAULT_TESLA_BLE_ENTITY_PREFIX]
 
-    # Check if configured prefix finds the BLE status entity
-    status_entity = TESLA_BLE_BINARY_STATUS.format(prefix=prefix)
-    if hass.states.get(status_entity) is not None:
-        return prefix
+    resolved = []
+    for prefix in prefixes:
+        status_entity = TESLA_BLE_BINARY_STATUS.format(prefix=prefix)
+        if hass.states.get(status_entity) is not None:
+            resolved.append(prefix)
+            continue
+        # Auto-detect fallback only for single-prefix configs
+        if len(prefixes) == 1:
+            for state in hass.states.async_all():
+                match = re.match(r"sensor\.(\w+)_charging_state$", state.entity_id)
+                if match and "ble" in match.group(1).lower():
+                    detected = match.group(1)
+                    _LOGGER.debug(
+                        "BLE prefix auto-detected as '%s' (configured: '%s')", detected, prefix
+                    )
+                    resolved.append(detected)
+                    break
+            else:
+                resolved.append(prefix)  # use as-is
+        else:
+            resolved.append(prefix)  # multi-prefix: trust user input
+    return resolved
 
-    # Auto-detect from BLE charging_state sensor
-    for state in hass.states.async_all():
-        match = re.match(r"sensor\.(\w+)_charging_state$", state.entity_id)
-        if match and "ble" in match.group(1).lower():
-            detected = match.group(1)
-            _LOGGER.debug(
-                "BLE prefix auto-detected as '%s' (configured: '%s')", detected, prefix
-            )
-            return detected
 
-    return prefix
+def _resolve_ble_prefix(hass, config: dict) -> str:
+    """Resolve single Tesla BLE entity prefix (backward compat wrapper)."""
+    prefixes = _resolve_ble_prefixes(hass, config)
+    return prefixes[0] if prefixes else DEFAULT_TESLA_BLE_ENTITY_PREFIX
+
+
+def _ble_prefix_for_vehicle(hass, config: dict, vehicle_vin: str | None) -> str | None:
+    """Get BLE prefix for a specific vehicle. Returns None if not a BLE vehicle."""
+    if vehicle_vin and vehicle_vin.startswith("ble_"):
+        return vehicle_vin[4:]  # strip "ble_" prefix
+    # Fallback: first configured prefix (for Fleet API vehicles in "both" mode)
+    prefixes = _resolve_ble_prefixes(hass, config)
+    return prefixes[0] if prefixes else None
 
 
 def _resolve_teslemetry_bt_prefix(hass) -> str | None:
@@ -351,27 +377,28 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
     ev_power_kw = 0.0
     ev_soc = None
 
-    # Check Tesla BLE sensors
+    # Check Tesla BLE sensors (all configured prefixes)
     config = {**entry.data, **entry.options}
-    prefix = _resolve_ble_prefix(hass, config)
+    for prefix in _resolve_ble_prefixes(hass, config):
+        ble_power_entity = TESLA_BLE_SENSOR_CHARGE_POWER.format(prefix=prefix)
+        ble_state = hass.states.get(ble_power_entity)
+        if ble_state and ble_state.state not in ("unknown", "unavailable"):
+            try:
+                val = float(ble_state.state)
+                if val > 0:
+                    ev_power_kw = max(ev_power_kw, val)
+            except (ValueError, TypeError):
+                pass
 
-    ble_power_entity = TESLA_BLE_SENSOR_CHARGE_POWER.format(prefix=prefix)
-    ble_state = hass.states.get(ble_power_entity)
-    if ble_state and ble_state.state not in ("unknown", "unavailable"):
-        try:
-            val = float(ble_state.state)
-            if val > 0:
-                ev_power_kw = max(ev_power_kw, val)
-        except (ValueError, TypeError):
-            pass
-
-    ble_soc_entity = TESLA_BLE_SENSOR_CHARGE_LEVEL.format(prefix=prefix)
-    ble_soc_state = hass.states.get(ble_soc_entity)
-    if ble_soc_state and ble_soc_state.state not in ("unknown", "unavailable"):
-        try:
-            ev_soc = int(float(ble_soc_state.state))
-        except (ValueError, TypeError):
-            pass
+        ble_soc_entity = TESLA_BLE_SENSOR_CHARGE_LEVEL.format(prefix=prefix)
+        ble_soc_state = hass.states.get(ble_soc_entity)
+        if ble_soc_state and ble_soc_state.state not in ("unknown", "unavailable"):
+            try:
+                soc_val = int(float(ble_soc_state.state))
+                if ev_soc is None:
+                    ev_soc = soc_val
+            except (ValueError, TypeError):
+                pass
 
     # Check Teslemetry Bluetooth sensors
     tbt_prefix = _resolve_teslemetry_bt_prefix(hass)
@@ -6012,21 +6039,28 @@ class EVStatusView(HomeAssistantView):
         if ev_provider not in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
             return {"available": False, "configured": False}
 
-        prefix = _resolve_ble_prefix(self._hass, config)
+        prefixes = _resolve_ble_prefixes(self._hass, config)
 
-        # Check if the BLE status entity exists
-        status_entity = TESLA_BLE_BINARY_STATUS.format(prefix=prefix)
-        state = self._hass.states.get(status_entity)
+        # Check if any BLE status entity exists
+        any_available = False
+        any_connected = False
+        for prefix in prefixes:
+            status_entity = TESLA_BLE_BINARY_STATUS.format(prefix=prefix)
+            state = self._hass.states.get(status_entity)
+            if state is not None:
+                any_available = True
+                if state.state == "on":
+                    any_connected = True
 
-        if state is not None:
+        if any_available:
             return {
                 "available": True,
                 "configured": True,
-                "connected": state.state == "on",
-                "entity_prefix": prefix,
+                "connected": any_connected,
+                "entity_prefix": ", ".join(prefixes),
             }
 
-        return {"available": False, "configured": True, "entity_prefix": prefix}
+        return {"available": False, "configured": True, "entity_prefix": ", ".join(prefixes)}
 
     def _get_teslemetry_bt_status(self) -> dict:
         """Check if Teslemetry Bluetooth entities are available."""
@@ -6272,7 +6306,34 @@ class EVVehiclesView(HomeAssistantView):
             return dict(entries[0].options)
         return {}
 
-    def _get_tesla_ble_vehicle(self, prefix: str) -> dict | None:
+    @staticmethod
+    def _supplement_fleet_with_ble(fleet_v: dict, ble_v: dict) -> None:
+        """Supplement a Fleet API vehicle dict with fresher BLE data in-place."""
+        ble_online = ble_v.get("is_online", False)
+        if ble_v.get("battery_level") is not None:
+            fleet_v["battery_level"] = ble_v["battery_level"]
+        ble_cs = ble_v.get("charging_state")
+        if ble_cs and ble_cs not in ("Unknown", "Asleep"):
+            fleet_v["charging_state"] = ble_cs
+        if ble_v.get("charge_limit_soc") is not None:
+            fleet_v["charge_limit_soc"] = ble_v["charge_limit_soc"]
+        # Sync is_plugged_in from BLE when it has a definitive
+        # reading (charge_flap is "on" or "off", not "unavailable").
+        if ble_v.get("plugged_in_definitive"):
+            fleet_v["is_plugged_in"] = ble_v["is_plugged_in"]
+            if not ble_v["is_plugged_in"]:
+                fleet_v["charging_state"] = "Disconnected"
+        # Sync charger_power from BLE (more real-time than Fleet API)
+        if ble_v.get("charger_power") is not None:
+            fleet_v["charger_power"] = ble_v["charger_power"]
+        # Use BLE timestamp if it's fresher than Fleet API
+        ble_ts = ble_v.get("data_updated_at", "")
+        fleet_ts = fleet_v.get("data_updated_at", "")
+        if ble_ts > fleet_ts:
+            fleet_v["data_updated_at"] = ble_ts
+        fleet_v["ble_connected"] = ble_online
+
+    def _get_tesla_ble_vehicle(self, prefix: str, vehicle_index: int = 1) -> dict | None:
         """Get vehicle data from Tesla BLE entities."""
         # Check if BLE status entity exists
         status_entity = TESLA_BLE_BINARY_STATUS.format(prefix=prefix)
@@ -6377,10 +6438,10 @@ class EVVehiclesView(HomeAssistantView):
         )
 
         return {
-            "id": 1,
+            "id": vehicle_index,
             "vehicle_id": f"ble_{prefix}",
             "vin": None,  # BLE doesn't provide VIN
-            "display_name": f"Tesla (BLE)",
+            "display_name": f"Tesla BLE ({prefix})",
             "model": None,
             "battery_level": battery_level,
             "charging_state": charging_state,
@@ -6505,7 +6566,6 @@ class EVVehiclesView(HomeAssistantView):
             # Get PowerSync config for EV provider setting
             config = self._get_powersync_config()
             ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
-            ble_prefix = _resolve_ble_prefix(self._hass, config)
 
             # Check for Tesla Fleet/Teslemetry integration
             active_integration = None
@@ -6641,46 +6701,28 @@ class EVVehiclesView(HomeAssistantView):
                             "brand": "tesla",
                         })
 
-            # Get/supplement with Tesla BLE data
+            # Get/supplement with Tesla BLE data (supports multiple BLE prefixes)
             if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
-                ble_vehicle = self._get_tesla_ble_vehicle(ble_prefix)
+                ble_prefixes = _resolve_ble_prefixes(self._hass, config)
 
-                if ble_vehicle:
-                    if ev_provider == EV_PROVIDER_BOTH and vehicles:
-                        # Supplement existing Fleet API vehicle with BLE data if available
-                        # BLE data is more real-time, so prefer it when available
-                        ble_online = ble_vehicle.get("is_online", False)
-                        for v in vehicles:
-                            if ble_vehicle.get("battery_level") is not None:
-                                v["battery_level"] = ble_vehicle["battery_level"]
-                            ble_cs = ble_vehicle.get("charging_state")
-                            if ble_cs and ble_cs not in ("Unknown", "Asleep"):
-                                v["charging_state"] = ble_cs
-                            if ble_vehicle.get("charge_limit_soc") is not None:
-                                v["charge_limit_soc"] = ble_vehicle["charge_limit_soc"]
-                            # Sync is_plugged_in from BLE when it has a definitive
-                            # reading (charge_flap is "on" or "off", not "unavailable").
-                            # Prevents stale Fleet API data showing "connected" for hours
-                            # after the car is unplugged and goes to sleep.
-                            if ble_vehicle.get("plugged_in_definitive"):
-                                v["is_plugged_in"] = ble_vehicle["is_plugged_in"]
-                                # When BLE definitively says unplugged, also fix
-                                # charging_state — charge_flap=off is more reliable
-                                # than the charging_state sensor when car is asleep
-                                if not ble_vehicle["is_plugged_in"]:
-                                    v["charging_state"] = "Disconnected"
-                            # Sync charger_power from BLE (more real-time than Fleet API)
-                            if ble_vehicle.get("charger_power") is not None:
-                                v["charger_power"] = ble_vehicle["charger_power"]
-                            # Use BLE timestamp if it's fresher than Fleet API
-                            ble_ts = ble_vehicle.get("data_updated_at", "")
-                            fleet_ts = v.get("data_updated_at", "")
-                            if ble_ts > fleet_ts:
-                                v["data_updated_at"] = ble_ts
-                            v["ble_connected"] = ble_online
-                    elif not vehicles:
-                        # No Fleet API vehicles, use BLE as primary
-                        vehicles.append(ble_vehicle)
+                if ev_provider == EV_PROVIDER_BOTH and vehicles:
+                    # Supplement fleet vehicles with BLE data positionally
+                    for i, prefix in enumerate(ble_prefixes):
+                        ble_vehicle = self._get_tesla_ble_vehicle(prefix, vehicle_index=len(vehicles) + i + 1)
+                        if not ble_vehicle:
+                            continue
+                        if i < len(vehicles):
+                            # Supplement existing fleet vehicle with BLE data
+                            self._supplement_fleet_with_ble(vehicles[i], ble_vehicle)
+                        else:
+                            # Extra BLE vehicle beyond fleet count — add standalone
+                            vehicles.append(ble_vehicle)
+                else:
+                    # BLE-only mode: each prefix is a separate vehicle
+                    for i, prefix in enumerate(ble_prefixes):
+                        ble_vehicle = self._get_tesla_ble_vehicle(prefix, vehicle_index=len(vehicles) + i + 1)
+                        if ble_vehicle:
+                            vehicles.append(ble_vehicle)
 
             # Discover BYD vehicles from hass-byd-vehicle integration
             byd_vehicles = self._get_byd_vehicles(start_id=len(vehicles) + 1)
@@ -6691,7 +6733,8 @@ class EVVehiclesView(HomeAssistantView):
                 if ev_provider == EV_PROVIDER_FLEET_API:
                     message = "No Tesla integration installed (tesla_fleet or teslemetry)"
                 elif ev_provider == EV_PROVIDER_TESLA_BLE:
-                    message = f"Tesla BLE entities not found (prefix: {ble_prefix})"
+                    ble_prefixes = _resolve_ble_prefixes(self._hass, config)
+                    message = f"Tesla BLE entities not found (prefixes: {', '.join(ble_prefixes)})"
                 return web.json_response({
                     "success": True,
                     "vehicles": [],
@@ -6809,29 +6852,58 @@ class EVVehicleCommandView(HomeAssistantView):
         return {}
 
     def _get_vin_from_vehicle_id(self, vehicle_id: str) -> str | None:
-        """Look up VIN from vehicle_id (sequential number in vehicle list).
+        """Look up VIN (or BLE vehicle_id) from vehicle_id (sequential number).
 
         The mobile app sends vehicle_id as a sequential number (1, 2, 3...)
-        from the vehicles list. We need to map this back to the actual VIN.
+        from the vehicles list. We need to map this back to the actual VIN
+        or BLE vehicle_id (ble_{prefix}).
         """
+        config = self._get_powersync_config()
+        ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
         device_registry = dr.async_get(self._hass)
 
-        # Build list of vehicles in same order as EVVehiclesView
+        # Build list of vehicles in same order as EVVehiclesView.get()
         vehicle_num = 0
-        for device in device_registry.devices.values():
-            for identifier in device.identifiers:
-                if len(identifier) < 2:
-                    continue
-                domain = identifier[0]
-                identifier_value = str(identifier[1])
-                if domain in TESLA_INTEGRATIONS:
-                    # Check if this looks like a VIN (17 chars, not all digits)
-                    if len(identifier_value) == 17 and not identifier_value.isdigit():
+
+        # Fleet API vehicles first
+        if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+            for device in device_registry.devices.values():
+                for identifier in device.identifiers:
+                    if len(identifier) < 2:
+                        continue
+                    domain = identifier[0]
+                    identifier_value = str(identifier[1])
+                    if domain in TESLA_INTEGRATIONS:
+                        if len(identifier_value) == 17 and not identifier_value.isdigit():
+                            vehicle_num += 1
+                            if str(vehicle_num) == str(vehicle_id):
+                                _LOGGER.debug(f"Mapped vehicle_id {vehicle_id} to VIN {identifier_value}")
+                                return identifier_value
+                            break
+
+        # BLE vehicles follow fleet vehicles in the list
+        if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+            ble_prefixes = _resolve_ble_prefixes(self._hass, config)
+            if ev_provider == EV_PROVIDER_BOTH:
+                # In "both" mode, BLE vehicles that supplement fleet vehicles
+                # share the fleet ID. Only extra BLE vehicles get new IDs.
+                fleet_count = vehicle_num
+                for i, prefix in enumerate(ble_prefixes):
+                    if i >= fleet_count:
+                        # This BLE vehicle is standalone (beyond fleet count)
                         vehicle_num += 1
                         if str(vehicle_num) == str(vehicle_id):
-                            _LOGGER.debug(f"Mapped vehicle_id {vehicle_id} to VIN {identifier_value}")
-                            return identifier_value
-                        break
+                            ble_vid = f"ble_{prefix}"
+                            _LOGGER.debug(f"Mapped vehicle_id {vehicle_id} to BLE {ble_vid}")
+                            return ble_vid
+            else:
+                # BLE-only mode: each prefix is a separate vehicle
+                for prefix in ble_prefixes:
+                    vehicle_num += 1
+                    if str(vehicle_num) == str(vehicle_id):
+                        ble_vid = f"ble_{prefix}"
+                        _LOGGER.debug(f"Mapped vehicle_id {vehicle_id} to BLE {ble_vid}")
+                        return ble_vid
 
         _LOGGER.warning(f"Could not find VIN for vehicle_id {vehicle_id}")
         return None
@@ -6923,7 +6995,7 @@ class EVVehicleCommandView(HomeAssistantView):
             return True
 
         _LOGGER.info("Vehicle is asleep, sending wake command...")
-        ble_prefix = _resolve_ble_prefix(self._hass, config)
+        ble_prefix = _ble_prefix_for_vehicle(self._hass, config, vehicle_vin)
 
         wake_sent = False
 
@@ -6990,6 +7062,25 @@ class EVVehicleCommandView(HomeAssistantView):
 
     async def _is_vehicle_plugged_in(self, vehicle_vin: str | None = None) -> bool:
         """Check if vehicle is plugged in."""
+        # Check BLE charge_flap sensor for BLE vehicles
+        if vehicle_vin and vehicle_vin.startswith("ble_"):
+            ble_prefix = vehicle_vin[4:]
+            charge_flap_entity = TESLA_BLE_BINARY_CHARGE_FLAP.format(prefix=ble_prefix)
+            state = self._hass.states.get(charge_flap_entity)
+            if state and state.state == "on":
+                return True
+            if state and state.state == "off":
+                return False
+            # unavailable/unknown — check cache
+            ble_plug_cache_key = f"ev_ble_plug_cache_{ble_prefix}"
+            cached = self._hass.data.get(DOMAIN, {}).get("_ev_cache", {}).get(ble_plug_cache_key)
+            if cached:
+                from homeassistant.util import dt as dt_util
+                if (dt_util.utcnow() - cached["cached_at"]).total_seconds() < 7200:
+                    return cached["is_plugged_in"]
+            _LOGGER.debug(f"BLE vehicle {ble_prefix}: cannot determine plug state")
+            return True  # Default True to not block commands
+
         # Check binary_sensor.*_charger (Tesla Fleet)
         charger_entity = await self._get_tesla_ev_entity(r"binary_sensor\..*_charger$", vehicle_vin)
         if charger_entity:
@@ -7013,6 +7104,15 @@ class EVVehicleCommandView(HomeAssistantView):
 
     async def _get_vehicle_charging_state(self, vehicle_vin: str | None = None) -> str:
         """Get current charging state."""
+        # Check BLE charging_state sensor for BLE vehicles
+        if vehicle_vin and vehicle_vin.startswith("ble_"):
+            ble_prefix = vehicle_vin[4:]
+            ble_entity = TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=ble_prefix)
+            state = self._hass.states.get(ble_entity)
+            if state and state.state not in ("unavailable", "unknown"):
+                return state.state.lower()
+            return ""
+
         # Tesla Fleet uses sensor.*_charging (no _state suffix)
         charging_entity = await self._get_tesla_ev_entity(r"sensor\..*_charging$", vehicle_vin)
         _LOGGER.debug(f"Charging state check for VIN {vehicle_vin}: found entity {charging_entity}")
@@ -7081,7 +7181,7 @@ class EVVehicleCommandView(HomeAssistantView):
 
         config = self._get_powersync_config()
         ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
-        ble_prefix = _resolve_ble_prefix(self._hass, config)
+        ble_prefix = _ble_prefix_for_vehicle(self._hass, config, vehicle_vin)
 
         # Try Teslemetry Bluetooth first
         if ev_provider in (EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
@@ -7175,7 +7275,7 @@ class EVVehicleCommandView(HomeAssistantView):
 
         config = self._get_powersync_config()
         ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
-        ble_prefix = _resolve_ble_prefix(self._hass, config)
+        ble_prefix = _ble_prefix_for_vehicle(self._hass, config, vehicle_vin)
 
         # Try Teslemetry Bluetooth first
         if ev_provider in (EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
@@ -7243,7 +7343,7 @@ class EVVehicleCommandView(HomeAssistantView):
 
         config = self._get_powersync_config()
         ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
-        ble_prefix = _resolve_ble_prefix(self._hass, config)
+        ble_prefix = _ble_prefix_for_vehicle(self._hass, config, vehicle_vin)
 
         # Teslemetry BT doesn't support charge limit — skip to Fleet API
         # Try ESPHome BLE first
@@ -7293,7 +7393,7 @@ class EVVehicleCommandView(HomeAssistantView):
 
         config = self._get_powersync_config()
         ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
-        ble_prefix = _resolve_ble_prefix(self._hass, config)
+        ble_prefix = _ble_prefix_for_vehicle(self._hass, config, vehicle_vin)
 
         # Try Teslemetry Bluetooth first
         if ev_provider in (EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
