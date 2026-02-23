@@ -509,26 +509,28 @@ class AmberPriceCoordinator(DataUpdateCoordinator):
                 )
 
             # Dual-resolution forecast approach to ensure complete data coverage:
-            # 1. Fetch 1 hour at 5-min resolution for CurrentInterval/ActualInterval spike detection
-            # 2. Fetch 48 hours at 30-min resolution for complete TOU schedule building
-            # (The Amber API doesn't provide 48 hours of 5-min data, causing missing sell prices)
+            # 1. Fetch today's 5-min data for CurrentInterval spike detection
+            # 2. Fetch forecast at 30-min resolution via /prices/current for full
+            #    AEMO horizon (~40h). The `next` param only works on /prices/current,
+            #    not /prices (which is date-range based and ignores `next`).
 
             # Step 1: Get 5-min resolution data for current period spike detection
             forecast_5min = await _fetch_with_retry(
                 self.session,
                 f"{AMBER_API_BASE_URL}/sites/{self.site_id}/prices",
                 headers,
-                params={"next": 1, "resolution": 5},
+                params={"resolution": 5},
                 max_retries=2,
                 timeout_seconds=30,
             )
 
-            # Step 2: Get 30-min resolution data for full 48-hour TOU schedule
+            # Step 2: Get 30-min forecast via /prices/current (supports `next`)
+            # Request 288 intervals (144h) — API returns whatever AEMO has (~40h)
             forecast_30min = await _fetch_with_retry(
                 self.session,
-                f"{AMBER_API_BASE_URL}/sites/{self.site_id}/prices",
+                f"{AMBER_API_BASE_URL}/sites/{self.site_id}/prices/current",
                 headers,
-                params={"next": 48, "resolution": 30},
+                params={"next": 288, "resolution": 30},
                 max_retries=2,
                 timeout_seconds=30,
             )
