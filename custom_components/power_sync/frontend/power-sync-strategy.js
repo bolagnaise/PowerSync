@@ -885,13 +885,7 @@ function _priceChart(e) {
     yaxis: [{
       id: 'price',
       min: '~0',
-      apex_config: {
-        forceNiceScale: true,
-        tickAmount: 5,
-        labels: {
-          formatter: "EVAL:function(val) { return (val * 100).toFixed(0) + '¢'; }",
-        },
-      },
+      decimals: 2,
     }],
     series: [
       {
@@ -1351,13 +1345,7 @@ function _energyChart(title, entity, color, yaxisOpts) {
   const yaxis = {
     id: 'y',
     ...(yaxisOpts || {}),
-    apex_config: {
-      forceNiceScale: true,
-      tickAmount: 4,
-      labels: {
-        formatter: "EVAL:function(val) { return val.toFixed(1) + ' kW'; }",
-      },
-    },
+    decimals: 1,
   };
   return {
     type: 'custom:apexcharts-card',
