@@ -489,18 +489,9 @@ class PowerSyncStrategy {
       left.push(_batteryHealth(e));
     }
 
-    // --- Center Column: Energy Charts — Solar & Grid ---
+    // --- Center Column: Combined Energy Chart ---
     if (hasApex && hasE('solar_power')) {
-      center.push(_energyChart('Solar', e('solar_power'), '#FFD700', { min: '~0' }));
-      center.push(_energyChart('Grid', e('grid_power'), '#F44336', {}));
-    }
-
-    // --- Right Column: Energy Charts — Battery & Home ---
-    if (hasApex && hasE('solar_power')) {
-      right.push(_energyChart('Battery', e('battery_power'), '#2196F3', {}));
-    }
-    if (hasApex && hasE('home_load')) {
-      right.push(_energyChart('Home', e('home_load'), '#9C27B0', { min: '~0' }));
+      center.push(_combinedEnergyChart(e, hasE('home_load')));
     }
 
     // --- Left Column: Demand Charge ---
@@ -910,7 +901,7 @@ function _priceChart(e) {
       },
     ],
     apex_config: {
-      chart: { height: 200 },
+      chart: { height: 150 },
       stroke: { curve: 'smooth' },
       legend: { show: true, position: 'bottom' },
       tooltip: {
@@ -1341,30 +1332,26 @@ Scan from the PowerSync Mobile app while connected to Powerwall WiFi.
   };
 }
 
-function _energyChart(title, entity, color, yaxisOpts) {
-  const yaxis = {
-    id: 'y',
-    ...(yaxisOpts || {}),
-    decimals: 1,
-  };
+function _combinedEnergyChart(e, hasHome) {
+  const series = [
+    { entity: e('solar_power'), name: 'Solar', type: 'line', color: '#FFD700', stroke_width: 2, extend_to: 'now', group_by: { func: 'avg', duration: '5min' } },
+    { entity: e('grid_power'), name: 'Grid', type: 'line', color: '#F44336', stroke_width: 2, extend_to: 'now', group_by: { func: 'avg', duration: '5min' } },
+    { entity: e('battery_power'), name: 'Battery', type: 'line', color: '#2196F3', stroke_width: 2, extend_to: 'now', group_by: { func: 'avg', duration: '5min' } },
+  ];
+  if (hasHome) {
+    series.push({ entity: e('home_load'), name: 'Home', type: 'line', color: '#9C27B0', stroke_width: 2, extend_to: 'now', group_by: { func: 'avg', duration: '5min' } });
+  }
   return {
     type: 'custom:apexcharts-card',
-    header: { show: true, title, show_states: true },
+    header: { show: true, title: 'Energy', show_states: true },
     graph_span: '24h',
     span: { start: 'day' },
-    yaxis: [yaxis],
-    series: [{
-      entity,
-      name: title,
-      type: 'area',
-      color,
-      stroke_width: 2,
-      extend_to: 'now',
-      yaxis_id: 'y',
-      group_by: { func: 'avg', duration: '5min' },
-    }],
+    yaxis: [{ id: 'y', decimals: 1 }],
+    series,
     apex_config: {
-      chart: { height: 150 },
+      chart: { height: 200 },
+      legend: { show: true, position: 'bottom' },
+      stroke: { curve: 'smooth' },
     },
   };
 }
