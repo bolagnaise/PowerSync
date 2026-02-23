@@ -2454,21 +2454,28 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 api_response["export_price"] = display_export[:n_sched]
             data["schedule"] = api_response
 
-            # Add EV charging power overlay if EV coordination is active
-            if self._ev_coordinator and data.get("ev"):
-                ev_power = [0.0] * len(api_response["timestamps"])
-                charging_plan = data["ev"].get("charging_plan", [])
-                if charging_plan:
-                    from datetime import datetime as _dt
-                    for window in charging_plan:
-                        w_start = _dt.fromisoformat(window["start"])
-                        w_end = _dt.fromisoformat(window["end"])
-                        w_power = window.get("power_available_w", 0)
-                        for idx, ts_str in enumerate(api_response["timestamps"]):
-                            ts = _dt.fromisoformat(ts_str)
-                            if w_start <= ts < w_end:
-                                ev_power[idx] = w_power
-                api_response["ev_charging_w"] = ev_power
+            # Add EV charging power overlay from the same source the LP uses
+            if self._ev_integration_enabled:
+                n_sched_pts = len(api_response["timestamps"])
+                ev_load_w = self._get_ev_planned_load(n_sched_pts)
+                if ev_load_w:
+                    api_response["ev_charging_w"] = ev_load_w
+                elif self._ev_coordinator and data.get("ev"):
+                    # Fallback: use EVCoordinator's real-time charging plan
+                    ev_power = [0.0] * n_sched_pts
+                    charging_plan = data["ev"].get("charging_plan", [])
+                    if charging_plan:
+                        from datetime import datetime as _dt
+                        for window in charging_plan:
+                            w_start = _dt.fromisoformat(window["start"])
+                            w_end = _dt.fromisoformat(window["end"])
+                            w_power = window.get("power_available_w", 0)
+                            for idx, ts_str in enumerate(api_response["timestamps"]):
+                                ts = _dt.fromisoformat(ts_str)
+                                if w_start <= ts < w_end:
+                                    ev_power[idx] = w_power
+                    if any(v > 0 for v in ev_power):
+                        api_response["ev_charging_w"] = ev_power
 
             daily_cost = self._get_daily_cost()
             daily_savings = self._get_daily_savings()
