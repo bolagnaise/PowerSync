@@ -11474,25 +11474,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 on_token_refresh=_persist_sigenergy_tokens,
             )
 
-            result = await client.set_tariff_rate(
-                station_id=station_id,
-                buy_prices=buy_prices,
-                sell_prices=sell_prices if sell_prices else buy_prices,
-                plan_name="PowerSync Amber",
-            )
+            try:
+                result = await client.set_tariff_rate(
+                    station_id=station_id,
+                    buy_prices=buy_prices,
+                    sell_prices=sell_prices if sell_prices else buy_prices,
+                    plan_name="PowerSync Amber",
+                )
 
-            if result.get("success"):
-                _LOGGER.info(f"✅ Sigenergy tariff synced successfully ({sync_mode})")
-                # Store tariff data for mobile app API
-                hass.data[DOMAIN][entry.entry_id]["sigenergy_tariff"] = {
-                    "buy_prices": buy_prices,
-                    "sell_prices": sell_prices if sell_prices else buy_prices,
-                    "synced_at": datetime.now().isoformat(),
-                    "sync_mode": sync_mode,
-                }
-            else:
-                error = result.get("error", "Unknown error")
-                _LOGGER.error(f"❌ Sigenergy tariff sync failed: {error}")
+                if result.get("success"):
+                    _LOGGER.info(f"✅ Sigenergy tariff synced successfully ({sync_mode})")
+                    # Store tariff data for mobile app API
+                    hass.data[DOMAIN][entry.entry_id]["sigenergy_tariff"] = {
+                        "buy_prices": buy_prices,
+                        "sell_prices": sell_prices if sell_prices else buy_prices,
+                        "synced_at": datetime.now().isoformat(),
+                        "sync_mode": sync_mode,
+                    }
+                else:
+                    error = result.get("error", "Unknown error")
+                    _LOGGER.error(f"❌ Sigenergy tariff sync failed: {error}")
+            finally:
+                await client.close()
 
         except Exception as e:
             _LOGGER.error(f"❌ Error in Sigenergy tariff sync: {e}", exc_info=True)
@@ -12670,6 +12673,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await handle_foxess_curtailment()
             return
 
+        # Sigenergy uses Modbus-based curtailment, not Tesla API
+        if is_sigenergy:
+            _LOGGER.debug("Sigenergy curtailment check skipped - Modbus-based curtailment not yet wired")
+            return
+
         # Find an available price coordinator (Amber, AEMO, or Octopus)
         _price_coord = amber_coordinator or aemo_sensor_coordinator or octopus_coordinator
         if not _price_coord:
@@ -12979,6 +12987,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             feedin_price = websocket_data.get('feedIn', {}).get('perKwh') if websocket_data else None
             import_price = websocket_data.get('general', {}).get('perKwh') if websocket_data else None
             await handle_foxess_curtailment(feedin_price=feedin_price, import_price=import_price)
+            return
+
+        # Sigenergy uses Modbus-based curtailment, not Tesla API
+        if is_sigenergy:
+            _LOGGER.debug("Sigenergy curtailment check skipped - Modbus-based curtailment not yet wired")
             return
 
         _LOGGER.info("=== Starting solar curtailment check (WebSocket event-driven) ===")
@@ -13479,12 +13492,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     slave_id=modbus_slave_id,
                 )
 
-                # Set high discharge rate and restore export limit
-                discharge_result = await controller.set_discharge_rate_limit(10.0)
-                export_result = await controller.restore_export_limit()
+                # Enable Remote EMS + set discharge mode + set rate
+                result = await controller.force_discharge(power_kw=10.0)
                 await controller.disconnect()
 
-                if discharge_result and export_result:
+                if result:
                     force_discharge_state["active"] = True
                     force_discharge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
                     _LOGGER.info(f"✅ Sigenergy FORCE DISCHARGE ACTIVE for {duration} minutes")
@@ -13512,7 +13524,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     await persist_force_mode_state()
                 else:
-                    _LOGGER.error(f"Sigenergy force discharge failed: discharge={discharge_result}, export={export_result}")
+                    _LOGGER.error("Sigenergy force discharge failed")
                 return
             except Exception as e:
                 _LOGGER.error(f"Error in Sigenergy force discharge: {e}", exc_info=True)
@@ -14053,12 +14065,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_discharge_state["active"] = False
                     force_discharge_state["expires_at"] = None
 
-                # Set high charge rate and prevent discharge
-                charge_result = await controller.set_charge_rate_limit(10.0)
-                discharge_result = await controller.set_discharge_rate_limit(0)
+                # Enable Remote EMS + set charge mode + set rate
+                result = await controller.force_charge(power_kw=10.0)
                 await controller.disconnect()
 
-                if charge_result and discharge_result:
+                if result:
                     force_charge_state["active"] = True
                     force_charge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
                     _LOGGER.info(f"✅ Sigenergy FORCE CHARGE ACTIVE for {duration} minutes")
@@ -14086,7 +14097,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     await persist_force_mode_state()
                 else:
-                    _LOGGER.error(f"Sigenergy force charge failed: charge={charge_result}, discharge={discharge_result}")
+                    _LOGGER.error("Sigenergy force charge failed")
                 return
             except Exception as e:
                 _LOGGER.error(f"Error in Sigenergy force charge: {e}", exc_info=True)
@@ -14644,15 +14655,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         slave_id=modbus_slave_id,
                     )
 
-                    # Restore normal operation: allow both charge and discharge
-                    charge_result = await controller.set_charge_rate_limit(10.0)
-                    discharge_result = await controller.set_discharge_rate_limit(10.0)
+                    # Disable Remote EMS — return to native EMS behavior
+                    result = await controller.restore_normal()
                     await controller.disconnect()
 
-                    if charge_result and discharge_result:
-                        _LOGGER.info("✅ Sigenergy normal operation restored (charge/discharge enabled)")
+                    if result:
+                        _LOGGER.info("✅ Sigenergy normal operation restored (Remote EMS disabled)")
                     else:
-                        _LOGGER.warning(f"Sigenergy restore partial: charge={charge_result}, discharge={discharge_result}")
+                        _LOGGER.warning("Sigenergy restore_normal failed")
 
                 # Clear state
                 force_discharge_state["active"] = False
@@ -15161,17 +15171,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         slave_id=modbus_slave_id,
                     )
 
-                    # Restore normal operation: allow both charge and discharge
-                    charge_result = await controller.set_charge_rate_limit(10.0)
-                    discharge_result = await controller.set_discharge_rate_limit(10.0)
+                    # Disable Remote EMS — return to native EMS (self-consumption)
+                    result = await controller.restore_normal()
                     await controller.disconnect()
 
-                    if charge_result and discharge_result:
-                        _LOGGER.info("✅ Sigenergy self-consumption mode set")
+                    if result:
+                        _LOGGER.info("✅ Sigenergy self-consumption mode set (Remote EMS disabled)")
                     else:
-                        _LOGGER.warning(f"Sigenergy self-consumption partial: charge={charge_result}, discharge={discharge_result}")
-
-                    _LOGGER.info("✅ SIGENERGY SELF-CONSUMPTION MODE SET")
+                        _LOGGER.warning("Sigenergy self-consumption restore_normal failed")
                 return
             except Exception as e:
                 _LOGGER.error(f"Error setting Sigenergy self-consumption: {e}", exc_info=True)
@@ -15369,7 +15376,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 modbus_slave_id = entry.options.get(
                     CONF_SIGENERGY_MODBUS_SLAVE_ID,
-                    entry.data.get(CONF_SIGENERGY_MODBUS_SLAVE_ID, 247)
+                    entry.data.get(CONF_SIGENERGY_MODBUS_SLAVE_ID, 1)
                 )
 
                 controller = SigenergyController(

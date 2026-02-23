@@ -44,6 +44,8 @@ class SigenergyController(InverterController):
     REG_PCS_EXPORT_LIMIT = 40042          # PCS export limit (U32, gain 1000)
     REG_ESS_MAX_CHARGE_LIMIT = 40032      # ESS max charging (U32, gain 1000, kW)
     REG_ESS_MAX_DISCHARGE_LIMIT = 40034   # ESS max discharging (U32, gain 1000, kW)
+    REG_REMOTE_EMS_ENABLE = 40029         # Remote EMS enable (U16: 0=disabled, 1=enabled)
+    REG_REMOTE_EMS_CONTROL_MODE = 40031   # Remote EMS control mode (U16: 3=charge, 5=discharge)
     REG_ESS_BACKUP_SOC = 40046            # ESS backup SOC (U16, gain 10, %)
     REG_ESS_CHARGE_CUTOFF_SOC = 40047     # ESS charge cut-off SOC (U16, gain 10, %)
     REG_ESS_DISCHARGE_CUTOFF_SOC = 40048  # ESS discharge cut-off SOC (U16, gain 10, %)
@@ -165,12 +167,13 @@ class SigenergyController(InverterController):
             self._connected = False
             _LOGGER.debug(f"Disconnected from Sigenergy at {self.host}")
 
-    async def _write_holding_registers(self, address: int, values: list[int]) -> bool:
+    async def _write_holding_registers(self, address: int, values: list[int], slave_id: Optional[int] = None) -> bool:
         """Write values to holding registers.
 
         Args:
             address: Starting register address (0-indexed)
             values: List of values to write
+            slave_id: Optional slave ID override (default: DEFAULT_SLAVE_ID=247 for plant registers)
 
         Returns:
             True if write successful
@@ -179,11 +182,13 @@ class SigenergyController(InverterController):
             if not await self.connect():
                 return False
 
+        effective_slave = slave_id if slave_id is not None else self.DEFAULT_SLAVE_ID
+
         try:
             result = await self._client.write_registers(
                 address=address,
                 values=values,
-                **{_SLAVE_PARAM: self.slave_id},
+                **{_SLAVE_PARAM: effective_slave},
             )
 
             if result.isError():
@@ -200,12 +205,13 @@ class SigenergyController(InverterController):
             _LOGGER.error(f"Error writing to register {address}: {e}")
             return False
 
-    async def _read_holding_registers(self, address: int, count: int = 1) -> Optional[list]:
+    async def _read_holding_registers(self, address: int, count: int = 1, slave_id: Optional[int] = None) -> Optional[list]:
         """Read values from holding registers.
 
         Args:
             address: Starting register address (0-indexed)
             count: Number of registers to read
+            slave_id: Optional slave ID override (default: DEFAULT_SLAVE_ID=247 for plant registers)
 
         Returns:
             List of register values or None on error
@@ -214,11 +220,13 @@ class SigenergyController(InverterController):
             if not await self.connect():
                 return None
 
+        effective_slave = slave_id if slave_id is not None else self.DEFAULT_SLAVE_ID
+
         try:
             result = await self._client.read_holding_registers(
                 address=address,
                 count=count,
-                **{_SLAVE_PARAM: self.slave_id},
+                **{_SLAVE_PARAM: effective_slave},
             )
 
             if result.isError():
@@ -806,6 +814,114 @@ class SigenergyController(InverterController):
 
         except Exception as e:
             _LOGGER.error(f"Error setting discharge rate limit: {e}")
+            return False
+
+    async def force_charge(self, power_kw: float = 10.0) -> bool:
+        """Force battery to charge from grid.
+
+        Enables Remote EMS mode, sets control mode to charge, and sets charge rate.
+
+        Args:
+            power_kw: Charge power in kW (default: 10.0)
+
+        Returns:
+            True if all commands successful
+        """
+        try:
+            if not await self.connect():
+                return False
+
+            # 1. Enable Remote EMS
+            ems_result = await self._write_holding_registers(self.REG_REMOTE_EMS_ENABLE, [1])
+            if not ems_result:
+                _LOGGER.error("Failed to enable Remote EMS for force charge")
+                return False
+            _LOGGER.info("Remote EMS enabled for force charge")
+
+            # 2. Set control mode to charge (mode 3)
+            mode_result = await self._write_holding_registers(self.REG_REMOTE_EMS_CONTROL_MODE, [3])
+            if not mode_result:
+                _LOGGER.error("Failed to set Remote EMS control mode to charge")
+                return False
+            _LOGGER.info("Remote EMS control mode set to CHARGE")
+
+            # 3. Set charge rate limit
+            rate_result = await self.set_charge_rate_limit(power_kw)
+            if not rate_result:
+                _LOGGER.error(f"Failed to set charge rate limit to {power_kw} kW")
+                return False
+
+            _LOGGER.info(f"Sigenergy FORCE CHARGE active at {power_kw} kW")
+            return True
+
+        except Exception as e:
+            _LOGGER.error(f"Error in Sigenergy force charge: {e}")
+            return False
+
+    async def force_discharge(self, power_kw: float = 10.0) -> bool:
+        """Force battery to discharge to grid/load.
+
+        Enables Remote EMS mode, sets control mode to discharge, and sets discharge rate.
+
+        Args:
+            power_kw: Discharge power in kW (default: 10.0)
+
+        Returns:
+            True if all commands successful
+        """
+        try:
+            if not await self.connect():
+                return False
+
+            # 1. Enable Remote EMS
+            ems_result = await self._write_holding_registers(self.REG_REMOTE_EMS_ENABLE, [1])
+            if not ems_result:
+                _LOGGER.error("Failed to enable Remote EMS for force discharge")
+                return False
+            _LOGGER.info("Remote EMS enabled for force discharge")
+
+            # 2. Set control mode to discharge (mode 5)
+            mode_result = await self._write_holding_registers(self.REG_REMOTE_EMS_CONTROL_MODE, [5])
+            if not mode_result:
+                _LOGGER.error("Failed to set Remote EMS control mode to discharge")
+                return False
+            _LOGGER.info("Remote EMS control mode set to DISCHARGE")
+
+            # 3. Set discharge rate limit
+            rate_result = await self.set_discharge_rate_limit(power_kw)
+            if not rate_result:
+                _LOGGER.error(f"Failed to set discharge rate limit to {power_kw} kW")
+                return False
+
+            _LOGGER.info(f"Sigenergy FORCE DISCHARGE active at {power_kw} kW")
+            return True
+
+        except Exception as e:
+            _LOGGER.error(f"Error in Sigenergy force discharge: {e}")
+            return False
+
+    async def restore_normal(self) -> bool:
+        """Restore normal (native EMS) operation.
+
+        Disables Remote EMS mode, returning control to the Sigenergy native EMS.
+
+        Returns:
+            True if successful
+        """
+        try:
+            if not await self.connect():
+                return False
+
+            # Disable Remote EMS — system returns to native EMS behavior
+            result = await self._write_holding_registers(self.REG_REMOTE_EMS_ENABLE, [0])
+            if result:
+                _LOGGER.info("Sigenergy Remote EMS disabled — normal operation restored")
+            else:
+                _LOGGER.error("Failed to disable Remote EMS")
+            return result
+
+        except Exception as e:
+            _LOGGER.error(f"Error restoring Sigenergy normal operation: {e}")
             return False
 
     async def get_backup_reserve(self) -> Optional[int]:
