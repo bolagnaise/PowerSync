@@ -17532,17 +17532,26 @@ class OptimizationSettingsView(HomeAssistantView):
             new_data = dict(config_entry.data)
             new_options = dict(config_entry.options)
 
+            # Track whether enabled actually changed (to avoid unnecessary reloads)
+            enabled_changed = False
             if "enabled" in settings:
                 from .const import CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_POWERSYNC, OPT_PROVIDER_NATIVE
-                if settings["enabled"]:
-                    new_data[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_POWERSYNC
-                    # Also set CONF_OPTIMIZATION_ENABLED in options so it persists correctly
-                    new_options[CONF_OPTIMIZATION_ENABLED] = True
-                    changes.append("Enabled Smart Optimization")
-                else:
-                    new_data[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_NATIVE
-                    new_options[CONF_OPTIMIZATION_ENABLED] = False
-                    changes.append("Disabled Smart Optimization")
+                was_enabled = config_entry.options.get(CONF_OPTIMIZATION_ENABLED, False)
+                if settings["enabled"] != was_enabled:
+                    enabled_changed = True
+                    if settings["enabled"]:
+                        new_data[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_POWERSYNC
+                        new_options[CONF_OPTIMIZATION_ENABLED] = True
+                        changes.append("Enabled Smart Optimization")
+                    else:
+                        new_data[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_NATIVE
+                        new_options[CONF_OPTIMIZATION_ENABLED] = False
+                        changes.append("Disabled Smart Optimization")
+
+            if "ev_integration" in settings:
+                from .const import CONF_OPTIMIZATION_EV_INTEGRATION
+                new_options[CONF_OPTIMIZATION_EV_INTEGRATION] = settings["ev_integration"]
+                changes.append(f"Set EV integration to {settings['ev_integration']}")
 
             if "cost_function" in settings:
                 from .const import CONF_OPTIMIZATION_COST_FUNCTION
@@ -17562,8 +17571,8 @@ class OptimizationSettingsView(HomeAssistantView):
             self._hass.config_entries.async_update_entry(config_entry, data=new_data, options=new_options)
             _LOGGER.info(f"Optimization settings updated via API: {changes}")
 
-            # If we enabled/disabled optimization, reload the integration in background
-            if "enabled" in settings:
+            # Only reload if enabled/disabled state actually changed
+            if enabled_changed:
                 _LOGGER.info("Scheduling integration reload to apply optimization changes")
                 # Fire and forget - don't await, return immediately to avoid timeout
                 self._hass.async_create_task(
