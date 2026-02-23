@@ -3072,6 +3072,21 @@ class SigenergyTariffView(HomeAssistantView):
         })
 
 
+MAX_REQUEST_BODY_BYTES = 64 * 1024  # 64 KB limit for API request bodies
+
+
+async def _parse_json_request(request: web.Request, max_bytes: int = MAX_REQUEST_BODY_BYTES) -> dict:
+    """Parse JSON request body with size limit. Raises ValueError if too large or invalid."""
+    content_length = request.content_length
+    if content_length is not None and content_length > max_bytes:
+        raise ValueError(f"Request body too large ({content_length} bytes, max {max_bytes})")
+    body_bytes = await request.read()
+    if len(body_bytes) > max_bytes:
+        raise ValueError(f"Request body too large ({len(body_bytes)} bytes, max {max_bytes})")
+    import json as _json
+    return _json.loads(body_bytes)
+
+
 class SungrowSettingsView(HomeAssistantView):
     """HTTP view to get Sungrow battery settings for mobile app Controls."""
 
@@ -3180,7 +3195,7 @@ class SungrowSettingsView(HomeAssistantView):
             )
 
         try:
-            body = await request.json()
+            body = await _parse_json_request(request)
 
             # Get Sungrow coordinator
             entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
@@ -3196,15 +3211,51 @@ class SungrowSettingsView(HomeAssistantView):
             results = {}
 
             if "backup_reserve" in body:
-                success = await sungrow_coordinator.set_backup_reserve(int(body["backup_reserve"]))
+                try:
+                    val = int(body["backup_reserve"])
+                    if not (0 <= val <= 100):
+                        return web.json_response(
+                            {"success": False, "error": "backup_reserve must be 0-100"},
+                            status=400
+                        )
+                    success = await sungrow_coordinator.set_backup_reserve(val)
+                except (ValueError, TypeError):
+                    return web.json_response(
+                        {"success": False, "error": "Invalid backup_reserve value"},
+                        status=400
+                    )
                 results["backup_reserve"] = success
 
             if "charge_rate_limit_kw" in body:
-                success = await sungrow_coordinator.set_charge_rate_limit(float(body["charge_rate_limit_kw"]))
+                try:
+                    val = float(body["charge_rate_limit_kw"])
+                    if not (0.0 <= val <= 100.0):
+                        return web.json_response(
+                            {"success": False, "error": "charge_rate_limit_kw must be 0-100"},
+                            status=400
+                        )
+                    success = await sungrow_coordinator.set_charge_rate_limit(val)
+                except (ValueError, TypeError):
+                    return web.json_response(
+                        {"success": False, "error": "Invalid charge_rate_limit_kw value"},
+                        status=400
+                    )
                 results["charge_rate_limit_kw"] = success
 
             if "discharge_rate_limit_kw" in body:
-                success = await sungrow_coordinator.set_discharge_rate_limit(float(body["discharge_rate_limit_kw"]))
+                try:
+                    val = float(body["discharge_rate_limit_kw"])
+                    if not (0.0 <= val <= 100.0):
+                        return web.json_response(
+                            {"success": False, "error": "discharge_rate_limit_kw must be 0-100"},
+                            status=400
+                        )
+                    success = await sungrow_coordinator.set_discharge_rate_limit(val)
+                except (ValueError, TypeError):
+                    return web.json_response(
+                        {"success": False, "error": "Invalid discharge_rate_limit_kw value"},
+                        status=400
+                    )
                 results["discharge_rate_limit_kw"] = success
 
             if "export_limit_w" in body:
@@ -3212,7 +3263,19 @@ class SungrowSettingsView(HomeAssistantView):
                 if export_limit is None:
                     success = await sungrow_coordinator.set_export_limit(None)
                 else:
-                    success = await sungrow_coordinator.set_export_limit(int(export_limit))
+                    try:
+                        val = int(export_limit)
+                        if not (0 <= val <= 100000):
+                            return web.json_response(
+                                {"success": False, "error": "export_limit_w must be 0-100000"},
+                                status=400
+                            )
+                        success = await sungrow_coordinator.set_export_limit(val)
+                    except (ValueError, TypeError):
+                        return web.json_response(
+                            {"success": False, "error": "Invalid export_limit_w value"},
+                            status=400
+                        )
                 results["export_limit_w"] = success
 
             if "force_charge" in body:
@@ -3360,7 +3423,7 @@ class FoxESSSettingsView(HomeAssistantView):
             )
 
         try:
-            body = await request.json()
+            body = await _parse_json_request(request)
 
             entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
             foxess_coordinator = entry_data.get("foxess_coordinator")
@@ -3374,11 +3437,34 @@ class FoxESSSettingsView(HomeAssistantView):
             results = {}
 
             if "min_soc" in body:
-                success = await foxess_coordinator.set_backup_reserve(int(body["min_soc"]))
+                try:
+                    val = int(body["min_soc"])
+                    if not (0 <= val <= 100):
+                        return web.json_response(
+                            {"success": False, "error": "min_soc must be 0-100"},
+                            status=400
+                        )
+                    success = await foxess_coordinator.set_backup_reserve(val)
+                except (ValueError, TypeError):
+                    return web.json_response(
+                        {"success": False, "error": "Invalid min_soc value"},
+                        status=400
+                    )
                 results["min_soc"] = success
 
             if "work_mode" in body:
-                requested_mode = int(body["work_mode"])
+                try:
+                    requested_mode = int(body["work_mode"])
+                except (ValueError, TypeError):
+                    return web.json_response(
+                        {"success": False, "error": "Invalid work_mode value"},
+                        status=400
+                    )
+                if not (0 <= requested_mode <= 4):
+                    return web.json_response(
+                        {"success": False, "error": "work_mode must be 0-4"},
+                        status=400
+                    )
                 # App sends 0-based indices: 0=Self Use, 1=Feed-in, 2=Backup,
                 # 3=Force Charge, 4=Force Discharge.
                 # Translate to model-specific register values (H3-Pro/Smart use 1-based).
@@ -3403,11 +3489,35 @@ class FoxESSSettingsView(HomeAssistantView):
                 results["work_mode"] = success
 
             if "max_charge_current_a" in body:
-                success = await foxess_coordinator.set_charge_rate_limit(float(body["max_charge_current_a"]))
+                try:
+                    val = float(body["max_charge_current_a"])
+                    if not (0.0 <= val <= 200.0):
+                        return web.json_response(
+                            {"success": False, "error": "max_charge_current_a must be 0-200"},
+                            status=400
+                        )
+                    success = await foxess_coordinator.set_charge_rate_limit(val)
+                except (ValueError, TypeError):
+                    return web.json_response(
+                        {"success": False, "error": "Invalid max_charge_current_a value"},
+                        status=400
+                    )
                 results["max_charge_current_a"] = success
 
             if "max_discharge_current_a" in body:
-                success = await foxess_coordinator.set_discharge_rate_limit(float(body["max_discharge_current_a"]))
+                try:
+                    val = float(body["max_discharge_current_a"])
+                    if not (0.0 <= val <= 200.0):
+                        return web.json_response(
+                            {"success": False, "error": "max_discharge_current_a must be 0-200"},
+                            status=400
+                        )
+                    success = await foxess_coordinator.set_discharge_rate_limit(val)
+                except (ValueError, TypeError):
+                    return web.json_response(
+                        {"success": False, "error": "Invalid max_discharge_current_a value"},
+                        status=400
+                    )
                 results["max_discharge_current_a"] = success
 
             if "force_charge" in body:
@@ -3524,7 +3634,7 @@ class GoodWeSettingsView(HomeAssistantView):
             )
 
         try:
-            body = await request.json()
+            body = await _parse_json_request(request)
             entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
             goodwe_coordinator = entry_data.get("goodwe_coordinator")
 
@@ -3687,7 +3797,7 @@ class AEMOSpikeView(HomeAssistantView):
             )
 
         try:
-            body = await request.json()
+            body = await _parse_json_request(request)
 
             # Handle enabling/disabling the feature
             if "enabled" in body:
@@ -5812,7 +5922,7 @@ class PushTokenRegisterView(HomeAssistantView):
             device_name = data.get("device_name", "Unknown device")
 
             _LOGGER.info(f"📱 PUSH REGISTER: platform={platform}, device={device_name}")
-            _LOGGER.info(f"📱 PUSH REGISTER: token={push_token[:60] if push_token else 'None'}...")
+            _LOGGER.debug(f"📱 PUSH REGISTER: token={'[%d chars]' % len(push_token) if push_token else 'None'}")
 
             if not push_token:
                 _LOGGER.error("📱 PUSH REGISTER: No push_token in request body")
@@ -8373,7 +8483,18 @@ class ChargingBoostView(HomeAssistantView):
         try:
             data = await request.json()
             vehicle_id = data.get("vehicle_id")
-            duration_minutes = int(data.get("duration_minutes", 60))
+            try:
+                duration_minutes = int(data.get("duration_minutes", 60))
+                if not (1 <= duration_minutes <= 1440):
+                    return web.json_response(
+                        {"success": False, "error": "duration_minutes must be 1-1440"},
+                        status=400
+                    )
+            except (ValueError, TypeError):
+                return web.json_response(
+                    {"success": False, "error": "Invalid duration_minutes value"},
+                    status=400
+                )
             target_soc = data.get("target_soc")
 
             from .automations.actions import execute_actions

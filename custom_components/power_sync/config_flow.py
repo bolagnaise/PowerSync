@@ -13,6 +13,7 @@ from homeassistant.const import CONF_ACCESS_TOKEN, CONF_TOKEN
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import TextSelector, TextSelectorConfig, TextSelectorType
 
 from .const import (
     DOMAIN,
@@ -332,7 +333,7 @@ async def validate_teslemetry_token(
                 return {"success": False, "error": "invalid_auth"}
             else:
                 error_text = await response.text()
-                _LOGGER.error("Teslemetry API error %s: %s", response.status, error_text)
+                _LOGGER.error("Teslemetry API error %s: %s", response.status, error_text[:200])
                 return {"success": False, "error": "cannot_connect"}
     except aiohttp.ClientError as err:
         _LOGGER.exception("Error connecting to Teslemetry API: %s", err)
@@ -379,7 +380,7 @@ async def validate_fleet_api_token(
                 return {"success": False, "error": "invalid_auth"}
             else:
                 error_text = await response.text()
-                _LOGGER.error("Fleet API error %s: %s", response.status, error_text)
+                _LOGGER.error("Fleet API error %s: %s", response.status, error_text[:200])
                 return {"success": False, "error": "cannot_connect"}
     except aiohttp.ClientError as err:
         _LOGGER.exception("Error connecting to Fleet API: %s", err)
@@ -856,7 +857,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         data_schema = vol.Schema(
             {
-                vol.Required(CONF_AMBER_API_TOKEN): str,
+                vol.Required(CONF_AMBER_API_TOKEN): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
             }
         )
 
@@ -1154,9 +1155,9 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="sigenergy_credentials",
             data_schema=vol.Schema({
                 vol.Required(CONF_SIGENERGY_USERNAME): str,
-                vol.Required(CONF_SIGENERGY_PASSWORD): str,
+                vol.Required(CONF_SIGENERGY_PASSWORD): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
                 vol.Optional(CONF_SIGENERGY_DEVICE_ID, default=""): str,
-                vol.Optional(CONF_SIGENERGY_PASS_ENC): str,  # Advanced: pre-encoded
+                vol.Optional(CONF_SIGENERGY_PASS_ENC): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
             }),
             errors=errors,
             description_placeholders={
@@ -1624,7 +1625,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="foxess_cloud",
             data_schema=vol.Schema({
-                vol.Optional(CONF_FOXESS_CLOUD_API_KEY, default=""): str,
+                vol.Optional(CONF_FOXESS_CLOUD_API_KEY, default=""): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
                 vol.Optional(CONF_FOXESS_CLOUD_DEVICE_SN, default=""): str,
             }),
             errors=errors,
@@ -1850,7 +1851,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         data_schema = vol.Schema(
             {
-                vol.Required(CONF_TESLEMETRY_API_TOKEN): str,
+                vol.Required(CONF_TESLEMETRY_API_TOKEN): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
             }
         )
 
@@ -2335,7 +2336,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional(
                     CONF_SOLCAST_API_KEY,
                     default="",
-                ): str,
+                ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
                 vol.Optional(
                     CONF_SOLCAST_RESOURCE_ID,
                     default="",
@@ -2463,9 +2464,9 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         # Show JWT token, Enlighten credentials, and grid profiles for Enphase
         if brand == "enphase":
-            schema_dict[vol.Optional(CONF_INVERTER_TOKEN, default="")] = str
+            schema_dict[vol.Optional(CONF_INVERTER_TOKEN, default="")] = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
             schema_dict[vol.Optional(CONF_ENPHASE_USERNAME, default="")] = str
-            schema_dict[vol.Optional(CONF_ENPHASE_PASSWORD, default="")] = str
+            schema_dict[vol.Optional(CONF_ENPHASE_PASSWORD, default="")] = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
             schema_dict[vol.Optional(CONF_ENPHASE_SERIAL, default="")] = str
             # Grid profile names for profile switching fallback (when DPEL/DER unavailable)
             schema_dict[vol.Optional(CONF_ENPHASE_NORMAL_PROFILE, default="")] = str
@@ -2736,7 +2737,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="zaptec_cloud",
             data_schema=vol.Schema({
                 vol.Required(CONF_ZAPTEC_USERNAME): str,
-                vol.Required(CONF_ZAPTEC_PASSWORD): str,
+                vol.Required(CONF_ZAPTEC_PASSWORD): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
             }),
             errors=errors,
         )
@@ -3059,11 +3060,11 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_SIGENERGY_PASSWORD,  # Plain password (recommended)
                         description={"suggested_value": ""},
-                    ): str,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
                     vol.Optional(
                         CONF_SIGENERGY_PASS_ENC,  # Advanced: pre-encoded
                         description={"suggested_value": ""},
-                    ): str,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
                     vol.Optional(
                         CONF_SIGENERGY_DEVICE_ID,
                         default=current_sigen_device_id,
@@ -3496,7 +3497,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             step_id="teslemetry_token",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_TESLEMETRY_API_TOKEN): str,
+                    vol.Required(CONF_TESLEMETRY_API_TOKEN): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
                 }
             ),
             errors=errors,
@@ -3798,7 +3799,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 vol.Optional(
                     CONF_SOLCAST_API_KEY,
                     default=self._get_option(CONF_SOLCAST_API_KEY, ""),
-                ): str,
+                ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
                 vol.Optional(
                     CONF_SOLCAST_RESOURCE_ID,
                     default=self._get_option(CONF_SOLCAST_RESOURCE_ID, ""),
@@ -3961,7 +3962,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             schema_dict[vol.Optional(
                 CONF_ENPHASE_PASSWORD,
                 default=current_enphase_password,
-            )] = str
+            )] = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
 
             current_enphase_serial = self._get_option(CONF_ENPHASE_SERIAL, "")
             schema_dict[vol.Optional(
@@ -4174,7 +4175,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_ZAPTEC_USERNAME,
                     default=self._get_option(CONF_ZAPTEC_USERNAME, ""),
                 ): str,
-                vol.Required(CONF_ZAPTEC_PASSWORD): str,
+                vol.Required(CONF_ZAPTEC_PASSWORD): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
             }),
             errors=errors,
         )
@@ -4313,7 +4314,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="flow_power_amber_token",
             data_schema=vol.Schema({
-                vol.Required(CONF_AMBER_API_TOKEN): str,
+                vol.Required(CONF_AMBER_API_TOKEN): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
             }),
             errors=errors,
             description_placeholders={

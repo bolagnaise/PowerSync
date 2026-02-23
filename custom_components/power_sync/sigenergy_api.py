@@ -135,8 +135,7 @@ class SigenergyAPIClient:
 
             async with session.post(url, headers=headers, data=data, timeout=30) as response:
                 if response.status != 200:
-                    text = await response.text()
-                    _LOGGER.error(f"Sigenergy auth failed: {response.status} - {text}")
+                    _LOGGER.error(f"Sigenergy auth failed: {response.status}")
                     return {"error": f"Authentication failed: {response.status}"}
 
                 result = await response.json()
@@ -145,7 +144,7 @@ class SigenergyAPIClient:
                 token_data = result.get("data", result)
 
                 if "access_token" not in token_data:
-                    _LOGGER.error(f"No access_token in response: {result}")
+                    _LOGGER.error("Sigenergy auth response missing access_token (keys: %s)", list(token_data.keys()))
                     return {"error": "Invalid response - no access token"}
 
                 self.access_token = token_data["access_token"]
@@ -392,8 +391,7 @@ class SigenergyAPIClient:
 
             async with session.post(url, headers=headers, json=payload, timeout=30) as response:
                 if response.status != 200:
-                    text = await response.text()
-                    _LOGGER.error(f"Set tariff failed: {response.status} - {text}")
+                    _LOGGER.error(f"Set tariff failed: {response.status}")
                     return {"error": f"Failed to set tariff: {response.status}"}
 
                 result = await response.json()
