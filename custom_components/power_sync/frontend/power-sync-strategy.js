@@ -351,27 +351,42 @@ if (!customElements.get('power-sync-chart')) {
 
 class PowerSyncStrategy {
   static async generate(config, hass) {
-    // Wait for HACS custom elements (async loading race condition fix).
-    // Instead of synchronous customElements.get(), we use whenDefined() with timeout.
+    // Check for HACS custom elements — use synchronous check first (instant if loaded),
+    // then check Lovelace resources as fallback (installed but not yet loaded).
+    // Never block dashboard generation on element loading — always generate cards
+    // and let HA show "custom element not found" if truly missing.
     const requiredCards = [
       { element: 'button-card', name: 'button-card', hacs: 'button-card' },
       { element: 'apexcharts-card', name: 'apexcharts-card', hacs: 'apexcharts-card' },
       { element: 'power-flow-card-plus', name: 'power-flow-card-plus', hacs: 'power-flow-card-plus' },
     ];
 
-    const timeout = (ms) => new Promise(r => setTimeout(() => r(false), ms));
+    // Check if resource is registered in Lovelace (works even before element loads)
+    const lovelaceResources = [];
+    try {
+      const lr = await hass.callWS({ type: 'lovelace/resources' });
+      if (Array.isArray(lr)) lovelaceResources.push(...lr);
+    } catch (_) { /* YAML mode — skip */ }
+
     const loaded = {};
-    await Promise.all(requiredCards.map(async c => {
-      loaded[c.element] = await Promise.race([
-        customElements.whenDefined(c.element).then(() => true),
-        timeout(10000),
-      ]);
-    }));
+    for (const c of requiredCards) {
+      // Already registered as custom element
+      if (customElements.get(c.element)) {
+        loaded[c.element] = true;
+        continue;
+      }
+      // Registered as Lovelace resource (installed via HACS, just not loaded yet)
+      const inResources = lovelaceResources.some(r =>
+        r.url && r.url.includes(c.element.replace(/-/g, ''))
+      );
+      loaded[c.element] = inResources;
+    }
 
     const missing = requiredCards.filter(c => !loaded[c.element]);
-    const hasApex = loaded['apexcharts-card'] !== false;
-    const hasButton = loaded['button-card'] !== false;
-    const hasFlowCard = loaded['power-flow-card-plus'] !== false;
+    // Always generate cards — HA handles missing custom elements gracefully
+    const hasApex = true;
+    const hasButton = true;
+    const hasFlowCard = true;
 
     // Entity resolver — tries power_sync_ prefixed first, then bare name.
     // Handles mixed installs where some entities have the prefix and others don't.
