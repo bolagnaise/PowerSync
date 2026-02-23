@@ -245,7 +245,10 @@ class BatteryOptimizer:
         c = [0.0] * (4 * n)
         for t in range(n):
             c[t] = import_prices[t] * dt        # grid_import cost
-            c[n + t] = -export_prices[t] * dt   # grid_export revenue (negative = profit)
+            if export_prices[t] > 0:
+                c[n + t] = -export_prices[t] * dt   # grid_export revenue (negative = profit)
+            else:
+                c[n + t] = 0.01 * dt                # chip-suppressed: small cost to avoid free exports
 
         # === Equality constraints: power balance ===
         # solar[t] + grid_import[t] + battery_discharge[t] = load[t] + grid_export[t] + battery_charge[t]

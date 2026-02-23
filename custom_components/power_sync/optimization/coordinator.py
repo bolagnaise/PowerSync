@@ -653,6 +653,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 effective_action = "self_consumption"
 
+            if effective_action in ("discharge", "export") and self._is_near_demand_window():
+                _LOGGER.info(
+                    "Optimizer: Overriding EXPORT → self_consumption "
+                    "near demand charge window (preserving battery)"
+                )
+                effective_action = "self_consumption"
+
             # When transitioning from IDLE to any other action, restore backup
             # reserve to the user's configured value. IDLE sets backup_reserve
             # to current SOC% to prevent discharge; we must undo that.
@@ -1089,6 +1096,65 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if end_min <= start_min:
             return current_min >= start_min or current_min < end_min
         return start_min <= current_min < end_min
+
+    def _is_near_demand_window(self, lead_minutes: int = 30) -> bool:
+        """Check if current time is within lead_minutes before or inside a demand charge window."""
+        if not self._entry:
+            return False
+
+        from ..const import (
+            CONF_DEMAND_CHARGE_ENABLED,
+            CONF_DEMAND_CHARGE_START_TIME,
+            CONF_DEMAND_CHARGE_END_TIME,
+            CONF_DEMAND_CHARGE_DAYS,
+        )
+
+        enabled = self._entry.options.get(
+            CONF_DEMAND_CHARGE_ENABLED,
+            self._entry.data.get(CONF_DEMAND_CHARGE_ENABLED, False),
+        )
+        if not enabled:
+            return False
+
+        start_str = self._entry.options.get(
+            CONF_DEMAND_CHARGE_START_TIME,
+            self._entry.data.get(CONF_DEMAND_CHARGE_START_TIME, "14:00"),
+        )
+        end_str = self._entry.options.get(
+            CONF_DEMAND_CHARGE_END_TIME,
+            self._entry.data.get(CONF_DEMAND_CHARGE_END_TIME, "20:00"),
+        )
+        days = self._entry.options.get(
+            CONF_DEMAND_CHARGE_DAYS,
+            self._entry.data.get(CONF_DEMAND_CHARGE_DAYS, "All Days"),
+        )
+
+        try:
+            s_parts = start_str.split(":")
+            start_min = int(s_parts[0]) * 60 + int(s_parts[1])
+            e_parts = end_str.split(":")
+            end_min = int(e_parts[0]) * 60 + int(e_parts[1])
+        except (ValueError, IndexError):
+            return False
+
+        now = dt_util.now()
+        weekday = now.weekday()
+
+        if days == "Weekdays Only" and weekday >= 5:
+            return False
+        if days == "Weekends Only" and weekday < 5:
+            return False
+
+        current_min = now.hour * 60 + now.minute
+        buffered_start = start_min - lead_minutes
+
+        if end_min <= start_min:
+            # Overnight window (e.g. 22:00-06:00)
+            return current_min >= buffered_start or current_min < end_min
+        # Normal window — buffer may wrap to previous day
+        if buffered_start < 0:
+            return current_min >= (buffered_start + 1440) or current_min < end_min
+        return buffered_start <= current_min < end_min
 
     def _is_in_demand_window_at(self, ts: datetime) -> bool:
         """Check if a given timestamp falls within a demand charge window."""
