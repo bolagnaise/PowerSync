@@ -356,6 +356,143 @@ if (!customElements.get('power-sync-chart')) {
   customElements.define('power-sync-chart', PowerSyncChart);
 }
 
+// ─── PowerSyncLayout Custom Element ─────────────────────────────
+// Viewport-fitting grid layout: 3 columns, fills available height.
+// Chart cards flex to fill remaining space; control cards stay natural size.
+// Scrolls only when content genuinely exceeds viewport.
+
+class PowerSyncLayout extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this._cards = [];
+    this._built = false;
+  }
+
+  setConfig(config) {
+    this._config = config;
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    if (!this._built) this._buildLayout();
+    for (const c of this._cards) c.hass = hass;
+  }
+
+  async _buildLayout() {
+    if (this._built) return;
+    this._built = true;
+
+    const root = this.shadowRoot;
+    const style = document.createElement('style');
+    style.textContent = `
+      :host {
+        display: block;
+        height: calc(100vh - var(--header-height, 56px));
+        overflow: auto;
+        box-sizing: border-box;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1.2fr 1fr;
+        gap: 8px;
+        padding: 4px 8px;
+        height: 100%;
+        box-sizing: border-box;
+      }
+      .column {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        min-height: 0;
+        overflow: hidden;
+      }
+      .card-wrap {
+        flex: 0 0 auto;
+        min-height: 0;
+      }
+      .card-wrap.fill {
+        flex: 1 1 0;
+        min-height: 80px;
+        overflow: hidden;
+      }
+      .card-wrap.fill > * {
+        height: 100% !important;
+        min-height: 0 !important;
+      }
+      @media (max-width: 1024px) {
+        .grid {
+          grid-template-columns: 1fr 1fr;
+        }
+      }
+      @media (max-width: 600px) {
+        :host {
+          height: auto;
+          overflow: visible;
+        }
+        .grid {
+          grid-template-columns: 1fr;
+          height: auto;
+        }
+        .card-wrap.fill {
+          flex: 0 0 auto;
+          min-height: 0;
+        }
+      }
+    `;
+    root.appendChild(style);
+
+    const grid = document.createElement('div');
+    grid.className = 'grid';
+
+    let helpers;
+    try { helpers = await window.loadCardHelpers(); } catch (_) {}
+
+    const FLEX_TYPES = new Set([
+      'custom:apexcharts-card',
+      'custom:power-sync-chart',
+      'custom:power-flow-card-plus',
+    ]);
+
+    for (const columnCards of (this._config.columns || [])) {
+      const col = document.createElement('div');
+      col.className = 'column';
+
+      for (const cardConfig of columnCards) {
+        const wrap = document.createElement('div');
+        wrap.className = FLEX_TYPES.has(cardConfig.type)
+          ? 'card-wrap fill' : 'card-wrap';
+
+        let card;
+        try {
+          card = helpers
+            ? await helpers.createCardElement(cardConfig)
+            : document.createElement(cardConfig.type);
+          if (!helpers && card.setConfig) card.setConfig(cardConfig);
+        } catch (err) {
+          card = document.createElement('hui-error-card');
+          try { card.setConfig({ type: 'error', error: err.message, origConfig: cardConfig }); } catch (_) {}
+        }
+
+        if (this._hass) card.hass = this._hass;
+        this._cards.push(card);
+        wrap.appendChild(card);
+        col.appendChild(wrap);
+      }
+
+      grid.appendChild(col);
+    }
+
+    root.appendChild(grid);
+  }
+
+  getCardSize() { return 12; }
+}
+
+if (!customElements.get('power-sync-layout')) {
+  customElements.define('power-sync-layout', PowerSyncLayout);
+}
+
 // ─── Dashboard Strategy ─────────────────────────────────────────
 
 class PowerSyncStrategy {
@@ -528,13 +665,10 @@ class PowerSyncStrategy {
       // Single column — flat list for narrow/simple installs
       cards = left.concat(center, right);
     } else {
-      // Multi-column grid via horizontal-stack + vertical-stack
+      // Viewport-fitting grid via custom layout element
       cards = [{
-        type: 'horizontal-stack',
-        cards: columns.map(col => ({
-          type: 'vertical-stack',
-          cards: col,
-        })),
+        type: 'custom:power-sync-layout',
+        columns,
       }];
     }
 
@@ -543,6 +677,7 @@ class PowerSyncStrategy {
         title: 'Energy Dashboard',
         path: 'energy',
         icon: 'mdi:lightning-bolt',
+        type: 'panel',
         cards,
       }],
     };
@@ -901,7 +1036,7 @@ function _priceChart(e) {
       },
     ],
     apex_config: {
-      chart: { height: 150 },
+      chart: { height: '100%' },
       stroke: { curve: 'smooth' },
       legend: { show: true, position: 'bottom' },
       tooltip: {
@@ -1349,7 +1484,7 @@ function _combinedEnergyChart(e, hasHome) {
     yaxis: [{ id: 'y', decimals: 1 }],
     series,
     apex_config: {
-      chart: { height: 200 },
+      chart: { height: '100%' },
       legend: { show: true, position: 'bottom' },
       stroke: { curve: 'smooth' },
     },
