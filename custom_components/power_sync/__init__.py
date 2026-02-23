@@ -13602,7 +13602,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         from homeassistant.util import dt as dt_util
 
         # Very high sell rate to encourage Powerwall to export all energy
-        sell_rate_discharge = 20.00  # $20/kWh - huge incentive to discharge
+        sell_rate_discharge = 99.00  # $99/kWh - huge incentive to discharge
         sell_rate_normal = 0.08      # 8c/kWh normal feed-in
 
         # Buy rate to discourage import during discharge
