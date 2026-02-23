@@ -451,6 +451,93 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
     return {"ev_power_kw": ev_power_kw, "ev_soc": ev_soc}
 
 
+def _get_ev_vehicles_status(hass, entry) -> list:
+    """Get per-vehicle EV status from Tesla vehicle sensors (Fleet API).
+
+    Returns a list of dicts, one per vehicle found at home, each with:
+      vehicle_name, ev_power_kw, ev_soc, is_connected, is_charging.
+    """
+    vehicles = []
+    entity_registry = er.async_get(hass)
+    device_registry = dr.async_get(hass)
+
+    for device in device_registry.devices.values():
+        is_tesla_vehicle = False
+        for identifier in device.identifiers:
+            if identifier[0] in TESLA_INTEGRATIONS:
+                potential_vin = str(identifier[1])
+                if len(potential_vin) == 17 and not potential_vin.isdigit():
+                    is_tesla_vehicle = True
+                break
+        if not is_tesla_vehicle:
+            continue
+
+        # Check if vehicle is at home — skip vehicles that are away
+        skip_vehicle = False
+        for entity in entity_registry.entities.values():
+            if entity.device_id != device.id:
+                continue
+            if entity.domain == "device_tracker" and "_location" in entity.entity_id.lower():
+                loc_state = hass.states.get(entity.entity_id)
+                if loc_state and loc_state.state == "not_home":
+                    skip_vehicle = True
+                    break
+        if skip_vehicle:
+            continue
+
+        ev_power_kw = 0.0
+        ev_soc = None
+        is_connected = False
+
+        for entity in entity_registry.entities.values():
+            if entity.device_id != device.id:
+                continue
+            eid = entity.entity_id.lower()
+            state = hass.states.get(entity.entity_id)
+            if not state or state.state in ("unknown", "unavailable"):
+                continue
+
+            # Check charging_state sensor for connected status
+            if entity.domain == "sensor" and "charging_state" in eid:
+                # Values like "Charging", "Connected", "Stopped", "Complete" = plugged in
+                # "Disconnected" = not plugged in
+                if state.state not in ("Disconnected",):
+                    is_connected = True
+
+            if not entity.entity_id.startswith("sensor."):
+                continue
+
+            if "charger_power" in eid or "charging_power" in eid or "charge_power" in eid:
+                try:
+                    val = float(state.state)
+                    if val > 0:
+                        ev_power_kw = max(ev_power_kw, val)
+                except (ValueError, TypeError):
+                    pass
+
+            if ev_soc is None and "battery" in eid and "range" not in eid and "heater" not in eid:
+                try:
+                    val = float(state.state)
+                    if 0 <= val <= 100:
+                        ev_soc = int(val)
+                except (ValueError, TypeError):
+                    pass
+
+        # If charging, must be connected
+        if ev_power_kw > 0.05:
+            is_connected = True
+
+        vehicles.append({
+            "vehicle_name": device.name or "Tesla EV",
+            "ev_power_kw": ev_power_kw,
+            "ev_soc": ev_soc,
+            "is_connected": is_connected,
+            "is_charging": ev_power_kw > 0.05,
+        })
+
+    return vehicles
+
+
 class SensitiveDataFilter(logging.Filter):
     """
     Logging filter that obfuscates sensitive data like API keys and tokens.
@@ -8339,6 +8426,7 @@ class EVWidgetDataView(HomeAssistantView):
                 widget_data.append({
                     "vehicle_name": vehicle_name,
                     "is_charging": current_amps > 0,
+                    "is_connected": state.get("active", False),
                     "current_soc": current_soc,
                     "target_soc": target_soc,
                     "current_power_kw": round(current_power_kw, 2),
@@ -8350,22 +8438,24 @@ class EVWidgetDataView(HomeAssistantView):
             # Always check external chargers (Zaptec, OCPP) regardless of dynamic EV state
             # This ensures standalone chargers appear even when idle vehicles exist
             zaptec_cached = entry_data.get("zaptec_cached_state")
-            if zaptec_cached and (
-                zaptec_cached.get("charger_operation_mode") == "charging"
-                or zaptec_cached.get("total_charge_power_w", 0) > 50
-            ):
+            if zaptec_cached:
+                zaptec_mode = zaptec_cached.get("charger_operation_mode", "")
+                zaptec_connected = zaptec_mode in ("charging", "connected_waiting", "connected_finishing")
                 power_w = zaptec_cached.get("total_charge_power_w", 0)
                 power_kw = power_w / 1000
-                if power_kw > 0.05:
-                    if surplus_kw >= power_kw * 0.8:
-                        zaptec_source = "solar"
-                    elif surplus_kw > 0:
-                        zaptec_source = "grid"
+                zaptec_charging = power_kw > 0.05 or zaptec_mode == "charging"
+                if zaptec_connected or zaptec_charging:
+                    if power_kw > 0.05:
+                        if surplus_kw >= power_kw * 0.8:
+                            zaptec_source = "solar"
+                        else:
+                            zaptec_source = "grid"
                     else:
-                        zaptec_source = "grid"
+                        zaptec_source = "idle"
                     widget_data.append({
                         "vehicle_name": "EV Charger",
-                        "is_charging": True,
+                        "is_charging": zaptec_charging,
+                        "is_connected": zaptec_connected,
                         "current_soc": 0,
                         "target_soc": 80,
                         "current_power_kw": round(power_kw, 2),
@@ -8390,6 +8480,7 @@ class EVWidgetDataView(HomeAssistantView):
                                 widget_data.append({
                                     "vehicle_name": f"OCPP {cp_id[:8]}",
                                     "is_charging": True,
+                                    "is_connected": True,
                                     "current_soc": 0,
                                     "target_soc": 80,
                                     "current_power_kw": round(power_kw, 2),
@@ -8400,32 +8491,45 @@ class EVWidgetDataView(HomeAssistantView):
                 except Exception as e:
                     _LOGGER.debug(f"Error checking OCPP chargers for widget: {e}")
 
-            # Check Tesla EV charging power — prefer vehicle sensor (e.g. sensor.tessy_charger_power),
-            # fall back to Wall Connector data from coordinator
-            ev_status = _get_ev_vehicle_status(self._hass, self._config_entry)
-            ev_sensor_kw = ev_status["ev_power_kw"]
-            ev_soc = ev_status["ev_soc"]
-            if ev_sensor_kw <= 0 and tesla_coordinator and tesla_coordinator.data:
-                ev_sensor_kw = tesla_coordinator.data.get("ev_power", 0)
-            if ev_sensor_kw > 0.05:
-                # Only add if no other source already covers this charging
-                # (dynamic EV state already tracks PowerSync-managed sessions)
-                already_covered = any(
-                    w["is_charging"] and w["current_power_kw"] > 0
-                    for w in widget_data
-                )
-                if not already_covered:
-                    if surplus_kw >= ev_sensor_kw * 0.8:
-                        ev_source = "solar"
-                    else:
-                        ev_source = "grid"
-                    widget_data.append({
+            # Check Tesla EV vehicles — per-vehicle data (power, SOC, connected status)
+            tesla_vehicles = _get_ev_vehicles_status(self._hass, self._config_entry)
+
+            # Fall back to Wall Connector data if no vehicles found with power
+            if not tesla_vehicles and tesla_coordinator and tesla_coordinator.data:
+                wc_power = tesla_coordinator.data.get("ev_power", 0)
+                if wc_power > 0.05:
+                    tesla_vehicles = [{
                         "vehicle_name": "Tesla EV",
+                        "ev_power_kw": wc_power,
+                        "ev_soc": None,
+                        "is_connected": True,
                         "is_charging": True,
-                        "current_soc": ev_soc,
+                    }]
+
+            # Only add if no other source already covers this charging
+            already_covered = any(
+                w["is_charging"] and w["current_power_kw"] > 0
+                for w in widget_data
+            )
+            if not already_covered:
+                for tv in tesla_vehicles:
+                    tv_power_kw = tv["ev_power_kw"]
+                    tv_soc = tv["ev_soc"]
+                    if tv_power_kw > 0.05:
+                        if surplus_kw >= tv_power_kw * 0.8:
+                            tv_source = "solar"
+                        else:
+                            tv_source = "grid"
+                    else:
+                        tv_source = "idle"
+                    widget_data.append({
+                        "vehicle_name": tv["vehicle_name"],
+                        "is_charging": tv["is_charging"],
+                        "is_connected": tv["is_connected"],
+                        "current_soc": tv_soc if tv_soc is not None else 0,
                         "target_soc": 80,
-                        "current_power_kw": round(ev_sensor_kw, 2),
-                        "source": ev_source,
+                        "current_power_kw": round(tv_power_kw, 2),
+                        "source": tv_source,
                         "eta_minutes": None,
                         "surplus_kw": round(surplus_kw, 2),
                     })
@@ -8440,6 +8544,7 @@ class EVWidgetDataView(HomeAssistantView):
                         continue
                     byd_soc = 0
                     byd_charging = False
+                    byd_connected = False
                     for byd_entity in byd_entity_registry.entities.values():
                         if byd_entity.device_id != byd_device.id:
                             continue
@@ -8454,26 +8559,33 @@ class EVWidgetDataView(HomeAssistantView):
                                 pass
                         if eid.startswith("binary_sensor.") and "charging" in eid and "charger" not in eid:
                             byd_charging = byd_state.state == "on"
+                        if eid.startswith("binary_sensor.") and "plugged_in" in eid:
+                            byd_connected = byd_state.state == "on"
+                    # If charging, must be connected
                     if byd_charging:
+                        byd_connected = True
+                    if byd_connected or byd_charging:
                         widget_data.append({
                             "vehicle_name": byd_device.name or "BYD Vehicle",
-                            "is_charging": True,
+                            "is_charging": byd_charging,
+                            "is_connected": byd_connected,
                             "current_soc": byd_soc,
                             "target_soc": 100,
                             "current_power_kw": 0,
-                            "source": "grid",
+                            "source": "grid" if byd_charging else "idle",
                             "eta_minutes": None,
                             "surplus_kw": round(surplus_kw, 2),
                         })
 
-            # Filter out idle vehicles — only keep entries that are actively charging
-            active_widget_data = [w for w in widget_data if w["is_charging"]]
+            # Filter to vehicles that are connected or charging
+            active_widget_data = [w for w in widget_data if w.get("is_connected") or w["is_charging"]]
 
-            # If no actively charging vehicles, return idle status
+            # If no connected/charging vehicles, return idle status
             if not active_widget_data:
                 active_widget_data.append({
                     "vehicle_name": "No Active Vehicle",
                     "is_charging": False,
+                    "is_connected": False,
                     "current_soc": 0,
                     "target_soc": 80,
                     "current_power_kw": 0,
