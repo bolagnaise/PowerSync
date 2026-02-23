@@ -9622,25 +9622,32 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         hass.http.register_static_path("/power_sync/frontend", frontend_dir, True)
 
     # Auto-register the Lovelace resource (storage mode only)
+    # Use version query param for cache-busting when JS changes
     try:
         resources = hass.data.get("lovelace", {})
         if hasattr(resources, "resources"):
             res_collection = resources.resources
-            url = "/power_sync/frontend/power-sync-strategy.js"
+            base_path = "/power_sync/frontend/power-sync-strategy.js"
+            from .const import POWER_SYNC_VERSION
+            url = f"{base_path}?v={POWER_SYNC_VERSION}"
 
-            # Check if already registered
+            # Find any existing PowerSync strategy resources (with or without version)
             existing = [
                 r for r in res_collection.async_items()
-                if r.get("url", "") == url
+                if base_path in r.get("url", "")
             ]
-            if not existing:
+            if existing:
+                # Update URL if version changed (cache-bust)
+                for r in existing:
+                    if r.get("url") != url:
+                        await res_collection.async_update_item(r["id"], {"url": url})
+                        _LOGGER.info("PowerSync dashboard strategy resource updated (cache-bust)")
+            else:
                 await res_collection.async_create_item({
                     "res_type": "module",
                     "url": url,
                 })
                 _LOGGER.info("PowerSync dashboard strategy registered as Lovelace resource")
-            else:
-                _LOGGER.debug("PowerSync dashboard strategy already registered")
     except Exception:
         # YAML mode dashboards don't have the resources API — that's fine,
         # users register the resource manually in lovelace.yaml
