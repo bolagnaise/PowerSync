@@ -388,56 +388,56 @@ class PowerSyncLayout extends HTMLElement {
     style.textContent = `
       :host {
         display: block;
-        height: calc(100vh - var(--header-height, 56px));
-        overflow: auto;
+        height: 100%;
+        overflow: hidden;
         box-sizing: border-box;
       }
       .grid {
         display: grid;
         grid-template-columns: 1fr 1.2fr 1fr;
+        grid-template-rows: 1fr;
         gap: 8px;
         padding: 4px 8px;
         height: 100%;
         box-sizing: border-box;
+        overflow: hidden;
       }
       .column {
         display: flex;
         flex-direction: column;
-        gap: 8px;
+        gap: 4px;
         min-height: 0;
         overflow: hidden;
       }
       .card-wrap {
         flex: 0 0 auto;
         min-height: 0;
+        overflow: hidden;
       }
       .card-wrap.fill {
         flex: 1 1 0;
-        min-height: 80px;
+        min-height: 60px;
         overflow: hidden;
       }
       .card-wrap.fill > * {
         height: 100% !important;
         min-height: 0 !important;
+        overflow: hidden !important;
       }
       @media (max-width: 1024px) {
         .grid {
           grid-template-columns: 1fr 1fr;
+          grid-template-rows: auto;
         }
+        :host { height: auto; overflow: auto; }
       }
       @media (max-width: 600px) {
-        :host {
-          height: auto;
-          overflow: visible;
-        }
         .grid {
           grid-template-columns: 1fr;
-          height: auto;
+          grid-template-rows: auto;
         }
-        .card-wrap.fill {
-          flex: 0 0 auto;
-          min-height: 0;
-        }
+        :host { height: auto; overflow: auto; }
+        .card-wrap.fill { flex: 0 0 auto; }
       }
     `;
     root.appendChild(style);
@@ -701,7 +701,7 @@ function _priceGauges(e) {
         max: 0.6,
         needle: true,
         severity: { green: 0, yellow: 0.25, red: 0.4 },
-        card_mod: { style: 'ha-card { height: 140px; }' },
+        card_mod: { style: 'ha-card { height: 110px; }' },
       },
       {
         type: 'gauge',
@@ -712,7 +712,7 @@ function _priceGauges(e) {
         max: 0.3,
         needle: true,
         severity: { red: -0.1, yellow: 0, green: 0.05 },
-        card_mod: { style: 'ha-card { height: 140px; }' },
+        card_mod: { style: 'ha-card { height: 110px; }' },
       },
       {
         type: 'gauge',
@@ -723,7 +723,7 @@ function _priceGauges(e) {
         max: 100,
         needle: true,
         severity: { red: 0, yellow: 30, green: 60 },
-        card_mod: { style: 'ha-card { height: 140px; }' },
+        card_mod: { style: 'ha-card { height: 110px; }' },
       },
     ],
   };
@@ -1394,9 +1394,9 @@ function _batteryHealth(e) {
     ]]]`,
     styles: {
       card: [
-        { height: '90px' },
+        { height: '70px' },
         { 'border-radius': '12px' },
-        { padding: '10px' },
+        { padding: '6px' },
         {
           display: `[[[
             const v = ${attrPath};
@@ -1411,9 +1411,9 @@ function _batteryHealth(e) {
         { 'font-size': '13px' },
       ],
       state: [
-        { 'font-size': '22px' },
+        { 'font-size': '18px' },
         { 'font-weight': '800' },
-        { 'margin-top': '6px' },
+        { 'margin-top': '2px' },
       ],
     },
   });

@@ -15,6 +15,9 @@ try:
 except (FileNotFoundError, json.JSONDecodeError):
     POWER_SYNC_VERSION = "0.0.0"
 
+# Dashboard JS version — bump this to cache-bust the strategy JS independently of the app version
+DASHBOARD_JS_VERSION = "1"
+
 # User-Agent for API identification
 POWER_SYNC_USER_AGENT = f"PowerSync/{POWER_SYNC_VERSION} HomeAssistant"
 

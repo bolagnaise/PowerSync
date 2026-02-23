@@ -9728,8 +9728,8 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         if hasattr(resources, "resources"):
             res_collection = resources.resources
             base_path = "/power_sync/frontend/power-sync-strategy.js"
-            from .const import POWER_SYNC_VERSION
-            url = f"{base_path}?v={POWER_SYNC_VERSION}"
+            from .const import POWER_SYNC_VERSION, DASHBOARD_JS_VERSION
+            url = f"{base_path}?v={POWER_SYNC_VERSION}.{DASHBOARD_JS_VERSION}"
 
             # Find any existing PowerSync strategy resources (with or without version)
             existing = [
