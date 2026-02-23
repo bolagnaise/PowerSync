@@ -15829,7 +15829,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Poll immediately, then every 60s
         from homeassistant.helpers.event import async_track_time_interval
-        from datetime import timedelta
         await _poll_zaptec_state()
         unsub_zaptec_poll = async_track_time_interval(
             hass, _poll_zaptec_state, timedelta(seconds=60)
@@ -16341,7 +16340,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             # For Enphase, always re-apply DPEL at least every 45 seconds since it may timeout
             # For other brands, only update if changed by more than 50W
-            from datetime import datetime, timedelta
             now_time = datetime.now()
             force_reapply = False
             if inverter_brand == "enphase":
