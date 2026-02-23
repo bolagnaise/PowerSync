@@ -408,105 +408,134 @@ class PowerSyncStrategy {
     // Shorthand: resolve then check
     const hasE = (name) => has(e(name));
 
-    const cards = [];
+    // ── 3-column layout: left (controls/status), center (flow/charts), right (prices/energy) ──
+    const left = [];
+    const center = [];
+    const right = [];
 
-    // --- Price Gauges ---
+    // --- Left Column: Price Gauges ---
     if (hasE('current_import_price')) {
-      cards.push(_priceGauges(e));
+      left.push(_priceGauges(e));
     }
 
-    // --- Battery Controls (requires button-card) ---
+    // --- Left Column: Battery Controls (requires button-card) ---
     if (hasButton && (hasE('battery_level') || hasE('battery_power'))) {
-      cards.push(_batteryControls());
+      left.push(_batteryControls());
     }
 
-    // --- Optimizer Status (requires button-card) ---
+    // --- Left Column: Optimizer Status (requires button-card) ---
     if (hasButton && hasE('optimization_status')) {
-      cards.push(_optimizerStatus(e));
+      left.push(_optimizerStatus(e));
     }
 
-    // --- Power Flow (requires power-flow-card-plus) ---
+    // --- Center Column: Power Flow (requires power-flow-card-plus) ---
     if (hasFlowCard && hasE('solar_power')) {
-      cards.push(_powerFlow(e));
+      center.push(_powerFlow(e));
     }
 
-    // --- Price Chart (Amber/Octopus 24h) — entity-history, requires apexcharts ---
+    // --- Right Column: Price Chart (Amber/Octopus 24h) — requires apexcharts ---
     if (hasApex && hasE('current_import_price')) {
-      cards.push(_priceChart(e));
+      right.push(_priceChart(e));
     }
 
-    // --- TOU Schedule (uses PowerSyncChart — no apexcharts dependency) ---
+    // --- Right Column: TOU Schedule (uses PowerSyncChart) ---
     if (hasE('tariff_schedule')) {
-      cards.push(_touSchedule(e));
+      right.push(_touSchedule(e));
     }
 
-    // --- LP Forecast Summary ---
+    // --- Center Column: LP Forecast Summary ---
     if (hasE('lp_solar_forecast')) {
-      cards.push(_lpForecastSummary(e));
+      center.push(_lpForecastSummary(e));
     }
 
-    // --- LP Forecast Charts (uses PowerSyncChart — no apexcharts dependency) ---
+    // --- Center Column: LP Price Chart (48h) ---
     if (hasE('lp_solar_forecast')) {
-      cards.push(_lpSolarLoadChart(e));
-      cards.push(_lpPriceChart(e));
+      center.push(_lpPriceChart(e));
     }
 
-    // --- Curtailment Status (requires button-card) ---
+    // --- Right Column: LP Solar & Load Chart (48h) ---
+    if (hasE('lp_solar_forecast')) {
+      right.push(_lpSolarLoadChart(e));
+    }
+
+    // --- Left Column: Curtailment Status (requires button-card) ---
     const hasDC = hasE('solar_curtailment');
     const hasAC = hasE('inverter_status');
     if (hasButton && (hasDC || hasAC)) {
-      cards.push(_curtailmentStatus(e, hasDC, hasAC));
+      left.push(_curtailmentStatus(e, hasDC, hasAC));
     }
 
-    // --- AC Inverter Controls (requires button-card) ---
+    // --- Left Column: AC Inverter Controls (requires button-card) ---
     if (hasButton && hasAC) {
-      cards.push(_acInverterControls(e));
+      left.push(_acInverterControls(e));
     }
 
-    // --- FoxESS Sensors ---
+    // --- Left Column: FoxESS Sensors ---
     if (hasE('pv1_power')) {
-      cards.push(_foxessSensors(e));
+      left.push(_foxessSensors(e));
     }
 
-    // --- Battery Health (requires button-card) ---
+    // --- Left Column: Battery Health (requires button-card) ---
     if (hasButton && hasE('battery_health')) {
-      cards.push(_batteryHealth(e));
+      left.push(_batteryHealth(e));
     }
 
-    // --- Energy Charts (entity-history, requires apexcharts) ---
+    // --- Center Column: Energy Charts — Solar & Grid ---
     if (hasApex && hasE('solar_power')) {
-      cards.push(_energyChart('Solar', e('solar_power'), '#FFD700', { yaxis: { min: 0 } }));
-      cards.push(_energyChart('Battery', e('battery_power'), '#2196F3', {}));
-      cards.push(_energyChart('Grid', e('grid_power'), '#F44336', {}));
+      center.push(_energyChart('Solar', e('solar_power'), '#FFD700', { yaxis: { min: 0 } }));
+      center.push(_energyChart('Grid', e('grid_power'), '#F44336', {}));
+    }
+
+    // --- Right Column: Energy Charts — Battery & Home ---
+    if (hasApex && hasE('solar_power')) {
+      right.push(_energyChart('Battery', e('battery_power'), '#2196F3', {}));
     }
     if (hasApex && hasE('home_load')) {
-      cards.push(_energyChart('Home', e('home_load'), '#9C27B0', { yaxis: { min: 0 } }));
+      right.push(_energyChart('Home', e('home_load'), '#9C27B0', { yaxis: { min: 0 } }));
     }
 
-    // --- Demand Charge ---
+    // --- Left Column: Demand Charge ---
     if (hasE('in_demand_charge_period')) {
-      cards.push(_demandCharge(e));
+      left.push(_demandCharge(e));
     }
 
-    // --- AEMO Spike ---
+    // --- Left Column: AEMO Spike ---
     if (hasE('aemo_price')) {
-      cards.push(_aemoSpike(e));
+      left.push(_aemoSpike(e));
     }
 
-    // --- Flow Power ---
+    // --- Left Column: Flow Power ---
     if (hasE('flow_power_price')) {
-      cards.push(_flowPower(e));
+      left.push(_flowPower(e));
     }
 
-    // --- Missing dependency warning (graceful degradation) ---
+    // --- Left Column: Missing dependency warning ---
     if (missing.length > 0) {
-      cards.push({
+      left.push({
         type: 'markdown',
         content:
           '**Note:** Some dashboard cards are hidden because these HACS frontend dependencies were not detected:\n\n' +
           missing.map(c => `- **${c.name}** — search "${c.hacs}" in HACS Frontend`).join('\n') + '\n\n' +
           'Install them via [HACS](https://hacs.xyz/) and refresh your browser.',
       });
+    }
+
+    // ── Build responsive layout ──
+    const columns = [left, center, right].filter(col => col.length > 0);
+    let cards;
+
+    if (columns.length <= 1) {
+      // Single column — flat list for narrow/simple installs
+      cards = left.concat(center, right);
+    } else {
+      // Multi-column grid via horizontal-stack + vertical-stack
+      cards = [{
+        type: 'horizontal-stack',
+        cards: columns.map(col => ({
+          type: 'vertical-stack',
+          cards: col,
+        })),
+      }];
     }
 
     return {
