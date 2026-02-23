@@ -47,7 +47,7 @@
 2. **Add Integration** — Settings > Devices & Services > Add Integration > "PowerSync"
 3. **Pick your electricity provider** and enter API credentials if required
 4. **Connect your battery system** and enter connection details
-5. **Done!** Sensors appear automatically and a **PowerSync dashboard** is auto-created in your sidebar. Enable [Smart Optimization](#smart-optimization) for automated scheduling, or install the [Mobile App](#mobile-app) for remote control.
+5. **Done!** Sensors appear automatically and a **PowerSync dashboard** is auto-created in your sidebar. Enable [Smart Optimization](https://github.com/bolagnaise/PowerSync/wiki/Smart-Optimization) for automated scheduling, or install the [Mobile App](#mobile-app) for remote control.
 
 ---
 
@@ -73,141 +73,17 @@ Or manually:
 
 ---
 
-## Battery System Setup
+## Features
 
-### Tesla Powerwall
-
-Two connection options — choose one:
-
-- **Teslemetry (Recommended)** — Simple API key from [teslemetry.com](https://teslemetry.com). ~$4/month.
-- **Tesla Fleet API (Free)** — Install the official Tesla Fleet integration in HA first. PowerSync auto-detects it.
-
-### FoxESS
-
-Supports **H1, H3, H3-Pro, H3 Smart, and KH** model families via Modbus TCP or RS485 serial. No cloud API required for battery control.
-
-OEM rebrands using identical hardware are also supported — the model family is auto-detected via register probing:
-
-| Model Family | Also sold as |
-|-------------|-------------|
-| **H1** | AIO-H1, a-TroniX AX |
-| **H3** | AIO-H3, Kuara H3, Sonnenkraft SK-HWR, 1KOMMA5 |
-| **H3-Pro** | — |
-| **H3 Smart** | — |
-| **KH** | — |
-
-- **H3 Smart:** Has built-in WiFi Modbus TCP — connect directly to the inverter's IP (appears as "espressif" on your network). Ensure inverter firmware is up to date.
-- **All models:** Default port 502, slave ID 247. Model family is auto-detected during setup — no manual selection needed for rebrands.
-- **Cloud API key** is optional — sync Amber/Octopus prices as time-based schedules on the inverter. Get your key from [foxesscloud.com](https://www.foxesscloud.com) > User Profile > API Management.
-
-> **Important: Do not run other Modbus integrations alongside PowerSync.** FoxESS inverters only support a single Modbus TCP connection. Running a second integration (e.g. foxess_modbus, foxess-ha) on the same IP will cause connection contention — register writes fail, force charge commands are delayed by minutes, and both integrations become unreliable. PowerSync already exposes all commonly-needed data as HA sensors (see [Sensors](#sensors) below), so the external integration is not needed.
-
-### Sigenergy
-
-Requires both Cloud API (for tariff sync) and Modbus TCP (for real-time data + DC curtailment).
-
-- **Cloud API:** Enter your Sigenergy email and password. Device ID is no longer required — leave it blank.
-- **Station ID:** Selected automatically after login, or ask SigenAI "Tell me my StationID" in the Sigenergy app.
-- **Modbus TCP:** Must be enabled on your inverter (configured by installer). Default port 502, slave ID 247.
-
-### GoodWe
-
-Supports **ET, EH, BT, BH** (3-phase hybrid) and **ES, EM, BP** (single-phase hybrid) series. Local connection only — no cloud API required.
-
-- **UDP (default):** Port 8899 via WiFi dongle — works with most GoodWe inverters
-- **TCP:** Port 502 via LAN dongle (WLA0000-01-00P V2.0)
-- Model family is auto-detected during setup. DT/MS/XS (grid-only) inverters are not supported.
-
-### Sungrow SH-series
-
-Direct Modbus TCP — no cloud API required. Supports SH-series hybrid inverters.
-
-- Default port 502, slave ID 1
-- **Dual inverter support** — optionally add a second SH inverter (e.g. on the primary's backup port) for combined monitoring and control
-- Also supports AC-coupled SG-series for solar curtailment only
-
----
-
-## Smart Optimization
-
-> **Alpha Feature:** Smart Optimization is currently in alpha. Bugs and unexpected behaviour will occur. Only enable this feature if you are willing to provide feedback and experience issues. Please report any problems in our Discord server.
-
-PowerSync includes a **built-in LP optimizer** (scipy HiGHS) that calculates the optimal battery schedule over a 48-hour horizon using electricity prices, solar forecasts, and load patterns.
-
-**Actions:** CHARGE (cheap grid periods) | EXPORT (expensive periods) | IDLE (hold SOC) | SELF_CONSUMPTION (natural operation)
-
-### Enable
-
-1. Settings > Devices & Services > PowerSync > Configure
-2. Select **Smart Optimization (Built-in LP)** as optimization provider
-3. Set your backup reserve percentage
-4. Toggle **Enable** in the mobile app Controls screen
-
-The optimizer runs every 5 minutes, re-optimizing as prices and forecasts update. Falls back to a greedy algorithm if scipy is unavailable.
-
----
-
-## EV Smart Charging
-
-Coordinates EV charging alongside battery optimization with dynamic power sharing. The EV charging plan is fed into the battery optimizer's load forecast so both systems work together.
-
-**Modes:** Prefer Solar | Solar Only | Cheapest | Meet Deadline
-
-**Supported chargers:** Tesla Wall Connector (BLE), OCPP, Wallbox, Easee, Generic (switch + number entity)
-
-> EV charger support is experimental. See the [wiki](https://github.com/bolagnaise/PowerSync/wiki) for detailed setup.
-
----
-
-## Advanced Features
-
-| Feature | Description |
-|---------|-------------|
-| **AEMO Spike Detection** | Auto-discharge during price spikes for VPP participation (Tesla, Sungrow, GoodWe) |
-| **Solar Curtailment** | Prevents paying to export during negative prices (Tesla export rules, Sigenergy/FoxESS Modbus) |
-| **AC Inverter Curtailment** | Control AC-coupled inverters (Sungrow, Fronius, GoodWe, Huawei, Enphase, Zeversolar, FoxESS) |
-| **Spike Protection** | Prevents grid charging during Amber price spikes |
-| **Export Price Boost** | Adjusts export prices to trigger battery discharge at lower thresholds |
-| **Chip Mode** | Suppress overnight exports unless price exceeds threshold |
-
-See the [wiki](https://github.com/bolagnaise/PowerSync/wiki) for configuration details.
-
----
-
-## Sensors
-
-PowerSync automatically creates sensor entities for energy monitoring. **All battery systems** get the core energy sensors:
-
-| Sensor | Entity ID | Unit | Description |
-|--------|-----------|------|-------------|
-| Solar Power | `sensor.power_sync_solar_power` | kW | Total solar generation |
-| Grid Power | `sensor.power_sync_grid_power` | kW | Grid import (+) / export (-) |
-| Battery Power | `sensor.power_sync_battery_power` | kW | Charge (+) / discharge (-) |
-| Home Load | `sensor.power_sync_home_load` | kW | Home consumption |
-| Battery Level | `sensor.power_sync_battery_level` | % | State of charge |
-
-### FoxESS Sensors
-
-FoxESS users get additional sensors from the Modbus data PowerSync already reads. These replace the need for a separate Modbus integration:
-
-| Sensor | Entity ID | Unit | Description |
-|--------|-----------|------|-------------|
-| PV1 Power | `sensor.power_sync_pv1_power` | kW | DC string 1 power |
-| PV2 Power | `sensor.power_sync_pv2_power` | kW | DC string 2 power |
-| CT2 Power | `sensor.power_sync_ct2_power` | kW | AC-coupled inverter (e.g. Solis behind FoxESS) |
-| Inverter Work Mode | `sensor.power_sync_work_mode` | — | Self Use / Feed-in / Backup |
-| Minimum SOC | `sensor.power_sync_min_soc` | % | Backup reserve setting |
-| Daily Battery Charge | `sensor.power_sync_daily_battery_charge_foxess` | kWh | Today's charge energy |
-| Daily Battery Discharge | `sensor.power_sync_daily_battery_discharge_foxess` | kWh | Today's discharge energy |
-
-### Optimizer Sensors
-
-When Smart Optimization is enabled, these sensors are created for **all battery systems**:
-
-| Sensor | Entity ID | Description |
-|--------|-----------|-------------|
-| Optimizer Current Action | `sensor.power_sync_optimization_status` | Current action: idle, charge, discharge, export, self_consumption. Attributes: `power_w`, `status` |
-| Optimizer Next Action | `sensor.power_sync_optimization_next_action` | Next scheduled action. Attributes: `time` (ISO timestamp), `power_w` |
+| Feature | Description | Wiki |
+|---------|-------------|------|
+| **Battery System Setup** | Tesla, FoxESS, Sigenergy, GoodWe, Sungrow connection guides | [Setup Guide](https://github.com/bolagnaise/PowerSync/wiki/Battery-System-Setup) |
+| **Smart Optimization** | Built-in LP optimizer calculates optimal charge/discharge schedule using prices, solar, and load | [Details](https://github.com/bolagnaise/PowerSync/wiki/Smart-Optimization) |
+| **EV Smart Charging** | Coordinate EV charging with battery optimization — Solar, Cheapest, Deadline modes | [Details](https://github.com/bolagnaise/PowerSync/wiki/EV-Smart-Charging) |
+| **Advanced Features** | AEMO spike detection, solar curtailment, spike protection, export boost, chip mode | [Details](https://github.com/bolagnaise/PowerSync/wiki/Advanced-Features) |
+| **Sensors** | Core power sensors, daily energy tracking, FoxESS Modbus sensors, optimizer status | [Full List](https://github.com/bolagnaise/PowerSync/wiki/Sensors) |
+| **Services** | Force charge/discharge, TOU sync, backup reserve, inverter curtailment | [Reference](https://github.com/bolagnaise/PowerSync/wiki/Services-Reference) |
+| **Troubleshooting** | Connection issues, debug logging, common fixes | [Guide](https://github.com/bolagnaise/PowerSync/wiki/Troubleshooting) |
 
 ---
 
@@ -245,46 +121,6 @@ Remote monitoring and control via iOS and Android.
   <img src="docs/images/app-provider.png" alt="Provider Settings" width="200"/>
   <img src="docs/images/app-provider-optimization.png" alt="Optimization Settings" width="200"/>
 </p>
-
----
-
-## Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| No sensors appearing | Check integration is enabled in Settings > Devices & Services |
-| Cannot connect (FoxESS) | Verify IP (H3 Smart = "espressif" on network), firmware is current, port 502 open |
-| Cannot connect (GoodWe) | Verify IP, check port 8899 (UDP) or 502 (TCP). Ensure WiFi/LAN dongle is online |
-| Cannot connect (Sungrow) | Check IP, port 502, slave ID. Ensure Modbus is enabled on inverter |
-| Cannot connect (Sigenergy) | Modbus TCP Server must be enabled by installer |
-| TOU sync failing | Check logs: `custom_components.power_sync` |
-| Missing forecast data | Ensure Solcast is configured for solar forecasts |
-| Mobile app won't connect | Verify HA URL is reachable from phone, regenerate access token |
-
-### Debug Logging
-
-```yaml
-logger:
-  logs:
-    custom_components.power_sync: debug
-```
-
----
-
-## Services
-
-| Service | Description |
-|---------|-------------|
-| `power_sync.sync_tou_schedule` | Sync TOU tariff to battery |
-| `power_sync.sync_now` | Refresh all data |
-| `power_sync.force_charge` | Force charge (`duration_minutes`) |
-| `power_sync.force_discharge` | Force discharge (`duration_minutes`) |
-| `power_sync.restore_normal` | Restore normal operation |
-| `power_sync.set_backup_reserve` | Set backup reserve (`backup_reserve` 0-100) |
-| `power_sync.curtail_inverter` | Curtail AC inverter to zero export |
-| `power_sync.restore_inverter` | Restore AC inverter |
-
-See the [wiki](https://github.com/bolagnaise/PowerSync/wiki) for the full services reference including Tesla, Sungrow, and FoxESS-specific services.
 
 ---
 
