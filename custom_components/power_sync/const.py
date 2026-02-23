@@ -16,7 +16,7 @@ except (FileNotFoundError, json.JSONDecodeError):
     POWER_SYNC_VERSION = "0.0.0"
 
 # Dashboard JS version — bump this to cache-bust the strategy JS independently of the app version
-DASHBOARD_JS_VERSION = "2"
+DASHBOARD_JS_VERSION = "3"
 
 # User-Agent for API identification
 POWER_SYNC_USER_AGENT = f"PowerSync/{POWER_SYNC_VERSION} HomeAssistant"
@@ -739,6 +739,7 @@ SENSOR_TYPE_DAILY_GRID_IMPORT = "daily_grid_import"
 SENSOR_TYPE_DAILY_GRID_EXPORT = "daily_grid_export"
 SENSOR_TYPE_DAILY_BATTERY_CHARGE = "daily_battery_charge"
 SENSOR_TYPE_DAILY_BATTERY_DISCHARGE = "daily_battery_discharge"
+SENSOR_TYPE_DAILY_LOAD = "daily_load"
 
 # Demand charge sensors
 SENSOR_TYPE_GRID_IMPORT_POWER = "grid_import_power"

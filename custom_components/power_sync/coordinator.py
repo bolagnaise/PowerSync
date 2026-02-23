@@ -1108,6 +1108,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         self.session = async_get_clientsession(hass)
         self._site_info_cache = None  # Cache site_info since timezone doesn't change
         self._site_info_fetch_failed = False  # Negative cache to avoid retrying on every sync cycle
+        self._energy_acc = EnergyAccumulator(hass, "tesla")
 
         # Determine API base URL based on provider
         if api_provider == TESLA_PROVIDER_FLEET_API:
@@ -1145,6 +1146,9 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from Tesla API (Teslemetry or Fleet API)."""
+        if not self._energy_acc._last_update:
+            await self._energy_acc.async_restore()
+
         current_token = self._get_current_token()
         headers = {
             "Authorization": f"Bearer {current_token}",
@@ -1185,14 +1189,23 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                     pass
 
             # Map Teslemetry API response to our data structure
+            solar_kw = live_status.get("solar_power", 0) / 1000
+            grid_kw = live_status.get("grid_power", 0) / 1000
+            battery_kw = live_status.get("battery_power", 0) / 1000
+            load_kw = (live_status.get("load_power", 0) / 1000) - ev_power_kw
+
+            # Accumulate daily energy from power readings
+            self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw)
+
             energy_data = {
-                "solar_power": live_status.get("solar_power", 0) / 1000,  # Convert W to kW
-                "grid_power": live_status.get("grid_power", 0) / 1000,
-                "battery_power": live_status.get("battery_power", 0) / 1000,
-                "load_power": (live_status.get("load_power", 0) / 1000) - ev_power_kw,
+                "solar_power": solar_kw,
+                "grid_power": grid_kw,
+                "battery_power": battery_kw,
+                "load_power": load_kw,
                 "battery_level": live_status.get("percentage_charged", 0),
                 "ev_power": ev_power_kw,
                 "last_update": dt_util.utcnow(),
+                "energy_summary": self._energy_acc.as_dict(),
             }
 
             return energy_data
@@ -1776,6 +1789,7 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
         self.port = port
         self.slave_id = slave_id
         self._controller = SigenergyController(host, port, slave_id)
+        self._energy_acc = EnergyAccumulator(hass, "sigenergy")
 
         super().__init__(
             hass,
@@ -1786,6 +1800,8 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from Sigenergy system via Modbus."""
+        if not self._energy_acc._last_update:
+            await self._energy_acc.async_restore()
         try:
             status = await self._controller.get_status()
 
@@ -1809,6 +1825,9 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
             # Simplified: Load = Solar + Grid + Battery (all with proper signs)
             load_kw = solar_kw + grid_kw + battery_kw
 
+            # Accumulate daily energy from power readings
+            self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw)
+
             energy_data = {
                 "solar_power": solar_kw,  # kW
                 "grid_power": grid_kw,  # kW, positive = importing, negative = exporting
@@ -1824,6 +1843,7 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
                 # Battery health data
                 "battery_soh": attrs.get("battery_soh"),  # % State of Health
                 "battery_capacity_kwh": attrs.get("battery_capacity_kwh"),  # kWh rated capacity
+                "energy_summary": self._energy_acc.as_dict(),
             }
 
             _LOGGER.debug(
@@ -2498,6 +2518,7 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
             host=host, port=port, comm_addr=comm_addr
         )
         self._connected = False
+        self._energy_acc = EnergyAccumulator(hass, "goodwe")
 
         super().__init__(
             hass,
@@ -2508,6 +2529,8 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from GoodWe inverter."""
+        if not self._energy_acc._last_update:
+            await self._energy_acc.async_restore()
         try:
             if not self._connected:
                 await self._controller.connect()
@@ -2515,11 +2538,19 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
 
             data = await self._controller.get_runtime_data()
 
+            solar_kw = data["solar_power"]
+            grid_kw = data["grid_power"]
+            battery_kw = data["battery_power"]
+            load_kw = data["load_power"]
+
+            # Accumulate daily energy from power readings
+            self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw)
+
             energy_data = {
-                "solar_power": data["solar_power"],
-                "grid_power": data["grid_power"],
-                "battery_power": data["battery_power"],
-                "load_power": data["load_power"],
+                "solar_power": solar_kw,
+                "grid_power": grid_kw,
+                "battery_power": battery_kw,
+                "load_power": load_kw,
                 "battery_level": data["battery_level"],
                 "last_update": dt_util.utcnow(),
                 # GoodWe-specific
@@ -2528,6 +2559,7 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
                 "model_name": data.get("model_name"),
                 "serial_number": data.get("serial_number"),
                 "rated_power_w": data.get("rated_power_w"),
+                "energy_summary": self._energy_acc.as_dict(),
             }
 
             _LOGGER.debug(

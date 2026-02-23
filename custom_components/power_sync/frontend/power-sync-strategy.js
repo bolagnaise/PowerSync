@@ -588,6 +588,26 @@ class PowerSyncStrategy {
       center.push(_combinedEnergyChart(e, hasE('home_load')));
     }
 
+    // --- Center Column: Daily Energy Summary ---
+    if (hasE('daily_solar_energy')) {
+      const dailyEntities = [
+        { entity: e('daily_solar_energy'), name: 'Solar', icon: 'mdi:solar-power' },
+        { entity: e('daily_grid_import'), name: 'Grid Import', icon: 'mdi:transmission-tower-import' },
+        { entity: e('daily_grid_export'), name: 'Grid Export', icon: 'mdi:transmission-tower-export' },
+        { entity: e('daily_battery_charge'), name: 'Battery Charge', icon: 'mdi:battery-charging' },
+        { entity: e('daily_battery_discharge'), name: 'Battery Discharge', icon: 'mdi:battery-arrow-down' },
+      ];
+      if (hasE('daily_load')) {
+        dailyEntities.push({ entity: e('daily_load'), name: 'Home Consumption', icon: 'mdi:home-lightning-bolt' });
+      }
+      center.push({
+        type: 'entities',
+        title: 'Daily Energy (kWh)',
+        show_header_toggle: false,
+        entities: dailyEntities,
+      });
+    }
+
     // --- Left Column: Demand Charge ---
     if (hasE('in_demand_charge_period')) {
       left.push(_demandCharge(e));
