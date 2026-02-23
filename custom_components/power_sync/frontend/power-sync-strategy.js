@@ -388,56 +388,24 @@ class PowerSyncLayout extends HTMLElement {
     style.textContent = `
       :host {
         display: block;
-        height: 100%;
-        overflow: hidden;
-        box-sizing: border-box;
       }
       .grid {
         display: grid;
         grid-template-columns: 1fr 1.2fr 1fr;
-        grid-template-rows: 1fr;
         gap: 8px;
         padding: 4px 8px;
-        height: 100%;
-        box-sizing: border-box;
-        overflow: hidden;
+        align-items: start;
       }
       .column {
         display: flex;
         flex-direction: column;
         gap: 4px;
-        min-height: 0;
-        overflow: hidden;
-      }
-      .card-wrap {
-        flex: 0 0 auto;
-        min-height: 0;
-        overflow: hidden;
-      }
-      .card-wrap.fill {
-        flex: 1 1 0;
-        min-height: 60px;
-        overflow: hidden;
-      }
-      .card-wrap.fill > * {
-        height: 100% !important;
-        min-height: 0 !important;
-        overflow: hidden !important;
       }
       @media (max-width: 1024px) {
-        .grid {
-          grid-template-columns: 1fr 1fr;
-          grid-template-rows: auto;
-        }
-        :host { height: auto; overflow: auto; }
+        .grid { grid-template-columns: 1fr 1fr; }
       }
       @media (max-width: 600px) {
-        .grid {
-          grid-template-columns: 1fr;
-          grid-template-rows: auto;
-        }
-        :host { height: auto; overflow: auto; }
-        .card-wrap.fill { flex: 0 0 auto; }
+        .grid { grid-template-columns: 1fr; }
       }
     `;
     root.appendChild(style);
@@ -448,21 +416,11 @@ class PowerSyncLayout extends HTMLElement {
     let helpers;
     try { helpers = await window.loadCardHelpers(); } catch (_) {}
 
-    const FLEX_TYPES = new Set([
-      'custom:apexcharts-card',
-      'custom:power-sync-chart',
-      'custom:power-flow-card-plus',
-    ]);
-
     for (const columnCards of (this._config.columns || [])) {
       const col = document.createElement('div');
       col.className = 'column';
 
       for (const cardConfig of columnCards) {
-        const wrap = document.createElement('div');
-        wrap.className = FLEX_TYPES.has(cardConfig.type)
-          ? 'card-wrap fill' : 'card-wrap';
-
         let card;
         try {
           card = helpers
@@ -476,8 +434,7 @@ class PowerSyncLayout extends HTMLElement {
 
         if (this._hass) card.hass = this._hass;
         this._cards.push(card);
-        wrap.appendChild(card);
-        col.appendChild(wrap);
+        col.appendChild(card);
       }
 
       grid.appendChild(col);
@@ -1036,7 +993,7 @@ function _priceChart(e) {
       },
     ],
     apex_config: {
-      chart: { height: '100%' },
+      chart: { height: 160 },
       stroke: { curve: 'smooth' },
       legend: { show: true, position: 'bottom' },
       tooltip: {
@@ -1484,7 +1441,7 @@ function _combinedEnergyChart(e, hasHome) {
     yaxis: [{ id: 'y', decimals: 1 }],
     series,
     apex_config: {
-      chart: { height: '100%' },
+      chart: { height: 200 },
       legend: { show: true, position: 'bottom' },
       stroke: { curve: 'smooth' },
     },
