@@ -17701,6 +17701,17 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.error(f"Error stopping WebSocket client: {e}")
 
+    # Flush energy accumulator so the next restore has the latest values
+    # (prevents total_increasing sensors from going backwards after reload)
+    for coord_key in ("tesla_coordinator", "sigenergy_coordinator", "sungrow_coordinator",
+                      "foxess_coordinator", "goodwe_coordinator"):
+        coord = entry_data.get(coord_key)
+        if coord and hasattr(coord, "_energy_acc"):
+            try:
+                await coord._energy_acc.async_flush()
+            except Exception as e:
+                _LOGGER.debug("Failed to flush energy accumulator for %s: %s", coord_key, e)
+
     # Unload platforms
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 

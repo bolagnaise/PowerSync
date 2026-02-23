@@ -95,6 +95,16 @@ class EnergyAccumulator:
                 stored_date, today,
             )
 
+    async def async_flush(self) -> None:
+        """Immediately write current energy data to persistent storage.
+
+        Called during integration unload so the next restore gets the latest
+        values, preventing total_increasing sensors from going backwards.
+        """
+        if not self._store:
+            return
+        await self._store.async_save(self._data_to_save())
+
     def _schedule_save(self) -> None:
         """Schedule a coalesced write of energy data to persistent storage."""
         if not self._store:
