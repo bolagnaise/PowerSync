@@ -15,34 +15,363 @@
  *     entity_prefix: "power_sync"   # override entity prefix (default: auto-detect)
  */
 
+// ─── PowerSyncChart Custom Element ──────────────────────────────
+// Self-contained SVG chart that reads data from HA entity attributes.
+// Replaces apexcharts-card data_generator usage (broken in apexcharts v2.2.0+).
+// Two modes: 'tou' (24h schedule) and 'forecast' (48h from entity arrays).
+
+class PowerSyncChart extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this._config = null;
+    this._hass = null;
+  }
+
+  setConfig(config) {
+    this._config = config;
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._render();
+  }
+
+  getCardSize() {
+    return 4;
+  }
+
+  _render() {
+    if (!this._config || !this._hass) return;
+
+    const config = this._config;
+    const hass = this._hass;
+    const mode = config.mode || 'forecast';
+
+    // Gather all series data
+    let allSeries;
+    if (mode === 'tou') {
+      allSeries = this._getTouData(config, hass);
+    } else {
+      allSeries = this._getForecastData(config, hass);
+    }
+
+    // Compute chart dimensions
+    const W = 600, H = 220;
+    const pad = { top: 30, right: 20, bottom: 50, left: 55 };
+    const chartW = W - pad.left - pad.right;
+    const chartH = H - pad.top - pad.bottom;
+
+    // Compute x-axis range
+    let xMin = Infinity, xMax = -Infinity;
+    for (const s of allSeries) {
+      for (const [t] of s.data) {
+        if (t < xMin) xMin = t;
+        if (t > xMax) xMax = t;
+      }
+    }
+    if (!isFinite(xMin) || !isFinite(xMax) || xMin === xMax) {
+      xMin = Date.now();
+      xMax = xMin + 3600000;
+    }
+
+    // Compute y-axis range
+    const yMultiplier = config.yMultiplier || 1;
+    let rawMin = Infinity, rawMax = -Infinity;
+    for (const s of allSeries) {
+      for (const [, v] of s.data) {
+        const scaled = v * yMultiplier;
+        if (scaled < rawMin) rawMin = scaled;
+        if (scaled > rawMax) rawMax = scaled;
+      }
+    }
+    if (!isFinite(rawMin)) { rawMin = 0; rawMax = 1; }
+    if (rawMin === rawMax) { rawMin -= 1; rawMax += 1; }
+
+    // Apply explicit yMin if set
+    if (config.yMin !== undefined) rawMin = config.yMin * yMultiplier;
+
+    // Nice tick calculation
+    const yRange = rawMax - rawMin;
+    const tickTarget = 5;
+    const rawStep = yRange / tickTarget;
+    const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+    const residual = rawStep / mag;
+    let niceStep;
+    if (residual <= 1.5) niceStep = 1 * mag;
+    else if (residual <= 3) niceStep = 2 * mag;
+    else if (residual <= 7) niceStep = 5 * mag;
+    else niceStep = 10 * mag;
+
+    const yMin = Math.floor(rawMin / niceStep) * niceStep;
+    const yMax = Math.ceil(rawMax / niceStep) * niceStep;
+    const ticks = [];
+    for (let v = yMin; v <= yMax + niceStep * 0.01; v += niceStep) {
+      ticks.push(Math.round(v * 1000) / 1000);
+    }
+
+    // Coordinate transforms
+    const xScale = (t) => pad.left + ((t - xMin) / (xMax - xMin)) * chartW;
+    const yScale = (v) => pad.top + chartH - ((v - yMin) / (yMax - yMin)) * chartH;
+
+    // Build SVG content
+    let svg = '';
+
+    // Grid lines
+    for (const tick of ticks) {
+      const y = yScale(tick);
+      svg += `<line x1="${pad.left}" y1="${y}" x2="${W - pad.right}" y2="${y}" stroke="var(--divider-color, #e0e0e0)" stroke-width="0.5" stroke-dasharray="4,3"/>`;
+      const label = config.yUnit === '¢'
+        ? tick.toFixed(tick === Math.round(tick) ? 0 : 1) + '¢'
+        : tick.toFixed(tick === Math.round(tick) ? 0 : 1) + ' ' + (config.yUnit || '');
+      svg += `<text x="${pad.left - 8}" y="${y + 4}" text-anchor="end" font-size="11" fill="var(--secondary-text-color, #888)">${label}</text>`;
+    }
+
+    // X-axis labels
+    const spanHours = (xMax - xMin) / 3600000;
+    let xTickInterval;
+    if (spanHours <= 6) xTickInterval = 1;
+    else if (spanHours <= 12) xTickInterval = 2;
+    else if (spanHours <= 24) xTickInterval = 3;
+    else if (spanHours <= 36) xTickInterval = 6;
+    else xTickInterval = 8;
+
+    const startDate = new Date(xMin);
+    const firstHour = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate(), Math.ceil(startDate.getHours() / xTickInterval) * xTickInterval);
+    for (let t = firstHour.getTime(); t <= xMax; t += xTickInterval * 3600000) {
+      const x = xScale(t);
+      if (x < pad.left || x > W - pad.right) continue;
+      const d = new Date(t);
+      let label;
+      if (spanHours > 24) {
+        const day = d.toLocaleDateString([], { weekday: 'short' });
+        label = day + ' ' + String(d.getHours()).padStart(2, '0') + ':00';
+      } else {
+        label = String(d.getHours()).padStart(2, '0') + ':00';
+      }
+      svg += `<line x1="${x}" y1="${pad.top}" x2="${x}" y2="${pad.top + chartH}" stroke="var(--divider-color, #e0e0e0)" stroke-width="0.3"/>`;
+      svg += `<text x="${x}" y="${H - pad.bottom + 18}" text-anchor="middle" font-size="10" fill="var(--secondary-text-color, #888)">${label}</text>`;
+    }
+
+    // Chart border
+    svg += `<rect x="${pad.left}" y="${pad.top}" width="${chartW}" height="${chartH}" fill="none" stroke="var(--divider-color, #e0e0e0)" stroke-width="0.5"/>`;
+
+    // Series paths
+    for (const series of allSeries) {
+      if (series.data.length === 0) continue;
+      const step = config.stepLine;
+      let pathD = '';
+
+      for (let i = 0; i < series.data.length; i++) {
+        const [t, v] = series.data[i];
+        const x = xScale(t);
+        const y = yScale(v * yMultiplier);
+        if (i === 0) {
+          pathD += `M${x},${y}`;
+        } else if (step) {
+          const prevX = xScale(series.data[i - 1][0]);
+          const prevY = yScale(series.data[i - 1][1] * yMultiplier);
+          pathD += `H${x}V${y}`;
+        } else {
+          pathD += `L${x},${y}`;
+        }
+      }
+
+      // Fill area if requested
+      if (series.fill) {
+        const baseline = yScale(Math.max(0, yMin));
+        const first = series.data[0];
+        const last = series.data[series.data.length - 1];
+        const fillD = pathD + `L${xScale(last[0])},${baseline}L${xScale(first[0])},${baseline}Z`;
+        svg += `<path d="${fillD}" fill="${series.color}" opacity="0.2"/>`;
+      }
+
+      // Stroke
+      svg += `<path d="${pathD}" fill="none" stroke="${series.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+    }
+
+    // "Now" marker line for forecast mode
+    if (mode === 'forecast') {
+      const nowX = xScale(Date.now());
+      if (nowX >= pad.left && nowX <= W - pad.right) {
+        svg += `<line x1="${nowX}" y1="${pad.top}" x2="${nowX}" y2="${pad.top + chartH}" stroke="var(--primary-color, #03a9f4)" stroke-width="1" stroke-dasharray="4,2" opacity="0.6"/>`;
+        svg += `<text x="${nowX}" y="${pad.top - 4}" text-anchor="middle" font-size="9" fill="var(--primary-color, #03a9f4)">Now</text>`;
+      }
+    }
+
+    // Title
+    const title = config.title || '';
+    svg += `<text x="${W / 2}" y="16" text-anchor="middle" font-size="13" font-weight="600" fill="var(--primary-text-color, #333)">${this._escSvg(title)}</text>`;
+
+    // Legend
+    const legendY = H - 8;
+    const legendItems = allSeries.map(s => ({ name: s.name, color: s.color }));
+    const legendTotalWidth = legendItems.length * 90;
+    let legendX = (W - legendTotalWidth) / 2;
+    for (const item of legendItems) {
+      svg += `<rect x="${legendX}" y="${legendY - 8}" width="12" height="3" rx="1.5" fill="${item.color}"/>`;
+      svg += `<text x="${legendX + 16}" y="${legendY - 4}" font-size="11" fill="var(--secondary-text-color, #888)">${this._escSvg(item.name)}</text>`;
+      legendX += 90;
+    }
+
+    this.shadowRoot.innerHTML = `
+      <style>
+        :host {
+          display: block;
+        }
+        .card {
+          background: var(--ha-card-background, var(--card-background-color, white));
+          border-radius: var(--ha-card-border-radius, 12px);
+          box-shadow: var(--ha-card-box-shadow, 0 2px 6px rgba(0,0,0,0.1));
+          padding: 12px;
+          overflow: hidden;
+        }
+        svg {
+          width: 100%;
+          height: auto;
+        }
+        .no-data {
+          text-align: center;
+          color: var(--secondary-text-color, #888);
+          padding: 24px 0;
+          font-size: 14px;
+        }
+      </style>
+      <div class="card">
+        ${allSeries.every(s => s.data.length === 0)
+          ? `<div class="no-data">${this._escHtml(title)}<br>No data available</div>`
+          : `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">${svg}</svg>`
+        }
+      </div>
+    `;
+  }
+
+  _getTouData(config, hass) {
+    const entityId = config.entity;
+    const stateObj = entityId ? hass.states[entityId] : null;
+    if (!stateObj) return (config.series || []).map(s => ({ name: s.name, color: s.color, fill: false, data: [] }));
+
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const currentDow = now.getDay();
+    const endOfDay = today.getTime() + 24 * 3600000 - 1;
+
+    return (config.series || []).map(s => {
+      const key = s.key;
+      let data = [];
+
+      // Format 1: schedule array with {time, buy, sell}
+      const schedule = stateObj.attributes?.schedule;
+      if (Array.isArray(schedule) && schedule.length > 0) {
+        data = schedule.map(entry => {
+          const [hours, mins] = String(entry.time).split(':').map(Number);
+          const ts = today.getTime() + hours * 3600000 + (mins || 0) * 60000;
+          return [ts, entry[key] || 0];
+        });
+        if (data.length > 0) {
+          data.push([endOfDay, data[data.length - 1][1]]);
+        }
+        return { name: s.name, color: s.color, fill: false, data };
+      }
+
+      // Format 2: tou_schedule array with periods and windows
+      const touSchedule = stateObj.attributes?.tou_schedule;
+      if (Array.isArray(touSchedule) && touSchedule.length > 0) {
+        const hourlyPrices = new Array(24).fill(null);
+        touSchedule.forEach(period => {
+          const windows = period.windows || [];
+          windows.forEach(w => {
+            if (currentDow >= w.from_day && currentDow <= w.to_day) {
+              const fromHour = w.from_hour || 0;
+              const toHour = w.to_hour || 24;
+              if (fromHour <= toHour) {
+                for (let h = fromHour; h < toHour && h < 24; h++) {
+                  hourlyPrices[h] = period[key];
+                }
+              } else {
+                for (let h = fromHour; h < 24; h++) hourlyPrices[h] = period[key];
+                for (let h = 0; h < toHour; h++) hourlyPrices[h] = period[key];
+              }
+            }
+          });
+        });
+        const defaultPrice = stateObj.attributes?.[key + '_price'] || touSchedule[0]?.[key] || 0;
+        for (let h = 0; h < 24; h++) {
+          if (hourlyPrices[h] === null) hourlyPrices[h] = defaultPrice;
+          data.push([today.getTime() + h * 3600000, hourlyPrices[h]]);
+        }
+        data.push([endOfDay, hourlyPrices[23]]);
+        return { name: s.name, color: s.color, fill: false, data };
+      }
+
+      // Format 3: flat price attribute
+      const price = stateObj.attributes?.[key + '_price'];
+      if (price !== undefined) {
+        data = [
+          [today.getTime(), price],
+          [endOfDay, price],
+        ];
+      }
+
+      return { name: s.name, color: s.color, fill: false, data };
+    });
+  }
+
+  _getForecastData(config, hass) {
+    const interval = (config.intervalMinutes || 5) * 60 * 1000;
+    const now = Date.now();
+    const start = Math.floor(now / interval) * interval;
+
+    return (config.series || []).map(s => {
+      const stateObj = s.entity ? hass.states[s.entity] : null;
+      const attr = s.attribute || 'forecast_values_kw';
+      const values = stateObj?.attributes?.[attr];
+      let data = [];
+      if (Array.isArray(values)) {
+        data = values.map((v, i) => [start + i * interval, v]);
+      }
+      return { name: s.name, color: s.color, fill: !!s.fill, data };
+    });
+  }
+
+  _escSvg(str) {
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  _escHtml(str) {
+    return this._escSvg(str);
+  }
+}
+
+if (!customElements.get('power-sync-chart')) {
+  customElements.define('power-sync-chart', PowerSyncChart);
+}
+
+// ─── Dashboard Strategy ─────────────────────────────────────────
+
 class PowerSyncStrategy {
   static async generate(config, hass) {
-    // Check for required HACS frontend dependencies
+    // Wait for HACS custom elements (async loading race condition fix).
+    // Instead of synchronous customElements.get(), we use whenDefined() with timeout.
     const requiredCards = [
       { element: 'button-card', name: 'button-card', hacs: 'custom-button-card' },
       { element: 'apexcharts-card', name: 'apexcharts-card', hacs: 'apexcharts-card' },
       { element: 'power-flow-card-plus', name: 'power-flow-card-plus', hacs: 'power-flow-card-plus' },
     ];
-    const missing = requiredCards.filter(c => !customElements.get(c.element));
-    if (missing.length > 0) {
-      return {
-        views: [{
-          title: 'Energy Dashboard',
-          path: 'energy',
-          icon: 'mdi:lightning-bolt',
-          cards: [{
-            type: 'markdown',
-            title: 'PowerSync Dashboard — Missing Dependencies',
-            content:
-              '## Required HACS Frontend Cards\n\n' +
-              'The PowerSync dashboard requires these custom cards to be installed via [HACS](https://hacs.xyz/):\n\n' +
-              missing.map(c => `- **${c.name}** — search "${c.hacs}" in HACS Frontend`).join('\n') + '\n\n' +
-              'Also recommended: **card-mod** (for styling)\n\n' +
-              'After installing, **refresh your browser** (Ctrl+Shift+R / Cmd+Shift+R).',
-          }],
-        }],
-      };
-    }
+
+    const timeout = (ms) => new Promise(r => setTimeout(() => r(false), ms));
+    const loaded = {};
+    await Promise.all(requiredCards.map(async c => {
+      loaded[c.element] = await Promise.race([
+        customElements.whenDefined(c.element).then(() => true),
+        timeout(10000),
+      ]);
+    }));
+
+    const missing = requiredCards.filter(c => !loaded[c.element]);
+    const hasApex = loaded['apexcharts-card'] !== false;
+    const hasButton = loaded['button-card'] !== false;
+    const hasFlowCard = loaded['power-flow-card-plus'] !== false;
 
     // Entity resolver — tries power_sync_ prefixed first, then bare name.
     // Handles mixed installs where some entities have the prefix and others don't.
@@ -71,27 +400,27 @@ class PowerSyncStrategy {
       cards.push(_priceGauges(e));
     }
 
-    // --- Battery Controls (always show if integration has battery sensors) ---
-    if (hasE('battery_level') || hasE('battery_power')) {
+    // --- Battery Controls (requires button-card) ---
+    if (hasButton && (hasE('battery_level') || hasE('battery_power'))) {
       cards.push(_batteryControls());
     }
 
-    // --- Optimizer Status ---
-    if (hasE('optimization_status')) {
+    // --- Optimizer Status (requires button-card) ---
+    if (hasButton && hasE('optimization_status')) {
       cards.push(_optimizerStatus(e));
     }
 
-    // --- Power Flow ---
-    if (hasE('solar_power')) {
+    // --- Power Flow (requires power-flow-card-plus) ---
+    if (hasFlowCard && hasE('solar_power')) {
       cards.push(_powerFlow(e));
     }
 
-    // --- Price Chart (Amber/Octopus 24h) ---
-    if (hasE('current_import_price')) {
+    // --- Price Chart (Amber/Octopus 24h) — entity-history, requires apexcharts ---
+    if (hasApex && hasE('current_import_price')) {
       cards.push(_priceChart(e));
     }
 
-    // --- TOU Schedule ---
+    // --- TOU Schedule (uses PowerSyncChart — no apexcharts dependency) ---
     if (hasE('tariff_schedule')) {
       cards.push(_touSchedule(e));
     }
@@ -101,21 +430,21 @@ class PowerSyncStrategy {
       cards.push(_lpForecastSummary(e));
     }
 
-    // --- LP Forecast Charts ---
+    // --- LP Forecast Charts (uses PowerSyncChart — no apexcharts dependency) ---
     if (hasE('lp_solar_forecast')) {
       cards.push(_lpSolarLoadChart(e));
       cards.push(_lpPriceChart(e));
     }
 
-    // --- Curtailment Status ---
+    // --- Curtailment Status (requires button-card) ---
     const hasDC = hasE('solar_curtailment');
     const hasAC = hasE('inverter_status');
-    if (hasDC || hasAC) {
+    if (hasButton && (hasDC || hasAC)) {
       cards.push(_curtailmentStatus(e, hasDC, hasAC));
     }
 
-    // --- AC Inverter Controls ---
-    if (hasAC) {
+    // --- AC Inverter Controls (requires button-card) ---
+    if (hasButton && hasAC) {
       cards.push(_acInverterControls(e));
     }
 
@@ -124,18 +453,18 @@ class PowerSyncStrategy {
       cards.push(_foxessSensors(e));
     }
 
-    // --- Battery Health ---
-    if (hasE('battery_health')) {
+    // --- Battery Health (requires button-card) ---
+    if (hasButton && hasE('battery_health')) {
       cards.push(_batteryHealth(e));
     }
 
-    // --- Energy Charts ---
-    if (hasE('solar_power')) {
+    // --- Energy Charts (entity-history, requires apexcharts) ---
+    if (hasApex && hasE('solar_power')) {
       cards.push(_energyChart('Solar', e('solar_power'), '#FFD700', { yaxis: { min: 0 } }));
       cards.push(_energyChart('Battery', e('battery_power'), '#2196F3', {}));
       cards.push(_energyChart('Grid', e('grid_power'), '#F44336', {}));
     }
-    if (hasE('home_load')) {
+    if (hasApex && hasE('home_load')) {
       cards.push(_energyChart('Home', e('home_load'), '#9C27B0', { yaxis: { min: 0 } }));
     }
 
@@ -152,6 +481,17 @@ class PowerSyncStrategy {
     // --- Flow Power ---
     if (hasE('flow_power_price')) {
       cards.push(_flowPower(e));
+    }
+
+    // --- Missing dependency warning (graceful degradation) ---
+    if (missing.length > 0) {
+      cards.push({
+        type: 'markdown',
+        content:
+          '**Note:** Some dashboard cards are hidden because these HACS frontend dependencies were not detected:\n\n' +
+          missing.map(c => `- **${c.name}** — search "${c.hacs}" in HACS Frontend`).join('\n') + '\n\n' +
+          'Install them via [HACS](https://hacs.xyz/) and refresh your browser.',
+      });
     }
 
     return {
@@ -536,118 +876,18 @@ function _priceChart(e) {
 }
 
 function _touSchedule(e) {
-  const touEntity = e('tariff_schedule');
   return {
-    type: 'custom:apexcharts-card',
-    header: { show: true, title: 'TOU Schedule', show_states: false },
-    graph_span: '24h',
-    span: { start: 'day' },
-    yaxis: [{
-      id: 'price',
-      min: 0,
-      apex_config: {
-        tickAmount: 5,
-        labels: {
-          formatter: "EVAL:function(val) { return val.toFixed(0) + '¢'; }",
-        },
-      },
-    }],
+    type: 'custom:power-sync-chart',
+    title: 'TOU Schedule',
+    entity: e('tariff_schedule'),
+    mode: 'tou',
+    stepLine: true,
+    yUnit: '¢',
     series: [
-      {
-        entity: touEntity,
-        name: 'Buy Price',
-        type: 'line',
-        color: '#FF9800',
-        yaxis_id: 'price',
-        stroke_width: 2,
-        curve: 'stepline',
-        extend_to: 'end',
-        data_generator: _touDataGenerator('buy'),
-      },
-      {
-        entity: touEntity,
-        name: 'Sell Price',
-        type: 'line',
-        color: '#4CAF50',
-        yaxis_id: 'price',
-        stroke_width: 2,
-        curve: 'stepline',
-        extend_to: 'end',
-        data_generator: _touDataGenerator('sell'),
-      },
+      { key: 'buy', name: 'Buy Price', color: '#FF9800' },
+      { key: 'sell', name: 'Sell Price', color: '#4CAF50' },
     ],
-    apex_config: {
-      chart: { height: 200 },
-      stroke: { curve: 'stepline' },
-      legend: { show: true, position: 'bottom' },
-      tooltip: {
-        x: { format: 'HH:mm' },
-        y: {
-          formatter: "EVAL:function(value) { if (value === null || value === undefined) return ''; if (Math.abs(value) >= 100) { return '$' + (value / 100).toFixed(2); } return value.toFixed(1) + '¢'; }",
-        },
-      },
-    },
   };
-}
-
-function _touDataGenerator(priceKey) {
-  return `
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const currentDow = now.getDay();
-    let data = [];
-    const schedule = entity?.attributes?.schedule || [];
-    if (schedule.length > 0) {
-      data = schedule.map((entry) => {
-        const [hours, mins] = String(entry.time).split(':').map(Number);
-        const timestamp = new Date(today.getTime() + hours * 3600000 + mins * 60000);
-        return [timestamp.getTime(), entry.${priceKey}];
-      });
-      if (data.length > 0) {
-        const endOfDay = new Date(today.getTime() + 24 * 3600000 - 1);
-        data.push([endOfDay.getTime(), data[data.length - 1][1]]);
-      }
-      return data;
-    }
-    const touSchedule = entity?.attributes?.tou_schedule || [];
-    if (touSchedule.length > 0) {
-      const hourlyPrices = new Array(24).fill(null);
-      touSchedule.forEach((period) => {
-        const windows = period.windows || [];
-        windows.forEach((w) => {
-          if (currentDow >= w.from_day && currentDow <= w.to_day) {
-            const fromHour = w.from_hour || 0;
-            const toHour = w.to_hour || 24;
-            if (fromHour <= toHour) {
-              for (let h = fromHour; h < toHour && h < 24; h++) {
-                hourlyPrices[h] = period.${priceKey};
-              }
-            } else {
-              for (let h = fromHour; h < 24; h++) hourlyPrices[h] = period.${priceKey};
-              for (let h = 0; h < toHour; h++) hourlyPrices[h] = period.${priceKey};
-            }
-          }
-        });
-      });
-      const defaultPrice = entity?.attributes?.${priceKey}_price || touSchedule[0]?.${priceKey} || 0;
-      for (let h = 0; h < 24; h++) {
-        if (hourlyPrices[h] === null) hourlyPrices[h] = defaultPrice;
-        const timestamp = new Date(today.getTime() + h * 3600000);
-        data.push([timestamp.getTime(), hourlyPrices[h]]);
-      }
-      const endOfDay = new Date(today.getTime() + 24 * 3600000 - 1);
-      data.push([endOfDay.getTime(), hourlyPrices[23]]);
-      return data;
-    }
-    const price = entity?.attributes?.${priceKey}_price;
-    if (price !== undefined) {
-      return [
-        [today.getTime(), price],
-        [new Date(today.getTime() + 24 * 3600000 - 1).getTime(), price]
-      ];
-    }
-    return [];
-  `;
 }
 
 function _lpForecastSummary(e) {
@@ -663,127 +903,33 @@ function _lpForecastSummary(e) {
 }
 
 function _lpSolarLoadChart(e) {
-  const forecastDataGen = `
-    const values = entity?.attributes?.forecast_values_kw;
-    if (!values || !Array.isArray(values)) return [];
-    const now = new Date();
-    const interval = 5 * 60 * 1000;
-    const start = new Date(Math.floor(now.getTime() / interval) * interval);
-    return values.map((v, i) => [start.getTime() + i * interval, v]);
-  `;
   return {
-    type: 'custom:apexcharts-card',
-    header: { show: true, title: 'LP Forecast - Solar & Load (48h)', show_states: false },
-    graph_span: '48h',
-    span: { start: 'minute' },
-    yaxis: [{
-      id: 'power',
-      min: 0,
-      apex_config: {
-        tickAmount: 5,
-        labels: {
-          formatter: "EVAL:function(val) { return val.toFixed(1) + ' kW'; }",
-        },
-      },
-    }],
+    type: 'custom:power-sync-chart',
+    title: 'LP Forecast - Solar & Load (48h)',
+    mode: 'forecast',
+    intervalMinutes: 5,
+    yUnit: 'kW',
+    yMin: 0,
     series: [
-      {
-        entity: e('lp_solar_forecast'),
-        name: 'Solar Forecast',
-        type: 'area',
-        color: '#FFD700',
-        yaxis_id: 'power',
-        stroke_width: 2,
-        opacity: 0.3,
-        curve: 'smooth',
-        extend_to: false,
-        data_generator: forecastDataGen,
-      },
-      {
-        entity: e('lp_load_forecast'),
-        name: 'Load Forecast',
-        type: 'line',
-        color: '#9C27B0',
-        yaxis_id: 'power',
-        stroke_width: 2,
-        curve: 'smooth',
-        extend_to: false,
-        data_generator: forecastDataGen,
-      },
+      { entity: e('lp_solar_forecast'), attribute: 'forecast_values_kw', name: 'Solar', color: '#FFD700', fill: true },
+      { entity: e('lp_load_forecast'), attribute: 'forecast_values_kw', name: 'Load', color: '#9C27B0' },
     ],
-    apex_config: {
-      chart: { height: 200 },
-      stroke: { curve: 'smooth' },
-      legend: { show: true, position: 'bottom' },
-      tooltip: {
-        x: { format: 'ddd HH:mm' },
-        y: {
-          formatter: "EVAL:function(value) { if (value === null || value === undefined) return ''; return value.toFixed(2) + ' kW'; }",
-        },
-      },
-    },
   };
 }
 
 function _lpPriceChart(e) {
-  const priceDataGen = `
-    const values = entity?.attributes?.price_values;
-    if (!values || !Array.isArray(values)) return [];
-    const now = new Date();
-    const interval = 5 * 60 * 1000;
-    const start = new Date(Math.floor(now.getTime() / interval) * interval);
-    return values.map((v, i) => [start.getTime() + i * interval, v]);
-  `;
   return {
-    type: 'custom:apexcharts-card',
-    header: { show: true, title: 'LP Forecast - Import & Export Prices (48h)', show_states: false },
-    graph_span: '48h',
-    span: { start: 'minute' },
-    yaxis: [{
-      id: 'price',
-      min: 0,
-      apex_config: {
-        tickAmount: 5,
-        labels: {
-          formatter: "EVAL:function(val) { return (val * 100).toFixed(0) + '¢'; }",
-        },
-      },
-    }],
+    type: 'custom:power-sync-chart',
+    title: 'LP Forecast - Import & Export Prices (48h)',
+    mode: 'forecast',
+    intervalMinutes: 5,
+    stepLine: true,
+    yUnit: '¢',
+    yMultiplier: 100,
     series: [
-      {
-        entity: e('lp_import_price_forecast'),
-        name: 'Import Price',
-        type: 'line',
-        color: '#FF9800',
-        yaxis_id: 'price',
-        stroke_width: 2,
-        curve: 'stepline',
-        extend_to: false,
-        data_generator: priceDataGen,
-      },
-      {
-        entity: e('lp_export_price_forecast'),
-        name: 'Export Price',
-        type: 'line',
-        color: '#4CAF50',
-        yaxis_id: 'price',
-        stroke_width: 2,
-        curve: 'stepline',
-        extend_to: false,
-        data_generator: priceDataGen,
-      },
+      { entity: e('lp_import_price_forecast'), attribute: 'price_values', name: 'Import', color: '#FF9800' },
+      { entity: e('lp_export_price_forecast'), attribute: 'price_values', name: 'Export', color: '#4CAF50' },
     ],
-    apex_config: {
-      chart: { height: 200 },
-      stroke: { curve: 'stepline' },
-      legend: { show: true, position: 'bottom' },
-      tooltip: {
-        x: { format: 'ddd HH:mm' },
-        y: {
-          formatter: "EVAL:function(value) { if (value === null || value === undefined) return ''; const cents = value * 100; if (Math.abs(cents) >= 1000) { return '$' + value.toFixed(2); } return cents.toFixed(1) + '¢'; }",
-        },
-      },
-    },
   };
 }
 
