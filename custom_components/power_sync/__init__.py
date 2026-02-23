@@ -17351,12 +17351,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.http.register_view(OptimizationSettingsView(hass))
     _LOGGER.info("Optimization HTTP endpoints registered at /api/power_sync/optimization")
 
+    # Reload integration when options change (e.g. optimizer toggled in config flow)
+    entry.async_on_unload(entry.add_update_listener(_async_options_update_listener))
+
     _LOGGER.info("=" * 60)
     _LOGGER.info("PowerSync integration setup complete!")
     _LOGGER.info("Domain '%s' registered successfully", DOMAIN)
     _LOGGER.info("Mobile app should now detect the integration")
     _LOGGER.info("=" * 60)
     return True
+
+
+async def _async_options_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Reload integration when options change."""
+    _LOGGER.info("Config entry options updated — reloading PowerSync integration")
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 class OptimizationView(HomeAssistantView):

@@ -88,15 +88,22 @@ class PowerSyncChart extends HTMLElement {
     if (!isFinite(rawMin)) { rawMin = 0; rawMax = 1; }
     if (rawMin === rawMax) { rawMin -= 1; rawMax += 1; }
 
-    // Apply explicit yMin if set
+    // Add 5% padding above max so lines don't touch the top edge
+    const dataRange = rawMax - rawMin;
+    rawMax += dataRange * 0.05;
+
+    // Apply explicit yMin/yMax if set
     if (config.yMin !== undefined) rawMin = config.yMin * yMultiplier;
+    if (config.yMax !== undefined) rawMax = config.yMax * yMultiplier;
 
     // Nice tick calculation
     const yRange = rawMax - rawMin;
     const tickTarget = 5;
     const rawStep = yRange / tickTarget;
-    const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
-    const residual = rawStep / mag;
+    // Guard against zero/negative step (all data identical after padding)
+    const safeStep = rawStep > 0 ? rawStep : 1;
+    const mag = Math.pow(10, Math.floor(Math.log10(safeStep)));
+    const residual = safeStep / mag;
     let niceStep;
     if (residual <= 1.5) niceStep = 1 * mag;
     else if (residual <= 3) niceStep = 2 * mag;
@@ -109,6 +116,8 @@ class PowerSyncChart extends HTMLElement {
     for (let v = yMin; v <= yMax + niceStep * 0.01; v += niceStep) {
       ticks.push(Math.round(v * 1000) / 1000);
     }
+    // Safety: cap at 20 ticks to prevent runaway loops from floating point
+    if (ticks.length > 20) ticks.length = 20;
 
     // Coordinate transforms
     const xScale = (t) => pad.left + ((t - xMin) / (xMax - xMin)) * chartW;
@@ -402,7 +411,7 @@ class PowerSyncStrategy {
     // Entity existence + availability helper
     const has = (id) => {
       const s = hass.states[id];
-      return s && s.state !== 'unavailable';
+      return s && s.state !== 'unavailable' && s.state !== 'unknown';
     };
 
     // Shorthand: resolve then check
@@ -482,7 +491,7 @@ class PowerSyncStrategy {
 
     // --- Center Column: Energy Charts — Solar & Grid ---
     if (hasApex && hasE('solar_power')) {
-      center.push(_energyChart('Solar', e('solar_power'), '#FFD700', { yaxis: { min: 0 } }));
+      center.push(_energyChart('Solar', e('solar_power'), '#FFD700', { min: '~0' }));
       center.push(_energyChart('Grid', e('grid_power'), '#F44336', {}));
     }
 
@@ -491,7 +500,7 @@ class PowerSyncStrategy {
       right.push(_energyChart('Battery', e('battery_power'), '#2196F3', {}));
     }
     if (hasApex && hasE('home_load')) {
-      right.push(_energyChart('Home', e('home_load'), '#9C27B0', { yaxis: { min: 0 } }));
+      right.push(_energyChart('Home', e('home_load'), '#9C27B0', { min: '~0' }));
     }
 
     // --- Left Column: Demand Charge ---
@@ -875,8 +884,9 @@ function _priceChart(e) {
     span: { start: 'day' },
     yaxis: [{
       id: 'price',
-      min: 0,
+      min: '~0',
       apex_config: {
+        forceNiceScale: true,
         tickAmount: 5,
         labels: {
           formatter: "EVAL:function(val) { return (val * 100).toFixed(0) + '¢'; }",
@@ -1337,12 +1347,24 @@ Scan from the PowerSync Mobile app while connected to Powerwall WiFi.
   };
 }
 
-function _energyChart(title, entity, color, extraApex) {
+function _energyChart(title, entity, color, yaxisOpts) {
+  const yaxis = {
+    id: 'y',
+    ...(yaxisOpts || {}),
+    apex_config: {
+      forceNiceScale: true,
+      tickAmount: 4,
+      labels: {
+        formatter: "EVAL:function(val) { return val.toFixed(1) + ' kW'; }",
+      },
+    },
+  };
   return {
     type: 'custom:apexcharts-card',
     header: { show: true, title, show_states: true },
     graph_span: '24h',
     span: { start: 'day' },
+    yaxis: [yaxis],
     series: [{
       entity,
       name: title,
@@ -1350,11 +1372,11 @@ function _energyChart(title, entity, color, extraApex) {
       color,
       stroke_width: 2,
       extend_to: 'now',
+      yaxis_id: 'y',
       group_by: { func: 'avg', duration: '5min' },
     }],
     apex_config: {
       chart: { height: 150 },
-      ...extraApex,
     },
   };
 }
