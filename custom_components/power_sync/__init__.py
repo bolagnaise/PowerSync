@@ -5435,9 +5435,11 @@ class AutomationsView(HomeAssistantView):
 
         try:
             automations = store.get_all()
+            available_vehicles = _get_available_ev_vehicles(self._hass)
             return web.json_response({
                 "success": True,
-                "automations": automations
+                "automations": automations,
+                "available_vehicles": available_vehicles,
             })
         except Exception as e:
             _LOGGER.error(f"Error fetching automations: {e}", exc_info=True)
@@ -6419,6 +6421,63 @@ class EVStatusView(HomeAssistantView):
                 "success": False,
                 "error": str(e)
             }, status=500)
+
+
+def _get_available_ev_vehicles(hass: HomeAssistant) -> list[dict]:
+    """Get lightweight vehicle list for automation vehicle picker."""
+    vehicles = []
+    config = {}
+    entries = hass.config_entries.async_entries(DOMAIN)
+    if entries:
+        config = dict(entries[0].options)
+    ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
+
+    # 1. Tesla Fleet API / Teslemetry — scan device registry for 17-char VIN identifiers
+    if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+        device_registry = dr.async_get(hass)
+        for device in device_registry.devices.values():
+            for identifier in device.identifiers:
+                if identifier[0] in TESLA_INTEGRATIONS:
+                    vin = str(identifier[1])
+                    if len(vin) == 17 and not vin.isdigit():
+                        vehicles.append({
+                            "id": vin,
+                            "display_name": device.name or f"Tesla ({vin[-4:]})",
+                            "source": "fleet_api",
+                        })
+                    break
+
+    # 2. Tesla BLE — resolve prefixes, check status entity exists
+    if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+        ble_prefixes = _resolve_ble_prefixes(hass, config)
+        for prefix in ble_prefixes:
+            status_entity = TESLA_BLE_BINARY_STATUS.format(prefix=prefix)
+            if hass.states.get(status_entity) is not None:
+                ble_id = f"ble_{prefix}"
+                # Skip if already covered by Fleet API (BOTH mode)
+                if not any(v["id"] == ble_id for v in vehicles):
+                    friendly = prefix.replace("_", " ").title()
+                    vehicles.append({
+                        "id": ble_id,
+                        "display_name": f"Tesla BLE ({friendly})",
+                        "source": "tesla_ble",
+                    })
+
+    # 3. BYD — scan device registry
+    if BYD_INTEGRATION in hass.config_entries.async_domains():
+        device_registry = dr.async_get(hass)
+        for device in device_registry.devices.values():
+            for identifier in device.identifiers:
+                if identifier[0] == BYD_INTEGRATION:
+                    device_id = str(identifier[1])
+                    vehicles.append({
+                        "id": f"byd_{device_id}",
+                        "display_name": device.name or f"BYD ({device_id[-4:]})",
+                        "source": "byd_cloud",
+                    })
+                    break
+
+    return vehicles
 
 
 class EVVehiclesView(HomeAssistantView):
