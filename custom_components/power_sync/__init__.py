@@ -7923,6 +7923,7 @@ class VehicleChargingConfigView(HomeAssistantView):
                     "min_amps": data.get("min_amps", 5),
                     "max_amps": data.get("max_amps", 32),
                     "voltage": data.get("voltage", 240),
+                    "phases": data.get("phases", 1),
                     "solar_charging_enabled": data.get("solar_charging_enabled", False),
                     "priority": data.get("priority", 1),
                     "home_battery_minimum": data.get("home_battery_minimum", 80),
@@ -17078,13 +17079,37 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         sorted_configs = sorted(vehicle_configs, key=lambda c: c.get("priority", 999))
                         vc = sorted_configs[0] if sorted_configs else {}
 
+                        # Get phases from vehicle config, falling back to auto-schedule
+                        # settings (the app may store phases in either location)
+                        vc_phases = vc.get("phases")
+                        if vc_phases is None or vc_phases <= 1:
+                            try:
+                                from .automations.ev_charging_planner import get_auto_schedule_executor as _get_exec
+                                _exec = _get_exec()
+                                if _exec:
+                                    for _vid, _settings in _exec._settings.items():
+                                        if _settings.phases > 1:
+                                            vc_phases = _settings.phases
+                                            # Also sync charger params from auto-schedule
+                                            if vc.get("min_amps") is None:
+                                                vc["min_amps"] = _settings.min_charge_amps
+                                            if vc.get("max_amps") is None:
+                                                vc["max_amps"] = _settings.max_charge_amps
+                                            if vc.get("voltage") is None:
+                                                vc["voltage"] = _settings.voltage
+                                            break
+                            except Exception:
+                                pass
+                        if vc_phases is None:
+                            vc_phases = 1
+
                         params = {
                             "dynamic_mode": "solar_surplus",
                             "charger_type": vc.get("charger_type", "tesla"),
                             "min_charge_amps": vc.get("min_amps", 5),
                             "max_charge_amps": vc.get("max_amps", 32),
                             "voltage": vc.get("voltage", 240),
-                            "phases": vc.get("phases", 1),
+                            "phases": vc_phases,
                             "charger_switch_entity": vc.get("charger_switch_entity"),
                             "charger_amps_entity": vc.get("charger_amps_entity"),
                             "ocpp_charger_id": vc.get("ocpp_charger_id"),
@@ -17104,7 +17129,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         if vc.get("display_name"):
                             params["vehicle_name"] = vc["display_name"]
 
-                        _LOGGER.info("☀️ Solar surplus charging enabled in app — starting dynamic solar surplus session")
+                        _LOGGER.info(
+                            f"☀️ Solar surplus charging enabled in app — starting dynamic solar surplus session "
+                            f"(phases={vc_phases}, amps={vc.get('min_amps', 5)}-{vc.get('max_amps', 32)}, "
+                            f"voltage={vc.get('voltage', 240)})"
+                        )
                         await _action_start_ev_charging_dynamic(hass, entry, params, context=None)
 
                     elif not surplus_enabled and surplus_session_active:
