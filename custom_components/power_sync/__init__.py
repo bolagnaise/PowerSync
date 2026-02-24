@@ -13664,13 +13664,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
 
                 # Enable Remote EMS + set discharge mode + set rate
-                result = await controller.force_discharge(power_kw=10.0)
+                power_w = call.data.get("power_w", 0)
+                power_kw = power_w / 1000 if power_w > 0 else 10.0
+                result = await controller.force_discharge(power_kw=power_kw)
                 await controller.disconnect()
 
                 if result:
                     force_discharge_state["active"] = True
                     force_discharge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
-                    _LOGGER.info(f"✅ Sigenergy FORCE DISCHARGE ACTIVE for {duration} minutes")
+                    _LOGGER.info(f"✅ Sigenergy FORCE DISCHARGE ACTIVE for {duration} minutes (power_kw={power_kw})")
 
                     # Dispatch event for switch entity
                     async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
@@ -14237,13 +14239,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_discharge_state["expires_at"] = None
 
                 # Enable Remote EMS + set charge mode + set rate
-                result = await controller.force_charge(power_kw=10.0)
+                power_w = call.data.get("power_w", 0)
+                power_kw = power_w / 1000 if power_w > 0 else 10.0
+                result = await controller.force_charge(power_kw=power_kw)
                 await controller.disconnect()
 
                 if result:
                     force_charge_state["active"] = True
                     force_charge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
-                    _LOGGER.info(f"✅ Sigenergy FORCE CHARGE ACTIVE for {duration} minutes")
+                    _LOGGER.info(f"✅ Sigenergy FORCE CHARGE ACTIVE for {duration} minutes (power_kw={power_kw})")
 
                     # Dispatch event for UI
                     async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
