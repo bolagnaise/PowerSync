@@ -8652,6 +8652,13 @@ class EVWidgetDataView(HomeAssistantView):
             # Calculate current surplus
             surplus_kw = _calculate_solar_surplus(live_status, 0, {"household_buffer_kw": 0.5})
 
+            # Get actual EV power from Tesla Wall Connector API (ground truth)
+            # This prevents showing phantom power when commanded amps > 0 but car isn't
+            # actually charging (e.g. not plugged in, or charge command didn't take effect)
+            actual_ev_power_kw = None  # None = no Tesla data available
+            if tesla_coordinator and tesla_coordinator.data:
+                actual_ev_power_kw = tesla_coordinator.data.get("ev_power", 0)
+
             # Get dynamic EV state
             vehicles = _dynamic_ev_state.get(entry_id, {})
 
@@ -8664,10 +8671,29 @@ class EVWidgetDataView(HomeAssistantView):
                 current_amps = state.get("current_amps", 0)
                 voltage = params.get("voltage", 240)
                 phases = params.get("phases", 1)
-                current_power_kw = (current_amps * voltage * phases) / 1000
+                commanded_power_kw = (current_amps * voltage * phases) / 1000
+
+                # Cross-check with actual Wall Connector power (Tesla systems only)
+                # Commanded amps can be non-zero when car isn't plugged in
+                if actual_ev_power_kw is not None:
+                    # Tesla: use Wall Connector API as ground truth
+                    if actual_ev_power_kw > 0.05:
+                        current_power_kw = commanded_power_kw
+                        actually_charging = True
+                    elif commanded_power_kw > 0:
+                        # Commands sent but car isn't drawing power (not plugged in)
+                        current_power_kw = 0.0
+                        actually_charging = False
+                    else:
+                        current_power_kw = 0.0
+                        actually_charging = False
+                else:
+                    # Non-Tesla: trust commanded amps (no WC API available)
+                    current_power_kw = commanded_power_kw
+                    actually_charging = current_amps > 0
 
                 # Determine charging source
-                if current_amps == 0:
+                if current_amps == 0 or not actually_charging:
                     source = "idle"
                 elif state.get("allocated_surplus_kw", 0) >= current_power_kw * 0.8:
                     source = "solar"
@@ -8694,7 +8720,7 @@ class EVWidgetDataView(HomeAssistantView):
 
                 widget_data.append({
                     "vehicle_name": vehicle_name,
-                    "is_charging": current_amps > 0,
+                    "is_charging": actually_charging,
                     "is_connected": state.get("active", False),
                     "current_soc": current_soc,
                     "target_soc": target_soc,
