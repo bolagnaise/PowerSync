@@ -471,6 +471,23 @@ def _get_ev_config(config_entry: ConfigEntry) -> dict:
     }
 
 
+def _resolve_ble_prefix_for_vehicle(
+    hass: HomeAssistant, config_entry: ConfigEntry, vehicle_vin: str | None
+) -> str:
+    """Get the correct BLE prefix for a specific vehicle.
+
+    If vehicle_vin is a BLE identifier (ble_*), extract the prefix from it.
+    Otherwise fall back to the first configured BLE prefix.
+    """
+    if vehicle_vin and vehicle_vin.startswith("ble_"):
+        return vehicle_vin[4:]  # "ble_joanna_model_3_local" → "joanna_model_3_local"
+
+    # Fall back to first configured prefix
+    raw = config_entry.options.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+    prefixes = [p.strip() for p in raw.split(",") if p.strip()]
+    return prefixes[0] if prefixes else DEFAULT_TESLA_BLE_ENTITY_PREFIX
+
+
 def _is_ble_available(hass: HomeAssistant, ble_prefix: str) -> bool:
     """Check if Tesla BLE entities are available."""
     charger_entity = TESLA_BLE_SWITCH_CHARGER.format(prefix=ble_prefix)
@@ -1484,8 +1501,8 @@ async def _action_start_ev_charging(
     """
     ev_config = _get_ev_config(config_entry)
     ev_provider = ev_config["ev_provider"]
-    ble_prefix = ev_config["ble_prefix"]
     vehicle_vin = params.get("vehicle_vin")
+    ble_prefix = _resolve_ble_prefix_for_vehicle(hass, config_entry, vehicle_vin)
     stop_outside_window = params.get("stop_outside_window", False)
 
     # Get time window from context
@@ -1632,8 +1649,8 @@ async def _action_stop_ev_charging(
 
     ev_config = _get_ev_config(config_entry)
     ev_provider = ev_config["ev_provider"]
-    ble_prefix = ev_config["ble_prefix"]
     vehicle_vin = params.get("vehicle_vin")
+    ble_prefix = _resolve_ble_prefix_for_vehicle(hass, config_entry, vehicle_vin)
 
     # Try Teslemetry Bluetooth first if configured
     if ev_provider in (EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
@@ -1704,8 +1721,8 @@ async def _action_set_ev_charge_limit(
     """
     ev_config = _get_ev_config(config_entry)
     ev_provider = ev_config["ev_provider"]
-    ble_prefix = ev_config["ble_prefix"]
     vehicle_vin = params.get("vehicle_vin")
+    ble_prefix = _resolve_ble_prefix_for_vehicle(hass, config_entry, vehicle_vin)
 
     # Accept multiple parameter names for flexibility
     percent = params.get("percent") or params.get("limit") or params.get("charge_limit_percent")
@@ -1778,8 +1795,8 @@ async def _action_set_ev_charging_amps(
     """
     ev_config = _get_ev_config(config_entry)
     ev_provider = ev_config["ev_provider"]
-    ble_prefix = ev_config["ble_prefix"]
     vehicle_vin = params.get("vehicle_vin")
+    ble_prefix = _resolve_ble_prefix_for_vehicle(hass, config_entry, vehicle_vin)
 
     # Accept both "amps" and "charging_amps" for flexibility
     amps = params.get("amps") or params.get("charging_amps")

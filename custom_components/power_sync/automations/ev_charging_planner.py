@@ -229,9 +229,18 @@ async def get_ev_location(
 
     # Method 2 (fallback): Tesla BLE - if available, vehicle is nearby (assume "home")
     # Only used if no authoritative location found above (e.g. BLE-only users without Teslemetry)
-    if location == "unknown" and vehicle_vin is None:
+    if location == "unknown":
         config = dict(config_entry.options) if config_entry else {}
-        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+
+        if vehicle_vin and vehicle_vin.startswith("ble_"):
+            # Vehicle-specific BLE — check that vehicle's charger entity
+            ble_prefix = vehicle_vin[4:]
+        else:
+            ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+            # Handle comma-separated prefixes — use first one
+            if "," in ble_prefix:
+                ble_prefix = ble_prefix.split(",")[0].strip()
+
         ble_charger_entity = f"switch.{ble_prefix}_charger"
         ble_state = hass.states.get(ble_charger_entity)
 
@@ -413,10 +422,36 @@ async def is_ev_plugged_in(
                         _LOGGER.debug(f"EV plugged in (charging state: {state.state}, VIN: {device_vin})")
                         return True
 
-    # Method 2 (fallback): Tesla BLE — only if no authoritative sensor found above
+    # Method 2 (fallback): Tesla BLE
+    config = dict(config_entry.options) if config_entry else {}
+
+    if vehicle_vin and vehicle_vin.startswith("ble_"):
+        # Vehicle-specific BLE check — extract prefix from BLE identifier
+        ble_prefix = vehicle_vin[4:]  # "ble_joanna_model_3_local" → "joanna_model_3_local"
+        charge_flap_entity = f"binary_sensor.{ble_prefix}_charge_flap"
+        charge_flap_state = hass.states.get(charge_flap_entity)
+        if charge_flap_state:
+            if charge_flap_state.state == "on":
+                _LOGGER.debug(f"Tesla BLE {ble_prefix}: charge flap open → plugged in")
+                return True
+            elif charge_flap_state.state == "off":
+                _LOGGER.debug(f"Tesla BLE {ble_prefix}: charge flap closed → not plugged in")
+                return False
+        # Also check charger switch state as fallback
+        ble_charger_entity = f"switch.{ble_prefix}_charger"
+        ble_state = hass.states.get(ble_charger_entity)
+        if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
+            _LOGGER.debug(f"Tesla BLE {ble_prefix}: charger entity available → assuming plugged in")
+            return True
+        _LOGGER.debug(f"Tesla BLE {ble_prefix}: could not determine plug status")
+        return False
+
     if vehicle_vin is None:
-        config = dict(config_entry.options) if config_entry else {}
+        # No specific vehicle — check first configured BLE prefix (backward compat)
         ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+        # Handle comma-separated prefixes — use first one
+        if "," in ble_prefix:
+            ble_prefix = ble_prefix.split(",")[0].strip()
         ble_charger_entity = f"switch.{ble_prefix}_charger"
         ble_state = hass.states.get(ble_charger_entity)
 
@@ -450,10 +485,25 @@ async def get_ev_battery_level(
     )
     from homeassistant.helpers import entity_registry as er, device_registry as dr
 
-    # Method 1: Tesla BLE (only for non-VIN-specific queries)
+    # Method 1: Tesla BLE
+    if vehicle_vin and vehicle_vin.startswith("ble_"):
+        # Vehicle-specific BLE — extract prefix from BLE identifier
+        ble_prefix = vehicle_vin[4:]
+        ble_battery_entity = f"sensor.{ble_prefix}_battery_level"
+        ble_state = hass.states.get(ble_battery_entity)
+        if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
+            try:
+                return float(ble_state.state)
+            except (ValueError, TypeError):
+                pass
+        return None  # BLE vehicle but no data — don't fall through to Fleet API
+
     if vehicle_vin is None:
         config = dict(config_entry.options) if config_entry else {}
         ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+        # Handle comma-separated prefixes — use first one
+        if "," in ble_prefix:
+            ble_prefix = ble_prefix.split(",")[0].strip()
         ble_battery_entity = f"sensor.{ble_prefix}_battery_level"
         ble_state = hass.states.get(ble_battery_entity)
 
@@ -2659,6 +2709,62 @@ class AutoScheduleExecutor:
         self._current_charge_amps: Dict[str, int] = {}  # {vehicle_id: current_amps}
         self._charge_rate_change_threshold = 2  # Only change rate if diff >= 2 amps
 
+    def _resolve_vehicle_vin(self, vehicle_id: str) -> Optional[str]:
+        """Resolve sequential vehicle_id to actual VIN or BLE identifier.
+
+        The auto-schedule stores vehicle IDs as sequential numbers (e.g. "1", "3").
+        This maps them to the actual VIN or BLE identifier needed by
+        is_ev_plugged_in() and get_ev_location().
+        """
+        from ..const import (
+            CONF_EV_PROVIDER,
+            EV_PROVIDER_FLEET_API,
+            EV_PROVIDER_BOTH,
+            EV_PROVIDER_TESLA_BLE,
+            CONF_TESLA_BLE_ENTITY_PREFIX,
+            DEFAULT_TESLA_BLE_ENTITY_PREFIX,
+        )
+
+        # Already a BLE identifier or VIN — return as-is
+        if vehicle_id and vehicle_id.startswith("ble_"):
+            return vehicle_id
+        if vehicle_id and len(vehicle_id) == 17 and vehicle_id.isalnum():
+            return vehicle_id
+
+        # Resolve sequential number to BLE prefix
+        config = dict(self.config_entry.options) if self.config_entry else {}
+        ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
+
+        vehicle_num = 0
+
+        # Fleet API vehicles numbered first (same order as EVVehiclesView)
+        if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+            from homeassistant.helpers import device_registry as dr
+            device_registry = dr.async_get(self.hass)
+            for device in device_registry.devices.values():
+                for identifier in device.identifiers:
+                    if len(identifier) < 2:
+                        continue
+                    domain = identifier[0]
+                    id_str = str(identifier[1])
+                    if domain in TESLA_INTEGRATIONS and len(id_str) == 17 and not id_str.isdigit():
+                        vehicle_num += 1
+                        if str(vehicle_num) == str(vehicle_id):
+                            return id_str
+                        break
+
+        # BLE vehicles follow fleet vehicles
+        if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+            raw = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+            ble_prefixes = [p.strip() for p in raw.split(",") if p.strip()]
+            for prefix in ble_prefixes:
+                vehicle_num += 1
+                if str(vehicle_num) == str(vehicle_id):
+                    return f"ble_{prefix}"
+
+        _LOGGER.debug(f"Could not resolve vehicle_id {vehicle_id} to VIN/BLE identifier")
+        return None
+
     def _get_ml_ev_schedule(self, vehicle_id: str):
         """
         Get the optimization schedule for a vehicle if available.
@@ -2772,9 +2878,10 @@ class AutoScheduleExecutor:
             )
             return True  # Not an error, just no change needed
 
-        # Set the charge rate
+        # Set the charge rate — resolve to actual VIN/BLE identifier
+        vehicle_vin = self._resolve_vehicle_vin(vehicle_id) if vehicle_id != "_default" else None
         params = {
-            "vehicle_vin": vehicle_id,
+            "vehicle_vin": vehicle_vin,
             "amps": target_amps,
         }
 
@@ -3022,7 +3129,15 @@ class AutoScheduleExecutor:
         if entries:
             config = dict(entries[0].options)
 
-        ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+        # Resolve vehicle-specific BLE prefix if available
+        vehicle_vin = self._resolve_vehicle_vin(vehicle_id)
+        if vehicle_vin and vehicle_vin.startswith("ble_"):
+            ble_prefix = vehicle_vin[4:]
+        else:
+            ble_prefix = config.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+            # Handle comma-separated prefixes — use first one
+            if "," in ble_prefix:
+                ble_prefix = ble_prefix.split(",")[0].strip()
         ble_charge_level_entity = TESLA_BLE_SENSOR_CHARGE_LEVEL.format(prefix=ble_prefix)
         ble_state = self.hass.states.get(ble_charge_level_entity)
 
@@ -3334,8 +3449,12 @@ class AutoScheduleExecutor:
         state = self.get_state(vehicle_id)
         now = datetime.now()
 
+        # Resolve sequential vehicle_id to actual VIN/BLE identifier
+        # so per-vehicle checks work correctly for multi-vehicle setups
+        vehicle_vin = self._resolve_vehicle_vin(vehicle_id)
+
         # Check if vehicle is at home - only charge at home
-        location = await get_ev_location(self.hass, self.config_entry)
+        location = await get_ev_location(self.hass, self.config_entry, vehicle_vin)
         if location not in ("home", "unknown"):
             # Vehicle is away - don't try to charge
             if state.is_charging:
@@ -3347,7 +3466,7 @@ class AutoScheduleExecutor:
             return
 
         # Check if vehicle is plugged in
-        plugged_in = await is_ev_plugged_in(self.hass, self.config_entry)
+        plugged_in = await is_ev_plugged_in(self.hass, self.config_entry, vehicle_vin)
         if not plugged_in:
             if state.is_charging:
                 state.is_charging = False
@@ -4228,11 +4347,9 @@ class AutoScheduleExecutor:
         else:
             dynamic_mode = "battery_target"
 
-        # Only pass vehicle_vin if it looks like a valid VIN (17 chars)
-        # Otherwise use None to let the system find the default vehicle
-        vehicle_vin = None
-        if vehicle_id and vehicle_id != "_default" and len(vehicle_id) == 17:
-            vehicle_vin = vehicle_id
+        # Resolve vehicle_id to actual VIN or BLE identifier
+        # Sequential IDs (e.g. "1", "3") are mapped to BLE identifiers or VINs
+        vehicle_vin = self._resolve_vehicle_vin(vehicle_id) if vehicle_id != "_default" else None
 
         params = {
             "vehicle_vin": vehicle_vin,
@@ -4279,12 +4396,10 @@ class AutoScheduleExecutor:
         """Stop charging for the vehicle."""
         from .actions import _action_stop_ev_charging_dynamic
 
-        # Only pass vehicle_id if it looks like a valid VIN (17 chars)
-        vid = None
-        if vehicle_id and vehicle_id != "_default" and len(vehicle_id) == 17:
-            vid = vehicle_id
+        # Resolve vehicle_id to actual VIN or BLE identifier
+        vehicle_vin = self._resolve_vehicle_vin(vehicle_id) if vehicle_id != "_default" else None
 
-        params = {"vehicle_vin": vid}
+        params = {"vehicle_vin": vehicle_vin}
 
         try:
             await _action_stop_ev_charging_dynamic(self.hass, self.config_entry, params)

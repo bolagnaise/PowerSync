@@ -6967,7 +6967,20 @@ class EVVehicleCommandView(HomeAssistantView):
         The mobile app sends vehicle_id as a sequential number (1, 2, 3...)
         from the vehicles list. We need to map this back to the actual VIN
         or BLE vehicle_id (ble_{prefix}).
+
+        Also accepts BLE identifiers (ble_*) and VINs (17-char) directly,
+        returning them as-is for robustness.
         """
+        # Accept BLE identifiers directly (e.g. "ble_joanna_model_3_local")
+        if vehicle_id and vehicle_id.startswith("ble_"):
+            _LOGGER.debug(f"Vehicle ID {vehicle_id} is already a BLE identifier")
+            return vehicle_id
+
+        # Accept VINs directly (17-char alphanumeric)
+        if vehicle_id and len(vehicle_id) == 17 and vehicle_id.isalnum():
+            _LOGGER.debug(f"Vehicle ID {vehicle_id} is already a VIN")
+            return vehicle_id
+
         config = self._get_powersync_config()
         ev_provider = config.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
         device_registry = dr.async_get(self._hass)
