@@ -8663,7 +8663,8 @@ class EVWidgetDataView(HomeAssistantView):
                 params = state.get("params", {})
                 current_amps = state.get("current_amps", 0)
                 voltage = params.get("voltage", 240)
-                current_power_kw = (current_amps * voltage) / 1000
+                phases = params.get("phases", 1)
+                current_power_kw = (current_amps * voltage * phases) / 1000
 
                 # Determine charging source
                 if current_amps == 0:
@@ -8775,8 +8776,10 @@ class EVWidgetDataView(HomeAssistantView):
                     }]
 
             # Only add if no other source already covers this charging
+            # Check for any connected/active vehicle (not just ones with power > 0)
+            # to avoid duplicates when a dynamic session is at 0A (starting/paused)
             already_covered = any(
-                w["is_charging"] and w["current_power_kw"] > 0
+                w.get("is_connected") or (w["is_charging"] and w["current_power_kw"] > 0)
                 for w in widget_data
             )
             if not already_covered:
