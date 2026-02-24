@@ -124,6 +124,10 @@ Remote monitoring and control via iOS and Android.
 
 ---
 
+## Sponsors
+
+<!-- sponsors --><!-- sponsors -->
+
 ## Support
 
 - **Discord:** https://discord.gg/eaWDWxEWE3 — bug reports, feature requests, and support
