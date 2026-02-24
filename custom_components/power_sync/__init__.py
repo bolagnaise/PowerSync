@@ -380,9 +380,18 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
     # Check Tesla BLE sensors (all configured prefixes)
     config = {**entry.data, **entry.options}
     for prefix in _resolve_ble_prefixes(hass, config):
+        # Only trust power sensor if vehicle is actually charging
+        ble_charging_entity = TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=prefix)
+        ble_charging_state = hass.states.get(ble_charging_entity)
+        is_ble_charging = (
+            ble_charging_state
+            and ble_charging_state.state not in ("unknown", "unavailable")
+            and ble_charging_state.state.lower() == "charging"
+        )
+
         ble_power_entity = TESLA_BLE_SENSOR_CHARGE_POWER.format(prefix=prefix)
         ble_state = hass.states.get(ble_power_entity)
-        if ble_state and ble_state.state not in ("unknown", "unavailable"):
+        if is_ble_charging and ble_state and ble_state.state not in ("unknown", "unavailable"):
             try:
                 val = float(ble_state.state)
                 if val > 0:
@@ -448,6 +457,22 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
         if skip_vehicle:
             continue
 
+        # First pass: check if vehicle is actively charging
+        is_fleet_charging = False
+        for entity in entity_registry.entities.values():
+            if entity.device_id != device.id:
+                continue
+            eid = entity.entity_id.lower()
+            if not entity.entity_id.startswith("sensor."):
+                continue
+            if ("charging" in eid or "charge_state" in eid) and "limit" not in eid and "rate" not in eid and "power" not in eid:
+                state = hass.states.get(entity.entity_id)
+                if state and state.state not in ("unknown", "unavailable"):
+                    if state.state.lower() == "charging":
+                        is_fleet_charging = True
+                        break
+
+        # Second pass: read power (only if charging) and SOC
         for entity in entity_registry.entities.values():
             if entity.device_id != device.id:
                 continue
@@ -458,7 +483,7 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
             if not state or state.state in ("unknown", "unavailable"):
                 continue
 
-            if "charger_power" in eid or "charging_power" in eid or "charge_power" in eid:
+            if is_fleet_charging and ("charger_power" in eid or "charging_power" in eid or "charge_power" in eid):
                 try:
                     val = float(state.state)
                     if val > 0:
@@ -6520,15 +6545,19 @@ class EVVehiclesView(HomeAssistantView):
                 is_plugged_in = cached["is_plugged_in"]
                 plugged_in_definitive = True  # treat cached as definitive
 
-        # Get charge power
+        # Get charge power (only trust it if vehicle is actively charging)
         charger_power = None
-        charge_power_entity = TESLA_BLE_SENSOR_CHARGE_POWER.format(prefix=prefix)
-        charge_power_state = self._hass.states.get(charge_power_entity)
-        if charge_power_state and charge_power_state.state not in ("unknown", "unavailable"):
-            try:
-                charger_power = float(charge_power_state.state)
-            except (ValueError, TypeError):
-                pass
+        is_ble_charging = (
+            charging_state and charging_state.lower() == "charging"
+        )
+        if is_ble_charging:
+            charge_power_entity = TESLA_BLE_SENSOR_CHARGE_POWER.format(prefix=prefix)
+            charge_power_state = self._hass.states.get(charge_power_entity)
+            if charge_power_state and charge_power_state.state not in ("unknown", "unavailable"):
+                try:
+                    charger_power = float(charge_power_state.state)
+                except (ValueError, TypeError):
+                    pass
 
         # Check BLE connection status
         is_online = status_state.state == "on"
@@ -6548,7 +6577,7 @@ class EVVehiclesView(HomeAssistantView):
         )
 
         return {
-            "id": vehicle_index,
+            "id": f"ble_{prefix}",
             "vehicle_id": f"ble_{prefix}",
             "vin": None,  # BLE doesn't provide VIN
             "display_name": f"Tesla BLE ({prefix})",
@@ -6646,7 +6675,7 @@ class EVVehiclesView(HomeAssistantView):
                     charging_state = "Disconnected"
 
             vehicles.append({
-                "id": vehicle_id,
+                "id": f"byd_{device.id}",
                 "vehicle_id": f"byd_{device.id}",
                 "vin": None,
                 "display_name": device.name or f"BYD Vehicle {vehicle_id}",
@@ -6793,9 +6822,13 @@ class EVVehiclesView(HomeAssistantView):
 
                         _LOGGER.debug(f"EV: Device {device.name} has {len(device_entities)} entities")
 
+                        # Don't report stale charger_power when not actively charging
+                        if charging_state and charging_state.lower() != "charging":
+                            charger_power = None
+
                         fleet_updated_at = latest_entity_update.isoformat() if latest_entity_update else datetime.now().isoformat()
                         vehicles.append({
-                            "id": vehicle_id,
+                            "id": vin or str(device.id),
                             "vehicle_id": vin or str(device.id),
                             "vin": vin,
                             "display_name": device.name or f"Tesla {vehicle_id}",
