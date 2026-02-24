@@ -17051,6 +17051,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             "min_charge_amps": vc.get("min_amps", 5),
                             "max_charge_amps": vc.get("max_amps", 32),
                             "voltage": vc.get("voltage", 240),
+                            "phases": vc.get("phases", 1),
                             "charger_switch_entity": vc.get("charger_switch_entity"),
                             "charger_amps_entity": vc.get("charger_amps_entity"),
                             "ocpp_charger_id": vc.get("ocpp_charger_id"),

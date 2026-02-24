@@ -2538,6 +2538,7 @@ async def _dynamic_ev_update_surplus(
     # For parallel charging check, we need to calculate surplus early
     # Calculate current EV power for THIS vehicle
     voltage = params.get("voltage", 240)
+    phases = params.get("phases", 1)
     current_amps = state.get("current_amps", 0)
 
     # Calculate TOTAL EV power from ALL active vehicles
@@ -2547,7 +2548,8 @@ async def _dynamic_ev_update_surplus(
         if v_state.get("active") and not v_state.get("paused"):
             v_amps = v_state.get("current_amps", 0)
             v_voltage = v_state.get("params", {}).get("voltage", 240)
-            total_ev_power_kw += (v_amps * v_voltage) / 1000
+            v_phases = v_state.get("params", {}).get("phases", 1)
+            total_ev_power_kw += (v_amps * v_voltage * v_phases) / 1000
 
     # Calculate raw surplus (before any parallel charging adjustments)
     raw_surplus_kw = _calculate_solar_surplus(live_status, total_ev_power_kw, params)
@@ -2676,7 +2678,7 @@ async def _dynamic_ev_update_surplus(
                         _LOGGER.debug(f"Could not send resume notification: {e}")
 
     # Calculate current EV power for THIS vehicle (for logging)
-    current_ev_kw = (current_amps * voltage) / 1000
+    current_ev_kw = (current_amps * voltage * phases) / 1000
 
     # Determine available surplus for EV
     # In parallel charging mode, reserve max_battery_charge_kw for the battery
@@ -2695,8 +2697,8 @@ async def _dynamic_ev_update_surplus(
     strategy = params.get("dual_vehicle_strategy", "priority_first")
     my_surplus_kw = _distribute_surplus(entry_id, vehicle_id, surplus_kw, strategy)
 
-    # Convert to amps
-    available_amps = (my_surplus_kw * 1000) / voltage
+    # Convert to amps (P = V × I × phases for AC charging)
+    available_amps = (my_surplus_kw * 1000) / (voltage * phases)
 
     # Apply constraints
     min_amps = params.get("min_charge_amps", 5)
@@ -2905,6 +2907,7 @@ async def _dynamic_ev_update(
     min_amps = params.get("min_charge_amps", 5)
     max_amps = params.get("max_charge_amps", 32)
     voltage = params.get("voltage", 240)
+    phases = params.get("phases", 1)
 
     current_amps = state.get("current_amps", max_amps)
 
@@ -2918,7 +2921,7 @@ async def _dynamic_ev_update(
     # battery_power: Positive = discharging, Negative = charging
     battery_power_kw = (live_status.get("battery_power", 0) or 0) / 1000
     grid_power_kw = (live_status.get("grid_power", 0) or 0) / 1000
-    current_ev_power_kw = (current_amps * voltage) / 1000
+    current_ev_power_kw = (current_amps * voltage * phases) / 1000
 
     # Target battery power in same convention (negative = charging)
     # If target_battery_charge_kw = 5, we want battery_power = -5 kW
@@ -2973,8 +2976,8 @@ async def _dynamic_ev_update(
     else:
         available_power_kw = grid_headroom_kw
 
-    # Convert available power to amps
-    available_amps = (available_power_kw * 1000) / voltage
+    # Convert available power to amps (P = V × I × phases for AC charging)
+    available_amps = (available_power_kw * 1000) / (voltage * phases)
 
     # Calculate new target amps
     raw_new_amps = current_amps + available_amps
@@ -3237,6 +3240,7 @@ async def _action_start_ev_charging_dynamic_locked(
         "min_charge_amps": min_charge_amps,
         "max_charge_amps": max_charge_amps,
         "voltage": voltage,
+        "phases": params.get("phases", 1),
         "stop_outside_window": stop_outside_window,
         "time_window_start": time_window_start,
         "time_window_end": time_window_end,

@@ -4358,6 +4358,7 @@ class AutoScheduleExecutor:
             "min_charge_amps": settings.min_charge_amps,
             "max_charge_amps": settings.max_charge_amps,
             "voltage": settings.voltage,
+            "phases": settings.phases,
             "charger_type": settings.charger_type,
             "min_battery_soc": settings.get_effective_min_battery_to_start(datetime.now().weekday()),
             "pause_below_soc": (
