@@ -2851,6 +2851,23 @@ async def _dynamic_ev_update_surplus(
                     _LOGGER.debug(f"Could not end session: {e}")
 
 
+def _get_phases_from_config(hass, config_entry, params):
+    """Get charging phases: from params, or fall back to home_power_settings."""
+    if "phases" in params and params["phases"] in (1, 3):
+        return params["phases"]
+    try:
+        from ..const import DOMAIN
+        entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
+        store = entry_data.get("automation_store")
+        if store:
+            stored = getattr(store, '_data', {}) or {}
+            phase_type = stored.get("home_power_settings", {}).get("phase_type", "single")
+            return 3 if phase_type == "three" else 1
+    except Exception:
+        pass
+    return 1
+
+
 async def _dynamic_ev_update(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -2909,6 +2926,16 @@ async def _dynamic_ev_update(
     voltage = params.get("voltage", 240)
     phases = params.get("phases", 1)
 
+    # Hard inverter cap: even if reactive logic miscalculates, amps never exceed inverter capacity
+    if no_grid_import:
+        inverter_max_amps = int((max_inverter_kw * 1000) / (voltage * phases))
+        if max_amps > inverter_max_amps:
+            _LOGGER.debug(
+                f"Dynamic EV: Capping max_amps {max_amps}A → {inverter_max_amps}A "
+                f"(inverter={max_inverter_kw}kW, {phases}-phase)"
+            )
+            max_amps = inverter_max_amps
+
     current_amps = state.get("current_amps", max_amps)
 
     # Get live status
@@ -2948,8 +2975,10 @@ async def _dynamic_ev_update(
         battery_charging_kw = max(0.0, -battery_power_kw)  # positive when battery is charging
         ev_relevant_grid_kw = grid_power_kw - battery_charging_kw
 
-        # Calculate home load (excluding EV and battery charging) from power balance
-        home_load_kw = ev_relevant_grid_kw - current_ev_power_kw
+        # Calculate home load using Tesla API's load_power (total behind-the-meter consumption)
+        # load_power includes home + EV + everything; subtract EV estimate for home-only load
+        load_power_kw = (live_status.get("load_power", 0) or 0) / 1000
+        home_load_kw = max(0, load_power_kw - current_ev_power_kw)
 
         # Max power available from inverter for EV = inverter_capacity - home_load
         # This is proactive: we know the limit before hitting it
@@ -3146,6 +3175,9 @@ async def _action_start_ev_charging_dynamic_locked(
     charger_type = params.get("charger_type", "tesla")
     priority = params.get("priority", 1)
 
+    # Resolve phases early for logging and start_amps capping
+    resolved_phases = _get_phases_from_config(hass, config_entry, params)
+
     # Mode-specific parameters
     if dynamic_mode == "solar_surplus":
         mode_params = {
@@ -3165,7 +3197,8 @@ async def _action_start_ev_charging_dynamic_locked(
             parallel_info = f", parallel_charging=enabled (battery_max={mode_params['max_battery_charge_rate_kw']}kW)"
         _LOGGER.info(
             f"⚡ Starting solar surplus EV charging: buffer={mode_params['household_buffer_kw']}kW, "
-            f"min_soc={mode_params['min_battery_soc']}%, amps={min_charge_amps}-{max_charge_amps}A{parallel_info}"
+            f"min_soc={mode_params['min_battery_soc']}%, amps={min_charge_amps}-{max_charge_amps}A, "
+            f"phases={resolved_phases}{parallel_info}"
         )
     else:
         # Battery target mode (existing behavior)
@@ -3182,10 +3215,14 @@ async def _action_start_ev_charging_dynamic_locked(
             "max_inverter_kw": params.get("max_inverter_kw", 10.0),
         }
         start_amps = params.get("start_amps", max_charge_amps)
+        if no_grid_import:
+            inverter_max_amps = int((mode_params["max_inverter_kw"] * 1000) / (voltage * resolved_phases))
+            start_amps = min(start_amps, inverter_max_amps)
         no_grid_info = f", no_grid_import=enabled (inverter={mode_params['max_inverter_kw']}kW)" if no_grid_import else ""
         _LOGGER.info(
             f"⚡ Starting dynamic EV charging: target_battery_charge={target_battery_charge_kw}kW, "
-            f"max_grid_import={mode_params['max_grid_import_kw']}kW, amps={min_charge_amps}-{max_charge_amps}A{no_grid_info}"
+            f"max_grid_import={mode_params['max_grid_import_kw']}kW, amps={min_charge_amps}-{max_charge_amps}A, "
+            f"phases={resolved_phases}{no_grid_info}"
         )
 
     # Get time window from context (passed from automation trigger)
@@ -3240,7 +3277,7 @@ async def _action_start_ev_charging_dynamic_locked(
         "min_charge_amps": min_charge_amps,
         "max_charge_amps": max_charge_amps,
         "voltage": voltage,
-        "phases": params.get("phases", 1),
+        "phases": _get_phases_from_config(hass, config_entry, params),
         "stop_outside_window": stop_outside_window,
         "time_window_start": time_window_start,
         "time_window_end": time_window_end,

@@ -380,13 +380,27 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
     # Check Tesla BLE sensors (all configured prefixes)
     config = {**entry.data, **entry.options}
     for prefix in _resolve_ble_prefixes(hass, config):
+        # Read SoC first so we can validate charging state
+        ble_soc_entity = TESLA_BLE_SENSOR_CHARGE_LEVEL.format(prefix=prefix)
+        ble_soc_state = hass.states.get(ble_soc_entity)
+        ble_soc_value = None
+        if ble_soc_state and ble_soc_state.state not in ("unknown", "unavailable"):
+            try:
+                ble_soc_value = int(float(ble_soc_state.state))
+                if ev_soc is None:
+                    ev_soc = ble_soc_value
+            except (ValueError, TypeError):
+                pass
+
         # Only trust power sensor if vehicle is actually charging
+        # Reject stale "Charging" state when SoC is 100% (BLE doesn't always update promptly)
         ble_charging_entity = TESLA_BLE_SENSOR_CHARGING_STATE.format(prefix=prefix)
         ble_charging_state = hass.states.get(ble_charging_entity)
         is_ble_charging = (
             ble_charging_state
             and ble_charging_state.state not in ("unknown", "unavailable")
             and ble_charging_state.state.lower() == "charging"
+            and (ble_soc_value is None or ble_soc_value < 100)
         )
 
         ble_power_entity = TESLA_BLE_SENSOR_CHARGE_POWER.format(prefix=prefix)
@@ -396,16 +410,6 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
                 val = float(ble_state.state)
                 if val > 0:
                     ev_power_kw = max(ev_power_kw, val)
-            except (ValueError, TypeError):
-                pass
-
-        ble_soc_entity = TESLA_BLE_SENSOR_CHARGE_LEVEL.format(prefix=prefix)
-        ble_soc_state = hass.states.get(ble_soc_entity)
-        if ble_soc_state and ble_soc_state.state not in ("unknown", "unavailable"):
-            try:
-                soc_val = int(float(ble_soc_state.state))
-                if ev_soc is None:
-                    ev_soc = soc_val
             except (ValueError, TypeError):
                 pass
 
