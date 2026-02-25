@@ -17977,6 +17977,20 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         demand_charging_cancel()
         _LOGGER.debug("Cancelled demand period grid charging timer")
 
+    # Re-enable grid charging if it was disabled for demand period
+    # (e.g. user disabled demand charges or enabled demand_allow_grid_charging mid-window)
+    if entry_data.get("grid_charging_disabled_for_demand", False):
+        ts_coordinator = entry_data.get("tesla_coordinator")
+        if ts_coordinator:
+            try:
+                success = await ts_coordinator.set_grid_charging_enabled(True)
+                if success:
+                    _LOGGER.info("Re-enabled grid charging on unload (was disabled for demand period)")
+                else:
+                    _LOGGER.warning("Failed to re-enable grid charging on unload")
+            except Exception as err:
+                _LOGGER.warning("Error re-enabling grid charging on unload: %s", err)
+
     # Cancel the automation evaluation timer if it exists
     if automation_cancel := entry_data.get("automation_cancel"):
         automation_cancel()
