@@ -9898,6 +9898,54 @@ def _migrate_entity_ids(hass: HomeAssistant, entry: ConfigEntry) -> None:
         _LOGGER.info("Entity ID migration complete: %d entities renamed", migrated)
 
 
+async def _ensure_lovelace_resource(hass: HomeAssistant) -> None:
+    """Register the PowerSync strategy JS as a Lovelace resource (storage mode only).
+
+    Must be called after HA_STARTED to ensure the lovelace ResourceStorageCollection
+    has fully loaded from disk.  If called earlier, async_items() may return an empty
+    list, causing async_create_item() to schedule a save that overwrites the entire
+    lovelace_resources file with only our entry — wiping every other resource.
+    """
+    try:
+        lovelace_data = hass.data.get("lovelace")
+        if lovelace_data is None or not hasattr(lovelace_data, "resources"):
+            _LOGGER.debug("Lovelace resources not available (YAML mode?)")
+            return
+
+        res_collection = lovelace_data.resources
+        base_path = "/power_sync/frontend/power-sync-strategy.js"
+        from .const import POWER_SYNC_VERSION, DASHBOARD_JS_VERSION
+        url = f"{base_path}?v={POWER_SYNC_VERSION}.{DASHBOARD_JS_VERSION}"
+
+        # Safety: if the collection has no items at all, something is wrong —
+        # don't create our resource to avoid wiping other resources on save.
+        all_items = res_collection.async_items()
+        existing = [r for r in all_items if base_path in r.get("url", "")]
+
+        if existing:
+            # Update URL if version changed (cache-bust)
+            for r in existing:
+                if r.get("url") != url:
+                    await res_collection.async_update_item(r["id"], {"url": url})
+                    _LOGGER.info("PowerSync dashboard strategy resource updated (cache-bust)")
+        elif len(all_items) == 0:
+            # Collection appears empty — lovelace may not have loaded yet.
+            # Skip to avoid overwriting the resources file.
+            _LOGGER.warning(
+                "Lovelace resource collection is empty — skipping auto-register "
+                "to avoid overwriting existing resources.  Add the PowerSync "
+                "strategy JS manually if needed: %s", url
+            )
+        else:
+            await res_collection.async_create_item({
+                "res_type": "module",
+                "url": url,
+            })
+            _LOGGER.info("PowerSync dashboard strategy registered as Lovelace resource")
+    except Exception:
+        _LOGGER.debug("Could not auto-register Lovelace resource", exc_info=True)
+
+
 async def _ensure_powersync_dashboard(hass: HomeAssistant) -> None:
     """Auto-create the PowerSync dashboard if it doesn't exist."""
     try:
@@ -9981,43 +10029,14 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
         # Older HA versions
         hass.http.register_static_path("/power_sync/frontend", frontend_dir, True)
 
-    # Auto-register the Lovelace resource (storage mode only)
-    # Use version query param for cache-busting when JS changes
-    try:
-        resources = hass.data.get("lovelace", {})
-        if hasattr(resources, "resources"):
-            res_collection = resources.resources
-            base_path = "/power_sync/frontend/power-sync-strategy.js"
-            from .const import POWER_SYNC_VERSION, DASHBOARD_JS_VERSION
-            url = f"{base_path}?v={POWER_SYNC_VERSION}.{DASHBOARD_JS_VERSION}"
-
-            # Find any existing PowerSync strategy resources (with or without version)
-            existing = [
-                r for r in res_collection.async_items()
-                if base_path in r.get("url", "")
-            ]
-            if existing:
-                # Update URL if version changed (cache-bust)
-                for r in existing:
-                    if r.get("url") != url:
-                        await res_collection.async_update_item(r["id"], {"url": url})
-                        _LOGGER.info("PowerSync dashboard strategy resource updated (cache-bust)")
-            else:
-                await res_collection.async_create_item({
-                    "res_type": "module",
-                    "url": url,
-                })
-                _LOGGER.info("PowerSync dashboard strategy registered as Lovelace resource")
-    except Exception:
-        # YAML mode dashboards don't have the resources API — that's fine,
-        # users register the resource manually in lovelace.yaml
-        _LOGGER.debug("Could not auto-register Lovelace resource (YAML mode?)")
-
-    # Auto-create the PowerSync dashboard after HA is fully started
-    # (ensures lovelace component is fully initialized)
+    # Auto-create the PowerSync dashboard and register Lovelace resource
+    # AFTER HA is fully started (ensures lovelace component and its
+    # ResourceStorageCollection are fully initialized — registering the
+    # resource before lovelace has loaded can wipe the entire resources list)
     from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 
     async def _on_ha_started(event):
+        await _ensure_lovelace_resource(hass)
         await _ensure_powersync_dashboard(hass)
 
     hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _on_ha_started)
