@@ -1119,6 +1119,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         self._site_info_cache = None  # Cache site_info since timezone doesn't change
         self._site_info_fetch_failed = False  # Negative cache to avoid retrying on every sync cycle
         self._energy_acc = EnergyAccumulator(hass, "tesla")
+        self._gateway_firmware = None  # Extracted from site_info gateways
 
         # Determine API base URL based on provider
         if api_provider == TESLA_PROVIDER_FLEET_API:
@@ -1207,6 +1208,13 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             # Accumulate daily energy from power readings
             self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw)
 
+            # Fetch site_info once to extract gateway firmware version
+            if self._gateway_firmware is None and not self._site_info_fetch_failed:
+                try:
+                    await self.async_get_site_info()
+                except Exception:
+                    pass  # Non-critical, don't fail the update
+
             energy_data = {
                 "solar_power": solar_kw,
                 "grid_power": grid_kw,
@@ -1216,6 +1224,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 "ev_power": ev_power_kw,
                 "last_update": dt_util.utcnow(),
                 "energy_summary": self._energy_acc.as_dict(),
+                "gateway_firmware": self._gateway_firmware,
             }
 
             return energy_data
@@ -1285,6 +1294,16 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                                     if 'battery' in k.lower() or 'nameplate' in k.lower()}
                 if component_battery:
                     _LOGGER.debug(f"Components battery fields: {component_battery}")
+
+            # Extract gateway firmware version
+            gateways = components.get("gateways", []) or site_info.get("gateways", [])
+            if gateways:
+                gateway = gateways[0]
+                fw_version = gateway.get("firmware_version") or gateway.get("version", "")
+                if fw_version:
+                    self._gateway_firmware = fw_version
+                    _LOGGER.info("Gateway firmware version: %s", fw_version)
+                _LOGGER.debug("Gateway keys: %s", list(gateway.keys()))
 
             # Cache the result
             self._site_info_cache = site_info

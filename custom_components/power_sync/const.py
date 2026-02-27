@@ -816,6 +816,7 @@ SENSOR_TYPE_AMBER_COMPARISON = "flow_power_amber_comparison"
 
 # Battery health sensor (from mobile app TEDAPI scans)
 SENSOR_TYPE_BATTERY_HEALTH = "battery_health"
+SENSOR_TYPE_GATEWAY_FIRMWARE = "gateway_firmware"
 
 # Amber Export Price Boost configuration
 # Artificially increase export prices to trigger Powerwall exports

@@ -10752,6 +10752,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "fp_avg_daily_tariff": fp_avg_daily_tariff,  # 24h avg network tariff (c/kWh) — v2
     }
 
+    # Track firmware version for change notifications (Tesla only)
+    if tesla_coordinator:
+        last_known_firmware = stored_data.get("last_known_firmware")
+
+        async def _check_firmware_change():
+            """Check if gateway firmware has changed and notify."""
+            nonlocal last_known_firmware
+            data = tesla_coordinator.data
+            if not data:
+                return
+            current_fw = data.get("gateway_firmware")
+            if not current_fw:
+                return
+            if last_known_firmware and current_fw != last_known_firmware:
+                _LOGGER.info("Firmware update detected: %s -> %s", last_known_firmware, current_fw)
+                try:
+                    from .automations.actions import _send_expo_push
+                    await _send_expo_push(
+                        hass,
+                        "Powerwall Update",
+                        f"Firmware updated: {current_fw}"
+                    )
+                except Exception:
+                    pass
+            if current_fw != last_known_firmware:
+                last_known_firmware = current_fw
+                sd = await store.async_load() or {}
+                sd["last_known_firmware"] = current_fw
+                await store.async_save(sd)
+
+        def _on_coordinator_update():
+            """Listener for coordinator data updates."""
+            hass.async_create_task(_check_firmware_change())
+
+        tesla_coordinator.async_add_listener(_on_coordinator_update)
+
     # Early initialization of tariff_schedule for non-Amber providers
     # This ensures price sensors can be created during platform setup
     # The full automation_store loading happens later and will update this
@@ -13555,6 +13591,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "saved_tariff": None,
         "saved_operation_mode": None,
         "saved_backup_reserve": None,
+        "saved_export_rule": None,
         "expires_at": None,
         "cancel_expiry_timer": None,
     }
@@ -13597,6 +13634,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "saved_tariff": force_discharge_state["saved_tariff"],
                 "saved_operation_mode": force_discharge_state["saved_operation_mode"],
                 "saved_backup_reserve": force_discharge_state["saved_backup_reserve"],
+                "saved_export_rule": force_discharge_state["saved_export_rule"],
             }
 
         stored_data["force_mode_state"] = state_to_save
@@ -13644,6 +13682,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 state["saved_tariff"] = saved_tariff
                 state["saved_operation_mode"] = persisted_force_state.get("saved_operation_mode")
                 state["saved_backup_reserve"] = saved_backup_reserve
+                state["saved_export_rule"] = persisted_force_state.get("saved_export_rule")
 
                 # Use handle_restore_normal for full cleanup — it has direct API access
                 # and doesn't depend on battery_controller (which isn't created yet)
@@ -13695,6 +13734,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_discharge_state["saved_tariff"] = persisted_force_state.get("saved_tariff")
                     force_discharge_state["saved_operation_mode"] = persisted_force_state.get("saved_operation_mode")
                     force_discharge_state["saved_backup_reserve"] = persisted_force_state.get("saved_backup_reserve")
+                    force_discharge_state["saved_export_rule"] = persisted_force_state.get("saved_export_rule")
 
                     # Re-setup expiry timer
                     async def auto_restore_discharge(_now):
@@ -13998,6 +14038,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                      force_discharge_state["saved_operation_mode"],
                                      force_discharge_state["saved_backup_reserve"])
 
+                        # Save current export rule so we can restore it after discharge
+                        components = site_info.get("components", {})
+                        saved_export_rule = components.get("customer_preferred_export_rule")
+                        if saved_export_rule is None:
+                            non_export = components.get("non_export_configured", False)
+                            saved_export_rule = "never" if non_export else "battery_ok"
+                        force_discharge_state["saved_export_rule"] = saved_export_rule
+                        _LOGGER.info("Saved export rule: %s", saved_export_rule)
+
                         # Fallback: if tariff wasn't saved from tariff_rate, try to get it from site_info
                         if not force_discharge_state.get("saved_tariff"):
                             site_tariff = site_info.get("tariff_content_v2") or site_info.get("tariff_content")
@@ -14036,6 +14085,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _LOGGER.info("Set backup reserve to 0%%")
                     else:
                         _LOGGER.warning("Could not set backup reserve to 0%%: %s", response.status)
+
+                # Step 2c: Set export rule to battery_ok to allow battery export during discharge
+                if force_discharge_state.get("saved_export_rule") != "battery_ok":
+                    _LOGGER.info("Setting export rule to battery_ok for force discharge...")
+                    async with session.post(
+                        f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
+                        headers=headers,
+                        json={"customer_preferred_export_rule": "battery_ok"},
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as response:
+                        if response.status == 200:
+                            _LOGGER.info("Set export rule to battery_ok")
+                        else:
+                            _LOGGER.warning("Could not set export rule: %s", response.status)
 
             # Step 3: Switch to autonomous mode for best export behavior
             if force_discharge_state.get("saved_operation_mode") != "autonomous":
@@ -14952,6 +15015,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 force_discharge_state["saved_tariff"] = None
                 force_discharge_state["saved_operation_mode"] = None
                 force_discharge_state["saved_backup_reserve"] = None
+                force_discharge_state["saved_export_rule"] = None
                 force_discharge_state["expires_at"] = None
                 force_charge_state["active"] = False
                 force_charge_state["saved_tariff"] = None
@@ -15289,6 +15353,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             else:
                 _LOGGER.warning("Could not determine backup reserve to restore")
 
+            # Restore export rule if it was changed during force discharge
+            saved_export_rule = force_discharge_state.get("saved_export_rule")
+            if saved_export_rule and saved_export_rule != "battery_ok":
+                _LOGGER.info("Restoring export rule to: %s", saved_export_rule)
+                async with session.post(
+                    f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
+                    headers=headers,
+                    json={"customer_preferred_export_rule": saved_export_rule},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 200:
+                        _LOGGER.info("Restored export rule to %s", saved_export_rule)
+                    else:
+                        _LOGGER.warning("Could not restore export rule: %s", response.status)
+
             # Explicitly re-enable grid charging unless still in a demand peak period
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
             dc_coordinator = entry_data.get("demand_charge_coordinator")
@@ -15313,6 +15392,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             force_discharge_state["saved_tariff"] = None
             force_discharge_state["saved_operation_mode"] = None
             force_discharge_state["saved_backup_reserve"] = None
+            force_discharge_state["saved_export_rule"] = None
             force_discharge_state["expires_at"] = None
 
             # Clear charge state

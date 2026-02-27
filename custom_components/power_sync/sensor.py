@@ -74,6 +74,7 @@ from .const import (
     NETWORK_API_NAME,
     DEFAULT_FP_AMBER_MARKUP,
     SENSOR_TYPE_BATTERY_HEALTH,
+    SENSOR_TYPE_GATEWAY_FIRMWARE,
     SENSOR_TYPE_INVERTER_STATUS,
     SENSOR_TYPE_BATTERY_MODE,
     SENSOR_TYPE_PV1_POWER,
@@ -408,6 +409,12 @@ FOXESS_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         suggested_display_precision=2,
         icon="mdi:battery-arrow-down",
         value_fn=lambda data: data.get("energy_summary", {}).get("discharge_today_kwh") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_GATEWAY_FIRMWARE,
+        name="Gateway Firmware",
+        icon="mdi:chip",
+        value_fn=lambda data: data.get("gateway_firmware") if data else None,
     ),
 )
 
@@ -2758,16 +2765,24 @@ class BatteryModeSensor(SensorEntity):
         # Add mode-specific attributes
         if mode == BATTERY_MODE_STATE_FORCE_CHARGE:
             attributes["description"] = "Battery is being force charged"
-            if force_charge_state.get("expiry"):
-                attributes["expires_at"] = force_charge_state["expiry"]
-            if force_charge_state.get("duration_minutes"):
-                attributes["duration_minutes"] = force_charge_state["duration_minutes"]
+            if force_charge_state.get("expires_at"):
+                expires_at = force_charge_state["expires_at"]
+                attributes["expires_at"] = expires_at.isoformat() if hasattr(expires_at, 'isoformat') else str(expires_at)
+                attributes["force_expires_at"] = attributes["expires_at"]
+                from homeassistant.util import dt as dt_util
+                remaining = (expires_at - dt_util.utcnow()).total_seconds() / 60
+                attributes["remaining_minutes"] = max(0, int(remaining))
+                attributes["force_remaining_minutes"] = attributes["remaining_minutes"]
         elif mode == BATTERY_MODE_STATE_FORCE_DISCHARGE:
             attributes["description"] = "Battery is being force discharged"
-            if force_discharge_state.get("expiry"):
-                attributes["expires_at"] = force_discharge_state["expiry"]
-            if force_discharge_state.get("duration_minutes"):
-                attributes["duration_minutes"] = force_discharge_state["duration_minutes"]
+            if force_discharge_state.get("expires_at"):
+                expires_at = force_discharge_state["expires_at"]
+                attributes["expires_at"] = expires_at.isoformat() if hasattr(expires_at, 'isoformat') else str(expires_at)
+                attributes["force_expires_at"] = attributes["expires_at"]
+                from homeassistant.util import dt as dt_util
+                remaining = (expires_at - dt_util.utcnow()).total_seconds() / 60
+                attributes["remaining_minutes"] = max(0, int(remaining))
+                attributes["force_remaining_minutes"] = attributes["remaining_minutes"]
         else:
             attributes["description"] = "Battery operating in normal self-consumption mode"
 
