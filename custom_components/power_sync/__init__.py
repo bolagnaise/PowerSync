@@ -6976,6 +6976,35 @@ class EVVehiclesView(HomeAssistantView):
             byd_vehicles = self._get_byd_vehicles(start_id=len(vehicles) + 1)
             vehicles.extend(byd_vehicles)
 
+            # Supplement BYD vehicles with Zaptec charger state
+            # BYD's charger_connected sensor doesn't reflect Zaptec cable state
+            if byd_vehicles:
+                entries = self._hass.config_entries.async_entries(DOMAIN)
+                for entry in entries:
+                    zaptec_state = self._hass.data.get(DOMAIN, {}).get(
+                        entry.entry_id, {}
+                    ).get("zaptec_cached_state")
+                    if not zaptec_state:
+                        continue
+                    mode = zaptec_state.get("charger_operation_mode", "")
+                    cable_locked = zaptec_state.get("cable_locked", False)
+                    if cable_locked or mode in ("charging", "connected_waiting"):
+                        for v in vehicles:
+                            if v.get("brand") != "byd":
+                                continue
+                            if not v["is_plugged_in"]:
+                                v["is_plugged_in"] = True
+                                _LOGGER.debug(
+                                    "EV BYD: Supplemented %s plug status from "
+                                    "Zaptec (mode=%s, cable_locked=%s)",
+                                    v.get("display_name"), mode, cable_locked,
+                                )
+                            if mode == "charging" and v["charging_state"] != "Charging":
+                                v["charging_state"] = "Charging"
+                            elif mode == "connected_waiting" and v["charging_state"] == "Disconnected":
+                                v["charging_state"] = "Stopped"
+                    break  # Only one PowerSync entry with Zaptec
+
             if not vehicles:
                 message = "No vehicles found"
                 if ev_provider == EV_PROVIDER_FLEET_API:
@@ -9167,6 +9196,33 @@ class PriceRecommendationView(HomeAssistantView):
                 min_battery_soc=home_battery_minimum,
             )
 
+            # Look up EV battery SOC from BYD vehicle integration
+            ev_battery_soc = None
+            try:
+                if BYD_INTEGRATION in self._hass.config_entries.async_domains():
+                    device_reg = dr.async_get(self._hass)
+                    entity_reg = er.async_get(self._hass)
+                    for device in device_reg.devices.values():
+                        if not any(i[0] == BYD_INTEGRATION for i in device.identifiers):
+                            continue
+                        for entity in entity_reg.entities.values():
+                            if entity.device_id != device.id:
+                                continue
+                            eid = entity.entity_id.lower()
+                            if eid.startswith("sensor.") and "battery_level" in eid:
+                                state = self._hass.states.get(entity.entity_id)
+                                if state and state.state not in ("unknown", "unavailable"):
+                                    try:
+                                        val = float(state.state)
+                                        if 0 <= val <= 100:
+                                            ev_battery_soc = round(val, 1)
+                                    except (ValueError, TypeError):
+                                        pass
+                        if ev_battery_soc is not None:
+                            break
+            except Exception:
+                pass
+
             # Build response with tariff info if available
             response = {
                 "success": True,
@@ -9174,6 +9230,9 @@ class PriceRecommendationView(HomeAssistantView):
                 "battery_soc": round(battery_soc, 1),
                 "price_source": price_source,
             }
+
+            if ev_battery_soc is not None:
+                response["ev_battery_soc"] = ev_battery_soc
 
             # Include tariff metadata for custom/Tesla tariff users
             if tariff_info:
@@ -9403,6 +9462,11 @@ class AutoScheduleStatusView(HomeAssistantView):
                     "departure_no_grid_import": {str(k): v for k, v in vehicle_settings.departure_limit_grid_import.items()},
                     "departure_home_battery_min": {str(k): v for k, v in vehicle_settings.departure_min_battery_to_start.items()},
                 }
+
+            _LOGGER.debug(
+                "Auto-schedule status: %s",
+                {v: s["enabled"] for v, s in settings.items()},
+            )
 
             return web.json_response({
                 "success": True,
@@ -16463,11 +16527,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 parsed = zaptec_client.parse_charger_state(raw_state)
                 hass.data[DOMAIN][entry.entry_id]["zaptec_cached_state"] = parsed
                 _LOGGER.debug(
-                    "Zaptec state poll OK: mode=%s (raw=%s), power=%sW, is_charging=%s, cable_locked=%s",
+                    "Zaptec state poll OK: mode=%s (raw=%s), power=%sW, "
+                    "phase_a=%.1fA, phase_b=%.1fA, phase_c=%.1fA, cable_locked=%s",
                     parsed.get('charger_operation_mode'),
                     raw_state.get(120, raw_state.get('120', '?')),
                     parsed.get('total_charge_power_w'),
-                    parsed.get('is_charging'),
+                    parsed.get('phase_a_current', 0),
+                    parsed.get('phase_b_current', 0),
+                    parsed.get('phase_c_current', 0),
                     parsed.get('cable_locked'),
                 )
             except Exception as e:

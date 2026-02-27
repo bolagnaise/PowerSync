@@ -439,10 +439,6 @@ class ZaptecCloudClient:
         cable_lock_raw = state.get(151, state.get("151", ""))
         parsed["cable_locked"] = str(cable_lock_raw).lower() in ("1", "true", "locked")
 
-        # IsCharging (StateId 507) — secondary signal from charger
-        is_charging_raw = state.get(507, state.get("507", ""))
-        parsed["is_charging"] = str(is_charging_raw).lower() in ("1", "true")
-
         # Power
         try:
             parsed["total_charge_power_w"] = float(
@@ -459,8 +455,8 @@ class ZaptecCloudClient:
         except (ValueError, TypeError):
             parsed["session_energy_wh"] = 0.0
 
-        # Phase currents
-        for phase, sid in [("phase_a_current", 520), ("phase_b_current", 521), ("phase_c_current", 522)]:
+        # Phase currents (StateId 507=Phase1, 508=Phase2, 509=Phase3)
+        for phase, sid in [("phase_a_current", 507), ("phase_b_current", 508), ("phase_c_current", 509)]:
             try:
                 parsed[phase] = float(state.get(sid, state.get(str(sid), 0)))
             except (ValueError, TypeError):
@@ -470,13 +466,13 @@ class ZaptecCloudClient:
         parsed["firmware_version"] = state.get(710, state.get("710", ""))
 
         # Mode-0 overrides: mode 0 (unknown/autonomous) needs disambiguation
-        # using secondary signals (power, IsCharging flag, cable lock state)
+        # using secondary signals (power, phase currents, cable lock state)
         if parsed["charger_operation_mode"] in ("unknown", "unknown_0"):
             if parsed["total_charge_power_w"] > 50:
                 # Significant power draw → actually charging (e.g. started from Zaptec app)
                 parsed["charger_operation_mode"] = "charging"
-            elif parsed["is_charging"]:
-                # IsCharging flag set → actually charging
+            elif any(parsed[f"phase_{p}_current"] > 0.5 for p in ("a", "b", "c")):
+                # Phase current > 0.5A → actually charging
                 parsed["charger_operation_mode"] = "charging"
             elif parsed["cable_locked"]:
                 # Cable locked but no power → vehicle connected, waiting
