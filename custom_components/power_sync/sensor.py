@@ -410,6 +410,9 @@ FOXESS_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         icon="mdi:battery-arrow-down",
         value_fn=lambda data: data.get("energy_summary", {}).get("discharge_today_kwh") if data else None,
     ),
+)
+
+TESLA_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_GATEWAY_FIRMWARE,
         name="Gateway Firmware",
@@ -683,6 +686,17 @@ async def async_setup_entry(
             )
     else:
         _LOGGER.warning("No energy coordinator available - energy sensors will not be created")
+
+    # Add Tesla-specific sensors (gateway firmware, etc.)
+    if tesla_coordinator:
+        for description in TESLA_SENSORS:
+            entities.append(
+                TeslaEnergySensor(
+                    coordinator=tesla_coordinator,
+                    description=description,
+                    entry=entry,
+                )
+            )
 
     # Add FoxESS-specific sensors (PV strings, CT2, work mode, etc.)
     if is_foxess and energy_coordinator:

@@ -1299,11 +1299,19 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             gateways = components.get("gateways", []) or site_info.get("gateways", [])
             if gateways:
                 gateway = gateways[0]
-                fw_version = gateway.get("firmware_version") or gateway.get("version", "")
+                _LOGGER.info("Gateway keys: %s", list(gateway.keys()))
+                fw_version = (
+                    gateway.get("firmware_version")
+                    or gateway.get("version")
+                    or gateway.get("gateway_firmware_version")
+                    or gateway.get("fw_version")
+                    or ""
+                )
                 if fw_version:
                     self._gateway_firmware = fw_version
                     _LOGGER.info("Gateway firmware version: %s", fw_version)
-                _LOGGER.debug("Gateway keys: %s", list(gateway.keys()))
+                else:
+                    _LOGGER.info("No firmware key found in gateway: %s", gateway)
 
             # Cache the result
             self._site_info_cache = site_info
