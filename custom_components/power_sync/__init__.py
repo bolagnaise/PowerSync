@@ -10801,7 +10801,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         last_known_firmware = stored_data.get("last_known_firmware")
 
         async def _check_firmware_change():
-            """Check if gateway firmware has changed and notify."""
+            """Check if firmware has changed and notify."""
             nonlocal last_known_firmware
             data = tesla_coordinator.data
             if not data:

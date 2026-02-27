@@ -415,7 +415,7 @@ FOXESS_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
 TESLA_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_GATEWAY_FIRMWARE,
-        name="Gateway Firmware",
+        name="Firmware",
         icon="mdi:chip",
         value_fn=lambda data: data.get("gateway_firmware") if data else None,
     ),
