@@ -336,6 +336,36 @@ ELECTRICITY_PROVIDERS = {
     "globird": "Globird",
     "aemo_vpp": "AEMO VPP (AGL, Engie, etc.)",
     "octopus": "Octopus Energy (UK)",
+    "nz": "New Zealand TOU",
+}
+
+# NZ Electricity provider configuration
+CONF_NZ_RETAILER = "nz_retailer"
+CONF_NZ_DISTRIBUTION_ZONE = "nz_distribution_zone"
+CONF_NZ_PEAK_RATE = "nz_peak_rate"
+CONF_NZ_SHOULDER_RATE = "nz_shoulder_rate"
+CONF_NZ_OFFPEAK_RATE = "nz_offpeak_rate"
+CONF_NZ_PEAK_EXPORT = "nz_peak_export"
+CONF_NZ_OFFPEAK_EXPORT = "nz_offpeak_export"
+CONF_NZ_DAILY_SUPPLY = "nz_daily_supply"
+
+NZ_RETAILERS = {
+    "octopus_nz": "Octopus Energy NZ",
+    "electric_kiwi": "Electric Kiwi",
+    "contact_good_weekends": "Contact Energy - Good Weekends",
+    "contact_good_nights": "Contact Energy - Good Nights",
+    "contact_good_charge": "Contact Energy - Good Charge",
+    "nz_custom": "Custom NZ TOU",
+}
+
+NZ_DISTRIBUTION_ZONES = {
+    "vector": "Vector (Auckland)",
+    "wellington": "Wellington Electricity",
+    "orion": "Orion (Canterbury)",
+    "powerco": "Powerco",
+    "unison": "Unison",
+    "aurora": "Aurora (Otago/Southland)",
+    "other": "Other / Generic",
 }
 
 # Octopus Energy UK configuration

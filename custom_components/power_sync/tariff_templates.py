@@ -1,5 +1,5 @@
 """
-Preset tariff templates for common Australian electricity plans.
+Preset tariff templates for common Australian and New Zealand electricity plans.
 
 These templates follow Tesla's tariff_content format and can be used as starting
 points for custom tariff configuration by non-Amber users.
@@ -339,11 +339,269 @@ TARIFF_TEMPLATES: Dict[str, Dict[str, Any]] = {
 }
 
 
+# ============================================================
+# NZ TOU period building blocks
+# ============================================================
+
+# NZ Peak: 7-9am and 5-9pm weekdays only
+NZ_WEEKDAY_PEAK = [
+    {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 7, "toHour": 9},
+    {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 17, "toHour": 21},
+]
+
+# NZ Shoulder: 9am-5pm weekdays + 7am-9pm weekends
+NZ_WEEKDAY_SHOULDER = [
+    {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 9, "toHour": 17},
+]
+
+NZ_WEEKEND_SHOULDER = [
+    {"fromDayOfWeek": 0, "toDayOfWeek": 0, "fromHour": 7, "toHour": 21},  # Sunday
+    {"fromDayOfWeek": 6, "toDayOfWeek": 6, "fromHour": 7, "toHour": 21},  # Saturday
+]
+
+# NZ Off-peak: 9pm-7am every day
+NZ_OFFPEAK_OVERNIGHT = [
+    {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 21, "toHour": 24},
+    {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 0, "toHour": 7},
+]
+
+NZ_TARIFF_TEMPLATES: Dict[str, Dict[str, Any]] = {
+    "octopus_nz": {
+        "id": "octopus_nz",
+        "name": "Octopus Energy NZ TOU",
+        "utility": "Octopus Energy NZ",
+        "description": "Octopus NZ time-of-use tariff. Peak 7-9am/5-9pm weekdays, shoulder 9am-5pm weekdays + 7am-9pm weekends, off-peak overnight.",
+        "seasons": {
+            "All Year": {
+                "fromMonth": 1,
+                "toMonth": 12,
+                "tou_periods": {
+                    "PEAK": NZ_WEEKDAY_PEAK,
+                    "SHOULDER": [
+                        *NZ_WEEKDAY_SHOULDER,
+                        *NZ_WEEKEND_SHOULDER,
+                    ],
+                    "OFF_PEAK": NZ_OFFPEAK_OVERNIGHT,
+                },
+            }
+        },
+        "energy_charges": {
+            "All Year": {
+                "PEAK": 0.46,       # 46 NZD c/kWh
+                "SHOULDER": 0.28,   # 28 NZD c/kWh
+                "OFF_PEAK": 0.15,   # 15 NZD c/kWh
+            }
+        },
+        "sell_tariff": {
+            "energy_charges": {
+                "All Year": {
+                    "PEAK": 0.17,       # 17 NZD c/kWh peak export
+                    "SHOULDER": 0.10,   # 10 NZD c/kWh shoulder export
+                    "OFF_PEAK": 0.08,   # 8 NZD c/kWh off-peak export
+                }
+            }
+        },
+    },
+
+    "electric_kiwi": {
+        "id": "electric_kiwi",
+        "name": "Electric Kiwi TOU",
+        "utility": "Electric Kiwi",
+        "description": "Electric Kiwi time-of-use tariff. Standard 3-tier NZ TOU periods. Note: Hour of Power free hour not modelled in TOU — select via Electric Kiwi app.",
+        "seasons": {
+            "All Year": {
+                "fromMonth": 1,
+                "toMonth": 12,
+                "tou_periods": {
+                    "PEAK": NZ_WEEKDAY_PEAK,
+                    "SHOULDER": [
+                        *NZ_WEEKDAY_SHOULDER,
+                        *NZ_WEEKEND_SHOULDER,
+                    ],
+                    "OFF_PEAK": NZ_OFFPEAK_OVERNIGHT,
+                },
+            }
+        },
+        "energy_charges": {
+            "All Year": {
+                "PEAK": 0.44,       # 44 NZD c/kWh
+                "SHOULDER": 0.26,   # 26 NZD c/kWh
+                "OFF_PEAK": 0.14,   # 14 NZD c/kWh
+            }
+        },
+        "sell_tariff": {
+            "energy_charges": {
+                "All Year": {
+                    "ALL": 0.08,    # 8 NZD c/kWh flat buyback
+                }
+            }
+        },
+    },
+
+    "contact_good_weekends": {
+        "id": "contact_good_weekends",
+        "name": "Contact Energy - Good Weekends",
+        "utility": "Contact Energy",
+        "description": "Contact Energy Good Weekends plan. Weekday peak/off-peak rates with free electricity on weekends (0 c/kWh).",
+        "seasons": {
+            "All Year": {
+                "fromMonth": 1,
+                "toMonth": 12,
+                "tou_periods": {
+                    "PEAK": [
+                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 7, "toHour": 21},
+                    ],
+                    "OFF_PEAK": [
+                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 21, "toHour": 24},
+                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 0, "toHour": 7},
+                    ],
+                    "SUPER_OFF_PEAK": [
+                        {"fromDayOfWeek": 0, "toDayOfWeek": 0, "fromHour": 0, "toHour": 24},  # Sunday
+                        {"fromDayOfWeek": 6, "toDayOfWeek": 6, "fromHour": 0, "toHour": 24},  # Saturday
+                    ],
+                },
+            }
+        },
+        "energy_charges": {
+            "All Year": {
+                "PEAK": 0.38,           # 38 NZD c/kWh weekday daytime
+                "OFF_PEAK": 0.18,       # 18 NZD c/kWh weekday overnight
+                "SUPER_OFF_PEAK": 0.0,  # Free weekends
+            }
+        },
+        "sell_tariff": {
+            "energy_charges": {
+                "All Year": {
+                    "ALL": 0.08,    # 8 NZD c/kWh flat buyback
+                }
+            }
+        },
+    },
+
+    "contact_good_nights": {
+        "id": "contact_good_nights",
+        "name": "Contact Energy - Good Nights",
+        "utility": "Contact Energy",
+        "description": "Contact Energy Good Nights plan. Standard TOU rates with free electricity 9pm-midnight every night.",
+        "seasons": {
+            "All Year": {
+                "fromMonth": 1,
+                "toMonth": 12,
+                "tou_periods": {
+                    "PEAK": NZ_WEEKDAY_PEAK,
+                    "SHOULDER": [
+                        *NZ_WEEKDAY_SHOULDER,
+                        *NZ_WEEKEND_SHOULDER,
+                    ],
+                    "SUPER_OFF_PEAK": [
+                        {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 21, "toHour": 24},
+                    ],
+                    "OFF_PEAK": [
+                        {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 0, "toHour": 7},
+                        {"fromDayOfWeek": 0, "toDayOfWeek": 0, "fromHour": 21, "toHour": 24},  # Weekend overlap handled by SUPER_OFF_PEAK priority
+                    ],
+                },
+            }
+        },
+        "energy_charges": {
+            "All Year": {
+                "PEAK": 0.42,           # 42 NZD c/kWh
+                "SHOULDER": 0.26,       # 26 NZD c/kWh
+                "SUPER_OFF_PEAK": 0.0,  # Free 9pm-midnight
+                "OFF_PEAK": 0.15,       # 15 NZD c/kWh overnight
+            }
+        },
+        "sell_tariff": {
+            "energy_charges": {
+                "All Year": {
+                    "ALL": 0.08,    # 8 NZD c/kWh flat buyback
+                }
+            }
+        },
+    },
+
+    "contact_good_charge": {
+        "id": "contact_good_charge",
+        "name": "Contact Energy - Good Charge",
+        "utility": "Contact Energy",
+        "description": "Contact Energy Good Charge plan. EV-focused with cheap overnight rate (9pm-7am) for charging.",
+        "seasons": {
+            "All Year": {
+                "fromMonth": 1,
+                "toMonth": 12,
+                "tou_periods": {
+                    "PEAK": NZ_WEEKDAY_PEAK,
+                    "SHOULDER": [
+                        *NZ_WEEKDAY_SHOULDER,
+                        *NZ_WEEKEND_SHOULDER,
+                    ],
+                    "OFF_PEAK": NZ_OFFPEAK_OVERNIGHT,
+                },
+            }
+        },
+        "energy_charges": {
+            "All Year": {
+                "PEAK": 0.44,       # 44 NZD c/kWh
+                "SHOULDER": 0.26,   # 26 NZD c/kWh
+                "OFF_PEAK": 0.10,   # 10 NZD c/kWh cheap overnight for EV charging
+            }
+        },
+        "sell_tariff": {
+            "energy_charges": {
+                "All Year": {
+                    "ALL": 0.08,    # 8 NZD c/kWh flat buyback
+                }
+            }
+        },
+    },
+
+    "nz_custom": {
+        "id": "nz_custom",
+        "name": "Custom NZ TOU",
+        "utility": "Custom NZ Provider",
+        "description": "Custom NZ time-of-use tariff. Enter your own rates.",
+        "seasons": {
+            "All Year": {
+                "fromMonth": 1,
+                "toMonth": 12,
+                "tou_periods": {
+                    "PEAK": NZ_WEEKDAY_PEAK,
+                    "SHOULDER": [
+                        *NZ_WEEKDAY_SHOULDER,
+                        *NZ_WEEKEND_SHOULDER,
+                    ],
+                    "OFF_PEAK": NZ_OFFPEAK_OVERNIGHT,
+                },
+            }
+        },
+        "energy_charges": {
+            "All Year": {
+                "PEAK": 0.40,       # Placeholder
+                "SHOULDER": 0.25,   # Placeholder
+                "OFF_PEAK": 0.15,   # Placeholder
+            }
+        },
+        "sell_tariff": {
+            "energy_charges": {
+                "All Year": {
+                    "ALL": 0.08,    # Placeholder
+                }
+            }
+        },
+    },
+}
+
+
 def get_template(template_id: str) -> Dict[str, Any] | None:
     """Get a tariff template by ID."""
-    return TARIFF_TEMPLATES.get(template_id)
+    return TARIFF_TEMPLATES.get(template_id) or NZ_TARIFF_TEMPLATES.get(template_id)
+
+
+def get_nz_template(retailer_id: str) -> Dict[str, Any] | None:
+    """Get a NZ tariff template by retailer ID."""
+    return NZ_TARIFF_TEMPLATES.get(retailer_id)
 
 
 def get_all_templates() -> Dict[str, Dict[str, Any]]:
     """Get all available tariff templates."""
-    return TARIFF_TEMPLATES
+    return {**TARIFF_TEMPLATES, **NZ_TARIFF_TEMPLATES}

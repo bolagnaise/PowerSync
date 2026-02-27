@@ -4430,6 +4430,48 @@ class ProviderConfigView(HomeAssistantView):
                     ),
                 }
 
+            elif electricity_provider == "nz":
+                # NZ TOU settings
+                from .const import (
+                    CONF_NZ_RETAILER, CONF_NZ_DISTRIBUTION_ZONE,
+                    CONF_NZ_PEAK_RATE, CONF_NZ_SHOULDER_RATE, CONF_NZ_OFFPEAK_RATE,
+                    CONF_NZ_PEAK_EXPORT, CONF_NZ_OFFPEAK_EXPORT, CONF_NZ_DAILY_SUPPLY,
+                )
+                config = {
+                    "nz_retailer": entry.options.get(
+                        CONF_NZ_RETAILER,
+                        entry.data.get(CONF_NZ_RETAILER, "nz_custom")
+                    ),
+                    "nz_distribution_zone": entry.options.get(
+                        CONF_NZ_DISTRIBUTION_ZONE,
+                        entry.data.get(CONF_NZ_DISTRIBUTION_ZONE, "other")
+                    ),
+                    "nz_peak_rate": entry.options.get(
+                        CONF_NZ_PEAK_RATE,
+                        entry.data.get(CONF_NZ_PEAK_RATE, 40.0)
+                    ),
+                    "nz_shoulder_rate": entry.options.get(
+                        CONF_NZ_SHOULDER_RATE,
+                        entry.data.get(CONF_NZ_SHOULDER_RATE, 25.0)
+                    ),
+                    "nz_offpeak_rate": entry.options.get(
+                        CONF_NZ_OFFPEAK_RATE,
+                        entry.data.get(CONF_NZ_OFFPEAK_RATE, 15.0)
+                    ),
+                    "nz_peak_export": entry.options.get(
+                        CONF_NZ_PEAK_EXPORT,
+                        entry.data.get(CONF_NZ_PEAK_EXPORT, 8.0)
+                    ),
+                    "nz_offpeak_export": entry.options.get(
+                        CONF_NZ_OFFPEAK_EXPORT,
+                        entry.data.get(CONF_NZ_OFFPEAK_EXPORT, 8.0)
+                    ),
+                    "nz_daily_supply": entry.options.get(
+                        CONF_NZ_DAILY_SUPPLY,
+                        entry.data.get(CONF_NZ_DAILY_SUPPLY, 200.0)
+                    ),
+                }
+
             result = {
                 "success": True,
                 "electricity_provider": electricity_provider,
@@ -9073,8 +9115,8 @@ class PriceRecommendationView(HomeAssistantView):
                 except Exception as e:
                     _LOGGER.debug(f"Could not read coordinator prices: {e}")
 
-            elif electricity_provider in ("globird", "aemo_vpp"):
-                # Globird/AEMO VPP: Read from Tesla/custom tariff with real-time TOU
+            elif electricity_provider in ("globird", "aemo_vpp", "nz"):
+                # Globird/AEMO VPP/NZ: Read from Tesla/custom tariff with real-time TOU
                 try:
                     tariff_prices = await self._fetch_tariff_prices()
                     if tariff_prices:
@@ -10067,6 +10109,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         expected_title = "PowerSync Flow Power"
     elif electricity_provider == "octopus":
         expected_title = "PowerSync Octopus"
+    elif electricity_provider == "nz":
+        expected_title = "PowerSync NZ"
     else:
         expected_title = "PowerSync Amber"
 
@@ -10103,7 +10147,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Check for TOU-tariff-only providers (Globird, etc.) that use Tesla tariff schedule
     # These providers don't need real-time pricing API - they use the TOU schedule from Tesla
-    has_tou_tariff_provider = electricity_provider in ("globird", "tou_only", "other")
+    has_tou_tariff_provider = electricity_provider in ("globird", "tou_only", "other", "nz")
     has_tesla_site = bool(entry.data.get(CONF_TESLA_ENERGY_SITE_ID))
 
     if has_amber:
@@ -10791,7 +10835,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Early initialization of tariff_schedule for non-Amber providers
     # This ensures price sensors can be created during platform setup
     # The full automation_store loading happens later and will update this
-    if electricity_provider in ("globird", "aemo_vpp", "other", "tou_only"):
+    if electricity_provider in ("globird", "aemo_vpp", "other", "tou_only", "nz"):
         initial_custom_tariff = entry.data.get("initial_custom_tariff")
         if initial_custom_tariff:
             tariff_schedule = convert_custom_tariff_to_schedule(initial_custom_tariff)
@@ -16519,7 +16563,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_ELECTRICITY_PROVIDER,
         entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
     )
-    if electricity_provider in ("globird", "aemo_vpp", "other"):
+    if electricity_provider in ("globird", "aemo_vpp", "other", "nz"):
         _LOGGER.info(f"📊 Fetching Tesla tariff schedule for {electricity_provider} user...")
         try:
             # If force charge/discharge is/was active, Tesla API may still have
@@ -17115,7 +17159,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_ELECTRICITY_PROVIDER,
         entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
     )
-    if electricity_provider in ("globird", "aemo_vpp", "other"):
+    if electricity_provider in ("globird", "aemo_vpp", "other", "nz"):
         # Only apply custom tariff if Tesla tariff wasn't already fetched
         existing_tariff = hass.data[DOMAIN][entry.entry_id].get("tariff_schedule")
         if existing_tariff and existing_tariff.get("tou_periods"):

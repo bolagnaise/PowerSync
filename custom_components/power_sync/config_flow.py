@@ -257,6 +257,17 @@ from .const import (
     DEFAULT_GOODWE_PORT_UDP,
     DEFAULT_GOODWE_PORT_TCP,
     BATTERY_SYSTEM_GOODWE,
+    # NZ Electricity provider configuration
+    CONF_NZ_RETAILER,
+    CONF_NZ_DISTRIBUTION_ZONE,
+    CONF_NZ_PEAK_RATE,
+    CONF_NZ_SHOULDER_RATE,
+    CONF_NZ_OFFPEAK_RATE,
+    CONF_NZ_PEAK_EXPORT,
+    CONF_NZ_OFFPEAK_EXPORT,
+    CONF_NZ_DAILY_SUPPLY,
+    NZ_RETAILERS,
+    NZ_DISTRIBUTION_ZONES,
 )
 
 # Combined network tariff key for config flow
@@ -601,6 +612,11 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._aemo_only_mode = False
                 self._amber_data = {}  # No Amber API needed
                 return await self.async_step_octopus()
+            elif provider == "nz":
+                # New Zealand TOU: Static tariff with retailer templates
+                self._aemo_only_mode = True
+                self._amber_data = {}
+                return await self.async_step_nz_retailer()
             else:
                 # Default to Amber
                 self._aemo_only_mode = False
@@ -617,6 +633,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "globird_desc": "AEMO spike detection for static tariff users",
                 "aemo_vpp_desc": "AEMO spike detection for VPP exports (AGL, Engie, etc.)",
                 "octopus_desc": "Octopus Energy UK with dynamic Agile pricing",
+                "nz_desc": "New Zealand TOU tariffs (Octopus NZ, Electric Kiwi, Contact Energy, etc.)",
             },
         )
 
@@ -2049,6 +2066,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 provider_name = {
                     "globird": "Globird Energy",
                     "aemo_vpp": "VPP Provider",
+                    "nz": "NZ Provider",
                     "other": "Custom Provider",
                 }.get(self._selected_electricity_provider, "Custom")
 
@@ -2128,6 +2146,173 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "info": "Configure your electricity tariff rates. All rates are in cents/kWh.",
                 "skip_hint": "Check 'Skip tariff configuration' to use default estimation instead.",
             },
+        )
+
+    async def async_step_nz_retailer(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle NZ retailer selection."""
+        if user_input is not None:
+            retailer = user_input.get(CONF_NZ_RETAILER, "nz_custom")
+            zone = user_input.get(CONF_NZ_DISTRIBUTION_ZONE, "other")
+
+            self._nz_retailer = retailer
+            self._nz_zone = zone
+
+            # Load template defaults for pre-filling rates
+            from .tariff_templates import get_nz_template
+            template = get_nz_template(retailer)
+
+            if template:
+                charges = template.get("energy_charges", {}).get("All Year", {})
+                sell_charges = template.get("sell_tariff", {}).get("energy_charges", {}).get("All Year", {})
+                self._nz_defaults = {
+                    CONF_NZ_PEAK_RATE: charges.get("PEAK", 0.40) * 100,
+                    CONF_NZ_SHOULDER_RATE: charges.get("SHOULDER", 0.25) * 100,
+                    CONF_NZ_OFFPEAK_RATE: charges.get("OFF_PEAK", charges.get("SUPER_OFF_PEAK", 0.15)) * 100,
+                    CONF_NZ_PEAK_EXPORT: sell_charges.get("PEAK", sell_charges.get("ALL", 0.08)) * 100,
+                    CONF_NZ_OFFPEAK_EXPORT: sell_charges.get("OFF_PEAK", sell_charges.get("ALL", 0.08)) * 100,
+                    CONF_NZ_DAILY_SUPPLY: 200.0,  # 200 NZD c/day default
+                }
+            else:
+                self._nz_defaults = {
+                    CONF_NZ_PEAK_RATE: 40.0,
+                    CONF_NZ_SHOULDER_RATE: 25.0,
+                    CONF_NZ_OFFPEAK_RATE: 15.0,
+                    CONF_NZ_PEAK_EXPORT: 8.0,
+                    CONF_NZ_OFFPEAK_EXPORT: 8.0,
+                    CONF_NZ_DAILY_SUPPLY: 200.0,
+                }
+
+            return await self.async_step_nz_rates()
+
+        return self.async_show_form(
+            step_id="nz_retailer",
+            data_schema=vol.Schema({
+                vol.Required(CONF_NZ_RETAILER, default="octopus_nz"): vol.In(NZ_RETAILERS),
+                vol.Required(CONF_NZ_DISTRIBUTION_ZONE, default="vector"): vol.In(NZ_DISTRIBUTION_ZONES),
+            }),
+        )
+
+    async def async_step_nz_rates(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle NZ rate entry (pre-filled from retailer template)."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            peak_rate = user_input.get(CONF_NZ_PEAK_RATE, 40.0)
+            shoulder_rate = user_input.get(CONF_NZ_SHOULDER_RATE, 25.0)
+            offpeak_rate = user_input.get(CONF_NZ_OFFPEAK_RATE, 15.0)
+            peak_export = user_input.get(CONF_NZ_PEAK_EXPORT, 8.0)
+            offpeak_export = user_input.get(CONF_NZ_OFFPEAK_EXPORT, 8.0)
+
+            # Load TOU periods from the selected retailer template
+            from .tariff_templates import get_nz_template, NZ_WEEKDAY_PEAK, NZ_WEEKDAY_SHOULDER, NZ_WEEKEND_SHOULDER, NZ_OFFPEAK_OVERNIGHT
+            template = get_nz_template(getattr(self, "_nz_retailer", "nz_custom"))
+
+            if template:
+                tou_periods = template["seasons"]["All Year"]["tou_periods"]
+            else:
+                # Fallback to standard NZ TOU periods
+                tou_periods = {
+                    "PEAK": NZ_WEEKDAY_PEAK,
+                    "SHOULDER": [*NZ_WEEKDAY_SHOULDER, *NZ_WEEKEND_SHOULDER],
+                    "OFF_PEAK": NZ_OFFPEAK_OVERNIGHT,
+                }
+
+            # Determine retailer name
+            retailer_name = NZ_RETAILERS.get(
+                getattr(self, "_nz_retailer", "nz_custom"), "Custom NZ Provider"
+            )
+
+            # Build energy charges from user input (convert cents to $/kWh)
+            energy_charges = {}
+            sell_charges = {}
+            for period_name in tou_periods:
+                if period_name == "PEAK":
+                    energy_charges[period_name] = peak_rate / 100
+                    sell_charges[period_name] = peak_export / 100
+                elif period_name == "SHOULDER":
+                    energy_charges[period_name] = shoulder_rate / 100
+                    sell_charges[period_name] = (peak_export + offpeak_export) / 200  # Average for shoulder export
+                elif period_name == "SUPER_OFF_PEAK":
+                    energy_charges[period_name] = offpeak_rate / 100
+                    sell_charges[period_name] = offpeak_export / 100
+                else:  # OFF_PEAK
+                    energy_charges[period_name] = offpeak_rate / 100
+                    sell_charges[period_name] = offpeak_export / 100
+
+            # Build custom tariff in Tesla format
+            self._custom_tariff_data = {
+                "name": f"{retailer_name} TOU",
+                "utility": retailer_name,
+                "seasons": {
+                    "All Year": {
+                        "fromMonth": 1,
+                        "toMonth": 12,
+                        "tou_periods": tou_periods,
+                    }
+                },
+                "energy_charges": {
+                    "All Year": energy_charges,
+                },
+                "sell_tariff": {
+                    "energy_charges": {
+                        "All Year": sell_charges,
+                    }
+                },
+            }
+
+            # Store NZ-specific config data
+            self._nz_config = {
+                CONF_NZ_RETAILER: getattr(self, "_nz_retailer", "nz_custom"),
+                CONF_NZ_DISTRIBUTION_ZONE: getattr(self, "_nz_zone", "other"),
+                CONF_NZ_PEAK_RATE: peak_rate,
+                CONF_NZ_SHOULDER_RATE: shoulder_rate,
+                CONF_NZ_OFFPEAK_RATE: offpeak_rate,
+                CONF_NZ_PEAK_EXPORT: peak_export,
+                CONF_NZ_OFFPEAK_EXPORT: offpeak_export,
+                CONF_NZ_DAILY_SUPPLY: user_input.get(CONF_NZ_DAILY_SUPPLY, 200.0),
+            }
+
+            # Route to battery-specific setup
+            if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
+                return await self.async_step_sigenergy_credentials()
+            elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
+                return await self.async_step_sungrow()
+            elif self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
+                return await self.async_step_foxess_connection()
+            elif self._selected_battery_system == BATTERY_SYSTEM_GOODWE:
+                return await self.async_step_goodwe_connection()
+            else:
+                return await self.async_step_tesla_provider()
+
+        defaults = getattr(self, "_nz_defaults", {})
+
+        return self.async_show_form(
+            step_id="nz_rates",
+            data_schema=vol.Schema({
+                vol.Required(CONF_NZ_PEAK_RATE, default=defaults.get(CONF_NZ_PEAK_RATE, 40.0)): vol.All(
+                    vol.Coerce(float), vol.Range(min=0, max=200)
+                ),
+                vol.Required(CONF_NZ_SHOULDER_RATE, default=defaults.get(CONF_NZ_SHOULDER_RATE, 25.0)): vol.All(
+                    vol.Coerce(float), vol.Range(min=0, max=200)
+                ),
+                vol.Required(CONF_NZ_OFFPEAK_RATE, default=defaults.get(CONF_NZ_OFFPEAK_RATE, 15.0)): vol.All(
+                    vol.Coerce(float), vol.Range(min=0, max=200)
+                ),
+                vol.Required(CONF_NZ_PEAK_EXPORT, default=defaults.get(CONF_NZ_PEAK_EXPORT, 8.0)): vol.All(
+                    vol.Coerce(float), vol.Range(min=0, max=100)
+                ),
+                vol.Required(CONF_NZ_OFFPEAK_EXPORT, default=defaults.get(CONF_NZ_OFFPEAK_EXPORT, 8.0)): vol.All(
+                    vol.Coerce(float), vol.Range(min=0, max=100)
+                ),
+                vol.Required(CONF_NZ_DAILY_SUPPLY, default=defaults.get(CONF_NZ_DAILY_SUPPLY, 200.0)): vol.All(
+                    vol.Coerce(float), vol.Range(min=0, max=1000)
+                ),
+            }),
+            errors=errors,
         )
 
     async def async_step_site_selection(
@@ -2877,6 +3062,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 return await self.async_step_globird_options()
             elif self._provider == "octopus":
                 return await self.async_step_octopus_options()
+            elif self._provider == "nz":
+                return await self.async_step_nz_options()
 
         current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
         current_tesla_provider = self.config_entry.data.get(CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_TESLEMETRY)
@@ -2998,6 +3185,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     return await self.async_step_globird_options()
                 elif self._provider == "octopus":
                     return await self.async_step_octopus_options()
+                elif self._provider == "nz":
+                    return await self.async_step_nz_options()
 
         current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
         current_modbus_host = self._get_option(CONF_SIGENERGY_MODBUS_HOST, "")
@@ -3156,6 +3345,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     return await self.async_step_globird_options()
                 elif self._provider == "octopus":
                     return await self.async_step_octopus_options()
+                elif self._provider == "nz":
+                    return await self.async_step_nz_options()
 
         current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
         current_host = self._get_option(CONF_SUNGROW_HOST, "")
@@ -3291,6 +3482,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     return await self.async_step_globird_options()
                 elif self._provider == "octopus":
                     return await self.async_step_octopus_options()
+                elif self._provider == "nz":
+                    return await self.async_step_nz_options()
 
         current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
         current_conn_type = self._get_option(CONF_FOXESS_CONNECTION_TYPE, FOXESS_CONNECTION_TCP)
@@ -3401,6 +3594,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     return await self.async_step_globird_options()
                 elif self._provider == "octopus":
                     return await self.async_step_octopus_options()
+                elif self._provider == "nz":
+                    return await self.async_step_nz_options()
 
         current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
         current_host = self._get_option(CONF_GOODWE_HOST, "")
@@ -3488,6 +3683,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                                 return await self.async_step_flow_power_options()
                             elif self._provider in ("globird", "aemo_vpp"):
                                 return await self.async_step_globird_options()
+                            elif self._provider == "nz":
+                                return await self.async_step_nz_options()
                         else:
                             errors["base"] = "invalid_auth"
                 except Exception:
@@ -4547,6 +4744,130 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             description_placeholders={
                 "octopus_url": "https://octopus.energy/smart/agile/",
             },
+        )
+
+    async def async_step_nz_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step 2e: NZ electricity provider options."""
+        if user_input is not None:
+            # Add provider to the data
+            user_input[CONF_ELECTRICITY_PROVIDER] = "nz"
+
+            retailer = user_input.get(CONF_NZ_RETAILER, self._get_option(CONF_NZ_RETAILER, "nz_custom"))
+            peak_rate = user_input.get(CONF_NZ_PEAK_RATE, 40.0)
+            shoulder_rate = user_input.get(CONF_NZ_SHOULDER_RATE, 25.0)
+            offpeak_rate = user_input.get(CONF_NZ_OFFPEAK_RATE, 15.0)
+            peak_export = user_input.get(CONF_NZ_PEAK_EXPORT, 8.0)
+            offpeak_export = user_input.get(CONF_NZ_OFFPEAK_EXPORT, 8.0)
+
+            # Load TOU periods from the selected retailer template
+            from .tariff_templates import get_nz_template, NZ_WEEKDAY_PEAK, NZ_WEEKDAY_SHOULDER, NZ_WEEKEND_SHOULDER, NZ_OFFPEAK_OVERNIGHT
+            template = get_nz_template(retailer)
+
+            if template:
+                tou_periods = template["seasons"]["All Year"]["tou_periods"]
+            else:
+                tou_periods = {
+                    "PEAK": NZ_WEEKDAY_PEAK,
+                    "SHOULDER": [*NZ_WEEKDAY_SHOULDER, *NZ_WEEKEND_SHOULDER],
+                    "OFF_PEAK": NZ_OFFPEAK_OVERNIGHT,
+                }
+
+            retailer_name = NZ_RETAILERS.get(retailer, "Custom NZ Provider")
+
+            # Build energy charges from user input (convert cents to $/kWh)
+            energy_charges = {}
+            sell_charges = {}
+            for period_name in tou_periods:
+                if period_name == "PEAK":
+                    energy_charges[period_name] = peak_rate / 100
+                    sell_charges[period_name] = peak_export / 100
+                elif period_name == "SHOULDER":
+                    energy_charges[period_name] = shoulder_rate / 100
+                    sell_charges[period_name] = (peak_export + offpeak_export) / 200
+                elif period_name == "SUPER_OFF_PEAK":
+                    energy_charges[period_name] = offpeak_rate / 100
+                    sell_charges[period_name] = offpeak_export / 100
+                else:
+                    energy_charges[period_name] = offpeak_rate / 100
+                    sell_charges[period_name] = offpeak_export / 100
+
+            # Build custom tariff and save to automation_store
+            custom_tariff = {
+                "name": f"{retailer_name} TOU",
+                "utility": retailer_name,
+                "seasons": {
+                    "All Year": {
+                        "fromMonth": 1,
+                        "toMonth": 12,
+                        "tou_periods": tou_periods,
+                    }
+                },
+                "energy_charges": {
+                    "All Year": energy_charges,
+                },
+                "sell_tariff": {
+                    "energy_charges": {
+                        "All Year": sell_charges,
+                    }
+                },
+            }
+
+            # Save custom tariff to automation_store (same pattern as custom_tariff_options)
+            if DOMAIN in self.hass.data:
+                for entry_id, entry_data in self.hass.data.get(DOMAIN, {}).items():
+                    if isinstance(entry_data, dict) and "automation_store" in entry_data:
+                        store = entry_data["automation_store"]
+                        store.set_custom_tariff(custom_tariff)
+                        await store.async_save()
+
+                        # Also update tariff_schedule for immediate use
+                        from . import convert_custom_tariff_to_schedule
+                        tariff_schedule = convert_custom_tariff_to_schedule(custom_tariff)
+                        entry_data["tariff_schedule"] = tariff_schedule
+                        _LOGGER.info("NZ custom tariff saved via options flow: %s", retailer_name)
+                        break
+
+            self._amber_options = user_input
+            return await self.async_step_demand_charge_options()
+
+        return self.async_show_form(
+            step_id="nz_options",
+            data_schema=vol.Schema({
+                vol.Required(
+                    CONF_NZ_RETAILER,
+                    default=self._get_option(CONF_NZ_RETAILER, "octopus_nz"),
+                ): vol.In(NZ_RETAILERS),
+                vol.Required(
+                    CONF_NZ_DISTRIBUTION_ZONE,
+                    default=self._get_option(CONF_NZ_DISTRIBUTION_ZONE, "vector"),
+                ): vol.In(NZ_DISTRIBUTION_ZONES),
+                vol.Required(
+                    CONF_NZ_PEAK_RATE,
+                    default=self._get_option(CONF_NZ_PEAK_RATE, 40.0),
+                ): vol.All(vol.Coerce(float), vol.Range(min=0, max=200)),
+                vol.Required(
+                    CONF_NZ_SHOULDER_RATE,
+                    default=self._get_option(CONF_NZ_SHOULDER_RATE, 25.0),
+                ): vol.All(vol.Coerce(float), vol.Range(min=0, max=200)),
+                vol.Required(
+                    CONF_NZ_OFFPEAK_RATE,
+                    default=self._get_option(CONF_NZ_OFFPEAK_RATE, 15.0),
+                ): vol.All(vol.Coerce(float), vol.Range(min=0, max=200)),
+                vol.Required(
+                    CONF_NZ_PEAK_EXPORT,
+                    default=self._get_option(CONF_NZ_PEAK_EXPORT, 8.0),
+                ): vol.All(vol.Coerce(float), vol.Range(min=0, max=100)),
+                vol.Required(
+                    CONF_NZ_OFFPEAK_EXPORT,
+                    default=self._get_option(CONF_NZ_OFFPEAK_EXPORT, 8.0),
+                ): vol.All(vol.Coerce(float), vol.Range(min=0, max=100)),
+                vol.Required(
+                    CONF_NZ_DAILY_SUPPLY,
+                    default=self._get_option(CONF_NZ_DAILY_SUPPLY, 200.0),
+                ): vol.All(vol.Coerce(float), vol.Range(min=0, max=1000)),
+            }),
         )
 
     async def async_step_custom_tariff_options(

@@ -8,7 +8,7 @@
       },
       "provider_selection": {
         "title": "Select Electricity Provider",
-        "description": "Choose your electricity provider:\n\n**Amber Electric**: Full real-time price sync using Amber API.\n\n**Flow Power**: Wholesale electricity with Happy Hour exports. Choose AEMO or Amber pricing.\n\n**Globird**: Static tariff plans with optional AEMO spike export.\n\n**AEMO VPP**: AEMO spike detection for VPP exports (AGL, Engie, etc.).",
+        "description": "Choose your electricity provider:\n\n**Amber Electric**: Full real-time price sync using Amber API.\n\n**Flow Power**: Wholesale electricity with Happy Hour exports. Choose AEMO or Amber pricing.\n\n**Globird**: Static tariff plans with optional AEMO spike export.\n\n**AEMO VPP**: AEMO spike detection for VPP exports (AGL, Engie, etc.).\n\n**New Zealand TOU**: NZ electricity retailers with TOU tariffs (Octopus NZ, Electric Kiwi, Contact Energy).",
         "data": {
           "electricity_provider": "Electricity Provider"
         },
@@ -130,6 +130,36 @@
           "super_offpeak_rate": "Optional: For plans with free or cheap solar soak periods (e.g., 10am-2pm)",
           "super_offpeak_start": "Start time of super off-peak period (e.g., 10:00 for solar soak)",
           "super_offpeak_end": "End time of super off-peak period (e.g., 14:00 for solar soak)"
+        },
+        "submit_button": "Next"
+      },
+      "nz_retailer": {
+        "title": "NZ Electricity Retailer",
+        "description": "Select your NZ electricity retailer and distribution zone. Rates will be pre-filled from the selected plan — you can adjust them in the next step.",
+        "data": {
+          "nz_retailer": "Retailer",
+          "nz_distribution_zone": "Distribution Zone"
+        },
+        "submit_button": "Next"
+      },
+      "nz_rates": {
+        "title": "NZ Electricity Rates",
+        "description": "Enter your rates in NZD cents per kWh. These are pre-filled from your selected retailer — adjust to match your actual plan.",
+        "data": {
+          "nz_peak_rate": "Peak Rate (c/kWh)",
+          "nz_shoulder_rate": "Shoulder Rate (c/kWh)",
+          "nz_offpeak_rate": "Off-Peak Rate (c/kWh)",
+          "nz_peak_export": "Peak Export Rate (c/kWh)",
+          "nz_offpeak_export": "Off-Peak Export Rate (c/kWh)",
+          "nz_daily_supply": "Daily Supply Charge (c/day)"
+        },
+        "data_description": {
+          "nz_peak_rate": "Weekday peak rate (typically 7-9am and 5-9pm)",
+          "nz_shoulder_rate": "Weekday daytime and weekend daytime rate",
+          "nz_offpeak_rate": "Overnight rate (typically 9pm-7am)",
+          "nz_peak_export": "Export rate during peak periods",
+          "nz_offpeak_export": "Export rate during off-peak periods",
+          "nz_daily_supply": "Fixed daily supply charge from your retailer"
         },
         "submit_button": "Next"
       },
@@ -746,6 +776,31 @@
           "octopus_region": "Your Grid Supply Point region - check your Octopus bill for your GSP code (single letter A-P)",
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices",
           "battery_curtailment_enabled": "Stop battery from exporting when prices are negative to avoid paying to export"
+        },
+        "submit_button": "Next"
+      },
+      "nz_options": {
+        "title": "NZ Electricity Settings",
+        "description": "Configure your NZ electricity plan. Select your retailer and adjust rates to match your plan.\n\nAll rates are in NZD cents per kWh.",
+        "data": {
+          "nz_retailer": "Retailer",
+          "nz_distribution_zone": "Distribution Zone",
+          "nz_peak_rate": "Peak Rate (c/kWh)",
+          "nz_shoulder_rate": "Shoulder Rate (c/kWh)",
+          "nz_offpeak_rate": "Off-Peak Rate (c/kWh)",
+          "nz_peak_export": "Peak Export Rate (c/kWh)",
+          "nz_offpeak_export": "Off-Peak Export Rate (c/kWh)",
+          "nz_daily_supply": "Daily Supply Charge (c/day)"
+        },
+        "data_description": {
+          "nz_retailer": "Select your NZ electricity retailer. Rates will update to match the selected plan.",
+          "nz_distribution_zone": "Your local distribution network zone",
+          "nz_peak_rate": "Weekday peak rate (typically 7-9am and 5-9pm)",
+          "nz_shoulder_rate": "Weekday daytime and weekend daytime rate",
+          "nz_offpeak_rate": "Overnight rate (typically 9pm-7am)",
+          "nz_peak_export": "Export rate during peak periods",
+          "nz_offpeak_export": "Export rate during off-peak periods",
+          "nz_daily_supply": "Fixed daily supply charge from your retailer"
         },
         "submit_button": "Next"
       },
