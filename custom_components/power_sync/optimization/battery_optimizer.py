@@ -127,6 +127,7 @@ class BatteryOptimizer:
         load_forecast: list[float],
         current_soc: float,
         cost_function: str = "cost",
+        acquisition_cost_kwh: float = 0.0,
     ) -> OptimizerResult:
         """
         Run the LP optimization.
@@ -169,6 +170,7 @@ class BatteryOptimizer:
                     load_forecast,
                     current_soc,
                     cost_function,
+                    acquisition_cost_kwh,
                 )
                 result.solve_time_s = time.monotonic() - start_time
                 return result
@@ -184,6 +186,7 @@ class BatteryOptimizer:
             load_forecast,
             current_soc,
             cost_function,
+            acquisition_cost_kwh,
         )
         result.solve_time_s = time.monotonic() - start_time
         return result
@@ -228,6 +231,7 @@ class BatteryOptimizer:
         load: list[float],
         soc_0: float,
         cost_function: str,
+        acquisition_cost_kwh: float = 0.0,
     ) -> OptimizerResult:
         """
         Solve the LP formulation using scipy.optimize.linprog.
@@ -239,6 +243,8 @@ class BatteryOptimizer:
             x[3n..4n-1] = battery_discharge[t] (kW, >= 0)
         """
         dt = self.dt_hours
+        eff = self.efficiency
+        cap = self.capacity_kwh
 
         # === Objective function: cost minimization ===
         # minimize SUM(import_price * grid_import - export_price * grid_export) * dt
@@ -249,6 +255,23 @@ class BatteryOptimizer:
                 c[n + t] = -export_prices[t] * dt   # grid_export revenue (negative = profit)
             else:
                 c[n + t] = 0.01 * dt                # chip-suppressed: small cost to avoid free exports
+
+        # === Terminal valuation: incentivize keeping charge at end of horizon ===
+        # Use median of second-half import prices as expected replacement cost.
+        # This prevents the LP from draining the battery at horizon's end.
+        half_n = n // 2
+        second_half_prices = import_prices[half_n:] if half_n < n else import_prices
+        if second_half_prices:
+            terminal_price = sorted(second_half_prices)[len(second_half_prices) // 2]
+        else:
+            terminal_price = 0.0
+
+        if terminal_price > 0:
+            for t in range(n):
+                # Charging adds SOC → subtract cost (incentivize keeping charge)
+                c[2 * n + t] -= terminal_price * eff * dt / cap
+                # Discharging removes SOC → add cost (penalize draining)
+                c[3 * n + t] += terminal_price * dt / (eff * cap)
 
         # === Equality constraints: power balance ===
         # solar[t] + grid_import[t] + battery_discharge[t] = load[t] + grid_export[t] + battery_charge[t]
@@ -277,9 +300,6 @@ class BatteryOptimizer:
         A_ub = []
         b_ub = []
 
-        eff = self.efficiency
-        cap = self.capacity_kwh
-
         for t in range(n):
             # Upper SOC bound: cumulative energy <= (1.0 - soc_0) * cap
             row_upper = [0.0] * (4 * n)
@@ -304,12 +324,25 @@ class BatteryOptimizer:
         bounds = []
         for t in range(n):
             bounds.append((0, max_grid_kw))  # grid_import
+
         for t in range(n):
-            bounds.append((0, max_grid_kw))  # grid_export
+            if acquisition_cost_kwh > 0 and export_prices[t] < acquisition_cost_kwh:
+                # Export price below acquisition cost — block grid export
+                bounds.append((0, 0))
+            else:
+                bounds.append((0, max_grid_kw))  # grid_export
+
         for t in range(n):
             bounds.append((0, self.max_charge_kw))  # battery_charge
+
         for t in range(n):
-            bounds.append((0, self.max_discharge_kw))  # battery_discharge
+            if acquisition_cost_kwh > 0 and export_prices[t] < acquisition_cost_kwh:
+                # Allow discharge only for self-consumption (serving home load)
+                net_load_kw = max(0.0, load[t] - solar[t])
+                max_self_consumption = net_load_kw / eff if eff > 0 else 0.0
+                bounds.append((0, min(self.max_discharge_kw, max_self_consumption)))
+            else:
+                bounds.append((0, self.max_discharge_kw))  # battery_discharge
 
         # === Solve ===
         _LOGGER.debug(f"Solving LP: {n} time steps, {4*n} variables")
@@ -330,11 +363,13 @@ class BatteryOptimizer:
             if "infeasible" in result.message.lower() and not getattr(self, '_relaxing', False):
                 # Try relaxing constraints (guard prevents infinite recursion)
                 return self._solve_lp_relaxed(
-                    n, import_prices, export_prices, solar, load, soc_0, cost_function
+                    n, import_prices, export_prices, solar, load, soc_0, cost_function,
+                    acquisition_cost_kwh,
                 )
             # Fall back to greedy
             return self._solve_greedy(
-                n, import_prices, export_prices, solar, load, soc_0, cost_function
+                n, import_prices, export_prices, solar, load, soc_0, cost_function,
+                acquisition_cost_kwh,
             )
 
         # === Extract solution ===
@@ -386,6 +421,7 @@ class BatteryOptimizer:
         load: list[float],
         soc_0: float,
         cost_function: str,
+        acquisition_cost_kwh: float = 0.0,
     ) -> OptimizerResult:
         """Retry LP with relaxed SOC constraints (lower backup reserve)."""
         _LOGGER.warning(
@@ -398,14 +434,16 @@ class BatteryOptimizer:
 
         try:
             result = self._solve_lp(
-                n, import_prices, export_prices, solar, load, soc_0, cost_function
+                n, import_prices, export_prices, solar, load, soc_0, cost_function,
+                acquisition_cost_kwh,
             )
             result.feasible = False  # Mark as relaxed
             return result
         except Exception:
             # Complete failure — use greedy
             return self._solve_greedy(
-                n, import_prices, export_prices, solar, load, soc_0, cost_function
+                n, import_prices, export_prices, solar, load, soc_0, cost_function,
+                acquisition_cost_kwh,
             )
         finally:
             self.backup_reserve = original_reserve
@@ -420,6 +458,7 @@ class BatteryOptimizer:
         load: list[float],
         soc_0: float,
         cost_function: str,
+        acquisition_cost_kwh: float = 0.0,
     ) -> OptimizerResult:
         """
         Greedy fallback optimizer.
@@ -454,6 +493,13 @@ class BatteryOptimizer:
         # Pass 1: assign discharge/export to highest-spread periods
         soc_tracker = soc_0
         for spread, t, net_load in spreads:
+            # Acquisition cost gate: skip discharge/export when unprofitable
+            if (
+                acquisition_cost_kwh > 0
+                and export_prices[t] < acquisition_cost_kwh
+                and spread > 0
+            ):
+                continue
             if spread > 0:
                 # Profitable to discharge
                 discharge_room = (soc_tracker - self.backup_reserve) * cap * eff / dt

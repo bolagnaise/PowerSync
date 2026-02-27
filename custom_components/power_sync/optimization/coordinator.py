@@ -523,6 +523,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     soc * 100,
                 )
 
+            # Compute acquisition cost: actual cost per kWh of grid-charged energy
+            if self._actual_charge_kwh_today > 0.1:
+                acq_cost = self._actual_import_cost_today / self._actual_charge_kwh_today
+            else:
+                # No meaningful charge data yet — use median import price as proxy
+                acq_cost = (
+                    sorted(import_prices)[len(import_prices) // 2]
+                    if import_prices
+                    else 0.0
+                )
+
             # Run LP in executor thread to avoid blocking event loop
             result: OptimizerResult = await self.hass.async_add_executor_job(
                 self._optimizer.optimize,
@@ -532,6 +543,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 load_forecast,
                 soc,
                 self._cost_function.value,
+                acq_cost,
             )
 
             self._last_optimizer_result = result
