@@ -38,6 +38,7 @@
 | **Flow Power / AEMO** | Australia | Wholesale pricing |
 | **Globird / AEMO VPP** | Australia | Static + spike detection |
 | **Octopus Energy** | UK | Dynamic 30-min (Agile, Go, Flux, Tracker) |
+| **NZ TOU** | New Zealand | Static TOU (Octopus NZ, Electric Kiwi, Contact Energy, Custom) |
 
 ---
 
