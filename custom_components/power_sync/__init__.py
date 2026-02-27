@@ -10806,7 +10806,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             data = tesla_coordinator.data
             if not data:
                 return
-            current_fw = data.get("gateway_firmware")
+            current_fw = data.get("firmware")
             if not current_fw:
                 return
             if last_known_firmware and current_fw != last_known_firmware:

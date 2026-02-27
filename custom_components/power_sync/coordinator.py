@@ -1119,7 +1119,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         self._site_info_cache = None  # Cache site_info since timezone doesn't change
         self._site_info_fetch_failed = False  # Negative cache to avoid retrying on every sync cycle
         self._energy_acc = EnergyAccumulator(hass, "tesla")
-        self._gateway_firmware = None  # Extracted from site_info gateways
+        self._firmware = None  # Extracted from site_info gateways
 
         # Determine API base URL based on provider
         if api_provider == TESLA_PROVIDER_FLEET_API:
@@ -1208,8 +1208,8 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             # Accumulate daily energy from power readings
             self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw)
 
-            # Fetch site_info once to extract gateway firmware version
-            if self._gateway_firmware is None and not self._site_info_fetch_failed:
+            # Fetch site_info once to extract firmware version
+            if self._firmware is None and not self._site_info_fetch_failed:
                 try:
                     await self.async_get_site_info()
                 except Exception:
@@ -1224,7 +1224,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 "ev_power": ev_power_kw,
                 "last_update": dt_util.utcnow(),
                 "energy_summary": self._energy_acc.as_dict(),
-                "gateway_firmware": self._gateway_firmware,
+                "firmware": self._firmware,
             }
 
             return energy_data
@@ -1295,7 +1295,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 if component_battery:
                     _LOGGER.debug(f"Components battery fields: {component_battery}")
 
-            # Extract gateway firmware version
+            # Extract firmware version
             gateways = components.get("gateways", []) or site_info.get("gateways", [])
             if gateways:
                 gateway = gateways[0]
@@ -1308,8 +1308,8 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                     or ""
                 )
                 if fw_version:
-                    self._gateway_firmware = fw_version
-                    _LOGGER.info("Gateway firmware version: %s", fw_version)
+                    self._firmware = fw_version
+                    _LOGGER.info("Firmware version: %s", fw_version)
                 else:
                     _LOGGER.info("No firmware key found in gateway: %s", gateway)
 

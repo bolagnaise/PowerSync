@@ -74,7 +74,7 @@ from .const import (
     NETWORK_API_NAME,
     DEFAULT_FP_AMBER_MARKUP,
     SENSOR_TYPE_BATTERY_HEALTH,
-    SENSOR_TYPE_GATEWAY_FIRMWARE,
+    SENSOR_TYPE_FIRMWARE,
     SENSOR_TYPE_INVERTER_STATUS,
     SENSOR_TYPE_BATTERY_MODE,
     SENSOR_TYPE_PV1_POWER,
@@ -414,10 +414,10 @@ FOXESS_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
 
 TESLA_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
-        key=SENSOR_TYPE_GATEWAY_FIRMWARE,
+        key=SENSOR_TYPE_FIRMWARE,
         name="Firmware",
         icon="mdi:chip",
-        value_fn=lambda data: data.get("gateway_firmware") if data else None,
+        value_fn=lambda data: data.get("firmware") if data else None,
     ),
 )
 
