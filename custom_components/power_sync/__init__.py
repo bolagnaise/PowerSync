@@ -9904,6 +9904,19 @@ def _migrate_entity_ids(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """
     ent_reg = er.async_get(hass)
     entry_prefix = f"{entry.entry_id}_"
+
+    # Migrate renamed unique_ids so HA reuses existing entities
+    _UNIQUE_ID_RENAMES = {
+        "gateway_firmware": "firmware",
+    }
+    for old_suffix, new_suffix in _UNIQUE_ID_RENAMES.items():
+        old_uid = f"{entry_prefix}{old_suffix}"
+        new_uid = f"{entry_prefix}{new_suffix}"
+        entity_entry = ent_reg.async_get_entity_id("sensor", DOMAIN, old_uid)
+        if entity_entry and not ent_reg.async_get_entity_id("sensor", DOMAIN, new_uid):
+            ent_reg.async_update_entity(entity_entry, new_unique_id=new_uid)
+            _LOGGER.info("Migrated unique_id: %s -> %s", old_uid, new_uid)
+
     migrated = 0
 
     for entity_entry in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
