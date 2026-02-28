@@ -1116,7 +1116,8 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         self._token_getter = token_getter  # Callable to get fresh token
         self.api_provider = api_provider
         self.session = async_get_clientsession(hass)
-        self._site_info_cache = None  # Cache site_info since timezone doesn't change
+        self._site_info_cache = None  # Cache site_info (refreshed every 6 hours)
+        self._site_info_last_fetch: float = 0  # Timestamp of last successful fetch
         self._site_info_fetch_failed = False  # Negative cache to avoid retrying on every sync cycle
         self._energy_acc = EnergyAccumulator(hass, "tesla")
         self._firmware = None  # Extracted from site_info gateways
@@ -1208,8 +1209,9 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             # Accumulate daily energy from power readings
             self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw)
 
-            # Fetch site_info once to extract firmware version
-            if self._firmware is None and not self._site_info_fetch_failed:
+            # Fetch site_info periodically to detect firmware updates (every 6 hours)
+            _site_info_stale = (time.monotonic() - self._site_info_last_fetch) > 21600
+            if _site_info_stale and not self._site_info_fetch_failed:
                 try:
                     await self.async_get_site_info()
                 except Exception:
@@ -1244,8 +1246,8 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         Returns:
             Site info dict containing installation_time_zone, or None if fetch fails
         """
-        # Return cached value if available
-        if self._site_info_cache:
+        # Return cached value if still fresh (< 6 hours old)
+        if self._site_info_cache and (time.monotonic() - self._site_info_last_fetch) <= 21600:
             _LOGGER.debug("Returning cached site_info")
             return self._site_info_cache
 
@@ -1313,8 +1315,9 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 else:
                     _LOGGER.info("No firmware key found in gateway: %s", gateway)
 
-            # Cache the result
+            # Cache the result with timestamp
             self._site_info_cache = site_info
+            self._site_info_last_fetch = time.monotonic()
 
             return site_info
 
