@@ -49,6 +49,7 @@ from .const import (
     CONF_DAILY_SUPPLY_CHARGE,
     CONF_MONTHLY_SUPPLY_CHARGE,
     CONF_BATTERY_CURTAILMENT_ENABLED,
+    CONF_SIGENERGY_DC_CURTAILMENT_ENABLED,
     CONF_TESLA_API_PROVIDER,
     CONF_FLEET_API_ACCESS_TOKEN,
     TESLA_PROVIDER_TESLEMETRY,
@@ -10867,6 +10868,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "is_foxess": is_foxess,  # Track if FoxESS battery system
         "is_goodwe": is_goodwe,  # Track if GoodWe battery system
         "foxess_curtailment_state": "normal",  # Track FoxESS DC curtailment state
+        "sigenergy_curtailment_state": "normal",  # Track Sigenergy DC curtailment state
         "amber_usage_coordinator": amber_usage_coordinator,  # For actual metered cost data
         "flow_power_twap_tracker": flow_power_twap_tracker,  # For dynamic PEA pricing
         "fp_tariff_rate": fp_tariff_rate,  # Current network tariff rate (c/kWh) — v2
@@ -13076,6 +13078,127 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.error("FoxESS curtailment error: %s", e, exc_info=True)
 
+    async def handle_sigenergy_curtailment(feedin_price=None, import_price=None) -> None:
+        """Handle Sigenergy DC curtailment via Modbus with load-following.
+
+        Uses the Sigenergy controller's curtail()/restore() methods which set
+        the grid export limit register. Supports load-following mode where
+        export is limited to home load (so solar still powers the house and
+        charges the battery) with zero-export as fallback.
+
+        Args:
+            feedin_price: Current feed-in price in c/kWh (None to fetch from Amber)
+            import_price: Current import price in c/kWh (for logging only)
+        """
+        # Check Sigenergy-specific DC curtailment toggle
+        dc_curtailment_enabled = entry.options.get(
+            CONF_SIGENERGY_DC_CURTAILMENT_ENABLED,
+            entry.data.get(CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False)
+        )
+        if not dc_curtailment_enabled:
+            _LOGGER.debug("Sigenergy DC curtailment is disabled, skipping")
+            return
+
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        current_state = entry_data.get("sigenergy_curtailment_state", "normal")
+
+        # Get prices from any available price coordinator if not provided
+        if feedin_price is None:
+            _price_coord = amber_coordinator or aemo_sensor_coordinator or octopus_coordinator
+            if _price_coord and _price_coord.data:
+                current_prices = _price_coord.data.get("current", [])
+                for price_data in current_prices:
+                    if price_data.get("channelType") == "feedIn":
+                        feedin_price = price_data.get("perKwh", 0)
+                    elif price_data.get("channelType") == "general":
+                        import_price = price_data.get("perKwh", 0)
+
+        if feedin_price is None:
+            _LOGGER.warning("Sigenergy curtailment: no feed-in price available")
+            return
+
+        export_earnings = -feedin_price
+        _LOGGER.info(
+            "Sigenergy curtailment check: export_earnings=%.2fc/kWh, import=%.2fc/kWh, state=%s",
+            export_earnings, import_price or 0, current_state,
+        )
+
+        # Get Sigenergy controller from coordinator
+        sig_coord = entry_data.get("sigenergy_coordinator")
+        if not sig_coord or not hasattr(sig_coord, '_controller') or not sig_coord._controller:
+            _LOGGER.debug("Sigenergy curtailment: no controller available")
+            return
+
+        controller = sig_coord._controller
+
+        try:
+            if export_earnings < 1:
+                # Negative or near-zero export earnings → curtail
+                # Get home load for load-following mode
+                home_load_w = None
+                if sig_coord.data:
+                    load_power_kw = sig_coord.data.get("load_power", 0)
+                    if load_power_kw and load_power_kw > 0:
+                        home_load_w = int(load_power_kw * 1000)
+                        # Add battery charge rate if charging
+                        battery_power_kw = sig_coord.data.get("battery_power", 0)
+                        # battery_power < 0 means charging (consuming power from solar)
+                        battery_charge_w = max(0, -int(battery_power_kw * 1000))
+                        if battery_charge_w > 50:
+                            home_load_w += battery_charge_w
+                            _LOGGER.info(
+                                "Sigenergy load-following: Home=%dW + Battery charging=%dW = %dW",
+                                home_load_w - battery_charge_w, battery_charge_w, home_load_w,
+                            )
+                        else:
+                            _LOGGER.info("Sigenergy load-following: Home load=%dW (battery not charging)", home_load_w)
+
+                curtail_mode = "load_following" if home_load_w is not None else "zero_export"
+
+                if current_state == "normal":
+                    # Transitioning from normal → curtailed
+                    if home_load_w is not None:
+                        _LOGGER.info("Sigenergy curtailment TRIGGERED: export_earnings=%.2fc (<1c) → load-following at %dW", export_earnings, home_load_w)
+                        success = await controller.curtail(home_load_w=home_load_w)
+                    else:
+                        _LOGGER.info("Sigenergy curtailment TRIGGERED: export_earnings=%.2fc (<1c) → zero export", export_earnings)
+                        success = await controller.curtail()
+                    if success:
+                        hass.data[DOMAIN][entry.entry_id]["sigenergy_curtailment_state"] = "curtailed"
+                        hass.data[DOMAIN][entry.entry_id]["sigenergy_curtailment_mode"] = curtail_mode
+                        hass.data[DOMAIN][entry.entry_id]["sigenergy_power_limit_w"] = home_load_w
+                    else:
+                        _LOGGER.error("Sigenergy curtail() failed")
+                else:
+                    # Already curtailed — re-apply load-following with updated home load
+                    if home_load_w is not None:
+                        current_limit = entry_data.get("sigenergy_power_limit_w")
+                        if current_limit is None or abs(home_load_w - current_limit) >= 50:
+                            success = await controller.curtail(home_load_w=home_load_w)
+                            if success:
+                                _LOGGER.debug("Sigenergy load-following updated: %dW → %dW", current_limit or 0, home_load_w)
+                                hass.data[DOMAIN][entry.entry_id]["sigenergy_power_limit_w"] = home_load_w
+                                hass.data[DOMAIN][entry.entry_id]["sigenergy_curtailment_mode"] = "load_following"
+                        else:
+                            _LOGGER.debug("Sigenergy already curtailed, load within 50W tolerance")
+                    else:
+                        _LOGGER.debug("Sigenergy already curtailed (zero export), no action needed")
+            else:
+                # Positive export earnings → restore
+                if current_state != "normal":
+                    _LOGGER.info("Sigenergy curtailment RESTORED: export_earnings=%.2fc (>=1c) → normal export", export_earnings)
+                    success = await controller.restore()
+                    if success:
+                        hass.data[DOMAIN][entry.entry_id]["sigenergy_curtailment_state"] = "normal"
+                        hass.data[DOMAIN][entry.entry_id]["sigenergy_curtailment_mode"] = None
+                        hass.data[DOMAIN][entry.entry_id]["sigenergy_power_limit_w"] = None
+                    else:
+                        _LOGGER.error("Sigenergy restore() failed")
+                else:
+                    _LOGGER.debug("Sigenergy already in normal mode, no action needed")
+        except Exception as e:
+            _LOGGER.error("Sigenergy curtailment error: %s", e, exc_info=True)
+
     async def handle_solar_curtailment_check(call: ServiceCall = None) -> None:
         """
         Check export prices and curtail solar export when price is below 1c/kWh.
@@ -13111,7 +13234,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Sigenergy uses Modbus-based curtailment, not Tesla API
         if is_sigenergy:
-            _LOGGER.debug("Sigenergy curtailment check skipped - Modbus-based curtailment not yet wired")
+            await handle_sigenergy_curtailment()
             return
 
         # Find an available price coordinator (Amber, AEMO, or Octopus)
@@ -13427,7 +13550,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Sigenergy uses Modbus-based curtailment, not Tesla API
         if is_sigenergy:
-            _LOGGER.debug("Sigenergy curtailment check skipped - Modbus-based curtailment not yet wired")
+            feedin_price = websocket_data.get('feedIn', {}).get('perKwh') if websocket_data else None
+            import_price = websocket_data.get('general', {}).get('perKwh') if websocket_data else None
+            await handle_sigenergy_curtailment(feedin_price=feedin_price, import_price=import_price)
             return
 
         _LOGGER.info("=== Starting solar curtailment check (WebSocket event-driven) ===")

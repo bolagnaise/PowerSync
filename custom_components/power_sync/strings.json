@@ -73,7 +73,7 @@
           "forecast_discrepancy_threshold": "Average price difference threshold to trigger alert. Default 10c/kWh means alert when predicted vs conservative differ by more than 10c on average",
           "force_tariff_mode_toggle": "After uploading a new tariff, briefly toggle operation mode to force immediate recalculation (Tesla only)",
           "export_boost_enabled": "Artificially increase sell prices during configured hours to encourage battery export during high-value periods",
-          "export_price_offset": "Amount to ADD to the actual Amber export price. Example: Amber=18c + Offset=5c → Tesla sees 23c",
+          "export_price_offset": "Amount to ADD to the actual Amber export price. Example: Amber=18c + Offset=5c → battery sees 23c",
           "export_min_price": "Floor price AFTER offset is applied. Example: Amber=12c + Offset=5c = 17c → bumped up to Floor=20c",
           "export_boost_threshold": "Only apply boost when ACTUAL Amber price (before boost) is at or above this value. Prices below this are sent unchanged. Use 0 to always boost.",
           "chip_mode_enabled": "Suppress exports during configured hours unless price exceeds threshold (inverse of Export Boost)",
@@ -413,7 +413,7 @@
           "ac_inverter_curtailment_enabled": "Enable AC-Coupled Inverter Shutdown"
         },
         "data_description": {
-          "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. Sets Tesla to self-consumption mode or Sigenergy export limit to 0. This is the MAIN toggle - must be enabled for curtailment to work.",
+          "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. This is the MAIN toggle - must be enabled for curtailment to work.",
           "ac_inverter_curtailment_enabled": "Shutdown AC-coupled solar inverter (Fronius, Sungrow, GoodWe, Enphase, etc.) when feed-in price is negative. Use this if your solar bypasses the battery and exports directly to grid. Requires inverter IP configuration in next step."
         },
         "submit_button": "Next"
@@ -680,7 +680,7 @@
           "forecast_discrepancy_threshold": "Average price difference threshold to trigger alert. Default 10c/kWh means alert when predicted vs conservative differ by more than 10c on average across forecast periods.",
           "force_tariff_mode_toggle": "After uploading a new tariff, briefly toggle operation mode to force immediate recalculation of battery behavior (Tesla only, ~5 second interruption)",
           "export_boost_enabled": "Artificially increase sell prices during configured hours to encourage battery export during high-value periods",
-          "export_price_offset": "Amount to ADD to the actual Amber export price. Example: Amber=18c + Offset=5c → Tesla sees 23c",
+          "export_price_offset": "Amount to ADD to the actual Amber export price. Example: Amber=18c + Offset=5c → battery sees 23c",
           "export_min_price": "Floor price AFTER offset is applied. Example: Amber=12c + Offset=5c = 17c → bumped up to Floor=20c",
           "export_boost_threshold": "Only apply boost when ACTUAL Amber price (before boost) is at or above this value. Prices below this are sent unchanged. Use 0 to always boost.",
           "chip_mode_enabled": "Suppress exports during configured hours unless price exceeds threshold (inverse of Export Boost)",
@@ -881,7 +881,7 @@
           "openweathermap_api_key": "OpenWeatherMap API Key (Optional)"
         },
         "data_description": {
-          "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. Sets Tesla to self-consumption mode or Sigenergy export limit to 0. This is the MAIN toggle - must be enabled for curtailment to work.",
+          "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. This is the MAIN toggle - must be enabled for curtailment to work.",
           "ac_inverter_curtailment_enabled": "Shutdown AC-coupled solar inverter (Fronius, Sungrow, GoodWe, Enphase, etc.) when feed-in price is negative. Use this if your solar bypasses the battery and exports directly to grid. Requires inverter IP configuration in next step.",
           "sigenergy_dc_curtailment_enabled": "Limit DC solar production via Sigenergy Modbus when feed-in price is negative. Only applies to Sigenergy systems with DC-coupled solar.",
           "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny/cloudy triggers). Leave blank to disable weather triggers."

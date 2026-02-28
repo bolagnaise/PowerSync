@@ -1093,7 +1093,7 @@ function _curtailmentStatus(e, hasDC, hasAC) {
     cards.push({
       type: 'custom:button-card',
       entity: dcEntity,
-      name: 'DC Solar (Tesla)',
+      name: 'DC Solar',
       show_icon: true,
       show_name: true,
       show_label: true,
@@ -1437,7 +1437,7 @@ function _batteryHealth(e) {
 {%- if states('${healthEntity}') not in ['unavailable', 'unknown'] %}
 **Capacity:** {{ current }} / {{ original }} kWh | **Last scan:** {{ scan[:10] if scan else 'N/A' }}
 {%- else %}
-Scan from the PowerSync Mobile app while connected to Powerwall WiFi.
+Scan from the PowerSync Mobile app while connected to your battery system's WiFi.
 {%- endif %}`,
       },
     ],

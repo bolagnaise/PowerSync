@@ -1024,22 +1024,22 @@ async def _action_force_discharge(
     duration = params.get("duration") or params.get("duration_minutes", 30)
 
     if _is_sigenergy(config_entry):
-        # Sigenergy: Set high discharge rate and restore export limit
+        # Sigenergy: Enable Remote EMS + force discharge mode
         controller = await _get_sigenergy_controller(config_entry)
         if not controller:
             _LOGGER.error("force_discharge: Sigenergy Modbus not configured")
             return False
         try:
-            # Set high discharge rate (10kW max)
-            discharge_result = await controller.set_discharge_rate_limit(10.0)
-            # Restore export limit to allow discharge to grid
-            export_result = await controller.restore_export_limit()
-            if discharge_result and export_result:
-                _LOGGER.info(f"Sigenergy: Force discharge activated for {duration} minutes")
+            power_kw = params.get("power_w", 10000) / 1000 if params.get("power_w") else 10.0
+            result = await controller.force_discharge(power_kw)
+            if result:
+                # Also restore export limit to allow discharge to grid
+                await controller.restore_export_limit()
+                _LOGGER.info(f"Sigenergy: Force discharge activated at {power_kw}kW for {duration} minutes")
                 return True
             else:
-                _LOGGER.warning(f"Sigenergy force discharge partial: discharge={discharge_result}, export={export_result}")
-                return discharge_result or export_result
+                _LOGGER.error("Sigenergy force_discharge() failed")
+                return False
         except Exception as e:
             _LOGGER.error(f"Failed to force discharge (Sigenergy): {e}")
             return False
@@ -1071,22 +1071,20 @@ async def _action_force_charge(
     duration = params.get("duration") or params.get("duration_minutes", 60)
 
     if _is_sigenergy(config_entry):
-        # Sigenergy: Set high charge rate and prevent discharge
+        # Sigenergy: Enable Remote EMS + force charge mode
         controller = await _get_sigenergy_controller(config_entry)
         if not controller:
             _LOGGER.error("force_charge: Sigenergy Modbus not configured")
             return False
         try:
-            # Set high charge rate (10kW max)
-            charge_result = await controller.set_charge_rate_limit(10.0)
-            # Prevent discharge while charging
-            discharge_result = await controller.set_discharge_rate_limit(0)
-            if charge_result and discharge_result:
-                _LOGGER.info(f"Sigenergy: Force charge activated for {duration} minutes")
+            power_kw = params.get("power_w", 10000) / 1000 if params.get("power_w") else 10.0
+            result = await controller.force_charge(power_kw)
+            if result:
+                _LOGGER.info(f"Sigenergy: Force charge activated at {power_kw}kW for {duration} minutes")
                 return True
             else:
-                _LOGGER.warning(f"Sigenergy force charge partial: charge={charge_result}, discharge={discharge_result}")
-                return charge_result or discharge_result
+                _LOGGER.error("Sigenergy force_charge() failed")
+                return False
         except Exception as e:
             _LOGGER.error(f"Failed to force charge (Sigenergy): {e}")
             return False
@@ -1318,20 +1316,19 @@ async def _action_restore_normal(
 ) -> bool:
     """Restore normal battery operation (cancel force charge/discharge)."""
     if _is_sigenergy(config_entry):
-        # Sigenergy: Restore default rate limits
+        # Sigenergy: Disable Remote EMS to return to native EMS
         controller = await _get_sigenergy_controller(config_entry)
         if not controller:
             _LOGGER.error("restore_normal: Sigenergy Modbus not configured")
             return False
         try:
-            # Restore default rates (max rates)
-            charge_result = await controller.set_charge_rate_limit(10.0)
-            discharge_result = await controller.set_discharge_rate_limit(10.0)
-            export_result = await controller.restore_export_limit()
-            if charge_result and discharge_result and export_result:
-                _LOGGER.info("Sigenergy: Restored normal operation")
+            result = await controller.restore_normal()
+            if result:
+                _LOGGER.info("Sigenergy: Restored normal operation (Remote EMS disabled)")
                 return True
-            return charge_result or discharge_result or export_result
+            else:
+                _LOGGER.error("Sigenergy restore_normal() failed")
+                return False
         except Exception as e:
             _LOGGER.error(f"Failed to restore normal (Sigenergy): {e}")
             return False
