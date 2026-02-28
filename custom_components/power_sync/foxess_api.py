@@ -40,7 +40,7 @@ class FoxESSCloudClient:
         """Initialize FoxESS Cloud client.
 
         Args:
-            api_key: API key from foxesscloud.com > User Profile > API Management
+            api_key: API key from foxesscloud.com/user/center > API Management
             device_sn: Inverter serial number
             session: Optional aiohttp session to reuse
         """

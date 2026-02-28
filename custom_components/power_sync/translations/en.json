@@ -268,7 +268,7 @@
       },
       "foxess_cloud": {
         "title": "FoxESS Cloud (Optional)",
-        "description": "Optionally provide your FoxESS Cloud API key to sync Amber/Octopus prices as time-based schedules on your inverter.\n\nGet your API key from **foxesscloud.com > User Profile > API Management**.\n\nThis is **not required** for battery control — all control is done locally via Modbus.\n\nLeave blank to skip.",
+        "description": "Optionally provide your FoxESS Cloud API key to sync Amber/Octopus prices as time-based schedules on your inverter.\n\nGet your API key from **foxesscloud.com/user/center > API Management**.\n\nThis is **not required** for battery control — all control is done locally via Modbus.\n\nLeave blank to skip.",
         "data": {
           "foxess_cloud_api_key": "FoxESS Cloud API Key",
           "foxess_cloud_device_sn": "Device Serial Number"
