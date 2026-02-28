@@ -254,37 +254,48 @@ class HuaweiController(InverterController):
     ) -> bool:
         """Enable load following curtailment on the Huawei inverter.
 
-        Sets active power control mode to zero export, which allows
-        self-consumption while preventing grid export.
+        If home_load_w is provided, uses kW limit mode to limit export to home load.
+        Otherwise sets active power control mode to zero export.
 
         Returns:
             True if curtailment successful
         """
-        _LOGGER.info(f"Curtailing Huawei inverter at {self.host} (zero export mode)")
-
         try:
             if not await self.connect():
                 _LOGGER.error("Cannot curtail: failed to connect to inverter")
                 return False
 
-            # Set active power control mode to zero export
-            success = await self._write_register(
-                self.REG_ACTIVE_POWER_CONTROL_MODE,
-                self.MODE_ZERO_EXPORT
-            )
-            if not success:
-                _LOGGER.warning("Zero export mode failed, trying kW limit mode")
-                # Fallback: Set to kW limit mode with 0 kW
+            if home_load_w is not None and home_load_w > 0:
+                # Load-following: use kW limit mode
+                limit_kw_scaled = int(home_load_w)  # gain 1000 → W value maps to kW×1000
+                _LOGGER.info(f"Curtailing Huawei inverter at {self.host} (load-following: {home_load_w:.0f}W)")
                 success = await self._write_register(
                     self.REG_ACTIVE_POWER_CONTROL_MODE,
                     self.MODE_LIMIT_KW
                 )
                 if success:
-                    # Write 0 kW limit (I32 = two registers)
                     success = await self._write_registers(
                         self.REG_MAX_FEED_GRID_POWER_KW,
-                        self._i32_to_registers(0)
+                        self._i32_to_registers(limit_kw_scaled)
                     )
+            else:
+                # Zero export mode
+                _LOGGER.info(f"Curtailing Huawei inverter at {self.host} (zero export mode)")
+                success = await self._write_register(
+                    self.REG_ACTIVE_POWER_CONTROL_MODE,
+                    self.MODE_ZERO_EXPORT
+                )
+                if not success:
+                    _LOGGER.warning("Zero export mode failed, trying kW limit mode with 0")
+                    success = await self._write_register(
+                        self.REG_ACTIVE_POWER_CONTROL_MODE,
+                        self.MODE_LIMIT_KW
+                    )
+                    if success:
+                        success = await self._write_registers(
+                            self.REG_MAX_FEED_GRID_POWER_KW,
+                            self._i32_to_registers(0)
+                        )
 
             if not success:
                 _LOGGER.error("Failed to enable export limiting")

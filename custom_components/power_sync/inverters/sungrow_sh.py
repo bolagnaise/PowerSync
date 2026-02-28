@@ -370,23 +370,25 @@ class SungrowSHController(InverterController):
     ) -> bool:
         """Enable load following curtailment on the Sungrow SH inverter.
 
-        Uses export power limiting (0W) to enable load following mode,
-        which allows self-consumption while preventing grid export.
+        If home_load_w is provided, limits export to match home load.
+        Otherwise sets export limit to 0W (zero export).
 
         Falls back to full shutdown if export limiting fails.
 
         Returns:
             True if curtailment successful
         """
-        _LOGGER.info(f"Curtailing Sungrow SH inverter at {self.host} (load following mode)")
+        export_limit_w = int(home_load_w) if home_load_w is not None and home_load_w > 0 else 0
+        mode_str = f"load-following: {export_limit_w}W" if export_limit_w > 0 else "zero export"
+        _LOGGER.info(f"Curtailing Sungrow SH inverter at {self.host} ({mode_str})")
 
         try:
             if not await self.connect():
                 _LOGGER.error("Cannot curtail: failed to connect to inverter")
                 return False
 
-            # Step 1: Set export limit to 0W (zero export)
-            success = await self._write_register(self.REG_EXPORT_LIMIT, 0)
+            # Step 1: Set export limit
+            success = await self._write_register(self.REG_EXPORT_LIMIT, export_limit_w)
             if not success:
                 _LOGGER.warning("Failed to set export limit, trying full shutdown")
                 # Fallback to full shutdown
@@ -404,7 +406,7 @@ class SungrowSHController(InverterController):
                     _LOGGER.info(f"Curtailed via full shutdown at {self.host}")
                 return success
 
-            _LOGGER.info(f"Successfully curtailed Sungrow SH inverter at {self.host} (0W export limit)")
+            _LOGGER.info(f"Successfully curtailed Sungrow SH inverter at {self.host} ({mode_str})")
             await asyncio.sleep(1)
             return True
 

@@ -11496,10 +11496,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _LOGGER.info(f"⚡ AC-COUPLED: Skipping inverter curtailment (battery can absorb solar)")
                         return True  # Success - intentionally not curtailing
 
-                # For Zeversolar, Sigenergy, Sungrow, and Enphase, use load-following curtailment
+                # Use load-following curtailment for supported brands
                 # Limit = home load + battery charge rate (so we don't export but still charge battery)
                 home_load_w = None
-                if inverter_brand in ("zeversolar", "sigenergy", "sungrow", "enphase"):
+                if inverter_brand in ("zeversolar", "sigenergy", "sungrow", "enphase", "foxess", "huawei", "goodwe"):
                     live_status = await get_live_status()
                     if live_status and live_status.get("load_power"):
                         home_load_w = int(live_status.get("load_power", 0))
@@ -16325,7 +16325,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     home_load_w = 0
             else:
                 # Load-following mode - get home load for dynamic limiting
-                if inverter_brand in ("zeversolar", "sigenergy", "sungrow", "enphase"):
+                if inverter_brand in ("zeversolar", "sigenergy", "sungrow", "enphase", "foxess", "huawei", "goodwe"):
                     live_status = await get_live_status()
                     if live_status and live_status.get("load_power"):
                         home_load_w = int(live_status.get("load_power", 0))
@@ -17152,8 +17152,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             inverter_brand = entry.options.get(CONF_INVERTER_BRAND, entry.data.get(CONF_INVERTER_BRAND))
             inverter_host = entry.options.get(CONF_INVERTER_HOST, entry.data.get(CONF_INVERTER_HOST))
 
-            # Only Zeversolar, Sigenergy, Sungrow, and Enphase support load-following
-            if inverter_brand not in ("zeversolar", "sigenergy", "sungrow", "enphase"):
+            # Only brands with load-following curtail() support
+            if inverter_brand not in ("zeversolar", "sigenergy", "sungrow", "enphase", "foxess", "huawei", "goodwe"):
                 return
 
             if not inverter_host:

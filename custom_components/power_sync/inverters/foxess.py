@@ -1032,9 +1032,10 @@ class FoxESSController(InverterController):
         home_load_w: Optional[float] = None,
         rated_capacity_w: Optional[float] = None,
     ) -> bool:
-        """Curtail solar export by enabling remote control with zero export power.
+        """Curtail solar export by enabling remote control with limited export power.
 
-        Sets remote active power to 0 to prevent grid export during negative price periods.
+        If home_load_w is provided, limits export to match home load (load-following).
+        Otherwise sets remote active power to 0 (zero export).
         """
         if not self._register_map:
             return False
@@ -1047,14 +1048,21 @@ class FoxESSController(InverterController):
             if reg.remote_timeout:
                 await self._write_holding_register(reg.remote_timeout, 600)
 
-        # Set remote active power to 0 (no export)
+        # Set remote active power
+        power_w = int(home_load_w) if home_load_w is not None and home_load_w > 0 else 0
+
         if reg.remote_active_power:
             if reg.remote_active_power_is_32bit:
-                await self._write_holding_registers(reg.remote_active_power, [0, 0])
+                high = (power_w >> 16) & 0xFFFF
+                low = power_w & 0xFFFF
+                await self._write_holding_registers(reg.remote_active_power, [high, low])
             else:
-                await self._write_holding_register(reg.remote_active_power, 0)
+                await self._write_holding_register(reg.remote_active_power, power_w)
 
-        _LOGGER.info("FoxESS solar export curtailed (remote power = 0)")
+        if power_w > 0:
+            _LOGGER.info(f"FoxESS solar export curtailed (load-following: {power_w}W)")
+        else:
+            _LOGGER.info("FoxESS solar export curtailed (remote power = 0)")
         return True
 
     async def restore(self) -> bool:

@@ -210,23 +210,25 @@ class GoodWeController(InverterController):
     ) -> bool:
         """Enable load following curtailment on the GoodWe inverter.
 
-        Sets export limit to 0W to enable load following mode,
-        which allows self-consumption while preventing grid export.
+        If home_load_w is provided, limits export to match home load.
+        Otherwise sets export limit to 0W (zero export).
 
         Returns:
             True if curtailment successful
         """
-        _LOGGER.info(f"Curtailing GoodWe inverter at {self.host} (load following mode)")
+        export_limit_w = int(home_load_w) if home_load_w is not None and home_load_w > 0 else 0
+        mode_str = f"load-following: {export_limit_w}W" if export_limit_w > 0 else "zero export"
+        _LOGGER.info(f"Curtailing GoodWe inverter at {self.host} ({mode_str})")
 
         try:
             if not await self.connect():
                 _LOGGER.error("Cannot curtail: failed to connect to inverter")
                 return False
 
-            # Step 1: Set export limit to 0W
-            success = await self._write_register(self.REG_EXPORT_LIMIT, 0)
+            # Step 1: Set export limit
+            success = await self._write_register(self.REG_EXPORT_LIMIT, export_limit_w)
             if not success:
-                _LOGGER.error("Failed to set export limit to 0W")
+                _LOGGER.error(f"Failed to set export limit to {export_limit_w}W")
                 return False
 
             # Step 2: Enable export limiting
@@ -235,7 +237,7 @@ class GoodWeController(InverterController):
                 _LOGGER.error("Failed to enable export limiting")
                 return False
 
-            _LOGGER.info(f"Successfully curtailed GoodWe inverter at {self.host} (0W export limit)")
+            _LOGGER.info(f"Successfully curtailed GoodWe inverter at {self.host} ({mode_str})")
             await asyncio.sleep(1)
             return True
 
