@@ -385,6 +385,39 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._enabled = True
         _LOGGER.info("Optimization enabled (built-in LP)")
 
+        # Defer Modbus-heavy startup operations to a background task so they
+        # don't block async_setup_entry.  HA's bootstrap stage 2 has a global
+        # timeout — if Modbus is slow (retries / no response) the entire
+        # config entry setup gets CancelledError, leaving all views unregistered.
+        self.hass.async_create_background_task(
+            self._deferred_enable_restore(), "powersync_enable_restore"
+        )
+
+        # Run initial optimization and start polling loop as background tasks
+        # so they don't block HA bootstrap (LP solve can take several seconds)
+        self.hass.async_create_background_task(
+            self._run_optimization(), "powersync_initial_optimization"
+        )
+        self.hass.async_create_background_task(
+            self._schedule_polling_loop(), "powersync_schedule_polling"
+        )
+
+        # Start EV coordination if enabled
+        if self._ev_coordinator and self._ev_configs:
+            await self._ev_coordinator.start()
+            _LOGGER.info(
+                "EV coordination started with %d charger(s)", len(self._ev_configs)
+            )
+
+        return True
+
+    async def _deferred_enable_restore(self) -> None:
+        """Restore backup reserve and work mode in the background.
+
+        Runs as a background task so Modbus operations (which may retry /
+        time-out) don't block async_setup_entry and risk HA bootstrap
+        stage 2 cancellation.
+        """
         # Safety: restore backup_reserve and work mode to configured values on
         # enable. Handles HA restart during IDLE where backup_reserve was set to
         # current SOC% and FoxESS was in Backup mode, but _last_executed_action
@@ -414,24 +447,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception as e:
                 _LOGGER.warning("Failed to restore work mode on enable: %s", e)
         self._last_executed_action = None
-
-        # Run initial optimization and start polling loop as background tasks
-        # so they don't block HA bootstrap (LP solve can take several seconds)
-        self.hass.async_create_background_task(
-            self._run_optimization(), "powersync_initial_optimization"
-        )
-        self.hass.async_create_background_task(
-            self._schedule_polling_loop(), "powersync_schedule_polling"
-        )
-
-        # Start EV coordination if enabled
-        if self._ev_coordinator and self._ev_configs:
-            await self._ev_coordinator.start()
-            _LOGGER.info(
-                "EV coordination started with %d charger(s)", len(self._ev_configs)
-            )
-
-        return True
 
     async def disable(self) -> None:
         """Disable optimization."""
