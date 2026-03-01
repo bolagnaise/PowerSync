@@ -371,16 +371,16 @@
         "submit_button": "Next"
       },
       "tesla_secondary": {
-        "title": "Secondary Powerwall (Optional)",
-        "description": "If you have a second Powerwall system on the same circuit (e.g., Powerwall 2 + Powerwall 3), select it here. Both will be controlled together to prevent inter-battery charging.",
+        "title": "Dual Powerwall — PW2 + PW3 (Optional)",
+        "description": "Only use this if you have a Powerwall 2 AND a Powerwall 3 as separate systems on the same circuit. This is NOT for multiple Powerwall 3 units in a leader/follower setup — Tesla manages those natively as a single system.\n\nWhen a PW2 and PW3 coexist on the same circuit without coordination, one battery's discharge can be absorbed by the other. This feature prevents that by sending identical commands to both.",
         "data": {
-          "tesla_energy_site_id_2": "Secondary Tesla Energy Site",
+          "tesla_energy_site_id_2": "PW2/PW3 Secondary Site",
           "tesla_battery_capacity_1": "Primary Battery Capacity (kWh)",
           "tesla_battery_capacity_2": "Secondary Battery Capacity (kWh)",
           "tesla_api_token_2": "Secondary API Token (only if different Tesla account)"
         },
         "data_description": {
-          "tesla_energy_site_id_2": "Select your second Powerwall system, or choose Skip to use a single Powerwall",
+          "tesla_energy_site_id_2": "Select the energy site for your other Powerwall system (PW2 or PW3). Skip if you only have one Powerwall system, or if you have multiple PW3 units in a leader/follower setup (Tesla handles those automatically).",
           "tesla_battery_capacity_1": "Battery capacity of your primary Powerwall in kWh (PW2=13.5, PW3=13.5)",
           "tesla_battery_capacity_2": "Battery capacity of your secondary Powerwall in kWh (PW2=13.5, PW3=13.5)",
           "tesla_api_token_2": "Only needed if the secondary Powerwall is on a different Tesla account. Leave blank if both are on the same account."
@@ -536,7 +536,7 @@
           "tesla_api_provider": "Tesla API Provider",
           "optimization_provider": "Optimization Provider",
           "optimization_backup_reserve": "Backup Reserve (%)",
-          "tesla_energy_site_id_2": "Secondary Powerwall Site ID (optional)",
+          "tesla_energy_site_id_2": "Dual PW2+PW3: Secondary Site ID (optional)",
           "tesla_battery_capacity_1": "Primary Battery Capacity (kWh)",
           "tesla_battery_capacity_2": "Secondary Battery Capacity (kWh)",
           "tesla_api_token_2": "Secondary API Token (different account only)"
@@ -544,7 +544,7 @@
         "data_description": {
           "optimization_provider": "Choose between Tesla's built-in optimization or Smart Optimization (Built-in LP)",
           "optimization_backup_reserve": "Minimum battery charge level to maintain (only applies to Smart Optimization)",
-          "tesla_energy_site_id_2": "Enter the energy site ID for your second Powerwall (leave blank for single Powerwall). Both will be controlled together.",
+          "tesla_energy_site_id_2": "Only for a separate PW2 + PW3 on the same circuit. Do NOT use this for multiple PW3 units in a leader/follower setup — Tesla manages those as a single system. Leave blank for single Powerwall.",
           "tesla_battery_capacity_1": "Battery capacity of your primary Powerwall in kWh (default 13.5)",
           "tesla_battery_capacity_2": "Battery capacity of your secondary Powerwall in kWh (default 13.5)",
           "tesla_api_token_2": "Only needed if the secondary Powerwall is on a different Tesla account"
