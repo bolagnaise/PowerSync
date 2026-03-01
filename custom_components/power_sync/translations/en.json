@@ -370,6 +370,23 @@
         },
         "submit_button": "Next"
       },
+      "tesla_secondary": {
+        "title": "Secondary Powerwall (Optional)",
+        "description": "If you have a second Powerwall system on the same circuit (e.g., Powerwall 2 + Powerwall 3), select it here. Both will be controlled together to prevent inter-battery charging.",
+        "data": {
+          "tesla_energy_site_id_2": "Secondary Tesla Energy Site",
+          "tesla_battery_capacity_1": "Primary Battery Capacity (kWh)",
+          "tesla_battery_capacity_2": "Secondary Battery Capacity (kWh)",
+          "tesla_api_token_2": "Secondary API Token (only if different Tesla account)"
+        },
+        "data_description": {
+          "tesla_energy_site_id_2": "Select your second Powerwall system, or choose Skip to use a single Powerwall",
+          "tesla_battery_capacity_1": "Battery capacity of your primary Powerwall in kWh (PW2=13.5, PW3=13.5)",
+          "tesla_battery_capacity_2": "Battery capacity of your secondary Powerwall in kWh (PW2=13.5, PW3=13.5)",
+          "tesla_api_token_2": "Only needed if the secondary Powerwall is on a different Tesla account. Leave blank if both are on the same account."
+        },
+        "submit_button": "Next"
+      },
       "weather_setup": {
         "title": "Weather & Solar Forecast (Optional)",
         "description": "Configure weather-based automations and solar production forecasting.\n\n**Already using Solcast HA integration?** PowerSync will automatically detect and use your existing Solcast sensors - no API key needed! Just enable Solcast below and leave the API fields blank.\n\n**New to Solcast?** Get a free API key from toolkit.solcast.com.au (10 API calls/day on hobbyist tier).",
@@ -517,11 +534,19 @@
           "electricity_provider": "Electricity Provider",
           "tesla_api_provider": "Tesla API Provider",
           "optimization_provider": "Optimization Provider",
-          "optimization_backup_reserve": "Backup Reserve (%)"
+          "optimization_backup_reserve": "Backup Reserve (%)",
+          "tesla_energy_site_id_2": "Secondary Powerwall Site ID (optional)",
+          "tesla_battery_capacity_1": "Primary Battery Capacity (kWh)",
+          "tesla_battery_capacity_2": "Secondary Battery Capacity (kWh)",
+          "tesla_api_token_2": "Secondary API Token (different account only)"
         },
         "data_description": {
           "optimization_provider": "Choose between Tesla's built-in optimization or Smart Optimization (Built-in LP)",
-          "optimization_backup_reserve": "Minimum battery charge level to maintain (only applies to Smart Optimization)"
+          "optimization_backup_reserve": "Minimum battery charge level to maintain (only applies to Smart Optimization)",
+          "tesla_energy_site_id_2": "Enter the energy site ID for your second Powerwall (leave blank for single Powerwall). Both will be controlled together.",
+          "tesla_battery_capacity_1": "Battery capacity of your primary Powerwall in kWh (default 13.5)",
+          "tesla_battery_capacity_2": "Battery capacity of your secondary Powerwall in kWh (default 13.5)",
+          "tesla_api_token_2": "Only needed if the secondary Powerwall is on a different Tesla account"
         },
         "submit_button": "Next"
       },

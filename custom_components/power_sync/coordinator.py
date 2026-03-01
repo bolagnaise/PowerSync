@@ -1509,6 +1509,141 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             return None
 
 
+class DualTeslaCoordinator(DataUpdateCoordinator):
+    """Coordinator that aggregates two Tesla Powerwall systems.
+
+    Wraps two TeslaEnergyCoordinator instances (e.g. PW2 + PW3 on the same
+    circuit) and presents a single coordinator interface to the optimizer.
+    Power values are summed, SOC is capacity-weighted, and both gateways
+    always receive the same action to prevent inter-battery power flow.
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        coord1: TeslaEnergyCoordinator,
+        coord2: TeslaEnergyCoordinator,
+        cap1_kwh: float = 13.5,
+        cap2_kwh: float = 13.5,
+    ) -> None:
+        self._coord1 = coord1  # Primary gateway
+        self._coord2 = coord2  # Secondary gateway
+        self._cap1 = cap1_kwh
+        self._cap2 = cap2_kwh
+        # Expose sub-coordinator attributes needed by service handlers
+        self.site_id = coord1.site_id
+        self.api_provider = coord1.api_provider
+        self.session = coord1.session
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_tesla_dual",
+            update_interval=UPDATE_INTERVAL_ENERGY,
+        )
+
+    @property
+    def primary(self) -> TeslaEnergyCoordinator:
+        """Return the primary sub-coordinator."""
+        return self._coord1
+
+    @property
+    def secondary(self) -> TeslaEnergyCoordinator:
+        """Return the secondary sub-coordinator."""
+        return self._coord2
+
+    def _get_current_token(self) -> str | None:
+        """Delegate to primary coordinator."""
+        return self._coord1._get_current_token()
+
+    async def async_get_site_info(self) -> dict[str, Any] | None:
+        """Delegate to primary coordinator."""
+        return await self._coord1.async_get_site_info()
+
+    async def set_grid_charging_enabled(self, enabled: bool) -> bool:
+        """Set grid charging on both gateways."""
+        r1 = await self._coord1.set_grid_charging_enabled(enabled)
+        r2 = await self._coord2.set_grid_charging_enabled(enabled)
+        if not r2:
+            _LOGGER.warning("Failed to set grid charging on secondary Tesla gateway")
+        return r1
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Aggregate data from both sub-coordinators."""
+        # Trigger refreshes on both sub-coordinators
+        try:
+            await asyncio.gather(
+                self._coord1.async_request_refresh(),
+                self._coord2.async_request_refresh(),
+            )
+        except Exception as err:
+            _LOGGER.warning("Error refreshing Tesla sub-coordinators: %s", err)
+
+        d1 = self._coord1.data or {}
+        d2 = self._coord2.data or {}
+
+        if not d1 and not d2:
+            raise UpdateFailed("No data from either Tesla gateway")
+
+        if not d1:
+            _LOGGER.warning("No data from primary Tesla gateway, using secondary only")
+            return d2
+        if not d2:
+            _LOGGER.warning("No data from secondary Tesla gateway, using primary only")
+            return d1
+
+        # Sum power values (kW)
+        solar = (d1.get("solar_power", 0) or 0) + (d2.get("solar_power", 0) or 0)
+        battery = (d1.get("battery_power", 0) or 0) + (d2.get("battery_power", 0) or 0)
+        grid = (d1.get("grid_power", 0) or 0) + (d2.get("grid_power", 0) or 0)
+        load = (d1.get("load_power", 0) or 0) + (d2.get("load_power", 0) or 0)
+        ev = (d1.get("ev_power", 0) or 0) + (d2.get("ev_power", 0) or 0)
+
+        # Capacity-weighted SOC
+        soc1 = d1.get("battery_level", 0) or 0
+        soc2 = d2.get("battery_level", 0) or 0
+        total_cap = self._cap1 + self._cap2
+        combined_soc = (soc1 * self._cap1 + soc2 * self._cap2) / total_cap if total_cap > 0 else 0
+
+        # SOC divergence warning
+        if abs(soc1 - soc2) > 10:
+            _LOGGER.info(
+                "Tesla SOC divergence: PW1=%d%% PW2=%d%% (weighted=%d%%)",
+                soc1, soc2, int(combined_soc),
+            )
+
+        # Combine energy summaries
+        es1 = d1.get("energy_summary", {}) or {}
+        es2 = d2.get("energy_summary", {}) or {}
+        combined_energy = {}
+        for key in (
+            "pv_today_kwh", "grid_import_today_kwh", "grid_export_today_kwh",
+            "charge_today_kwh", "discharge_today_kwh", "load_today_kwh",
+        ):
+            combined_energy[key] = round(
+                (es1.get(key, 0) or 0) + (es2.get(key, 0) or 0), 3
+            )
+
+        return {
+            "solar_power": max(0, solar),
+            "grid_power": grid,
+            "battery_power": battery,
+            "load_power": load,
+            "battery_level": combined_soc,
+            "ev_power": ev,
+            "last_update": dt_util.utcnow(),
+            "energy_summary": combined_energy,
+            "firmware": d1.get("firmware"),
+            # Per-gateway SOC for monitoring
+            "battery_level_1": soc1,
+            "battery_level_2": soc2,
+        }
+
+    async def async_shutdown(self) -> None:
+        """Shut down both sub-coordinators."""
+        await self._coord1.async_shutdown()
+        await self._coord2.async_shutdown()
+
+
 class DemandChargeCoordinator(DataUpdateCoordinator):
     """Coordinator to track demand charges."""
 

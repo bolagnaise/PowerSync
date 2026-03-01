@@ -37,6 +37,11 @@ from .const import (
     CONF_AUTO_SYNC_ENABLED,
     CONF_TESLEMETRY_API_TOKEN,
     CONF_TESLA_ENERGY_SITE_ID,
+    CONF_TESLA_ENERGY_SITE_ID_2,
+    CONF_TESLA_API_TOKEN_2,
+    CONF_TESLA_BATTERY_CAPACITY_1,
+    CONF_TESLA_BATTERY_CAPACITY_2,
+    DEFAULT_TESLA_BATTERY_CAPACITY,
     CONF_DEMAND_CHARGE_ENABLED,
     CONF_DEMAND_CHARGE_RATE,
     CONF_DEMAND_CHARGE_START_TIME,
@@ -286,6 +291,7 @@ from .coordinator import (
     SigenergyEnergyCoordinator,
     SungrowEnergyCoordinator,
     DualSungrowCoordinator,
+    DualTeslaCoordinator,
     FoxESSEnergyCoordinator,
     GoodWeEnergyCoordinator,
     DemandChargeCoordinator,
@@ -1956,6 +1962,34 @@ def get_tesla_api_token(hass: HomeAssistant, entry: ConfigEntry) -> tuple[str | 
         return entry.data[CONF_TESLEMETRY_API_TOKEN], TESLA_PROVIDER_TESLEMETRY
 
     return None, TESLA_PROVIDER_TESLEMETRY
+
+
+def _get_tesla_site_configs(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> list[tuple[str, str, str]]:
+    """Return list of (site_id, token, provider) for all Tesla gateways.
+
+    For dual Powerwall setups, returns configs for both primary and secondary
+    gateways. The secondary uses its own token if configured (different Tesla
+    account), otherwise shares the primary token.
+    """
+    configs = []
+    primary_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
+    if primary_id:
+        token, provider = get_tesla_api_token(hass, entry)
+        if token:
+            configs.append((primary_id, token, provider))
+
+    secondary_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID_2)
+    if secondary_id:
+        # Use secondary token if configured, else share primary token
+        token2 = entry.data.get(CONF_TESLA_API_TOKEN_2)
+        if token2:
+            configs.append((secondary_id, token2, TESLA_PROVIDER_TESLEMETRY))
+        elif configs:
+            # Share primary token/provider
+            configs.append((secondary_id, configs[0][1], configs[0][2]))
+    return configs
 
 
 def _calculate_cost_from_tariff(tariff_schedule: dict, time_series: list) -> dict | None:
@@ -10486,6 +10520,45 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await amber_coordinator.async_config_entry_first_refresh()
     if tesla_coordinator:
         await tesla_coordinator.async_config_entry_first_refresh()
+
+        # Initialize secondary Tesla and wrap in DualTeslaCoordinator
+        secondary_site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID_2)
+        if secondary_site_id:
+            try:
+                # Determine token for secondary gateway
+                token2 = entry.data.get(CONF_TESLA_API_TOKEN_2)
+                if token2:
+                    sec_token = token2
+                    sec_provider = TESLA_PROVIDER_TESLEMETRY
+                    sec_token_getter = None
+                else:
+                    sec_token = tesla_api_token
+                    sec_provider = tesla_api_provider
+                    sec_token_getter = token_getter
+
+                tesla_coordinator_2 = TeslaEnergyCoordinator(
+                    hass,
+                    secondary_site_id,
+                    sec_token,
+                    api_provider=sec_provider,
+                    token_getter=sec_token_getter,
+                )
+                await tesla_coordinator_2.async_config_entry_first_refresh()
+                _LOGGER.info("Secondary Tesla coordinator initialized for site %s", secondary_site_id)
+
+                cap1 = entry.data.get(CONF_TESLA_BATTERY_CAPACITY_1, DEFAULT_TESLA_BATTERY_CAPACITY)
+                cap2 = entry.data.get(CONF_TESLA_BATTERY_CAPACITY_2, DEFAULT_TESLA_BATTERY_CAPACITY)
+                tesla_coordinator = DualTeslaCoordinator(
+                    hass, tesla_coordinator, tesla_coordinator_2,
+                    cap1_kwh=cap1, cap2_kwh=cap2,
+                )
+                await tesla_coordinator.async_config_entry_first_refresh()
+                _LOGGER.info("Dual Tesla coordinator active (%.1f kWh + %.1f kWh)", cap1, cap2)
+            except Exception as e:
+                _LOGGER.warning(
+                    "Secondary Tesla coordinator failed to initialize: %s — "
+                    "falling back to single-gateway mode", e
+                )
     if sigenergy_coordinator:
         try:
             await sigenergy_coordinator.async_config_entry_first_refresh()
@@ -12781,16 +12854,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.error("No Tesla API token available for TOU sync")
             return
 
-        success = await send_tariff_to_tesla(
-            hass,
-            entry.data[CONF_TESLA_ENERGY_SITE_ID],
-            tariff,
-            current_token,
-            current_provider,
-        )
+        # Send to all Tesla gateways (primary + optional secondary)
+        site_configs = _get_tesla_site_configs(hass, entry)
+        if not site_configs:
+            _LOGGER.error("No Tesla site configs available for TOU sync")
+            return
+
+        success = True
+        for site_id, s_token, s_provider in site_configs:
+            site_success = await send_tariff_to_tesla(
+                hass,
+                site_id,
+                tariff,
+                s_token,
+                s_provider,
+            )
+            if not site_success:
+                _LOGGER.error("Failed to sync TOU to Tesla site %s", site_id)
+                success = False
+            elif len(site_configs) > 1:
+                await asyncio.sleep(1)  # Rate limit between gateways
 
         if success:
-            _LOGGER.info(f"TOU schedule synced successfully ({sync_mode})")
+            _LOGGER.info(f"TOU schedule synced to {len(site_configs)} gateway(s) ({sync_mode})")
 
             # Alpha: Force mode toggle for faster Powerwall response
             # Only toggle on settled prices, not forecast (reduces unnecessary toggles)
@@ -14231,152 +14317,181 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
 
         try:
-            # Get current token and provider using helper function
-            current_token, provider = get_tesla_api_token(hass, entry)
-
-            site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
-            if not site_id or not current_token:
+            # Get all Tesla gateway configs (primary + optional secondary)
+            site_configs = _get_tesla_site_configs(hass, entry)
+            if not site_configs:
                 _LOGGER.error("Missing Tesla site ID or token for force discharge")
                 return
 
             session = async_get_clientsession(hass)
-            headers = {
-                "Authorization": f"Bearer {current_token}",
-                "Content-Type": "application/json",
-            }
-            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
 
-            # Step 1: Save current tariff (if not already in discharge mode)
+            # Step 1: Save current tariff and state (if not already in discharge mode)
             tariff_saved_from_site_info = False
             if not force_discharge_state["active"]:
-                _LOGGER.info("Saving current tariff before force discharge...")
-                async with session.get(
-                    f"{api_base}/api/1/energy_sites/{site_id}/tariff_rate",
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        resp = data.get("response", {})
-                        # Try tariff_content_v2 first, then fall back to tariff_content
-                        saved_tariff = resp.get("tariff_content_v2") or resp.get("tariff_content")
-                        force_discharge_state["saved_tariff"] = saved_tariff
-                        if saved_tariff:
-                            _LOGGER.info("Saved current tariff for restoration after discharge (name: %s)",
-                                        saved_tariff.get("name", "unknown"))
-                        else:
-                            _LOGGER.warning("Could not extract tariff from tariff_rate response - will try site_info")
-                    else:
-                        _LOGGER.warning("tariff_rate endpoint returned %s - will try site_info fallback", response.status)
+                # Initialize per-site saved states dict
+                saved_states = {}
+                for site_id, current_token, provider in site_configs:
+                    headers = {
+                        "Authorization": f"Bearer {current_token}",
+                        "Content-Type": "application/json",
+                    }
+                    api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+                    site_state = {}
 
-                # Step 2: Get and save current operation mode, backup reserve, and tariff (fallback)
-                async with session.get(
-                    f"{api_base}/api/1/energy_sites/{site_id}/site_info",
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        site_info = data.get("response", {})
-                        force_discharge_state["saved_operation_mode"] = site_info.get("default_real_mode")
-                        force_discharge_state["saved_backup_reserve"] = site_info.get("backup_reserve_percent")
-                        _LOGGER.info("Saved operation mode: %s, backup reserve: %s%%",
-                                     force_discharge_state["saved_operation_mode"],
-                                     force_discharge_state["saved_backup_reserve"])
-
-                        # Save current export rule so we can restore it after discharge
-                        components = site_info.get("components", {})
-                        saved_export_rule = components.get("customer_preferred_export_rule")
-                        if saved_export_rule is None:
-                            non_export = components.get("non_export_configured", False)
-                            saved_export_rule = "never" if non_export else "battery_ok"
-                        force_discharge_state["saved_export_rule"] = saved_export_rule
-                        _LOGGER.info("Saved export rule: %s", saved_export_rule)
-
-                        # Fallback: if tariff wasn't saved from tariff_rate, try to get it from site_info
-                        if not force_discharge_state.get("saved_tariff"):
-                            site_tariff = site_info.get("tariff_content_v2") or site_info.get("tariff_content")
-                            if site_tariff:
-                                force_discharge_state["saved_tariff"] = site_tariff
-                                tariff_saved_from_site_info = True
-                                _LOGGER.info("Saved tariff from site_info fallback (name: %s)",
-                                            site_tariff.get("name", "unknown"))
-                            else:
-                                _LOGGER.warning("No tariff found in site_info either")
-                                # For Globird users, warn that tariff may not be restored
-                                electricity_provider = entry.options.get(
-                                    CONF_ELECTRICITY_PROVIDER,
-                                    entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
-                                )
-                                if electricity_provider == "globird":
-                                    try:
-                                        from .automations.actions import _send_expo_push
-                                        await _send_expo_push(
-                                            hass,
-                                            "Battery Warning",
-                                            "Tariff not saved - may need reconfiguration"
-                                        )
-                                    except Exception as notify_err:
-                                        _LOGGER.debug(f"Could not send notification: {notify_err}")
-
-                # Step 2b: Set backup reserve to 0% to allow full discharge
-                _LOGGER.info("Setting backup reserve to 0%% to allow full discharge...")
-                async with session.post(
-                    f"{api_base}/api/1/energy_sites/{site_id}/backup",
-                    headers=headers,
-                    json={"backup_reserve_percent": 0},
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    if response.status == 200:
-                        _LOGGER.info("Set backup reserve to 0%%")
-                    else:
-                        _LOGGER.warning("Could not set backup reserve to 0%%: %s", response.status)
-
-                # Step 2c: Set export rule to battery_ok to allow battery export during discharge
-                if force_discharge_state.get("saved_export_rule") != "battery_ok":
-                    _LOGGER.info("Setting export rule to battery_ok for force discharge...")
-                    async with session.post(
-                        f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
+                    _LOGGER.info("Saving current tariff before force discharge for site %s...", site_id)
+                    async with session.get(
+                        f"{api_base}/api/1/energy_sites/{site_id}/tariff_rate",
                         headers=headers,
-                        json={"customer_preferred_export_rule": "battery_ok"},
                         timeout=aiohttp.ClientTimeout(total=30),
                     ) as response:
                         if response.status == 200:
-                            _LOGGER.info("Set export rule to battery_ok")
+                            data = await response.json()
+                            resp = data.get("response", {})
+                            saved_tariff = resp.get("tariff_content_v2") or resp.get("tariff_content")
+                            site_state["saved_tariff"] = saved_tariff
+                            if saved_tariff:
+                                _LOGGER.info("Saved tariff for site %s (name: %s)", site_id,
+                                            saved_tariff.get("name", "unknown"))
+                            else:
+                                _LOGGER.warning("Could not extract tariff from tariff_rate for site %s - will try site_info", site_id)
                         else:
-                            _LOGGER.warning("Could not set export rule: %s", response.status)
+                            _LOGGER.warning("tariff_rate endpoint returned %s for site %s - will try site_info fallback", response.status, site_id)
 
-            # Step 3: Switch to autonomous mode for best export behavior
-            if force_discharge_state.get("saved_operation_mode") != "autonomous":
-                _LOGGER.info("Switching to autonomous mode for optimal export...")
-                async with session.post(
-                    f"{api_base}/api/1/energy_sites/{site_id}/operation",
-                    headers=headers,
-                    json={"default_real_mode": "autonomous"},
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    if response.status == 200:
-                        _LOGGER.info("Switched to autonomous mode")
-                    else:
-                        _LOGGER.warning("Could not switch operation mode: %s", response.status)
+                    # Get and save current operation mode, backup reserve, and tariff (fallback)
+                    async with session.get(
+                        f"{api_base}/api/1/energy_sites/{site_id}/site_info",
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            site_info = data.get("response", {})
+                            site_state["saved_operation_mode"] = site_info.get("default_real_mode")
+                            site_state["saved_backup_reserve"] = site_info.get("backup_reserve_percent")
+                            _LOGGER.info("Site %s: saved operation mode: %s, backup reserve: %s%%",
+                                         site_id, site_state["saved_operation_mode"],
+                                         site_state["saved_backup_reserve"])
 
-            # Step 4: Create and upload discharge tariff (high export rates)
+                            components = site_info.get("components", {})
+                            saved_export_rule = components.get("customer_preferred_export_rule")
+                            if saved_export_rule is None:
+                                non_export = components.get("non_export_configured", False)
+                                saved_export_rule = "never" if non_export else "battery_ok"
+                            site_state["saved_export_rule"] = saved_export_rule
+                            _LOGGER.info("Site %s: saved export rule: %s", site_id, saved_export_rule)
+
+                            if not site_state.get("saved_tariff"):
+                                site_tariff = site_info.get("tariff_content_v2") or site_info.get("tariff_content")
+                                if site_tariff:
+                                    site_state["saved_tariff"] = site_tariff
+                                    tariff_saved_from_site_info = True
+                                    _LOGGER.info("Saved tariff from site_info fallback for site %s (name: %s)",
+                                                site_id, site_tariff.get("name", "unknown"))
+                                else:
+                                    _LOGGER.warning("No tariff found in site_info either for site %s", site_id)
+                                    electricity_provider = entry.options.get(
+                                        CONF_ELECTRICITY_PROVIDER,
+                                        entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
+                                    )
+                                    if electricity_provider == "globird":
+                                        try:
+                                            from .automations.actions import _send_expo_push
+                                            await _send_expo_push(
+                                                hass,
+                                                "Battery Warning",
+                                                "Tariff not saved - may need reconfiguration"
+                                            )
+                                        except Exception as notify_err:
+                                            _LOGGER.debug(f"Could not send notification: {notify_err}")
+
+                    # Set backup reserve to 0% to allow full discharge
+                    _LOGGER.info("Setting backup reserve to 0%% for site %s...", site_id)
+                    async with session.post(
+                        f"{api_base}/api/1/energy_sites/{site_id}/backup",
+                        headers=headers,
+                        json={"backup_reserve_percent": 0},
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as response:
+                        if response.status == 200:
+                            _LOGGER.info("Set backup reserve to 0%% for site %s", site_id)
+                        else:
+                            _LOGGER.warning("Could not set backup reserve to 0%% for site %s: %s", site_id, response.status)
+
+                    # Set export rule to battery_ok to allow battery export during discharge
+                    if site_state.get("saved_export_rule") != "battery_ok":
+                        _LOGGER.info("Setting export rule to battery_ok for site %s...", site_id)
+                        async with session.post(
+                            f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
+                            headers=headers,
+                            json={"customer_preferred_export_rule": "battery_ok"},
+                            timeout=aiohttp.ClientTimeout(total=30),
+                        ) as response:
+                            if response.status == 200:
+                                _LOGGER.info("Set export rule to battery_ok for site %s", site_id)
+                            else:
+                                _LOGGER.warning("Could not set export rule for site %s: %s", site_id, response.status)
+
+                    saved_states[site_id] = site_state
+
+                    # Small delay between gateways to avoid rate limiting
+                    if len(site_configs) > 1:
+                        await asyncio.sleep(1)
+
+                # Store per-site saved states
+                force_discharge_state["saved_states"] = saved_states
+                # Keep backward-compat keys from primary for restore_normal
+                primary_state = saved_states.get(site_configs[0][0], {})
+                force_discharge_state["saved_tariff"] = primary_state.get("saved_tariff")
+                force_discharge_state["saved_operation_mode"] = primary_state.get("saved_operation_mode")
+                force_discharge_state["saved_backup_reserve"] = primary_state.get("saved_backup_reserve")
+                force_discharge_state["saved_export_rule"] = primary_state.get("saved_export_rule")
+
+            # Step 3: Switch to autonomous mode on all gateways
+            for site_id, current_token, provider in site_configs:
+                headers = {
+                    "Authorization": f"Bearer {current_token}",
+                    "Content-Type": "application/json",
+                }
+                api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+                saved_mode = force_discharge_state.get("saved_states", {}).get(site_id, {}).get("saved_operation_mode")
+                if saved_mode != "autonomous":
+                    _LOGGER.info("Switching to autonomous mode for site %s...", site_id)
+                    async with session.post(
+                        f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                        headers=headers,
+                        json={"default_real_mode": "autonomous"},
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as response:
+                        if response.status == 200:
+                            _LOGGER.info("Switched to autonomous mode for site %s", site_id)
+                        else:
+                            _LOGGER.warning("Could not switch operation mode for site %s: %s", site_id, response.status)
+
+            # Step 4: Create and upload discharge tariff to all gateways
             discharge_tariff, actual_expiry = _create_discharge_tariff(duration)
-            success = await send_tariff_to_tesla(
-                hass,
-                site_id,
-                discharge_tariff,
-                current_token,
-                provider,
-            )
+            all_success = True
+            for site_id, current_token, provider in site_configs:
+                success = await send_tariff_to_tesla(
+                    hass,
+                    site_id,
+                    discharge_tariff,
+                    current_token,
+                    provider,
+                )
+                if not success:
+                    _LOGGER.error("Failed to upload discharge tariff to site %s", site_id)
+                    all_success = False
+                elif len(site_configs) > 1:
+                    await asyncio.sleep(1)
 
-            if success:
+            if all_success:
                 force_discharge_state["active"] = True
                 # Use the actual expiry time aligned to tariff window boundary
                 # This ensures the timer doesn't fire before the tariff window ends
                 force_discharge_state["expires_at"] = actual_expiry.astimezone(dt_util.UTC)
                 actual_duration = int((actual_expiry - dt_util.now()).total_seconds() / 60)
-                _LOGGER.info(f"✅ FORCE DISCHARGE ACTIVE: Tariff uploaded, expires at {actual_expiry.strftime('%H:%M')} ({actual_duration} min)")
+                _LOGGER.info(f"FORCE DISCHARGE ACTIVE: Tariff uploaded to {len(site_configs)} gateway(s), expires at {actual_expiry.strftime('%H:%M')} ({actual_duration} min)")
 
                 # Dispatch event for switch entity
                 async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
@@ -14392,7 +14507,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 async def auto_restore(_now):
                     """Auto-restore normal operation when discharge expires."""
                     if force_discharge_state["active"]:
-                        _LOGGER.info("⏰ Force discharge expired, auto-restoring normal operation")
+                        _LOGGER.info("Force discharge expired, auto-restoring normal operation")
                         await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
 
                 # Use async_track_point_in_utc_time for one-time expiry (not recurring daily)
@@ -14405,7 +14520,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # Persist state to survive HA restarts
                 await persist_force_mode_state()
             else:
-                _LOGGER.error("Failed to upload discharge tariff")
+                _LOGGER.error("Failed to upload discharge tariff to one or more gateways")
 
         except Exception as e:
             _LOGGER.error(f"Error in force discharge: {e}", exc_info=True)
@@ -14856,20 +14971,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
 
         try:
-            # Get current token and provider using helper function
-            current_token, provider = get_tesla_api_token(hass, entry)
-
-            site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
-            if not site_id or not current_token:
+            # Get all Tesla gateway configs (primary + optional secondary)
+            site_configs = _get_tesla_site_configs(hass, entry)
+            if not site_configs:
                 _LOGGER.error("Missing Tesla site ID or token for force charge")
                 return
 
             session = async_get_clientsession(hass)
-            headers = {
-                "Authorization": f"Bearer {current_token}",
-                "Content-Type": "application/json",
-            }
-            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
 
             # Cancel active discharge mode if switching to charge
             if force_discharge_state["active"]:
@@ -14880,115 +14988,145 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 force_discharge_state["active"] = False
                 force_discharge_state["expires_at"] = None
 
-            # Step 1: Save current tariff (if not already in charge mode)
+            # Step 1: Save current tariff and state (if not already in charge mode)
             if not force_charge_state["active"]:
-                _LOGGER.info("Saving current tariff before force charge...")
-                async with session.get(
-                    f"{api_base}/api/1/energy_sites/{site_id}/tariff_rate",
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        resp = data.get("response", {})
-                        # Try tariff_content_v2 first, then fall back to tariff_content
-                        saved_tariff = resp.get("tariff_content_v2") or resp.get("tariff_content")
-                        force_charge_state["saved_tariff"] = saved_tariff
-                        if saved_tariff:
-                            _LOGGER.info("Saved current tariff for restoration after charge (name: %s)",
-                                        saved_tariff.get("name", "unknown"))
-                        else:
-                            _LOGGER.warning("Could not extract tariff from tariff_rate response - will try site_info")
-                    else:
-                        _LOGGER.warning("tariff_rate endpoint returned %s - will try site_info fallback", response.status)
+                saved_states = {}
+                for site_id, current_token, provider in site_configs:
+                    headers = {
+                        "Authorization": f"Bearer {current_token}",
+                        "Content-Type": "application/json",
+                    }
+                    api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+                    site_state = {}
 
-                # Step 2: Get and save current operation mode, backup reserve, and tariff (fallback)
-                async with session.get(
-                    f"{api_base}/api/1/energy_sites/{site_id}/site_info",
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        site_info = data.get("response", {})
-                        force_charge_state["saved_operation_mode"] = site_info.get("default_real_mode")
-                        force_charge_state["saved_backup_reserve"] = site_info.get("backup_reserve_percent")
-                        _LOGGER.info("Saved operation mode: %s, backup reserve: %s%%",
-                                     force_charge_state["saved_operation_mode"],
-                                     force_charge_state["saved_backup_reserve"])
-                        if force_charge_state["saved_backup_reserve"] is None:
-                            _LOGGER.warning("backup_reserve_percent not in site_info response - will use default on restore")
-
-                        # Fallback: if tariff wasn't saved from tariff_rate, try to get it from site_info
-                        if not force_charge_state.get("saved_tariff"):
-                            site_tariff = site_info.get("tariff_content_v2") or site_info.get("tariff_content")
-                            if site_tariff:
-                                force_charge_state["saved_tariff"] = site_tariff
-                                _LOGGER.info("Saved tariff from site_info fallback (name: %s)",
-                                            site_tariff.get("name", "unknown"))
+                    _LOGGER.info("Saving current tariff before force charge for site %s...", site_id)
+                    async with session.get(
+                        f"{api_base}/api/1/energy_sites/{site_id}/tariff_rate",
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            resp = data.get("response", {})
+                            saved_tariff = resp.get("tariff_content_v2") or resp.get("tariff_content")
+                            site_state["saved_tariff"] = saved_tariff
+                            if saved_tariff:
+                                _LOGGER.info("Saved tariff for site %s (name: %s)", site_id,
+                                            saved_tariff.get("name", "unknown"))
                             else:
-                                _LOGGER.warning("No tariff found in site_info either")
-                                # For Globird users, warn that tariff may not be restored
-                                electricity_provider = entry.options.get(
-                                    CONF_ELECTRICITY_PROVIDER,
-                                    entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
-                                )
-                                if electricity_provider == "globird":
-                                    try:
-                                        from .automations.actions import _send_expo_push
-                                        await _send_expo_push(
-                                            hass,
-                                            "Battery Warning",
-                                            "Tariff not saved - may need reconfiguration"
-                                        )
-                                    except Exception as notify_err:
-                                        _LOGGER.debug(f"Could not send notification: {notify_err}")
-                    else:
-                        text = await response.text()
-                        _LOGGER.error(f"Failed to get site_info for saving: {response.status} - {text}")
+                                _LOGGER.warning("Could not extract tariff from tariff_rate for site %s - will try site_info", site_id)
+                        else:
+                            _LOGGER.warning("tariff_rate endpoint returned %s for site %s - will try site_info fallback", response.status, site_id)
 
-            # Step 3: Switch to autonomous mode for best charging behavior
-            if force_charge_state.get("saved_operation_mode") != "autonomous":
-                _LOGGER.info("Switching to autonomous mode for optimal charging...")
+                    # Get and save current operation mode, backup reserve, and tariff (fallback)
+                    async with session.get(
+                        f"{api_base}/api/1/energy_sites/{site_id}/site_info",
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            site_info = data.get("response", {})
+                            site_state["saved_operation_mode"] = site_info.get("default_real_mode")
+                            site_state["saved_backup_reserve"] = site_info.get("backup_reserve_percent")
+                            _LOGGER.info("Site %s: saved operation mode: %s, backup reserve: %s%%",
+                                         site_id, site_state["saved_operation_mode"],
+                                         site_state["saved_backup_reserve"])
+
+                            if not site_state.get("saved_tariff"):
+                                site_tariff = site_info.get("tariff_content_v2") or site_info.get("tariff_content")
+                                if site_tariff:
+                                    site_state["saved_tariff"] = site_tariff
+                                    _LOGGER.info("Saved tariff from site_info fallback for site %s (name: %s)",
+                                                site_id, site_tariff.get("name", "unknown"))
+                                else:
+                                    _LOGGER.warning("No tariff found in site_info for site %s", site_id)
+                                    electricity_provider = entry.options.get(
+                                        CONF_ELECTRICITY_PROVIDER,
+                                        entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
+                                    )
+                                    if electricity_provider == "globird":
+                                        try:
+                                            from .automations.actions import _send_expo_push
+                                            await _send_expo_push(
+                                                hass,
+                                                "Battery Warning",
+                                                "Tariff not saved - may need reconfiguration"
+                                            )
+                                        except Exception as notify_err:
+                                            _LOGGER.debug(f"Could not send notification: {notify_err}")
+                        else:
+                            text = await response.text()
+                            _LOGGER.error(f"Failed to get site_info for site {site_id}: {response.status} - {text}")
+
+                    saved_states[site_id] = site_state
+                    if len(site_configs) > 1:
+                        await asyncio.sleep(1)
+
+                # Store per-site saved states
+                force_charge_state["saved_states"] = saved_states
+                primary_state = saved_states.get(site_configs[0][0], {})
+                force_charge_state["saved_tariff"] = primary_state.get("saved_tariff")
+                force_charge_state["saved_operation_mode"] = primary_state.get("saved_operation_mode")
+                force_charge_state["saved_backup_reserve"] = primary_state.get("saved_backup_reserve")
+
+            # Step 3: Switch to autonomous mode and set backup reserve on all gateways
+            for site_id, current_token, provider in site_configs:
+                headers = {
+                    "Authorization": f"Bearer {current_token}",
+                    "Content-Type": "application/json",
+                }
+                api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+                saved_mode = force_charge_state.get("saved_states", {}).get(site_id, {}).get("saved_operation_mode")
+                if saved_mode != "autonomous":
+                    _LOGGER.info("Switching to autonomous mode for site %s...", site_id)
+                    async with session.post(
+                        f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                        headers=headers,
+                        json={"default_real_mode": "autonomous"},
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as response:
+                        if response.status == 200:
+                            _LOGGER.info("Switched to autonomous mode for site %s", site_id)
+                        else:
+                            _LOGGER.warning("Could not switch operation mode for site %s: %s", site_id, response.status)
+
+                # Set backup reserve to 100% to force charging
+                _LOGGER.info("Setting backup reserve to 100%% for site %s...", site_id)
                 async with session.post(
-                    f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                    f"{api_base}/api/1/energy_sites/{site_id}/backup",
                     headers=headers,
-                    json={"default_real_mode": "autonomous"},
+                    json={"backup_reserve_percent": 100},
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as response:
                     if response.status == 200:
-                        _LOGGER.info("Switched to autonomous mode")
+                        _LOGGER.info("Set backup reserve to 100%% for site %s", site_id)
                     else:
-                        _LOGGER.warning("Could not switch operation mode: %s", response.status)
+                        _LOGGER.warning("Could not set backup reserve for site %s: %s", site_id, response.status)
 
-            # Step 3b: Set backup reserve to 100% to force charging
-            _LOGGER.info("Setting backup reserve to 100%% to force charging...")
-            async with session.post(
-                f"{api_base}/api/1/energy_sites/{site_id}/backup",
-                headers=headers,
-                json={"backup_reserve_percent": 100},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status == 200:
-                    _LOGGER.info("Set backup reserve to 100%%")
-                else:
-                    _LOGGER.warning("Could not set backup reserve: %s", response.status)
-
-            # Step 4: Create and upload charge tariff (free import, no export incentive)
+            # Step 4: Create and upload charge tariff to all gateways
             charge_tariff, actual_expiry = _create_charge_tariff(duration)
-            success = await send_tariff_to_tesla(
-                hass,
-                site_id,
-                charge_tariff,
-                current_token,
-                provider,
-            )
+            all_success = True
+            for site_id, current_token, provider in site_configs:
+                success = await send_tariff_to_tesla(
+                    hass,
+                    site_id,
+                    charge_tariff,
+                    current_token,
+                    provider,
+                )
+                if not success:
+                    _LOGGER.error("Failed to upload charge tariff to site %s", site_id)
+                    all_success = False
+                elif len(site_configs) > 1:
+                    await asyncio.sleep(1)
 
-            if success:
+            if all_success:
                 force_charge_state["active"] = True
                 # Use actual_expiry aligned to tariff window end, not duration from now
                 force_charge_state["expires_at"] = actual_expiry.astimezone(dt_util.UTC)
-                _LOGGER.info(f"✅ FORCE CHARGE ACTIVE: Tariff uploaded for {duration} min, expires at {actual_expiry.strftime('%H:%M')}")
+                _LOGGER.info(f"FORCE CHARGE ACTIVE: Tariff uploaded to {len(site_configs)} gateway(s) for {duration} min, expires at {actual_expiry.strftime('%H:%M')}")
 
                 # Kick PW3 to ensure it starts charging immediately
                 hass.async_create_task(_tesla_charge_kick("force_charge"))
@@ -15007,7 +15145,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 async def auto_restore_charge(_now):
                     """Auto-restore normal operation when charge expires."""
                     if force_charge_state["active"]:
-                        _LOGGER.info("⏰ Force charge expired, auto-restoring normal operation")
+                        _LOGGER.info("Force charge expired, auto-restoring normal operation")
                         await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
 
                 # Use async_track_point_in_utc_time for one-time expiry (not recurring daily)
@@ -15020,7 +15158,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # Persist state to survive HA restarts
                 await persist_force_mode_state()
             else:
-                _LOGGER.error("Failed to upload charge tariff")
+                _LOGGER.error("Failed to upload charge tariff to one or more gateways")
 
         except Exception as e:
             _LOGGER.error(f"Error in force charge: {e}", exc_info=True)
@@ -15425,35 +15563,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             return
 
         try:
-            # Get current token and provider using helper function
-            current_token, provider = get_tesla_api_token(hass, entry)
-
-            site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
-            if not site_id or not current_token:
+            # Get all Tesla gateway configs (primary + optional secondary)
+            site_configs = _get_tesla_site_configs(hass, entry)
+            if not site_configs:
                 _LOGGER.error("Missing Tesla site ID or token for restore normal")
                 return
 
             session = async_get_clientsession(hass)
-            headers = {
-                "Authorization": f"Bearer {current_token}",
-                "Content-Type": "application/json",
-            }
-            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
 
-            # IMMEDIATELY switch to self_consumption to stop any ongoing export/import
-            # This ensures discharge stops right away, before tariff restoration completes
+            # IMMEDIATELY switch to self_consumption on all gateways to stop any ongoing export/import
             if force_discharge_state.get("active") or force_charge_state.get("active"):
                 _LOGGER.info("Immediately switching to self_consumption to stop forced charge/discharge")
-                async with session.post(
-                    f"{api_base}/api/1/energy_sites/{site_id}/operation",
-                    headers=headers,
-                    json={"default_real_mode": "self_consumption"},
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    if response.status == 200:
-                        _LOGGER.info("Switched to self_consumption mode - export/import stopped")
-                    else:
-                        _LOGGER.warning(f"Could not switch to self_consumption: {response.status}")
+                for site_id, current_token, provider in site_configs:
+                    headers = {
+                        "Authorization": f"Bearer {current_token}",
+                        "Content-Type": "application/json",
+                    }
+                    api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+                    async with session.post(
+                        f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                        headers=headers,
+                        json={"default_real_mode": "self_consumption"},
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as response:
+                        if response.status == 200:
+                            _LOGGER.info("Switched site %s to self_consumption mode", site_id)
+                        else:
+                            _LOGGER.warning("Could not switch site %s to self_consumption: %s", site_id, response.status)
 
             # Check if user is using dynamic pricing (restore via sync instead of saved tariff)
             electricity_provider = entry.options.get(
@@ -15468,22 +15604,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             dynamic_providers = ("amber", "flow_power", "aemo_vpp")
             if electricity_provider in dynamic_providers:
                 # Dynamic pricing users - trigger a fresh sync to get current prices
+                # (sync handler already loops over all site_ids)
                 _LOGGER.info(f"{electricity_provider} user - triggering sync to restore normal operation")
                 await hass.services.async_call(DOMAIN, SERVICE_SYNC_TOU, {}, blocking=True)
             elif saved_tariff:
-                # Non-Amber users - restore the saved tariff
-                _LOGGER.info("Restoring saved tariff...")
-                success = await send_tariff_to_tesla(
-                    hass,
-                    site_id,
-                    saved_tariff,
-                    current_token,
-                    provider,
-                )
-                if success:
-                    _LOGGER.info("Restored saved tariff successfully")
-                else:
-                    _LOGGER.error("Failed to restore saved tariff")
+                # Non-dynamic users - restore saved tariffs per site
+                _LOGGER.info("Restoring saved tariffs...")
+                # Check for per-site saved states (dual mode) or fall back to global saved tariff
+                discharge_saved = force_discharge_state.get("saved_states", {})
+                charge_saved = force_charge_state.get("saved_states", {})
+                for site_id, current_token, provider in site_configs:
+                    site_tariff = (
+                        discharge_saved.get(site_id, {}).get("saved_tariff") or
+                        charge_saved.get(site_id, {}).get("saved_tariff") or
+                        saved_tariff  # Fall back to global saved tariff
+                    )
+                    if site_tariff:
+                        success = await send_tariff_to_tesla(
+                            hass, site_id, site_tariff, current_token, provider,
+                        )
+                        if success:
+                            _LOGGER.info("Restored saved tariff for site %s", site_id)
+                        else:
+                            _LOGGER.error("Failed to restore saved tariff for site %s", site_id)
+                    if len(site_configs) > 1:
+                        await asyncio.sleep(1)
             else:
                 # No saved tariff - for Globird users this is a problem since sync does nothing
                 if electricity_provider == "globird":
@@ -15501,118 +15646,126 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _LOGGER.warning("No saved tariff to restore, triggering sync")
                     await hass.services.async_call(DOMAIN, SERVICE_SYNC_TOU, {}, blocking=True)
 
-            # Restore operation mode (prefer discharge saved mode, then charge)
-            restore_mode = (
-                force_discharge_state.get("saved_operation_mode") or
-                force_charge_state.get("saved_operation_mode") or
-                "autonomous"
-            )
-            _LOGGER.info(f"Restoring operation mode to: {restore_mode}")
-            async with session.post(
-                f"{api_base}/api/1/energy_sites/{site_id}/operation",
-                headers=headers,
-                json={"default_real_mode": restore_mode},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status == 200:
-                    _LOGGER.info(f"Restored operation mode to {restore_mode}")
+            # Restore operation mode and backup reserve on all gateways
+            for site_id, current_token, provider in site_configs:
+                headers = {
+                    "Authorization": f"Bearer {current_token}",
+                    "Content-Type": "application/json",
+                }
+                api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+                # Per-site saved mode, or fall back to global saved mode
+                discharge_saved = force_discharge_state.get("saved_states", {})
+                charge_saved = force_charge_state.get("saved_states", {})
+                restore_mode = (
+                    discharge_saved.get(site_id, {}).get("saved_operation_mode") or
+                    charge_saved.get(site_id, {}).get("saved_operation_mode") or
+                    force_discharge_state.get("saved_operation_mode") or
+                    force_charge_state.get("saved_operation_mode") or
+                    "autonomous"
+                )
+                _LOGGER.info("Restoring operation mode to %s for site %s", restore_mode, site_id)
+                async with session.post(
+                    f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                    headers=headers,
+                    json={"default_real_mode": restore_mode},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 200:
+                        _LOGGER.info("Restored operation mode to %s for site %s", restore_mode, site_id)
+                    else:
+                        _LOGGER.warning("Could not restore operation mode for site %s: %s", site_id, response.status)
+                        try:
+                            from .automations.actions import _send_expo_push
+                            await _send_expo_push(
+                                hass,
+                                "Battery Alert",
+                                "Mode restore failed - check settings"
+                            )
+                        except Exception as notify_err:
+                            _LOGGER.debug(f"Could not send notification: {notify_err}")
+
+                # Restore backup reserve per site
+                saved_backup_reserve = (
+                    discharge_saved.get(site_id, {}).get("saved_backup_reserve")
+                )
+                if saved_backup_reserve is None:
+                    saved_backup_reserve = charge_saved.get(site_id, {}).get("saved_backup_reserve")
+                if saved_backup_reserve is None:
+                    saved_backup_reserve = force_discharge_state.get("saved_backup_reserve")
+                if saved_backup_reserve is None:
+                    saved_backup_reserve = force_charge_state.get("saved_backup_reserve")
+                was_discharging = force_discharge_state.get("active")
+
+                if saved_backup_reserve is None:
+                    _LOGGER.warning("No saved backup reserve for site %s - will not change current setting", site_id)
                 else:
-                    _LOGGER.warning(f"Could not restore operation mode: {response.status}")
-                    # Send push notification for restore failure
-                    try:
-                        from .automations.actions import _send_expo_push
-                        await _send_expo_push(
-                            hass,
-                            "Battery Alert",
-                            "Mode restore failed - check settings"
-                        )
-                    except Exception as notify_err:
-                        _LOGGER.debug(f"Could not send notification: {notify_err}")
+                    should_restore_reserve = True
+                    if was_discharging:
+                        try:
+                            coordinator = hass.data[DOMAIN][entry.entry_id].get("coordinator")
+                            if coordinator and coordinator.data:
+                                current_soc = coordinator.data.get("battery_level", 100)
+                                if current_soc < saved_backup_reserve:
+                                    _LOGGER.warning(
+                                        "SoC (%.1f%%) is below saved backup reserve (%d%%) - "
+                                        "skipping reserve restore to prevent grid imports",
+                                        current_soc, saved_backup_reserve,
+                                    )
+                                    should_restore_reserve = False
+                                    try:
+                                        from .automations.actions import _send_expo_push
+                                        await _send_expo_push(
+                                            hass,
+                                            "Battery",
+                                            f"Reserve at 0% (battery {current_soc:.0f}%) - set manually"
+                                        )
+                                    except Exception as notify_err:
+                                        _LOGGER.debug(f"Could not send notification: {notify_err}")
+                                else:
+                                    _LOGGER.info("SoC (%.1f%%) above saved reserve (%d%%) - safe to restore", current_soc, saved_backup_reserve)
+                        except Exception as e:
+                            _LOGGER.warning(f"Could not check SoC for reserve restore: {e}")
 
-            # Restore backup reserve if it was saved during force charge OR force discharge
-            # For discharge: only restore if current SoC > saved reserve (to prevent grid imports)
-            # Note: Use explicit None check, not 'or', because 0% is a valid saved value
-            saved_backup_reserve = force_discharge_state.get("saved_backup_reserve")
-            if saved_backup_reserve is None:
-                saved_backup_reserve = force_charge_state.get("saved_backup_reserve")
-            was_discharging = force_discharge_state.get("active")
-
-            if saved_backup_reserve is None:
-                # No saved value - this shouldn't happen normally, but handle gracefully
-                # DON'T assume 0% means "from force mode" - user may have intentionally set 0%
-                _LOGGER.warning("No saved backup reserve found - will not change current setting")
-                # Skip backup reserve restoration entirely rather than guessing
-
-            if saved_backup_reserve is not None:
-                # For discharge restore: check if SoC > backup reserve to prevent imports
-                should_restore_reserve = True
-                if was_discharging:
-                    try:
-                        # Get current battery SoC from coordinator
-                        coordinator = hass.data[DOMAIN][entry.entry_id].get("coordinator")
-                        if coordinator and coordinator.data:
-                            current_soc = coordinator.data.get("battery_level", 100)
-                            if current_soc < saved_backup_reserve:
-                                _LOGGER.warning(
-                                    f"SoC ({current_soc:.1f}%%) is below saved backup reserve ({saved_backup_reserve}%%) - "
-                                    f"skipping reserve restore to prevent grid imports"
-                                )
-                                should_restore_reserve = False
-                                # Send notification about this
+                    if should_restore_reserve:
+                        _LOGGER.info("Restoring backup reserve to %d%% for site %s", saved_backup_reserve, site_id)
+                        async with session.post(
+                            f"{api_base}/api/1/energy_sites/{site_id}/backup",
+                            headers=headers,
+                            json={"backup_reserve_percent": saved_backup_reserve},
+                            timeout=aiohttp.ClientTimeout(total=30),
+                        ) as response:
+                            if response.status == 200:
+                                _LOGGER.info("Restored backup reserve to %d%% for site %s", saved_backup_reserve, site_id)
+                            else:
+                                text = await response.text()
+                                _LOGGER.error("Failed to restore backup reserve for site %s: %s - %s", site_id, response.status, text)
                                 try:
                                     from .automations.actions import _send_expo_push
                                     await _send_expo_push(
                                         hass,
-                                        "Battery",
-                                        f"Reserve at 0% (battery {current_soc:.0f}%) - set manually"
+                                        "Battery Alert",
+                                        f"Reserve restore failed ({saved_backup_reserve}%)"
                                     )
                                 except Exception as notify_err:
                                     _LOGGER.debug(f"Could not send notification: {notify_err}")
-                            else:
-                                _LOGGER.info(f"SoC ({current_soc:.1f}%%) is above saved reserve ({saved_backup_reserve}%%) - safe to restore")
-                    except Exception as e:
-                        _LOGGER.warning(f"Could not check SoC for reserve restore: {e}")
 
-                if should_restore_reserve:
-                    _LOGGER.info(f"Restoring backup reserve to: {saved_backup_reserve}%")
+                # Restore export rule per site
+                saved_export_rule = discharge_saved.get(site_id, {}).get("saved_export_rule")
+                if saved_export_rule is None:
+                    saved_export_rule = force_discharge_state.get("saved_export_rule")
+                if saved_export_rule and saved_export_rule != "battery_ok":
+                    _LOGGER.info("Restoring export rule to %s for site %s", saved_export_rule, site_id)
                     async with session.post(
-                        f"{api_base}/api/1/energy_sites/{site_id}/backup",
+                        f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
                         headers=headers,
-                        json={"backup_reserve_percent": saved_backup_reserve},
+                        json={"customer_preferred_export_rule": saved_export_rule},
                         timeout=aiohttp.ClientTimeout(total=30),
                     ) as response:
                         if response.status == 200:
-                            _LOGGER.info(f"✅ Restored backup reserve to {saved_backup_reserve}%")
+                            _LOGGER.info("Restored export rule to %s for site %s", saved_export_rule, site_id)
                         else:
-                            text = await response.text()
-                            _LOGGER.error(f"Failed to restore backup reserve: {response.status} - {text}")
-                            # Send push notification for backup reserve restore failure
-                            try:
-                                from .automations.actions import _send_expo_push
-                                await _send_expo_push(
-                                    hass,
-                                    "Battery Alert",
-                                    f"Reserve restore failed ({saved_backup_reserve}%)"
-                                )
-                            except Exception as notify_err:
-                                _LOGGER.debug(f"Could not send notification: {notify_err}")
-            else:
-                _LOGGER.warning("Could not determine backup reserve to restore")
-
-            # Restore export rule if it was changed during force discharge
-            saved_export_rule = force_discharge_state.get("saved_export_rule")
-            if saved_export_rule and saved_export_rule != "battery_ok":
-                _LOGGER.info("Restoring export rule to: %s", saved_export_rule)
-                async with session.post(
-                    f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
-                    headers=headers,
-                    json={"customer_preferred_export_rule": saved_export_rule},
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    if response.status == 200:
-                        _LOGGER.info("Restored export rule to %s", saved_export_rule)
-                    else:
-                        _LOGGER.warning("Could not restore export rule: %s", response.status)
+                            _LOGGER.warning("Could not restore export rule for site %s: %s", site_id, response.status)
 
             # Explicitly re-enable grid charging unless still in a demand peak period
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
@@ -15639,6 +15792,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             force_discharge_state["saved_operation_mode"] = None
             force_discharge_state["saved_backup_reserve"] = None
             force_discharge_state["saved_export_rule"] = None
+            force_discharge_state["saved_states"] = None
             force_discharge_state["expires_at"] = None
 
             # Clear charge state
@@ -15646,9 +15800,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             force_charge_state["saved_tariff"] = None
             force_charge_state["saved_operation_mode"] = None
             force_charge_state["saved_backup_reserve"] = None
+            force_charge_state["saved_states"] = None
             force_charge_state["expires_at"] = None
 
-            _LOGGER.info("✅ NORMAL OPERATION RESTORED")
+            _LOGGER.info("NORMAL OPERATION RESTORED")
 
             # Send push notification for successful restore
             if not suppress_notification:
@@ -15795,33 +15950,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Tesla Powerwall
         try:
-            current_token, provider = get_tesla_api_token(hass, entry)
-
-            site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
-            if not site_id or not current_token:
+            site_configs = _get_tesla_site_configs(hass, entry)
+            if not site_configs:
                 _LOGGER.error("Missing Tesla site ID or token for self-consumption mode")
                 return
 
             session = async_get_clientsession(hass)
-            headers = {
-                "Authorization": f"Bearer {current_token}",
-                "Content-Type": "application/json",
-            }
-            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+            for site_id, current_token, provider in site_configs:
+                headers = {
+                    "Authorization": f"Bearer {current_token}",
+                    "Content-Type": "application/json",
+                }
+                api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
 
-            # Set to self_consumption mode (NOT autonomous)
-            # This ensures battery offsets home load without TOU-based decisions
-            async with session.post(
-                f"{api_base}/api/1/energy_sites/{site_id}/operation",
-                headers=headers,
-                json={"default_real_mode": "self_consumption"},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status == 200:
-                    _LOGGER.info("✅ Tesla set to self_consumption mode (no TOU optimization)")
-                else:
-                    text = await response.text()
-                    _LOGGER.warning(f"Could not set self_consumption mode: {response.status} - {text}")
+                async with session.post(
+                    f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                    headers=headers,
+                    json={"default_real_mode": "self_consumption"},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 200:
+                        _LOGGER.info("Tesla site %s set to self_consumption mode", site_id)
+                    else:
+                        text = await response.text()
+                        _LOGGER.warning("Could not set self_consumption mode for site %s: %s - %s", site_id, response.status, text)
 
             # Do NOT clear force_charge_state/force_discharge_state here.
             # If force charge/discharge is active, the expiry timer owns cleanup
@@ -15851,31 +16003,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Tesla Powerwall
         try:
-            current_token, provider = get_tesla_api_token(hass, entry)
-
-            site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
-            if not site_id or not current_token:
+            site_configs = _get_tesla_site_configs(hass, entry)
+            if not site_configs:
                 _LOGGER.error("Missing Tesla site ID or token for autonomous mode")
                 return
 
             session = async_get_clientsession(hass)
-            headers = {
-                "Authorization": f"Bearer {current_token}",
-                "Content-Type": "application/json",
-            }
-            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+            for site_id, current_token, provider in site_configs:
+                headers = {
+                    "Authorization": f"Bearer {current_token}",
+                    "Content-Type": "application/json",
+                }
+                api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
 
-            async with session.post(
-                f"{api_base}/api/1/energy_sites/{site_id}/operation",
-                headers=headers,
-                json={"default_real_mode": "autonomous"},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status == 200:
-                    _LOGGER.info("✅ Tesla set to autonomous (TOU) mode")
-                else:
-                    text = await response.text()
-                    _LOGGER.warning(f"Could not set autonomous mode: {response.status} - {text}")
+                async with session.post(
+                    f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                    headers=headers,
+                    json={"default_real_mode": "autonomous"},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 200:
+                        _LOGGER.info("Tesla site %s set to autonomous (TOU) mode", site_id)
+                    else:
+                        text = await response.text()
+                        _LOGGER.warning("Could not set autonomous mode for site %s: %s - %s", site_id, response.status, text)
 
         except Exception as e:
             _LOGGER.error(f"Error setting autonomous mode: {e}", exc_info=True)
@@ -16017,33 +16168,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     percent = 100
 
-                current_token, provider = get_tesla_api_token(hass, entry)
-                site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
-                if not site_id or not current_token:
+                site_configs = _get_tesla_site_configs(hass, entry)
+                if not site_configs:
                     _LOGGER.error("Missing Tesla site ID or token for set_backup_reserve")
                     return
 
                 session = async_get_clientsession(hass)
-                headers = {
-                    "Authorization": f"Bearer {current_token}",
-                    "Content-Type": "application/json",
-                }
-                api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+                for site_id, current_token, provider in site_configs:
+                    headers = {
+                        "Authorization": f"Bearer {current_token}",
+                        "Content-Type": "application/json",
+                    }
+                    api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
 
-                async with session.post(
-                    f"{api_base}/api/1/energy_sites/{site_id}/backup",
-                    headers=headers,
-                    json={"backup_reserve_percent": percent},
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    if response.status == 200:
-                        _LOGGER.info(f"✅ Tesla backup reserve set to {percent}%")
-                        if percent == 100:
-                            # Kick PW3 to ensure it starts charging immediately
-                            hass.async_create_task(_tesla_charge_kick("backup_reserve_100"))
-                    else:
-                        text = await response.text()
-                        _LOGGER.error(f"Failed to set Tesla backup reserve: {response.status} - {text}")
+                    async with session.post(
+                        f"{api_base}/api/1/energy_sites/{site_id}/backup",
+                        headers=headers,
+                        json={"backup_reserve_percent": percent},
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as response:
+                        if response.status == 200:
+                            _LOGGER.info("Tesla site %s backup reserve set to %d%%", site_id, percent)
+                            if percent == 100:
+                                hass.async_create_task(_tesla_charge_kick("backup_reserve_100"))
+                        else:
+                            text = await response.text()
+                            _LOGGER.error("Failed to set Tesla backup reserve for site %s: %s - %s", site_id, response.status, text)
 
             except Exception as e:
                 _LOGGER.error(f"Error setting Tesla backup reserve: {e}", exc_info=True)
@@ -16058,36 +16208,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info(f"⚙️ Setting operation mode to {mode}")
 
         try:
-            current_token, provider = get_tesla_api_token(hass, entry)
-            site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
-            if not site_id or not current_token:
+            site_configs = _get_tesla_site_configs(hass, entry)
+            if not site_configs:
                 _LOGGER.error("Missing Tesla site ID or token for set_operation_mode")
                 return
 
             session = async_get_clientsession(hass)
-            headers = {
-                "Authorization": f"Bearer {current_token}",
-                "Content-Type": "application/json",
-            }
-            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+            for site_id, current_token, provider in site_configs:
+                headers = {
+                    "Authorization": f"Bearer {current_token}",
+                    "Content-Type": "application/json",
+                }
+                api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
 
-            async with session.post(
-                f"{api_base}/api/1/energy_sites/{site_id}/operation",
-                headers=headers,
-                json={"default_real_mode": mode},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status == 200:
-                    _LOGGER.info(f"✅ Operation mode set to {mode}")
-                    # When user explicitly sets self_consumption, clear the force toggle time
-                    # This tells TOU sync that this is intentional, not a Tesla reversion
-                    if mode == "self_consumption":
-                        if entry.entry_id in hass.data[DOMAIN]:
-                            hass.data[DOMAIN][entry.entry_id].pop("last_force_toggle_time", None)
-                            _LOGGER.debug("Cleared last_force_toggle_time (user set self_consumption)")
-                else:
-                    text = await response.text()
-                    _LOGGER.error(f"Failed to set operation mode: {response.status} - {text}")
+                async with session.post(
+                    f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                    headers=headers,
+                    json={"default_real_mode": mode},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 200:
+                        _LOGGER.info("Operation mode set to %s for site %s", mode, site_id)
+                        if mode == "self_consumption":
+                            if entry.entry_id in hass.data[DOMAIN]:
+                                hass.data[DOMAIN][entry.entry_id].pop("last_force_toggle_time", None)
+                                _LOGGER.debug("Cleared last_force_toggle_time (user set self_consumption)")
+                    else:
+                        text = await response.text()
+                        _LOGGER.error("Failed to set operation mode for site %s: %s - %s", site_id, response.status, text)
 
         except Exception as e:
             _LOGGER.error(f"Error setting operation mode: {e}", exc_info=True)
@@ -16102,40 +16250,39 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info(f"📤 Setting grid export rule to {rule}")
 
         try:
-            current_token, provider = get_tesla_api_token(hass, entry)
-            site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
-            if not site_id or not current_token:
+            site_configs = _get_tesla_site_configs(hass, entry)
+            if not site_configs:
                 _LOGGER.error("Missing Tesla site ID or token for set_grid_export")
                 return
 
             session = async_get_clientsession(hass)
-            headers = {
-                "Authorization": f"Bearer {current_token}",
-                "Content-Type": "application/json",
-            }
-            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+            for site_id, current_token, provider in site_configs:
+                headers = {
+                    "Authorization": f"Bearer {current_token}",
+                    "Content-Type": "application/json",
+                }
+                api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
 
-            async with session.post(
-                f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
-                headers=headers,
-                json={"customer_preferred_export_rule": rule},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status == 200:
-                    _LOGGER.info(f"✅ Grid export rule set to {rule}")
-                    # If solar curtailment is enabled, mark this as a manual override
-                    solar_curtailment_enabled = entry.options.get(
-                        CONF_BATTERY_CURTAILMENT_ENABLED,
-                        entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
-                    )
-                    if solar_curtailment_enabled:
-                        entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
-                        entry_data["manual_export_override"] = True
-                        entry_data["manual_export_rule"] = rule
-                        _LOGGER.info(f"📌 Manual export override enabled: {rule}")
-                else:
-                    text = await response.text()
-                    _LOGGER.error(f"Failed to set grid export rule: {response.status} - {text}")
+                async with session.post(
+                    f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
+                    headers=headers,
+                    json={"customer_preferred_export_rule": rule},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 200:
+                        _LOGGER.info("Grid export rule set to %s for site %s", rule, site_id)
+                        solar_curtailment_enabled = entry.options.get(
+                            CONF_BATTERY_CURTAILMENT_ENABLED,
+                            entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
+                        )
+                        if solar_curtailment_enabled:
+                            entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+                            entry_data["manual_export_override"] = True
+                            entry_data["manual_export_rule"] = rule
+                            _LOGGER.info("Manual export override enabled: %s", rule)
+                    else:
+                        text = await response.text()
+                        _LOGGER.error("Failed to set grid export rule for site %s: %s - %s", site_id, response.status, text)
 
         except Exception as e:
             _LOGGER.error(f"Error setting grid export rule: {e}", exc_info=True)
@@ -16166,31 +16313,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info(f"🔌 Setting grid charging to {'enabled' if enabled else 'disabled'}")
 
         try:
-            current_token, provider = get_tesla_api_token(hass, entry)
-            site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
-            if not site_id or not current_token:
+            site_configs = _get_tesla_site_configs(hass, entry)
+            if not site_configs:
                 _LOGGER.error("Missing Tesla site ID or token for set_grid_charging")
                 return
 
             session = async_get_clientsession(hass)
-            headers = {
-                "Authorization": f"Bearer {current_token}",
-                "Content-Type": "application/json",
-            }
-            api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+            for site_id, current_token, provider in site_configs:
+                headers = {
+                    "Authorization": f"Bearer {current_token}",
+                    "Content-Type": "application/json",
+                }
+                api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
 
-            # Note: Tesla API uses inverted logic - disallow_charge_from_grid_with_solar_installed
-            async with session.post(
-                f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
-                headers=headers,
-                json={"disallow_charge_from_grid_with_solar_installed": not enabled},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status == 200:
-                    _LOGGER.info(f"✅ Grid charging {'enabled' if enabled else 'disabled'}")
-                else:
-                    text = await response.text()
-                    _LOGGER.error(f"Failed to set grid charging: {response.status} - {text}")
+                # Note: Tesla API uses inverted logic - disallow_charge_from_grid_with_solar_installed
+                async with session.post(
+                    f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
+                    headers=headers,
+                    json={"disallow_charge_from_grid_with_solar_installed": not enabled},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 200:
+                        _LOGGER.info("Grid charging %s for site %s", 'enabled' if enabled else 'disabled', site_id)
+                    else:
+                        text = await response.text()
+                        _LOGGER.error("Failed to set grid charging for site %s: %s - %s", site_id, response.status, text)
 
         except Exception as e:
             _LOGGER.error(f"Error setting grid charging: {e}", exc_info=True)

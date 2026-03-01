@@ -23,6 +23,11 @@ from .const import (
     CONF_BATTERY_CURTAILMENT_ENABLED,
     CONF_TESLEMETRY_API_TOKEN,
     CONF_TESLA_ENERGY_SITE_ID,
+    CONF_TESLA_ENERGY_SITE_ID_2,
+    CONF_TESLA_API_TOKEN_2,
+    CONF_TESLA_BATTERY_CAPACITY_1,
+    CONF_TESLA_BATTERY_CAPACITY_2,
+    DEFAULT_TESLA_BATTERY_CAPACITY,
     CONF_AUTO_SYNC_ENABLED,
     CONF_DEMAND_CHARGE_ENABLED,
     CONF_DEMAND_CHARGE_RATE,
@@ -2361,6 +2366,10 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._site_data[CONF_AUTO_SYNC_ENABLED] = False
             # For Flow Power, these settings are already in _flow_power_data
 
+            # If multiple Tesla sites available, offer secondary selection
+            if self._tesla_sites and len(self._tesla_sites) > 1:
+                return await self.async_step_tesla_secondary()
+
             # Go to curtailment setup (for AC inverter configuration)
             return await self.async_step_curtailment_setup()
 
@@ -2443,6 +2452,62 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="site_selection",
+            data_schema=data_schema,
+            errors=errors,
+        )
+
+    async def async_step_tesla_secondary(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Optional: configure a second Tesla energy site (dual Powerwall)."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            secondary_id = user_input.get(CONF_TESLA_ENERGY_SITE_ID_2, "")
+            if not secondary_id or secondary_id == "none":
+                # User skipped — no secondary
+                return await self.async_step_curtailment_setup()
+
+            # Store secondary site config
+            self._site_data[CONF_TESLA_ENERGY_SITE_ID_2] = secondary_id
+
+            # Store battery capacities
+            self._site_data[CONF_TESLA_BATTERY_CAPACITY_1] = user_input.get(
+                CONF_TESLA_BATTERY_CAPACITY_1, DEFAULT_TESLA_BATTERY_CAPACITY
+            )
+            self._site_data[CONF_TESLA_BATTERY_CAPACITY_2] = user_input.get(
+                CONF_TESLA_BATTERY_CAPACITY_2, DEFAULT_TESLA_BATTERY_CAPACITY
+            )
+
+            # Optional: secondary token (different Tesla account)
+            token2 = user_input.get(CONF_TESLA_API_TOKEN_2, "").strip()
+            if token2:
+                self._site_data[CONF_TESLA_API_TOKEN_2] = token2
+
+            return await self.async_step_curtailment_setup()
+
+        # Build options — exclude already-selected primary site
+        primary_id = self._site_data.get(CONF_TESLA_ENERGY_SITE_ID, "")
+        site_options = {"none": "Skip (single Powerwall)"}
+        for site in self._tesla_sites:
+            site_id = str(site.get("energy_site_id"))
+            if site_id != primary_id:
+                site_name = site.get("site_name", f"Tesla Energy Site {site_id}")
+                site_options[site_id] = f"{site_name} ({site_id})"
+
+        if len(site_options) <= 1:
+            # No other sites available — skip
+            return await self.async_step_curtailment_setup()
+
+        data_schema = vol.Schema({
+            vol.Required(CONF_TESLA_ENERGY_SITE_ID_2, default="none"): vol.In(site_options),
+            vol.Optional(CONF_TESLA_BATTERY_CAPACITY_1, default=DEFAULT_TESLA_BATTERY_CAPACITY): vol.Coerce(float),
+            vol.Optional(CONF_TESLA_BATTERY_CAPACITY_2, default=DEFAULT_TESLA_BATTERY_CAPACITY): vol.Coerce(float),
+            vol.Optional(CONF_TESLA_API_TOKEN_2, default=""): str,
+        })
+
+        return self.async_show_form(
+            step_id="tesla_secondary",
             data_schema=data_schema,
             errors=errors,
         )
@@ -3049,6 +3114,29 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = user_input.get(
                     CONF_OPTIMIZATION_BACKUP_RESERVE, int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100)
                 ) / 100.0  # Convert from % to decimal
+
+            # Dual Tesla Powerwall configuration
+            secondary_site_id = user_input.get(CONF_TESLA_ENERGY_SITE_ID_2, "").strip()
+            if secondary_site_id:
+                new_data[CONF_TESLA_ENERGY_SITE_ID_2] = secondary_site_id
+                new_data[CONF_TESLA_BATTERY_CAPACITY_1] = user_input.get(
+                    CONF_TESLA_BATTERY_CAPACITY_1, DEFAULT_TESLA_BATTERY_CAPACITY
+                )
+                new_data[CONF_TESLA_BATTERY_CAPACITY_2] = user_input.get(
+                    CONF_TESLA_BATTERY_CAPACITY_2, DEFAULT_TESLA_BATTERY_CAPACITY
+                )
+                token2 = user_input.get(CONF_TESLA_API_TOKEN_2, "").strip()
+                if token2:
+                    new_data[CONF_TESLA_API_TOKEN_2] = token2
+                elif CONF_TESLA_API_TOKEN_2 in new_data:
+                    del new_data[CONF_TESLA_API_TOKEN_2]
+            else:
+                # Clear secondary config if removed
+                new_data.pop(CONF_TESLA_ENERGY_SITE_ID_2, None)
+                new_data.pop(CONF_TESLA_API_TOKEN_2, None)
+                new_data.pop(CONF_TESLA_BATTERY_CAPACITY_1, None)
+                new_data.pop(CONF_TESLA_BATTERY_CAPACITY_2, None)
+
             self.hass.config_entries.async_update_entry(
                 self.config_entry, data=new_data
             )
@@ -3069,6 +3157,9 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         current_tesla_provider = self.config_entry.data.get(CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_TESLEMETRY)
         current_opt_provider = self.config_entry.data.get(CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE)
         current_backup_reserve = self.config_entry.data.get(CONF_OPTIMIZATION_BACKUP_RESERVE, DEFAULT_OPTIMIZATION_BACKUP_RESERVE)
+        current_secondary_site = self.config_entry.data.get(CONF_TESLA_ENERGY_SITE_ID_2, "")
+        current_cap1 = self.config_entry.data.get(CONF_TESLA_BATTERY_CAPACITY_1, DEFAULT_TESLA_BATTERY_CAPACITY)
+        current_cap2 = self.config_entry.data.get(CONF_TESLA_BATTERY_CAPACITY_2, DEFAULT_TESLA_BATTERY_CAPACITY)
 
         # Build Tesla provider choices
         tesla_providers = {
@@ -3102,6 +3193,23 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_OPTIMIZATION_BACKUP_RESERVE,
                         default=int(current_backup_reserve * 100) if current_backup_reserve < 1 else int(current_backup_reserve),
                     ): vol.All(vol.Coerce(int), vol.Range(min=0, max=100)),
+                    # Dual Tesla Powerwall (optional)
+                    vol.Optional(
+                        CONF_TESLA_ENERGY_SITE_ID_2,
+                        default=current_secondary_site,
+                    ): str,
+                    vol.Optional(
+                        CONF_TESLA_BATTERY_CAPACITY_1,
+                        default=current_cap1,
+                    ): vol.Coerce(float),
+                    vol.Optional(
+                        CONF_TESLA_BATTERY_CAPACITY_2,
+                        default=current_cap2,
+                    ): vol.Coerce(float),
+                    vol.Optional(
+                        CONF_TESLA_API_TOKEN_2,
+                        default="",
+                    ): str,
                 }
             ),
         )
