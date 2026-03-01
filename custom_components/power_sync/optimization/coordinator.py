@@ -1387,7 +1387,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     # starting from the current interval.
                     now = dt_util.now()
                     current_window = now.replace(
-                        minute=(now.minute // 30) * 30,
+                        minute=(now.minute // 5) * 5,
                         second=0, microsecond=0,
                     )
                     for lst in (general, feed_in):
@@ -1415,13 +1415,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 len(lst),
                             )
 
-                    # Build 5-min price arrays: detect entry duration from data
-                    # Amber/Octopus: 30-min intervals → expand=6, Localvolts: 5-min → expand=1
+                    # Build 5-min price arrays with per-entry expansion.
+                    # Mixed feeds (e.g. Amber 5-min + 30-min) expand each entry
+                    # by its own duration: 5-min→1x, 30-min→6x.
                     interval = self._config.interval_minutes  # 5
-                    entry_duration = 30  # default for Amber/Octopus (30-min intervals)
-                    if general and general[0].get("duration"):
-                        entry_duration = general[0]["duration"]
-                    expand = max(1, entry_duration // interval)
                     n_steps = int(self._config.horizon_hours * 60) // interval  # 576
 
                     # Detect Flow Power for price adjustment
@@ -1458,7 +1455,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             )
 
                     import_prices = []
+                    entry_positions = []  # start index for each general entry
                     for e in general:
+                        entry_positions.append(len(import_prices))
+                        dur = e.get("duration", 30)
+                        entry_expand = max(1, dur // interval)
                         if is_flow_power:
                             if fp_custom_pea is not None:
                                 price_dollar = max(
@@ -1487,13 +1488,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 price_dollar = max(0, fp_base_rate / 100)
                         else:
                             price_dollar = e.get("perKwh", 0) / 100
-                        import_prices.extend([price_dollar] * expand)
+                        import_prices.extend([price_dollar] * entry_expand)
 
                     export_prices = []
                     for e in feed_in:
+                        dur = e.get("duration", 30)
+                        entry_expand = max(1, dur // interval)
                         # feedIn perKwh is negative (you get paid), abs for optimizer
                         price_dollar = abs(e.get("perKwh", 0)) / 100
-                        export_prices.extend([price_dollar] * expand)
+                        export_prices.extend([price_dollar] * entry_expand)
 
                     # Track actual forecast length before padding
                     actual_price_intervals = len(import_prices)
@@ -1528,10 +1531,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             for idx, e in enumerate(general):
                                 spike_status = e.get("spikeStatus", "none")
                                 if spike_status in ("spike", "potential"):
-                                    base_idx = idx * expand
+                                    base_idx = entry_positions[idx]
+                                    dur = e.get("duration", 30)
+                                    entry_expand = max(1, dur // interval)
                                     original_price = e.get("perKwh", 0)
                                     capped_count = 0
-                                    for j in range(expand):
+                                    for j in range(entry_expand):
                                         pos = base_idx + j
                                         if pos < len(import_prices) and import_prices[pos] > cap_price:
                                             import_prices[pos] = cap_price

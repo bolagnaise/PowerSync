@@ -519,6 +519,48 @@ async def _fetch_with_retry(
     raise last_error or UpdateFailed("All retry attempts failed")
 
 
+def _merge_amber_forecasts(forecast_5min: list, forecast_30min: list) -> list:
+    """Merge 5-min near-term with 30-min extended horizon, avoiding overlap.
+
+    5-min data covers today at NEM dispatch resolution; 30-min extends ~40h.
+    We keep all 5-min entries and only append 30-min entries that start at or
+    after the latest 5-min interval end (nemTime).
+    """
+    if not forecast_5min:
+        return forecast_30min or []
+    if not forecast_30min:
+        return forecast_5min or []
+
+    # Find latest nemTime (interval END) in 5-min data
+    latest_5min_end = max(
+        (e.get("nemTime", "") for e in forecast_5min),
+        default="",
+    )
+    if not latest_5min_end:
+        return forecast_30min
+
+    try:
+        boundary = datetime.fromisoformat(latest_5min_end.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return forecast_30min
+
+    # Keep only 30-min entries whose start is at or after the boundary
+    filtered_30min = []
+    for entry in forecast_30min:
+        nem = entry.get("nemTime", "")
+        dur = entry.get("duration", 30)
+        if nem:
+            try:
+                end = datetime.fromisoformat(nem.replace("Z", "+00:00"))
+                start = end - timedelta(minutes=dur)
+                if start >= boundary:
+                    filtered_30min.append(entry)
+            except (ValueError, TypeError):
+                filtered_30min.append(entry)  # keep if unparseable
+
+    return list(forecast_5min) + filtered_30min
+
+
 class AmberPriceCoordinator(DataUpdateCoordinator):
     """Coordinator to fetch Amber electricity price data."""
 
@@ -614,8 +656,8 @@ class AmberPriceCoordinator(DataUpdateCoordinator):
 
             return {
                 "current": current_prices,
-                "forecast": forecast_30min,  # Use 30-min forecast for TOU schedule
-                "forecast_5min": forecast_5min,  # Keep 5-min for CurrentInterval extraction
+                "forecast": _merge_amber_forecasts(forecast_5min, forecast_30min),
+                "forecast_5min": forecast_5min,  # Keep for TOU sync spike detection
                 "last_update": dt_util.utcnow(),
             }
 
