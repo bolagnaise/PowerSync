@@ -8,7 +8,7 @@
       },
       "provider_selection": {
         "title": "Select Electricity Provider",
-        "description": "Choose your electricity provider:\n\n**Amber Electric**: Full real-time price sync using Amber API.\n\n**Flow Power**: Wholesale electricity with Happy Hour exports. Choose AEMO or Amber pricing.\n\n**Globird**: Static tariff plans with optional AEMO spike export.\n\n**AEMO VPP**: AEMO spike detection for VPP exports (AGL, Engie, etc.).\n\n**New Zealand TOU**: NZ electricity retailers with TOU tariffs (Octopus NZ, Electric Kiwi, Contact Energy).",
+        "description": "Choose your electricity provider:\n\n**Amber Electric**: Full real-time price sync using Amber API.\n\n**Localvolts**: Real-time wholesale pricing with 5-minute NEM interval data.\n\n**Flow Power**: Wholesale electricity with Happy Hour exports. Choose AEMO or Amber pricing.\n\n**Globird**: Static tariff plans with optional AEMO spike export.\n\n**AEMO VPP**: AEMO spike detection for VPP exports (AGL, Engie, etc.).\n\n**New Zealand TOU**: NZ electricity retailers with TOU tariffs (Octopus NZ, Electric Kiwi, Contact Energy).",
         "data": {
           "electricity_provider": "Electricity Provider"
         },
@@ -43,6 +43,21 @@
         "description": "Enter your Amber Electric API token. You can get this from {amber_url}",
         "data": {
           "amber_api_token": "Amber API Token"
+        },
+        "submit_button": "Next"
+      },
+      "localvolts": {
+        "title": "Localvolts Configuration",
+        "description": "Enter your Localvolts API credentials. Contact Localvolts to obtain your API key and Partner ID.",
+        "data": {
+          "localvolts_api_key": "API Key",
+          "localvolts_partner_id": "Partner ID",
+          "localvolts_nmi": "NMI (National Meter Identifier)"
+        },
+        "data_description": {
+          "localvolts_api_key": "Your Localvolts API key (keep this secret)",
+          "localvolts_partner_id": "Your Localvolts Partner ID",
+          "localvolts_nmi": "Your 10-digit National Meter Identifier. Use * for all authorized NMIs."
         },
         "submit_button": "Next"
       },
@@ -784,6 +799,25 @@
         "data_description": {
           "aemo_spike_enabled": "Enable if your Globird plan includes payments for exporting during AEMO price spikes. Not all plans include this feature.",
           "configure_custom_tariff": "Recommended: your TOU rates are needed for accurate price sensors, battery optimisation, and EV charging"
+        },
+        "submit_button": "Next"
+      },
+      "localvolts_options": {
+        "title": "Localvolts Options",
+        "description": "Update your Localvolts API credentials and settings.",
+        "data": {
+          "localvolts_api_key": "API Key",
+          "localvolts_partner_id": "Partner ID",
+          "localvolts_nmi": "NMI (National Meter Identifier)",
+          "auto_sync_enabled": "Enable automatic TOU schedule syncing",
+          "battery_curtailment_enabled": "Enable Battery Export Curtailment (stop export at negative prices)"
+        },
+        "data_description": {
+          "localvolts_api_key": "Your Localvolts API key (keep this secret)",
+          "localvolts_partner_id": "Your Localvolts Partner ID",
+          "localvolts_nmi": "Your 10-digit National Meter Identifier. Use * for all authorized NMIs.",
+          "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices",
+          "battery_curtailment_enabled": "Stop battery from exporting when prices are negative to avoid paying to export"
         },
         "submit_button": "Next"
       },

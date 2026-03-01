@@ -14,7 +14,7 @@
 
 </div>
 
-> **Disclaimer:** This is an unofficial integration and is not affiliated with or endorsed by Tesla, Sigenergy, Sungrow, FoxESS, GoodWe, Amber Electric, or Octopus Energy. Use at your own risk.
+> **Disclaimer:** This is an unofficial integration and is not affiliated with or endorsed by Tesla, Sigenergy, Sungrow, FoxESS, GoodWe, Amber Electric, Localvolts, or Octopus Energy. Use at your own risk.
 
 ---
 
@@ -35,6 +35,7 @@
 | Provider | Country | Pricing |
 |----------|---------|---------|
 | **Amber Electric** | Australia | Dynamic 30-min (API token required) |
+| **Localvolts** | Australia | Real-time 5-min wholesale pricing (API key + Partner ID) |
 | **Flow Power / AEMO** | Australia | Wholesale pricing |
 | **Globird / AEMO VPP** | Australia | Static + spike detection |
 | **Octopus Energy** | UK | Dynamic 30-min (Agile, Go, Flux, Tracker) |

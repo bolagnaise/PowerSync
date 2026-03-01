@@ -337,12 +337,19 @@ AEMO_SENSOR_30MIN_PATTERN = "sensor.aemo_nem_{region}_current_30min_forecast"
 # Electricity provider options
 ELECTRICITY_PROVIDERS = {
     "amber": "Amber Electric",
+    "localvolts": "Localvolts",
     "flow_power": "Flow Power",
     "globird": "Globird",
     "aemo_vpp": "AEMO VPP (AGL, Engie, etc.)",
     "octopus": "Octopus Energy (UK)",
     "nz": "New Zealand TOU",
 }
+
+# Localvolts configuration
+CONF_LOCALVOLTS_API_KEY = "localvolts_api_key"
+CONF_LOCALVOLTS_PARTNER_ID = "localvolts_partner_id"
+CONF_LOCALVOLTS_NMI = "localvolts_nmi"
+LOCALVOLTS_API_BASE_URL = "https://api.localvolts.com/v1"
 
 # NZ Electricity provider configuration
 CONF_NZ_RETAILER = "nz_retailer"

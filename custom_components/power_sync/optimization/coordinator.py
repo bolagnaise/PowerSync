@@ -1415,9 +1415,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 len(lst),
                             )
 
-                    # Build 5-min price arrays: each 30-min entry → 6 intervals
+                    # Build 5-min price arrays: detect entry duration from data
+                    # Amber/Octopus: 30-min intervals → expand=6, Localvolts: 5-min → expand=1
                     interval = self._config.interval_minutes  # 5
-                    expand = 30 // interval  # 6
+                    entry_duration = 30  # default for Amber/Octopus (30-min intervals)
+                    if general and general[0].get("duration"):
+                        entry_duration = general[0]["duration"]
+                    expand = max(1, entry_duration // interval)
                     n_steps = int(self._config.horizon_hours * 60) // interval  # 576
 
                     # Detect Flow Power for price adjustment

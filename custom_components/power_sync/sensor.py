@@ -138,7 +138,7 @@ from .const import (
     ATTR_AEMO_THRESHOLD,
     ATTR_SPIKE_START_TIME,
 )
-from .coordinator import AmberPriceCoordinator, TeslaEnergyCoordinator, DemandChargeCoordinator, SolcastForecastCoordinator
+from .coordinator import AmberPriceCoordinator, LocalvoltsPriceCoordinator, TeslaEnergyCoordinator, DemandChargeCoordinator, SolcastForecastCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -601,6 +601,7 @@ async def async_setup_entry(
     """Set up PowerSync sensor entities."""
     domain_data = hass.data[DOMAIN][entry.entry_id]
     amber_coordinator: AmberPriceCoordinator | None = domain_data.get("amber_coordinator")
+    localvolts_coordinator: LocalvoltsPriceCoordinator | None = domain_data.get("localvolts_coordinator")
     tesla_coordinator: TeslaEnergyCoordinator | None = domain_data.get("tesla_coordinator")
     sigenergy_coordinator = domain_data.get("sigenergy_coordinator")
     sungrow_coordinator = domain_data.get("sungrow_coordinator")
@@ -616,7 +617,7 @@ async def async_setup_entry(
     entities: list[SensorEntity] = []
 
     # Add price sensors
-    # For Amber users: use AmberPriceSensor with live API data
+    # For Amber/Localvolts users: use AmberPriceSensor with live API data
     # For non-Amber users (Globird, etc.): use TariffPriceSensor with TOU schedule
     if amber_coordinator:
         _LOGGER.info("Adding Amber price sensors (import and export)")
@@ -624,6 +625,16 @@ async def async_setup_entry(
             entities.append(
                 AmberPriceSensor(
                     coordinator=amber_coordinator,
+                    description=description,
+                    entry=entry,
+                )
+            )
+    elif localvolts_coordinator:
+        _LOGGER.info("Adding Localvolts price sensors (import and export)")
+        for description in PRICE_SENSORS:
+            entities.append(
+                AmberPriceSensor(
+                    coordinator=localvolts_coordinator,
                     description=description,
                     entry=entry,
                 )

@@ -218,6 +218,10 @@ from .const import (
     OCTOPUS_PRODUCT_CODES,
     OCTOPUS_EXPORT_PRODUCT_CODES,
     OCTOPUS_GSP_REGIONS,
+    # Localvolts configuration
+    CONF_LOCALVOLTS_API_KEY,
+    CONF_LOCALVOLTS_PARTNER_ID,
+    CONF_LOCALVOLTS_NMI,
     # Smart Optimization configuration
     CONF_BATTERY_MANAGEMENT_MODE,
     BATTERY_MODE_MANUAL,
@@ -310,6 +314,19 @@ async def validate_amber_token(hass: HomeAssistant, api_token: str) -> dict[str,
     except Exception as err:
         _LOGGER.exception("Unexpected error validating Amber token: %s", err)
         return {"success": False, "error": "unknown"}
+
+
+async def validate_localvolts_credentials(
+    hass: HomeAssistant, api_key: str, partner_id: str, nmi: str
+) -> dict[str, Any]:
+    """Validate Localvolts API credentials by fetching current interval."""
+    from .localvolts_api import LocalvoltsClient
+    session = async_get_clientsession(hass)
+    client = LocalvoltsClient(session, api_key, partner_id)
+    try:
+        return await client.validate_credentials(nmi)
+    except Exception:
+        return {"success": False, "error": "cannot_connect"}
 
 
 async def validate_teslemetry_token(
@@ -574,6 +591,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._aemo_data: dict[str, Any] = {}
         self._flow_power_data: dict[str, Any] = {}
         self._octopus_data: dict[str, Any] = {}  # Octopus Energy UK configuration
+        self._localvolts_data: dict[str, Any] = {}  # Localvolts configuration
         self._selected_electricity_provider: str = "amber"
         self._custom_tariff_data: dict[str, Any] = {}  # Custom tariff for non-Amber users
         # Optimization provider selection (for Tesla/Sigenergy)
@@ -612,6 +630,11 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._aemo_only_mode = True
                 self._amber_data = {}
                 return await self.async_step_aemo_config()
+            elif provider == "localvolts":
+                # Localvolts: Real-time wholesale pricing (Australia)
+                self._aemo_only_mode = False
+                self._amber_data = {}
+                return await self.async_step_localvolts()
             elif provider == "octopus":
                 # Octopus Energy UK: Dynamic pricing
                 self._aemo_only_mode = False
@@ -890,6 +913,41 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={
                 "amber_url": "https://app.amber.com.au/developers",
             },
+        )
+
+    async def async_step_localvolts(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle Localvolts API configuration."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            validation = await validate_localvolts_credentials(
+                self.hass,
+                user_input[CONF_LOCALVOLTS_API_KEY],
+                user_input[CONF_LOCALVOLTS_PARTNER_ID],
+                user_input[CONF_LOCALVOLTS_NMI],
+            )
+            if validation["success"]:
+                self._localvolts_data = user_input
+                return await self.async_step_amber_settings()
+            else:
+                errors["base"] = validation.get("error", "cannot_connect")
+
+        data_schema = vol.Schema(
+            {
+                vol.Required(CONF_LOCALVOLTS_API_KEY): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                ),
+                vol.Required(CONF_LOCALVOLTS_PARTNER_ID): TextSelector(),
+                vol.Required(CONF_LOCALVOLTS_NMI): TextSelector(),
+            }
+        )
+
+        return self.async_show_form(
+            step_id="localvolts",
+            data_schema=data_schema,
+            errors=errors,
         )
 
     async def async_step_amber_settings(
@@ -1304,6 +1362,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             **self._site_data,  # Include Amber site ID for NEM region auto-detection
             **self._flow_power_data,
             **self._octopus_data,  # Include Octopus Energy UK configuration
+            **self._localvolts_data,
             **self._sigenergy_data,
             **self._aemo_data,  # Include AEMO configuration
             **getattr(self, '_demand_data', {}),
@@ -1428,6 +1487,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             **self._site_data,  # Include Amber site ID for NEM region auto-detection
             **self._flow_power_data,
             **self._octopus_data,  # Include Octopus Energy UK configuration
+            **self._localvolts_data,
             **self._sungrow_data,
             **self._aemo_data,  # Include AEMO configuration
             **getattr(self, '_demand_data', {}),
@@ -1664,6 +1724,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             **self._site_data,
             **self._flow_power_data,
             **self._octopus_data,
+            **self._localvolts_data,
             **self._foxess_data,
             **self._aemo_data,
             **getattr(self, '_demand_data', {}),
@@ -1750,6 +1811,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             **self._site_data,
             **self._flow_power_data,
             **self._octopus_data,
+            **self._localvolts_data,
             **self._goodwe_data,
             **self._aemo_data,
             **getattr(self, '_demand_data', {}),
@@ -2886,6 +2948,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             **self._aemo_data,
             **self._flow_power_data,
             **self._octopus_data,
+            **self._localvolts_data,
             **getattr(self, '_curtailment_data', {}),
             **getattr(self, '_inverter_data', {}),
             **getattr(self, '_demand_data', {}),
@@ -2934,6 +2997,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             title = "PowerSync Globird"
         elif self._selected_electricity_provider == "flow_power":
             title = "PowerSync Flow Power"
+        elif self._selected_electricity_provider == "localvolts":
+            title = "PowerSync Localvolts"
         elif self._selected_electricity_provider == "octopus":
             title = "PowerSync Octopus"
         else:
@@ -3148,6 +3213,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 return await self.async_step_flow_power_options()
             elif self._provider in ("globird", "aemo_vpp"):
                 return await self.async_step_globird_options()
+            elif self._provider == "localvolts":
+                return await self.async_step_localvolts_options()
             elif self._provider == "octopus":
                 return await self.async_step_octopus_options()
             elif self._provider == "nz":
@@ -4759,6 +4826,56 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             description_placeholders={
                 "tariff_hint": tariff_hint,
             },
+        )
+
+    async def async_step_localvolts_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Step 2e: Localvolts specific options."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            api_key = user_input.get(CONF_LOCALVOLTS_API_KEY, "")
+            partner_id = user_input.get(CONF_LOCALVOLTS_PARTNER_ID, "")
+            nmi = user_input.get(CONF_LOCALVOLTS_NMI, "")
+
+            # Validate if credentials changed
+            if api_key and partner_id and nmi:
+                validation = await validate_localvolts_credentials(
+                    self.hass, api_key, partner_id, nmi
+                )
+                if not validation["success"]:
+                    errors["base"] = validation.get("error", "cannot_connect")
+
+            if not errors:
+                self._amber_options = {
+                    CONF_ELECTRICITY_PROVIDER: "localvolts",
+                    CONF_LOCALVOLTS_API_KEY: api_key,
+                    CONF_LOCALVOLTS_PARTNER_ID: partner_id,
+                    CONF_LOCALVOLTS_NMI: nmi,
+                    CONF_AUTO_SYNC_ENABLED: user_input.get(CONF_AUTO_SYNC_ENABLED, True),
+                    CONF_BATTERY_CURTAILMENT_ENABLED: user_input.get(CONF_BATTERY_CURTAILMENT_ENABLED, False),
+                }
+                return await self.async_step_demand_charge_options()
+
+        current_api_key = self.config_entry.data.get(CONF_LOCALVOLTS_API_KEY, "")
+        current_partner_id = self.config_entry.data.get(CONF_LOCALVOLTS_PARTNER_ID, "")
+        current_nmi = self.config_entry.data.get(CONF_LOCALVOLTS_NMI, "")
+        current_auto_sync = self._get_option(CONF_AUTO_SYNC_ENABLED, True)
+        current_curtailment = self._get_option(CONF_BATTERY_CURTAILMENT_ENABLED, False)
+
+        return self.async_show_form(
+            step_id="localvolts_options",
+            data_schema=vol.Schema({
+                vol.Required(CONF_LOCALVOLTS_API_KEY, default=current_api_key): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                ),
+                vol.Required(CONF_LOCALVOLTS_PARTNER_ID, default=current_partner_id): TextSelector(),
+                vol.Required(CONF_LOCALVOLTS_NMI, default=current_nmi): TextSelector(),
+                vol.Optional(CONF_AUTO_SYNC_ENABLED, default=current_auto_sync): bool,
+                vol.Optional(CONF_BATTERY_CURTAILMENT_ENABLED, default=current_curtailment): bool,
+            }),
+            errors=errors,
         )
 
     async def async_step_octopus_options(

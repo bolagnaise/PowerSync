@@ -626,6 +626,134 @@ class AmberPriceCoordinator(DataUpdateCoordinator):
 
 
 # ============================================================
+# Localvolts Price Coordinator
+# ============================================================
+
+def _parse_localvolts_price(value) -> float:
+    """Parse a Localvolts price value, handling 'N/A' and non-numeric values.
+
+    Returns price in c/kWh (same unit as Amber perKwh).
+    """
+    if value is None or value == "N/A" or value == "n/a":
+        return 0.0
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _localvolts_interval_start(interval_end: str, duration_minutes: int = 5) -> str:
+    """Calculate interval start time from interval end time.
+
+    Args:
+        interval_end: ISO 8601 datetime string for interval end
+        duration_minutes: Duration of interval in minutes (default 5)
+
+    Returns:
+        ISO 8601 datetime string for interval start
+    """
+    try:
+        end_dt = datetime.fromisoformat(interval_end.replace("Z", "+00:00"))
+        start_dt = end_dt - timedelta(minutes=duration_minutes)
+        return start_dt.isoformat()
+    except (ValueError, TypeError):
+        return interval_end
+
+
+class LocalvoltsPriceCoordinator(DataUpdateCoordinator):
+    """Coordinator to fetch Localvolts electricity price data.
+
+    Converts Localvolts API data to Amber-compatible format so all downstream
+    code (LP optimizer, sensors, TOU sync, curtailment) works unchanged.
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        api_key: str,
+        partner_id: str,
+        nmi: str,
+    ) -> None:
+        """Initialize the coordinator."""
+        from .localvolts_api import LocalvoltsClient
+
+        self.client = LocalvoltsClient(
+            async_get_clientsession(hass), api_key, partner_id
+        )
+        self.nmi = nmi
+
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_localvolts_prices",
+            update_interval=timedelta(minutes=5),
+        )
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Fetch data from Localvolts API and convert to Amber-compatible format."""
+        try:
+            intervals = await self.client.get_intervals(self.nmi)
+
+            if not intervals:
+                raise UpdateFailed("No interval data returned from Localvolts API")
+
+            current_prices = []
+            forecast_prices = []
+
+            for interval in intervals:
+                nem_time = interval.get("intervalEnd", "")
+                quality = interval.get("quality", "Fcst")
+
+                # Import price: costsFlexUp (c/kWh)
+                import_ckwh = _parse_localvolts_price(interval.get("costsFlexUp"))
+                # Export price: earningsFlexUp (c/kWh)
+                # Negate to match Amber convention: Amber feedIn.perKwh is negative
+                # when earning; Localvolts earningsFlexUp is positive when earning
+                export_ckwh = -_parse_localvolts_price(interval.get("earningsFlexUp"))
+
+                start_time = _localvolts_interval_start(nem_time, 5)
+
+                general_entry = {
+                    "nemTime": nem_time,
+                    "perKwh": import_ckwh,
+                    "channelType": "general",
+                    "type": "CurrentInterval" if quality in ("Act", "Exp") else "ForecastInterval",
+                    "duration": 5,
+                    "startTime": start_time,
+                }
+                feedin_entry = {
+                    "nemTime": nem_time,
+                    "perKwh": export_ckwh,
+                    "channelType": "feedIn",
+                    "type": general_entry["type"],
+                    "duration": 5,
+                    "startTime": start_time,
+                }
+
+                if quality in ("Act", "Exp"):
+                    current_prices.extend([general_entry, feedin_entry])
+                else:
+                    forecast_prices.extend([general_entry, feedin_entry])
+
+            _LOGGER.debug(
+                "Localvolts data: %d current entries, %d forecast entries",
+                len(current_prices),
+                len(forecast_prices),
+            )
+
+            return {
+                "current": current_prices,
+                "forecast": forecast_prices,
+                "last_update": dt_util.utcnow(),
+            }
+
+        except UpdateFailed:
+            raise
+        except Exception as err:
+            raise UpdateFailed(f"Error fetching Localvolts data: {err}") from err
+
+
+# ============================================================
 # Amber Usage API — actual metered cost data from NEM
 # ============================================================
 
