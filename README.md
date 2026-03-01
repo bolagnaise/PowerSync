@@ -34,7 +34,7 @@
 
 | Provider | Country | Pricing |
 |----------|---------|---------|
-| **Amber Electric** | Australia | Dynamic 30-min (API token required) |
+| **Amber Electric** | Australia | Dynamic 5-min & 30-min (API token required) |
 | **Localvolts** | Australia | Real-time 5-min wholesale pricing (API key + Partner ID) |
 | **Flow Power / AEMO** | Australia | Wholesale pricing |
 | **Globird / AEMO VPP** | Australia | Static + spike detection |
