@@ -608,6 +608,22 @@ class PowerSyncStrategy {
       });
     }
 
+    // --- Center Column: Daily Cost Tracking ---
+    if (hasE('daily_import_cost')) {
+      const costEntities = [
+        { entity: e('daily_import_cost'), name: 'Import Cost Today', icon: 'mdi:cash-minus' },
+      ];
+      if (hasE('daily_export_earnings')) {
+        costEntities.push({ entity: e('daily_export_earnings'), name: 'Export Earnings Today', icon: 'mdi:cash-plus' });
+      }
+      center.push({
+        type: 'entities',
+        title: 'Daily Cost Tracking',
+        show_header_toggle: false,
+        entities: costEntities,
+      });
+    }
+
     // --- Left Column: Demand Charge ---
     if (hasE('in_demand_charge_period')) {
       left.push(_demandCharge(e));

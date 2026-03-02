@@ -54,6 +54,8 @@ class EnergyAccumulator:
         self.battery_charge_kwh: float = 0.0
         self.battery_discharge_kwh: float = 0.0
         self.load_kwh: float = 0.0
+        self.import_cost_today: float = 0.0
+        self.export_earnings_today: float = 0.0
         self._store: Store | None = None
         if hass and store_key:
             self._store = Store(
@@ -82,11 +84,14 @@ class EnergyAccumulator:
             self.battery_charge_kwh = float(data.get("battery_charge_kwh", 0.0))
             self.battery_discharge_kwh = float(data.get("battery_discharge_kwh", 0.0))
             self.load_kwh = float(data.get("load_kwh", 0.0))
+            self.import_cost_today = float(data.get("import_cost_today", 0.0))
+            self.export_earnings_today = float(data.get("export_earnings_today", 0.0))
             _LOGGER.info(
                 "Restored energy accumulator: solar=%.2f grid_in=%.2f grid_out=%.2f "
-                "charge=%.2f discharge=%.2f load=%.2f kWh (date=%s)",
+                "charge=%.2f discharge=%.2f load=%.2f kWh, cost=$%.2f earn=$%.2f (date=%s)",
                 self.solar_kwh, self.grid_import_kwh, self.grid_export_kwh,
                 self.battery_charge_kwh, self.battery_discharge_kwh, self.load_kwh,
+                self.import_cost_today, self.export_earnings_today,
                 stored_date,
             )
         else:
@@ -124,6 +129,8 @@ class EnergyAccumulator:
             "battery_charge_kwh": round(self.battery_charge_kwh, 4),
             "battery_discharge_kwh": round(self.battery_discharge_kwh, 4),
             "load_kwh": round(self.load_kwh, 4),
+            "import_cost_today": round(self.import_cost_today, 4),
+            "export_earnings_today": round(self.export_earnings_today, 4),
         }
 
     def update(
@@ -132,6 +139,8 @@ class EnergyAccumulator:
         grid_kw: float,
         battery_kw: float,
         load_kw: float,
+        buy_price_per_kwh: float | None = None,
+        sell_price_per_kwh: float | None = None,
     ) -> None:
         """Update accumulators with current power readings.
 
@@ -140,6 +149,10 @@ class EnergyAccumulator:
             grid_kw: positive = importing, negative = exporting
             battery_kw: positive = discharging, negative = charging
             load_kw: always >= 0
+
+        Optional cost tracking:
+            buy_price_per_kwh: current import price in $/kWh (None = skip cost tracking)
+            sell_price_per_kwh: current export/feed-in price in $/kWh (None = skip cost tracking)
         """
         now = dt_util.now()  # Local time for midnight reset
 
@@ -147,9 +160,10 @@ class EnergyAccumulator:
         if self._last_date is not None and now.date() != self._last_date:
             _LOGGER.info(
                 "Energy accumulator midnight reset: solar=%.2f grid_in=%.2f grid_out=%.2f "
-                "charge=%.2f discharge=%.2f load=%.2f kWh",
+                "charge=%.2f discharge=%.2f load=%.2f kWh, cost=$%.2f earn=$%.2f",
                 self.solar_kwh, self.grid_import_kwh, self.grid_export_kwh,
                 self.battery_charge_kwh, self.battery_discharge_kwh, self.load_kwh,
+                self.import_cost_today, self.export_earnings_today,
             )
             self.solar_kwh = 0.0
             self.grid_import_kwh = 0.0
@@ -157,6 +171,8 @@ class EnergyAccumulator:
             self.battery_charge_kwh = 0.0
             self.battery_discharge_kwh = 0.0
             self.load_kwh = 0.0
+            self.import_cost_today = 0.0
+            self.export_earnings_today = 0.0
 
         # Integrate power × time
         if self._last_update is not None:
@@ -168,6 +184,11 @@ class EnergyAccumulator:
                 self.battery_charge_kwh += max(0, -battery_kw) * delta_h
                 self.battery_discharge_kwh += max(0, battery_kw) * delta_h
                 self.load_kwh += max(0, load_kw) * delta_h
+                # Accumulate costs if prices available
+                if buy_price_per_kwh is not None:
+                    self.import_cost_today += max(0, grid_kw) * buy_price_per_kwh * delta_h
+                if sell_price_per_kwh is not None:
+                    self.export_earnings_today += max(0, -grid_kw) * sell_price_per_kwh * delta_h
                 self._schedule_save()
 
         self._last_update = now
@@ -182,7 +203,50 @@ class EnergyAccumulator:
             "charge_today_kwh": round(self.battery_charge_kwh, 3),
             "discharge_today_kwh": round(self.battery_discharge_kwh, 3),
             "load_today_kwh": round(self.load_kwh, 3),
+            "import_cost_today": round(self.import_cost_today, 4),
+            "export_earnings_today": round(self.export_earnings_today, 4),
         }
+
+
+def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | None, float | None]:
+    """Get current buy/sell prices in $/kWh for cost tracking.
+
+    Tries Amber coordinator data first, then falls back to tariff schedule.
+    Returns (buy_price_per_kwh, sell_price_per_kwh) or (None, None) on failure.
+    """
+    try:
+        entry_data = hass.data.get(DOMAIN, {}).get(entry_id, {})
+
+        # Try Amber coordinator first (real-time market prices)
+        amber_coordinator = entry_data.get("amber_coordinator")
+        if amber_coordinator and amber_coordinator.data:
+            current_prices = amber_coordinator.data.get("current", [])
+            buy_cents = None
+            sell_cents = None
+            for price in current_prices:
+                channel = price.get("channelType", "")
+                if channel == "general":
+                    buy_cents = price.get("perKwh")
+                elif channel == "feedIn":
+                    sell_cents = price.get("perKwh")
+            if buy_cents is not None:
+                # Amber perKwh is in cents → convert to $/kWh
+                buy_dollar = buy_cents / 100.0
+                sell_dollar = (sell_cents / 100.0) if sell_cents is not None else 0.0
+                # Feed-in prices from Amber are negative (credit) → use absolute value
+                return (buy_dollar, abs(sell_dollar))
+
+        # Fall back to tariff schedule (TOU rates)
+        tariff_schedule = entry_data.get("tariff_schedule")
+        if tariff_schedule:
+            from . import get_current_price_from_tariff_schedule
+            buy_cents, sell_cents, _ = get_current_price_from_tariff_schedule(tariff_schedule)
+            return (buy_cents / 100.0, sell_cents / 100.0)
+
+    except Exception as exc:
+        _LOGGER.debug("Failed to get current prices for cost tracking: %s", exc)
+
+    return (None, None)
 
 
 class SensitiveDataFilter(logging.Filter):
@@ -1270,6 +1334,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         api_token: str,
         api_provider: str = TESLA_PROVIDER_TESLEMETRY,
         token_getter: callable = None,
+        entry_id: str = "",
     ) -> None:
         """Initialize the coordinator.
 
@@ -1280,11 +1345,13 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             api_provider: API provider (teslemetry or fleet_api)
             token_getter: Optional callable that returns (token, provider) tuple.
                           If provided, this is called before each request to get fresh token.
+            entry_id: Config entry ID for price lookups
         """
         self.site_id = site_id
         self._api_token = api_token  # Fallback token
         self._token_getter = token_getter  # Callable to get fresh token
         self.api_provider = api_provider
+        self._entry_id = entry_id
         self.session = async_get_clientsession(hass)
         self._site_info_cache = None  # Cache site_info (refreshed every 6 hours)
         self._site_info_last_fetch: float = 0  # Timestamp of last successful fetch
@@ -1376,8 +1443,9 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             battery_kw = live_status.get("battery_power", 0) / 1000
             load_kw = (live_status.get("load_power", 0) / 1000) - ev_power_kw
 
-            # Accumulate daily energy from power readings
-            self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw)
+            # Accumulate daily energy from power readings (with cost tracking)
+            buy, sell = _get_current_prices(self.hass, self._entry_id)
+            self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
 
             # Fetch site_info periodically to detect firmware updates (every 6 hours)
             _site_info_stale = (time.monotonic() - self._site_info_last_fetch) > 21600
@@ -1788,9 +1856,10 @@ class DualTeslaCoordinator(DataUpdateCoordinator):
         for key in (
             "pv_today_kwh", "grid_import_today_kwh", "grid_export_today_kwh",
             "charge_today_kwh", "discharge_today_kwh", "load_today_kwh",
+            "import_cost_today", "export_earnings_today",
         ):
             combined_energy[key] = round(
-                (es1.get(key, 0) or 0) + (es2.get(key, 0) or 0), 3
+                (es1.get(key, 0) or 0) + (es2.get(key, 0) or 0), 4
             )
 
         return {
@@ -2119,6 +2188,7 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
         host: str,
         port: int = 502,
         slave_id: int = 1,
+        entry_id: str = "",
     ) -> None:
         """Initialize the coordinator.
 
@@ -2127,12 +2197,14 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
             host: IP address of Sigenergy system
             port: Modbus TCP port (default: 502)
             slave_id: Modbus slave ID (default: 1)
+            entry_id: Config entry ID for price lookups
         """
         from .inverters.sigenergy import SigenergyController
 
         self.host = host
         self.port = port
         self.slave_id = slave_id
+        self._entry_id = entry_id
         self._controller = SigenergyController(host, port, slave_id)
         self._energy_acc = EnergyAccumulator(hass, "sigenergy")
 
@@ -2170,8 +2242,9 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
             # Simplified: Load = Solar + Grid + Battery (all with proper signs)
             load_kw = solar_kw + grid_kw + battery_kw
 
-            # Accumulate daily energy from power readings
-            self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw)
+            # Accumulate daily energy from power readings (with cost tracking)
+            buy, sell = _get_current_prices(self.hass, self._entry_id)
+            self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
 
             energy_data = {
                 "solar_power": solar_kw,  # kW
@@ -2224,6 +2297,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         host: str,
         port: int = 502,
         slave_id: int = 1,
+        entry_id: str = "",
     ) -> None:
         """Initialize the coordinator.
 
@@ -2232,12 +2306,14 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             host: IP address of Sungrow inverter
             port: Modbus TCP port (default: 502)
             slave_id: Modbus slave ID (default: 1)
+            entry_id: Config entry ID for price lookups
         """
         from .inverters.sungrow_sh import SungrowSHController
 
         self.host = host
         self.port = port
         self.slave_id = slave_id
+        self._entry_id = entry_id
         self._controller = SungrowSHController(host, port, slave_id)
         self._energy_acc = EnergyAccumulator(hass, "sungrow")
 
@@ -2269,8 +2345,9 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             # If battery charging (negative power), Solar = Load + Export + Battery_Charge
             solar_kw = load_kw - grid_kw - battery_kw
 
-            # Accumulate daily energy from power readings
-            self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw)
+            # Accumulate daily energy from power readings (with cost tracking)
+            buy, sell = _get_current_prices(self.hass, self._entry_id)
+            self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
 
             energy_data = {
                 "solar_power": max(0, solar_kw),  # kW, clamp to 0 if calculated negative
@@ -2539,9 +2616,10 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
         for key in (
             "pv_today_kwh", "grid_import_today_kwh", "grid_export_today_kwh",
             "charge_today_kwh", "discharge_today_kwh", "load_today_kwh",
+            "import_cost_today", "export_earnings_today",
         ):
             combined_energy[key] = round(
-                (es1.get(key, 0) or 0) + (es2.get(key, 0) or 0), 3
+                (es1.get(key, 0) or 0) + (es2.get(key, 0) or 0), 4
             )
 
         return {
@@ -2667,6 +2745,7 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
         serial_port: str | None = None,
         baudrate: int = 9600,
         model_family: str | None = None,
+        entry_id: str = "",
     ) -> None:
         """Initialize the coordinator."""
         from .inverters.foxess import FoxESSController
@@ -2674,6 +2753,7 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
         self.host = host
         self.port = port
         self.slave_id = slave_id
+        self._entry_id = entry_id
         self._controller = FoxESSController(
             host=host,
             port=port,
@@ -2717,8 +2797,9 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
             # Total solar = DC PV strings + AC-coupled CT2 meter
             total_solar_kw = solar_kw + max(0, ct2_kw)
 
-            # Accumulate daily energy from power readings
-            self._energy_acc.update(total_solar_kw, grid_kw, battery_kw, load_kw)
+            # Accumulate daily energy from power readings (with cost tracking)
+            buy, sell = _get_current_prices(self.hass, self._entry_id)
+            self._energy_acc.update(total_solar_kw, grid_kw, battery_kw, load_kw, buy, sell)
 
             # Merge Modbus energy registers (charge/discharge) with accumulated values
             acc = self._energy_acc.as_dict()
@@ -2853,12 +2934,14 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
         host: str,
         port: int = 8899,
         comm_addr: int = 0,
+        entry_id: str = "",
     ) -> None:
         """Initialize the coordinator."""
         from .inverters.goodwe_battery import GoodWeBatteryController
 
         self.host = host
         self.port = port
+        self._entry_id = entry_id
         self._controller = GoodWeBatteryController(
             host=host, port=port, comm_addr=comm_addr
         )
@@ -2888,8 +2971,9 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
             battery_kw = data["battery_power"]
             load_kw = data["load_power"]
 
-            # Accumulate daily energy from power readings
-            self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw)
+            # Accumulate daily energy from power readings (with cost tracking)
+            buy, sell = _get_current_prices(self.hass, self._entry_id)
+            self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
 
             energy_data = {
                 "solar_power": solar_kw,

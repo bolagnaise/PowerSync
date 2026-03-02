@@ -4473,6 +4473,74 @@ class PriceLevelChargingState:
     managed_by_powersync: bool = False
 
 
+def _get_vehicle_charger_params(
+    hass: "HomeAssistant",
+    domain: str,
+    config_entry: "ConfigEntry",
+    vehicle_vin: Optional[str] = None,
+) -> dict:
+    """Get per-vehicle charger params from AutoScheduleSettings or vehicle_charging_configs.
+
+    Looks up charger settings (min/max amps, voltage, phases) for a specific vehicle,
+    falling back to the first available config or defaults.
+    """
+    defaults = {"min_charge_amps": 5, "max_charge_amps": 32, "voltage": 230, "phases": 1}
+
+    # Try AutoScheduleSettings first (most authoritative — configured per vehicle)
+    try:
+        exec_instance = get_auto_schedule_executor()
+        if exec_instance:
+            # If vehicle_vin provided, look for matching settings
+            if vehicle_vin:
+                for vid, settings in exec_instance._settings.items():
+                    if vid == vehicle_vin:
+                        return {
+                            "min_charge_amps": settings.min_charge_amps,
+                            "max_charge_amps": settings.max_charge_amps,
+                            "voltage": settings.voltage,
+                            "phases": settings.phases,
+                        }
+            # No VIN match — use first available settings
+            for vid, settings in exec_instance._settings.items():
+                return {
+                    "min_charge_amps": settings.min_charge_amps,
+                    "max_charge_amps": settings.max_charge_amps,
+                    "voltage": settings.voltage,
+                    "phases": settings.phases,
+                }
+    except Exception:
+        pass
+
+    # Fallback: read from vehicle_charging_configs in store
+    try:
+        entry_data = hass.data.get(domain, {}).get(config_entry.entry_id, {})
+        store = entry_data.get("automation_store")
+        if store:
+            stored_data = getattr(store, '_data', {}) or {}
+            configs = stored_data.get("vehicle_charging_configs", [])
+            for vc in configs:
+                if vehicle_vin and vc.get("vehicle_id") == vehicle_vin:
+                    return {
+                        "min_charge_amps": vc.get("min_amps", 5),
+                        "max_charge_amps": vc.get("max_amps", 32),
+                        "voltage": vc.get("voltage", 230),
+                        "phases": vc.get("phases", 1),
+                    }
+            # No VIN match — use first config
+            if configs:
+                vc = configs[0]
+                return {
+                    "min_charge_amps": vc.get("min_amps", 5),
+                    "max_charge_amps": vc.get("max_amps", 32),
+                    "voltage": vc.get("voltage", 230),
+                    "phases": vc.get("phases", 1),
+                }
+    except Exception:
+        pass
+
+    return defaults
+
+
 class PriceLevelChargingExecutor:
     """
     Executes price-level charging based on current price thresholds.
@@ -4760,12 +4828,13 @@ class PriceLevelChargingExecutor:
 
         from .actions import _action_start_ev_charging_dynamic
 
+        charger_params = _get_vehicle_charger_params(
+            self.hass, self._domain, self.config_entry, vehicle_vin
+        )
         params = {
             "vehicle_vin": vehicle_vin,
             "dynamic_mode": "battery_target",
-            "min_charge_amps": 5,
-            "max_charge_amps": 32,
-            "voltage": 230,
+            **charger_params,
             "charger_type": charger_type,
             "no_grid_import": self._get_settings().get("no_grid_import", False),
         }
@@ -5361,12 +5430,13 @@ class ScheduledChargingExecutor:
 
         from .actions import _action_start_ev_charging_dynamic
 
+        charger_params = _get_vehicle_charger_params(
+            self.hass, self._domain, self.config_entry
+        )
         params = {
             "vehicle_vin": None,
             "dynamic_mode": "battery_target",
-            "min_charge_amps": 5,
-            "max_charge_amps": 32,
-            "voltage": 230,
+            **charger_params,
             "charger_type": charger_type,
         }
 
@@ -5599,12 +5669,13 @@ class EVChargingModeCoordinator:
 
         from .actions import _action_start_ev_charging_dynamic
 
+        charger_params = _get_vehicle_charger_params(
+            self.hass, self._domain, self.config_entry
+        )
         params = {
             "vehicle_vin": None,
             "dynamic_mode": "battery_target",
-            "min_charge_amps": 5,
-            "max_charge_amps": 32,
-            "voltage": 230,
+            **charger_params,
             "charger_type": charger_type,
         }
 

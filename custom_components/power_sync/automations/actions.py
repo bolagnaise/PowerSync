@@ -2516,6 +2516,31 @@ async def _dynamic_ev_update_surplus(
 
     params = state.get("params", {})
 
+    # Re-check Tesla entity max after charging starts (Tesla reports real max only when active)
+    # The entity needs a few seconds to update after the car starts drawing power,
+    # so we do this on the first update cycle after charging_started=True (10-30s later).
+    if (state.get("charging_started") and not state.get("entity_max_rechecked")
+            and params.get("charger_type") == "tesla"
+            and vehicle_id != DEFAULT_VEHICLE_ID):
+        try:
+            entity = await _get_tesla_ev_entity(
+                hass, r"number\..*(charging_amps|charge_current)$", vehicle_id
+            )
+            if entity:
+                entity_state = hass.states.get(entity)
+                if entity_state:
+                    new_max = int(entity_state.attributes.get("max", 0))
+                    old_max = params.get("max_charge_amps", 32)
+                    if new_max > 0 and new_max != old_max:
+                        _LOGGER.info(
+                            f"⚡ Solar surplus EV: Updated max_charge_amps {old_max}A -> {new_max}A "
+                            f"(entity limit after charging started)"
+                        )
+                        params["max_charge_amps"] = new_max
+        except Exception:
+            pass
+        state["entity_max_rechecked"] = True
+
     # Get live status
     live_status = await _get_tesla_live_status(hass, config_entry)
     if not live_status:
@@ -3160,7 +3185,7 @@ async def _action_start_ev_charging_dynamic_locked(
     entry_vehicles = _dynamic_ev_state.get(entry_id, {})
     for vid, v_state in entry_vehicles.items():
         if v_state.get("active") and v_state.get("params", {}).get("dynamic_mode") == dynamic_mode:
-            if vid == vehicle_id or dynamic_mode == "solar_surplus":
+            if vid == vehicle_id:
                 _LOGGER.debug(f"Dynamic session ({dynamic_mode}) already active for vehicle {vid}, skipping duplicate")
                 return True
 
@@ -3293,6 +3318,8 @@ async def _action_start_ev_charging_dynamic_locked(
 
     # Store vehicle-specific state
     # Read entity max for Tesla chargers to avoid over-reporting amps
+    # Note: Tesla reports max=16A when car is idle; real max (e.g. 32A for wall connector)
+    # only appears once charging starts. We apply a preliminary cap here and re-check later.
     if charger_type == "tesla" and vehicle_id != DEFAULT_VEHICLE_ID:
         try:
             entity = await _get_tesla_ev_entity(
@@ -3303,7 +3330,10 @@ async def _action_start_ev_charging_dynamic_locked(
                 if entity_state:
                     entity_max = int(entity_state.attributes.get("max", max_charge_amps))
                     if entity_max < full_params.get("max_charge_amps", 32):
-                        _LOGGER.info(f"Capping max_charge_amps to {entity_max}A (entity limit)")
+                        _LOGGER.info(
+                            f"Preliminary cap: max_charge_amps to {entity_max}A "
+                            f"(will re-check after charging starts)"
+                        )
                         full_params["max_charge_amps"] = entity_max
         except Exception:
             pass
@@ -3318,6 +3348,7 @@ async def _action_start_ev_charging_dynamic_locked(
         "paused": False,
         "paused_reason": None,
         "charging_started": dynamic_mode == "battery_target",  # Already started for battery_target
+        "entity_max_rechecked": False,  # Re-check Tesla entity max after charging starts
         "allocated_surplus_kw": 0,
         "reason": "",
         "vehicle_name": full_params.get("vehicle_name"),

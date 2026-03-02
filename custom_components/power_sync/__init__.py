@@ -2185,6 +2185,130 @@ def _weighted_avg_rates(tou_periods: dict, buy_rates: dict, sell_rates: dict) ->
     return avg_buy, avg_sell
 
 
+async def _calculate_cost_from_statistics(
+    hass: HomeAssistant, period: str, end_date: str | None
+) -> dict | None:
+    """Calculate import/export costs from HA long-term statistics.
+
+    Queries the recorder for hourly cost sensor data and sums it over the
+    requested calendar period. Returns None if no statistics are available
+    (e.g. new installation, sensors not yet recorded).
+    """
+    from datetime import datetime as dt, timedelta
+    from homeassistant.util import dt as dt_util
+
+    try:
+        now = dt_util.now()
+
+        # Determine end of period
+        if end_date:
+            try:
+                end_dt = dt.strptime(end_date, "%Y-%m-%d").replace(
+                    tzinfo=now.tzinfo
+                )
+                # End of that day
+                end_dt = end_dt.replace(hour=23, minute=59, second=59)
+            except ValueError:
+                end_dt = now
+        else:
+            end_dt = now
+
+        # Calculate start of period using calendar ranges
+        if period == "day":
+            start_dt = end_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        elif period == "week":
+            # Start of week (Monday)
+            days_since_monday = end_dt.weekday()
+            start_dt = (end_dt - timedelta(days=days_since_monday)).replace(
+                hour=0, minute=0, second=0, microsecond=0
+            )
+        elif period == "month":
+            start_dt = end_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        elif period == "year":
+            start_dt = end_dt.replace(
+                month=1, day=1, hour=0, minute=0, second=0, microsecond=0
+            )
+        else:
+            return None
+
+        # Find cost sensor entity IDs
+        import_cost_entity = None
+        export_earnings_entity = None
+        for state in hass.states.async_all("sensor"):
+            eid = state.entity_id
+            if eid.endswith("daily_import_cost") and "power_sync" in eid:
+                import_cost_entity = eid
+            elif eid.endswith("daily_export_earnings") and "power_sync" in eid:
+                export_earnings_entity = eid
+
+        if not import_cost_entity:
+            return None
+
+        # Query recorder statistics
+        from homeassistant.components.recorder import get_instance
+        from homeassistant.components.recorder.statistics import (
+            statistics_during_period,
+        )
+
+        start_utc = dt_util.as_utc(start_dt)
+        end_utc = dt_util.as_utc(end_dt)
+
+        entity_ids = [import_cost_entity]
+        if export_earnings_entity:
+            entity_ids.append(export_earnings_entity)
+
+        instance = get_instance(hass)
+        stats = await instance.async_add_executor_job(
+            statistics_during_period,
+            hass,
+            start_utc,
+            end_utc,
+            set(entity_ids),
+            "hour",
+            None,
+            {"change"},
+        )
+
+        if not stats:
+            return None
+
+        # Sum hourly change values
+        total_import_cost = 0.0
+        total_export_earnings = 0.0
+
+        if import_cost_entity in stats:
+            for entry in stats[import_cost_entity]:
+                change = entry.get("change")
+                if change is not None:
+                    total_import_cost += change
+
+        if export_earnings_entity and export_earnings_entity in stats:
+            for entry in stats[export_earnings_entity]:
+                change = entry.get("change")
+                if change is not None:
+                    total_export_earnings += change
+
+        # Only return if we got meaningful data
+        if total_import_cost == 0 and total_export_earnings == 0:
+            # Check if there are any stats at all (vs just zero cost)
+            has_any = any(
+                len(stats.get(eid, [])) > 0 for eid in entity_ids
+            )
+            if not has_any:
+                return None
+
+        return {
+            "import_cost": round(total_import_cost, 2),
+            "export_earnings": round(total_export_earnings, 2),
+            "net_cost": round(total_import_cost - total_export_earnings, 2),
+            "estimated": False,
+        }
+
+    except Exception as exc:
+        _LOGGER.debug("Failed to calculate cost from statistics: %s", exc)
+        return None
+
+
 class CalendarHistoryView(HomeAssistantView):
     """HTTP view to get calendar history for mobile app."""
 
@@ -2292,10 +2416,11 @@ class CalendarHistoryView(HomeAssistantView):
                 "serial_number": None,
                 "installation_date": None,
             }
-            if tariff_schedule:
+            cost_summary = await _calculate_cost_from_statistics(self._hass, period, end_date)
+            if not cost_summary and tariff_schedule:
                 cost_summary = _calculate_cost_from_tariff(tariff_schedule, time_series)
-                if cost_summary:
-                    result["cost_summary"] = cost_summary
+            if cost_summary:
+                result["cost_summary"] = cost_summary
             return web.json_response(result)
 
         if is_foxess and foxess_coordinator:
@@ -2323,10 +2448,11 @@ class CalendarHistoryView(HomeAssistantView):
                 "serial_number": None,
                 "installation_date": None,
             }
-            if tariff_schedule:
+            cost_summary = await _calculate_cost_from_statistics(self._hass, period, end_date)
+            if not cost_summary and tariff_schedule:
                 cost_summary = _calculate_cost_from_tariff(tariff_schedule, time_series)
-                if cost_summary:
-                    result["cost_summary"] = cost_summary
+            if cost_summary:
+                result["cost_summary"] = cost_summary
             return web.json_response(result)
 
         if is_goodwe and goodwe_coordinator:
@@ -2350,10 +2476,11 @@ class CalendarHistoryView(HomeAssistantView):
                 "serial_number": None,
                 "installation_date": None,
             }
-            if tariff_schedule:
+            cost_summary = await _calculate_cost_from_statistics(self._hass, period, end_date)
+            if not cost_summary and tariff_schedule:
                 cost_summary = _calculate_cost_from_tariff(tariff_schedule, time_series)
-                if cost_summary:
-                    result["cost_summary"] = cost_summary
+            if cost_summary:
+                result["cost_summary"] = cost_summary
             return web.json_response(result)
 
         if not tesla_coordinator:
@@ -2429,10 +2556,11 @@ class CalendarHistoryView(HomeAssistantView):
             "serial_number": history.get("serial_number"),
             "installation_date": history.get("installation_date"),
         }
-        if tariff_schedule:
+        cost_summary = await _calculate_cost_from_statistics(self._hass, period, end_date)
+        if not cost_summary and tariff_schedule:
             cost_summary = _calculate_cost_from_tariff(tariff_schedule, time_series)
-            if cost_summary:
-                result["cost_summary"] = cost_summary
+        if cost_summary:
+            result["cost_summary"] = cost_summary
 
         _LOGGER.info(f"✅ Calendar history HTTP response: {len(time_series)} records for period '{period}'")
         return web.json_response(result)
@@ -10405,6 +10533,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 sigenergy_modbus_host,
                 port=sigenergy_modbus_port,
                 slave_id=sigenergy_modbus_slave_id,
+                entry_id=entry.entry_id,
             )
         else:
             _LOGGER.warning("Sigenergy mode enabled but no Modbus host configured - energy sensors will be unavailable")
@@ -10433,6 +10562,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             sungrow_host,
             port=sungrow_port,
             slave_id=sungrow_slave_id,
+            entry_id=entry.entry_id,
         )
 
         # Check for secondary Sungrow inverter (dual-inverter setup)
@@ -10458,6 +10588,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 sungrow_host_2,
                 port=sungrow_port_2,
                 slave_id=sungrow_slave_id_2,
+                entry_id=entry.entry_id,
             )
     elif is_foxess:
         _LOGGER.info("Running in FoxESS mode - Tesla credentials not required")
@@ -10486,6 +10617,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             serial_port=foxess_serial_port,
             baudrate=foxess_baudrate,
             model_family=foxess_model_family,
+            entry_id=entry.entry_id,
         )
     elif is_goodwe:
         _LOGGER.info("Running in GoodWe mode - Tesla credentials not required")
@@ -10498,6 +10630,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass,
             goodwe_host,
             port=goodwe_port,
+            entry_id=entry.entry_id,
         )
     else:
         # Get initial Tesla API token and provider
@@ -10527,6 +10660,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             tesla_api_token,
             api_provider=tesla_api_provider,
             token_getter=token_getter,
+            entry_id=entry.entry_id,
         )
 
     # Fetch initial data
@@ -10556,6 +10690,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     sec_token,
                     api_provider=sec_provider,
                     token_getter=sec_token_getter,
+                    entry_id=entry.entry_id,
                 )
                 await tesla_coordinator_2.async_config_entry_first_refresh()
                 _LOGGER.info("Secondary Tesla coordinator initialized for site %s", secondary_site_id)
@@ -17723,76 +17858,106 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     surplus_config = stored.get("solar_surplus_config", {})
                     surplus_enabled = surplus_config.get("enabled", False)
 
-                    # Check if a solar surplus dynamic session is already active
+                    # Check which vehicles already have active solar surplus sessions
                     entry_vehicles = _dynamic_ev_state.get(entry.entry_id, {})
-                    surplus_session_active = any(
-                        v.get("active") and v.get("params", {}).get("dynamic_mode") == "solar_surplus"
-                        for v in entry_vehicles.values()
+                    active_surplus_vids = set(
+                        vid for vid, v in entry_vehicles.items()
+                        if v.get("active") and v.get("params", {}).get("dynamic_mode") == "solar_surplus"
                     )
+                    surplus_session_active = len(active_surplus_vids) > 0
 
-                    if surplus_enabled and not surplus_session_active and live_status:
+                    if surplus_enabled and live_status:
                         # Get vehicle charger config from store
                         vehicle_configs = stored.get("vehicle_charging_configs", [])
-                        # Select highest priority vehicle (lowest priority number)
                         sorted_configs = sorted(vehicle_configs, key=lambda c: c.get("priority", 999))
-                        vc = sorted_configs[0] if sorted_configs else {}
+                        allow_parallel = surplus_config.get("allow_parallel_charging", False)
 
-                        # Get phases from vehicle config, falling back to auto-schedule
-                        # settings (the app may store phases in either location)
-                        vc_phases = vc.get("phases")
-                        if vc_phases is None or vc_phases <= 1:
-                            try:
-                                from .automations.ev_charging_planner import get_auto_schedule_executor as _get_exec
-                                _exec = _get_exec()
-                                if _exec:
-                                    for _vid, _settings in _exec._settings.items():
-                                        if _settings.phases > 1:
-                                            vc_phases = _settings.phases
-                                            # Also sync charger params from auto-schedule
-                                            if vc.get("min_amps") is None:
-                                                vc["min_amps"] = _settings.min_charge_amps
-                                            if vc.get("max_amps") is None:
-                                                vc["max_amps"] = _settings.max_charge_amps
-                                            if vc.get("voltage") is None:
-                                                vc["voltage"] = _settings.voltage
-                                            break
-                            except Exception:
-                                pass
-                        if vc_phases is None:
-                            vc_phases = 1
+                        # Determine which vehicles need sessions started
+                        configs_to_start = []
+                        for vc in sorted_configs:
+                            vid = vc.get("vehicle_id")
+                            # Skip vehicles that already have active surplus sessions
+                            if vid and vid in active_surplus_vids:
+                                continue
+                            configs_to_start.append(vc)
+                            if not allow_parallel:
+                                break  # Only start one vehicle when parallel is disabled
 
-                        params = {
-                            "dynamic_mode": "solar_surplus",
-                            "charger_type": vc.get("charger_type", "tesla"),
-                            "min_charge_amps": vc.get("min_amps", 5),
-                            "max_charge_amps": vc.get("max_amps", 32),
-                            "voltage": vc.get("voltage", 240),
-                            "phases": vc_phases,
-                            "charger_switch_entity": vc.get("charger_switch_entity"),
-                            "charger_amps_entity": vc.get("charger_amps_entity"),
-                            "ocpp_charger_id": vc.get("ocpp_charger_id"),
-                            "household_buffer_kw": surplus_config.get("household_buffer_kw", 0.5),
-                            "surplus_calculation": surplus_config.get("surplus_calculation", "grid_based"),
-                            "sustained_surplus_minutes": surplus_config.get("sustained_surplus_minutes", 2),
-                            "stop_delay_minutes": surplus_config.get("stop_delay_minutes", 5),
-                            "min_battery_soc": surplus_config.get("home_battery_minimum", 80),
-                            "pause_below_soc": max(0, surplus_config.get("home_battery_minimum", 80) - 10),
-                            "dual_vehicle_strategy": surplus_config.get("dual_vehicle_strategy", "priority_first"),
-                            "allow_parallel_charging": surplus_config.get("allow_parallel_charging", False),
-                            "max_battery_charge_rate_kw": surplus_config.get("max_battery_charge_rate_kw", 5.0),
-                        }
+                        # Don't start new vehicles if parallel is disabled and one is already active
+                        if not allow_parallel and surplus_session_active:
+                            configs_to_start = []
 
-                        if vc.get("vehicle_id"):
-                            params["vehicle_vin"] = vc["vehicle_id"]
-                        if vc.get("display_name"):
-                            params["vehicle_name"] = vc["display_name"]
+                        for vc in configs_to_start:
+                            # Get phases from vehicle config, falling back to auto-schedule
+                            # settings (the app may store phases in either location)
+                            vc_phases = vc.get("phases")
+                            if vc_phases is None or vc_phases <= 1:
+                                try:
+                                    from .automations.ev_charging_planner import get_auto_schedule_executor as _get_exec
+                                    _exec = _get_exec()
+                                    if _exec:
+                                        # Try to match by vehicle_id first
+                                        _matched = False
+                                        for _vid, _settings in _exec._settings.items():
+                                            if _vid == vc.get("vehicle_id") and _settings.phases > 1:
+                                                vc_phases = _settings.phases
+                                                if vc.get("min_amps") is None:
+                                                    vc["min_amps"] = _settings.min_charge_amps
+                                                if vc.get("max_amps") is None:
+                                                    vc["max_amps"] = _settings.max_charge_amps
+                                                if vc.get("voltage") is None:
+                                                    vc["voltage"] = _settings.voltage
+                                                _matched = True
+                                                break
+                                        if not _matched:
+                                            for _vid, _settings in _exec._settings.items():
+                                                if _settings.phases > 1:
+                                                    vc_phases = _settings.phases
+                                                    if vc.get("min_amps") is None:
+                                                        vc["min_amps"] = _settings.min_charge_amps
+                                                    if vc.get("max_amps") is None:
+                                                        vc["max_amps"] = _settings.max_charge_amps
+                                                    if vc.get("voltage") is None:
+                                                        vc["voltage"] = _settings.voltage
+                                                    break
+                                except Exception:
+                                    pass
+                            if vc_phases is None:
+                                vc_phases = 1
 
-                        _LOGGER.info(
-                            f"☀️ Solar surplus charging enabled in app — starting dynamic solar surplus session "
-                            f"(phases={vc_phases}, amps={vc.get('min_amps', 5)}-{vc.get('max_amps', 32)}, "
-                            f"voltage={vc.get('voltage', 240)})"
-                        )
-                        await _action_start_ev_charging_dynamic(hass, entry, params, context=None)
+                            params = {
+                                "dynamic_mode": "solar_surplus",
+                                "charger_type": vc.get("charger_type", "tesla"),
+                                "min_charge_amps": vc.get("min_amps", 5),
+                                "max_charge_amps": vc.get("max_amps", 32),
+                                "voltage": vc.get("voltage", 240),
+                                "phases": vc_phases,
+                                "charger_switch_entity": vc.get("charger_switch_entity"),
+                                "charger_amps_entity": vc.get("charger_amps_entity"),
+                                "ocpp_charger_id": vc.get("ocpp_charger_id"),
+                                "household_buffer_kw": surplus_config.get("household_buffer_kw", 0.5),
+                                "surplus_calculation": surplus_config.get("surplus_calculation", "grid_based"),
+                                "sustained_surplus_minutes": surplus_config.get("sustained_surplus_minutes", 2),
+                                "stop_delay_minutes": surplus_config.get("stop_delay_minutes", 5),
+                                "min_battery_soc": surplus_config.get("home_battery_minimum", 80),
+                                "pause_below_soc": max(0, surplus_config.get("home_battery_minimum", 80) - 10),
+                                "dual_vehicle_strategy": surplus_config.get("dual_vehicle_strategy", "priority_first"),
+                                "allow_parallel_charging": allow_parallel,
+                                "max_battery_charge_rate_kw": surplus_config.get("max_battery_charge_rate_kw", 5.0),
+                            }
+
+                            if vc.get("vehicle_id"):
+                                params["vehicle_vin"] = vc["vehicle_id"]
+                            if vc.get("display_name"):
+                                params["vehicle_name"] = vc["display_name"]
+
+                            _LOGGER.info(
+                                f"☀️ Solar surplus charging enabled in app — starting dynamic solar surplus session "
+                                f"for {vc.get('display_name', vc.get('vehicle_id', 'EV'))} "
+                                f"(phases={vc_phases}, amps={vc.get('min_amps', 5)}-{vc.get('max_amps', 32)}, "
+                                f"voltage={vc.get('voltage', 240)})"
+                            )
+                            await _action_start_ev_charging_dynamic(hass, entry, params, context=None)
 
                     elif not surplus_enabled and surplus_session_active:
                         _LOGGER.info("☀️ Solar surplus charging disabled in app — stopping dynamic solar surplus session")
