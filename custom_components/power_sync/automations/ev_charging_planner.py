@@ -408,8 +408,16 @@ async def is_ev_plugged_in(
                         if location == "home":
                             _LOGGER.debug(f"Charge cable {entity_id} is {state.state} but car is home, treating as plugged in")
                             return True
+                        elif location == "unknown":
+                            # Both cable AND location unknown — car fully asleep.
+                            # Fall through to BLE/other fallbacks instead of assuming unplugged.
+                            _LOGGER.debug(
+                                f"Charge cable {entity_id} is {state.state} and location unknown "
+                                f"(car likely asleep), checking fallbacks"
+                            )
+                            break  # Break entity loop, fall to BLE fallback
                         else:
-                            _LOGGER.debug(f"Charge cable {entity_id} is {state.state} and car not home, treating as unplugged")
+                            _LOGGER.debug(f"Charge cable {entity_id} is {state.state} and car {location}, treating as unplugged")
                             return False
                     is_plugged = state.state == "on"
                     _LOGGER.debug(f"Found plugged in state from {entity_id} (VIN: {device_vin}): {is_plugged}")
@@ -438,10 +446,11 @@ async def is_ev_plugged_in(
                 _LOGGER.debug(f"Tesla BLE {ble_prefix}: charge flap closed → not plugged in")
                 return False
         # Also check charger switch state as fallback
+        # Entity existing (even if unavailable when car asleep) means car was detected here
         ble_charger_entity = f"switch.{ble_prefix}_charger"
         ble_state = hass.states.get(ble_charger_entity)
-        if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
-            _LOGGER.debug(f"Tesla BLE {ble_prefix}: charger entity available → assuming plugged in")
+        if ble_state:
+            _LOGGER.debug(f"Tesla BLE {ble_prefix}: charger entity exists (state={ble_state.state}) → assuming plugged in")
             return True
         _LOGGER.debug(f"Tesla BLE {ble_prefix}: could not determine plug status")
         return False
@@ -455,8 +464,8 @@ async def is_ev_plugged_in(
         ble_charger_entity = f"switch.{ble_prefix}_charger"
         ble_state = hass.states.get(ble_charger_entity)
 
-        if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
-            _LOGGER.debug(f"Tesla BLE detected (fallback), assuming plugged in")
+        if ble_state:
+            _LOGGER.debug(f"Tesla BLE {ble_prefix} entity exists (state={ble_state.state}), assuming plugged in")
             return True
 
     return False
@@ -3323,8 +3332,9 @@ class AutoScheduleExecutor:
                         _LOGGER.debug(f"Found vehicle at work from {entity_id}")
                         break
 
-        # Method 2 (fallback): Tesla BLE - if available, vehicle is nearby (assume "home")
-        # Only used if no authoritative location found above (e.g. BLE-only users without Teslemetry)
+        # Method 2 (fallback): Tesla BLE - if configured, vehicle is nearby (assume "home")
+        # BLE entities may be "unavailable" when car is asleep, but the car is still in the garage.
+        # If BLE prefix is configured and the entity exists, assume home (matches main automation behavior).
         if location == "unknown":
             config = {}
             entries = self.hass.config_entries.async_entries(DOMAIN)
@@ -3335,9 +3345,11 @@ class AutoScheduleExecutor:
             ble_charger_entity = f"switch.{ble_prefix}_charger"
             ble_state = self.hass.states.get(ble_charger_entity)
 
-            if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
+            if ble_state:
+                # Entity exists — car was previously detected via BLE at this location.
+                # Even if unavailable (car asleep), it's still in the garage.
                 location = "home"
-                _LOGGER.debug(f"Tesla BLE detected (fallback), assuming location=home")
+                _LOGGER.debug(f"Tesla BLE entity {ble_charger_entity} exists (state={ble_state.state}), assuming location=home")
 
         return location
 
@@ -3393,8 +3405,16 @@ class AutoScheduleExecutor:
                             if location == "home":
                                 _LOGGER.debug(f"Charge cable {entity_id} is {state.state} but car is home, treating as plugged in")
                                 return True
+                            elif location == "unknown":
+                                # Both cable AND location are unknown — car is fully asleep.
+                                # Don't return False yet; fall through to BLE/other fallbacks.
+                                _LOGGER.debug(
+                                    f"Charge cable {entity_id} is {state.state} and location unknown "
+                                    f"(car likely asleep), checking fallbacks"
+                                )
+                                break  # Break out of entity loop, fall to BLE fallback
                             else:
-                                _LOGGER.debug(f"Charge cable {entity_id} is {state.state} and car not home, treating as unplugged")
+                                _LOGGER.debug(f"Charge cable {entity_id} is {state.state} and car {location}, treating as unplugged")
                                 return False
                         is_plugged = state.state == "on"
                         _LOGGER.debug(f"Found plugged in state from {entity_id}: {is_plugged}")
@@ -3410,6 +3430,8 @@ class AutoScheduleExecutor:
                             return True
 
         # Method 2 (fallback): Tesla BLE — only if no authoritative sensor found above
+        # BLE entities may be "unavailable" when car is asleep, but the car is still plugged in.
+        # If the entity exists at all, the car was previously detected — assume still plugged in.
         config = {}
         entries = self.hass.config_entries.async_entries(DOMAIN)
         if entries:
@@ -3419,8 +3441,10 @@ class AutoScheduleExecutor:
         ble_charger_entity = f"switch.{ble_prefix}_charger"
         ble_state = self.hass.states.get(ble_charger_entity)
 
-        if ble_state and ble_state.state not in ("unavailable", "unknown", "None", None):
-            _LOGGER.debug(f"Tesla BLE detected (fallback), assuming plugged in")
+        if ble_state:
+            # Entity exists — car was previously detected via BLE.
+            # Even if unavailable (car asleep), it's still plugged in at home.
+            _LOGGER.debug(f"Tesla BLE entity {ble_charger_entity} exists (state={ble_state.state}), assuming plugged in")
             return True
 
         return False

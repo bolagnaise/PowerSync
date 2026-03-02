@@ -2949,6 +2949,8 @@ async def _dynamic_ev_update(
     phases = params.get("phases", 1)
 
     # Hard inverter cap: even if reactive logic miscalculates, amps never exceed inverter capacity
+    # Save original max_amps — restored later if battery depletes and grid takes over
+    uncapped_max_amps = max_amps
     if no_grid_import:
         inverter_max_amps = int((max_inverter_kw * 1000) / (voltage * phases))
         if max_amps > inverter_max_amps:
@@ -2986,8 +2988,10 @@ async def _dynamic_ev_update(
 
     # Available power for EV adjustment:
     # - In no_grid_import mode: limit to inverter capacity and prevent grid imports
+    #   UNLESS battery has depleted (stopped discharging) — then allow grid import
     # - If battery has surplus (deficit > 0.1), use that surplus
     # - Otherwise, use grid headroom
+    battery_depleted = False  # Track whether we bypassed no_grid_import due to battery depletion
     if no_grid_import:
         # Exclude intentional home battery grid-charging from the grid import figure.
         # When the LP optimizer force-charges the home battery from grid, battery_power_kw
@@ -2997,23 +3001,46 @@ async def _dynamic_ev_update(
         battery_charging_kw = max(0.0, -battery_power_kw)  # positive when battery is charging
         ev_relevant_grid_kw = grid_power_kw - battery_charging_kw
 
-        # Calculate home load using Tesla API's load_power (total behind-the-meter consumption)
-        # load_power includes home + EV + everything; subtract EV estimate for home-only load
-        load_power_kw = (live_status.get("load_power", 0) or 0) / 1000
-        home_load_kw = max(0, load_power_kw - current_ev_power_kw)
+        # Check if battery has effectively depleted (stopped discharging).
+        # When battery is not providing power (hit backup_reserve or LP set IDLE),
+        # allow grid import — the battery can't supply EV power anymore.
+        if battery_power_kw <= 0.1 and current_amps > 0:
+            battery_depleted = True
+            if not state.get("_battery_depleted_logged"):
+                _LOGGER.info(
+                    f"⚡ No-grid-import: Battery not discharging ({battery_power_kw:.1f}kW), "
+                    f"allowing grid import for EV charging"
+                )
+                state["_battery_depleted_logged"] = True
+            # Battery depleted — use grid headroom directly (ignore inverter cap)
+            max_amps = uncapped_max_amps  # Remove inverter cap, charge at full charger rate
+            available_power_kw = grid_headroom_kw
+        else:
+            # Battery is discharging — clear depleted flag if it was set
+            if state.get("_battery_depleted_logged"):
+                _LOGGER.info(
+                    f"⚡ No-grid-import: Battery discharging again ({battery_power_kw:.1f}kW), "
+                    f"re-engaging inverter capacity limit"
+                )
+                state["_battery_depleted_logged"] = False
 
-        # Max power available from inverter for EV = inverter_capacity - home_load
-        # This is proactive: we know the limit before hitting it
-        inverter_headroom_kw = max_inverter_kw - max(0, home_load_kw)
+            # Calculate home load using Tesla API's load_power (total behind-the-meter consumption)
+            # load_power includes home + EV + everything; subtract EV estimate for home-only load
+            load_power_kw = (live_status.get("load_power", 0) or 0) / 1000
+            home_load_kw = max(0, load_power_kw - current_ev_power_kw)
 
-        # Reactive adjustment based on current grid state (excluding battery charging)
-        # ev_relevant_grid_kw: positive = importing for home+EV (bad), negative = exporting (good)
-        grid_reactive_kw = -(ev_relevant_grid_kw + grid_import_tolerance_kw)
+            # Max power available from inverter for EV = inverter_capacity - home_load
+            # This is proactive: we know the limit before hitting it
+            inverter_headroom_kw = max_inverter_kw - max(0, home_load_kw)
 
-        # Use the more conservative of the two approaches
-        # - inverter_headroom: proactive limit based on known capacity
-        # - grid_reactive: reactive adjustment based on actual grid flow
-        available_power_kw = min(inverter_headroom_kw, grid_reactive_kw + current_ev_power_kw) - current_ev_power_kw
+            # Reactive adjustment based on current grid state (excluding battery charging)
+            # ev_relevant_grid_kw: positive = importing for home+EV (bad), negative = exporting (good)
+            grid_reactive_kw = -(ev_relevant_grid_kw + grid_import_tolerance_kw)
+
+            # Use the more conservative of the two approaches
+            # - inverter_headroom: proactive limit based on known capacity
+            # - grid_reactive: reactive adjustment based on actual grid flow
+            available_power_kw = min(inverter_headroom_kw, grid_reactive_kw + current_ev_power_kw) - current_ev_power_kw
     elif battery_deficit_kw > 0.1:
         # Battery has surplus beyond target — available for EV
         available_power_kw = battery_deficit_kw
@@ -3041,8 +3068,9 @@ async def _dynamic_ev_update(
     # In no_grid_import mode, respond immediately to grid imports (don't wait for 1A threshold)
     # Use ev_relevant_grid_kw (excludes battery charging) to avoid throttling due to
     # intentional home battery grid-charging by the LP optimizer
+    # Skip this check if battery has depleted — grid import is expected in that case
     ev_grid_check = ev_relevant_grid_kw if no_grid_import else grid_power_kw
-    if no_grid_import and ev_grid_check > grid_import_tolerance_kw:
+    if no_grid_import and not battery_depleted and ev_grid_check > grid_import_tolerance_kw:
         # We're importing (beyond battery charging) - reduce aggressively
         if new_amps < current_amps:
             _LOGGER.info(
@@ -3061,6 +3089,7 @@ async def _dynamic_ev_update(
         f"deficit={battery_deficit_kw:.1f}kW, grid={grid_power_kw:.1f}kW (max={max_grid_import_kw:.1f}kW), "
         f"headroom={grid_headroom_kw:.1f}kW, available={available_power_kw:.1f}kW, "
         f"current={current_amps}A, target={new_amps}A, no_grid_import={no_grid_import}"
+        f"{', battery_depleted=True' if battery_depleted else ''}"
     )
 
     # Only update if change is >= 1 amp (avoid constant micro-adjustments)
