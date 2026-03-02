@@ -14656,7 +14656,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 }
                 api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
 
-                saved_mode = force_discharge_state.get("saved_states", {}).get(site_id, {}).get("saved_operation_mode")
+                saved_mode = (force_discharge_state.get("saved_states") or {}).get(site_id, {}).get("saved_operation_mode")
                 if saved_mode != "autonomous":
                     _LOGGER.info("Switching to autonomous mode for site %s...", site_id)
                     async with session.post(
@@ -15280,7 +15280,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 }
                 api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
 
-                saved_mode = force_charge_state.get("saved_states", {}).get(site_id, {}).get("saved_operation_mode")
+                saved_mode = (force_charge_state.get("saved_states") or {}).get(site_id, {}).get("saved_operation_mode")
                 if saved_mode != "autonomous":
                     _LOGGER.info("Switching to autonomous mode for site %s...", site_id)
                     async with session.post(
@@ -15813,8 +15813,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # Non-dynamic users - restore saved tariffs per site
                 _LOGGER.info("Restoring saved tariffs...")
                 # Check for per-site saved states (dual mode) or fall back to global saved tariff
-                discharge_saved = force_discharge_state.get("saved_states", {})
-                charge_saved = force_charge_state.get("saved_states", {})
+                discharge_saved = force_discharge_state.get("saved_states") or {}
+                charge_saved = force_charge_state.get("saved_states") or {}
                 for site_id, current_token, provider in site_configs:
                     site_tariff = (
                         discharge_saved.get(site_id, {}).get("saved_tariff") or
@@ -15857,8 +15857,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
 
                 # Per-site saved mode, or fall back to global saved mode
-                discharge_saved = force_discharge_state.get("saved_states", {})
-                charge_saved = force_charge_state.get("saved_states", {})
+                discharge_saved = force_discharge_state.get("saved_states") or {}
+                charge_saved = force_charge_state.get("saved_states") or {}
                 restore_mode = (
                     discharge_saved.get(site_id, {}).get("saved_operation_mode") or
                     charge_saved.get(site_id, {}).get("saved_operation_mode") or
@@ -15994,7 +15994,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             force_discharge_state["saved_operation_mode"] = None
             force_discharge_state["saved_backup_reserve"] = None
             force_discharge_state["saved_export_rule"] = None
-            force_discharge_state["saved_states"] = None
+            force_discharge_state["saved_states"] = {}
             force_discharge_state["expires_at"] = None
 
             # Clear charge state
@@ -16002,7 +16002,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             force_charge_state["saved_tariff"] = None
             force_charge_state["saved_operation_mode"] = None
             force_charge_state["saved_backup_reserve"] = None
-            force_charge_state["saved_states"] = None
+            force_charge_state["saved_states"] = {}
             force_charge_state["expires_at"] = None
 
             _LOGGER.info("NORMAL OPERATION RESTORED")
