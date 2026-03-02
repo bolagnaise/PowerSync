@@ -3162,13 +3162,23 @@ class AutoScheduleExecutor:
                     break
 
                 is_tesla_device = False
+                device_vin = None
                 for identifier in device.identifiers:
                     if len(identifier) >= 2 and identifier[0] in tesla_integrations:
-                        is_tesla_device = True
+                        id_str = str(identifier[1])
+                        # Only match vehicle devices (VIN format: 17 chars, not all digits)
+                        if len(id_str) == 17 and not id_str.isdigit():
+                            is_tesla_device = True
+                            device_vin = id_str
                         break
 
                 if not is_tesla_device:
                     continue
+
+                # If we have a resolved VIN, only match the correct vehicle
+                if vehicle_vin and len(vehicle_vin) == 17 and vehicle_vin.isalnum():
+                    if device_vin != vehicle_vin:
+                        continue
 
                 # Find battery/charge_level sensor for this Tesla device
                 for entity in entity_registry.entities.values():
@@ -3247,6 +3257,9 @@ class AutoScheduleExecutor:
 
         location = "unknown"
 
+        # Resolve vehicle VIN for matching
+        vehicle_vin = self._resolve_vehicle_vin(vehicle_id)
+
         # Method 1: Check Tesla Fleet/Teslemetry device_tracker entities
         entity_registry = er.async_get(self.hass)
         device_registry = dr.async_get(self.hass)
@@ -3259,6 +3272,7 @@ class AutoScheduleExecutor:
 
             is_tesla_device = False
             device_name = None
+            device_vin = None
             for identifier in device.identifiers:
                 if len(identifier) >= 2 and identifier[0] in tesla_integrations:
                     # Check if this is a vehicle (VIN format: 17 chars, not all digits)
@@ -3266,10 +3280,16 @@ class AutoScheduleExecutor:
                     if len(id_str) == 17 and not id_str.isdigit():
                         is_tesla_device = True
                         device_name = device.name
+                        device_vin = id_str
                         break
 
             if not is_tesla_device:
                 continue
+
+            # If we have a resolved VIN, only match the correct vehicle
+            if vehicle_vin and len(vehicle_vin) == 17 and vehicle_vin.isalnum():
+                if device_vin != vehicle_vin:
+                    continue
 
             # Find location entities for this Tesla vehicle
             for entity in entity_registry.entities.values():
