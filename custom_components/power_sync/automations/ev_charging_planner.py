@@ -410,12 +410,13 @@ async def is_ev_plugged_in(
                             return True
                         elif location == "unknown":
                             # Both cable AND location unknown — car fully asleep.
-                            # Fall through to BLE/other fallbacks instead of assuming unplugged.
+                            # A sleeping car didn't drive away. Assume still plugged in at home.
+                            # Works for both BLE and Fleet/Teslemetry-only users.
                             _LOGGER.debug(
                                 f"Charge cable {entity_id} is {state.state} and location unknown "
-                                f"(car likely asleep), checking fallbacks"
+                                f"(car asleep), assuming still plugged in"
                             )
-                            break  # Break entity loop, fall to BLE fallback
+                            return True
                         else:
                             _LOGGER.debug(f"Charge cable {entity_id} is {state.state} and car {location}, treating as unplugged")
                             return False
@@ -3406,13 +3407,14 @@ class AutoScheduleExecutor:
                                 _LOGGER.debug(f"Charge cable {entity_id} is {state.state} but car is home, treating as plugged in")
                                 return True
                             elif location == "unknown":
-                                # Both cable AND location are unknown — car is fully asleep.
-                                # Don't return False yet; fall through to BLE/other fallbacks.
+                                # Both cable AND location unknown — car fully asleep.
+                                # A sleeping car didn't drive away. Assume still plugged in.
+                                # Works for both BLE and Fleet/Teslemetry-only users.
                                 _LOGGER.debug(
                                     f"Charge cable {entity_id} is {state.state} and location unknown "
-                                    f"(car likely asleep), checking fallbacks"
+                                    f"(car asleep), assuming still plugged in"
                                 )
-                                break  # Break out of entity loop, fall to BLE fallback
+                                return True
                             else:
                                 _LOGGER.debug(f"Charge cable {entity_id} is {state.state} and car {location}, treating as unplugged")
                                 return False
