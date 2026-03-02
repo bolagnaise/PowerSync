@@ -1284,13 +1284,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self,
         import_prices: list[float],
         export_prices: list[float],
-        confidence_horizon_hours: float = 4.0,
+        confidence_horizon_hours: float = 6.0,
         decay_rate: float = 0.15,
     ) -> tuple[list[float], list[float]]:
         """Pull far-future prices toward median to reflect forecast uncertainty.
 
         Prices within confidence_horizon_hours are unchanged. Beyond that,
         each price decays toward the median at exp(-decay_rate * excess_hours).
+
+        6h horizon ensures evening peaks are visible from early afternoon,
+        so the LP pre-charges rather than leaving the battery empty through
+        the peak. Far-future spikes (12h+) still decay heavily.
 
         Asymmetric decay: only prices ABOVE median are decayed. Below-median
         prices are preserved so the LP can see that cheap future periods
