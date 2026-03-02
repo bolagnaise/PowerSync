@@ -4390,7 +4390,13 @@ class AutoScheduleExecutor:
             "charger_switch_entity": settings.charger_switch_entity,
             "charger_amps_entity": settings.charger_amps_entity,
             "ocpp_charger_id": settings.ocpp_charger_id,
-            "no_grid_import": settings.get_effective_limit_grid_import(datetime.now().weekday()),
+            # Only honor no_grid_import for solar_surplus sessions.
+            # Grid-sourced sessions (grid_deadline, grid_offpeak, etc.) need grid import — that's the point.
+            "no_grid_import": (
+                settings.get_effective_limit_grid_import(datetime.now().weekday())
+                if source == "solar_surplus"
+                else False
+            ),
         }
 
         try:
