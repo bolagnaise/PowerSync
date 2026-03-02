@@ -12354,9 +12354,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
             _LOGGER.info(f"Using AEMO API forecast: {len(forecast_data) // 2} periods")
         else:
-            # Refresh Amber coordinator to get latest forecast data (regardless of WebSocket status)
-            await amber_coordinator.async_request_refresh()
-
+            # Amber coordinator already refreshed above (for current price) —
+            # _async_update_data fetches both 5-min and 30-min in one call.
             if not amber_coordinator.data:
                 _LOGGER.error("No Amber forecast data available")
                 return
