@@ -325,12 +325,11 @@ class BatteryOptimizer:
         for t in range(n):
             bounds.append((0, max_grid_kw))  # grid_import
 
+        # Grid export is always allowed — solar surplus must be exportable
+        # even when export price < acquisition cost. Battery-to-grid
+        # profitability is controlled via battery_discharge bounds below.
         for t in range(n):
-            if acquisition_cost_kwh > 0 and export_prices[t] < acquisition_cost_kwh:
-                # Export price below acquisition cost — block grid export
-                bounds.append((0, 0))
-            else:
-                bounds.append((0, max_grid_kw))  # grid_export
+            bounds.append((0, max_grid_kw))  # grid_export
 
         for t in range(n):
             bounds.append((0, self.max_charge_kw))  # battery_charge
