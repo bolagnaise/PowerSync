@@ -646,6 +646,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 action_summary,
             )
 
+            # Execute the current action immediately so the battery responds
+            # right after the LP solve — don't wait for the next polling tick
+            # (up to 5 minutes away).  The polling loop still re-applies the
+            # action as a heartbeat, but this removes the initial delay.
+            current_action = self._get_current_action()
+            if current_action and self._executor:
+                await self._execute_optimizer_action(current_action)
+
         except Exception as e:
             _LOGGER.error("Optimization failed: %s", e, exc_info=True)
 
