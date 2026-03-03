@@ -242,6 +242,44 @@ class BatteryOptimizer:
             x[2n..3n-1] = battery_charge[t] (kW, >= 0)
             x[3n..4n-1] = battery_discharge[t] (kW, >= 0)
         """
+        # If SOC is below backup_reserve, the LP is guaranteed infeasible
+        # (cannot satisfy soc[0] >= backup_reserve when starting below it
+        # and max charge can't bridge the gap in one timestep).
+        # Temporarily lower the effective reserve to current SOC so the LP
+        # can still produce a useful schedule (it will plan to charge back
+        # up towards the real reserve rather than failing outright).
+        _soc_below_reserve = soc_0 < self.backup_reserve
+        _saved_reserve = self.backup_reserve
+        if _soc_below_reserve:
+            effective_reserve = max(0.0, soc_0 - 0.01)
+            _LOGGER.warning(
+                "SOC (%.1f%%) below backup reserve (%.0f%%) — using effective "
+                "reserve %.1f%% to avoid infeasibility",
+                soc_0 * 100, self.backup_reserve * 100, effective_reserve * 100,
+            )
+            self.backup_reserve = effective_reserve
+
+        try:
+            return self._solve_lp_inner(
+                n, import_prices, export_prices, solar, load, soc_0,
+                cost_function, acquisition_cost_kwh,
+            )
+        finally:
+            if _soc_below_reserve:
+                self.backup_reserve = _saved_reserve
+
+    def _solve_lp_inner(
+        self,
+        n: int,
+        import_prices: list[float],
+        export_prices: list[float],
+        solar: list[float],
+        load: list[float],
+        soc_0: float,
+        cost_function: str,
+        acquisition_cost_kwh: float = 0.0,
+    ) -> OptimizerResult:
+        """Inner LP solver (separated for SOC-below-reserve guard in _solve_lp)."""
         dt = self.dt_hours
         eff = self.efficiency
         cap = self.capacity_kwh
@@ -531,7 +569,7 @@ class BatteryOptimizer:
                 grid_export[t] = -net_grid
 
             soc += (charge_kw * eff - discharge_kw / eff) * dt / cap
-            soc = max(0.0, min(1.0, soc))
+            soc = max(self.backup_reserve, min(1.0, soc))
 
         # Build schedule
         schedule = self._build_schedule(
@@ -611,7 +649,7 @@ class BatteryOptimizer:
 
             # Update SOC
             soc += (charge_kw * eff - discharge_kw / eff) * dt / cap
-            soc = max(0.0, min(1.0, soc))
+            soc = max(self.backup_reserve, min(1.0, soc))
 
             # Determine action
             if charge_kw > threshold_kw and import_kw > (load[t] + threshold_kw):

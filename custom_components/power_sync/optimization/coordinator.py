@@ -770,16 +770,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 effective_action = "self_consumption"
 
-            # When transitioning from IDLE to any other action, restore backup
-            # reserve to the user's configured value. IDLE sets backup_reserve
-            # to current SOC% to prevent discharge; we must undo that.
+            # When transitioning from IDLE to any other action, restore the
+            # work mode (FoxESS/Sungrow hold mode → normal).
+            # Note: we do NOT restore backup_reserve here — self_consumption
+            # should be able to run to 0% naturally. The backup_reserve floor
+            # is enforced only on force_discharge (optimizer-controlled export).
+            prev = self._last_executed_action
             if (
-                self._last_executed_action == "idle"
+                prev == "idle"
                 and effective_action != "idle"
             ):
-                if hasattr(battery, "set_backup_reserve"):
-                    configured_reserve_pct = int(self._config.backup_reserve * 100)
-                    await battery.set_backup_reserve(configured_reserve_pct)
                 # FoxESS/Sungrow: restore from IDLE hold mode to normal operation
                 if (
                     self.energy_coordinator
@@ -787,7 +787,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ):
                     await self.energy_coordinator.restore_work_mode_from_idle()
                 _LOGGER.info(
-                    "Optimizer: Exiting IDLE — restored backup reserve and work mode",
+                    "Optimizer: Exiting IDLE — restored work mode",
                 )
 
             if effective_action == "charge":
@@ -798,12 +798,47 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                     _LOGGER.info("Optimizer: Charging at %.0fW", action.power_w)
             elif effective_action in ("discharge", "export"):
-                if hasattr(battery, "force_discharge"):
+                # Safety guard: do NOT force-discharge if SOC is at or below
+                # the configured backup reserve.  force_discharge sets Tesla
+                # backup_reserve=0%, so if the LP planned discharge based on
+                # stale/forecast data but SOC has already dropped past the
+                # reserve, the battery would drain to 0%.
+                soc_now, _ = await self._get_battery_state()
+                if soc_now <= self._config.backup_reserve + 0.01:
+                    _LOGGER.warning(
+                        "Optimizer: Skipping %s — SOC %.1f%% at/below backup "
+                        "reserve %.0f%%, switching to self_consumption",
+                        effective_action, soc_now * 100,
+                        self._config.backup_reserve * 100,
+                    )
+                    effective_action = "self_consumption"
+                    if hasattr(battery, "set_self_consumption_mode"):
+                        await battery.set_self_consumption_mode()
+                    # Do NOT set backup_reserve — self_consumption should be
+                    # able to discharge naturally to 0% (powering the home).
+                    # The optimizer will take back over when SOC rises above
+                    # the reserve (e.g. from solar charging).
+                elif hasattr(battery, "force_discharge"):
                     await battery.force_discharge(
                         duration_minutes=self._config.interval_minutes + 5,
                         power_w=action.power_w,
                     )
-                    _LOGGER.info("Optimizer: Discharging/exporting at %.0fW", action.power_w)
+                    # force_discharge sets Tesla backup_reserve=0% (needed for
+                    # TOU-based discharge). Override it with the configured
+                    # reserve so the Tesla firmware itself enforces the floor.
+                    # Without this, the battery can drain past the reserve
+                    # between optimizer ticks (up to 5 minutes).
+                    if hasattr(battery, "set_backup_reserve"):
+                        configured_reserve_pct = int(
+                            self._config.backup_reserve * 100
+                        )
+                        await battery.set_backup_reserve(configured_reserve_pct)
+                    _LOGGER.info(
+                        "Optimizer: Discharging/exporting at %.0fW "
+                        "(backup reserve floor=%d%%)",
+                        action.power_w,
+                        int(self._config.backup_reserve * 100),
+                    )
             elif effective_action == "idle":
                 # IDLE: Hold battery at current SOC by setting backup reserve
                 # to current percentage. This prevents discharge while grid
@@ -811,6 +846,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # and the battery should hold charge for an upcoming spike.
                 soc, _ = await self._get_battery_state()
                 soc_pct = int(soc * 100)
+                # Never hold below the configured backup reserve
+                configured_idle_floor = int(self._config.backup_reserve * 100)
+                soc_pct = max(soc_pct, configured_idle_floor)
 
                 # FoxESS/Sungrow: Use a hold mode for IDLE. In normal
                 # self-consumption mode, min_soc/backup_reserve is only a
@@ -841,7 +879,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     # is acceptable — LP re-evaluates every 5 minutes).
                     # Tesla API constraint: backup_reserve accepts 0-80%
                     # or 100%. Values 81-99% are clamped to 80%.
-                    reserve = min(soc_pct, 80)
+                    # Never set reserve below configured backup_reserve —
+                    # that is the user's hard floor.
+                    configured_reserve_pct = int(self._config.backup_reserve * 100)
+                    reserve = min(max(soc_pct, configured_reserve_pct), 80)
                     if hasattr(battery, "set_self_consumption_mode"):
                         await battery.set_self_consumption_mode()
                     await battery.set_backup_reserve(reserve)
@@ -856,7 +897,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 elif hasattr(battery, "restore_normal"):
                     await battery.restore_normal()
             else:
-                # self_consumption or consume — let battery operate naturally
+                # self_consumption or consume — let battery operate naturally.
+                # Do NOT set backup_reserve here — self_consumption should be
+                # able to run all the way to 0% (powering the home naturally).
+                # The backup_reserve floor only applies to optimizer-controlled
+                # discharge/export (force_discharge to grid).
                 if hasattr(battery, "set_self_consumption_mode"):
                     await battery.set_self_consumption_mode()
                 elif hasattr(battery, "restore_normal"):
