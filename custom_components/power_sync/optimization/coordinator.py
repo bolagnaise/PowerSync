@@ -181,6 +181,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Track last executed action for IDLE→non-IDLE transition
         self._last_executed_action: str | None = None
 
+        # Background task handles (for cancellation on disable)
+        self._polling_task: asyncio.Task | None = None
+        self._initial_opt_task: asyncio.Task | None = None
+
     @property
     def enabled(self) -> bool:
         """Check if optimization is enabled."""
@@ -395,10 +399,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Run initial optimization and start polling loop as background tasks
         # so they don't block HA bootstrap (LP solve can take several seconds)
-        self.hass.async_create_background_task(
+        self._initial_opt_task = self.hass.async_create_background_task(
             self._run_optimization(), "powersync_initial_optimization"
         )
-        self.hass.async_create_background_task(
+        self._polling_task = self.hass.async_create_background_task(
             self._schedule_polling_loop(), "powersync_schedule_polling"
         )
 
@@ -482,6 +486,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     _LOGGER.warning("Failed to restore work mode on disable: %s", e)
         self._last_executed_action = None
 
+        # Cancel background tasks first so they can't run optimization
+        # after _enabled is set to False (e.g. polling loop waking from sleep)
+        self._enabled = False
+
+        if self._polling_task and not self._polling_task.done():
+            self._polling_task.cancel()
+            self._polling_task = None
+        if self._initial_opt_task and not self._initial_opt_task.done():
+            self._initial_opt_task.cancel()
+            self._initial_opt_task = None
+
         if self._price_listener_unsub:
             self._price_listener_unsub()
             self._price_listener_unsub = None
@@ -495,12 +510,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Flush cost data to disk before shutdown
         await self._cost_store.async_save(self._cost_data_to_save())
 
-        self._enabled = False
         _LOGGER.info("Optimization disabled")
 
     async def _run_optimization(self) -> None:
         """Run the built-in LP optimizer with current forecast data."""
-        if not self._optimizer:
+        if not self._optimizer or not self._enabled:
             return
 
         try:
@@ -677,6 +691,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
                 # Wait for next interval
                 await asyncio.sleep(self._config.interval_minutes * 60)
+
+                # Check again after sleep — disable() may have been called
+                if not self._enabled:
+                    break
 
                 # Re-optimize on each interval
                 await self._run_optimization()
