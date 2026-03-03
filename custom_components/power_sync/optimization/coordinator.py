@@ -184,6 +184,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Background task handles (for cancellation on disable)
         self._polling_task: asyncio.Task | None = None
         self._initial_opt_task: asyncio.Task | None = None
+        self._deferred_restore_task: asyncio.Task | None = None
 
     @property
     def enabled(self) -> bool:
@@ -393,7 +394,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # don't block async_setup_entry.  HA's bootstrap stage 2 has a global
         # timeout — if Modbus is slow (retries / no response) the entire
         # config entry setup gets CancelledError, leaving all views unregistered.
-        self.hass.async_create_background_task(
+        self._deferred_restore_task = self.hass.async_create_background_task(
             self._deferred_enable_restore(), "powersync_enable_restore"
         )
 
@@ -422,6 +423,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         time-out) don't block async_setup_entry and risk HA bootstrap
         stage 2 cancellation.
         """
+        if not self._enabled:
+            return
         # Safety: restore backup_reserve and work mode to configured values on
         # enable. Handles HA restart during IDLE where backup_reserve was set to
         # current SOC% and FoxESS was in Backup mode, but _last_executed_action
@@ -439,6 +442,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     _LOGGER.warning("Optimizer startup: set_backup_reserve returned failure")
             except Exception as e:
                 _LOGGER.warning("Failed to restore backup reserve on enable: %s", e)
+        if not self._enabled:
+            return
         # FoxESS/Sungrow: ensure normal operation mode on startup (may have been
         # left in IDLE hold mode if HA restarted during IDLE)
         if (
@@ -450,7 +455,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _LOGGER.info("Optimizer startup: ensured normal operation mode")
             except Exception as e:
                 _LOGGER.warning("Failed to restore work mode on enable: %s", e)
-        self._last_executed_action = None
 
     async def disable(self) -> None:
         """Disable optimization."""
@@ -496,6 +500,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._initial_opt_task and not self._initial_opt_task.done():
             self._initial_opt_task.cancel()
             self._initial_opt_task = None
+        if self._deferred_restore_task and not self._deferred_restore_task.done():
+            self._deferred_restore_task.cancel()
+            self._deferred_restore_task = None
 
         if self._price_listener_unsub:
             self._price_listener_unsub()
