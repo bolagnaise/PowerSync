@@ -8238,6 +8238,38 @@ class VehicleChargingConfigView(HomeAssistantView):
                 store._data["vehicle_charging_configs"] = vehicle_configs
                 await store.async_save()
 
+            # Sync charger params to AutoScheduleSettings so planner uses correct values
+            try:
+                from .automations.ev_charging_planner import get_auto_schedule_executor
+                executor = get_auto_schedule_executor()
+                if executor:
+                    saved_config = next(
+                        (c for c in vehicle_configs if c.get("vehicle_id") == vehicle_id),
+                        None,
+                    )
+                    if saved_config and vehicle_id in executor._settings:
+                        settings = executor._settings[vehicle_id]
+                        if "max_amps" in saved_config:
+                            settings.max_charge_amps = saved_config["max_amps"]
+                        if "min_amps" in saved_config:
+                            settings.min_charge_amps = saved_config["min_amps"]
+                        if "voltage" in saved_config:
+                            settings.voltage = saved_config["voltage"]
+                        if "phases" in saved_config:
+                            settings.phases = saved_config["phases"]
+                        if "charger_type" in saved_config:
+                            settings.charger_type = saved_config["charger_type"]
+                        _LOGGER.debug(
+                            "Synced charger params to auto-schedule for %s: "
+                            "max=%dA, voltage=%dV, phases=%d",
+                            vehicle_id,
+                            settings.max_charge_amps,
+                            settings.voltage,
+                            settings.phases,
+                        )
+            except Exception:
+                pass  # Non-critical — params will sync on next evaluation cycle
+
             return web.json_response({
                 "success": True,
                 "config": vehicle_configs[-1] if not config_found else next(c for c in vehicle_configs if c.get("vehicle_id") == vehicle_id)

@@ -2840,7 +2840,7 @@ class AutoScheduleExecutor:
         self._use_ml_optimization = enabled
         _LOGGER.info(f"Smart Optimization for EV charging: {'enabled' if enabled else 'disabled'}")
 
-    def _power_to_amps(self, power_w: float, voltage: int = 230, phases: int = 1) -> int:
+    def _power_to_amps(self, power_w: float, voltage: int = 230, phases: int = 1, max_amps: int = 32) -> int:
         """
         Convert power in watts to charging amps.
 
@@ -2848,9 +2848,10 @@ class AutoScheduleExecutor:
             power_w: Power in watts
             voltage: Voltage (default 230V for Australia)
             phases: Number of phases (1 or 3)
+            max_amps: Maximum charge amps for this vehicle's charger
 
         Returns:
-            Charging amps (clamped to 5-32A range)
+            Charging amps (clamped to 5-max_amps range)
         """
         if power_w <= 0:
             return 0
@@ -2858,9 +2859,9 @@ class AutoScheduleExecutor:
         # P = V * I * phases (for AC charging)
         amps = power_w / (voltage * phases)
 
-        # Clamp to valid Tesla charging range (5A minimum, 32A typical max for home chargers)
+        # Clamp to valid range (5A minimum for Tesla, per-vehicle max)
         # Below 5A Tesla refuses to charge
-        amps = max(5, min(32, int(amps)))
+        amps = max(5, min(max_amps, int(amps)))
 
         return amps
 
@@ -2893,8 +2894,8 @@ class AutoScheduleExecutor:
         phases = 1 if home_config.get("phase_type") == "single" else 3
         voltage = 230  # Australia standard
 
-        # Convert power to amps
-        target_amps = self._power_to_amps(power_w, voltage, phases)
+        # Convert power to amps (use per-vehicle max from settings)
+        target_amps = self._power_to_amps(power_w, voltage, phases, settings.max_charge_amps)
 
         if target_amps == 0:
             return False
@@ -3525,6 +3526,37 @@ class AutoScheduleExecutor:
         # Periodically save cached SoC values to storage
         await self._save_cached_soc_if_needed()
 
+    def _sync_charger_params_from_vehicle_configs(
+        self,
+        vehicle_id: str,
+        settings: AutoScheduleSettings,
+    ) -> None:
+        """Sync charger params from vehicle_charging_configs into settings.
+
+        vehicle_charging_configs is the source of truth for physical charger
+        properties (max_amps, voltage, phases) set by the app. AutoScheduleSettings
+        defaults to 32A which may not match the user's actual charger.
+        """
+        if not self._store:
+            return
+        try:
+            stored_data = getattr(self._store, '_data', {}) or {}
+            for vc in stored_data.get("vehicle_charging_configs", []):
+                if vc.get("vehicle_id") == vehicle_id:
+                    if "max_amps" in vc:
+                        settings.max_charge_amps = vc["max_amps"]
+                    if "min_amps" in vc:
+                        settings.min_charge_amps = vc["min_amps"]
+                    if "voltage" in vc:
+                        settings.voltage = vc["voltage"]
+                    if "phases" in vc:
+                        settings.phases = vc["phases"]
+                    if "charger_type" in vc:
+                        settings.charger_type = vc["charger_type"]
+                    return
+        except Exception:
+            pass
+
     async def _evaluate_vehicle(
         self,
         vehicle_id: str,
@@ -3533,6 +3565,9 @@ class AutoScheduleExecutor:
         current_price_cents: Optional[float],
     ) -> None:
         """Evaluate and control charging for a single vehicle."""
+        # Sync charger params from vehicle_charging_configs (source of truth)
+        self._sync_charger_params_from_vehicle_configs(vehicle_id, settings)
+
         state = self.get_state(vehicle_id)
         now = datetime.now()
 
@@ -3595,8 +3630,8 @@ class AutoScheduleExecutor:
             # Get next charging window for status display
             next_start, next_end, next_power = ml_schedule.get_next_charging_window(now)
 
-            # Calculate target amps for logging
-            target_amps = self._power_to_amps(power_w) if power_w > 0 else 0
+            # Calculate target amps for logging (use per-vehicle max)
+            target_amps = self._power_to_amps(power_w, max_amps=settings.max_charge_amps) if power_w > 0 else 0
 
             if should_charge:
                 reason = f"Smart Optimization: charge at {power_w/1000:.1f}kW ({target_amps}A)"
@@ -3740,9 +3775,7 @@ class AutoScheduleExecutor:
                     # Parallel charging: surplus exceeds battery's max charge rate
                     # Calculate available surplus for EV (after reserving max for battery)
                     ev_surplus_kw = current_surplus_kw - max_battery_charge_kw
-                    min_charge_amps = 5  # Tesla minimum
-                    voltage = 230  # Australia standard
-                    min_surplus = (min_charge_amps * voltage * phases) / 1000
+                    min_surplus = settings.get_min_surplus_kw()
 
                     if ev_surplus_kw >= min_surplus:
                         reason = (
@@ -3774,10 +3807,7 @@ class AutoScheduleExecutor:
                     )
             else:
                 # Battery is above threshold, check surplus requirement
-                # Calculate min surplus from home power settings
-                min_charge_amps = 5  # Tesla minimum
-                voltage = 230  # Australia standard
-                min_surplus = (min_charge_amps * voltage * phases) / 1000
+                min_surplus = settings.get_min_surplus_kw()
                 if current_surplus_kw < min_surplus:
                     should_charge = False
                     reason = f"Surplus {current_surplus_kw:.1f}kW < min {min_surplus:.1f}kW"
@@ -4546,39 +4576,16 @@ def _get_vehicle_charger_params(
     config_entry: "ConfigEntry",
     vehicle_vin: Optional[str] = None,
 ) -> dict:
-    """Get per-vehicle charger params from AutoScheduleSettings or vehicle_charging_configs.
+    """Get per-vehicle charger params from vehicle_charging_configs or AutoScheduleSettings.
 
     Looks up charger settings (min/max amps, voltage, phases) for a specific vehicle,
     falling back to the first available config or defaults.
+
+    Priority: vehicle_charging_configs (source of truth from app) > AutoScheduleSettings > defaults
     """
     defaults = {"min_charge_amps": 5, "max_charge_amps": 32, "voltage": 230, "phases": 1}
 
-    # Try AutoScheduleSettings first (most authoritative — configured per vehicle)
-    try:
-        exec_instance = get_auto_schedule_executor()
-        if exec_instance:
-            # If vehicle_vin provided, look for matching settings
-            if vehicle_vin:
-                for vid, settings in exec_instance._settings.items():
-                    if vid == vehicle_vin:
-                        return {
-                            "min_charge_amps": settings.min_charge_amps,
-                            "max_charge_amps": settings.max_charge_amps,
-                            "voltage": settings.voltage,
-                            "phases": settings.phases,
-                        }
-            # No VIN match — use first available settings
-            for vid, settings in exec_instance._settings.items():
-                return {
-                    "min_charge_amps": settings.min_charge_amps,
-                    "max_charge_amps": settings.max_charge_amps,
-                    "voltage": settings.voltage,
-                    "phases": settings.phases,
-                }
-    except Exception:
-        pass
-
-    # Fallback: read from vehicle_charging_configs in store
+    # Try vehicle_charging_configs first (source of truth — app writes charger params here)
     try:
         entry_data = hass.data.get(domain, {}).get(config_entry.entry_id, {})
         store = entry_data.get("automation_store")
@@ -4601,6 +4608,30 @@ def _get_vehicle_charger_params(
                     "max_charge_amps": vc.get("max_amps", 32),
                     "voltage": vc.get("voltage", 230),
                     "phases": vc.get("phases", 1),
+                }
+    except Exception:
+        pass
+
+    # Fallback: try AutoScheduleSettings
+    try:
+        exec_instance = get_auto_schedule_executor()
+        if exec_instance:
+            if vehicle_vin:
+                for vid, settings in exec_instance._settings.items():
+                    if vid == vehicle_vin:
+                        return {
+                            "min_charge_amps": settings.min_charge_amps,
+                            "max_charge_amps": settings.max_charge_amps,
+                            "voltage": settings.voltage,
+                            "phases": settings.phases,
+                        }
+            # No VIN match — use first available settings
+            for vid, settings in exec_instance._settings.items():
+                return {
+                    "min_charge_amps": settings.min_charge_amps,
+                    "max_charge_amps": settings.max_charge_amps,
+                    "voltage": settings.voltage,
+                    "phases": settings.phases,
                 }
     except Exception:
         pass
