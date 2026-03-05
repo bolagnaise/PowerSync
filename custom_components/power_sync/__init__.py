@@ -8605,13 +8605,23 @@ class ChargingScheduleView(HomeAssistantView):
 
         for device in device_registry.devices.values():
             is_tesla_device = False
+            device_vin = None
             for identifier in device.identifiers:
                 if len(identifier) >= 2 and identifier[0] in tesla_integrations:
-                    is_tesla_device = True
+                    id_str = str(identifier[1])
+                    # Only match vehicle devices (VIN format: 17 chars, not all digits)
+                    if len(id_str) == 17 and not id_str.isdigit():
+                        is_tesla_device = True
+                        device_vin = id_str
                     break
 
             if not is_tesla_device:
                 continue
+
+            # Filter by vehicle_id (VIN) when not using default
+            if vehicle_id != "_default" and device_vin:
+                if device_vin != vehicle_id:
+                    continue
 
             # Find battery/charge_level sensor for this Tesla device
             for entity in entity_registry.entities.values():
@@ -8627,12 +8637,10 @@ class ChargingScheduleView(HomeAssistantView):
                 if entity_id.startswith("sensor."):
                     # Skip powerwall entities entirely
                     if "powerwall" in entity_id_lower:
-                        _LOGGER.debug(f"ChargingScheduleView: Skipping Powerwall entity {entity_id}")
                         continue
 
                     # Skip power sensors (battery_power, etc)
                     if "battery_power" in entity_id_lower or entity_id_lower.endswith("_power"):
-                        _LOGGER.debug(f"ChargingScheduleView: Skipping power sensor {entity_id}")
                         continue
 
                     # Only match explicit level sensors (battery_level, charge_level)
@@ -8643,7 +8651,7 @@ class ChargingScheduleView(HomeAssistantView):
                             try:
                                 level = float(state.state)
                                 if 0 <= level <= 100:
-                                    _LOGGER.debug(f"ChargingScheduleView: Found Tesla Fleet/Teslemetry SoC from {entity_id}: {level}%")
+                                    _LOGGER.debug(f"ChargingScheduleView: Found Tesla Fleet/Teslemetry SoC from {entity_id}: {level}% (VIN: {device_vin})")
                                     return int(level)
                             except (ValueError, TypeError):
                                 continue
