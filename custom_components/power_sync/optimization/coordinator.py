@@ -1375,14 +1375,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return buffered_start <= current_min < end_min
 
     def _should_block_export_for_demand(self) -> bool:
-        """Check if exports should be blocked to preserve battery for demand charges.
+        """Check if exports should be blocked for demand charge reasons.
 
-        Only blocks exports in the 30-min lead-up BEFORE the demand window,
-        not during it — the LP already factors demand penalties into its cost
-        function, so its export decisions inside the window should be trusted.
+        The LP re-optimizes every 5 minutes and already factors demand
+        penalties into its cost function, so no lead-up guard is needed —
+        it won't schedule exports that leave the battery too depleted.
 
-        Never blocks exports when demand_charge_apply_to is "Buy Only" because
-        exporting doesn't increase import peak demand.
+        Only blocks exports when demand_charge_apply_to includes sell
+        ("Sell Only" or "Both"), since exporting itself would increase
+        export peak demand. "Buy Only" never blocks exports.
         """
         if not self._entry:
             return False
@@ -1399,7 +1400,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not enabled:
             return False
 
-        # "Buy Only" demand charges only penalize imports — exports are free
         apply_to = self._entry.options.get(
             CONF_DEMAND_CHARGE_APPLY_TO,
             self._entry.data.get(CONF_DEMAND_CHARGE_APPLY_TO, "Buy Only"),
@@ -1407,12 +1407,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if apply_to == "Buy Only":
             return False
 
-        # Only block in the lead-up period, not during the window itself.
-        # During the window the LP has full demand-penalty visibility.
-        if self._is_in_demand_window():
-            return False
-
-        return self._is_near_demand_window()
+        # "Sell Only" or "Both": exporting during the window increases
+        # export peak demand, so block exports inside the window only.
+        return self._is_in_demand_window()
 
     def _is_in_demand_window_at(self, ts: datetime) -> bool:
         """Check if a given timestamp falls within a demand charge window."""
