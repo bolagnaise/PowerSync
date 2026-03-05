@@ -14819,10 +14819,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         sell_rate_discharge = 99.00  # $99/kWh - huge incentive to discharge
         sell_rate_normal = 0.08      # 8c/kWh normal feed-in
 
-        # Buy rate to discourage import during discharge
-        buy_rate = 0.30  # 30c/kWh
+        # Buy rates: HIGH during discharge to prevent Tesla firmware from
+        # grid-charging (it sees cheap buy + high sell spread → arbitrage).
+        # Normal outside discharge window.
+        buy_rate_discharge = 99.00   # $99/kWh - no incentive to charge from grid
+        buy_rate_normal = 0.30       # 30c/kWh
 
-        _LOGGER.info(f"Creating discharge tariff: sell=${sell_rate_discharge}/kWh, buy=${buy_rate}/kWh for {duration_minutes} min")
+        _LOGGER.info(f"Creating discharge tariff: sell=${sell_rate_discharge}/kWh, buy=${buy_rate_discharge}/kWh for {duration_minutes} min")
 
         # Build rates dictionaries for all 48 x 30-minute periods (24 hours)
         buy_rates = {}
@@ -14878,10 +14881,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             # Set rates based on whether we're in discharge window
             if is_discharge_period:
-                buy_rates[period_name] = buy_rate
+                buy_rates[period_name] = buy_rate_discharge
                 sell_rates[period_name] = sell_rate_discharge
             else:
-                buy_rates[period_name] = buy_rate
+                buy_rates[period_name] = buy_rate_normal
                 sell_rates[period_name] = sell_rate_normal
 
             # Calculate end time (30 minutes later)
