@@ -11439,6 +11439,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                 )
                                 return
 
+                        # Battery already full — nothing to charge, not a failure
+                        soc = poll_status.get("battery_soc") if poll_status else None
+                        if soc is not None and soc >= 99:
+                            _LOGGER.info(
+                                "Charge kick verification (%s): battery already at %.0f%% — skipping",
+                                reason, soc,
+                            )
+                            return
+
                         # At the 120s mark (poll index 1), retry bounce once
                         if poll == 1 and not retry_bounce_done:
                             _LOGGER.info(
