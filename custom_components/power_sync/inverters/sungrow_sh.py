@@ -965,6 +965,20 @@ class SungrowSHController(InverterController):
             if daily_charge:
                 data["daily_battery_charge"] = round(daily_charge[0] * 0.1, 2)
 
+            # Read daily energy registers (hardware-tracked, more reliable than
+            # software accumulator which can be polluted by transient bad reads)
+            daily_pv = await self._read_input_register(self.REG_DAILY_PV, 1)
+            if daily_pv:
+                data["daily_pv_generation"] = round(daily_pv[0] * 0.1, 2)
+
+            daily_import = await self._read_input_register(self.REG_DAILY_IMPORT, 1)
+            if daily_import:
+                data["daily_import"] = round(daily_import[0] * 0.1, 2)
+
+            daily_export = await self._read_input_register(self.REG_DAILY_EXPORT, 1)
+            if daily_export:
+                data["daily_export"] = round(daily_export[0] * 0.1, 2)
+
             # Read load power (S32 with U16 fallback for older firmware)
             load_power = await self._read_input_register(self.REG_LOAD_POWER, 2)
             if load_power and len(load_power) >= 2:
