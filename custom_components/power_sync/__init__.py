@@ -2850,6 +2850,17 @@ class BatteryHealthView(HomeAssistantView):
         """Initialize the view."""
         self._hass = hass
 
+    def _get_coordinator_soh(self, entry) -> float | None:
+        """Get battery_soh from the energy coordinator for non-Tesla systems."""
+        entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        for key in ("sungrow_coordinator", "sigenergy_coordinator", "goodwe_coordinator"):
+            coord = entry_data.get(key)
+            if coord and coord.data:
+                soh = coord.data.get("battery_soh")
+                if soh is not None and soh > 0:
+                    return soh
+        return None
+
     async def get(self, request: web.Request) -> web.Response:
         """Handle GET request - return stored battery health data."""
         _LOGGER.info("🔋 Battery health HTTP request")
@@ -2880,10 +2891,20 @@ class BatteryHealthView(HomeAssistantView):
                     battery_health = stored_data.get("battery_health")
 
             if not battery_health:
+                # Fall back to coordinator battery_soh for non-Tesla systems
+                soh = self._get_coordinator_soh(entry)
+                if soh is not None and soh > 0:
+                    return web.json_response({
+                        "success": True,
+                        "available": True,
+                        "health_percent": round(float(soh), 1),
+                        "source": "inverter_modbus",
+                    })
+
                 return web.json_response({
                     "success": True,
                     "available": False,
-                    "message": "No battery health data available. Run a TEDAPI scan from the mobile app.",
+                    "message": "No battery health data available.",
                 })
 
             # Calculate health percentage
@@ -2903,6 +2924,7 @@ class BatteryHealthView(HomeAssistantView):
                 "battery_count": battery_health.get("battery_count", 1),
                 "last_scan": battery_health.get("scanned_at"),
                 "individual_batteries": battery_health.get("individual_batteries"),
+                "source": "mobile_app_tedapi",
             })
 
         except Exception as e:
@@ -4265,12 +4287,13 @@ class ConfigView(HomeAssistantView):
                 entry.data.get(CONF_EV_PROVIDER)
             )
 
-            # Include battery health summary (from last TEDAPI scan)
+            # Include battery health summary
             battery_health = None
             domain_data = self._hass.data.get(DOMAIN, {})
             entry_data = domain_data.get(entry.entry_id, {})
             health_data = entry_data.get("battery_health")
             if health_data:
+                # TEDAPI scan data (Tesla / blueprint)
                 original = health_data.get("original_capacity_wh", 0)
                 current = health_data.get("current_capacity_wh", 0)
                 battery_health = {
@@ -4280,7 +4303,20 @@ class ConfigView(HomeAssistantView):
                     "degradation_percent": health_data.get("degradation_percent"),
                     "battery_count": health_data.get("battery_count", 1),
                     "last_scan": health_data.get("scanned_at"),
+                    "source": "mobile_app_tedapi",
                 }
+            else:
+                # Fall back to coordinator battery_soh (Sungrow, Sigenergy, GoodWe)
+                for key in ("sungrow_coordinator", "sigenergy_coordinator", "goodwe_coordinator"):
+                    coord = entry_data.get(key)
+                    if coord and coord.data:
+                        soh = coord.data.get("battery_soh")
+                        if soh is not None and soh > 0:
+                            battery_health = {
+                                "health_percent": round(float(soh), 1),
+                                "source": "inverter_modbus",
+                            }
+                            break
 
             # Look up actual entity_ids from the entity registry
             # (HA derives entity_ids from device name, not our suggested_object_id)
