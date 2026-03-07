@@ -38,52 +38,53 @@ class SungrowSHController(InverterController):
     # Modbus register addresses (0-indexed for pymodbus)
     # Documentation register - 1 = pymodbus address
 
-    # Export power limiting (load following) - PREFERRED METHOD
-    REG_EXPORT_LIMIT = 13072           # 13073 - Export power limit (W)
-    REG_EXPORT_LIMIT_MODE = 13085      # 13086 - Export limit mode (0xAA=enable, 0x55=disable)
+    # Export power limiting (load following)
     EXPORT_LIMIT_ENABLE = 0xAA         # 170 - Enable export limiting
     EXPORT_LIMIT_DISABLE = 0x55        # 85 - Disable export limiting
 
-    # System state control (fallback - full shutdown)
+    # System state control (holding register, FC 0x03 — fallback full shutdown)
     REGISTER_SYSTEM_STATE = 12999      # 13000 - System state control
     STATE_STOP = 0xCE   # 206 - Stop inverter
     STATE_START = 0xCF  # 207 - Start inverter
 
-    # Running state register and values
-    REGISTER_RUNNING_STATE = 12999     # 13000 - Running state
+    # Running state register (input register, FC 0x04 — same address, different FC)
+    REGISTER_RUNNING_STATE = 12999     # 13000 - Running state (input register)
     RUNNING_STATE_STOP = 0x8000
     RUNNING_STATE_STANDBY = 0x1400
     RUNNING_STATE_RUNNING = 0x0002
     RUNNING_STATE_FAULT = 0x1300
 
-    # ===== SH Series Register Addresses (0-indexed) =====
+    # ===== SH Series Input Register Addresses (pymodbus 0-indexed = doc - 1) =====
+    # Reference: Sungrow Communication Protocol V1.1.2
+    # Read with FC 0x04 (read_input_registers)
+
     # PV Generation
-    REG_DAILY_PV = 13000               # 13001 - Daily PV generation (kWh * 0.1)
-    REG_TOTAL_PV = 13001               # 13002-13003 - Total PV generation (kWh * 0.1, U32)
+    REG_DAILY_PV = 13001               # 13002 - Daily PV generation (kWh * 0.1)
+    REG_TOTAL_PV = 13002               # 13003-13004 - Total PV generation (kWh * 0.1, U32)
 
     # Power readings
-    REG_LOAD_POWER = 13006             # 13007-13008 - Load power (W, I32)
-    REG_EXPORT_POWER = 13008           # 13009-13010 - Export power (W, I32)
-    REG_TOTAL_ACTIVE_POWER = 13032     # 13033-13034 - Total active power (W, I32)
+    REG_LOAD_POWER = 13007             # 13008-13009 - Load power (W, S32)
+    REG_EXPORT_POWER = 13009           # 13010-13011 - Export power (W, S32)
+    REG_TOTAL_ACTIVE_POWER = 13033     # 13034-13035 - Total active power (W, S32)
 
     # Battery
-    REG_BATTERY_VOLTAGE = 13018        # 13019 - Battery voltage (V * 0.1)
-    REG_BATTERY_CURRENT = 13019        # 13020 - Battery current (A * 0.1, signed)
-    REG_BATTERY_POWER = 13020          # 13021 - Battery power (W, signed)
-    REG_BATTERY_LEVEL = 13021          # 13022 - Battery level (% * 0.1)
-    REG_BATTERY_SOH = 13022            # 13023 - Battery state of health (% * 0.1)
-    REG_BATTERY_TEMP = 13023           # 13024 - Battery temperature (°C * 0.1, signed)
-    REG_DAILY_BATTERY_DISCHARGE = 13024  # 13025 - Daily battery discharge (kWh * 0.1)
-    REG_DAILY_BATTERY_CHARGE = 13038   # 13039 - Daily battery charge (kWh * 0.1)
+    REG_BATTERY_VOLTAGE = 13019        # 13020 - Battery voltage (V * 0.1)
+    REG_BATTERY_CURRENT = 13020        # 13021 - Battery current (A * 0.1, signed)
+    REG_BATTERY_POWER = 13021          # 13022 - Battery power (W, signed)
+    REG_BATTERY_LEVEL = 13022          # 13023 - Battery level (% * 0.1)
+    REG_BATTERY_SOH = 13023            # 13024 - Battery state of health (% * 0.1)
+    REG_BATTERY_TEMP = 13024           # 13025 - Battery temperature (°C * 0.1, signed)
+    REG_DAILY_BATTERY_DISCHARGE = 13025  # 13026 - Daily battery discharge (kWh * 0.1)
+    REG_DAILY_BATTERY_CHARGE = 13039   # 13040 - Daily battery charge (kWh * 0.1)
 
     # Energy accounting
-    REG_DAILY_IMPORT = 13034           # 13035 - Daily imported energy (kWh * 0.1)
-    REG_TOTAL_IMPORT = 13035           # 13036-13037 - Total imported energy (kWh * 0.1, U32)
-    REG_DAILY_EXPORT = 13043           # 13044 - Daily exported energy (kWh * 0.1)
-    REG_TOTAL_EXPORT = 13044           # 13045-13046 - Total exported energy (kWh * 0.1, U32)
+    REG_DAILY_IMPORT = 13035           # 13036 - Daily imported energy (kWh * 0.1)
+    REG_TOTAL_IMPORT = 13036           # 13037-13038 - Total imported energy (kWh * 0.1, U32)
+    REG_DAILY_EXPORT = 13044           # 13045 - Daily exported energy (kWh * 0.1)
+    REG_TOTAL_EXPORT = 13045           # 13046-13047 - Total exported energy (kWh * 0.1, U32)
 
     # Temperature
-    REG_INVERTER_TEMP = 5006           # 5007 - Inverter temperature (°C * 0.1, signed)
+    REG_INVERTER_TEMP = 5007           # 5008 - Inverter temperature (°C * 0.1, signed)
 
     # Grid
     REG_GRID_FREQUENCY = 5035          # 5036 - Grid frequency (Hz * 0.1)
@@ -110,9 +111,9 @@ class SungrowSHController(InverterController):
     REG_MAX_DISCHARGE_CURRENT = 13065  # 13066 - Max discharge current (A * 1000)
     REG_MAX_CHARGE_CURRENT = 13066     # 13067 - Max charge current (A * 1000)
 
-    # Export Control
+    # Export Control (holding registers, FC 0x03)
     REG_EXPORT_LIMIT_SETTING = 13073   # 13074 - Export power limit setting (W)
-    REG_EXPORT_LIMIT_ENABLED = 13086   # 13087 - Export limit enabled (0=disabled, 1=enabled)
+    REG_EXPORT_LIMIT_ENABLED = 13086   # 13087 - Export limit (0xAA=enable, 0x55=disable)
 
     # Backup Reserve
     REG_BACKUP_RESERVE = 13099         # 13100 - Reserved SOC for backup (% * 10)
@@ -249,6 +250,43 @@ class SungrowSHController(InverterController):
             _LOGGER.debug(f"Error reading register {address}: {e}")
             return None
 
+    async def _read_input_register(self, address: int, count: int = 1) -> Optional[list]:
+        """Read values from Modbus input registers (FC 0x04).
+
+        Input registers are read-only status/measurement registers (battery,
+        power, energy, temperature). Uses function code 0x04 per Sungrow protocol.
+
+        Args:
+            address: Starting register address (0-indexed)
+            count: Number of registers to read
+
+        Returns:
+            List of register values or None on error
+        """
+        if not self._client or not self._client.connected:
+            if not await self.connect():
+                return None
+
+        try:
+            result = await self._client.read_input_registers(
+                address=address,
+                count=count,
+                **{_SLAVE_PARAM: self.slave_id},
+            )
+
+            if result.isError():
+                _LOGGER.debug(f"Modbus input read error at register {address}: {result}")
+                return None
+
+            return result.registers
+
+        except ModbusException as e:
+            _LOGGER.debug(f"Modbus exception reading input register {address}: {e}")
+            return None
+        except Exception as e:
+            _LOGGER.debug(f"Error reading input register {address}: {e}")
+            return None
+
     def _to_signed16(self, value: int) -> int:
         """Convert unsigned 16-bit to signed."""
         if value >= 0x8000:
@@ -271,8 +309,8 @@ class SungrowSHController(InverterController):
         attrs = {}
 
         try:
-            # Read battery registers (13019-13025) in one batch
-            battery_regs = await self._read_register(self.REG_BATTERY_VOLTAGE, 7)
+            # Read battery registers (doc 13020-13026) in one batch via FC 0x04
+            battery_regs = await self._read_input_register(self.REG_BATTERY_VOLTAGE, 7)
             if battery_regs and len(battery_regs) >= 7:
                 voltage = round(battery_regs[0] * 0.1, 1)
                 attrs["battery_voltage"] = voltage
@@ -286,75 +324,75 @@ class SungrowSHController(InverterController):
                 attrs["daily_battery_discharge"] = round(battery_regs[6] * 0.1, 2)
 
             # Read daily PV generation
-            daily_pv = await self._read_register(self.REG_DAILY_PV, 1)
+            daily_pv = await self._read_input_register(self.REG_DAILY_PV, 1)
             if daily_pv:
                 attrs["daily_pv_generation"] = round(daily_pv[0] * 0.1, 2)
 
             # Read total PV generation (32-bit)
-            total_pv = await self._read_register(self.REG_TOTAL_PV, 2)
+            total_pv = await self._read_input_register(self.REG_TOTAL_PV, 2)
             if total_pv and len(total_pv) >= 2:
                 attrs["total_pv_generation"] = round(self._to_unsigned32(total_pv[0], total_pv[1]) * 0.1, 1)
 
             # Read load power (32-bit signed)
-            load_power = await self._read_register(self.REG_LOAD_POWER, 2)
+            load_power = await self._read_input_register(self.REG_LOAD_POWER, 2)
             if load_power and len(load_power) >= 2:
                 attrs["load_power"] = self._to_signed32(load_power[0], load_power[1])
 
             # Read export power (32-bit signed)
-            export_power = await self._read_register(self.REG_EXPORT_POWER, 2)
+            export_power = await self._read_input_register(self.REG_EXPORT_POWER, 2)
             if export_power and len(export_power) >= 2:
                 attrs["export_power"] = self._to_signed32(export_power[0], export_power[1])
 
             # Read total active power (32-bit signed)
-            active_power = await self._read_register(self.REG_TOTAL_ACTIVE_POWER, 2)
+            active_power = await self._read_input_register(self.REG_TOTAL_ACTIVE_POWER, 2)
             if active_power and len(active_power) >= 2:
                 attrs["active_power"] = self._to_signed32(active_power[0], active_power[1])
 
             # Read daily import/export
-            daily_import = await self._read_register(self.REG_DAILY_IMPORT, 1)
+            daily_import = await self._read_input_register(self.REG_DAILY_IMPORT, 1)
             if daily_import:
                 attrs["daily_import"] = round(daily_import[0] * 0.1, 2)
 
             # Read total (lifetime) import energy (32-bit unsigned)
-            total_import = await self._read_register(self.REG_TOTAL_IMPORT, 2)
+            total_import = await self._read_input_register(self.REG_TOTAL_IMPORT, 2)
             if total_import and len(total_import) >= 2:
                 attrs["total_import"] = round(self._to_unsigned32(total_import[0], total_import[1]) * 0.1, 1)
 
-            daily_export = await self._read_register(self.REG_DAILY_EXPORT, 1)
+            daily_export = await self._read_input_register(self.REG_DAILY_EXPORT, 1)
             if daily_export:
                 attrs["daily_export"] = round(daily_export[0] * 0.1, 2)
 
             # Read total (lifetime) export energy (32-bit unsigned)
-            total_export = await self._read_register(self.REG_TOTAL_EXPORT, 2)
+            total_export = await self._read_input_register(self.REG_TOTAL_EXPORT, 2)
             if total_export and len(total_export) >= 2:
                 attrs["total_export"] = round(self._to_unsigned32(total_export[0], total_export[1]) * 0.1, 1)
 
             # Read daily battery charge
-            daily_charge = await self._read_register(self.REG_DAILY_BATTERY_CHARGE, 1)
+            daily_charge = await self._read_input_register(self.REG_DAILY_BATTERY_CHARGE, 1)
             if daily_charge:
                 attrs["daily_battery_charge"] = round(daily_charge[0] * 0.1, 2)
 
-            # Read inverter temperature (from 5xxx range)
-            inv_temp = await self._read_register(self.REG_INVERTER_TEMP, 1)
+            # Read inverter temperature (from 5xxx input register range)
+            inv_temp = await self._read_input_register(self.REG_INVERTER_TEMP, 1)
             if inv_temp:
                 attrs["inverter_temperature"] = round(self._to_signed16(inv_temp[0]) * 0.1, 1)
 
             # Read grid frequency
-            grid_freq = await self._read_register(self.REG_GRID_FREQUENCY, 1)
+            grid_freq = await self._read_input_register(self.REG_GRID_FREQUENCY, 1)
             if grid_freq:
                 attrs["grid_frequency"] = round(grid_freq[0] * 0.1, 2)
 
             # Read phase A voltage
-            voltage = await self._read_register(self.REG_PHASE_A_VOLTAGE, 1)
+            voltage = await self._read_input_register(self.REG_PHASE_A_VOLTAGE, 1)
             if voltage:
                 attrs["grid_voltage"] = round(voltage[0] * 0.1, 1)
 
-            # Read export limit status
-            export_limit = await self._read_register(self.REG_EXPORT_LIMIT, 1)
+            # Read export limit status (holding registers)
+            export_limit = await self._read_register(self.REG_EXPORT_LIMIT_SETTING, 1)
             if export_limit:
                 attrs["export_limit_w"] = export_limit[0]
 
-            export_mode = await self._read_register(self.REG_EXPORT_LIMIT_MODE, 1)
+            export_mode = await self._read_register(self.REG_EXPORT_LIMIT_ENABLED, 1)
             if export_mode:
                 attrs["export_limit_enabled"] = export_mode[0] == self.EXPORT_LIMIT_ENABLE
 
@@ -387,8 +425,8 @@ class SungrowSHController(InverterController):
                 _LOGGER.error("Cannot curtail: failed to connect to inverter")
                 return False
 
-            # Step 1: Set export limit
-            success = await self._write_register(self.REG_EXPORT_LIMIT, export_limit_w)
+            # Step 1: Set export limit (W)
+            success = await self._write_register(self.REG_EXPORT_LIMIT_SETTING, export_limit_w)
             if not success:
                 _LOGGER.warning("Failed to set export limit, trying full shutdown")
                 # Fallback to full shutdown
@@ -397,8 +435,8 @@ class SungrowSHController(InverterController):
                     _LOGGER.info(f"Curtailed via full shutdown at {self.host}")
                 return success
 
-            # Step 2: Enable export limiting mode
-            success = await self._write_register(self.REG_EXPORT_LIMIT_MODE, self.EXPORT_LIMIT_ENABLE)
+            # Step 2: Enable export limiting (0xAA)
+            success = await self._write_register(self.REG_EXPORT_LIMIT_ENABLED, self.EXPORT_LIMIT_ENABLE)
             if not success:
                 _LOGGER.warning("Failed to enable export limit mode, trying full shutdown")
                 success = await self._write_register(self.REGISTER_SYSTEM_STATE, self.STATE_STOP)
@@ -429,8 +467,8 @@ class SungrowSHController(InverterController):
                 _LOGGER.error("Cannot restore: failed to connect to inverter")
                 return False
 
-            # Disable export limiting mode
-            success = await self._write_register(self.REG_EXPORT_LIMIT_MODE, self.EXPORT_LIMIT_DISABLE)
+            # Disable export limiting (0x55)
+            success = await self._write_register(self.REG_EXPORT_LIMIT_ENABLED, self.EXPORT_LIMIT_DISABLE)
             if not success:
                 _LOGGER.warning("Failed to disable export limit, trying start command")
                 # Fallback: ensure inverter is running
@@ -475,8 +513,8 @@ class SungrowSHController(InverterController):
                     attributes={"host": self.host, "model": self.model or "SH Series"},
                 )
 
-            # Determine status based on running state
-            running_state = await self._read_register(self.REGISTER_RUNNING_STATE, 1)
+            # Determine status based on running state (input register, FC 0x04)
+            running_state = await self._read_input_register(self.REGISTER_RUNNING_STATE, 1)
             status = InverterStatus.ONLINE
             is_curtailed = False
 
@@ -738,7 +776,7 @@ class SungrowSHController(InverterController):
         """Set maximum charge rate in kW.
 
         Converts kW to Amps using the actual battery voltage (read from
-        register 13019), falling back to 48V if not yet available.
+        register 13020), falling back to 48V if not yet available.
         """
         voltage = self._battery_voltage
         _LOGGER.info("Setting Sungrow SH at %s charge rate limit to %s kW (using %.1fV)", self.host, kw, voltage)
@@ -764,7 +802,7 @@ class SungrowSHController(InverterController):
         """Set maximum discharge rate in kW.
 
         Converts kW to Amps using the actual battery voltage (read from
-        register 13019), falling back to 48V if not yet available.
+        register 13020), falling back to 48V if not yet available.
         """
         voltage = self._battery_voltage
         _LOGGER.info("Setting Sungrow SH at %s discharge rate limit to %s kW (using %.1fV)", self.host, kw, voltage)
@@ -819,15 +857,15 @@ class SungrowSHController(InverterController):
                 return False
 
             if watts is None:
-                # Disable export limit
+                # Disable export limit (0x55)
                 _LOGGER.info(f"Disabling Sungrow SH at {self.host} export limit")
-                success = await self._write_register(self.REG_EXPORT_LIMIT_ENABLED, 0)
+                success = await self._write_register(self.REG_EXPORT_LIMIT_ENABLED, self.EXPORT_LIMIT_DISABLE)
             else:
-                # Set and enable export limit
+                # Set and enable export limit (0xAA)
                 _LOGGER.info(f"Setting Sungrow SH at {self.host} export limit to {watts} W")
                 success = await self._write_register(self.REG_EXPORT_LIMIT_SETTING, watts)
                 if success:
-                    success = await self._write_register(self.REG_EXPORT_LIMIT_ENABLED, 1)
+                    success = await self._write_register(self.REG_EXPORT_LIMIT_ENABLED, self.EXPORT_LIMIT_ENABLE)
 
             return success
 
@@ -847,8 +885,8 @@ class SungrowSHController(InverterController):
             if not await self.connect():
                 return data
 
-            # Read battery state registers (13018-13024)
-            battery_regs = await self._read_register(self.REG_BATTERY_VOLTAGE, 7)
+            # Read battery state registers (doc 13020-13026) via FC 0x04
+            battery_regs = await self._read_input_register(self.REG_BATTERY_VOLTAGE, 7)
             if battery_regs and len(battery_regs) >= 7:
                 voltage = round(battery_regs[0] * 0.1, 1)
                 data["battery_voltage"] = voltage
@@ -862,17 +900,17 @@ class SungrowSHController(InverterController):
                 data["daily_battery_discharge"] = round(battery_regs[6] * 0.1, 2)
 
             # Read daily battery charge
-            daily_charge = await self._read_register(self.REG_DAILY_BATTERY_CHARGE, 1)
+            daily_charge = await self._read_input_register(self.REG_DAILY_BATTERY_CHARGE, 1)
             if daily_charge:
                 data["daily_battery_charge"] = round(daily_charge[0] * 0.1, 2)
 
             # Read load power (32-bit signed)
-            load_power = await self._read_register(self.REG_LOAD_POWER, 2)
+            load_power = await self._read_input_register(self.REG_LOAD_POWER, 2)
             if load_power and len(load_power) >= 2:
                 data["load_power"] = self._to_signed32(load_power[0], load_power[1])
 
             # Read export power (32-bit signed)
-            export_power = await self._read_register(self.REG_EXPORT_POWER, 2)
+            export_power = await self._read_input_register(self.REG_EXPORT_POWER, 2)
             if export_power and len(export_power) >= 2:
                 data["export_power"] = self._to_signed32(export_power[0], export_power[1])
 
