@@ -819,10 +819,12 @@ class SigenergyController(InverterController):
     async def force_charge(self, power_kw: float = 10.0) -> bool:
         """Force battery to charge from grid.
 
-        Enables Remote EMS mode, sets control mode to charge, and sets charge rate.
+        Enables Remote EMS mode and sets control mode to charge.
+        Does NOT reduce the charge rate limit — the ESS max charge limit
+        should stay at rated capacity so the battery can charge at full speed.
 
         Args:
-            power_kw: Charge power in kW (default: 10.0)
+            power_kw: Charge power in kW (used for logging, rate set by inverter)
 
         Returns:
             True if all commands successful
@@ -845,13 +847,10 @@ class SigenergyController(InverterController):
                 return False
             _LOGGER.info("Remote EMS control mode set to CHARGE")
 
-            # 3. Set charge rate limit
-            rate_result = await self.set_charge_rate_limit(power_kw)
-            if not rate_result:
-                _LOGGER.error(f"Failed to set charge rate limit to {power_kw} kW")
-                return False
+            # Note: ESS max charge/discharge limits are left at rated capacity.
+            # Reducing them would prevent the battery from covering home load.
 
-            _LOGGER.info(f"Sigenergy FORCE CHARGE active at {power_kw} kW")
+            _LOGGER.info(f"Sigenergy FORCE CHARGE active (requested {power_kw} kW)")
             return True
 
         except Exception as e:
@@ -861,10 +860,13 @@ class SigenergyController(InverterController):
     async def force_discharge(self, power_kw: float = 10.0) -> bool:
         """Force battery to discharge to grid/load.
 
-        Enables Remote EMS mode, sets control mode to discharge, and sets discharge rate.
+        Enables Remote EMS mode, sets control mode to discharge, and sets
+        the grid export limit to the target power. The ESS max discharge
+        limit is left at rated capacity so the battery can always cover
+        home load — only the grid export is capped.
 
         Args:
-            power_kw: Discharge power in kW (default: 10.0)
+            power_kw: Target grid export power in kW (default: 10.0)
 
         Returns:
             True if all commands successful
@@ -887,13 +889,16 @@ class SigenergyController(InverterController):
                 return False
             _LOGGER.info("Remote EMS control mode set to DISCHARGE")
 
-            # 3. Set discharge rate limit
-            rate_result = await self.set_discharge_rate_limit(power_kw)
+            # 3. Set grid export limit (NOT discharge rate limit)
+            # The ESS max discharge limit stays at rated capacity so the
+            # battery can always cover home load. The grid export limit
+            # controls how much power goes to the grid on top of that.
+            rate_result = await self.set_export_limit(power_kw)
             if not rate_result:
-                _LOGGER.error(f"Failed to set discharge rate limit to {power_kw} kW")
+                _LOGGER.error(f"Failed to set grid export limit to {power_kw} kW")
                 return False
 
-            _LOGGER.info(f"Sigenergy FORCE DISCHARGE active at {power_kw} kW")
+            _LOGGER.info(f"Sigenergy FORCE DISCHARGE active — grid export limit {power_kw} kW")
             return True
 
         except Exception as e:
@@ -903,7 +908,8 @@ class SigenergyController(InverterController):
     async def restore_normal(self) -> bool:
         """Restore normal (native EMS) operation.
 
-        Disables Remote EMS mode, returning control to the Sigenergy native EMS.
+        Disables Remote EMS mode and restores grid export limit to unlimited,
+        returning control to the Sigenergy native EMS.
 
         Returns:
             True if successful
@@ -912,12 +918,20 @@ class SigenergyController(InverterController):
             if not await self.connect():
                 return False
 
-            # Disable Remote EMS — system returns to native EMS behavior
+            # 1. Disable Remote EMS — system returns to native EMS behavior
             result = await self._write_holding_registers(self.REG_REMOTE_EMS_ENABLE, [0])
             if result:
                 _LOGGER.info("Sigenergy Remote EMS disabled — normal operation restored")
             else:
                 _LOGGER.error("Failed to disable Remote EMS")
+                return False
+
+            # 2. Restore grid export limit to unlimited
+            # force_discharge sets this to a specific value — need to clear it
+            export_result = await self.restore_export_limit()
+            if not export_result:
+                _LOGGER.warning("Failed to restore grid export limit to unlimited")
+
             return result
 
         except Exception as e:
