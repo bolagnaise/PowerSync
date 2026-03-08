@@ -33,6 +33,9 @@ class AEMOAPIClient:
     DISPATCH_URL = "https://nemweb.com.au/Reports/Current/DispatchIS_Reports/"
     PREDISPATCH_URL = "https://nemweb.com.au/Reports/Current/Predispatch_Reports/"
 
+    # NEMWEB requires a User-Agent header (blocks bare aiohttp requests with 403)
+    HEADERS = {"User-Agent": "PowerSync-HomeAssistant/2.4 (AEMO NEM data)"}
+
     # NEM Regions
     REGIONS = {
         "NSW1": "New South Wales",
@@ -84,7 +87,7 @@ class AEMOAPIClient:
 
             # Step 1: Get directory listing from NEMWEB dispatch reports
             async with session.get(
-                self.DISPATCH_URL, timeout=aiohttp.ClientTimeout(total=15)
+                self.DISPATCH_URL, headers=self.HEADERS, timeout=aiohttp.ClientTimeout(total=15)
             ) as response:
                 response.raise_for_status()
                 index_html = await response.text()
@@ -104,7 +107,7 @@ class AEMOAPIClient:
             # Step 3: Download the ZIP
             file_url = f"{self.DISPATCH_URL}{latest_file}"
             async with session.get(
-                file_url, timeout=aiohttp.ClientTimeout(total=30)
+                file_url, headers=self.HEADERS, timeout=aiohttp.ClientTimeout(total=30)
             ) as response:
                 response.raise_for_status()
                 zip_content = await response.read()
@@ -316,7 +319,7 @@ class AEMOAPIClient:
 
             # Step 1: Get list of available pre-dispatch files from NEMWeb
             async with session.get(
-                self.PREDISPATCH_URL, timeout=aiohttp.ClientTimeout(total=30)
+                self.PREDISPATCH_URL, headers=self.HEADERS, timeout=aiohttp.ClientTimeout(total=30)
             ) as response:
                 response.raise_for_status()
                 index_html = await response.text()
@@ -344,7 +347,7 @@ class AEMOAPIClient:
             file_url = f"{self.PREDISPATCH_URL}{latest_file}"
             _LOGGER.info("Downloading AEMO pre-dispatch: %s", latest_file)
 
-            async with session.get(file_url, timeout=aiohttp.ClientTimeout(total=60)) as response:
+            async with session.get(file_url, headers=self.HEADERS, timeout=aiohttp.ClientTimeout(total=60)) as response:
                 response.raise_for_status()
                 zip_content = await response.read()
 
