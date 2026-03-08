@@ -6641,6 +6641,15 @@ class EVStatusView(HomeAssistantView):
             # Check Zaptec status
             zaptec_status = self._get_zaptec_status()
 
+            # Check generic charger
+            from .const import CONF_GENERIC_CHARGER_ENABLED as _GCE
+            generic_charger_enabled = False
+            for entry in self._hass.config_entries.async_entries(DOMAIN):
+                opts = {**entry.data, **entry.options}
+                if opts.get(_GCE):
+                    generic_charger_enabled = True
+                    break
+
             # Determine overall configured status
             is_configured = (
                 has_credentials
@@ -6648,7 +6657,10 @@ class EVStatusView(HomeAssistantView):
                 or tbt_status.get("available", False)
                 or zaptec_status.get("available", False)
                 or byd_available
+                or generic_charger_enabled
             )
+
+            generic_count = 1 if generic_charger_enabled else 0
 
             return web.json_response({
                 "success": True,
@@ -6656,13 +6668,14 @@ class EVStatusView(HomeAssistantView):
                 "linked": is_configured,
                 "has_access_token": has_credentials,
                 "token_expires_at": None,
-                "vehicle_count": vehicle_count + byd_count,
+                "vehicle_count": vehicle_count + byd_count + generic_count,
                 "integration": active_integration,
                 "ev_provider": ev_provider,
                 "tesla_ble": ble_status,
                 "teslemetry_bt": tbt_status,
                 "zaptec": zaptec_status,
                 "byd": {"available": byd_available, "vehicle_count": byd_count},
+                "generic_charger": {"available": generic_charger_enabled, "vehicle_count": generic_count},
             })
 
         except Exception as e:
@@ -7208,6 +7221,71 @@ class EVVehiclesView(HomeAssistantView):
                             elif mode == "connected_waiting" and v["charging_state"] == "Disconnected":
                                 v["charging_state"] = "Stopped"
                     break  # Only one PowerSync entry with Zaptec
+
+            # Discover generic charger vehicle (SoC from external sensor e.g. MQTT/BYD)
+            from .const import (
+                CONF_GENERIC_CHARGER_ENABLED,
+                CONF_GENERIC_CHARGER_SOC_ENTITY,
+                CONF_GENERIC_CHARGER_STATUS_ENTITY,
+            )
+            entries = self._hass.config_entries.async_entries(DOMAIN)
+            for entry in entries:
+                opts = {**entry.data, **entry.options}
+                if not opts.get(CONF_GENERIC_CHARGER_ENABLED):
+                    continue
+                soc_entity = opts.get(CONF_GENERIC_CHARGER_SOC_ENTITY, "")
+                status_entity = opts.get(CONF_GENERIC_CHARGER_STATUS_ENTITY, "")
+                if not soc_entity and not status_entity:
+                    continue  # No sensors configured — nothing to show
+
+                battery_level = None
+                if soc_entity:
+                    soc_state = self._hass.states.get(soc_entity)
+                    if soc_state and soc_state.state not in ("unavailable", "unknown", "None", None):
+                        try:
+                            val = float(soc_state.state)
+                            if 0 <= val <= 100:
+                                battery_level = int(val)
+                        except (ValueError, TypeError):
+                            pass
+
+                is_plugged_in = False
+                charging_state = "Disconnected"
+                if status_entity:
+                    cs_state = self._hass.states.get(status_entity)
+                    if cs_state:
+                        status_lower = cs_state.state.lower()
+                        if status_lower in ("charging", "preparing", "suspended_evse", "suspended_ev", "finishing"):
+                            is_plugged_in = True
+                            charging_state = cs_state.state.capitalize()
+                            if status_lower == "suspended_evse":
+                                charging_state = "Stopped"
+                            elif status_lower == "suspended_ev":
+                                charging_state = "Stopped"
+                            elif status_lower == "finishing":
+                                charging_state = "Complete"
+
+                vehicles.append({
+                    "id": "generic_ev",
+                    "vehicle_id": "generic_ev",
+                    "vin": None,
+                    "display_name": "EV",
+                    "model": None,
+                    "battery_level": battery_level,
+                    "charging_state": charging_state,
+                    "charge_limit_soc": None,
+                    "is_plugged_in": is_plugged_in,
+                    "charger_power": None,
+                    "is_online": True,
+                    "data_updated_at": datetime.now().isoformat(),
+                    "source": "generic_charger",
+                    "brand": "generic",
+                })
+                _LOGGER.debug(
+                    "EV Generic: soc=%s, plugged=%s, state=%s",
+                    battery_level, is_plugged_in, charging_state,
+                )
+                break  # Only one generic charger entry
 
             if not vehicles:
                 message = "No vehicles found"
@@ -8600,9 +8678,27 @@ class ChargingScheduleView(HomeAssistantView):
         Returns:
             Current battery level (0-100), defaults to 50 if not found.
         """
+        # Method 0: Generic charger SoC sensor
+        from .const import CONF_GENERIC_CHARGER_ENABLED, CONF_GENERIC_CHARGER_SOC_ENTITY
+        entries = self._hass.config_entries.async_entries(DOMAIN)
+        for entry in entries:
+            opts = {**entry.data, **entry.options}
+            if opts.get(CONF_GENERIC_CHARGER_ENABLED):
+                soc_entity = opts.get(CONF_GENERIC_CHARGER_SOC_ENTITY, "")
+                if soc_entity:
+                    state = self._hass.states.get(soc_entity)
+                    if state and state.state not in ("unavailable", "unknown", "None", None):
+                        try:
+                            level = float(state.state)
+                            if 0 <= level <= 100:
+                                _LOGGER.debug("ChargingScheduleView: Found generic charger SoC from %s: %.1f%%", soc_entity, level)
+                                return int(level)
+                        except (ValueError, TypeError):
+                            pass
+                break
+
         # Method 1a: Check Tesla BLE sensor with configured prefix
         config = {}
-        entries = self._hass.config_entries.async_entries(DOMAIN)
         if entries:
             config = dict(entries[0].options)
 

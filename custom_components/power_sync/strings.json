@@ -994,7 +994,8 @@
           "generic_charger_enabled": "[Generic] Enable Generic Charger",
           "generic_charger_switch_entity": "[Generic] Charger Switch Entity",
           "generic_charger_amps_entity": "[Generic] Charger Amps Entity",
-          "generic_charger_status_entity": "[Generic] Connector Status Sensor"
+          "generic_charger_status_entity": "[Generic] Connector Status Sensor",
+          "generic_charger_soc_entity": "[Generic] EV Battery SoC Sensor"
         },
         "data_description": {
           "ev_charging_enabled": "Enable smart charging control for Tesla vehicles. Not required for OCPP or Zaptec chargers.",
@@ -1008,7 +1009,8 @@
           "generic_charger_enabled": "Control any EV charger that has a switch and optional amps entity in Home Assistant (e.g. Evnex, Wallbox, or any charger with an HA integration).",
           "generic_charger_switch_entity": "Entity ID of the switch that starts/stops charging (e.g. switch.evnex_charge_now). Required.",
           "generic_charger_amps_entity": "Entity ID of the number that controls charge current in amps (e.g. number.evnex_connector_1_maximum_current). Leave blank if your charger doesn't support amp control.",
-          "generic_charger_status_entity": "Entity ID of a sensor that reports charger connector status (e.g. sensor.home_charger_connector_status). Used to detect if an EV is plugged in. Recognised states: charging, preparing, suspended_evse, suspended_ev, finishing. Leave blank to skip plug detection."
+          "generic_charger_status_entity": "Entity ID of a sensor that reports charger connector status (e.g. sensor.home_charger_connector_status). Used to detect if an EV is plugged in. Recognised states: charging, preparing, suspended_evse, suspended_ev, finishing. Leave blank to skip plug detection.",
+          "generic_charger_soc_entity": "Entity ID of a sensor that reports EV battery state of charge as a percentage (e.g. sensor.byd_atto_3_battery_level). Used for target SoC charging. Leave blank if not available."
         },
         "submit_button": "Submit"
       },
@@ -1040,7 +1042,8 @@
           "generic_charger_enabled": "[Generic] Enable Generic Charger",
           "generic_charger_switch_entity": "[Generic] Charger Switch Entity",
           "generic_charger_amps_entity": "[Generic] Charger Amps Entity",
-          "generic_charger_status_entity": "[Generic] Connector Status Sensor"
+          "generic_charger_status_entity": "[Generic] Connector Status Sensor",
+          "generic_charger_soc_entity": "[Generic] EV Battery SoC Sensor"
         },
         "data_description": {
           "ev_charging_enabled": "Enable smart charging control for Tesla vehicles. Not required for OCPP or Zaptec chargers.",
@@ -1054,7 +1057,8 @@
           "generic_charger_enabled": "Control any EV charger that has a switch and optional amps entity in Home Assistant (e.g. Evnex, Wallbox, or any charger with an HA integration).",
           "generic_charger_switch_entity": "Entity ID of the switch that starts/stops charging (e.g. switch.evnex_charge_now). Required.",
           "generic_charger_amps_entity": "Entity ID of the number that controls charge current in amps (e.g. number.evnex_connector_1_maximum_current). Leave blank if your charger doesn't support amp control.",
-          "generic_charger_status_entity": "Entity ID of a sensor that reports charger connector status (e.g. sensor.home_charger_connector_status). Used to detect if an EV is plugged in. Recognised states: charging, preparing, suspended_evse, suspended_ev, finishing. Leave blank to skip plug detection."
+          "generic_charger_status_entity": "Entity ID of a sensor that reports charger connector status (e.g. sensor.home_charger_connector_status). Used to detect if an EV is plugged in. Recognised states: charging, preparing, suspended_evse, suspended_ev, finishing. Leave blank to skip plug detection.",
+          "generic_charger_soc_entity": "Entity ID of a sensor that reports EV battery state of charge as a percentage (e.g. sensor.byd_atto_3_battery_level). Used for target SoC charging. Leave blank if not available."
         },
         "submit_button": "Submit"
       },

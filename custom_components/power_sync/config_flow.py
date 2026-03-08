@@ -208,6 +208,7 @@ from .const import (
     CONF_GENERIC_CHARGER_SWITCH_ENTITY,
     CONF_GENERIC_CHARGER_AMPS_ENTITY,
     CONF_GENERIC_CHARGER_STATUS_ENTITY,
+    CONF_GENERIC_CHARGER_SOC_ENTITY,
     # Solcast Solar Forecast configuration
     CONF_SOLCAST_ENABLED,
     CONF_SOLCAST_API_KEY,
@@ -2953,6 +2954,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional(CONF_GENERIC_CHARGER_SWITCH_ENTITY, default=""): str,
                 vol.Optional(CONF_GENERIC_CHARGER_AMPS_ENTITY, default=""): str,
                 vol.Optional(CONF_GENERIC_CHARGER_STATUS_ENTITY, default=""): str,
+                vol.Optional(CONF_GENERIC_CHARGER_SOC_ENTITY, default=""): str,
             }),
         )
 
@@ -3023,6 +3025,9 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         status_entity = ev_input.get(CONF_GENERIC_CHARGER_STATUS_ENTITY, "")
         if status_entity:
             data[CONF_GENERIC_CHARGER_STATUS_ENTITY] = status_entity
+        soc_entity = ev_input.get(CONF_GENERIC_CHARGER_SOC_ENTITY, "")
+        if soc_entity:
+            data[CONF_GENERIC_CHARGER_SOC_ENTITY] = soc_entity
 
         # Set appropriate title based on provider
         if self._aemo_only_mode:
@@ -4497,6 +4502,10 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_GENERIC_CHARGER_STATUS_ENTITY,
                 default=self._get_option(CONF_GENERIC_CHARGER_STATUS_ENTITY, ""),
             ): str,
+            vol.Optional(
+                CONF_GENERIC_CHARGER_SOC_ENTITY,
+                default=self._get_option(CONF_GENERIC_CHARGER_SOC_ENTITY, ""),
+            ): str,
         }
 
         return self.async_show_form(
@@ -4558,6 +4567,9 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         generic_status = ev_input.get(CONF_GENERIC_CHARGER_STATUS_ENTITY, "")
         if generic_status:
             final_data[CONF_GENERIC_CHARGER_STATUS_ENTITY] = generic_status
+        generic_soc = ev_input.get(CONF_GENERIC_CHARGER_SOC_ENTITY, "")
+        if generic_soc:
+            final_data[CONF_GENERIC_CHARGER_SOC_ENTITY] = generic_soc
 
         return self.async_create_entry(title="", data=final_data)
 

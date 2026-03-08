@@ -536,8 +536,30 @@ async def get_ev_battery_level(
         DOMAIN,
         CONF_TESLA_BLE_ENTITY_PREFIX,
         DEFAULT_TESLA_BLE_ENTITY_PREFIX,
+        CONF_GENERIC_CHARGER_ENABLED,
+        CONF_GENERIC_CHARGER_SOC_ENTITY,
     )
     from homeassistant.helpers import entity_registry as er, device_registry as dr
+
+    # Generic charger — check configured SoC sensor
+    if config_entry:
+        opts = {**config_entry.data, **config_entry.options}
+        if opts.get(CONF_GENERIC_CHARGER_ENABLED):
+            soc_entity = opts.get(CONF_GENERIC_CHARGER_SOC_ENTITY, "")
+            if soc_entity:
+                state = hass.states.get(soc_entity)
+                if state and state.state not in ("unavailable", "unknown", "None", None):
+                    try:
+                        level = float(state.state)
+                        if 0 <= level <= 100:
+                            _LOGGER.debug(
+                                "Generic charger SoC from %s: %.1f%%",
+                                soc_entity, level,
+                            )
+                            return level
+                    except (ValueError, TypeError):
+                        pass
+                _LOGGER.debug("Generic charger SoC entity %s not available", soc_entity)
 
     # Method 1: Tesla BLE
     if vehicle_vin and vehicle_vin.startswith("ble_"):

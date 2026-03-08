@@ -100,6 +100,7 @@ CONF_GENERIC_CHARGER_ENABLED = "generic_charger_enabled"
 CONF_GENERIC_CHARGER_SWITCH_ENTITY = "generic_charger_switch_entity"
 CONF_GENERIC_CHARGER_AMPS_ENTITY = "generic_charger_amps_entity"
 CONF_GENERIC_CHARGER_STATUS_ENTITY = "generic_charger_status_entity"
+CONF_GENERIC_CHARGER_SOC_ENTITY = "generic_charger_soc_entity"
 
 # Battery System Selection
 CONF_BATTERY_SYSTEM = "battery_system"
