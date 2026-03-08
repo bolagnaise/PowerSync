@@ -4488,6 +4488,7 @@ class AutoScheduleExecutor:
             "charger_amps_entity": settings.charger_amps_entity,
             "ocpp_charger_id": settings.ocpp_charger_id,
             "no_grid_import": settings.get_effective_limit_grid_import(datetime.now().weekday()),
+            **_get_optimizer_battery_params(self.hass, self.config_entry),
         }
 
         try:
@@ -4637,6 +4638,35 @@ def _get_vehicle_charger_params(
         pass
 
     return defaults
+
+
+def _get_optimizer_battery_params(
+    hass: "HomeAssistant",
+    config_entry: "ConfigEntry",
+) -> dict:
+    """Get battery charge/discharge specs from the optimizer coordinator.
+
+    Returns target_battery_charge_kw and max_inverter_kw derived from the
+    optimizer's auto-detected or manually-configured battery specs.
+    Falls back to empty dict if the optimizer isn't available.
+    """
+    try:
+        from ..const import DOMAIN
+        entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
+        opt_coordinator = entry_data.get("optimization_coordinator")
+        if opt_coordinator and hasattr(opt_coordinator, '_config'):
+            max_charge_kw = opt_coordinator._config.max_charge_w / 1000.0
+            max_discharge_kw = opt_coordinator._config.max_discharge_w / 1000.0
+            if max_charge_kw > 0 and max_discharge_kw > 0:
+                return {
+                    "target_battery_charge_kw": max_charge_kw,
+                    "max_inverter_kw": max_discharge_kw,
+                    "max_battery_charge_rate_kw": max_charge_kw,
+                }
+    except Exception:
+        pass
+
+    return {}
 
 
 class PriceLevelChargingExecutor:
@@ -4933,6 +4963,7 @@ class PriceLevelChargingExecutor:
             "vehicle_vin": vehicle_vin,
             "dynamic_mode": "battery_target",
             **charger_params,
+            **_get_optimizer_battery_params(self.hass, self.config_entry),
             "charger_type": charger_type,
             "no_grid_import": self._get_settings().get("no_grid_import", False),
         }
@@ -5535,6 +5566,7 @@ class ScheduledChargingExecutor:
             "vehicle_vin": None,
             "dynamic_mode": "battery_target",
             **charger_params,
+            **_get_optimizer_battery_params(self.hass, self.config_entry),
             "charger_type": charger_type,
         }
 
@@ -5774,6 +5806,7 @@ class EVChargingModeCoordinator:
             "vehicle_vin": None,
             "dynamic_mode": "battery_target",
             **charger_params,
+            **_get_optimizer_battery_params(self.hass, self.config_entry),
             "charger_type": charger_type,
         }
 
