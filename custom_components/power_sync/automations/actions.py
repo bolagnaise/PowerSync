@@ -3211,11 +3211,21 @@ async def _action_start_ev_charging_dynamic_locked(
     dynamic_mode = params.get("dynamic_mode", "battery_target")
 
     # Prevent duplicate sessions for the same vehicle/mode
+    # _default and a resolved VIN (e.g. LRWYHCEK3PC907290) refer to the same physical
+    # vehicle in single-vehicle setups. Treat them as duplicates to prevent two update
+    # loops fighting over the same car's charge current.
     entry_vehicles = _dynamic_ev_state.get(entry_id, {})
     for vid, v_state in entry_vehicles.items():
         if v_state.get("active") and v_state.get("params", {}).get("dynamic_mode") == dynamic_mode:
             if vid == vehicle_id:
                 _LOGGER.debug(f"Dynamic session ({dynamic_mode}) already active for vehicle {vid}, skipping duplicate")
+                return True
+            # _default overlaps with any VIN (single-vehicle setup)
+            if vid == DEFAULT_VEHICLE_ID or vehicle_id == DEFAULT_VEHICLE_ID:
+                _LOGGER.info(
+                    f"Dynamic session ({dynamic_mode}) already active for {vid}, "
+                    f"skipping duplicate start for {vehicle_id}"
+                )
                 return True
 
     # Get common parameters with defaults
@@ -3456,8 +3466,15 @@ async def _action_stop_ev_charging_dynamic(
     vehicles = _dynamic_ev_state.get(entry_id, {})
 
     if vehicle_id:
-        # Stop specific vehicle
-        vehicle_ids_to_stop = [vehicle_id] if vehicle_id in vehicles else []
+        # Stop specific vehicle — also match _default ↔ VIN overlap
+        if vehicle_id in vehicles:
+            vehicle_ids_to_stop = [vehicle_id]
+        elif vehicle_id != DEFAULT_VEHICLE_ID and DEFAULT_VEHICLE_ID in vehicles:
+            vehicle_ids_to_stop = [DEFAULT_VEHICLE_ID]
+        elif vehicle_id == DEFAULT_VEHICLE_ID:
+            vehicle_ids_to_stop = list(vehicles.keys())  # Stop all (single vehicle)
+        else:
+            vehicle_ids_to_stop = []
     else:
         # Stop all vehicles for this entry
         vehicle_ids_to_stop = list(vehicles.keys())
