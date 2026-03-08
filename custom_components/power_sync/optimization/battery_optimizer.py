@@ -295,12 +295,17 @@ class BatteryOptimizer:
                 c[n + t] = 0.01 * dt                # chip-suppressed: small cost to avoid free exports
 
         # === Terminal valuation: incentivize keeping charge at end of horizon ===
-        # Use median of second-half import prices as expected replacement cost.
-        # This prevents the LP from draining the battery at horizon's end.
+        # Use the cheapest available recharge price as the replacement cost.
+        # The battery will recharge during the cheapest period in the horizon,
+        # so min is the correct marginal cost. Using median over-penalizes
+        # discharge when free/cheap charging windows exist (e.g. GloBird
+        # FOUR4FREE has 4 hours at 0c — median would be ~31c, causing the LP
+        # to prefer grid import over battery discharge at 31c partial-peak
+        # because the efficiency-adjusted penalty 31/0.9=34.4c > 31c import).
         half_n = n // 2
         second_half_prices = import_prices[half_n:] if half_n < n else import_prices
         if second_half_prices:
-            terminal_price = sorted(second_half_prices)[len(second_half_prices) // 2]
+            terminal_price = max(0.001, min(second_half_prices))
         else:
             terminal_price = 0.0
 
