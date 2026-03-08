@@ -45,7 +45,7 @@ class SigenergyController(InverterController):
     REG_ESS_MAX_CHARGE_LIMIT = 40032      # ESS max charging (U32, gain 1000, kW)
     REG_ESS_MAX_DISCHARGE_LIMIT = 40034   # ESS max discharging (U32, gain 1000, kW)
     REG_REMOTE_EMS_ENABLE = 40029         # Remote EMS enable (U16: 0=disabled, 1=enabled)
-    REG_REMOTE_EMS_CONTROL_MODE = 40031   # Remote EMS control mode (U16: 3=charge, 5=discharge)
+    REG_REMOTE_EMS_CONTROL_MODE = 40031   # Remote EMS control mode (U16, see REMOTE_EMS_MODE_* constants)
     REG_ESS_BACKUP_SOC = 40046            # ESS backup SOC (U16, gain 10, %)
     REG_ESS_CHARGE_CUTOFF_SOC = 40047     # ESS charge cut-off SOC (U16, gain 10, %)
     REG_ESS_DISCHARGE_CUTOFF_SOC = 40048  # ESS discharge cut-off SOC (U16, gain 10, %)
@@ -86,10 +86,21 @@ class SigenergyController(InverterController):
     GAIN_SOC = 10      # % → scaled value
     GAIN_ENERGY = 100  # kWh → scaled value for energy registers
 
+    # Remote EMS Control Modes (register 40031)
+    # Remote EMS can be left permanently enabled — mode 2 is equivalent
+    # to native self-consumption and allows instant transitions to other modes.
+    REMOTE_EMS_MODE_PCS_REMOTE = 0          # PCS remote control
+    REMOTE_EMS_MODE_STANDBY = 1             # Standby
+    REMOTE_EMS_MODE_SELF_CONSUMPTION = 2    # Maximum self-consumption
+    REMOTE_EMS_MODE_CHARGE_GRID = 3         # Command charging (grid first)
+    REMOTE_EMS_MODE_CHARGE_PV = 4           # Command charging (PV first)
+    REMOTE_EMS_MODE_DISCHARGE_PV = 5        # Command discharging (PV first)
+    REMOTE_EMS_MODE_DISCHARGE_ESS = 6       # Command discharging (ESS first)
+
     # Curtailment values
-    # Use export limit (load-following) rather than full PV shutdown
-    # This allows solar to continue powering house and charging battery
-    EXPORT_LIMIT_ZERO = 0         # Zero export (load-following mode)
+    # Zero export lets the inverter self-curtail PV at hardware speed —
+    # solar continues powering house and charging battery, only grid export is blocked.
+    EXPORT_LIMIT_ZERO = 0         # Zero export
     EXPORT_LIMIT_UNLIMITED = 0xFFFFFFFE  # Unlimited export (normal operation)
     PV_POWER_LIMIT_ZERO = 0       # Set PV limit to 0 kW (full shutdown - not used)
     ACTIVE_POWER_PCT_ZERO = 0     # 0% active power
@@ -324,17 +335,15 @@ class SigenergyController(InverterController):
         home_load_w: Optional[float] = None,
         rated_capacity_w: Optional[float] = None,
     ) -> bool:
-        """Curtail solar export using load-following mode.
+        """Curtail solar export by setting export limit to zero.
 
-        If home_load_w is provided, sets export limit to match home load.
-        Otherwise sets export limit to 0 kW (zero export mode).
-
-        Both modes allow solar to power the house and charge the battery,
-        which is better than full PV shutdown.
+        Sets the grid export limit to 0 kW. The Sigenergy inverter handles
+        PV curtailment at hardware speed — solar continues to power the house
+        and charge the battery, only grid export is blocked.
 
         Args:
-            home_load_w: Optional home load in watts for load-following mode
-            rated_capacity_w: Inverter rated capacity (unused, for interface compat)
+            home_load_w: Unused (kept for interface compatibility)
+            rated_capacity_w: Unused (kept for interface compatibility)
 
         Returns:
             True if curtailment successful
@@ -351,33 +360,14 @@ class SigenergyController(InverterController):
                     limit_str = f"{self._original_pv_limit / self.GAIN_POWER} kW" if self._original_pv_limit < self.EXPORT_LIMIT_UNLIMITED else "unlimited"
                     _LOGGER.info(f"Stored original export limit: {limit_str}")
 
-            # Determine export limit
-            if home_load_w is not None and home_load_w > 0:
-                # Load-following mode: limit export to home load
-                export_limit_kw = max(0.1, home_load_w / 1000)  # Minimum 0.1 kW
-                _LOGGER.info(f"Curtailing Sigenergy at {self.host} (load-following: {export_limit_kw:.1f}kW = {home_load_w}W home load)")
-            else:
-                # Zero export mode
-                export_limit_kw = 0
-                _LOGGER.info(f"Curtailing Sigenergy at {self.host} (zero export mode)")
+            _LOGGER.info(f"Curtailing Sigenergy at {self.host} (zero export)")
 
-            # Set the export limit
-            scaled_value = int(export_limit_kw * self.GAIN_POWER)
-            values = self._from_unsigned32(scaled_value)
+            # Set export limit to 0 — inverter self-curtails PV at hardware speed
+            values = self._from_unsigned32(self.EXPORT_LIMIT_ZERO)
             success = await self._write_holding_registers(self.REG_GRID_EXPORT_LIMIT, values)
 
             if success:
-                if export_limit_kw > 0:
-                    _LOGGER.info(f"Successfully set load-following mode ({export_limit_kw:.1f}kW) on Sigenergy")
-                else:
-                    _LOGGER.info(f"Successfully set zero export mode on Sigenergy")
-                # Brief delay then verify
-                await asyncio.sleep(1)
-                state = await self.get_status()
-                if state.is_curtailed:
-                    _LOGGER.info("Curtailment verified - load-following active")
-                else:
-                    _LOGGER.warning("Curtailment command sent but verification pending")
+                _LOGGER.info(f"Successfully set zero export on Sigenergy")
             else:
                 _LOGGER.error(f"Failed to curtail Sigenergy at {self.host}")
 
@@ -650,7 +640,7 @@ class SigenergyController(InverterController):
             # Determine overall status
             if is_curtailed:
                 status = InverterStatus.CURTAILED
-                attrs["curtailment_mode"] = "load_following"
+                attrs["curtailment_mode"] = "zero_export"
             elif pv_power_w is not None and pv_power_w > 0:
                 status = InverterStatus.ONLINE
             else:
@@ -661,7 +651,7 @@ class SigenergyController(InverterController):
             attrs["host"] = self.host
             attrs["register_level"] = register_level
 
-            # In load-following mode, PV is not limited - only export is
+            # In zero-export mode, PV is not limited - only grid export is blocked
             self._last_state = InverterState(
                 status=status,
                 is_curtailed=is_curtailed,
@@ -816,6 +806,44 @@ class SigenergyController(InverterController):
             _LOGGER.error(f"Error setting discharge rate limit: {e}")
             return False
 
+    async def set_self_consumption_mode(self) -> bool:
+        """Set Remote EMS to maximum self-consumption mode.
+
+        Enables Remote EMS and sets mode 2 (MAXIMUM_SELF_CONSUMPTION).
+        The inverter handles PV -> house -> battery -> grid priority at
+        hardware speed, equivalent to native self-consumption mode.
+
+        Remote EMS stays permanently enabled — mode 2 allows instant
+        transitions to charge/discharge modes without re-enabling.
+
+        Returns:
+            True if successful
+        """
+        try:
+            if not await self.connect():
+                return False
+
+            # Enable Remote EMS (idempotent if already enabled)
+            ems_result = await self._write_holding_registers(self.REG_REMOTE_EMS_ENABLE, [1])
+            if not ems_result:
+                _LOGGER.error("Failed to enable Remote EMS for self-consumption")
+                return False
+
+            # Set mode to maximum self-consumption
+            mode_result = await self._write_holding_registers(
+                self.REG_REMOTE_EMS_CONTROL_MODE, [self.REMOTE_EMS_MODE_SELF_CONSUMPTION]
+            )
+            if not mode_result:
+                _LOGGER.error("Failed to set Remote EMS mode to self-consumption")
+                return False
+
+            _LOGGER.info("Sigenergy Remote EMS set to MAXIMUM_SELF_CONSUMPTION (mode 2)")
+            return True
+
+        except Exception as e:
+            _LOGGER.error(f"Error setting self-consumption mode: {e}")
+            return False
+
     async def force_charge(self, power_kw: float = 10.0) -> bool:
         """Force battery to charge from grid.
 
@@ -840,8 +868,10 @@ class SigenergyController(InverterController):
                 return False
             _LOGGER.info("Remote EMS enabled for force charge")
 
-            # 2. Set control mode to charge (mode 3)
-            mode_result = await self._write_holding_registers(self.REG_REMOTE_EMS_CONTROL_MODE, [3])
+            # 2. Set control mode to charge (grid first)
+            mode_result = await self._write_holding_registers(
+                self.REG_REMOTE_EMS_CONTROL_MODE, [self.REMOTE_EMS_MODE_CHARGE_GRID]
+            )
             if not mode_result:
                 _LOGGER.error("Failed to set Remote EMS control mode to charge")
                 return False
@@ -882,8 +912,10 @@ class SigenergyController(InverterController):
                 return False
             _LOGGER.info("Remote EMS enabled for force discharge")
 
-            # 2. Set control mode to discharge (mode 5)
-            mode_result = await self._write_holding_registers(self.REG_REMOTE_EMS_CONTROL_MODE, [5])
+            # 2. Set control mode to discharge (PV first)
+            mode_result = await self._write_holding_registers(
+                self.REG_REMOTE_EMS_CONTROL_MODE, [self.REMOTE_EMS_MODE_DISCHARGE_PV]
+            )
             if not mode_result:
                 _LOGGER.error("Failed to set Remote EMS control mode to discharge")
                 return False
@@ -906,10 +938,12 @@ class SigenergyController(InverterController):
             return False
 
     async def restore_normal(self) -> bool:
-        """Restore normal (native EMS) operation.
+        """Restore normal self-consumption operation.
 
-        Disables Remote EMS mode and restores grid export limit to unlimited,
-        returning control to the Sigenergy native EMS.
+        Sets Remote EMS to maximum self-consumption mode (mode 2) and
+        restores grid export limit to unlimited. Remote EMS stays enabled
+        — mode 2 is equivalent to native self-consumption but allows
+        instant transitions to charge/discharge modes.
 
         Returns:
             True if successful
@@ -918,12 +952,10 @@ class SigenergyController(InverterController):
             if not await self.connect():
                 return False
 
-            # 1. Disable Remote EMS — system returns to native EMS behavior
-            result = await self._write_holding_registers(self.REG_REMOTE_EMS_ENABLE, [0])
-            if result:
-                _LOGGER.info("Sigenergy Remote EMS disabled — normal operation restored")
-            else:
-                _LOGGER.error("Failed to disable Remote EMS")
+            # 1. Set Remote EMS to self-consumption (leave enabled)
+            result = await self.set_self_consumption_mode()
+            if not result:
+                _LOGGER.error("Failed to set self-consumption mode during restore")
                 return False
 
             # 2. Restore grid export limit to unlimited
@@ -932,7 +964,8 @@ class SigenergyController(InverterController):
             if not export_result:
                 _LOGGER.warning("Failed to restore grid export limit to unlimited")
 
-            return result
+            _LOGGER.info("Sigenergy restored to self-consumption (Remote EMS mode 2, unlimited export)")
+            return True
 
         except Exception as e:
             _LOGGER.error(f"Error restoring Sigenergy normal operation: {e}")

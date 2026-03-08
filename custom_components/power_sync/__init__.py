@@ -13570,12 +13570,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.error("FoxESS curtailment error: %s", e, exc_info=True)
 
     async def handle_sigenergy_curtailment(feedin_price=None, import_price=None) -> None:
-        """Handle Sigenergy DC curtailment via Modbus with load-following.
+        """Handle Sigenergy DC curtailment via Modbus with zero-export.
 
         Uses the Sigenergy controller's curtail()/restore() methods which set
-        the grid export limit register. Supports load-following mode where
-        export is limited to home load (so solar still powers the house and
-        charges the battery) with zero-export as fallback.
+        the grid export limit register. Zero-export mode lets the inverter
+        self-curtail PV at hardware speed — solar continues powering the house
+        and charging the battery, only grid export is blocked.
 
         Args:
             feedin_price: Current feed-in price in c/kWh (None to fetch from Amber)
@@ -13624,65 +13624,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         try:
             if export_earnings < 1:
-                # Negative or near-zero export earnings → curtail
-                # Get home load for load-following mode
-                home_load_w = None
-                if sig_coord.data:
-                    load_power_kw = sig_coord.data.get("load_power", 0)
-                    if load_power_kw and load_power_kw > 0:
-                        home_load_w = int(load_power_kw * 1000)
-                        # Add battery charge rate if charging
-                        battery_power_kw = sig_coord.data.get("battery_power", 0)
-                        # battery_power < 0 means charging (consuming power from solar)
-                        battery_charge_w = max(0, -int(battery_power_kw * 1000))
-                        if battery_charge_w > 50:
-                            home_load_w += battery_charge_w
-                            _LOGGER.info(
-                                "Sigenergy load-following: Home=%dW + Battery charging=%dW = %dW",
-                                home_load_w - battery_charge_w, battery_charge_w, home_load_w,
-                            )
-                        else:
-                            _LOGGER.info("Sigenergy load-following: Home load=%dW (battery not charging)", home_load_w)
-
-                curtail_mode = "load_following" if home_load_w is not None else "zero_export"
-
+                # Negative or near-zero export earnings → zero-export curtailment
                 if current_state == "normal":
-                    # Transitioning from normal → curtailed
-                    if home_load_w is not None:
-                        _LOGGER.info("Sigenergy curtailment TRIGGERED: export_earnings=%.2fc (<1c) → load-following at %dW", export_earnings, home_load_w)
-                        success = await controller.curtail(home_load_w=home_load_w)
-                    else:
-                        _LOGGER.info("Sigenergy curtailment TRIGGERED: export_earnings=%.2fc (<1c) → zero export", export_earnings)
-                        success = await controller.curtail()
+                    _LOGGER.info(
+                        "Sigenergy curtailment TRIGGERED: export_earnings=%.2fc (<1c) → zero export",
+                        export_earnings,
+                    )
+                    success = await controller.curtail()
                     if success:
                         hass.data[DOMAIN][entry.entry_id]["sigenergy_curtailment_state"] = "curtailed"
-                        hass.data[DOMAIN][entry.entry_id]["sigenergy_curtailment_mode"] = curtail_mode
-                        hass.data[DOMAIN][entry.entry_id]["sigenergy_power_limit_w"] = home_load_w
                     else:
                         _LOGGER.error("Sigenergy curtail() failed")
                 else:
-                    # Already curtailed — re-apply load-following with updated home load
-                    if home_load_w is not None:
-                        current_limit = entry_data.get("sigenergy_power_limit_w")
-                        if current_limit is None or abs(home_load_w - current_limit) >= 50:
-                            success = await controller.curtail(home_load_w=home_load_w)
-                            if success:
-                                _LOGGER.debug("Sigenergy load-following updated: %dW → %dW", current_limit or 0, home_load_w)
-                                hass.data[DOMAIN][entry.entry_id]["sigenergy_power_limit_w"] = home_load_w
-                                hass.data[DOMAIN][entry.entry_id]["sigenergy_curtailment_mode"] = "load_following"
-                        else:
-                            _LOGGER.debug("Sigenergy already curtailed, load within 50W tolerance")
-                    else:
-                        _LOGGER.debug("Sigenergy already curtailed (zero export), no action needed")
+                    _LOGGER.debug("Sigenergy already curtailed (zero export), no action needed")
             else:
                 # Positive export earnings → restore
                 if current_state != "normal":
-                    _LOGGER.info("Sigenergy curtailment RESTORED: export_earnings=%.2fc (>=1c) → normal export", export_earnings)
+                    _LOGGER.info(
+                        "Sigenergy curtailment RESTORED: export_earnings=%.2fc (>=1c) → normal export",
+                        export_earnings,
+                    )
                     success = await controller.restore()
                     if success:
                         hass.data[DOMAIN][entry.entry_id]["sigenergy_curtailment_state"] = "normal"
-                        hass.data[DOMAIN][entry.entry_id]["sigenergy_curtailment_mode"] = None
-                        hass.data[DOMAIN][entry.entry_id]["sigenergy_power_limit_w"] = None
                     else:
                         _LOGGER.error("Sigenergy restore() failed")
                 else:
@@ -16352,37 +16316,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
         if is_sigenergy:
             try:
-                from .inverters.sigenergy import SigenergyController
-                modbus_host = entry.options.get(
-                    CONF_SIGENERGY_MODBUS_HOST,
-                    entry.data.get(CONF_SIGENERGY_MODBUS_HOST)
-                )
-                if not modbus_host:
-                    _LOGGER.warning("Self-consumption: Sigenergy Modbus host not configured")
-                else:
-                    modbus_port = entry.options.get(
-                        CONF_SIGENERGY_MODBUS_PORT,
-                        entry.data.get(CONF_SIGENERGY_MODBUS_PORT, 502)
-                    )
-                    modbus_slave_id = entry.options.get(
-                        CONF_SIGENERGY_MODBUS_SLAVE_ID,
-                        entry.data.get(CONF_SIGENERGY_MODBUS_SLAVE_ID, 1)
-                    )
-
-                    controller = SigenergyController(
-                        host=modbus_host,
-                        port=modbus_port,
-                        slave_id=modbus_slave_id,
-                    )
-
-                    # Disable Remote EMS — return to native EMS (self-consumption)
-                    result = await controller.restore_normal()
-                    await controller.disconnect()
-
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                sig_coord = entry_data.get("sigenergy_coordinator")
+                if sig_coord and hasattr(sig_coord, '_controller') and sig_coord._controller:
+                    controller = sig_coord._controller
+                    result = await controller.set_self_consumption_mode()
                     if result:
-                        _LOGGER.info("✅ Sigenergy self-consumption mode set (Remote EMS disabled)")
+                        _LOGGER.info("Sigenergy self-consumption mode set (Remote EMS mode 2)")
                     else:
-                        _LOGGER.warning("Sigenergy self-consumption restore_normal failed")
+                        _LOGGER.warning("Sigenergy set_self_consumption_mode failed")
+                else:
+                    _LOGGER.error("Self-consumption: Sigenergy coordinator/controller not available")
                 return
             except Exception as e:
                 _LOGGER.error(f"Error setting Sigenergy self-consumption: {e}", exc_info=True)
