@@ -2912,7 +2912,7 @@ class AutoScheduleExecutor:
         Returns:
             True if charge rate was set successfully
         """
-        from .actions import _action_set_ev_charging_amps
+        from .actions import _set_vehicle_amps
 
         # Get home power settings for voltage/phases
         home_config = await self._get_home_power_settings()
@@ -2938,11 +2938,15 @@ class AutoScheduleExecutor:
         params = {
             "vehicle_vin": vehicle_vin,
             "amps": target_amps,
+            "charger_type": settings.charger_type,
+            "charger_switch_entity": settings.charger_switch_entity,
+            "charger_amps_entity": settings.charger_amps_entity,
+            "ocpp_charger_id": settings.ocpp_charger_id,
         }
 
         try:
-            success = await _action_set_ev_charging_amps(
-                self.hass, self.config_entry, params
+            success = await _set_vehicle_amps(
+                self.hass, self.config_entry, vehicle_vin or vehicle_id, target_amps, params
             )
 
             if success:

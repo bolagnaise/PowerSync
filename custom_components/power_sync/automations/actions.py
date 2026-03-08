@@ -3489,9 +3489,14 @@ async def _action_stop_ev_charging_dynamic(
         # Stop all vehicles for this entry
         vehicle_ids_to_stop = list(vehicles.keys())
 
+    # Collect per-vehicle params before deleting state (needed for stop)
+    vehicle_params: Dict[str, dict] = {}
+
     for vid in vehicle_ids_to_stop:
         state = vehicles.get(vid)
         if state:
+            vehicle_params[vid] = state.get("params", {})
+
             # Cancel the timer
             cancel_timer = state.get("cancel_timer")
             if cancel_timer:
@@ -3558,9 +3563,15 @@ async def _action_stop_ev_charging_dynamic(
     # Stop EV charging if requested
     if stop_charging and vehicle_ids_to_stop:
         for vid_to_stop in vehicle_ids_to_stop:
-            stop_params = dict(params)
-            stop_params["vehicle_vin"] = vid_to_stop
-            await _action_stop_ev_charging(hass, config_entry, stop_params)
+            v_params = vehicle_params.get(vid_to_stop, {})
+            charger_type = v_params.get("charger_type", "tesla")
+            if charger_type in ("generic", "ocpp"):
+                # Use _set_vehicle_amps which handles all charger types
+                await _set_vehicle_amps(hass, config_entry, vid_to_stop, 0, v_params)
+            else:
+                stop_params = dict(params)
+                stop_params["vehicle_vin"] = vid_to_stop
+                await _action_stop_ev_charging(hass, config_entry, stop_params)
         return True
 
     return True
