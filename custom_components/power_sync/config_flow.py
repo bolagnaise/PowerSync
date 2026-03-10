@@ -2595,8 +2595,9 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Handle curtailment configuration during initial setup."""
-        # Only show for Tesla battery system (Sigenergy/Sungrow have their own setup)
-        if self._selected_battery_system in (BATTERY_SYSTEM_SIGENERGY, BATTERY_SYSTEM_SUNGROW):
+        # Sungrow has built-in curtailment — skip this step
+        # Sigenergy users may have AC-coupled inverters (e.g. Enphase) that need curtailment
+        if self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
             return await self.async_step_weather_setup()
 
         if user_input is not None:
@@ -4119,7 +4120,11 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 self.hass.config_entries.async_update_entry(
                     self.config_entry, data=new_data
                 )
-                # Route to weather options
+                # Check if AC inverter curtailment needs configuration
+                ac_enabled = user_input.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False)
+                self._curtailment_options[CONF_AC_INVERTER_CURTAILMENT_ENABLED] = ac_enabled
+                if ac_enabled:
+                    return await self.async_step_inverter_brand()
                 return await self.async_step_weather_options()
             elif is_sungrow:
                 # Sungrow doesn't have separate curtailment config - go straight to weather
@@ -4149,6 +4154,11 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             schema_dict[vol.Optional(
                 CONF_SIGENERGY_DC_CURTAILMENT_ENABLED,
                 default=self.config_entry.data.get(CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False),
+            )] = bool
+            # AC-coupled inverter curtailment (e.g. Enphase microinverters)
+            schema_dict[vol.Optional(
+                CONF_AC_INVERTER_CURTAILMENT_ENABLED,
+                default=self._get_option(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False),
             )] = bool
         elif is_sungrow:
             # Sungrow doesn't need additional curtailment options - battery controls built-in

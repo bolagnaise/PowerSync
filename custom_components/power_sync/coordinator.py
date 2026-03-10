@@ -2224,6 +2224,16 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
 
             attrs = status.attributes or {}
 
+            # If Modbus returned no battery data, keep previous readings
+            # rather than reporting SOC=0% which causes optimizer issues.
+            if "battery_soc" not in attrs:
+                if self.data:
+                    _LOGGER.warning(
+                        "Sigenergy Modbus returned no battery data — keeping previous readings"
+                    )
+                    return self.data
+                raise UpdateFailed("Sigenergy Modbus connection failed — no data available")
+
             # Map Sigenergy data to standard format (same as Tesla)
             # Power values in kW from Modbus, we keep them in kW for sensors
             solar_kw = attrs.get("pv_power_kw", 0)
@@ -2368,6 +2378,17 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             await self._energy_acc.async_restore()
         try:
             data = await self._controller.get_battery_data()
+
+            # If Modbus returned no battery data, keep previous readings
+            # rather than reporting SOC=0% which causes the optimizer to
+            # incorrectly schedule IDLE (thinking the battery is empty).
+            if "battery_soc" not in data:
+                if self.data:
+                    _LOGGER.warning(
+                        "Sungrow Modbus returned no battery data — keeping previous readings"
+                    )
+                    return self.data
+                raise UpdateFailed("Sungrow Modbus connection failed — no data available")
 
             # Map Sungrow data to standard format
             battery_power_w = data.get("battery_power", 0)  # Signed: positive = discharging
