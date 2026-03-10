@@ -182,6 +182,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Track last executed action for IDLE→non-IDLE transition
         self._last_executed_action: str | None = None
+        self._idle_sc_holdoff: int = 0  # Hysteresis counter for IDLE→SC transitions
 
         # Background task handles (for cancellation on disable)
         self._polling_task: asyncio.Task | None = None
@@ -819,39 +820,76 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 effective_action = "self_consumption"
 
-            # When transitioning from IDLE to any other action, undo what
-            # IDLE did: restore work mode AND reset backup_reserve to the
-            # configured value. IDLE sets backup_reserve = current_soc to
-            # hold the battery; without resetting it, self_consumption would
-            # be stuck at that SOC level (Tesla won't discharge below
-            # backup_reserve even in self_consumption mode).
+            # When transitioning from IDLE to another action, we need to
+            # undo what IDLE did (restore work mode and backup_reserve).
+            # However, the LP can oscillate between IDLE and self_consumption
+            # at decision boundaries — each exit resets backup_reserve to 0%
+            # for one cycle, slowly draining the battery overnight.
+            # To prevent this, apply hysteresis for IDLE→self_consumption:
+            # require 3 consecutive non-IDLE decisions before resetting
+            # backup_reserve. For charge/export, exit IDLE immediately.
             prev = self._last_executed_action
-            if (
-                prev == "idle"
-                and effective_action != "idle"
-            ):
-                # FoxESS/Sungrow: restore from IDLE hold mode to normal operation
-                if (
-                    self.energy_coordinator
-                    and hasattr(self.energy_coordinator, "restore_work_mode_from_idle")
-                ):
-                    await self.energy_coordinator.restore_work_mode_from_idle()
-                # Reset backup_reserve to configured value (e.g. 0% or 20%)
-                # so the battery can discharge naturally in self_consumption.
-                if hasattr(battery, "set_backup_reserve"):
-                    configured_reserve_pct = int(
-                        self._config.backup_reserve * 100
-                    )
-                    await battery.set_backup_reserve(configured_reserve_pct)
-                    _LOGGER.info(
-                        "Optimizer: Exiting IDLE — restored work mode and "
-                        "backup reserve to %d%%",
-                        configured_reserve_pct,
-                    )
+            if effective_action == "idle":
+                self._idle_sc_holdoff = 0  # Reset hysteresis
+            elif prev == "idle":
+                if effective_action in ("charge", "discharge", "export"):
+                    # Charge/export: exit IDLE immediately
+                    self._idle_sc_holdoff = 0
+                    if (
+                        self.energy_coordinator
+                        and hasattr(self.energy_coordinator, "restore_work_mode_from_idle")
+                    ):
+                        await self.energy_coordinator.restore_work_mode_from_idle()
+                    if hasattr(battery, "set_backup_reserve"):
+                        configured_reserve_pct = int(
+                            self._config.backup_reserve * 100
+                        )
+                        await battery.set_backup_reserve(configured_reserve_pct)
+                        _LOGGER.info(
+                            "Optimizer: Exiting IDLE → %s — restored backup "
+                            "reserve to %d%%",
+                            effective_action, configured_reserve_pct,
+                        )
+                    else:
+                        _LOGGER.info(
+                            "Optimizer: Exiting IDLE → %s — restored work mode",
+                            effective_action,
+                        )
                 else:
-                    _LOGGER.info(
-                        "Optimizer: Exiting IDLE — restored work mode",
-                    )
+                    # self_consumption: apply hysteresis to prevent oscillation
+                    self._idle_sc_holdoff += 1
+                    if self._idle_sc_holdoff < 3:
+                        # Stay in IDLE — LP hasn't committed yet
+                        _LOGGER.info(
+                            "Optimizer: LP chose self_consumption but staying "
+                            "in IDLE (hysteresis %d/3 — preventing oscillation)",
+                            self._idle_sc_holdoff,
+                        )
+                        effective_action = "idle"
+                    else:
+                        # LP has chosen non-IDLE 3 times — genuinely exit
+                        self._idle_sc_holdoff = 0
+                        if (
+                            self.energy_coordinator
+                            and hasattr(self.energy_coordinator, "restore_work_mode_from_idle")
+                        ):
+                            await self.energy_coordinator.restore_work_mode_from_idle()
+                        if hasattr(battery, "set_backup_reserve"):
+                            configured_reserve_pct = int(
+                                self._config.backup_reserve * 100
+                            )
+                            await battery.set_backup_reserve(configured_reserve_pct)
+                            _LOGGER.info(
+                                "Optimizer: Exiting IDLE → self_consumption "
+                                "(confirmed after 3 cycles) — restored backup "
+                                "reserve to %d%%",
+                                configured_reserve_pct,
+                            )
+                        else:
+                            _LOGGER.info(
+                                "Optimizer: Exiting IDLE → self_consumption "
+                                "(confirmed after 3 cycles)",
+                            )
 
             if effective_action == "charge":
                 if hasattr(battery, "force_charge"):
