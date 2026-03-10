@@ -176,6 +176,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             f"power_sync.costs.{entry_id}",
         )
 
+        # Saving sessions coordinator (set from __init__.py when configured)
+        self._saving_session_coordinator = None
+
         # Price monitoring
         self._is_dynamic_pricing = False
         self._price_listener_unsub: Callable | None = None
@@ -1087,6 +1090,65 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return result
 
+    def _apply_saving_session_prices(
+        self,
+        import_prices: list[float],
+        export_prices: list[float],
+    ) -> tuple[list[float], list[float]]:
+        """Overlay saving session rates onto LP prices.
+
+        Saving sessions: massive export boost (octopoints rate >> normal export).
+        Free electricity: import price -> 0 (free grid power).
+        """
+        if not self._saving_session_coordinator or not self._saving_session_coordinator.data:
+            return import_prices, export_prices
+
+        sessions = self._saving_session_coordinator.data.get("sessions", [])
+        if not sessions:
+            return import_prices, export_prices
+
+        octopoints_per_penny = self._saving_session_coordinator._octopoints_per_penny
+        interval = self._config.interval_minutes
+        now = dt_util.now()
+        import_result = list(import_prices)
+        export_result = list(export_prices)
+        boosted = 0
+
+        for session in sessions:
+            if not session.joined:
+                continue
+            # Convert octopoints to GBP/kWh:
+            # octopoints_per_kwh / octopoints_per_penny = pence/kWh
+            # pence/kWh / 100 = GBP/kWh (same unit as our price arrays)
+            if session.octopoints_per_kwh > 0:
+                session_rate = (session.octopoints_per_kwh / octopoints_per_penny) / 100
+            else:
+                session_rate = 0.0
+
+            for t in range(len(export_result)):
+                ts = now + timedelta(minutes=t * interval)
+                # Compare in UTC to handle timezone-aware session times
+                ts_utc = ts.astimezone(dt_util.UTC)
+                if session.start <= ts_utc < session.end:
+                    if session.session_type == "saving":
+                        # Add session rate ON TOP of existing export price
+                        export_result[t] += session_rate
+                        # Also bump import price to discourage grid charging
+                        import_result[t] = max(import_result[t], session_rate * 2)
+                    elif session.session_type == "free_electricity":
+                        # Free power - set import price to 0
+                        import_result[t] = 0.0
+                    boosted += 1
+
+        if boosted:
+            joined_count = len([s for s in sessions if s.joined])
+            _LOGGER.info(
+                "Saving sessions: overlaid %d intervals from %d session(s)",
+                boosted, joined_count,
+            )
+
+        return import_result, export_result
+
     def _apply_chip_mode(
         self,
         export_prices: list[float],
@@ -1829,8 +1891,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         self._last_display_import_prices = list(import_prices[:actual_price_intervals])
                         self._last_display_export_prices = list(export_prices[:actual_price_intervals])
 
-                        # Apply export boost and chip mode to LP export prices
+                        # Apply export boost, saving session overlay, and chip mode to LP prices
                         export_prices = self._apply_export_boost(export_prices)
+                        import_prices, export_prices = self._apply_saving_session_prices(import_prices, export_prices)
                         export_prices = self._apply_chip_mode(export_prices)
 
                         # Apply demand charge penalty to LP import prices
@@ -2031,6 +2094,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Store actual tariff prices for mobile app display
         self._last_display_import_prices = display_import
         self._last_display_export_prices = display_export
+
+        # Apply saving session overlay to TOU prices
+        import_prices, export_prices = self._apply_saving_session_prices(import_prices, export_prices)
 
         # Apply demand charge penalty to LP import prices
         import_prices = self._apply_demand_charge_penalty(import_prices)

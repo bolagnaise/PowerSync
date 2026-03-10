@@ -232,6 +232,18 @@ from .const import (
     CONF_OCTOPUS_REGION,
     CONF_OCTOPUS_EXPORT_PRODUCT_CODE,
     CONF_OCTOPUS_EXPORT_TARIFF_CODE,
+    # Octopus Saving Sessions
+    CONF_OCTOPUS_SAVING_SESSIONS_ENABLED,
+    CONF_OCTOPUS_SAVING_SESSIONS_SOURCE,
+    CONF_OCTOPUS_API_KEY,
+    CONF_OCTOPUS_ACCOUNT_NUMBER,
+    CONF_OCTOPUS_SAVING_SESSIONS_ENTITY,
+    CONF_OCTOPUS_SAVING_SESSIONS_AUTO_JOIN,
+    CONF_OCTOPUS_OCTOPOINTS_PER_PENNY,
+    DEFAULT_OCTOPOINTS_PER_PENNY,
+    SENSOR_TYPE_SAVING_SESSION_ACTIVE,
+    SENSOR_TYPE_NEXT_SAVING_SESSION,
+    SENSOR_TYPE_SAVING_SESSION_RATE,
     # Localvolts configuration
     CONF_LOCALVOLTS_API_KEY,
     CONF_LOCALVOLTS_PARTNER_ID,
@@ -1634,6 +1646,442 @@ class GenericAEMOSpikeManager:
             "last_price": self._last_price,
             "spike_start_time": self._spike_start_time.isoformat() if self._spike_start_time else None,
             "last_check": self._last_check.isoformat() if self._last_check else None,
+            "battery_system": self._battery_type,
+        }
+
+
+class SavingSessionTariffManager:
+    """Manages Tesla tariff modifications for Octopus Saving Sessions.
+
+    When a joined session starts:
+    1. Save current Tesla tariff and operation mode
+    2. Upload session tariff with massive sell rates
+    3. Switch to autonomous mode for optimal export
+    When session ends:
+    4. Restore saved tariff and operation mode
+
+    Modelled on AEMOSpikeManager.
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        session_coordinator,
+        site_id: str,
+        api_token: str,
+        api_provider: str = TESLA_PROVIDER_TESLEMETRY,
+        token_getter: callable = None,
+        octopoints_per_penny: int = 8,
+    ):
+        """Initialize the saving session tariff manager."""
+        self.hass = hass
+        self.entry = entry
+        self._session_coordinator = session_coordinator
+        self.site_id = site_id
+        self._api_token = api_token
+        self._token_getter = token_getter
+        self.api_provider = api_provider
+        self._octopoints_per_penny = octopoints_per_penny
+
+        # State tracking
+        self._in_session_mode = False
+        self._session_start_time: datetime | None = None
+        self._saved_tariff: dict | None = None
+        self._saved_operation_mode: str | None = None
+        self._active_session_code: str | None = None
+
+        _LOGGER.info("Saving Session Tariff Manager initialized for Tesla site %s", site_id)
+
+    def _get_current_token(self) -> tuple[str, str]:
+        """Get the current API token."""
+        if self._token_getter:
+            try:
+                token, provider = self._token_getter()
+                if token:
+                    self.api_provider = provider
+                    return token, provider
+            except Exception as e:
+                _LOGGER.warning("Token getter failed, using fallback: %s", e)
+        return self._api_token, self.api_provider
+
+    @property
+    def in_session_mode(self) -> bool:
+        """Return whether currently in session mode."""
+        return self._in_session_mode
+
+    async def check_and_handle_sessions(self) -> None:
+        """Check if a saving session is active and manage tariff."""
+        if not self._session_coordinator or not self._session_coordinator.data:
+            return
+
+        sessions = self._session_coordinator.data.get("sessions", [])
+        active = next(
+            (s for s in sessions if s.is_active() and s.joined and s.session_type == "saving"),
+            None,
+        )
+
+        if active and not self._in_session_mode:
+            await self._enter_session_mode(active)
+        elif not active and self._in_session_mode:
+            await self._exit_session_mode()
+
+    async def _enter_session_mode(self, session) -> None:
+        """Save tariff, create session tariff, upload to Tesla."""
+        from homeassistant.util import dt as dt_util
+
+        _LOGGER.warning(
+            "SAVING SESSION STARTING: %s (%s - %s, %d octopoints/kWh) - entering session mode",
+            session.code, session.start, session.end, session.octopoints_per_kwh,
+        )
+
+        try:
+            current_token, current_provider = self._get_current_token()
+            session_http = async_get_clientsession(self.hass)
+            headers = {
+                "Authorization": f"Bearer {current_token}",
+                "Content-Type": "application/json",
+            }
+            api_base = TESLEMETRY_API_BASE_URL if current_provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+            # Step 1: Save current tariff
+            _LOGGER.info("Saving current tariff before session mode...")
+            async with session_http.get(
+                f"{api_base}/api/1/energy_sites/{self.site_id}/tariff_rate",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    resp = data.get("response", {})
+                    self._saved_tariff = resp.get("tariff_content_v2") or resp.get("tariff_content")
+                    if self._saved_tariff:
+                        _LOGGER.info("Saved current tariff (name: %s)", self._saved_tariff.get("name", "unknown"))
+                    else:
+                        _LOGGER.warning("Could not extract tariff from tariff_rate response")
+
+            # Step 2: Get and save current operation mode
+            async with session_http.get(
+                f"{api_base}/api/1/energy_sites/{self.site_id}/site_info",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    site_info = data.get("response", {})
+                    self._saved_operation_mode = site_info.get("default_real_mode")
+                    _LOGGER.info("Saved operation mode: %s", self._saved_operation_mode)
+
+                    if not self._saved_tariff:
+                        site_tariff = site_info.get("tariff_content_v2") or site_info.get("tariff_content")
+                        if site_tariff:
+                            self._saved_tariff = site_tariff
+                            _LOGGER.info("Saved tariff from site_info fallback")
+
+            # Step 3: Switch to autonomous mode
+            if self._saved_operation_mode != "autonomous":
+                _LOGGER.info("Switching to autonomous mode for session export...")
+                async with session_http.post(
+                    f"{api_base}/api/1/energy_sites/{self.site_id}/operation",
+                    headers=headers,
+                    json={"default_real_mode": "autonomous"},
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 200:
+                        _LOGGER.info("Switched to autonomous mode")
+
+            # Step 4: Create and upload session tariff
+            session_tariff = self._create_session_tariff(session)
+            success = await send_tariff_to_tesla(
+                self.hass,
+                self.site_id,
+                session_tariff,
+                current_token,
+                current_provider,
+            )
+
+            if success:
+                self._in_session_mode = True
+                self._session_start_time = dt_util.utcnow()
+                self._active_session_code = session.code
+                _LOGGER.warning(
+                    "SESSION MODE ACTIVE: Tariff uploaded for %d octopoints/kWh export",
+                    session.octopoints_per_kwh,
+                )
+            else:
+                _LOGGER.error("Failed to upload session tariff")
+
+            # Send push notification
+            try:
+                from .automations.actions import _send_expo_push
+                rate_p = session.octopoints_per_kwh / self._octopoints_per_penny
+                await _send_expo_push(
+                    self.hass,
+                    "Saving Session",
+                    f"Active: {rate_p:.0f}p/kWh - exporting battery",
+                )
+            except Exception:
+                pass
+
+        except Exception as e:
+            _LOGGER.error("Error entering session mode: %s", e, exc_info=True)
+
+    def _create_session_tariff(self, session) -> dict:
+        """Create Tesla tariff with massive sell rates during session window."""
+        # Convert octopoints to GBP/kWh
+        sell_rate = (session.octopoints_per_kwh / self._octopoints_per_penny) / 100
+        # Buy rate must EXCEED sell rate to prevent grid charging arbitrage
+        buy_rate = max(sell_rate * 2.0, 5.0)
+
+        tariff = {
+            "code": "OCTOPUS-SAVING-SESSION",
+            "utility": "Octopus Saving Session",
+            "name": f"Saving Session ({session.octopoints_per_kwh} octopoints/kWh)",
+            "daily_charges": [{"name": "Grid Connection", "amount": 1.0}],
+            "demand_charges": {"ALL": {"ALL": 0}},
+            "energy_charges": {"ALL": {"ALL": 0}},
+            "seasons": {
+                "Summer": {
+                    "fromMonth": 1,
+                    "fromDay": 1,
+                    "toMonth": 12,
+                    "toDay": 31,
+                    "tou_periods": {
+                        "SESSION": {
+                            "periods": [{"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 0, "fromMinute": 0, "toHour": 0, "toMinute": 0}],
+                            "buy": buy_rate,
+                            "sell": sell_rate,
+                        }
+                    }
+                }
+            },
+            "sell_tariff": {
+                "name": "Session Export",
+                "utility": "Octopus",
+                "daily_charges": [],
+                "demand_charges": {},
+                "energy_charges": {"ALL": {"ALL": sell_rate}},
+            }
+        }
+
+        _LOGGER.info(
+            "Created session tariff: buy=%.2f GBP/kWh, sell=%.2f GBP/kWh (%d octopoints/kWh)",
+            buy_rate, sell_rate, session.octopoints_per_kwh,
+        )
+        return tariff
+
+    async def _exit_session_mode(self) -> None:
+        """Restore saved tariff and operation mode after session ends."""
+        _LOGGER.info("Saving session ended - restoring normal operation")
+
+        try:
+            current_token, current_provider = self._get_current_token()
+            session_http = async_get_clientsession(self.hass)
+            headers = {
+                "Authorization": f"Bearer {current_token}",
+                "Content-Type": "application/json",
+            }
+            api_base = TESLEMETRY_API_BASE_URL if current_provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+
+            # Step 1: Switch to self_consumption mode first
+            _LOGGER.info("Switching to self_consumption before tariff restore...")
+            async with session_http.post(
+                f"{api_base}/api/1/energy_sites/{self.site_id}/operation",
+                headers=headers,
+                json={"default_real_mode": "self_consumption"},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status == 200:
+                    _LOGGER.info("Switched to self_consumption mode")
+
+            # Step 2: Restore saved tariff
+            if self._saved_tariff:
+                _LOGGER.info("Restoring saved tariff...")
+                success = await send_tariff_to_tesla(
+                    self.hass,
+                    self.site_id,
+                    self._saved_tariff,
+                    current_token,
+                    current_provider,
+                )
+                if success:
+                    _LOGGER.info("Restored saved tariff successfully")
+                else:
+                    _LOGGER.error("Failed to restore saved tariff")
+
+            # Step 3: Wait for Tesla to process
+            await asyncio.sleep(5)
+
+            # Step 4: Restore original operation mode
+            restore_mode = self._saved_operation_mode or "autonomous"
+            _LOGGER.info("Restoring operation mode to: %s", restore_mode)
+            async with session_http.post(
+                f"{api_base}/api/1/energy_sites/{self.site_id}/operation",
+                headers=headers,
+                json={"default_real_mode": restore_mode},
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
+                if response.status == 200:
+                    _LOGGER.info("Restored operation mode to %s", restore_mode)
+
+            # Clear session state
+            self._in_session_mode = False
+            self._session_start_time = None
+            self._active_session_code = None
+            _LOGGER.info("SESSION MODE ENDED: Normal operation restored")
+
+            # Send push notification
+            try:
+                from .automations.actions import _send_expo_push
+                await _send_expo_push(
+                    self.hass,
+                    "Session Ended",
+                    "Saving session complete - normal operation restored",
+                )
+            except Exception:
+                pass
+
+        except Exception as e:
+            _LOGGER.error("Error exiting session mode: %s", e, exc_info=True)
+
+    def get_status(self) -> dict:
+        """Get current session manager status."""
+        return {
+            "enabled": True,
+            "in_session_mode": self._in_session_mode,
+            "active_session_code": self._active_session_code,
+            "session_start_time": self._session_start_time.isoformat() if self._session_start_time else None,
+        }
+
+
+class GenericSavingSessionManager:
+    """Battery-agnostic saving session manager using force_discharge/restore_normal.
+
+    For non-Tesla batteries (Sigenergy, Sungrow, FoxESS, GoodWe).
+    Uses service calls to force discharge during saving sessions.
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        session_coordinator,
+        battery_type: str,
+        octopoints_per_penny: int = 8,
+    ):
+        """Initialize the generic saving session manager."""
+        self.hass = hass
+        self.entry = entry
+        self._session_coordinator = session_coordinator
+        self._battery_type = battery_type
+        self._octopoints_per_penny = octopoints_per_penny
+
+        # State tracking
+        self._in_session_mode = False
+        self._session_start_time: datetime | None = None
+        self._active_session_code: str | None = None
+
+        _LOGGER.info(
+            "Generic Saving Session Manager initialized for %s", battery_type
+        )
+
+    @property
+    def in_session_mode(self) -> bool:
+        """Return whether currently in session mode."""
+        return self._in_session_mode
+
+    async def check_and_handle_sessions(self) -> None:
+        """Check if a saving session is active and manage battery."""
+        if not self._session_coordinator or not self._session_coordinator.data:
+            return
+
+        sessions = self._session_coordinator.data.get("sessions", [])
+        active = next(
+            (s for s in sessions if s.is_active() and s.joined and s.session_type == "saving"),
+            None,
+        )
+
+        if active and not self._in_session_mode:
+            await self._enter_session_mode(active)
+        elif not active and self._in_session_mode:
+            await self._exit_session_mode()
+
+    async def _enter_session_mode(self, session) -> None:
+        """Force discharge battery during saving session."""
+        from homeassistant.util import dt as dt_util
+
+        _LOGGER.warning(
+            "%s SAVING SESSION STARTING: %s (%d octopoints/kWh) - force discharging",
+            self._battery_type, session.code, session.octopoints_per_kwh,
+        )
+
+        try:
+            await self.hass.services.async_call(
+                DOMAIN, SERVICE_FORCE_DISCHARGE, {}, blocking=True
+            )
+
+            self._in_session_mode = True
+            self._session_start_time = dt_util.utcnow()
+            self._active_session_code = session.code
+            _LOGGER.warning(
+                "%s SESSION MODE ACTIVE: Battery force discharging",
+                self._battery_type,
+            )
+
+            # Send push notification
+            try:
+                from .automations.actions import _send_expo_push
+                rate_p = session.octopoints_per_kwh / self._octopoints_per_penny
+                await _send_expo_push(
+                    self.hass,
+                    "Saving Session",
+                    f"Active: {rate_p:.0f}p/kWh - discharging battery",
+                )
+            except Exception:
+                pass
+
+        except Exception as e:
+            _LOGGER.error("%s: Error entering session mode: %s", self._battery_type, e, exc_info=True)
+
+    async def _exit_session_mode(self) -> None:
+        """Restore normal operation after saving session ends."""
+        _LOGGER.info("%s: Saving session ended - restoring normal operation", self._battery_type)
+
+        try:
+            await self.hass.services.async_call(
+                DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True
+            )
+
+            _LOGGER.info("%s: Normal operation restored after session", self._battery_type)
+
+            # Send push notification
+            try:
+                from .automations.actions import _send_expo_push
+                await _send_expo_push(
+                    self.hass,
+                    "Session Ended",
+                    "Saving session complete - normal operation restored",
+                )
+            except Exception:
+                pass
+
+            self._in_session_mode = False
+            self._session_start_time = None
+            self._active_session_code = None
+
+        except Exception as e:
+            _LOGGER.error("%s: Error exiting session mode: %s", self._battery_type, e, exc_info=True)
+            self._in_session_mode = False
+            self._session_start_time = None
+            self._active_session_code = None
+
+    def get_status(self) -> dict:
+        """Get current session manager status."""
+        return {
+            "enabled": True,
+            "in_session_mode": self._in_session_mode,
+            "active_session_code": self._active_session_code,
+            "session_start_time": self._session_start_time.isoformat() if self._session_start_time else None,
             "battery_system": self._battery_type,
         }
 
@@ -11076,6 +11524,116 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         elif aemo_spike_enabled:
             _LOGGER.warning("AEMO spike detection enabled but no region configured")
 
+    # Initialize Octopus Saving Sessions if enabled
+    saving_session_coordinator = None
+    saving_session_tariff_manager = None
+    generic_saving_session_manager = None
+    saving_sessions_enabled = entry.options.get(
+        CONF_OCTOPUS_SAVING_SESSIONS_ENABLED,
+        entry.data.get(CONF_OCTOPUS_SAVING_SESSIONS_ENABLED, False)
+    )
+
+    if saving_sessions_enabled and has_octopus:
+        from .coordinator import OctopusSavingSessionCoordinator
+
+        ss_source = entry.options.get(
+            CONF_OCTOPUS_SAVING_SESSIONS_SOURCE,
+            entry.data.get(CONF_OCTOPUS_SAVING_SESSIONS_SOURCE, "direct")
+        )
+        ss_auto_join = entry.options.get(
+            CONF_OCTOPUS_SAVING_SESSIONS_AUTO_JOIN,
+            entry.data.get(CONF_OCTOPUS_SAVING_SESSIONS_AUTO_JOIN, True)
+        )
+        ss_octopoints_per_penny = entry.options.get(
+            CONF_OCTOPUS_OCTOPOINTS_PER_PENNY,
+            entry.data.get(CONF_OCTOPUS_OCTOPOINTS_PER_PENNY, DEFAULT_OCTOPOINTS_PER_PENNY)
+        )
+
+        ss_client = None
+        ss_entity_id = None
+
+        if ss_source == "direct":
+            octopus_api_key = entry.options.get(
+                CONF_OCTOPUS_API_KEY,
+                entry.data.get(CONF_OCTOPUS_API_KEY, "")
+            )
+            octopus_account = entry.options.get(
+                CONF_OCTOPUS_ACCOUNT_NUMBER,
+                entry.data.get(CONF_OCTOPUS_ACCOUNT_NUMBER, "")
+            )
+            if octopus_api_key and octopus_account:
+                from .octopus_sessions import OctopusSavingSessionsClient
+                session = async_get_clientsession(hass)
+                ss_client = OctopusSavingSessionsClient(
+                    session, octopus_api_key, octopus_account
+                )
+                # Authenticate immediately
+                try:
+                    authed = await ss_client.authenticate()
+                    if authed:
+                        _LOGGER.info("Octopus Saving Sessions API authenticated")
+                    else:
+                        _LOGGER.error("Failed to authenticate Octopus Saving Sessions API")
+                        ss_client = None
+                except Exception as e:
+                    _LOGGER.error("Octopus Saving Sessions auth error: %s", e)
+                    ss_client = None
+            else:
+                _LOGGER.warning("Octopus Saving Sessions: direct mode but missing API key or account number")
+        elif ss_source == "entity":
+            ss_entity_id = entry.options.get(
+                CONF_OCTOPUS_SAVING_SESSIONS_ENTITY,
+                entry.data.get(CONF_OCTOPUS_SAVING_SESSIONS_ENTITY, "")
+            )
+            if not ss_entity_id:
+                _LOGGER.warning("Octopus Saving Sessions: entity mode but no entity configured")
+
+        if ss_client or ss_entity_id:
+            saving_session_coordinator = OctopusSavingSessionCoordinator(
+                hass,
+                client=ss_client,
+                entity_id=ss_entity_id,
+                auto_join=ss_auto_join,
+                octopoints_per_penny=ss_octopoints_per_penny,
+            )
+            try:
+                await saving_session_coordinator.async_config_entry_first_refresh()
+                _LOGGER.info(
+                    "Octopus Saving Sessions coordinator initialized (source=%s)",
+                    ss_source,
+                )
+            except Exception as e:
+                _LOGGER.error("Failed to initialize Saving Sessions coordinator: %s", e)
+                saving_session_coordinator = None
+
+        # Create session managers for non-LP battery control
+        if saving_session_coordinator:
+            # Tesla TOU mode manager
+            if has_tesla_site and not is_sigenergy and not is_sungrow and not is_foxess and not is_goodwe:
+                saving_session_tariff_manager = SavingSessionTariffManager(
+                    hass=hass,
+                    entry=entry,
+                    session_coordinator=saving_session_coordinator,
+                    site_id=entry.data[CONF_TESLA_ENERGY_SITE_ID],
+                    api_token=tesla_api_token,
+                    api_provider=tesla_api_provider,
+                    token_getter=token_getter,
+                    octopoints_per_penny=ss_octopoints_per_penny,
+                )
+                _LOGGER.info("Saving Session Tariff Manager initialized for Tesla")
+
+            # Non-Tesla generic manager
+            elif is_sigenergy or is_sungrow or is_foxess or is_goodwe:
+                battery_type = "sigenergy" if is_sigenergy else "sungrow" if is_sungrow else "goodwe" if is_goodwe else "foxess"
+                generic_saving_session_manager = GenericSavingSessionManager(
+                    hass=hass,
+                    entry=entry,
+                    session_coordinator=saving_session_coordinator,
+                    battery_type=battery_type,
+                    octopoints_per_penny=ss_octopoints_per_penny,
+                )
+                _LOGGER.info("Generic Saving Session Manager initialized for %s", battery_type)
+
     # Initialize AEMO Price Coordinator for Flow Power AEMO mode
     # Now fetches directly from AEMO API - no external integration required
     aemo_sensor_coordinator = None  # Keep variable name for compatibility
@@ -11309,6 +11867,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "flow_power_twap_tracker": flow_power_twap_tracker,  # For dynamic PEA pricing
         "fp_tariff_rate": fp_tariff_rate,  # Current network tariff rate (c/kWh) — v2
         "fp_avg_daily_tariff": fp_avg_daily_tariff,  # 24h avg network tariff (c/kWh) — v2
+        "saving_session_coordinator": saving_session_coordinator,  # Octopus Saving Sessions
+        "saving_session_tariff_manager": saving_session_tariff_manager,  # Tesla session tariff manager
+        "generic_saving_session_manager": generic_saving_session_manager,  # Non-Tesla session manager
+        "saving_session_cancel": None,  # Will store the session check cancel function
     }
 
     # Track firmware version for change notifications (Tesla only)
@@ -17797,6 +18359,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info("Performing initial generic AEMO spike check")
         await generic_aemo_spike_manager.check_and_handle_spike()
 
+    # Set up automatic saving session check every minute if enabled
+    if saving_session_tariff_manager:
+        async def auto_saving_session_check(now):
+            """Check for active saving sessions (Tesla TOU mode)."""
+            await saving_session_tariff_manager.check_and_handle_sessions()
+
+        saving_session_cancel_timer = async_track_utc_time_change(
+            hass,
+            auto_saving_session_check,
+            second=45,  # Every minute at :45 seconds (offset from AEMO checks)
+        )
+        hass.data[DOMAIN][entry.entry_id]["saving_session_cancel"] = saving_session_cancel_timer
+        _LOGGER.info("Saving session check scheduled every minute (Tesla TOU mode)")
+
+    if generic_saving_session_manager:
+        async def auto_generic_saving_session_check(now):
+            """Check for active saving sessions (generic force discharge)."""
+            await generic_saving_session_manager.check_and_handle_sessions()
+
+        generic_ss_cancel_timer = async_track_utc_time_change(
+            hass,
+            auto_generic_saving_session_check,
+            second=50,  # Every minute at :50 seconds
+        )
+        hass.data[DOMAIN][entry.entry_id]["saving_session_cancel"] = generic_ss_cancel_timer
+        _LOGGER.info(
+            "Saving session check scheduled every minute (%s force discharge mode)",
+            generic_saving_session_manager._battery_type,
+        )
+
     # Set up automatic demand period grid charging check if demand charges enabled
     if demand_charge_coordinator:
         async def auto_demand_charging_check(now):
@@ -18405,6 +18997,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             _LOGGER.info(f"Smart Optimization cost function: {saved_cost_function}, interval: {saved_interval_minutes}min, backup_reserve: {saved_backup_reserve:.0%}")
 
+            # Wire saving session coordinator to optimizer for price overlay
+            if saving_session_coordinator:
+                optimization_coordinator._saving_session_coordinator = saving_session_coordinator
+                _LOGGER.info("Saving session coordinator linked to LP optimizer")
+
             # Enable the optimizer
             await optimization_coordinator.enable()
 
@@ -18902,6 +19499,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if generic_aemo_spike_cancel := entry_data.get("generic_aemo_spike_cancel"):
         generic_aemo_spike_cancel()
         _LOGGER.debug("Cancelled generic AEMO spike timer")
+
+    # Cancel the saving session timer if it exists
+    if saving_session_cancel := entry_data.get("saving_session_cancel"):
+        saving_session_cancel()
+        _LOGGER.debug("Cancelled saving session timer")
 
     # Cancel the demand period grid charging timer if it exists
     if demand_charging_cancel := entry_data.get("demand_charging_cancel"):

@@ -224,6 +224,13 @@ from .const import (
     OCTOPUS_PRODUCT_CODES,
     OCTOPUS_EXPORT_PRODUCT_CODES,
     OCTOPUS_GSP_REGIONS,
+    # Octopus Saving Sessions
+    CONF_OCTOPUS_SAVING_SESSIONS_ENABLED,
+    CONF_OCTOPUS_SAVING_SESSIONS_SOURCE,
+    CONF_OCTOPUS_API_KEY,
+    CONF_OCTOPUS_ACCOUNT_NUMBER,
+    CONF_OCTOPUS_SAVING_SESSIONS_ENTITY,
+    CONF_OCTOPUS_SAVING_SESSIONS_AUTO_JOIN,
     # Localvolts configuration
     CONF_LOCALVOLTS_API_KEY,
     CONF_LOCALVOLTS_PARTNER_ID,
@@ -870,17 +877,8 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     product_code, tariff_code, region
                 )
 
-                # Route based on battery system selection
-                if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
-                    return await self.async_step_sigenergy_credentials()
-                elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
-                    return await self.async_step_sungrow()
-                elif self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
-                    return await self.async_step_foxess_connection()
-                elif self._selected_battery_system == BATTERY_SYSTEM_GOODWE:
-                    return await self.async_step_goodwe_connection()
-                else:
-                    return await self.async_step_tesla_provider()
+                # Route to saving sessions step
+                return await self.async_step_octopus_saving_sessions()
 
         # Build form schema
         data_schema = vol.Schema({
@@ -895,6 +893,82 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={
                 "octopus_url": "https://octopus.energy/smart/agile/",
             },
+        )
+
+    async def async_step_octopus_saving_sessions(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure Octopus Saving Sessions."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            if user_input.get(CONF_OCTOPUS_SAVING_SESSIONS_ENABLED):
+                source = user_input.get(CONF_OCTOPUS_SAVING_SESSIONS_SOURCE, "direct")
+
+                if source == "direct":
+                    api_key = user_input.get(CONF_OCTOPUS_API_KEY, "")
+                    account = user_input.get(CONF_OCTOPUS_ACCOUNT_NUMBER, "")
+                    if not api_key or not account:
+                        errors["base"] = "missing_credentials"
+                    else:
+                        # Validate API key + account number via GraphQL auth
+                        try:
+                            from .octopus_sessions import OctopusSavingSessionsClient
+                            session = async_get_clientsession(self.hass)
+                            client = OctopusSavingSessionsClient(session, api_key, account)
+                            authed = await client.authenticate()
+                            if not authed:
+                                errors["base"] = "invalid_auth"
+                        except Exception:
+                            errors["base"] = "cannot_connect"
+
+                # Store config and continue
+                if not errors:
+                    if not hasattr(self, "_octopus_data"):
+                        self._octopus_data = {}
+                    self._octopus_data.update({
+                        CONF_OCTOPUS_SAVING_SESSIONS_ENABLED: True,
+                        CONF_OCTOPUS_SAVING_SESSIONS_SOURCE: source,
+                        CONF_OCTOPUS_API_KEY: user_input.get(CONF_OCTOPUS_API_KEY, ""),
+                        CONF_OCTOPUS_ACCOUNT_NUMBER: user_input.get(CONF_OCTOPUS_ACCOUNT_NUMBER, ""),
+                        CONF_OCTOPUS_SAVING_SESSIONS_ENTITY: user_input.get(CONF_OCTOPUS_SAVING_SESSIONS_ENTITY, ""),
+                        CONF_OCTOPUS_SAVING_SESSIONS_AUTO_JOIN: user_input.get(CONF_OCTOPUS_SAVING_SESSIONS_AUTO_JOIN, True),
+                    })
+            else:
+                # Skip saving sessions
+                if not hasattr(self, "_octopus_data"):
+                    self._octopus_data = {}
+                self._octopus_data[CONF_OCTOPUS_SAVING_SESSIONS_ENABLED] = False
+
+            if not errors:
+                # Route to battery system step
+                if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
+                    return await self.async_step_sigenergy_credentials()
+                elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
+                    return await self.async_step_sungrow()
+                elif self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
+                    return await self.async_step_foxess_connection()
+                elif self._selected_battery_system == BATTERY_SYSTEM_GOODWE:
+                    return await self.async_step_goodwe_connection()
+                else:
+                    return await self.async_step_tesla_provider()
+
+        data_schema = vol.Schema({
+            vol.Optional(CONF_OCTOPUS_SAVING_SESSIONS_ENABLED, default=False): bool,
+            vol.Optional(CONF_OCTOPUS_SAVING_SESSIONS_SOURCE, default="direct"): vol.In({
+                "direct": "Direct (Octopus API key)",
+                "entity": "Bottlecap Dave integration",
+            }),
+            vol.Optional(CONF_OCTOPUS_API_KEY, default=""): str,
+            vol.Optional(CONF_OCTOPUS_ACCOUNT_NUMBER, default=""): str,
+            vol.Optional(CONF_OCTOPUS_SAVING_SESSIONS_ENTITY, default=""): str,
+            vol.Optional(CONF_OCTOPUS_SAVING_SESSIONS_AUTO_JOIN, default=True): bool,
+        })
+
+        return self.async_show_form(
+            step_id="octopus_saving_sessions",
+            data_schema=data_schema,
+            errors=errors,
         )
 
     async def async_step_amber(
@@ -5027,8 +5101,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                     product_code, tariff_code, region
                 )
 
-                # Continue to demand charge options
-                return await self.async_step_demand_charge_options()
+                # Continue to saving sessions options
+                return await self.async_step_octopus_saving_sessions_options()
 
         # Get current values
         current_product = self._get_option(CONF_OCTOPUS_PRODUCT, "agile")
@@ -5052,6 +5126,70 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
             description_placeholders={
                 "octopus_url": "https://octopus.energy/smart/agile/",
             },
+        )
+
+    async def async_step_octopus_saving_sessions_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure Octopus Saving Sessions options."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            if user_input.get(CONF_OCTOPUS_SAVING_SESSIONS_ENABLED):
+                source = user_input.get(CONF_OCTOPUS_SAVING_SESSIONS_SOURCE, "direct")
+
+                if source == "direct":
+                    api_key = user_input.get(CONF_OCTOPUS_API_KEY, "")
+                    account = user_input.get(CONF_OCTOPUS_ACCOUNT_NUMBER, "")
+                    if not api_key or not account:
+                        errors["base"] = "missing_credentials"
+                    else:
+                        try:
+                            from .octopus_sessions import OctopusSavingSessionsClient
+                            session = async_get_clientsession(self.hass)
+                            client = OctopusSavingSessionsClient(session, api_key, account)
+                            authed = await client.authenticate()
+                            if not authed:
+                                errors["base"] = "invalid_auth"
+                        except Exception:
+                            errors["base"] = "cannot_connect"
+
+            if not errors:
+                # Store saving session options in _amber_options (merged with Octopus tariff)
+                self._amber_options.update({
+                    CONF_OCTOPUS_SAVING_SESSIONS_ENABLED: user_input.get(CONF_OCTOPUS_SAVING_SESSIONS_ENABLED, False),
+                    CONF_OCTOPUS_SAVING_SESSIONS_SOURCE: user_input.get(CONF_OCTOPUS_SAVING_SESSIONS_SOURCE, "direct"),
+                    CONF_OCTOPUS_API_KEY: user_input.get(CONF_OCTOPUS_API_KEY, ""),
+                    CONF_OCTOPUS_ACCOUNT_NUMBER: user_input.get(CONF_OCTOPUS_ACCOUNT_NUMBER, ""),
+                    CONF_OCTOPUS_SAVING_SESSIONS_ENTITY: user_input.get(CONF_OCTOPUS_SAVING_SESSIONS_ENTITY, ""),
+                    CONF_OCTOPUS_SAVING_SESSIONS_AUTO_JOIN: user_input.get(CONF_OCTOPUS_SAVING_SESSIONS_AUTO_JOIN, True),
+                })
+                return await self.async_step_demand_charge_options()
+
+        # Get current values
+        current_enabled = self._get_option(CONF_OCTOPUS_SAVING_SESSIONS_ENABLED, False)
+        current_source = self._get_option(CONF_OCTOPUS_SAVING_SESSIONS_SOURCE, "direct")
+        current_api_key = self._get_option(CONF_OCTOPUS_API_KEY, "")
+        current_account = self._get_option(CONF_OCTOPUS_ACCOUNT_NUMBER, "")
+        current_entity = self._get_option(CONF_OCTOPUS_SAVING_SESSIONS_ENTITY, "")
+        current_auto_join = self._get_option(CONF_OCTOPUS_SAVING_SESSIONS_AUTO_JOIN, True)
+
+        data_schema = vol.Schema({
+            vol.Optional(CONF_OCTOPUS_SAVING_SESSIONS_ENABLED, default=current_enabled): bool,
+            vol.Optional(CONF_OCTOPUS_SAVING_SESSIONS_SOURCE, default=current_source): vol.In({
+                "direct": "Direct (Octopus API key)",
+                "entity": "Bottlecap Dave integration",
+            }),
+            vol.Optional(CONF_OCTOPUS_API_KEY, default=current_api_key): str,
+            vol.Optional(CONF_OCTOPUS_ACCOUNT_NUMBER, default=current_account): str,
+            vol.Optional(CONF_OCTOPUS_SAVING_SESSIONS_ENTITY, default=current_entity): str,
+            vol.Optional(CONF_OCTOPUS_SAVING_SESSIONS_AUTO_JOIN, default=current_auto_join): bool,
+        })
+
+        return self.async_show_form(
+            step_id="octopus_saving_sessions_options",
+            data_schema=data_schema,
+            errors=errors,
         )
 
     async def async_step_nz_options(

@@ -122,6 +122,27 @@
         },
         "submit_button": "Next"
       },
+      "octopus_saving_sessions": {
+        "title": "Octopus Saving Sessions",
+        "description": "Octopus Saving Sessions pay you to reduce grid usage during peak demand (typically 1-2 hours, 4-7pm in winter). PowerSync will automatically export your battery during active sessions.\n\nYou can connect directly via Octopus API or use the Bottlecap Dave integration.",
+        "data": {
+          "octopus_saving_sessions_enabled": "Enable Saving Sessions support",
+          "octopus_saving_sessions_source": "Data Source",
+          "octopus_api_key": "Octopus API Key",
+          "octopus_account_number": "Account Number",
+          "octopus_saving_sessions_entity": "Bottlecap Dave Entity ID",
+          "octopus_saving_sessions_auto_join": "Auto-join available sessions"
+        },
+        "data_description": {
+          "octopus_saving_sessions_enabled": "Enable automatic battery export during Octopus Saving Sessions",
+          "octopus_saving_sessions_source": "Direct uses the Octopus GraphQL API (requires API key). Entity reads from Bottlecap Dave's Octopus integration.",
+          "octopus_api_key": "Your Octopus API key from the developer dashboard (not the same as your public tariff API key)",
+          "octopus_account_number": "Your Octopus account number (e.g. A-12345678)",
+          "octopus_saving_sessions_entity": "Entity ID of the Bottlecap Dave saving sessions event entity (e.g. event.octopus_energy_saving_sessions)",
+          "octopus_saving_sessions_auto_join": "Automatically join available saving sessions (direct mode only)"
+        },
+        "submit_button": "Next"
+      },
       "custom_tariff": {
         "title": "Custom Tariff Configuration",
         "description": "Configure your electricity tariff rates for battery optimisation, price sensors, and EV charging.\n\n{info}\n\n{skip_hint}",
@@ -837,6 +858,27 @@
           "octopus_region": "Your Grid Supply Point region - check your Octopus bill for your GSP code (single letter A-P)",
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices",
           "battery_curtailment_enabled": "Stop battery from exporting when prices are negative to avoid paying to export"
+        },
+        "submit_button": "Next"
+      },
+      "octopus_saving_sessions_options": {
+        "title": "Octopus Saving Sessions",
+        "description": "Configure Saving Sessions support. PowerSync will automatically export your battery during active sessions to earn Octopoints.\n\nDirect mode requires your Octopus API key and account number. Entity mode reads from Bottlecap Dave's Octopus integration.",
+        "data": {
+          "octopus_saving_sessions_enabled": "Enable Saving Sessions support",
+          "octopus_saving_sessions_source": "Data Source",
+          "octopus_api_key": "Octopus API Key",
+          "octopus_account_number": "Account Number",
+          "octopus_saving_sessions_entity": "Bottlecap Dave Entity ID",
+          "octopus_saving_sessions_auto_join": "Auto-join available sessions"
+        },
+        "data_description": {
+          "octopus_saving_sessions_enabled": "Enable automatic battery export during Octopus Saving Sessions",
+          "octopus_saving_sessions_source": "Direct uses the Octopus GraphQL API (requires API key). Entity reads from Bottlecap Dave's Octopus integration.",
+          "octopus_api_key": "Your Octopus API key from the developer dashboard",
+          "octopus_account_number": "Your Octopus account number (e.g. A-12345678)",
+          "octopus_saving_sessions_entity": "Entity ID of the Bottlecap Dave saving sessions event entity",
+          "octopus_saving_sessions_auto_join": "Automatically join available saving sessions (direct mode only)"
         },
         "submit_button": "Next"
       },

@@ -444,6 +444,21 @@ OCTOPUS_GSP_REGIONS = {
     "P": "North Scotland",
 }
 
+# Octopus Saving Sessions
+CONF_OCTOPUS_SAVING_SESSIONS_ENABLED = "octopus_saving_sessions_enabled"
+CONF_OCTOPUS_SAVING_SESSIONS_SOURCE = "octopus_saving_sessions_source"  # "direct" or "entity"
+CONF_OCTOPUS_API_KEY = "octopus_api_key"  # GraphQL auth (different from public price API)
+CONF_OCTOPUS_ACCOUNT_NUMBER = "octopus_account_number"  # e.g. "A-12345678"
+CONF_OCTOPUS_SAVING_SESSIONS_ENTITY = "octopus_saving_sessions_entity"  # Bottlecap Dave entity
+CONF_OCTOPUS_SAVING_SESSIONS_AUTO_JOIN = "octopus_saving_sessions_auto_join"
+CONF_OCTOPUS_OCTOPOINTS_PER_PENNY = "octopus_octopoints_per_penny"  # Default 8
+DEFAULT_OCTOPOINTS_PER_PENNY = 8
+
+# Saving session sensor types
+SENSOR_TYPE_SAVING_SESSION_ACTIVE = "saving_session_active"
+SENSOR_TYPE_NEXT_SAVING_SESSION = "next_saving_session"
+SENSOR_TYPE_SAVING_SESSION_RATE = "saving_session_rate"
+
 # Flow Power state options with export rates
 FLOW_POWER_STATES = {
     "NSW1": "New South Wales (45c export)",

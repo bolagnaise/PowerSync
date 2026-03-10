@@ -63,6 +63,9 @@ from .const import (
     CONF_ELECTRICITY_PROVIDER,
     SENSOR_TYPE_TARIFF_SCHEDULE,
     SENSOR_TYPE_SOLAR_CURTAILMENT,
+    SENSOR_TYPE_SAVING_SESSION_ACTIVE,
+    SENSOR_TYPE_NEXT_SAVING_SESSION,
+    SENSOR_TYPE_SAVING_SESSION_RATE,
     SENSOR_TYPE_FLOW_POWER_PRICE,
     SENSOR_TYPE_FLOW_POWER_EXPORT_PRICE,
     SENSOR_TYPE_FLOW_POWER_TWAP,
@@ -569,6 +572,58 @@ AEMO_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
 )
 
 
+# Octopus Saving Session Sensors
+SAVING_SESSION_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_SAVING_SESSION_ACTIVE,
+        name="Saving Session Active",
+        icon="mdi:lightning-bolt",
+        value_fn=lambda data: "Active" if data and data.get("active_session") else "Inactive",
+        attr_fn=lambda data: {
+            "session_code": data["active_session"].code if data and data.get("active_session") else None,
+            "session_start": data["active_session"].start.isoformat() if data and data.get("active_session") else None,
+            "session_end": data["active_session"].end.isoformat() if data and data.get("active_session") else None,
+            "session_type": data["active_session"].session_type if data and data.get("active_session") else None,
+            "octopoints_per_kwh": data["active_session"].octopoints_per_kwh if data and data.get("active_session") else None,
+        } if data else {},
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_NEXT_SAVING_SESSION,
+        name="Next Saving Session",
+        icon="mdi:calendar-clock",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        value_fn=lambda data: data["next_session"].start if data and data.get("next_session") else None,
+        attr_fn=lambda data: {
+            "session_code": data["next_session"].code if data and data.get("next_session") else None,
+            "session_end": data["next_session"].end.isoformat() if data and data.get("next_session") else None,
+            "session_type": data["next_session"].session_type if data and data.get("next_session") else None,
+            "octopoints_per_kwh": data["next_session"].octopoints_per_kwh if data and data.get("next_session") else None,
+            "rate_pence_per_kwh": data["next_session"].rate_pence_per_kwh if data and data.get("next_session") else None,
+        } if data else {},
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_SAVING_SESSION_RATE,
+        name="Saving Session Rate",
+        icon="mdi:currency-gbp",
+        native_unit_of_measurement="p/kWh",
+        suggested_display_precision=1,
+        value_fn=lambda data: (
+            data["active_session"].rate_pence_per_kwh
+            if data and data.get("active_session")
+            else (
+                data["next_session"].rate_pence_per_kwh
+                if data and data.get("next_session")
+                else None
+            )
+        ),
+        attr_fn=lambda data: {
+            "source": "active" if data and data.get("active_session") else ("next" if data and data.get("next_session") else None),
+            "total_sessions": len(data.get("sessions", [])) if data else 0,
+        } if data else {},
+    ),
+)
+
+
 # Solcast Solar Forecast Sensors
 SOLCAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
@@ -774,6 +829,19 @@ async def async_setup_entry(
             entities.append(
                 AEMOSpikeSensor(
                     spike_manager=aemo_spike_manager,
+                    description=description,
+                    entry=entry,
+                )
+            )
+
+    # Add Saving Session sensors if coordinator exists
+    saving_session_coordinator = domain_data.get("saving_session_coordinator")
+    if saving_session_coordinator:
+        _LOGGER.info("Octopus Saving Sessions enabled - adding sensors")
+        for description in SAVING_SESSION_SENSORS:
+            entities.append(
+                SavingSessionSensor(
+                    coordinator=saving_session_coordinator,
                     description=description,
                     entry=entry,
                 )
@@ -1182,6 +1250,47 @@ class AEMOSpikeSensor(SensorEntity):
         """Return additional attributes."""
         if self.entity_description.attr_fn:
             return self.entity_description.attr_fn(self._spike_manager.get_status())
+        return {}
+
+
+class SavingSessionSensor(CoordinatorEntity, SensorEntity):
+    """Sensor for Octopus Saving Sessions status."""
+
+    entity_description: PowerSyncSensorEntityDescription
+
+    def __init__(
+        self,
+        coordinator,  # OctopusSavingSessionCoordinator
+        description: PowerSyncSensorEntityDescription,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator)
+        self.entity_description = description
+        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        self._attr_has_entity_name = True
+        self._attr_suggested_object_id = f"power_sync_{description.key}"
+        self._entry = entry
+
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
+
+    @property
+    def native_value(self) -> Any:
+        """Return the state of the sensor."""
+        if self.entity_description.value_fn:
+            return self.entity_description.value_fn(self.coordinator.data)
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return additional attributes."""
+        if self.entity_description.attr_fn:
+            return self.entity_description.attr_fn(self.coordinator.data)
         return {}
 
 

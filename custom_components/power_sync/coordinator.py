@@ -3973,6 +3973,109 @@ class OctopusPriceCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(f"Error fetching Octopus data: {err}") from err
 
 
+class OctopusSavingSessionCoordinator(DataUpdateCoordinator):
+    """Coordinator that polls for Octopus Saving Sessions.
+
+    Supports two data sources:
+    - Direct API: Uses OctopusSavingSessionsClient with GraphQL
+    - Entity: Reads from Bottlecap Dave's Octopus integration event entity
+
+    Polls every 15 minutes. Optionally auto-joins available sessions.
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        client=None,
+        entity_id: str | None = None,
+        auto_join: bool = False,
+        octopoints_per_penny: int = 8,
+    ) -> None:
+        """Initialize the coordinator.
+
+        Args:
+            hass: HomeAssistant instance
+            client: OctopusSavingSessionsClient (direct mode) or None
+            entity_id: Bottlecap Dave event entity ID (entity mode) or None
+            auto_join: Auto-join available sessions (direct mode only)
+            octopoints_per_penny: Conversion rate (default 8)
+        """
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_octopus_saving_sessions",
+            update_interval=timedelta(minutes=15),
+        )
+        self._client = client
+        self._entity_id = entity_id
+        self._auto_join = auto_join
+        self._octopoints_per_penny = octopoints_per_penny
+
+    async def _async_update_data(self) -> dict:
+        """Fetch sessions from direct API or Bottlecap Dave entity."""
+        from homeassistant.util import dt as dt_util
+        from .octopus_sessions import SavingSession
+
+        sessions: list[SavingSession] = []
+
+        if self._client:
+            # Direct API mode
+            try:
+                raw = await self._client.get_sessions()
+                if self._auto_join:
+                    for s in raw:
+                        if not s.joined and s.session_type == "saving":
+                            joined = await self._client.join_session(s.code)
+                            if joined:
+                                s.joined = True
+                                _LOGGER.info(
+                                    "Auto-joined saving session: %s (%s - %s)",
+                                    s.code, s.start, s.end,
+                                )
+                sessions = raw
+            except Exception as err:
+                _LOGGER.error("Error fetching saving sessions from API: %s", err)
+
+        elif self._entity_id:
+            # Bottlecap Dave entity mode
+            state = self.hass.states.get(self._entity_id)
+            if state:
+                # Parse joined_events from entity attributes
+                for ev in state.attributes.get("joined_events", []):
+                    try:
+                        start_str = ev.get("start", "")
+                        end_str = ev.get("end", "")
+                        if not start_str or not end_str:
+                            continue
+                        start = datetime.fromisoformat(str(start_str))
+                        end = datetime.fromisoformat(str(end_str))
+                        sessions.append(SavingSession(
+                            code=str(ev.get("id", "")),
+                            start=start,
+                            end=end,
+                            octopoints_per_kwh=ev.get("octopoints_per_kwh", 800),
+                            joined=True,
+                            session_type="saving",
+                        ))
+                    except (ValueError, KeyError, TypeError) as err:
+                        _LOGGER.debug("Skipping malformed entity event: %s", err)
+            else:
+                _LOGGER.debug(
+                    "Saving sessions entity %s not available", self._entity_id
+                )
+
+        now = dt_util.utcnow()
+        return {
+            "sessions": sessions,
+            "active_session": next(
+                (s for s in sessions if s.is_active() and s.joined), None
+            ),
+            "next_session": next(
+                (s for s in sessions if s.start > now and s.joined), None
+            ),
+        }
+
+
 class FlowPowerTWAPTracker:
     """Tracks wholesale prices and calculates rolling 30-day TWAP.
 
