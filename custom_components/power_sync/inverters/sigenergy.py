@@ -51,7 +51,8 @@ class SigenergyController(InverterController):
     REG_ESS_DISCHARGE_CUTOFF_SOC = 40048  # ESS discharge cut-off SOC (U16, gain 10, %)
 
     # Input registers (read-only) - Real-time power
-    REG_PV_POWER = 30035                  # PV power (S32, gain 1000, kW)
+    REG_PV_POWER = 30035                  # PV power (S32, gain 1000, kW) — DC-coupled only
+    REG_THIRD_PARTY_PV_POWER = 30194     # Third-party inverter power (S32, gain 1000, kW) — AC-coupled (Smart Port)
     REG_ACTIVE_POWER = 30031              # Active power (S32, gain 1000, kW)
     REG_ESS_SOC = 30014                   # Battery SOC (U16, gain 10, %)
     REG_ESS_POWER = 30037                 # Battery power (S32, gain 1000, kW)
@@ -425,13 +426,21 @@ class SigenergyController(InverterController):
         attrs = {}
         success_count = 0
 
-        # Read PV power (S32, 2 registers)
+        # Read PV power (S32, 2 registers) — DC-coupled solar only
         pv_power_regs = await self._read_input_registers(self.REG_PV_POWER, 2)
         if pv_power_regs and len(pv_power_regs) >= 2:
             pv_power_kw = self._to_signed32(pv_power_regs[0], pv_power_regs[1]) / self.GAIN_POWER
             attrs["pv_power_kw"] = round(pv_power_kw, 2)
             attrs["pv_power_w"] = pv_power_kw * 1000
             success_count += 1
+
+        # Read third-party PV power (S32, 2 registers) — AC-coupled solar via Smart Port
+        tp_pv_regs = await self._read_input_registers(self.REG_THIRD_PARTY_PV_POWER, 2)
+        if tp_pv_regs and len(tp_pv_regs) >= 2:
+            tp_pv_kw = self._to_signed32(tp_pv_regs[0], tp_pv_regs[1]) / self.GAIN_POWER
+            # Only include positive values (generation); 0 is normal for systems without Smart Port
+            if tp_pv_kw > 0:
+                attrs["third_party_pv_power_kw"] = round(tp_pv_kw, 2)
 
         # Read battery SOC (U16)
         soc_regs = await self._read_input_registers(self.REG_ESS_SOC, 1)

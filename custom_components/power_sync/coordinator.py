@@ -2236,7 +2236,9 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
 
             # Map Sigenergy data to standard format (same as Tesla)
             # Power values in kW from Modbus, we keep them in kW for sensors
-            solar_kw = attrs.get("pv_power_kw", 0)
+            dc_solar_kw = attrs.get("pv_power_kw", 0)
+            ac_solar_kw = attrs.get("third_party_pv_power_kw", 0)  # AC-coupled via Smart Port
+            solar_kw = dc_solar_kw + ac_solar_kw
             grid_kw = attrs.get("grid_power_kw", 0)  # Positive = importing, negative = exporting
 
             # Sigenergy battery sign convention is OPPOSITE to Tesla:
@@ -2257,7 +2259,7 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
             self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
 
             energy_data = {
-                "solar_power": solar_kw,  # kW
+                "solar_power": solar_kw,  # kW (DC + AC-coupled)
                 "grid_power": grid_kw,  # kW, positive = importing, negative = exporting
                 "battery_power": battery_kw,  # kW, positive = discharging, negative = charging
                 "load_power": load_kw,  # kW, calculated from energy balance
@@ -2268,6 +2270,7 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
                 "export_limit_kw": attrs.get("export_limit_kw"),
                 "ems_work_mode": attrs.get("ems_work_mode"),
                 "is_curtailed": status.is_curtailed,
+                "third_party_pv_power_kw": ac_solar_kw,  # AC-coupled solar via Smart Port
                 # Battery health data
                 "battery_soh": attrs.get("battery_soh"),  # % State of Health
                 "battery_capacity_kwh": attrs.get("battery_capacity_kwh"),  # kWh rated capacity
@@ -2275,8 +2278,10 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
             }
 
             _LOGGER.debug(
-                "Sigenergy data: solar=%.2f kW, grid=%.2f kW, battery=%.2f kW (%.0f%%), load=%.2f kW, curtailed=%s",
+                "Sigenergy data: solar=%.2f kW (dc=%.2f, ac=%.2f), grid=%.2f kW, battery=%.2f kW (%.0f%%), load=%.2f kW, curtailed=%s",
                 energy_data["solar_power"],
+                dc_solar_kw,
+                ac_solar_kw,
                 energy_data["grid_power"],
                 energy_data["battery_power"],
                 energy_data["battery_level"],
