@@ -302,12 +302,29 @@ class BatteryOptimizer:
         # FOUR4FREE has 4 hours at 0c — median would be ~31c, causing the LP
         # to prefer grid import over battery discharge at 31c partial-peak
         # because the efficiency-adjusted penalty 31/0.9=34.4c > 31c import).
+        #
+        # Solar recharging: when solar is available, the battery can recharge
+        # at the opportunity cost of export (foregone export revenue), which
+        # is typically much cheaper than grid import. Without this, flat-rate
+        # users see terminal_price = import_price, making the efficiency-
+        # adjusted penalty > import_price, so the LP prefers IDLE (grid
+        # import) over self-consumption — exactly wrong.
         half_n = n // 2
         second_half_prices = import_prices[half_n:] if half_n < n else import_prices
-        if second_half_prices:
-            terminal_price = max(0.001, min(second_half_prices))
+        min_grid_recharge = min(second_half_prices) if second_half_prices else 0.0
+
+        # Check if solar can recharge the battery in the second half of horizon.
+        # If so, the marginal recharge cost is the export price (opportunity cost).
+        solar_recharge_costs = [
+            export_prices[t]
+            for t in range(half_n, n)
+            if solar[t] > 0.1  # Meaningful solar available
+        ]
+        if solar_recharge_costs:
+            min_solar_recharge = min(solar_recharge_costs)
+            terminal_price = max(0.001, min(min_grid_recharge, min_solar_recharge))
         else:
-            terminal_price = 0.0
+            terminal_price = max(0.001, min_grid_recharge) if min_grid_recharge > 0 else 0.0
 
         if terminal_price > 0:
             for t in range(n):
