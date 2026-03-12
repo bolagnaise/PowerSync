@@ -145,6 +145,7 @@ class SungrowSHController(InverterController):
         self._lock = asyncio.Lock()
         self._battery_voltage: float = self.BATTERY_VOLTAGE_FALLBACK
         self._original_ems_mode: Optional[int] = None
+        self._in_forced_stop: bool = False
 
     async def connect(self) -> bool:
         """Connect to the Sungrow SH inverter via Modbus TCP."""
@@ -693,11 +694,13 @@ class SungrowSHController(InverterController):
 
     async def force_charge(self) -> bool:
         """Set EMS to forced charge mode."""
+        self._in_forced_stop = False
         _LOGGER.info("Setting Sungrow SH at %s to forced charge mode", self.host)
         return await self._write_forced_mode(self.CMD_CHARGE, "force charge")
 
     async def force_discharge(self) -> bool:
         """Set EMS to forced discharge mode."""
+        self._in_forced_stop = False
         _LOGGER.info("Setting Sungrow SH at %s to forced discharge mode", self.host)
         return await self._write_forced_mode(self.CMD_DISCHARGE, "force discharge")
 
@@ -726,6 +729,7 @@ class SungrowSHController(InverterController):
                 return False
 
             self._original_ems_mode = None
+            self._in_forced_stop = False
             _LOGGER.info("Sungrow SH at %s restored to %s", self.host, mode_name)
             return True
 
@@ -762,6 +766,7 @@ class SungrowSHController(InverterController):
                 _LOGGER.error("Failed to send stop command for IDLE")
                 return False
 
+            self._in_forced_stop = True
             _LOGGER.info(f"Sungrow SH at {self.host} now in Forced+Stop (IDLE hold)")
             return True
 
@@ -786,6 +791,15 @@ class SungrowSHController(InverterController):
         Returns:
             True if successful, False otherwise
         """
+        # Sungrow firmware rejects reg 13099 writes in Forced+Stop mode
+        # (exception_code=4). Forced+Stop already halts all battery activity
+        # so backup_reserve is redundant — skip to avoid Modbus error cascade.
+        if self._in_forced_stop:
+            _LOGGER.debug(
+                "Skipping backup_reserve write — Sungrow is in Forced+Stop (IDLE hold)"
+            )
+            return True
+
         _LOGGER.info(f"Setting Sungrow SH at {self.host} backup reserve to {percent}%")
         try:
             if not await self.connect():
