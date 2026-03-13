@@ -186,6 +186,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Track last executed action for IDLE→non-IDLE transition
         self._last_executed_action: str | None = None
         self._idle_sc_holdoff: int = 0  # Hysteresis counter for IDLE→SC transitions
+        self._charge_holdoff: int = 0  # Hysteresis for entering CHARGE (require 2 consecutive)
 
         # Background task handles (for cancellation on disable)
         self._polling_task: asyncio.Task | None = None
@@ -894,13 +895,74 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 "(confirmed after 3 cycles)",
                             )
 
+            # CHARGE hysteresis: require 2 consecutive CHARGE decisions
+            # before executing force_charge. This prevents oscillation at
+            # decision boundaries (e.g. LP flipping CHARGE↔SC every cycle
+            # near a demand window). Each flip triggers a full tariff
+            # upload + mode switch cycle that creates unnecessary grid
+            # import spikes. Cost: 5-min delay entering charge, negligible
+            # for multi-hour off-peak charging.
+            if effective_action == "charge":
+                if self._last_executed_action != "charge":
+                    self._charge_holdoff += 1
+                    if self._charge_holdoff < 2:
+                        _LOGGER.info(
+                            "Optimizer: LP chose CHARGE but holding off "
+                            "(hysteresis %d/2 — confirming commitment)",
+                            self._charge_holdoff,
+                        )
+                        effective_action = "self_consumption"
+                    else:
+                        self._charge_holdoff = 0
+                        _LOGGER.info(
+                            "Optimizer: CHARGE confirmed after 2 consecutive cycles"
+                        )
+                # else: already charging, holdoff stays at 0
+            else:
+                self._charge_holdoff = 0
+
             if effective_action == "charge":
                 if hasattr(battery, "force_charge"):
-                    await battery.force_charge(
-                        duration_minutes=self._config.interval_minutes + 5,
-                        power_w=action.power_w,
-                    )
-                    _LOGGER.info("Optimizer: Charging at %.0fW", action.power_w)
+                    charge_duration = self._config.interval_minutes + 5
+                    # Near the demand window, shorten charge duration so the
+                    # auto-restore fires 1 minute before demand starts.  The
+                    # optimizer recalculates every 5 minutes and will upload a
+                    # fresh tariff, so the 30-min TOU rounding is irrelevant.
+                    # Within 1 minute of demand, override to self_consumption.
+                    mins_to_demand = self._minutes_to_demand_start()
+                    if mins_to_demand is not None and mins_to_demand <= 1:
+                        _LOGGER.info(
+                            "Optimizer: Blocking CHARGE — %d min to demand "
+                            "window, switching to self_consumption",
+                            mins_to_demand,
+                        )
+                        effective_action = "self_consumption"
+                        if hasattr(battery, "set_self_consumption_mode"):
+                            await battery.set_self_consumption_mode()
+                        elif hasattr(battery, "restore_normal"):
+                            await battery.restore_normal()
+                    elif mins_to_demand is not None and mins_to_demand <= charge_duration:
+                        charge_duration = max(1, mins_to_demand - 1)
+                        _LOGGER.info(
+                            "Optimizer: Shortening charge to %dmin "
+                            "(%d min before demand window)",
+                            charge_duration, mins_to_demand,
+                        )
+                        await battery.force_charge(
+                            duration_minutes=charge_duration,
+                            power_w=action.power_w,
+                        )
+                        _LOGGER.info(
+                            "Optimizer: Charging at %.0fW for %dmin "
+                            "(auto-restore before demand)",
+                            action.power_w, charge_duration,
+                        )
+                    else:
+                        await battery.force_charge(
+                            duration_minutes=charge_duration,
+                            power_w=action.power_w,
+                        )
+                        _LOGGER.info("Optimizer: Charging at %.0fW", action.power_w)
             elif effective_action in ("discharge", "export"):
                 # Safety guard: do NOT force-discharge if SOC is at or below
                 # the configured backup reserve.  force_discharge sets Tesla
@@ -1473,6 +1535,76 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if buffered_start < 0:
             return current_min >= (buffered_start + 1440) or current_min < end_min
         return buffered_start <= current_min < end_min
+
+    def _minutes_to_demand_start(self) -> int | None:
+        """Return minutes until the demand charge window starts today.
+
+        Returns:
+            Positive int if before the window (minutes until start).
+            0 if currently inside the window.
+            None if demand charge is disabled or doesn't apply today.
+        """
+        if not self._entry:
+            return None
+
+        from ..const import (
+            CONF_DEMAND_CHARGE_ENABLED,
+            CONF_DEMAND_CHARGE_START_TIME,
+            CONF_DEMAND_CHARGE_END_TIME,
+            CONF_DEMAND_CHARGE_DAYS,
+        )
+
+        enabled = self._entry.options.get(
+            CONF_DEMAND_CHARGE_ENABLED,
+            self._entry.data.get(CONF_DEMAND_CHARGE_ENABLED, False),
+        )
+        if not enabled:
+            return None
+
+        start_str = self._entry.options.get(
+            CONF_DEMAND_CHARGE_START_TIME,
+            self._entry.data.get(CONF_DEMAND_CHARGE_START_TIME, "14:00"),
+        )
+        end_str = self._entry.options.get(
+            CONF_DEMAND_CHARGE_END_TIME,
+            self._entry.data.get(CONF_DEMAND_CHARGE_END_TIME, "20:00"),
+        )
+        days = self._entry.options.get(
+            CONF_DEMAND_CHARGE_DAYS,
+            self._entry.data.get(CONF_DEMAND_CHARGE_DAYS, "All Days"),
+        )
+
+        try:
+            s_parts = start_str.split(":")
+            start_min = int(s_parts[0]) * 60 + int(s_parts[1])
+            e_parts = end_str.split(":")
+            end_min = int(e_parts[0]) * 60 + int(e_parts[1])
+        except (ValueError, IndexError):
+            return None
+
+        now = dt_util.now()
+        weekday = now.weekday()
+
+        if days == "Weekdays Only" and weekday >= 5:
+            return None
+        if days == "Weekends Only" and weekday < 5:
+            return None
+
+        current_min = now.hour * 60 + now.minute
+
+        # Check if inside the window
+        if end_min > start_min:
+            if start_min <= current_min < end_min:
+                return 0
+        else:
+            if current_min >= start_min or current_min < end_min:
+                return 0
+
+        # Before the window — return minutes until start
+        diff = start_min - current_min
+        if diff < 0:
+            diff += 1440
+        return diff
 
     def _should_block_export_for_demand(self) -> bool:
         """Check if exports should be blocked for demand charge reasons.

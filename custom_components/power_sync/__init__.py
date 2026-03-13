@@ -15675,7 +15675,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Block force charge during demand peak periods (grid charging must stay off)
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         dc_coordinator = entry_data.get("demand_charge_coordinator")
-        if dc_coordinator and not entry_data.get("demand_allow_grid_charging", False):
+        if dc_coordinator and dc_coordinator.enabled and not entry_data.get("demand_allow_grid_charging", False):
             current_time = dt_util.now()
             if dc_coordinator._is_in_peak_period(current_time):
                 _LOGGER.warning(
@@ -16173,6 +16173,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         charge_start = current_period_index
         charge_end = (current_period_index + total_periods) % 48
+
+        # Cap charge window at the demand period boundary (safety net).
+        # The optimizer shortens charge duration near demand so the auto-
+        # restore fires before the window opens. This tariff cap is a belt-
+        # and-suspenders guard: if the auto-restore is delayed, Tesla
+        # firmware still sees buy=$10/kWh at the demand boundary and stops
+        # charging autonomously. The cap is at the exact boundary — the
+        # optimizer handles the 1-minute buffer via duration shortening.
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        _dc_coord = entry_data.get("demand_charge_coordinator")
+        if _dc_coord and _dc_coord.enabled and not entry_data.get("demand_allow_grid_charging", False):
+            try:
+                ds_parts = _dc_coord.start_time.split(":")
+                demand_start_period = int(ds_parts[0]) * 2 + (1 if int(ds_parts[1]) >= 30 else 0)
+                if charge_end > demand_start_period and charge_start < demand_start_period:
+                    _LOGGER.info(
+                        "Charge tariff: capping window at demand boundary "
+                        "(period %d → %d, demand starts period %d)",
+                        charge_end, demand_start_period, demand_start_period,
+                    )
+                    charge_end = demand_start_period
+                    total_periods = charge_end - charge_start
+            except (ValueError, IndexError):
+                pass  # Malformed start_time — skip capping
 
         # Calculate actual expiry time aligned to tariff window end
         # This ensures the timer doesn't fire before the tariff window ends
