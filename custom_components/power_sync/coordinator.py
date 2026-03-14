@@ -2351,7 +2351,12 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         """
         summary = self._energy_acc.as_dict()
 
-        # Override kWh counters with register-based values when available
+        # Override kWh counters with register-based values when available.
+        # Some Sungrow systems have no external energy meter paired, so the
+        # daily import/export registers (13035/13044) permanently read 0.
+        # Detect this by checking whether the register reads 0 while the
+        # software accumulator has already recorded energy — if so, the
+        # register is broken and we keep the accumulator value.
         daily_pv = data.get("daily_pv_generation")
         daily_import = data.get("daily_import")
         daily_export = data.get("daily_export")
@@ -2361,18 +2366,26 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         if daily_pv is not None:
             summary["pv_today_kwh"] = daily_pv
         if daily_import is not None:
-            summary["grid_import_today_kwh"] = daily_import
+            acc_import = summary.get("grid_import_today_kwh", 0)
+            if daily_import > 0 or acc_import < 0.01:
+                summary["grid_import_today_kwh"] = daily_import
         if daily_export is not None:
-            summary["grid_export_today_kwh"] = daily_export
+            acc_export = summary.get("grid_export_today_kwh", 0)
+            if daily_export > 0 or acc_export < 0.01:
+                summary["grid_export_today_kwh"] = daily_export
         if daily_discharge is not None:
             summary["discharge_today_kwh"] = daily_discharge
         if daily_charge is not None:
             summary["charge_today_kwh"] = daily_charge
 
+        # Use the final (possibly corrected) import/export values for load calc
+        final_import = summary.get("grid_import_today_kwh", 0)
+        final_export = summary.get("grid_export_today_kwh", 0)
+
         # Calculate daily load from energy balance (no register for this)
-        if all(v is not None for v in (daily_pv, daily_import, daily_discharge, daily_export, daily_charge)):
+        if all(v is not None for v in (daily_pv, daily_discharge, daily_charge)):
             summary["load_today_kwh"] = round(max(0,
-                daily_pv + daily_import + daily_discharge - daily_export - daily_charge
+                daily_pv + final_import + (daily_discharge or 0) - final_export - (daily_charge or 0)
             ), 2)
 
         return summary
