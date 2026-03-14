@@ -1359,6 +1359,12 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         self._energy_acc = EnergyAccumulator(hass, "tesla")
         self._firmware = None  # Extracted from site_info gateways
 
+        # Tesla server outage tracking
+        self._consecutive_failures: int = 0
+        self._outage_notified: bool = False
+        self._outage_start: float = 0  # monotonic timestamp
+        self._last_outage_notification: float = 0  # monotonic timestamp (cooldown)
+
         # Determine API base URL based on provider
         if api_provider == TESLA_PROVIDER_FLEET_API:
             self.api_base_url = FLEET_API_BASE_URL
@@ -1467,11 +1473,65 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 "firmware": self._firmware,
             }
 
+            # Tesla API recovered — send recovery notification if we were in outage
+            if self._outage_notified:
+                outage_mins = int((time.monotonic() - self._outage_start) / 60)
+                _LOGGER.warning(
+                    "Tesla API recovered after %d min outage (site %s)",
+                    outage_mins, self.site_id,
+                )
+                try:
+                    from .automations.actions import _send_expo_push
+                    await _send_expo_push(
+                        self.hass,
+                        "Tesla Server Recovered",
+                        f"Tesla API is back online after {outage_mins} min outage",
+                    )
+                except Exception:
+                    pass
+            self._consecutive_failures = 0
+            self._outage_notified = False
+
             return energy_data
 
-        except UpdateFailed:
-            raise  # Re-raise UpdateFailed exceptions
-        except Exception as err:
+        except (UpdateFailed, Exception) as err:
+            self._consecutive_failures += 1
+            now = time.monotonic()
+
+            # After 5 consecutive failures (~5 min), notify once per 30 min
+            if self._consecutive_failures >= 5 and not self._outage_notified:
+                self._outage_notified = True
+                self._outage_start = now
+                self._last_outage_notification = now
+                _LOGGER.error(
+                    "Tesla server outage detected: %d consecutive failures (site %s)",
+                    self._consecutive_failures, self.site_id,
+                )
+                try:
+                    from .automations.actions import _send_expo_push
+                    await _send_expo_push(
+                        self.hass,
+                        "Tesla Server Outage",
+                        f"Tesla API unreachable — optimization paused. Error: {err}",
+                    )
+                except Exception:
+                    pass
+            elif self._outage_notified and (now - self._last_outage_notification) > 1800:
+                # Repeat notification every 30 min during ongoing outage
+                outage_mins = int((now - self._outage_start) / 60)
+                self._last_outage_notification = now
+                try:
+                    from .automations.actions import _send_expo_push
+                    await _send_expo_push(
+                        self.hass,
+                        "Tesla Server Outage",
+                        f"Tesla API still unreachable after {outage_mins} min",
+                    )
+                except Exception:
+                    pass
+
+            if isinstance(err, UpdateFailed):
+                raise
             raise UpdateFailed(f"Unexpected error fetching Tesla energy data: {err}") from err
 
     async def async_get_site_info(self) -> dict[str, Any] | None:
