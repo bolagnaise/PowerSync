@@ -834,7 +834,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # backup_reserve. For charge/export, exit IDLE immediately.
             prev = self._last_executed_action
             if effective_action == "idle":
-                self._idle_sc_holdoff = 0  # Reset hysteresis
+                # Only reset hysteresis when entering IDLE from a non-IDLE
+                # state.  When already in IDLE, preserve the counter so SC
+                # decisions can accumulate across LP cycles.  Without this,
+                # the counter oscillates 0→1→0 because the LP alternates
+                # IDLE/SC at schedule boundaries, and the system stays stuck
+                # in Forced+Stop mode indefinitely.
+                if prev != "idle":
+                    self._idle_sc_holdoff = 0
             elif prev == "idle":
                 if effective_action in ("charge", "discharge", "export"):
                     # Charge/export: exit IDLE immediately
