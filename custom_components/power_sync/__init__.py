@@ -15051,6 +15051,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         source = call.data.get("source", "user")
         _LOGGER.info(f"🔋 FORCE DISCHARGE: Activating for {duration} minutes (source={source})")
 
+        # Set force discharge state IMMEDIATELY so the optimizer sees it
+        # before the async Modbus/API call completes (same race fix as force_charge).
+        was_already_force_discharging = force_discharge_state.get("active", False)
+        force_discharge_state["active"] = True
+        force_discharge_state["source"] = source
+
         # Check if this is a Sigenergy system
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
         if is_sigenergy:
@@ -15061,6 +15067,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     entry.data.get(CONF_SIGENERGY_MODBUS_HOST)
                 )
                 if not modbus_host:
+                    force_discharge_state["active"] = False
                     _LOGGER.error("Force discharge: Sigenergy Modbus host not configured")
                     return
 
@@ -15114,9 +15121,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     await persist_force_mode_state()
                 else:
+                    force_discharge_state["active"] = False
                     _LOGGER.error("Sigenergy force discharge failed")
                 return
             except Exception as e:
+                force_discharge_state["active"] = False
                 _LOGGER.error(f"Error in Sigenergy force discharge: {e}", exc_info=True)
                 return
 
@@ -15127,6 +15136,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 foxess_coord = entry_data.get("foxess_coordinator")
                 if not foxess_coord:
+                    force_discharge_state["active"] = False
                     _LOGGER.error("Force discharge: FoxESS coordinator not available")
                     return
 
@@ -15159,9 +15169,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     await persist_force_mode_state()
                 else:
+                    force_discharge_state["active"] = False
                     _LOGGER.error("FoxESS force discharge failed")
                 return
             except Exception as e:
+                force_discharge_state["active"] = False
                 _LOGGER.error(f"Error in FoxESS force discharge: {e}", exc_info=True)
                 return
 
@@ -15172,6 +15184,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 goodwe_coord = entry_data.get("goodwe_coordinator")
                 if not goodwe_coord:
+                    force_discharge_state["active"] = False
                     _LOGGER.error("Force discharge: GoodWe coordinator not available")
                     return
 
@@ -15204,9 +15217,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     await persist_force_mode_state()
                 else:
+                    force_discharge_state["active"] = False
                     _LOGGER.error("GoodWe force discharge failed")
                 return
             except Exception as e:
+                force_discharge_state["active"] = False
                 _LOGGER.error(f"Error in GoodWe force discharge: {e}", exc_info=True)
                 return
 
@@ -15217,6 +15232,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 sungrow_coord = entry_data.get("sungrow_coordinator")
                 if not sungrow_coord:
+                    force_discharge_state["active"] = False
                     _LOGGER.error("Force discharge: Sungrow coordinator not available")
                     return
 
@@ -15250,9 +15266,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     await persist_force_mode_state()
                 else:
+                    force_discharge_state["active"] = False
                     _LOGGER.error("Sungrow force discharge failed")
                 return
             except Exception as e:
+                force_discharge_state["active"] = False
                 _LOGGER.error(f"Error in Sungrow force discharge: {e}", exc_info=True)
                 return
 
@@ -15260,6 +15278,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Get all Tesla gateway configs (primary + optional secondary)
             site_configs = _get_tesla_site_configs(hass, entry)
             if not site_configs:
+                force_discharge_state["active"] = False
                 _LOGGER.error("Missing Tesla site ID or token for force discharge")
                 return
 
@@ -15267,7 +15286,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             # Step 1: Save current tariff and state (if not already in discharge mode)
             tariff_saved_from_site_info = False
-            if not force_discharge_state["active"]:
+            if not was_already_force_discharging:
                 # Initialize per-site saved states dict
                 saved_states = {}
                 for site_id, current_token, provider in site_configs:
@@ -15468,9 +15487,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # Persist state to survive HA restarts
                 await persist_force_mode_state()
             else:
+                force_discharge_state["active"] = False
                 _LOGGER.error("Failed to upload discharge tariff to one or more gateways")
 
         except Exception as e:
+            force_discharge_state["active"] = False
             _LOGGER.error(f"Error in force discharge: {e}", exc_info=True)
 
     def _create_discharge_tariff(duration_minutes: int) -> tuple[dict, datetime]:
@@ -15685,6 +15706,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 return
 
+        # Set force charge state IMMEDIATELY so the optimizer sees it
+        # before the async Modbus/API call completes.  Prevents a race
+        # where the optimizer finishes its LP cycle during the Modbus
+        # write and overrides the mode (e.g. FoxESS Backup → Self Use).
+        # Each battery branch sets expires_at on success or clears
+        # active on failure.
+        was_already_force_charging = force_charge_state.get("active", False)
+        force_charge_state["active"] = True
+        force_charge_state["source"] = source
+
         # Check if this is a Sigenergy system
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
         if is_sigenergy:
@@ -15695,6 +15726,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     entry.data.get(CONF_SIGENERGY_MODBUS_HOST)
                 )
                 if not modbus_host:
+                    force_charge_state["active"] = False
                     _LOGGER.error("Force charge: Sigenergy Modbus host not configured")
                     return
 
@@ -15757,9 +15789,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     await persist_force_mode_state()
                 else:
+                    force_charge_state["active"] = False
                     _LOGGER.error("Sigenergy force charge failed")
                 return
             except Exception as e:
+                force_charge_state["active"] = False
                 _LOGGER.error(f"Error in Sigenergy force charge: {e}", exc_info=True)
                 return
 
@@ -15770,6 +15804,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 foxess_coord = entry_data.get("foxess_coordinator")
                 if not foxess_coord:
+                    force_charge_state["active"] = False
                     _LOGGER.error("Force charge: FoxESS coordinator not available")
                     return
 
@@ -15811,9 +15846,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     await persist_force_mode_state()
                 else:
+                    force_charge_state["active"] = False
                     _LOGGER.error("FoxESS force charge failed")
                 return
             except Exception as e:
+                force_charge_state["active"] = False
                 _LOGGER.error(f"Error in FoxESS force charge: {e}", exc_info=True)
                 return
 
@@ -15824,6 +15861,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 goodwe_coord = entry_data.get("goodwe_coordinator")
                 if not goodwe_coord:
+                    force_charge_state["active"] = False
                     _LOGGER.error("Force charge: GoodWe coordinator not available")
                     return
 
@@ -15865,9 +15903,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     await persist_force_mode_state()
                 else:
+                    force_charge_state["active"] = False
                     _LOGGER.error("GoodWe force charge failed")
                 return
             except Exception as e:
+                force_charge_state["active"] = False
                 _LOGGER.error(f"Error in GoodWe force charge: {e}", exc_info=True)
                 return
 
@@ -15878,6 +15918,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 sungrow_coord = entry_data.get("sungrow_coordinator")
                 if not sungrow_coord:
+                    force_charge_state["active"] = False
                     _LOGGER.error("Force charge: Sungrow coordinator not available")
                     return
 
@@ -15920,9 +15961,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     await persist_force_mode_state()
                 else:
+                    force_charge_state["active"] = False
                     _LOGGER.error("Sungrow force charge failed")
                 return
             except Exception as e:
+                force_charge_state["active"] = False
                 _LOGGER.error(f"Error in Sungrow force charge: {e}", exc_info=True)
                 return
 
@@ -15930,6 +15973,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # Get all Tesla gateway configs (primary + optional secondary)
             site_configs = _get_tesla_site_configs(hass, entry)
             if not site_configs:
+                force_charge_state["active"] = False
                 _LOGGER.error("Missing Tesla site ID or token for force charge")
                 return
 
@@ -15945,7 +15989,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 force_discharge_state["expires_at"] = None
 
             # Step 1: Save current tariff and state (if not already in charge mode)
-            if not force_charge_state["active"]:
+            if not was_already_force_charging:
                 saved_states = {}
                 for site_id, current_token, provider in site_configs:
                     headers = {
@@ -16124,9 +16168,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # Persist state to survive HA restarts
                 await persist_force_mode_state()
             else:
+                force_charge_state["active"] = False
                 _LOGGER.error("Failed to upload charge tariff to one or more gateways")
 
         except Exception as e:
+            force_charge_state["active"] = False
             _LOGGER.error(f"Error in force charge: {e}", exc_info=True)
 
     def _create_charge_tariff(duration_minutes: int) -> tuple[dict, datetime]:

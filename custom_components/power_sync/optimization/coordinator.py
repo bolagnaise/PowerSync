@@ -2190,14 +2190,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             display_import.append(buy)
             display_export.append(sell)
 
-            # When price is zero the LP has zero marginal cost, so HiGHS
-            # may assign imports/exports arbitrarily (LP degeneracy).
-            # Use tiny positive values to break degeneracy while keeping
-            # the LP bounded (negative import price → unbounded!).
-            if buy < 0.001:
-                buy = 0.001    # Near-free import: incentivizes charging
-            if sell < 0.001:
-                sell = 0.001   # Near-zero export: discourages wasteful export
+            # When price is exactly zero the LP has zero marginal cost,
+            # so HiGHS may assign imports/exports arbitrarily (LP
+            # degeneracy).  Use a tiny positive epsilon to break ties
+            # while keeping the cost economically irrelevant.
+            #
+            # The epsilon must be much smaller than the terminal-price
+            # floor (0.001) so that free-import tariffs (e.g. GloBird
+            # FOUR4FREE super-off-peak at 0c) still show a clear net
+            # benefit for grid charging after efficiency losses.
+            # At 0.001 the import cost exceeded the terminal benefit
+            # (0.001 * eff / cap), causing the LP to avoid charging
+            # during genuinely free windows.
+            if buy < 1e-6:
+                buy = 1e-6
+            if sell < 1e-6:
+                sell = 1e-6
 
             import_prices.append(buy)
             export_prices.append(sell)
