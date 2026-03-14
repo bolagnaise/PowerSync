@@ -3021,6 +3021,28 @@ class AutoScheduleExecutor:
                 soc_summary = ', '.join(f"{v}={d.get('soc')}%" for v, d in self._cached_soc.items())
                 _LOGGER.info(f"Restored cached SoC for {len(self._cached_soc)} vehicles: {soc_summary}")
 
+            # Migrate: if VIN-based vehicle entries exist, disable any stale
+            # sequential-number entries (legacy from pre-VIN era).  These
+            # orphaned entries cause the app to show Smart Schedule as "On"
+            # even when the user disabled it for their real vehicle.
+            vin_entries = [
+                vid for vid in self._settings
+                if not vid.isdigit() and vid != "_default"
+            ]
+            if vin_entries:
+                needs_save = False
+                for vid in list(self._settings):
+                    if vid.isdigit() and self._settings[vid].enabled:
+                        _LOGGER.info(
+                            "Disabling stale sequential vehicle entry '%s' "
+                            "(superseded by VIN-based entries: %s)",
+                            vid, vin_entries,
+                        )
+                        self._settings[vid].enabled = False
+                        needs_save = True
+                if needs_save:
+                    await self.save_settings(store)
+
             _LOGGER.debug(f"Loaded auto-schedule settings for {len(self._settings)} vehicles")
         except Exception as e:
             _LOGGER.error(f"Failed to load auto-schedule settings: {e}")
@@ -4992,6 +5014,20 @@ class PriceLevelChargingExecutor:
                     zaptec_state.start_cooldown_until = 0.0
                     zaptec_state.managed_by_powersync = False
                     _LOGGER.info(f"Price-level charging: Started Zaptec ({mode}) - {reason}")
+
+                    # Track charging session
+                    try:
+                        from .ev_charging_session import get_session_manager
+                        sm = get_session_manager()
+                        if sm:
+                            vid = vehicle_vin or "zaptec_standalone"
+                            if vid not in sm.active_sessions:
+                                await sm.start_session(vid, mode)
+                            entry_data = self.hass.data.get(self._domain, {}).get(self.config_entry.entry_id, {})
+                            entry_data["zaptec_charging_session_vid"] = vid
+                    except Exception as sess_err:
+                        _LOGGER.debug("Session tracking start failed: %s", sess_err)
+
                     return True
                 except Exception as e:
                     zaptec_state.consecutive_start_failures += 1
@@ -5094,6 +5130,20 @@ class PriceLevelChargingExecutor:
                     zaptec_state.stop_cooldown_until = 0.0
                     zaptec_state.managed_by_powersync = True
                     _LOGGER.info(f"Price-level charging: Stopped Zaptec - {reason}")
+
+                    # End charging session
+                    try:
+                        from .ev_charging_session import get_session_manager
+                        sm = get_session_manager()
+                        if sm:
+                            vid = vehicle_vin or "zaptec_standalone"
+                            if vid in sm.active_sessions:
+                                await sm.end_session(vid, reason)
+                            entry_data = self.hass.data.get(self._domain, {}).get(self.config_entry.entry_id, {})
+                            entry_data["zaptec_charging_session_vid"] = None
+                    except Exception as sess_err:
+                        _LOGGER.debug("Session tracking end failed: %s", sess_err)
+
                     return True
                 except Exception as e:
                     zaptec_state.consecutive_stop_failures += 1
@@ -5608,6 +5658,17 @@ class ScheduledChargingExecutor:
                     self._state.last_decision = "started"
                     self._state.last_decision_reason = reason
                     _LOGGER.info(f"Scheduled charging: Started Zaptec - {reason}")
+
+                    # Track charging session
+                    try:
+                        from .ev_charging_session import get_session_manager
+                        sm = get_session_manager()
+                        if sm and "zaptec_standalone" not in sm.active_sessions:
+                            await sm.start_session("zaptec_standalone", "scheduled")
+                            entry_data["zaptec_charging_session_vid"] = "zaptec_standalone"
+                    except Exception as sess_err:
+                        _LOGGER.debug("Session tracking start failed: %s", sess_err)
+
                     return True
                 except Exception as e:
                     _LOGGER.error(f"Scheduled charging: Zaptec start failed: {e}")
@@ -5673,6 +5734,17 @@ class ScheduledChargingExecutor:
                     self._state.last_decision = "stopped"
                     self._state.last_decision_reason = reason
                     _LOGGER.info(f"Scheduled charging: Stopped Zaptec - {reason}")
+
+                    # End charging session
+                    try:
+                        from .ev_charging_session import get_session_manager
+                        sm = get_session_manager()
+                        if sm and "zaptec_standalone" in sm.active_sessions:
+                            await sm.end_session("zaptec_standalone", reason)
+                            entry_data["zaptec_charging_session_vid"] = None
+                    except Exception as sess_err:
+                        _LOGGER.debug("Session tracking end failed: %s", sess_err)
+
                     return True
                 except Exception as e:
                     _LOGGER.error(f"Scheduled charging: Zaptec stop failed: {e}")
@@ -5856,6 +5928,17 @@ class EVChargingModeCoordinator:
                     self._active_modes = modes
                     self._last_reason = reason
                     _LOGGER.info(f"EV Coordinator: Started Zaptec charging - modes: {modes}, reason: {reason}")
+
+                    # Track charging session
+                    try:
+                        from .ev_charging_session import get_session_manager
+                        sm = get_session_manager()
+                        if sm and "zaptec_standalone" not in sm.active_sessions:
+                            await sm.start_session("zaptec_standalone", modes[0] if modes else "ev_coordinator")
+                            entry_data["zaptec_charging_session_vid"] = "zaptec_standalone"
+                    except Exception as sess_err:
+                        _LOGGER.debug("Session tracking start failed: %s", sess_err)
+
                     return True
                 except Exception as e:
                     _LOGGER.error(f"EV Coordinator: Zaptec start charging failed: {e}")
@@ -5921,6 +6004,17 @@ class EVChargingModeCoordinator:
                     self._active_modes = []
                     self._last_reason = reason
                     _LOGGER.info(f"EV Coordinator: Stopped Zaptec charging - {reason}")
+
+                    # End charging session
+                    try:
+                        from .ev_charging_session import get_session_manager
+                        sm = get_session_manager()
+                        if sm and "zaptec_standalone" in sm.active_sessions:
+                            await sm.end_session("zaptec_standalone", reason)
+                            entry_data["zaptec_charging_session_vid"] = None
+                    except Exception as sess_err:
+                        _LOGGER.debug("Session tracking end failed: %s", sess_err)
+
                     return True
                 except Exception as e:
                     _LOGGER.error(f"EV Coordinator: Zaptec stop charging failed: {e}")

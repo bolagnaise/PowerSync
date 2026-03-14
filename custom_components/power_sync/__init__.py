@@ -17801,6 +17801,45 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     parsed.get('phase_c_current', 0),
                     parsed.get('cable_locked'),
                 )
+                # Update charging session if actively charging
+                if parsed.get('charger_operation_mode') == 'charging':
+                    try:
+                        from .automations.ev_charging_session import get_session_manager
+                        sm = get_session_manager()
+                        vid = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("zaptec_charging_session_vid")
+                        if sm and vid and vid in sm.active_sessions:
+                            power_w = parsed.get('total_charge_power_w', 0)
+                            power_kw = power_w / 1000
+                            amps = int(max(
+                                parsed.get('phase_a_current', 0),
+                                parsed.get('phase_b_current', 0),
+                                parsed.get('phase_c_current', 0),
+                            ))
+                            # Get current prices from available sources
+                            ed = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                            import_price = 30.0
+                            export_price = 8.0
+                            amber_coord = ed.get("amber_coordinator")
+                            if amber_coord and amber_coord.data:
+                                for p in amber_coord.data.get("current", []):
+                                    if p.get("channelType") == "general":
+                                        import_price = p.get("perKwh", 30.0)
+                                    elif p.get("channelType") == "feedIn":
+                                        export_price = abs(p.get("perKwh", 8.0))
+                            elif ed.get("tariff_schedule"):
+                                import_price = ed["tariff_schedule"].get("buy_price", 30.0)
+                                export_price = ed["tariff_schedule"].get("sell_price", 8.0)
+                            await sm.update_session(
+                                vehicle_id=vid,
+                                power_kw=power_kw,
+                                amps=amps,
+                                is_solar=False,
+                                import_price_cents=import_price,
+                                export_price_cents=export_price,
+                            )
+                    except Exception as se:
+                        _LOGGER.debug("Zaptec session update failed: %s", se)
+
             except Exception as e:
                 _LOGGER.warning(f"Zaptec state poll error: {e}")
 
