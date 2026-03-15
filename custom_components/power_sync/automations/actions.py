@@ -2983,10 +2983,16 @@ async def _dynamic_ev_update(
     battery_power_kw = (live_status.get("battery_power", 0) or 0) / 1000
     grid_power_kw = (live_status.get("grid_power", 0) or 0) / 1000
     current_ev_power_kw = (current_amps * voltage * phases) / 1000
+    battery_soc = live_status.get("percentage_charged", 0) or 0
 
     # Target battery power in same convention (negative = charging)
     # If target_battery_charge_kw = 5, we want battery_power = -5 kW
     target_battery_power_kw = -target_battery_charge_kw
+
+    # When battery is full (>=97%), it tapers charge rate naturally.
+    # Don't treat this taper as a "deficit" — the battery isn't failing to charge,
+    # it's done. Use grid headroom directly instead of penalizing the EV.
+    battery_full = battery_soc >= 97.0
 
     # Battery deficit: How much more the battery should be charging
     # Positive deficit = battery is charging MORE than target (surplus available for EV)
@@ -3051,6 +3057,9 @@ async def _dynamic_ev_update(
             # - inverter_headroom: proactive limit based on known capacity
             # - grid_reactive: reactive adjustment based on actual grid flow
             available_power_kw = min(inverter_headroom_kw, grid_reactive_kw + current_ev_power_kw) - current_ev_power_kw
+    elif battery_full:
+        # Battery is full — taper is natural, not a deficit. Use grid headroom directly.
+        available_power_kw = grid_headroom_kw
     elif battery_deficit_kw > 0.1:
         # Battery has surplus beyond target — available for EV
         available_power_kw = battery_deficit_kw
@@ -3100,6 +3109,7 @@ async def _dynamic_ev_update(
         f"headroom={grid_headroom_kw:.1f}kW, available={available_power_kw:.1f}kW, "
         f"current={current_amps}A, target={new_amps}A, no_grid_import={no_grid_import}"
         f"{', battery_depleted=True' if battery_depleted else ''}"
+        f"{', battery_full=True' if battery_full else ''}"
     )
 
     # Only update if change is >= 1 amp (avoid constant micro-adjustments)
