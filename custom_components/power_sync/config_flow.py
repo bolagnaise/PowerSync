@@ -2180,10 +2180,35 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         peak_start_hour = 15
                         peak_end_hour = 21
 
-                    # Peak: weekdays only
-                    tou_periods["PEAK"] = [
-                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": peak_start_hour, "toHour": peak_end_hour}
-                    ]
+                    # Peak
+                    peak_days = user_input.get("peak_days", "weekdays")
+                    if peak_days == "weekdays":
+                        tou_periods["PEAK"] = [
+                            {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": peak_start_hour, "toHour": peak_end_hour}
+                        ]
+                    else:
+                        tou_periods["PEAK"] = [
+                            {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": peak_start_hour, "toHour": peak_end_hour}
+                        ]
+
+                    # Shoulder if configured
+                    shoulder_start = user_input.get("shoulder_start")
+                    shoulder_end = user_input.get("shoulder_end")
+                    if shoulder_start and shoulder_end:
+                        try:
+                            sh_start = int(shoulder_start.split(":")[0])
+                            sh_end = int(shoulder_end.split(":")[0])
+                            shoulder_days = user_input.get("shoulder_days", "weekdays")
+                            if shoulder_days == "weekdays":
+                                tou_periods["SHOULDER"] = [
+                                    {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": sh_start, "toHour": sh_end}
+                                ]
+                            else:
+                                tou_periods["SHOULDER"] = [
+                                    {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": sh_start, "toHour": sh_end}
+                                ]
+                        except (ValueError, IndexError):
+                            pass
 
                     # Super off-peak if configured (e.g., solar soak period)
                     if super_offpeak_start and super_offpeak_end:
@@ -2196,19 +2221,45 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         except (ValueError, IndexError):
                             pass
 
-                    # Shoulder: weekday morning (7am to peak start)
-                    if peak_start_hour > 7:
-                        tou_periods["SHOULDER"] = [
-                            {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 7, "toHour": peak_start_hour}
-                        ]
+                    # Off-peak: fill remaining hours
+                    # Collect all defined weekday hour ranges to compute off-peak gaps
+                    defined_hours = set()
+                    for period_name, periods in tou_periods.items():
+                        for p in periods:
+                            if p["fromDayOfWeek"] <= 5 and p["toDayOfWeek"] >= 1:
+                                for h in range(p["fromHour"], p["toHour"]):
+                                    defined_hours.add(h)
 
-                    # Off-peak: overnight and weekends
-                    tou_periods["OFF_PEAK"] = [
-                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": peak_end_hour, "toHour": 24},
-                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 0, "toHour": 7},
-                        {"fromDayOfWeek": 0, "toDayOfWeek": 0, "fromHour": 0, "toHour": 24},  # Sunday
-                        {"fromDayOfWeek": 6, "toDayOfWeek": 6, "fromHour": 0, "toHour": 24},  # Saturday
-                    ]
+                    # Build off-peak from gaps in weekday schedule
+                    offpeak_periods = []
+                    gap_start = None
+                    for h in range(25):
+                        if h < 24 and h not in defined_hours:
+                            if gap_start is None:
+                                gap_start = h
+                        else:
+                            if gap_start is not None:
+                                offpeak_periods.append(
+                                    {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": gap_start, "toHour": h}
+                                )
+                                gap_start = None
+
+                    # Weekends are off-peak unless peak/shoulder apply all days
+                    weekend_defined = any(
+                        p["fromDayOfWeek"] == 0 and p["toDayOfWeek"] == 6
+                        for periods in tou_periods.values()
+                        for p in periods
+                    )
+                    if not weekend_defined:
+                        offpeak_periods.append(
+                            {"fromDayOfWeek": 0, "toDayOfWeek": 0, "fromHour": 0, "toHour": 24}  # Sunday
+                        )
+                        offpeak_periods.append(
+                            {"fromDayOfWeek": 6, "toDayOfWeek": 6, "fromHour": 0, "toHour": 24}  # Saturday
+                        )
+
+                    if offpeak_periods:
+                        tou_periods["OFF_PEAK"] = offpeak_periods
 
                     # Build energy charges
                     energy_charges = {
@@ -2265,6 +2316,11 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Build hour options for time selection
         hour_options = {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}
 
+        day_options = {
+            "weekdays": "Weekdays only (Mon-Fri)",
+            "all_days": "All days (Mon-Sun)",
+        }
+
         # Schema for custom tariff configuration
         data_schema = vol.Schema(
             {
@@ -2274,6 +2330,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "flat": "Flat Rate (single rate all day)",
                     "tou": "Time of Use (peak/shoulder/off-peak)",
                 }),
+                # --- Rates (c/kWh) ---
                 vol.Required("peak_rate", default=45): vol.All(
                     vol.Coerce(float), vol.Range(min=0, max=100)
                 ),
@@ -2289,8 +2346,15 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required("fit_rate", default=5): vol.All(
                     vol.Coerce(float), vol.Range(min=0, max=50)
                 ),
+                # --- Peak times ---
                 vol.Optional("peak_start", default="15:00"): vol.In(hour_options),
                 vol.Optional("peak_end", default="21:00"): vol.In(hour_options),
+                vol.Optional("peak_days", default="weekdays"): vol.In(day_options),
+                # --- Shoulder times ---
+                vol.Optional("shoulder_start"): vol.In(hour_options),
+                vol.Optional("shoulder_end"): vol.In(hour_options),
+                vol.Optional("shoulder_days", default="weekdays"): vol.In(day_options),
+                # --- Super off-peak times ---
                 vol.Optional("super_offpeak_start"): vol.In(hour_options),
                 vol.Optional("super_offpeak_end"): vol.In(hour_options),
             }
