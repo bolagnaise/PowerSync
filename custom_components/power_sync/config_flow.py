@@ -6037,8 +6037,8 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
                 return await self.async_step_tariff_period_options()
 
             # Done — build and save tariff
-            custom_tariff = PowerSyncConfigFlow._build_tariff_from_periods(
-                self, self._tariff_periods,
+            custom_tariff = self._build_tariff_from_periods_compat(
+                self._tariff_periods,
             )
             await self._save_custom_tariff(custom_tariff)
             return await self.async_step_demand_charge_options()
