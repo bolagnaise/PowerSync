@@ -669,6 +669,11 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._aemo_only_mode = True
                 self._amber_data = {}
                 return await self.async_step_nz_retailer()
+            elif provider == "other":
+                # Other/Custom TOU: AEMO spike optional + custom tariff builder
+                self._aemo_only_mode = True
+                self._amber_data = {}
+                return await self.async_step_aemo_config()
             else:
                 # Default to Amber
                 self._aemo_only_mode = False

@@ -350,6 +350,7 @@ ELECTRICITY_PROVIDERS = {
     "aemo_vpp": "AEMO VPP (AGL, Engie, etc.)",
     "octopus": "Octopus Energy (UK)",
     "nz": "New Zealand TOU",
+    "other": "Other / Custom TOU",
 }
 
 # Localvolts configuration
