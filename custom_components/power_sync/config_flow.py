@@ -1428,7 +1428,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             dc_enabled = user_input.get(CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False)
             self._sigenergy_data[CONF_SIGENERGY_DC_CURTAILMENT_ENABLED] = dc_enabled
-            return await self.async_step_demand_charges()
+            return await self.async_step_curtailment_setup()
 
         return self.async_show_form(
             step_id="sigenergy_dc_curtailment",
@@ -1535,7 +1535,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             host2 = user_input.get(CONF_SUNGROW_HOST_2, "").strip()
             if not host2:
                 # User left it blank — skip secondary
-                return await self.async_step_demand_charges()
+                return await self.async_step_curtailment_setup()
 
             port2 = user_input.get(CONF_SUNGROW_PORT_2, DEFAULT_SUNGROW_PORT)
             slave_id2 = user_input.get(CONF_SUNGROW_SLAVE_ID_2, DEFAULT_SUNGROW_SLAVE_ID)
@@ -1552,7 +1552,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     host2,
                     test_result.get("battery_soc", 0),
                 )
-                return await self.async_step_demand_charges()
+                return await self.async_step_curtailment_setup()
             else:
                 errors["base"] = "cannot_connect"
 
@@ -1784,7 +1784,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     if success:
                         self._foxess_data[CONF_FOXESS_CLOUD_API_KEY] = api_key
                         self._foxess_data[CONF_FOXESS_CLOUD_DEVICE_SN] = device_sn
-                        return await self.async_step_demand_charges()
+                        return await self.async_step_curtailment_setup()
                     else:
                         _LOGGER.warning("FoxESS Cloud connection test failed: %s", message)
                         errors["base"] = "foxess_cloud_auth_failed"
@@ -1793,7 +1793,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     errors["base"] = "foxess_cloud_connection_error"
             else:
                 # Blank API key — skip cloud setup
-                return await self.async_step_demand_charges()
+                return await self.async_step_curtailment_setup()
 
         return self.async_show_form(
             step_id="foxess_cloud",
@@ -1874,7 +1874,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             result.get("serial_number"),
                             result.get("rated_power"),
                         )
-                        return await self.async_step_demand_charges()
+                        return await self.async_step_curtailment_setup()
                 else:
                     errors["base"] = "goodwe_connect_failed"
 
@@ -2961,7 +2961,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_INVERTER_RESTORE_SOC, DEFAULT_INVERTER_RESTORE_SOC
                 )
 
-                return await self.async_step_demand_charges()
+                return await self.async_step_weather_setup()
 
         # Get brand-specific models and defaults
         # Pass battery system to filter out conflicting models (e.g., SH-series when battery is Sungrow)
@@ -3051,15 +3051,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._demand_data[CONF_DAILY_SUPPLY_CHARGE] = user_input.get(CONF_DAILY_SUPPLY_CHARGE, 0.0)
             self._demand_data[CONF_MONTHLY_SUPPLY_CHARGE] = user_input.get(CONF_MONTHLY_SUPPLY_CHARGE, 0.0)
 
-            # Route based on battery system
-            if self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
-                return await self.async_step_finish_foxess()
-            elif self._selected_battery_system == BATTERY_SYSTEM_GOODWE:
-                return await self.async_step_finish_goodwe()
-            elif self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
-                return await self.async_step_finish_sigenergy()
-            elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
-                return await self.async_step_finish_sungrow()
+            # All battery systems proceed to EV charging setup
             return await self.async_step_ev_charging_setup()
 
         # Build the form schema
@@ -3163,7 +3155,7 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, ev_input: dict[str, Any]
     ) -> FlowResult:
         """Create final config entry from EV charging step data."""
-        # Combine all data
+        # Combine all data — include battery-specific data for all systems
         data = {
             **self._amber_data,
             **self._teslemetry_data,
@@ -3175,8 +3167,16 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             **getattr(self, '_curtailment_data', {}),
             **getattr(self, '_inverter_data', {}),
             **getattr(self, '_demand_data', {}),
+            **getattr(self, '_sigenergy_data', {}),
+            **getattr(self, '_sungrow_data', {}),
+            **getattr(self, '_foxess_data', {}),
+            **getattr(self, '_goodwe_data', {}),
             CONF_ELECTRICITY_PROVIDER: self._selected_electricity_provider,
         }
+
+        # Set battery system type
+        if self._selected_battery_system:
+            data[CONF_BATTERY_SYSTEM] = self._selected_battery_system
 
         # Include custom tariff data if configured
         if self._custom_tariff_data:
@@ -3230,8 +3230,17 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if soc_entity:
             data[CONF_GENERIC_CHARGER_SOC_ENTITY] = soc_entity
 
-        # Set appropriate title based on provider
-        if self._aemo_only_mode:
+        # Set appropriate title based on battery system and provider
+        battery_label = {
+            BATTERY_SYSTEM_SIGENERGY: "Sigenergy",
+            BATTERY_SYSTEM_SUNGROW: "Sungrow",
+            BATTERY_SYSTEM_FOXESS: "FoxESS",
+            BATTERY_SYSTEM_GOODWE: "GoodWe",
+        }.get(self._selected_battery_system, "")
+
+        if battery_label:
+            title = f"PowerSync - {battery_label}"
+        elif self._aemo_only_mode:
             title = "PowerSync Globird"
         elif self._selected_electricity_provider == "flow_power":
             title = "PowerSync Flow Power"
