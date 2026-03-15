@@ -920,35 +920,39 @@
         "submit_button": "Next"
       },
       "custom_tariff_options": {
-        "title": "Custom Tariff Configuration",
-        "description": "Configure your electricity tariff rates for battery optimisation, price sensors, and EV charging.\n\n{info}",
+        "title": "Custom Tariff Setup",
+        "description": "{info}",
         "data": {
           "plan_name": "Plan Name (optional)",
           "tariff_type": "Tariff Type",
-          "peak_rate": "Peak Rate (c/kWh)",
-          "shoulder_rate": "Shoulder Rate (c/kWh)",
+          "flat_rate": "Flat Rate (c/kWh)",
           "offpeak_rate": "Off-Peak Rate (c/kWh)",
-          "super_offpeak_rate": "Super Off-Peak Rate (c/kWh)",
-          "fit_rate": "Feed-in Tariff (c/kWh)",
-          "peak_start": "Peak Start Time",
-          "peak_end": "Peak End Time",
-          "peak_days": "Peak Applies To",
-          "shoulder_start": "Shoulder Start Time",
-          "shoulder_end": "Shoulder End Time",
-          "shoulder_days": "Shoulder Applies To",
-          "offpeak_start": "Off-Peak Start Time",
-          "offpeak_end": "Off-Peak End Time",
-          "offpeak_days": "Off-Peak Applies To",
-          "super_offpeak_start": "Super Off-Peak Start Time",
-          "super_offpeak_end": "Super Off-Peak End Time"
+          "fit_rate": "Default Feed-in Tariff (c/kWh)"
         },
         "data_description": {
-          "tariff_type": "Flat rate uses a single price all day. Time of Use has different prices for peak, shoulder, and off-peak periods.",
-          "shoulder_start": "Optional: Set start/end times for shoulder period.",
-          "offpeak_start": "Optional: Set specific off-peak hours. Leave blank to auto-fill remaining hours.",
-          "super_offpeak_rate": "Optional: For plans with free or cheap solar soak periods (e.g., 10am-2pm)",
-          "super_offpeak_start": "Start time of super off-peak period (e.g., 10:00 for solar soak)",
-          "super_offpeak_end": "End time of super off-peak period (e.g., 14:00 for solar soak)"
+          "tariff_type": "Flat rate uses a single price all day. Time of Use lets you add multiple periods with different rates.",
+          "flat_rate": "Only used for Flat Rate tariff type",
+          "offpeak_rate": "Rate for hours not covered by any period you define",
+          "fit_rate": "Default export rate for off-peak hours"
+        },
+        "submit_button": "Next"
+      },
+      "tariff_period_options": {
+        "title": "Add Tariff Period",
+        "description": "{period_info}",
+        "data": {
+          "period_type": "Period Type",
+          "period_start": "Start Time",
+          "period_end": "End Time",
+          "period_days": "Applies To",
+          "import_rate": "Import Rate (c/kWh)",
+          "export_rate": "Export/Feed-in Rate (c/kWh)",
+          "add_another": "Add another period"
+        },
+        "data_description": {
+          "period_type": "e.g. Peak, Shoulder, Off-Peak, Super Off-Peak",
+          "export_rate": "What you earn for exporting during this period",
+          "add_another": "Uncheck when done. Remaining hours become off-peak."
         },
         "submit_button": "Next"
       },

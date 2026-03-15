@@ -2129,14 +2129,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             tesla_dow = (dow + 1) % 7
 
             matched_period = None
-            # Check in priority order to handle overlaps
-            priority = [
-                "SUPER_OFF_PEAK", "ON_PEAK", "PEAK",
-                "PARTIAL_PEAK", "SHOULDER", "OFF_PEAK",
-            ]
-            for period_name in priority:
-                if period_name not in tou_periods:
-                    continue
+            # Check all defined periods. Order: specific periods first (SUPER_OFF_PEAK,
+            # PEAK, SHOULDER variants), then OFF_PEAK variants last as catch-all.
+            # This supports custom period names like PEAK_1, PEAK_2, OFF_PEAK_AUTO.
+            sorted_periods = sorted(
+                tou_periods.keys(),
+                key=lambda n: (
+                    2 if n.startswith("OFF_PEAK") else
+                    0 if n.startswith("SUPER_OFF_PEAK") else 1
+                ),
+            )
+            for period_name in sorted_periods:
                 periods_list = tou_periods[period_name]
                 if not isinstance(periods_list, list):
                     continue

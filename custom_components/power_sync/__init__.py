@@ -2562,12 +2562,17 @@ def _find_season_for_month(seasons: dict, month: int) -> str:
 def _match_tou_period(tou_periods: dict, hour: int, tesla_dow: int) -> str:
     """Match an hour and day-of-week to a TOU period name.
 
-    Uses priority order: SUPER_OFF_PEAK > ON_PEAK > PEAK > PARTIAL_PEAK > SHOULDER > OFF_PEAK
+    Supports custom period names like PEAK_1, PEAK_2, OFF_PEAK_AUTO.
+    SUPER_OFF_PEAK checked first, OFF_PEAK last as catch-all.
     """
-    period_priority = ["SUPER_OFF_PEAK", "ON_PEAK", "PEAK", "PARTIAL_PEAK", "SHOULDER", "OFF_PEAK"]
-    for period_name in period_priority:
-        if period_name not in tou_periods:
-            continue
+    sorted_priority = sorted(
+        tou_periods.keys(),
+        key=lambda n: (
+            2 if n.startswith("OFF_PEAK") else
+            0 if n.startswith("SUPER_OFF_PEAK") else 1
+        ),
+    )
+    for period_name in sorted_priority:
         period_data = tou_periods[period_name]
         if isinstance(period_data, dict) and "periods" in period_data:
             periods_list = period_data["periods"]
@@ -5530,11 +5535,16 @@ class TariffPriceView(HomeAssistantView):
             # Tesla DOW: 0=Sunday, Python weekday(): 0=Monday, 6=Sunday
             tesla_dow = (current_dow + 1) % 7
 
-            period_priority = ["SUPER_OFF_PEAK", "ON_PEAK", "PEAK", "PARTIAL_PEAK", "SHOULDER", "OFF_PEAK"]
+            # Check all defined periods — supports custom names like PEAK_1, PEAK_2.
+            sorted_priority = sorted(
+                tou_periods.keys(),
+                key=lambda n: (
+                    2 if n.startswith("OFF_PEAK") else
+                    0 if n.startswith("SUPER_OFF_PEAK") else 1
+                ),
+            )
             current_period = None
-            for period_name in period_priority:
-                if period_name not in tou_periods:
-                    continue
+            for period_name in sorted_priority:
                 period_data = tou_periods[period_name]
                 periods_list = period_data.get("periods", []) if isinstance(period_data, dict) else []
                 for p in periods_list:
@@ -5702,11 +5712,16 @@ async def fetch_tesla_tariff_schedule(hass: HomeAssistant, entry: ConfigEntry) -
         # that overlap with SUPER_OFF_PEAK (e.g., OFF_PEAK 21:00-24:00 overlaps with SUPER_OFF_PEAK 23:00-07:00)
         tou_periods = seasons.get(current_season, {}).get("tou_periods", {})
         # Include all common TOU period names in priority order (most specific first)
-        period_priority = ["SUPER_OFF_PEAK", "ON_PEAK", "PEAK", "PARTIAL_PEAK", "SHOULDER", "OFF_PEAK"]
+        # Check all defined periods — supports custom names like PEAK_1, PEAK_2.
+        sorted_priority = sorted(
+            tou_periods.keys(),
+            key=lambda n: (
+                2 if n.startswith("OFF_PEAK") else
+                0 if n.startswith("SUPER_OFF_PEAK") else 1
+            ),
+        )
         current_period = None
-        for period_name in period_priority:
-            if period_name not in tou_periods:
-                continue
+        for period_name in sorted_priority:
             period_data = tou_periods[period_name]
             # Handle both list format and object format
             # Handle both custom format (list) and Tesla tariff_content format ({"periods": [...]})
@@ -5867,11 +5882,16 @@ def convert_custom_tariff_to_schedule(custom_tariff: dict) -> dict:
         # Check periods in priority order to handle overlaps correctly
         # SUPER_OFF_PEAK must be checked before OFF_PEAK since OFF_PEAK may include hours
         # that overlap with SUPER_OFF_PEAK
-        period_priority = ["SUPER_OFF_PEAK", "ON_PEAK", "PEAK", "PARTIAL_PEAK", "SHOULDER", "OFF_PEAK"]
+        # Check all defined periods — supports custom names like PEAK_1, PEAK_2.
+        sorted_priority = sorted(
+            tou_periods.keys(),
+            key=lambda n: (
+                2 if n.startswith("OFF_PEAK") else
+                0 if n.startswith("SUPER_OFF_PEAK") else 1
+            ),
+        )
         current_period = None
-        for period_name in period_priority:
-            if period_name not in tou_periods:
-                continue
+        for period_name in sorted_priority:
             period_data = tou_periods[period_name]
             # Handle both custom format (list) and Tesla tariff_content format ({"periods": [...]})
             if isinstance(period_data, dict) and "periods" in period_data:
@@ -6013,11 +6033,16 @@ def get_current_price_from_tariff_schedule(tariff_schedule: dict) -> tuple[float
         # Check periods in priority order to handle overlaps correctly
         # SUPER_OFF_PEAK must be checked before OFF_PEAK since OFF_PEAK may include hours
         # that overlap with SUPER_OFF_PEAK (e.g., OFF_PEAK 21:00-24:00 overlaps with SUPER_OFF_PEAK 23:00-07:00)
-        period_priority = ["SUPER_OFF_PEAK", "ON_PEAK", "PEAK", "PARTIAL_PEAK", "SHOULDER", "OFF_PEAK"]
+        # Check all defined periods — supports custom names like PEAK_1, PEAK_2.
+        sorted_priority = sorted(
+            tou_periods.keys(),
+            key=lambda n: (
+                2 if n.startswith("OFF_PEAK") else
+                0 if n.startswith("SUPER_OFF_PEAK") else 1
+            ),
+        )
         current_period = None
-        for period_name in period_priority:
-            if period_name not in tou_periods:
-                continue
+        for period_name in sorted_priority:
             period_data = tou_periods[period_name]
             # Handle both custom format (list) and Tesla tariff_content format ({"periods": [...]})
             if isinstance(period_data, dict) and "periods" in period_data:
