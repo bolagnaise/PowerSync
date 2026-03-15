@@ -2130,267 +2130,54 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_custom_tariff(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Configure custom tariff for non-Amber users (Globird/AEMO VPP/Other).
+        """Configure custom tariff for non-Amber users — step 1: basic setup.
 
-        This step allows users to define their TOU tariff structure which is then
-        used for EV charging price decisions and Sigenergy Cloud tariff sync.
+        Collects plan name, tariff type, off-peak rate, and FIT rate.
+        For TOU tariffs, proceeds to the period builder to add time blocks.
         """
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            # User can skip tariff configuration
             skip_tariff = user_input.get("skip_tariff", False)
 
             if skip_tariff:
-                self._custom_tariff_data = {}  # No custom tariff
-            else:
-                # Parse and validate tariff data
-                tariff_type = user_input.get("tariff_type", "tou")
+                self._custom_tariff_data = {}
+                return await self._route_after_tariff()
 
-                # Get rates (in cents, will be converted to $/kWh)
-                peak_rate = user_input.get("peak_rate", 45) / 100
-                shoulder_rate = user_input.get("shoulder_rate", 28) / 100
-                offpeak_rate = user_input.get("offpeak_rate", 15) / 100
-                super_offpeak_rate = user_input.get("super_offpeak_rate")
-                if super_offpeak_rate is not None:
-                    super_offpeak_rate = super_offpeak_rate / 100
-                fit_rate = user_input.get("fit_rate", 5) / 100
+            tariff_type = user_input.get("tariff_type", "tou")
+            self._tariff_plan_name = user_input.get("plan_name", "")
+            self._tariff_offpeak_rate = user_input.get("offpeak_rate", 15) / 100
+            self._tariff_fit_rate = user_input.get("fit_rate", 5) / 100
 
-                # Parse time strings
-                peak_start = user_input.get("peak_start", "15:00")
-                peak_end = user_input.get("peak_end", "21:00")
-                super_offpeak_start = user_input.get("super_offpeak_start")
-                super_offpeak_end = user_input.get("super_offpeak_end")
+            if tariff_type == "flat":
+                flat_rate = user_input.get("flat_rate", 30) / 100
+                self._custom_tariff_data = self._build_tariff_from_periods(
+                    [{"name": "ALL", "start": 0, "end": 24, "days": "all_days",
+                      "import_rate": flat_rate, "export_rate": self._tariff_fit_rate}],
+                )
+                return await self._route_after_tariff()
 
-                # Build TOU periods based on tariff type
-                tou_periods = {}
+            # TOU — start the period builder
+            self._tariff_periods = []
+            return await self.async_step_tariff_period()
 
-                if tariff_type == "flat":
-                    # Flat rate - single ALL period
-                    tou_periods["ALL"] = [
-                        {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 0, "toHour": 24}
-                    ]
-                    energy_charges = {"ALL": peak_rate}  # Use peak_rate as the flat rate
-                else:
-                    # TOU - build periods from time inputs
-                    try:
-                        peak_start_hour = int(peak_start.split(":")[0])
-                        peak_end_hour = int(peak_end.split(":")[0])
-                    except (ValueError, IndexError):
-                        peak_start_hour = 15
-                        peak_end_hour = 21
-
-                    # Peak
-                    peak_days = user_input.get("peak_days", "weekdays")
-                    if peak_days == "weekdays":
-                        tou_periods["PEAK"] = [
-                            {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": peak_start_hour, "toHour": peak_end_hour}
-                        ]
-                    else:
-                        tou_periods["PEAK"] = [
-                            {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": peak_start_hour, "toHour": peak_end_hour}
-                        ]
-
-                    # Shoulder if configured
-                    shoulder_start = user_input.get("shoulder_start")
-                    shoulder_end = user_input.get("shoulder_end")
-                    if shoulder_start and shoulder_end:
-                        try:
-                            sh_start = int(shoulder_start.split(":")[0])
-                            sh_end = int(shoulder_end.split(":")[0])
-                            shoulder_days = user_input.get("shoulder_days", "weekdays")
-                            if shoulder_days == "weekdays":
-                                tou_periods["SHOULDER"] = [
-                                    {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": sh_start, "toHour": sh_end}
-                                ]
-                            else:
-                                tou_periods["SHOULDER"] = [
-                                    {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": sh_start, "toHour": sh_end}
-                                ]
-                        except (ValueError, IndexError):
-                            pass
-
-                    # Super off-peak if configured (e.g., solar soak period)
-                    if super_offpeak_start and super_offpeak_end:
-                        try:
-                            sop_start = int(super_offpeak_start.split(":")[0])
-                            sop_end = int(super_offpeak_end.split(":")[0])
-                            tou_periods["SUPER_OFF_PEAK"] = [
-                                {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": sop_start, "toHour": sop_end}
-                            ]
-                        except (ValueError, IndexError):
-                            pass
-
-                    # Off-peak: use explicit times if provided, otherwise fill gaps
-                    offpeak_start_input = user_input.get("offpeak_start")
-                    offpeak_end_input = user_input.get("offpeak_end")
-                    offpeak_days = user_input.get("offpeak_days", "all_days")
-
-                    if offpeak_start_input and offpeak_end_input:
-                        try:
-                            op_start = int(offpeak_start_input.split(":")[0])
-                            op_end = int(offpeak_end_input.split(":")[0])
-                            if offpeak_days == "weekdays":
-                                tou_periods["OFF_PEAK"] = [
-                                    {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": op_start, "toHour": op_end}
-                                ]
-                            else:
-                                tou_periods["OFF_PEAK"] = [
-                                    {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": op_start, "toHour": op_end}
-                                ]
-                            # Also add weekends as off-peak if peak/shoulder are weekday-only
-                            weekend_defined = any(
-                                p["fromDayOfWeek"] == 0 and p["toDayOfWeek"] == 6
-                                for periods in tou_periods.values()
-                                for p in periods
-                            )
-                            if not weekend_defined:
-                                tou_periods["OFF_PEAK"].append(
-                                    {"fromDayOfWeek": 0, "toDayOfWeek": 0, "fromHour": 0, "toHour": 24}
-                                )
-                                tou_periods["OFF_PEAK"].append(
-                                    {"fromDayOfWeek": 6, "toDayOfWeek": 6, "fromHour": 0, "toHour": 24}
-                                )
-                        except (ValueError, IndexError):
-                            pass
-
-                    if "OFF_PEAK" not in tou_periods:
-                        # Auto-fill: collect defined weekday hours and fill gaps
-                        defined_hours = set()
-                        for period_name, periods in tou_periods.items():
-                            for p in periods:
-                                if p["fromDayOfWeek"] <= 5 and p["toDayOfWeek"] >= 1:
-                                    for h in range(p["fromHour"], p["toHour"]):
-                                        defined_hours.add(h)
-
-                        offpeak_periods = []
-                        gap_start = None
-                        for h in range(25):
-                            if h < 24 and h not in defined_hours:
-                                if gap_start is None:
-                                    gap_start = h
-                            else:
-                                if gap_start is not None:
-                                    offpeak_periods.append(
-                                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": gap_start, "toHour": h}
-                                    )
-                                    gap_start = None
-
-                        weekend_defined = any(
-                            p["fromDayOfWeek"] == 0 and p["toDayOfWeek"] == 6
-                            for periods in tou_periods.values()
-                            for p in periods
-                        )
-                        if not weekend_defined:
-                            offpeak_periods.append(
-                                {"fromDayOfWeek": 0, "toDayOfWeek": 0, "fromHour": 0, "toHour": 24}
-                            )
-                            offpeak_periods.append(
-                                {"fromDayOfWeek": 6, "toDayOfWeek": 6, "fromHour": 0, "toHour": 24}
-                            )
-                        if offpeak_periods:
-                            tou_periods["OFF_PEAK"] = offpeak_periods
-
-                    # Build energy charges
-                    energy_charges = {
-                        "PEAK": peak_rate,
-                        "OFF_PEAK": offpeak_rate,
-                    }
-                    if "SHOULDER" in tou_periods:
-                        energy_charges["SHOULDER"] = shoulder_rate
-                    if "SUPER_OFF_PEAK" in tou_periods and super_offpeak_rate is not None:
-                        energy_charges["SUPER_OFF_PEAK"] = super_offpeak_rate
-
-                # Build custom tariff in Tesla format
-                provider_name = {
-                    "globird": "Globird Energy",
-                    "aemo_vpp": "VPP Provider",
-                    "nz": "NZ Provider",
-                    "other": "Custom Provider",
-                }.get(self._selected_electricity_provider, "Custom")
-
-                self._custom_tariff_data = {
-                    "name": user_input.get("plan_name", f"{provider_name} TOU"),
-                    "utility": provider_name,
-                    "seasons": {
-                        "All Year": {
-                            "fromMonth": 1,
-                            "toMonth": 12,
-                            "tou_periods": tou_periods,
-                        }
-                    },
-                    "energy_charges": {
-                        "All Year": energy_charges,
-                    },
-                    "sell_tariff": {
-                        "energy_charges": {
-                            "All Year": {
-                                "ALL": fit_rate,
-                            }
-                        }
-                    },
-                }
-
-            # Route to battery-specific setup
-            if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
-                return await self.async_step_sigenergy_credentials()
-            elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
-                return await self.async_step_sungrow()
-            elif self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
-                return await self.async_step_foxess_connection()
-            elif self._selected_battery_system == BATTERY_SYSTEM_GOODWE:
-                return await self.async_step_goodwe_connection()
-            else:
-                return await self.async_step_tesla_provider()
-
-        # Build hour options for time selection
-        hour_options = {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}
-
-        day_options = {
-            "weekdays": "Weekdays only (Mon-Fri)",
-            "all_days": "All days (Mon-Sun)",
-        }
-
-        # Schema for custom tariff configuration
         data_schema = vol.Schema(
             {
                 vol.Optional("skip_tariff", default=False): bool,
                 vol.Optional("plan_name", default=""): str,
                 vol.Required("tariff_type", default="tou"): vol.In({
                     "flat": "Flat Rate (single rate all day)",
-                    "tou": "Time of Use (peak/shoulder/off-peak)",
+                    "tou": "Time of Use (multiple periods)",
                 }),
-                # --- Rates (c/kWh) ---
-                vol.Required("peak_rate", default=45): vol.All(
-                    vol.Coerce(float), vol.Range(min=0, max=100)
-                ),
-                vol.Optional("shoulder_rate", default=28): vol.All(
-                    vol.Coerce(float), vol.Range(min=0, max=100)
+                vol.Optional("flat_rate", default=30): vol.All(
+                    vol.Coerce(float), vol.Range(min=0, max=200)
                 ),
                 vol.Required("offpeak_rate", default=15): vol.All(
-                    vol.Coerce(float), vol.Range(min=0, max=100)
-                ),
-                vol.Optional("super_offpeak_rate"): vol.All(
-                    vol.Coerce(float), vol.Range(min=0, max=100)
+                    vol.Coerce(float), vol.Range(min=0, max=200)
                 ),
                 vol.Required("fit_rate", default=5): vol.All(
-                    vol.Coerce(float), vol.Range(min=0, max=50)
+                    vol.Coerce(float), vol.Range(min=0, max=100)
                 ),
-                # --- Peak times ---
-                vol.Optional("peak_start", default="15:00"): vol.In(hour_options),
-                vol.Optional("peak_end", default="21:00"): vol.In(hour_options),
-                vol.Optional("peak_days", default="weekdays"): vol.In(day_options),
-                # --- Shoulder times ---
-                vol.Optional("shoulder_start"): vol.In(hour_options),
-                vol.Optional("shoulder_end"): vol.In(hour_options),
-                vol.Optional("shoulder_days", default="weekdays"): vol.In(day_options),
-                # --- Off-peak times ---
-                vol.Optional("offpeak_start"): vol.In(hour_options),
-                vol.Optional("offpeak_end"): vol.In(hour_options),
-                vol.Optional("offpeak_days", default="all_days"): vol.In(day_options),
-                # --- Super off-peak times ---
-                vol.Optional("super_offpeak_start"): vol.In(hour_options),
-                vol.Optional("super_offpeak_end"): vol.In(hour_options),
             }
         )
 
@@ -2399,10 +2186,251 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=data_schema,
             errors=errors,
             description_placeholders={
-                "info": "Configure your electricity tariff rates. All rates are in cents/kWh.",
+                "info": "Configure your electricity tariff. All rates in cents/kWh.\nFor TOU, you'll add time periods in the next step.",
                 "skip_hint": "Check 'Skip tariff configuration' to use default estimation instead.",
             },
         )
+
+    async def async_step_tariff_period(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Add a tariff time period. Loops until user unchecks 'Add another'.
+
+        Each period has: type, start hour, end hour, days, import rate, export rate.
+        This supports tariffs like GloBird Zero Hero where the same period type
+        (e.g. Peak) occurs at multiple times with different export rates.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            try:
+                start_hour = int(user_input.get("period_start", "15:00").split(":")[0])
+                end_hour = int(user_input.get("period_end", "21:00").split(":")[0])
+            except (ValueError, IndexError):
+                start_hour = 15
+                end_hour = 21
+
+            period = {
+                "name": user_input.get("period_type", "PEAK"),
+                "start": start_hour,
+                "end": end_hour,
+                "days": user_input.get("period_days", "weekdays"),
+                "import_rate": user_input.get("import_rate", 45) / 100,
+                "export_rate": user_input.get("export_rate", 5) / 100,
+            }
+            self._tariff_periods.append(period)
+
+            if user_input.get("add_another", False):
+                return await self.async_step_tariff_period()
+
+            # Done adding periods — build the tariff
+            self._custom_tariff_data = self._build_tariff_from_periods(
+                self._tariff_periods,
+            )
+            return await self._route_after_tariff()
+
+        hour_options = {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}
+        day_options = {
+            "weekdays": "Weekdays only (Mon-Fri)",
+            "all_days": "All days (Mon-Sun)",
+        }
+        period_types = {
+            "PEAK": "Peak",
+            "SHOULDER": "Shoulder",
+            "OFF_PEAK": "Off-Peak",
+            "SUPER_OFF_PEAK": "Super Off-Peak",
+        }
+
+        # Show what's been added so far
+        count = len(self._tariff_periods)
+        added_desc = ""
+        if count > 0:
+            lines = []
+            for i, p in enumerate(self._tariff_periods, 1):
+                label = {"PEAK": "Peak", "SHOULDER": "Shoulder", "OFF_PEAK": "Off-Peak",
+                         "SUPER_OFF_PEAK": "Super Off-Peak"}.get(p["name"], p["name"])
+                lines.append(f"{i}. {label} {p['start']:02d}:00-{p['end']:02d}:00 "
+                             f"({p['import_rate']*100:.0f}c import, {p['export_rate']*100:.0f}c export)")
+            added_desc = "Periods added:\n" + "\n".join(lines)
+
+        data_schema = vol.Schema(
+            {
+                vol.Required("period_type", default="PEAK"): vol.In(period_types),
+                vol.Required("period_start", default="15:00"): vol.In(hour_options),
+                vol.Required("period_end", default="21:00"): vol.In(hour_options),
+                vol.Optional("period_days", default="weekdays"): vol.In(day_options),
+                vol.Required("import_rate", default=45): vol.All(
+                    vol.Coerce(float), vol.Range(min=0, max=200)
+                ),
+                vol.Required("export_rate", default=5): vol.All(
+                    vol.Coerce(float), vol.Range(min=0, max=200)
+                ),
+                vol.Optional("add_another", default=True): bool,
+            }
+        )
+
+        return self.async_show_form(
+            step_id="tariff_period",
+            data_schema=data_schema,
+            errors=errors,
+            description_placeholders={
+                "period_info": added_desc if added_desc else "Add your first tariff period. Remaining hours will be off-peak.",
+            },
+        )
+
+    def _build_tariff_from_periods(self, periods: list[dict]) -> dict:
+        """Build a Tesla-format tariff from a list of user-defined time periods.
+
+        Each period with different rates gets a unique internal name (e.g. PEAK_1,
+        PEAK_2) so the optimizer sees distinct prices for each time block.
+        Remaining weekday hours not covered by any period become OFF_PEAK.
+        """
+        tou_periods: dict[str, list] = {}
+        energy_charges: dict[str, float] = {}
+        sell_charges: dict[str, float] = {}
+
+        # Assign unique names when the same period type has different rates
+        name_counters: dict[str, int] = {}
+        for period in periods:
+            base_name = period["name"]
+            rate_key = (base_name, period["import_rate"], period["export_rate"])
+
+            # Check if an existing period with same name has the same rates
+            existing_key = None
+            for key in tou_periods:
+                if key == base_name or key.startswith(base_name + "_"):
+                    if energy_charges.get(key) == period["import_rate"] and sell_charges.get(key) == period["export_rate"]:
+                        existing_key = key
+                        break
+
+            if existing_key:
+                # Same rates — add time range to existing period
+                unique_name = existing_key
+            else:
+                # Different rates or new period — create unique name
+                if base_name not in name_counters:
+                    # First occurrence — use base name
+                    if base_name in tou_periods:
+                        # Base name taken with different rates — rename it
+                        old_periods = tou_periods.pop(base_name)
+                        old_import = energy_charges.pop(base_name)
+                        old_export = sell_charges.pop(base_name)
+                        new_name = f"{base_name}_1"
+                        tou_periods[new_name] = old_periods
+                        energy_charges[new_name] = old_import
+                        sell_charges[new_name] = old_export
+                        name_counters[base_name] = 2
+                        unique_name = f"{base_name}_2"
+                    else:
+                        unique_name = base_name
+                        name_counters[base_name] = 1
+                else:
+                    name_counters[base_name] += 1
+                    unique_name = f"{base_name}_{name_counters[base_name]}"
+
+            # Build day range
+            if period["days"] == "weekdays":
+                from_day, to_day = 1, 5
+            else:
+                from_day, to_day = 0, 6
+
+            time_range = {
+                "fromDayOfWeek": from_day,
+                "toDayOfWeek": to_day,
+                "fromHour": period["start"],
+                "toHour": period["end"],
+            }
+
+            if unique_name not in tou_periods:
+                tou_periods[unique_name] = []
+            tou_periods[unique_name].append(time_range)
+            energy_charges[unique_name] = period["import_rate"]
+            sell_charges[unique_name] = period["export_rate"]
+
+        # Auto-fill remaining weekday hours as OFF_PEAK
+        defined_hours = set()
+        for period_list in tou_periods.values():
+            for p in period_list:
+                if p["fromDayOfWeek"] <= 5 and p["toDayOfWeek"] >= 1:
+                    for h in range(p["fromHour"], p["toHour"]):
+                        defined_hours.add(h)
+
+        offpeak_periods = []
+        gap_start = None
+        for h in range(25):
+            if h < 24 and h not in defined_hours:
+                if gap_start is None:
+                    gap_start = h
+            else:
+                if gap_start is not None:
+                    offpeak_periods.append(
+                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": gap_start, "toHour": h}
+                    )
+                    gap_start = None
+
+        # Weekends are off-peak unless a period covers all days
+        weekend_defined = any(
+            p["fromDayOfWeek"] == 0 and p["toDayOfWeek"] == 6
+            for period_list in tou_periods.values()
+            for p in period_list
+        )
+        if not weekend_defined:
+            offpeak_periods.append({"fromDayOfWeek": 0, "toDayOfWeek": 0, "fromHour": 0, "toHour": 24})
+            offpeak_periods.append({"fromDayOfWeek": 6, "toDayOfWeek": 6, "fromHour": 0, "toHour": 24})
+
+        offpeak_rate = getattr(self, "_tariff_offpeak_rate", 0.15)
+        fit_rate = getattr(self, "_tariff_fit_rate", 0.05)
+
+        if offpeak_periods:
+            # Use a unique off-peak name if OFF_PEAK is already taken by a user period
+            op_name = "OFF_PEAK"
+            if op_name in tou_periods:
+                op_name = "OFF_PEAK_AUTO"
+            tou_periods[op_name] = offpeak_periods
+            energy_charges[op_name] = offpeak_rate
+            sell_charges[op_name] = fit_rate
+
+        provider_name = {
+            "globird": "Globird Energy",
+            "aemo_vpp": "VPP Provider",
+            "nz": "NZ Provider",
+            "other": "Custom Provider",
+        }.get(getattr(self, "_selected_electricity_provider", "other"), "Custom")
+
+        plan_name = getattr(self, "_tariff_plan_name", "") or f"{provider_name} TOU"
+
+        return {
+            "name": plan_name,
+            "utility": provider_name,
+            "seasons": {
+                "All Year": {
+                    "fromMonth": 1,
+                    "toMonth": 12,
+                    "tou_periods": tou_periods,
+                }
+            },
+            "energy_charges": {
+                "All Year": energy_charges,
+            },
+            "sell_tariff": {
+                "energy_charges": {
+                    "All Year": sell_charges,
+                }
+            },
+        }
+
+    async def _route_after_tariff(self) -> FlowResult:
+        """Route to battery-specific setup after tariff configuration."""
+        if self._selected_battery_system == BATTERY_SYSTEM_SIGENERGY:
+            return await self.async_step_sigenergy_credentials()
+        elif self._selected_battery_system == BATTERY_SYSTEM_SUNGROW:
+            return await self.async_step_sungrow()
+        elif self._selected_battery_system == BATTERY_SYSTEM_FOXESS:
+            return await self.async_step_foxess_connection()
+        elif self._selected_battery_system == BATTERY_SYSTEM_GOODWE:
+            return await self.async_step_goodwe_connection()
+        else:
+            return await self.async_step_tesla_provider()
 
     async def async_step_nz_retailer(
         self, user_input: dict[str, Any] | None = None
