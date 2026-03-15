@@ -2221,45 +2221,75 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         except (ValueError, IndexError):
                             pass
 
-                    # Off-peak: fill remaining hours
-                    # Collect all defined weekday hour ranges to compute off-peak gaps
-                    defined_hours = set()
-                    for period_name, periods in tou_periods.items():
-                        for p in periods:
-                            if p["fromDayOfWeek"] <= 5 and p["toDayOfWeek"] >= 1:
-                                for h in range(p["fromHour"], p["toHour"]):
-                                    defined_hours.add(h)
+                    # Off-peak: use explicit times if provided, otherwise fill gaps
+                    offpeak_start_input = user_input.get("offpeak_start")
+                    offpeak_end_input = user_input.get("offpeak_end")
+                    offpeak_days = user_input.get("offpeak_days", "all_days")
 
-                    # Build off-peak from gaps in weekday schedule
-                    offpeak_periods = []
-                    gap_start = None
-                    for h in range(25):
-                        if h < 24 and h not in defined_hours:
-                            if gap_start is None:
-                                gap_start = h
-                        else:
-                            if gap_start is not None:
-                                offpeak_periods.append(
-                                    {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": gap_start, "toHour": h}
+                    if offpeak_start_input and offpeak_end_input:
+                        try:
+                            op_start = int(offpeak_start_input.split(":")[0])
+                            op_end = int(offpeak_end_input.split(":")[0])
+                            if offpeak_days == "weekdays":
+                                tou_periods["OFF_PEAK"] = [
+                                    {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": op_start, "toHour": op_end}
+                                ]
+                            else:
+                                tou_periods["OFF_PEAK"] = [
+                                    {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": op_start, "toHour": op_end}
+                                ]
+                            # Also add weekends as off-peak if peak/shoulder are weekday-only
+                            weekend_defined = any(
+                                p["fromDayOfWeek"] == 0 and p["toDayOfWeek"] == 6
+                                for periods in tou_periods.values()
+                                for p in periods
+                            )
+                            if not weekend_defined:
+                                tou_periods["OFF_PEAK"].append(
+                                    {"fromDayOfWeek": 0, "toDayOfWeek": 0, "fromHour": 0, "toHour": 24}
                                 )
-                                gap_start = None
+                                tou_periods["OFF_PEAK"].append(
+                                    {"fromDayOfWeek": 6, "toDayOfWeek": 6, "fromHour": 0, "toHour": 24}
+                                )
+                        except (ValueError, IndexError):
+                            pass
 
-                    # Weekends are off-peak unless peak/shoulder apply all days
-                    weekend_defined = any(
-                        p["fromDayOfWeek"] == 0 and p["toDayOfWeek"] == 6
-                        for periods in tou_periods.values()
-                        for p in periods
-                    )
-                    if not weekend_defined:
-                        offpeak_periods.append(
-                            {"fromDayOfWeek": 0, "toDayOfWeek": 0, "fromHour": 0, "toHour": 24}  # Sunday
-                        )
-                        offpeak_periods.append(
-                            {"fromDayOfWeek": 6, "toDayOfWeek": 6, "fromHour": 0, "toHour": 24}  # Saturday
-                        )
+                    if "OFF_PEAK" not in tou_periods:
+                        # Auto-fill: collect defined weekday hours and fill gaps
+                        defined_hours = set()
+                        for period_name, periods in tou_periods.items():
+                            for p in periods:
+                                if p["fromDayOfWeek"] <= 5 and p["toDayOfWeek"] >= 1:
+                                    for h in range(p["fromHour"], p["toHour"]):
+                                        defined_hours.add(h)
 
-                    if offpeak_periods:
-                        tou_periods["OFF_PEAK"] = offpeak_periods
+                        offpeak_periods = []
+                        gap_start = None
+                        for h in range(25):
+                            if h < 24 and h not in defined_hours:
+                                if gap_start is None:
+                                    gap_start = h
+                            else:
+                                if gap_start is not None:
+                                    offpeak_periods.append(
+                                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": gap_start, "toHour": h}
+                                    )
+                                    gap_start = None
+
+                        weekend_defined = any(
+                            p["fromDayOfWeek"] == 0 and p["toDayOfWeek"] == 6
+                            for periods in tou_periods.values()
+                            for p in periods
+                        )
+                        if not weekend_defined:
+                            offpeak_periods.append(
+                                {"fromDayOfWeek": 0, "toDayOfWeek": 0, "fromHour": 0, "toHour": 24}
+                            )
+                            offpeak_periods.append(
+                                {"fromDayOfWeek": 6, "toDayOfWeek": 6, "fromHour": 0, "toHour": 24}
+                            )
+                        if offpeak_periods:
+                            tou_periods["OFF_PEAK"] = offpeak_periods
 
                     # Build energy charges
                     energy_charges = {
@@ -2354,6 +2384,10 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional("shoulder_start"): vol.In(hour_options),
                 vol.Optional("shoulder_end"): vol.In(hour_options),
                 vol.Optional("shoulder_days", default="weekdays"): vol.In(day_options),
+                # --- Off-peak times ---
+                vol.Optional("offpeak_start"): vol.In(hour_options),
+                vol.Optional("offpeak_end"): vol.In(hour_options),
+                vol.Optional("offpeak_days", default="all_days"): vol.In(day_options),
                 # --- Super off-peak times ---
                 vol.Optional("super_offpeak_start"): vol.In(hour_options),
                 vol.Optional("super_offpeak_end"): vol.In(hour_options),

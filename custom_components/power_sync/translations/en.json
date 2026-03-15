@@ -161,13 +161,17 @@
           "shoulder_start": "Shoulder Start Time",
           "shoulder_end": "Shoulder End Time",
           "shoulder_days": "Shoulder Applies To",
+          "offpeak_start": "Off-Peak Start Time",
+          "offpeak_end": "Off-Peak End Time",
+          "offpeak_days": "Off-Peak Applies To",
           "super_offpeak_start": "Super Off-Peak Start Time",
           "super_offpeak_end": "Super Off-Peak End Time"
         },
         "data_description": {
           "skip_tariff": "Check to use default estimation instead of configuring custom rates",
           "tariff_type": "Flat rate uses a single price all day. Time of Use has different prices for peak, shoulder, and off-peak periods.",
-          "shoulder_start": "Optional: Set start/end times for shoulder period. Off-peak fills remaining hours automatically.",
+          "shoulder_start": "Optional: Set start/end times for shoulder period.",
+          "offpeak_start": "Optional: Set specific off-peak hours. Leave blank to auto-fill remaining hours.",
           "super_offpeak_rate": "Optional: For plans with free or cheap solar soak periods (e.g., 10am-2pm)",
           "super_offpeak_start": "Start time of super off-peak period (e.g., 10:00 for solar soak)",
           "super_offpeak_end": "End time of super off-peak period (e.g., 14:00 for solar soak)"
@@ -928,12 +932,16 @@
           "shoulder_start": "Shoulder Start Time",
           "shoulder_end": "Shoulder End Time",
           "shoulder_days": "Shoulder Applies To",
+          "offpeak_start": "Off-Peak Start Time",
+          "offpeak_end": "Off-Peak End Time",
+          "offpeak_days": "Off-Peak Applies To",
           "super_offpeak_start": "Super Off-Peak Start Time",
           "super_offpeak_end": "Super Off-Peak End Time"
         },
         "data_description": {
           "tariff_type": "Flat rate uses a single price all day. Time of Use has different prices for peak, shoulder, and off-peak periods.",
-          "shoulder_start": "Optional: Set start/end times for shoulder period. Off-peak fills remaining hours automatically.",
+          "shoulder_start": "Optional: Set start/end times for shoulder period.",
+          "offpeak_start": "Optional: Set specific off-peak hours. Leave blank to auto-fill remaining hours.",
           "super_offpeak_rate": "Optional: For plans with free or cheap solar soak periods (e.g., 10am-2pm)",
           "super_offpeak_start": "Start time of super off-peak period (e.g., 10:00 for solar soak)",
           "super_offpeak_end": "End time of super off-peak period (e.g., 14:00 for solar soak)"
