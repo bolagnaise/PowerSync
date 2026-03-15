@@ -2392,12 +2392,42 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         self._controller = SungrowSHController(host, port, slave_id)
         self._energy_acc = EnergyAccumulator(hass, "sungrow")
 
+        # Midnight baselines for computing daily import/export from total registers
+        # Used when daily registers (13035/13044) read 0 (e.g. SH10RS + SBH)
+        self._total_import_baseline: float | None = None
+        self._total_export_baseline: float | None = None
+        self._baseline_date: str | None = None  # ISO date string
+
         super().__init__(
             hass,
             _LOGGER,
             name=f"{DOMAIN}_sungrow_energy",
             update_interval=UPDATE_INTERVAL_ENERGY,
         )
+
+    def _update_total_baselines(self, data: dict) -> None:
+        """Track midnight baselines for total import/export registers.
+
+        Some Sungrow systems (e.g. SH10RS + SBH) have no working daily
+        import/export registers — they permanently read 0.  We derive
+        daily values from the total (lifetime) registers by subtracting
+        a baseline captured at midnight (or on first read of the day).
+        """
+        today = dt_util.now().date().isoformat()
+        total_import = data.get("total_import")
+        total_export = data.get("total_export")
+
+        if self._baseline_date != today:
+            # New day — capture baselines from current total values
+            if total_import is not None:
+                self._total_import_baseline = total_import
+            if total_export is not None:
+                self._total_export_baseline = total_export
+            self._baseline_date = today
+            _LOGGER.info(
+                "Sungrow daily baseline reset: import=%.1f export=%.1f kWh (total)",
+                self._total_import_baseline or 0, self._total_export_baseline or 0,
+            )
 
     def _build_energy_summary(self, data: dict) -> dict:
         """Build energy summary using Sungrow register-based daily values.
@@ -2415,24 +2445,41 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
         # Some Sungrow systems have no external energy meter paired, so the
         # daily import/export registers (13035/13044) permanently read 0.
         # Detect this by checking whether the register reads 0 while the
-        # software accumulator has already recorded energy — if so, the
-        # register is broken and we keep the accumulator value.
+        # software accumulator has already recorded energy — if so, try
+        # deriving daily values from the total (lifetime) registers.
         daily_pv = data.get("daily_pv_generation")
         daily_import = data.get("daily_import")
         daily_export = data.get("daily_export")
         daily_discharge = data.get("daily_battery_discharge")
         daily_charge = data.get("daily_battery_charge")
 
+        # Update midnight baselines for total register delta method
+        self._update_total_baselines(data)
+
         if daily_pv is not None:
             summary["pv_today_kwh"] = daily_pv
-        if daily_import is not None:
-            acc_import = summary.get("grid_import_today_kwh", 0)
-            if daily_import > 0 or acc_import < 0.01:
-                summary["grid_import_today_kwh"] = daily_import
-        if daily_export is not None:
-            acc_export = summary.get("grid_export_today_kwh", 0)
-            if daily_export > 0 or acc_export < 0.01:
-                summary["grid_export_today_kwh"] = daily_export
+        # For import/export: prefer daily register → total delta → accumulator
+        if daily_import is not None and daily_import > 0:
+            summary["grid_import_today_kwh"] = daily_import
+        else:
+            # Daily register missing or 0 — derive from total register delta
+            total_import = data.get("total_import")
+            if total_import is not None and self._total_import_baseline is not None:
+                derived = round(total_import - self._total_import_baseline, 2)
+                if derived >= 0:
+                    summary["grid_import_today_kwh"] = derived
+            # else: keep accumulator value (already in summary)
+
+        if daily_export is not None and daily_export > 0:
+            summary["grid_export_today_kwh"] = daily_export
+        else:
+            # Daily register missing or 0 — derive from total register delta
+            total_export = data.get("total_export")
+            if total_export is not None and self._total_export_baseline is not None:
+                derived = round(total_export - self._total_export_baseline, 2)
+                if derived >= 0:
+                    summary["grid_export_today_kwh"] = derived
+            # else: keep accumulator value (already in summary)
         if daily_discharge is not None:
             summary["discharge_today_kwh"] = daily_discharge
         if daily_charge is not None:

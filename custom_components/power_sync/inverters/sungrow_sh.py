@@ -993,6 +993,16 @@ class SungrowSHController(InverterController):
             if daily_export:
                 data["daily_export"] = round(daily_export[0] * 0.1, 2)
 
+            # Read total (lifetime) import/export — used to derive daily values
+            # when daily registers read 0 (SH10RS + SBH has no daily registers)
+            total_import = await self._read_input_register(self.REG_TOTAL_IMPORT, 2)
+            if total_import and len(total_import) >= 2:
+                data["total_import"] = round(self._to_unsigned32(total_import[0], total_import[1]) * 0.1, 1)
+
+            total_export = await self._read_input_register(self.REG_TOTAL_EXPORT, 2)
+            if total_export and len(total_export) >= 2:
+                data["total_export"] = round(self._to_unsigned32(total_export[0], total_export[1]) * 0.1, 1)
+
             # Read load power (S32 with U16 fallback for older firmware)
             load_power = await self._read_input_register(self.REG_LOAD_POWER, 2)
             if load_power and len(load_power) >= 2:
