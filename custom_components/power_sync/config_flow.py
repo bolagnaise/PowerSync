@@ -589,7 +589,7 @@ async def test_goodwe_connection(
         return {"success": False, "error": str(err)}
 
 
-class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for PowerSync."""
 
     VERSION = 6
@@ -3783,12 +3783,12 @@ class TeslaAmberSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @callback
     def async_get_options_flow(
         config_entry: config_entries.ConfigEntry,
-    ) -> TeslaAmberSyncOptionsFlow:
+    ) -> PowerSyncOptionsFlow:
         """Get the options flow for this handler."""
-        return TeslaAmberSyncOptionsFlow()
+        return PowerSyncOptionsFlow()
 
 
-class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
+class PowerSyncOptionsFlow(config_entries.OptionsFlow):
     """Handle options flow for PowerSync."""
 
     async def _restore_export_rule(self) -> None:
@@ -6099,7 +6099,7 @@ class TeslaAmberSyncOptionsFlow(config_entries.OptionsFlow):
         ctx._tariff_fit_rate = getattr(self, '_tariff_fit_rate', 0.05)
         ctx._tariff_plan_name = getattr(self, '_tariff_plan_name', '')
         ctx._selected_electricity_provider = self.config_entry.data.get(CONF_ELECTRICITY_PROVIDER, 'other')
-        return TeslaAmberSyncConfigFlow._build_tariff_from_periods(ctx, periods)
+        return PowerSyncConfigFlow._build_tariff_from_periods(ctx, periods)
 
     async def _save_custom_tariff(self, custom_tariff: dict) -> None:
         """Save custom tariff to automation_store and update live tariff_schedule."""
