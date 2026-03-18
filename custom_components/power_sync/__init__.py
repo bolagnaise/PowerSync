@@ -4457,6 +4457,9 @@ class AEMOSpikeView(HomeAssistantView):
 
                 # Update config entry options (shared key for all battery systems)
                 new_options = {**entry.options, CONF_AEMO_SPIKE_ENABLED: new_enabled}
+                domain_data = self._hass.data.get(DOMAIN, {})
+                entry_data = domain_data.get(entry.entry_id, {})
+                entry_data["_skip_reload"] = True
                 self._hass.config_entries.async_update_entry(entry, options=new_options)
 
                 _LOGGER.info(
@@ -4483,6 +4486,9 @@ class AEMOSpikeView(HomeAssistantView):
                     }, status=400)
 
                 new_options = {**entry.options, CONF_AEMO_REGION: new_region}
+                domain_data = self._hass.data.get(DOMAIN, {})
+                entry_data = domain_data.get(entry.entry_id, {})
+                entry_data["_skip_reload"] = True
                 self._hass.config_entries.async_update_entry(entry, options=new_options)
 
                 _LOGGER.info("AEMO region updated to %s", new_region)
@@ -5209,7 +5215,12 @@ class ProviderConfigView(HomeAssistantView):
                 if key in key_mapping:
                     new_options[key_mapping[key]] = value
 
-            # Update the config entry
+            # Update the config entry without triggering a full reload.
+            # Set a flag so the update listener knows to skip the reload —
+            # API-driven saves don't need a full integration restart.
+            domain_data = self._hass.data.get(DOMAIN, {})
+            entry_data = domain_data.get(entry.entry_id, {})
+            entry_data["_skip_reload"] = True
             self._hass.config_entries.async_update_entry(entry, options=new_options)
 
             _LOGGER.info(f"✅ Provider config updated successfully")
@@ -19265,7 +19276,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def _async_options_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload integration when options change."""
+    """Reload integration when options change (unless API-driven)."""
+    domain_data = hass.data.get(DOMAIN, {})
+    entry_data = domain_data.get(entry.entry_id, {})
+    if entry_data.get("_skip_reload"):
+        entry_data.pop("_skip_reload", None)
+        _LOGGER.info("Config entry options updated via API — skipping reload")
+        return
     _LOGGER.info("Config entry options updated — reloading PowerSync integration")
     await hass.config_entries.async_reload(entry.entry_id)
 
