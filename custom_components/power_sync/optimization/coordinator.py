@@ -2163,6 +2163,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         display_import: list[float] = []
         display_export: list[float] = []
 
+        # Log TOU period windows for debugging day-of-week matching
+        dow_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        for pname in tou_periods:
+            plist = tou_periods[pname] if isinstance(tou_periods[pname], list) else []
+            for pw in plist:
+                fd, td = pw.get("fromDayOfWeek", 0), pw.get("toDayOfWeek", 6)
+                fh, th = pw.get("fromHour", 0), pw.get("toHour", 24)
+                _LOGGER.debug(
+                    "TOU period %s: %s-%s %02d:00-%02d:00 (sell=%s)",
+                    pname, dow_names[fd], dow_names[td], fh, th,
+                    sell_rates.get(pname, "?"),
+                )
+
         for t in range(n_steps):
             ts = now + timedelta(minutes=t * interval)
             hour = ts.hour
