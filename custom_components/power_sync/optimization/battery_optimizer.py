@@ -456,7 +456,7 @@ class BatteryOptimizer:
         # Build schedule with action mapping
         schedule = self._build_schedule(
             n, grid_import, grid_export, battery_charge, battery_discharge,
-            solar, load, soc_0
+            solar, load, soc_0, import_prices
         )
 
         # Calculate costs for first 24 hours only (display as daily cost)
@@ -608,7 +608,7 @@ class BatteryOptimizer:
         # Build schedule
         schedule = self._build_schedule(
             n, grid_import, grid_export, battery_charge, battery_discharge,
-            solar, load, soc_0
+            solar, load, soc_0, import_prices
         )
 
         # Calculate costs for first 24 hours only (display as daily cost)
@@ -643,6 +643,7 @@ class BatteryOptimizer:
         solar: list[float],
         load: list[float],
         soc_0: float,
+        import_prices: list[float] | None = None,
     ) -> OptimizationSchedule:
         """
         Map LP solution to battery actions.
@@ -686,7 +687,7 @@ class BatteryOptimizer:
             soc = max(self.backup_reserve, min(1.0, soc))
 
             # Determine action
-            if import_prices[t] <= 0.001 and soc < 0.99 and charge_kw > 0:
+            if import_prices is not None and import_prices[t] <= 0.001 and soc < 0.99 and charge_kw > 0:
                 # Free electricity and battery not full — always force charge
                 # to maximize free grid intake (don't oscillate with SC)
                 action = "charge"
