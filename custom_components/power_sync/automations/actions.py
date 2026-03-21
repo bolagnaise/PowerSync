@@ -1928,10 +1928,13 @@ def _calculate_solar_surplus(live_status: dict, current_ev_power_kw: float, conf
         # Add back current EV power (since we want to know what's available if EV wasn't charging)
         # Add battery charging power (we can redirect it to EV instead)
         battery_charge_kw = max(0, -battery_kw)  # Only count when charging (negative = charging)
-        surplus = -grid_kw + current_ev_power_kw + battery_charge_kw
+        battery_discharge_kw = max(0, battery_kw)  # Positive = discharging
+        # Subtract battery discharge: grid export from battery isn't solar surplus
+        surplus = -grid_kw + current_ev_power_kw + battery_charge_kw - battery_discharge_kw
         _LOGGER.debug(
             f"Surplus calc (grid_based): grid={grid_kw:.2f}kW, ev={current_ev_power_kw:.2f}kW, "
-            f"bat_charge={battery_charge_kw:.2f}kW → raw={surplus:.2f}kW, after_buffer={max(0, surplus - buffer_kw):.2f}kW"
+            f"bat_charge={battery_charge_kw:.2f}kW, bat_discharge={battery_discharge_kw:.2f}kW → "
+            f"raw={surplus:.2f}kW, after_buffer={max(0, surplus - buffer_kw):.2f}kW"
         )
     else:  # direct method
         # Direct calculation: what solar is producing minus what's being used
