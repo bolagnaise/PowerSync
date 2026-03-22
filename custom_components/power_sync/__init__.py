@@ -15683,7 +15683,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             }
         }
 
-        _LOGGER.info(f"Created discharge tariff: buy=${buy_rate}/kWh, sell=${sell_rate_discharge}/kWh for {total_periods} periods, "
+        _LOGGER.info(f"Created discharge tariff: buy=${buy_rate_discharge}/kWh, sell=${sell_rate_discharge}/kWh for {total_periods} periods, "
                      f"expires at {actual_expiry.strftime('%H:%M')}")
 
         return tariff, actual_expiry
