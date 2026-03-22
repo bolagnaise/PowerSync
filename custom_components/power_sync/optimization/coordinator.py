@@ -987,21 +987,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         duration_minutes=self._config.interval_minutes + 5,
                         power_w=action.power_w,
                     )
-                    # force_discharge sets Tesla backup_reserve=0% (needed for
-                    # TOU-based discharge). Override it with the configured
-                    # reserve so the Tesla firmware itself enforces the floor.
-                    # Without this, the battery can drain past the reserve
-                    # between optimizer ticks (up to 5 minutes).
-                    if hasattr(battery, "set_backup_reserve"):
-                        configured_reserve_pct = int(
-                            self._config.backup_reserve * 100
-                        )
-                        await battery.set_backup_reserve(configured_reserve_pct)
+                    # Don't override Tesla's hardware backup_reserve here.
+                    # The optimizer's backup_reserve is a software decision
+                    # boundary only — the LP won't plan discharge below it,
+                    # and the SOC-at-floor check switches to self_consumption
+                    # if SOC reaches the floor. The user's Tesla hardware
+                    # reserve (e.g. 20%) is the absolute safety net.
                     _LOGGER.info(
-                        "Optimizer: Discharging/exporting at %.0fW "
-                        "(backup reserve floor=%d%%)",
+                        "Optimizer: Discharging/exporting at %.0fW",
                         action.power_w,
-                        int(self._config.backup_reserve * 100),
                     )
             elif effective_action == "idle":
                 # IDLE: Hold battery at current SOC by setting backup reserve
