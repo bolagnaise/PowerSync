@@ -806,6 +806,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Self-consumption lets the battery discharge to cover home load,
             # minimizing grid import during the demand window.
             effective_action = action.action
+
+            # Skip charge/export actions during suspected calibration
+            from ..const import DOMAIN as _CAL_DOMAIN
+            _cal_ed = self.hass.data.get(_CAL_DOMAIN, {}).get(self.entry_id, {})
+            if _cal_ed.get("calibration_suspected") and effective_action in ("charge", "export"):
+                _LOGGER.info(
+                    "Optimizer: Skipping %s — calibration suspected, using self_consumption",
+                    effective_action,
+                )
+                effective_action = "self_consumption"
+
             if effective_action == "idle" and self._is_in_demand_window():
                 _LOGGER.info(
                     "Optimizer: Overriding IDLE → self_consumption during demand charge window"
@@ -3120,6 +3131,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             for ar in action_ranges:
                 ar.pop("_powers", None)
             data["next_actions"] = action_ranges
+
+        # Add calibration status
+        _cal_entry_data = self.hass.data.get(DOMAIN, {}).get(self.entry_id, {})
+        data["calibration_suspected"] = _cal_entry_data.get("calibration_suspected", False)
+        _cal_detected_at = _cal_entry_data.get("calibration_detected_at")
+        data["calibration_detected_at"] = _cal_detected_at.isoformat() if _cal_detected_at else None
 
         return data
 

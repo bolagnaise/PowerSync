@@ -11856,6 +11856,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "saving_session_tariff_manager": saving_session_tariff_manager,  # Tesla session tariff manager
         "generic_saving_session_manager": generic_saving_session_manager,  # Non-Tesla session manager
         "saving_session_cancel": None,  # Will store the session check cancel function
+        "calibration_suspected": False,
+        "calibration_detected_at": None,
+        "_mode_stick_failures": [],  # list of timestamps for calibration detection
+        "_calibration_check_unsub": None,
     }
 
     # Track firmware version for change notifications (Tesla only)
@@ -11974,6 +11978,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         Args:
             reason: Short label for log messages (e.g. "force_charge", "backup_reserve_100").
         """
+        # Skip charge kick during suspected calibration
+        _ck_entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        if _ck_entry_data.get("calibration_suspected"):
+            _LOGGER.debug("Skipping charge kick (%s) — calibration suspected", reason)
+            return
+
         try:
             # --- Pre-check: already charging? ---
             status = await get_live_status()
@@ -13828,12 +13838,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if success:
             _LOGGER.info(f"TOU schedule synced to Tesla gateway ({sync_mode})")
 
+            # --- Calibration detection helper ---
+            def _record_mode_stick_failure(hass, entry_id):
+                """Record a mode-verification failure and check for calibration pattern."""
+                from homeassistant.util import dt as dt_util
+                entry_data = hass.data.get(DOMAIN, {}).get(entry_id, {})
+                failures = entry_data.get("_mode_stick_failures", [])
+                now = dt_util.utcnow()
+                failures.append(now)
+                # Keep only failures from last 30 minutes
+                cutoff = now - timedelta(minutes=30)
+                failures = [t for t in failures if t > cutoff]
+                entry_data["_mode_stick_failures"] = failures
+
+                if len(failures) >= 3 and not entry_data.get("calibration_suspected"):
+                    entry_data["calibration_suspected"] = True
+                    entry_data["calibration_detected_at"] = now
+                    _LOGGER.warning(
+                        "Calibration suspected: %d mode-stick failures in 30 minutes — pausing battery control",
+                        len(failures),
+                    )
+                    return True  # newly detected
+                return False
+
             # Alpha: Force mode toggle for faster Powerwall response
             # Only toggle on settled prices, not forecast (reduces unnecessary toggles)
             force_mode_toggle = entry.options.get(
                 CONF_FORCE_TARIFF_MODE_TOGGLE,
                 entry.data.get(CONF_FORCE_TARIFF_MODE_TOGGLE, False)
             )
+            if force_mode_toggle and sync_mode != 'initial_forecast':
+                # Skip toggle if calibration suspected (tariff upload still proceeds)
+                _toggle_entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                if _toggle_entry_data.get("calibration_suspected"):
+                    _LOGGER.debug("Skipping force mode toggle — calibration suspected")
+                    force_mode_toggle = False  # Skip toggle below but don't skip tariff upload
+
             if force_mode_toggle and sync_mode != 'initial_forecast':
                 try:
                     site_id = entry.data[CONF_TESLA_ENERGY_SITE_ID]
@@ -13994,6 +14034,90 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             if not switched_back:
                                 _LOGGER.warning("Mode toggle failed after 3 quick retries — starting background retry")
 
+                                # Record mode-stick failure for calibration detection
+                                newly_detected = _record_mode_stick_failure(hass, entry.entry_id)
+                                if newly_detected:
+                                    # Send push notification
+                                    try:
+                                        from .automations.actions import _send_expo_push
+                                        await _send_expo_push(
+                                            hass,
+                                            "Battery Alert",
+                                            "Powerwall may be calibrating — battery control paused until complete",
+                                        )
+                                    except Exception:
+                                        pass
+
+                                    # Start periodic recovery check every 30 minutes
+                                    async def _calibration_recovery_check(_now=None):
+                                        """Periodically check if calibration has completed."""
+                                        _cal_ed = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                                        if not _cal_ed.get("calibration_suspected"):
+                                            return
+                                        try:
+                                            _cal_session = async_get_clientsession(hass)
+                                            _cal_site_id = entry.data[CONF_TESLA_ENERGY_SITE_ID]
+                                            _cal_token = current_token
+                                            _cal_api_base = TESLEMETRY_API_BASE_URL if current_provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
+                                            _cal_headers = {"Authorization": f"Bearer {_cal_token}", "Content-Type": "application/json"}
+
+                                            # Try setting autonomous mode
+                                            async with _cal_session.post(
+                                                f"{_cal_api_base}/api/1/energy_sites/{_cal_site_id}/operation",
+                                                headers=_cal_headers,
+                                                json={"default_real_mode": "autonomous"},
+                                                timeout=aiohttp.ClientTimeout(total=30),
+                                            ) as _cal_resp:
+                                                if _cal_resp.status != 200:
+                                                    _LOGGER.debug("Calibration recovery check: API returned %s", _cal_resp.status)
+                                                    return
+
+                                            await asyncio.sleep(3)
+
+                                            # Verify mode stuck
+                                            async with _cal_session.get(
+                                                f"{_cal_api_base}/api/1/energy_sites/{_cal_site_id}/site_info",
+                                                headers=_cal_headers,
+                                                timeout=aiohttp.ClientTimeout(total=30),
+                                            ) as _cal_vresp:
+                                                if _cal_vresp.status == 200:
+                                                    _cal_vdata = await _cal_vresp.json()
+                                                    _cal_mode = _cal_vdata.get("response", {}).get("default_real_mode")
+                                                    if _cal_mode == "autonomous":
+                                                        # Calibration complete — clear state
+                                                        _cal_ed["calibration_suspected"] = False
+                                                        _cal_ed["calibration_detected_at"] = None
+                                                        _cal_ed["_mode_stick_failures"] = []
+                                                        _LOGGER.info("Calibration complete — mode restored to autonomous")
+
+                                                        # Cancel periodic check
+                                                        unsub = _cal_ed.get("_calibration_check_unsub")
+                                                        if unsub:
+                                                            unsub()
+                                                            _cal_ed["_calibration_check_unsub"] = None
+
+                                                        # Send push notification
+                                                        try:
+                                                            from .automations.actions import _send_expo_push
+                                                            await _send_expo_push(
+                                                                hass,
+                                                                "Battery",
+                                                                "Calibration complete — resuming normal battery control",
+                                                            )
+                                                        except Exception:
+                                                            pass
+                                                    else:
+                                                        _LOGGER.debug("Calibration recovery check: mode still '%s'", _cal_mode)
+                                        except Exception as _cal_err:
+                                            _LOGGER.debug("Calibration recovery check error: %s", _cal_err)
+
+                                    from homeassistant.helpers.event import async_track_time_interval
+                                    _cal_unsub = async_track_time_interval(
+                                        hass, _calibration_recovery_check, timedelta(minutes=30)
+                                    )
+                                    _cal_ed_store = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                                    _cal_ed_store["_calibration_check_unsub"] = _cal_unsub
+
                                 # Background retry with exponential backoff.
                                 # Only send push notification if ALL retries fail.
                                 async def _retry_autonomous_restore():
@@ -14018,13 +14142,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                                                         if vresp.status == 200:
                                                             vdata = await vresp.json()
                                                             if vdata.get("response", {}).get("default_real_mode") == "autonomous":
-                                                                _LOGGER.info("✅ Mode restore succeeded on retry %d", retry + 1)
+                                                                _LOGGER.info("Mode restore succeeded on retry %d", retry + 1)
+                                                                # Clear calibration state on success
+                                                                _bg_ed = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                                                                _bg_ed["calibration_suspected"] = False
+                                                                _bg_ed["calibration_detected_at"] = None
+                                                                _bg_ed["_mode_stick_failures"] = []
+                                                                # Cancel periodic calibration check if running
+                                                                _bg_unsub = _bg_ed.get("_calibration_check_unsub")
+                                                                if _bg_unsub:
+                                                                    _bg_unsub()
+                                                                    _bg_ed["_calibration_check_unsub"] = None
                                                                 return
                                         except Exception as e:
                                             _LOGGER.debug("Mode restore retry %d failed: %s", retry + 1, e)
 
                                     # All retries exhausted — NOW send notification (once)
-                                    _LOGGER.error("❌ Mode restore failed after all retries")
+                                    _LOGGER.error("Mode restore failed after all retries")
                                     ed = hass.data[DOMAIN].get(entry.entry_id, {})
                                     if not ed.get("_mode_restore_notified"):
                                         try:
@@ -15050,6 +15184,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Force discharge mode - switches to autonomous with high export tariff."""
         from homeassistant.util import dt as dt_util
 
+        # Warn if calibration suspected (don't block — user manual command)
+        _fd_entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        if _fd_entry_data.get("calibration_suspected"):
+            _LOGGER.warning("Force discharge called during suspected calibration — command may not stick")
+
         # Log call context for debugging (helps identify if called by automation)
         context = call.context
         _LOGGER.info(f"🔋 Force discharge service called (context: user_id={context.user_id}, parent_id={context.parent_id})")
@@ -15708,6 +15847,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async def handle_force_charge(call: ServiceCall) -> None:
         """Force charge mode - switches to autonomous with free import tariff."""
         from homeassistant.util import dt as dt_util
+
+        # Warn if calibration suspected (don't block — user manual command)
+        _fc_entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        if _fc_entry_data.get("calibration_suspected"):
+            _LOGGER.warning("Force charge called during suspected calibration — command may not stick")
 
         # Log call context for debugging (helps identify if called by automation)
         context = call.context
