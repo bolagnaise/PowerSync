@@ -3133,7 +3133,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             data["next_actions"] = action_ranges
 
         # Add calibration status
-        _cal_entry_data = self.hass.data.get(DOMAIN, {}).get(self.entry_id, {})
+        from ..const import DOMAIN as _CAL_DOMAIN
+        _cal_entry_data = self.hass.data.get(_CAL_DOMAIN, {}).get(self.entry_id, {})
         data["calibration_suspected"] = _cal_entry_data.get("calibration_suspected", False)
         _cal_detected_at = _cal_entry_data.get("calibration_detected_at")
         data["calibration_detected_at"] = _cal_detected_at.isoformat() if _cal_detected_at else None
