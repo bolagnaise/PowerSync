@@ -1064,6 +1064,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     median_price = sorted(self._last_import_prices)[len(self._last_import_prices) // 2]
                     if current_price >= median_price * 0.9:  # Within 10% of median or above
                         effective_action = "self_consumption"
+                        # Restore pre-IDLE backup reserve if still pending
+                        if self._pre_idle_backup_reserve is not None and hasattr(battery, "set_backup_reserve"):
+                            _LOGGER.info(
+                                "Optimizer: Restoring backup reserve to %d%% (was elevated by IDLE)",
+                                self._pre_idle_backup_reserve,
+                            )
+                            await battery.set_backup_reserve(self._pre_idle_backup_reserve)
+                            self._pre_idle_backup_reserve = None
                         if self._last_executed_action == "self_consumption":
                             _LOGGER.debug(
                                 "Optimizer: IDLE overridden — import %.1fc >= median %.1fc, already in SC",
