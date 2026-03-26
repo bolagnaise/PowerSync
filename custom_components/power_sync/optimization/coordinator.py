@@ -467,16 +467,25 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # the optimizer completes its first run.
         battery = self._executor.battery_controller if self._executor else None
         if battery:
-            # Capture the user's real backup reserve BEFORE any IDLE modifies it.
-            # This is the authoritative value for all future restores.
-            try:
-                if hasattr(battery, "get_backup_reserve"):
-                    startup_reserve = await battery.get_backup_reserve()
-                    if startup_reserve is not None:
-                        self._startup_backup_reserve = startup_reserve
-                        _LOGGER.info("Optimizer startup: captured user backup reserve: %d%%", startup_reserve)
-            except Exception as e:
-                _LOGGER.debug("Could not read startup backup reserve: %s", e)
+            # Restore persisted user backup reserve (survives restarts).
+            # If not persisted, capture from the battery API.
+            persisted_reserve = self._entry.options.get("_user_backup_reserve") if self._entry else None
+            if persisted_reserve is not None:
+                self._startup_backup_reserve = int(persisted_reserve)
+                _LOGGER.info("Optimizer startup: restored persisted user backup reserve: %d%%", self._startup_backup_reserve)
+            else:
+                try:
+                    if hasattr(battery, "get_backup_reserve"):
+                        startup_reserve = await battery.get_backup_reserve()
+                        if startup_reserve is not None:
+                            self._startup_backup_reserve = startup_reserve
+                            _LOGGER.info("Optimizer startup: captured user backup reserve: %d%%", startup_reserve)
+                            # Persist it so it survives restarts
+                            if self._entry:
+                                new_opts = {**self._entry.options, "_user_backup_reserve": startup_reserve}
+                                self.hass.config_entries.async_update_entry(self._entry, options=new_opts)
+                except Exception as e:
+                    _LOGGER.debug("Could not read startup backup reserve: %s", e)
 
             try:
                 if hasattr(battery, "set_self_consumption_mode"):
