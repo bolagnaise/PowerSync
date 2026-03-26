@@ -2592,7 +2592,11 @@ async def _dynamic_ev_update_surplus(
     except Exception:
         pass
 
-    if current_import_price <= 1.0:  # Free or near-free electricity (≤1c/kWh)
+    # Threshold: free tariff periods (GloBird 0c) AND very cheap dynamic
+    # prices (Amber negative/near-zero during solar glut). At ≤5c the grid
+    # is practically free — no point waiting for solar surplus.
+    cheap_threshold = params.get("cheap_grid_threshold_cents", 5.0)
+    if current_import_price <= cheap_threshold:
         max_amps = params.get("max_charge_amps", 32)
         if not state.get("_free_power_logged"):
             _LOGGER.info(
