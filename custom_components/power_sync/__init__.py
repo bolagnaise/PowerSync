@@ -5164,6 +5164,32 @@ class ProviderConfigView(HomeAssistantView):
                     ),
                 }
 
+            # Add demand charge fields for all providers
+            config["demand_charge_enabled"] = entry.options.get(
+                CONF_DEMAND_CHARGE_ENABLED,
+                entry.data.get(CONF_DEMAND_CHARGE_ENABLED, False)
+            )
+            config["demand_charge_rate"] = entry.options.get(
+                CONF_DEMAND_CHARGE_RATE,
+                entry.data.get(CONF_DEMAND_CHARGE_RATE, 0.0)
+            )
+            config["demand_charge_start_time"] = entry.options.get(
+                CONF_DEMAND_CHARGE_START_TIME,
+                entry.data.get(CONF_DEMAND_CHARGE_START_TIME, "16:00")
+            )
+            config["demand_charge_end_time"] = entry.options.get(
+                CONF_DEMAND_CHARGE_END_TIME,
+                entry.data.get(CONF_DEMAND_CHARGE_END_TIME, "21:00")
+            )
+            config["demand_charge_days"] = entry.options.get(
+                CONF_DEMAND_CHARGE_DAYS,
+                entry.data.get(CONF_DEMAND_CHARGE_DAYS, [0, 1, 2, 3, 4])
+            )
+            config["demand_charge_billing_day"] = entry.options.get(
+                CONF_DEMAND_CHARGE_BILLING_DAY,
+                entry.data.get(CONF_DEMAND_CHARGE_BILLING_DAY, 1)
+            )
+
             result = {
                 "success": True,
                 "electricity_provider": electricity_provider,
