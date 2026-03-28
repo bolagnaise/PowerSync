@@ -722,6 +722,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 action_summary,
             )
 
+            # Push fresh data to HA sensors immediately after LP solve.
+            # Without this, sensors only update on the 5-minute DataUpdateCoordinator
+            # interval and can show stale "idle" while the API returns the real action.
+            self.async_set_updated_data(self.get_api_data())
+
             # Execute the current action immediately so the battery responds
             # right after the LP solve — don't wait for the next polling tick
             # (up to 5 minutes away).  The polling loop still re-applies the
@@ -758,6 +763,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             current_action.soc * 100,
                         )
                         await self._execute_optimizer_action(current_action)
+                        # Keep sensors in sync with current action
+                        self.async_set_updated_data(self.get_api_data())
                     elif not current_action:
                         _LOGGER.debug("Polling: no current action found in schedule")
 
