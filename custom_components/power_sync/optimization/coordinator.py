@@ -907,6 +907,30 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 effective_action = "self_consumption"
 
+            # Block EXPORT when curtailment is active (export price below threshold).
+            # Without this, force_discharge would override the Tesla "never" export
+            # rule, causing the battery to export at a loss during negative prices.
+            if effective_action in ("discharge", "export") and self._entry:
+                from ..const import (
+                    CONF_AC_INVERTER_CURTAILMENT_ENABLED,
+                    CONF_BATTERY_CURTAILMENT_ENABLED,
+                    CONF_SIGENERGY_DC_CURTAILMENT_ENABLED,
+                )
+                _curtailment_on = (
+                    self._entry.options.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False)
+                    or self._entry.options.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
+                    or self._entry.options.get(CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False)
+                )
+                if _curtailment_on and export_prices:
+                    _current_export = export_prices[0] if export_prices else 0
+                    if _current_export < 0.01:  # < 1c/kWh
+                        _LOGGER.info(
+                            "Optimizer: Overriding %s → self_consumption — "
+                            "curtailment active and export price %.1fc/kWh < 1c threshold",
+                            effective_action, _current_export * 100,
+                        )
+                        effective_action = "self_consumption"
+
             # When transitioning from IDLE to another action, we need to
             # undo what IDLE did (restore work mode and backup_reserve).
             # However, the LP can oscillate between IDLE and self_consumption
@@ -2161,8 +2185,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     for e in feed_in:
                         dur = e.get("duration", 30)
                         entry_expand = max(1, dur // interval)
-                        # feedIn perKwh is negative (you get paid), abs for optimizer
-                        price_dollar = abs(e.get("perKwh", 0)) / 100
+                        # feedIn perKwh: negative = you get paid, positive = you pay to export.
+                        # Negate so optimizer sees positive = revenue.  Clamp to 0 so
+                        # genuinely negative export prices (you pay) don't look profitable.
+                        price_dollar = max(0, -(e.get("perKwh", 0))) / 100
                         export_prices.extend([price_dollar] * entry_expand)
 
                     # Track actual forecast length before padding
