@@ -657,15 +657,26 @@ class SolcastForecaster:
     ) -> list[float] | None:
         """Get forecast from Solcast integration if available."""
         try:
-            # First, try the Solcast Solar integration (solcast_solar domain)
-            # This is the preferred source as it's a dedicated integration
+            # Primary: Read detailedForecast from Solcast sensor attributes
+            # The BJReplay/ha-solcast-solar integration (v4+) exposes
+            # detailedForecast as attributes on forecast_today/tomorrow sensors
+            forecast = self._read_from_solcast_sensors(start_time, n_intervals)
+            if forecast:
+                _LOGGER.debug(
+                    "Using solar forecast from Solcast sensor attributes "
+                    "(%d intervals, peak=%.1fW)",
+                    len(forecast), max(forecast) if forecast else 0,
+                )
+                return forecast
+
+            # Fallback: try the Solcast Solar integration hass.data
             solcast_solar_data = self.hass.data.get("solcast_solar")
             if solcast_solar_data:
                 forecast = self._extract_from_solcast_solar_integration(
                     solcast_solar_data, start_time, n_intervals
                 )
                 if forecast:
-                    _LOGGER.debug("Using solar forecast from Solcast Solar integration")
+                    _LOGGER.debug("Using solar forecast from Solcast Solar integration hass.data")
                     return forecast
 
             # Fallback: Check for Solcast data in PowerSync's own coordinator
@@ -716,6 +727,105 @@ class SolcastForecaster:
         except Exception as e:
             _LOGGER.warning(f"Could not get Solcast forecast: {e}")
             return None
+
+    def _read_from_solcast_sensors(
+        self,
+        start_time: datetime,
+        n_intervals: int,
+    ) -> list[float] | None:
+        """Read forecast from Solcast PV Forecast sensor attributes.
+
+        The BJReplay/ha-solcast-solar integration (v4+) exposes detailedForecast
+        as attributes on sensor.solcast_pv_forecast_forecast_today and
+        sensor.solcast_pv_forecast_forecast_tomorrow. Each entry has:
+            period_start: ISO timestamp
+            pv_estimate: power in kW
+            pv_estimate10: P10 estimate
+            pv_estimate90: P90 estimate
+        """
+        # Try common entity ID patterns
+        today_entity = "sensor.solcast_pv_forecast_forecast_today"
+        tomorrow_entity = "sensor.solcast_pv_forecast_forecast_tomorrow"
+
+        today_state = self.hass.states.get(today_entity)
+        if not today_state:
+            return None
+
+        today_detailed = today_state.attributes.get("detailedForecast")
+        if not today_detailed or not isinstance(today_detailed, list):
+            return None
+
+        # Combine today + tomorrow for 48h coverage
+        combined_forecast = list(today_detailed)
+
+        tomorrow_state = self.hass.states.get(tomorrow_entity)
+        if tomorrow_state:
+            tomorrow_detailed = tomorrow_state.attributes.get("detailedForecast")
+            if tomorrow_detailed and isinstance(tomorrow_detailed, list):
+                combined_forecast.extend(tomorrow_detailed)
+
+        if not combined_forecast:
+            return None
+
+        # Build time-indexed lookup (period_start → power in W)
+        forecast_by_time: dict[datetime, float] = {}
+        for item in combined_forecast:
+            if not isinstance(item, dict):
+                continue
+            period_start_str = item.get("period_start")
+            if not period_start_str:
+                continue
+            try:
+                if isinstance(period_start_str, datetime):
+                    period_start = period_start_str
+                else:
+                    period_start = datetime.fromisoformat(
+                        period_start_str.replace("Z", "+00:00")
+                    )
+                pv_kw = item.get("pv_estimate", 0) or 0
+                forecast_by_time[period_start] = pv_kw * 1000  # kW → W
+            except (ValueError, TypeError):
+                continue
+
+        if not forecast_by_time:
+            return None
+
+        # Generate interval forecast aligned to start_time
+        result: list[float] = []
+        current_time = start_time
+        sorted_times = sorted(forecast_by_time.keys())
+
+        for _ in range(n_intervals):
+            # Find the forecast period that contains current_time
+            # Solcast uses period_start (beginning of 30-min window)
+            power_w = 0.0
+            for i, ft in enumerate(sorted_times):
+                # Check if current_time falls within this period
+                next_ft = sorted_times[i + 1] if i + 1 < len(sorted_times) else ft + timedelta(minutes=30)
+                if ft <= current_time < next_ft:
+                    power_w = forecast_by_time[ft]
+                    break
+                elif ft > current_time:
+                    # Past all known periods — nighttime
+                    break
+
+            result.append(power_w)
+            current_time += timedelta(minutes=self.interval_minutes)
+
+        # Validate: should have some non-zero values during daytime
+        if not any(v > 0 for v in result):
+            _LOGGER.debug("Solcast sensor forecast is all zeros — may be nighttime or stale data")
+
+        total_kwh = sum(result) * (self.interval_minutes / 60) / 1000
+        _LOGGER.info(
+            "Solcast sensor forecast: %d periods from %d entries, "
+            "peak=%.1fW, total=%.1fkWh (48h)",
+            len(result), len(forecast_by_time),
+            max(result) if result else 0,
+            total_kwh,
+        )
+
+        return result
 
     def _extract_from_solcast_solar_integration(
         self,
