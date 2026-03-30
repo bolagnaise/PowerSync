@@ -1004,6 +1004,27 @@ async def async_setup_entry(
 
             _LOGGER.info("Flow Power price sensors added (import, export, and TWAP)")
 
+            # Add portal sensors if portal is connected
+            from .const import CONF_FLOWPOWER_EMAIL, FLOW_POWER_PORTAL_SENSORS
+            fp_email = entry.options.get(
+                CONF_FLOWPOWER_EMAIL, entry.data.get(CONF_FLOWPOWER_EMAIL)
+            )
+            if fp_email:
+                for sensor_type, name, data_key, unit, icon, source in FLOW_POWER_PORTAL_SENSORS:
+                    entities.append(
+                        FlowPowerPortalSensor(
+                            hass=hass,
+                            entry=entry,
+                            sensor_type=sensor_type,
+                            name=name,
+                            data_key=data_key,
+                            unit=unit,
+                            icon=icon,
+                            source_label=source,
+                        )
+                    )
+                _LOGGER.info("Flow Power portal sensors added (%d sensors)", len(FLOW_POWER_PORTAL_SENSORS))
+
     # Always add battery health sensor
     # For non-Tesla systems, pass coordinator so it can read battery_soh
     battery_system = "tesla"
@@ -2704,6 +2725,58 @@ class FlowPowerAmberComparisonSensor(SensorEntity):
             attrs["price_cents"] = round(amber_cents, 2)
 
         return attrs
+
+
+class FlowPowerPortalSensor(SensorEntity):
+    """Sensor for individual Flow Power portal account metrics.
+
+    Reads from hass.data[DOMAIN][entry_id]["flow_power_portal_data"] which is
+    populated by the portal client every 30 minutes.
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        sensor_type: str,
+        name: str,
+        data_key: str,
+        unit: str | None,
+        icon: str,
+        source_label: str,
+    ) -> None:
+        self.hass = hass
+        self._entry = entry
+        self._sensor_type = sensor_type
+        self._data_key = data_key
+        self._source_label = source_label
+        self._attr_name = f"Power Sync {name}"
+        self._attr_unique_id = f"power_sync_{entry.entry_id}_{sensor_type}"
+        self._attr_native_unit_of_measurement = unit
+        self._attr_icon = icon
+        self._attr_state_class = SensorStateClass.MEASUREMENT if unit else None
+
+    @property
+    def native_value(self) -> float | None:
+        domain_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        portal_data = domain_data.get("flow_power_portal_data")
+        if not portal_data:
+            return None
+        val = portal_data.get(self._data_key)
+        if val is not None:
+            try:
+                return round(float(val), 3)
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {"source": self._source_label}
+
+    @property
+    def should_poll(self) -> bool:
+        return True
 
 
 class BatteryHealthSensor(SensorEntity):

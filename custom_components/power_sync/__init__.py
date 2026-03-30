@@ -11820,6 +11820,41 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if fp_tariff_rate is not None:
                 _LOGGER.info("Current network tariff rate: %.2fc/kWh", fp_tariff_rate)
 
+    # Initialize Flow Power portal client for actual account data
+    flow_power_portal_client = None
+    flow_power_portal_data = None
+    if electricity_provider == "flow_power":
+        from .const import CONF_FLOWPOWER_EMAIL, CONF_FLOWPOWER_PASSWORD
+        fp_email = entry.options.get(CONF_FLOWPOWER_EMAIL, entry.data.get(CONF_FLOWPOWER_EMAIL))
+        fp_password = entry.options.get(CONF_FLOWPOWER_PASSWORD, entry.data.get(CONF_FLOWPOWER_PASSWORD))
+
+        # Check for authenticated client from config flow
+        pending_client = hass.data.get(DOMAIN, {}).pop("_pending_fp_client", None)
+        if pending_client is not None:
+            flow_power_portal_client = pending_client
+            _LOGGER.info("Flow Power: Using authenticated portal client from config flow")
+        elif fp_email:
+            # Try to restore session from saved cookies
+            from .flow_power_portal import FlowPowerPortalClient
+            flow_power_portal_client = FlowPowerPortalClient()
+            store = Store(hass, 1, f"{DOMAIN}.fp_session.{entry.entry_id}")
+            try:
+                saved = await store.async_load()
+                if saved and saved.get("cookies"):
+                    flow_power_portal_client.import_session_cookies(saved["cookies"])
+                    if await flow_power_portal_client.restore_session():
+                        _LOGGER.info("Flow Power: Portal session restored from cookies")
+                        # Fetch initial account data
+                        flow_power_portal_data = await flow_power_portal_client.get_account_data()
+                    else:
+                        _LOGGER.warning("Flow Power: Saved session expired — re-authenticate via options")
+                        flow_power_portal_client = None
+                else:
+                    flow_power_portal_client = None
+            except Exception as exc:
+                _LOGGER.warning("Flow Power: Error restoring portal session: %s", exc)
+                flow_power_portal_client = None
+
     # Initialize Solcast Solar Forecast Coordinator if enabled
     # Skip if the Solcast Solar integration is already installed (avoid double-polling API)
     solcast_coordinator = None
@@ -11970,6 +12005,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "sigenergy_curtailment_state": "normal",  # Track Sigenergy DC curtailment state
         "amber_usage_coordinator": amber_usage_coordinator,  # For actual metered cost data
         "flow_power_twap_tracker": flow_power_twap_tracker,  # For dynamic PEA pricing
+        "flow_power_portal_client": flow_power_portal_client,  # Authenticated portal client
+        "flow_power_portal_data": flow_power_portal_data,  # Account PEA/LWAP/TWAP/DLF data
         "fp_tariff_rate": fp_tariff_rate,  # Current network tariff rate (c/kWh) — v2
         "fp_avg_daily_tariff": fp_avg_daily_tariff,  # 24h avg network tariff (c/kWh) — v2
         "saving_session_coordinator": saving_session_coordinator,  # Octopus Saving Sessions
@@ -13795,8 +13832,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     try:
                         twap_value = float(twap_override)
                     except (ValueError, TypeError):
-                        twap_value = fp_tracker.twap if fp_tracker else None
+                        twap_value = None
                 else:
+                    twap_value = None
+
+                # Prefer portal TWAP (actual billing data) over local tracker
+                if twap_value is None:
+                    portal_data = hass.data[DOMAIN][entry.entry_id].get("flow_power_portal_data")
+                    if portal_data and portal_data.get("twap") is not None:
+                        twap_value = portal_data["twap"]
+                        _LOGGER.debug("Using portal TWAP: %.2f c/kWh", twap_value)
+                if twap_value is None:
                     twap_value = fp_tracker.twap if fp_tracker else None
 
                 # Build per-period tariff rate lookup for v2 formula
@@ -18692,6 +18738,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN][entry.entry_id]["fp_midnight_cancel"] = fp_midnight_cancel
         _LOGGER.info("Flow Power v2 tariff refresh scheduled (every 5min + midnight recalc)")
 
+    # Set up portal data refresh (every 30 min) if portal client is connected
+    if electricity_provider == "flow_power":
+        _fp_portal = hass.data[DOMAIN][entry.entry_id].get("flow_power_portal_client")
+        if _fp_portal and _fp_portal.is_authenticated:
+            from .const import UPDATE_INTERVAL_FLOWPOWER
+
+            async def _refresh_fp_portal_data(now):
+                """Fetch latest account data from Flow Power portal."""
+                client = hass.data[DOMAIN].get(entry.entry_id, {}).get("flow_power_portal_client")
+                if not client or not client.is_authenticated:
+                    return
+                data = await client.get_account_data()
+                if data:
+                    hass.data[DOMAIN][entry.entry_id]["flow_power_portal_data"] = data
+                    _LOGGER.debug("Flow Power portal data refreshed: PEA=%.2f, TWAP=%.2f",
+                                  data.get("pea_actual") or 0, data.get("twap") or 0)
+                    # Save session cookies
+                    fp_store = Store(hass, 1, f"{DOMAIN}.fp_session.{entry.entry_id}")
+                    await fp_store.async_save({"cookies": client.export_session_cookies()})
+
+            from homeassistant.helpers.event import async_track_time_interval as _track_fp
+            fp_portal_cancel = _track_fp(
+                hass, _refresh_fp_portal_data, timedelta(seconds=UPDATE_INTERVAL_FLOWPOWER)
+            )
+            hass.data[DOMAIN][entry.entry_id]["fp_portal_cancel"] = fp_portal_cancel
+            _LOGGER.info("Flow Power portal data refresh scheduled (every 30min)")
+
     # Set up fast load-following update (every 30 seconds) for responsive power limiting
     # This only updates the power limit when already in load-following mode, doesn't change curtail/restore decisions
     async def fast_load_following_update(now):
@@ -20027,6 +20100,18 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.debug("Saved Flow Power TWAP history")
         except Exception as e:
             _LOGGER.debug(f"Error saving TWAP history: {e}")
+
+    # Close Flow Power portal client and save session on unload
+    if fp_portal_cancel := entry_data.get("fp_portal_cancel"):
+        fp_portal_cancel()
+    if fp_client := entry_data.get("flow_power_portal_client"):
+        try:
+            fp_store = Store(hass, 1, f"{DOMAIN}.fp_session.{entry.entry_id}")
+            await fp_store.async_save({"cookies": fp_client.export_session_cookies()})
+            await fp_client.close()
+            _LOGGER.debug("Flow Power portal session saved and closed")
+        except Exception as e:
+            _LOGGER.debug(f"Error closing Flow Power portal: {e}")
 
     # Stop Amber usage coordinator if it exists
     if usage_coord := entry_data.get("amber_usage_coordinator"):

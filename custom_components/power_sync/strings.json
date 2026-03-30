@@ -38,6 +38,28 @@
         },
         "submit_button": "Next"
       },
+      "flow_power_portal": {
+        "title": "Flow Power Portal (Optional)",
+        "description": "Connect your Flow Power portal account to get actual billing data (PEA, LWAP, TWAP, DLF) instead of estimates.\n\nThis requires your Flow Power portal login and SMS verification.",
+        "data": {
+          "connect_portal": "Connect Flow Power portal account"
+        }
+      },
+      "flow_power_portal_login": {
+        "title": "Flow Power Portal Login",
+        "description": "Enter your Flow Power portal credentials. An SMS verification code will be sent to your registered phone.",
+        "data": {
+          "flowpower_email": "Email Address",
+          "flowpower_password": "Password"
+        }
+      },
+      "flow_power_portal_mfa": {
+        "title": "Flow Power SMS Verification",
+        "description": "Enter the SMS verification code sent to your phone.",
+        "data": {
+          "mfa_code": "SMS Code"
+        }
+      },
       "amber": {
         "title": "Amber Electric Configuration",
         "description": "Enter your Amber Electric API token. You can get this from {amber_url}",
@@ -548,6 +570,8 @@
       "foxess_cloud_connection_error": "Unable to connect to FoxESS Cloud. Check your internet connection and try again.",
       "goodwe_connect_failed": "Cannot connect to GoodWe inverter. Check IP address and ensure the inverter is online.",
       "goodwe_no_battery": "This GoodWe inverter does not have battery support (DT/MS/XS series are grid-only).",
+      "invalid_credentials": "Invalid email or password. Please check your Flow Power portal credentials.",
+      "invalid_mfa_code": "Invalid SMS verification code. Please try again.",
       "zaptec_auth_failed": "Zaptec Cloud authentication failed. Check your email and password are correct.",
       "zaptec_missing_credentials": "Please provide both your Zaptec email and password.",
       "no_prices": "No Octopus prices found for this tariff and region. Check your product and GSP region are correct.",
@@ -758,7 +782,8 @@
           "fp_network": "V2 Tariff: Network Distributor",
           "fp_tariff_code": "V2 Tariff: Tariff Code",
           "fp_twap_override": "TWAP Override (c/kWh)",
-          "fp_amber_markup": "Amber Comparison Markup (c/kWh)"
+          "fp_amber_markup": "Amber Comparison Markup (c/kWh)",
+          "connect_portal": "Connect/re-authenticate Flow Power portal"
         },
         "data_description": {
           "flow_power_price_source": "AEMO Direct fetches wholesale prices from NEMWeb (no API key needed). Amber API uses your Amber Electric account for pricing.",
@@ -770,6 +795,21 @@
           "fp_amber_markup": "Retailer margin used for the Amber comparison sensor. Leave empty for the regional default (~4 c/kWh)."
         },
         "submit_button": "Next"
+      },
+      "flow_power_portal_reauth": {
+        "title": "Flow Power Portal Login",
+        "description": "Enter your Flow Power portal credentials to re-authenticate.",
+        "data": {
+          "flowpower_email": "Email Address",
+          "flowpower_password": "Password"
+        }
+      },
+      "flow_power_portal_mfa_options": {
+        "title": "Flow Power SMS Verification",
+        "description": "Enter the SMS verification code sent to your phone.",
+        "data": {
+          "mfa_code": "SMS Code"
+        }
       },
       "flow_power_amber_token": {
         "title": "Amber API Token",
