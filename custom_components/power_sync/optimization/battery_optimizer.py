@@ -714,8 +714,15 @@ class BatteryOptimizer:
                 and discharge_kw < threshold_kw
                 and import_kw > threshold_kw
             ):
-                # Battery idle while home draws from grid — hold SOC
-                action = "idle"
+                # Battery idle while home draws from grid — hold SOC.
+                # But if SOC is at the optimizer backup reserve, show
+                # self_consumption instead: the executor overrides IDLE
+                # to SC at the reserve floor anyway, and the schedule
+                # chart should match what actually executes.
+                if soc <= self.backup_reserve + 0.01:
+                    action = "self_consumption"
+                else:
+                    action = "idle"
                 power_w = 0.0
             else:
                 # Natural self-consumption: solar charging or battery serving load
