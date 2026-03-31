@@ -867,7 +867,20 @@ async def async_setup_entry(
     optimization_coordinator = domain_data.get("optimization_coordinator")
     if optimization_coordinator:
         _LOGGER.info("LP optimizer active - adding forecast sensors")
+        # Skip price forecast sensors for fixed-price providers (prices never change)
+        electricity_provider = entry.options.get(
+            CONF_ELECTRICITY_PROVIDER,
+            entry.data.get(CONF_ELECTRICITY_PROVIDER, "")
+        )
+        fixed_price_providers = ("globird", "aemo_vpp", "nz_retailer", "nz_custom")
+        has_dynamic_prices = electricity_provider not in fixed_price_providers
         for description in LP_FORECAST_SENSORS:
+            # Skip price forecast sensors for fixed-price providers
+            if not has_dynamic_prices and description.key in (
+                SENSOR_TYPE_LP_IMPORT_PRICE_FORECAST,
+                SENSOR_TYPE_LP_EXPORT_PRICE_FORECAST,
+            ):
+                continue
             entities.append(
                 LPForecastSensor(
                     coordinator=optimization_coordinator,
