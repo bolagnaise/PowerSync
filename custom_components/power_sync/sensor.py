@@ -872,7 +872,7 @@ async def async_setup_entry(
             CONF_ELECTRICITY_PROVIDER,
             entry.data.get(CONF_ELECTRICITY_PROVIDER, "")
         )
-        fixed_price_providers = ("globird", "aemo_vpp", "nz_retailer", "nz_custom")
+        fixed_price_providers = ("globird", "nz_retailer", "nz_custom")
         has_dynamic_prices = electricity_provider not in fixed_price_providers
         for description in LP_FORECAST_SENSORS:
             # Skip price forecast sensors for fixed-price providers

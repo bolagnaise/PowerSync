@@ -19642,7 +19642,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 from .sensor import LP_FORECAST_SENSORS, LPForecastSensor, OPTIMIZER_ACTION_SENSORS, OptimizerActionSensor
                 from .const import CONF_ELECTRICITY_PROVIDER as _CEP
                 _ep = entry.options.get(_CEP, entry.data.get(_CEP, ""))
-                _fixed = ("globird", "aemo_vpp", "nz_retailer", "nz_custom")
+                _fixed = ("globird", "nz_retailer", "nz_custom")
                 _has_dynamic = _ep not in _fixed
                 from .const import SENSOR_TYPE_LP_IMPORT_PRICE_FORECAST, SENSOR_TYPE_LP_EXPORT_PRICE_FORECAST
                 deferred_sensors = [
