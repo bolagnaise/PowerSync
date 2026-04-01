@@ -1084,16 +1084,28 @@ class SigenergyController(InverterController):
                 return False
             _LOGGER.info("Remote EMS control mode set to DISCHARGE")
 
-            # 3. Set grid export limit (NOT discharge rate limit)
-            # The ESS max discharge limit stays at rated capacity so the
-            # battery can always cover home load. The grid export limit
-            # controls how much power goes to the grid on top of that.
+            # 3. Set active power target (negative = export/discharge)
+            # REG_ACTIVE_POWER_FIXED_TARGET is S32, gain 1000, kW.
+            # Negative value tells the inverter to actively push power to grid.
+            target_raw = int(-power_kw * 1000)  # kW → gain-1000, negative for export
+            # Two's complement for negative S32 → two unsigned U16 registers
+            if target_raw < 0:
+                target_raw = target_raw + 0x100000000
+            hi = (target_raw >> 16) & 0xFFFF
+            lo = target_raw & 0xFFFF
+            power_result = await self._write_holding_registers(
+                self.REG_ACTIVE_POWER_FIXED_TARGET, [hi, lo]
+            )
+            if not power_result:
+                _LOGGER.warning(f"Failed to set active power target to {-power_kw} kW, falling back to export limit only")
+
+            # 4. Set grid export limit as ceiling
             rate_result = await self.set_export_limit(power_kw)
             if not rate_result:
                 _LOGGER.error(f"Failed to set grid export limit to {power_kw} kW")
                 return False
 
-            _LOGGER.info(f"Sigenergy FORCE DISCHARGE active — grid export limit {power_kw} kW")
+            _LOGGER.info(f"Sigenergy FORCE DISCHARGE active — target {power_kw} kW, export limit {power_kw} kW")
             return True
 
         except Exception as e:
