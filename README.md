@@ -30,6 +30,23 @@
 | **GoodWe** (ET, EH, BT, BH, ES, EM, BP) | UDP or TCP (local) | Force charge/discharge, backup reserve, export limit |
 | **Sungrow SH-series** | Modbus TCP | Force charge/discharge, rate limiting, export control, dual inverter |
 
+### AC-Coupled Inverter Curtailment
+
+Solar inverters that bypass the battery can be curtailed during negative feed-in prices:
+
+| Inverter | Connection | Method |
+|----------|-----------|--------|
+| **Fronius** | SunSpec Modbus | WMaxLimPct power limiting |
+| **Sungrow SG** | Modbus TCP | Percentage power limit |
+| **Sungrow SH** | Modbus TCP | Export limit register |
+| **Enphase** | IQ Gateway REST API | DPEL/DER export limit |
+| **FoxESS** | Modbus TCP | Remote active power |
+| **Huawei** | Smart Dongle Modbus | Feed grid power limit |
+| **GoodWe** | Modbus TCP | Export limit register |
+| **Zeversolar** | HTTP API | Power limit percentage |
+| **Solax** | Modbus TCP or HA entity | Export control user limit (reg 0x42) |
+| **Sigenergy** | Modbus TCP | Grid export limit / DC curtailment |
+
 ### Electricity Providers
 
 | Provider | Country | Pricing |
@@ -38,7 +55,7 @@
 | **Localvolts** | Australia | Real-time 5-min wholesale pricing (API key + Partner ID) |
 | **Flow Power / AEMO** | Australia | Wholesale pricing |
 | **Globird / AEMO VPP** | Australia | Static + spike detection |
-| **Octopus Energy** | UK | Dynamic 30-min (Agile, Go, Flux, Tracker) |
+| **Octopus Energy** | UK | Dynamic 30-min (Agile, Go, Intelligent Go, Flux, Tracker). Reads from [BottlecapDave's integration](https://github.com/BottlecapDave/HomeAssistant-OctopusEnergy) when installed |
 | **EPEX Day-Ahead** | EU (DE, AT, BE, NL, DK, SE) | Hourly day-ahead pricing with configurable surcharge & tax |
 | **NZ TOU** | New Zealand | Static TOU (Octopus NZ, Electric Kiwi, Contact Energy, Custom) |
 
