@@ -15408,6 +15408,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_charge_state["saved_operation_mode"] = persisted_force_state.get("saved_operation_mode")
                     force_charge_state["saved_backup_reserve"] = persisted_force_state.get("saved_backup_reserve")
 
+                    # Re-issue the charge command to the inverter
+                    try:
+                        remaining_min = int(remaining_minutes)
+                        await hass.services.async_call(
+                            DOMAIN, SERVICE_FORCE_CHARGE,
+                            {"duration": remaining_min},
+                            blocking=True,
+                        )
+                        _LOGGER.info(
+                            "🔋 Re-issued force charge command after restart (%d min)",
+                            remaining_min,
+                        )
+                    except Exception as e:
+                        _LOGGER.error("Failed to re-issue force charge after restart: %s", e)
+
                     # Re-setup expiry timer
                     async def auto_restore_charge(_now):
                         if force_charge_state["active"]:
@@ -15434,6 +15449,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_discharge_state["saved_operation_mode"] = persisted_force_state.get("saved_operation_mode")
                     force_discharge_state["saved_backup_reserve"] = persisted_force_state.get("saved_backup_reserve")
                     force_discharge_state["saved_export_rule"] = persisted_force_state.get("saved_export_rule")
+
+                    # Re-issue the discharge command to the inverter.
+                    # After restart, the inverter reverts to normal mode —
+                    # the state flag alone doesn't resume hardware discharge.
+                    try:
+                        remaining_min = int(remaining_minutes)
+                        await hass.services.async_call(
+                            DOMAIN, SERVICE_FORCE_DISCHARGE,
+                            {"duration": remaining_min},
+                            blocking=True,
+                        )
+                        _LOGGER.info(
+                            "🔋 Re-issued force discharge command after restart (%d min)",
+                            remaining_min,
+                        )
+                    except Exception as e:
+                        _LOGGER.error("Failed to re-issue force discharge after restart: %s", e)
 
                     # Re-setup expiry timer
                     async def auto_restore_discharge(_now):
