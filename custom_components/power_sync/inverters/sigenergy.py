@@ -1072,9 +1072,12 @@ class SigenergyController(InverterController):
                 return False
             _LOGGER.info("Remote EMS enabled for force discharge")
 
-            # 2. Set control mode to discharge (PV first)
+            # 2. Set control mode to discharge (ESS first — battery priority)
+            # DISCHARGE_PV (mode 5) limits to PV output, which is near-zero
+            # in the evening when exports are most valuable.
+            # DISCHARGE_ESS (mode 6) discharges directly from battery storage.
             mode_result = await self._write_holding_registers(
-                self.REG_REMOTE_EMS_CONTROL_MODE, [self.REMOTE_EMS_MODE_DISCHARGE_PV]
+                self.REG_REMOTE_EMS_CONTROL_MODE, [self.REMOTE_EMS_MODE_DISCHARGE_ESS]
             )
             if not mode_result:
                 _LOGGER.error("Failed to set Remote EMS control mode to discharge")
