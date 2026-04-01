@@ -721,17 +721,17 @@ class BatteryOptimizer:
                 and import_kw > threshold_kw
             ):
                 # Battery idle while home draws from grid.
-                # At the reserve floor, show self_consumption — the battery
-                # is empty, not actively holding charge. IDLE implies a
-                # deliberate hold which is misleading when SOC is at the
-                # floor (whether hardware = optimizer or not).
-                # Only show IDLE when SOC is ABOVE the reserve — the LP
-                # is choosing to hold charge for later use.
-                at_reserve = soc <= self.backup_reserve + 0.01
-                if at_reserve:
-                    action = "self_consumption"
-                else:
+                # The optimizer reserve is for charge/discharge decisions only.
+                # Self-consumption can continue down to the hardware reserve.
+                # Only show IDLE when SOC is well above the optimizer reserve
+                # AND there's meaningful charge to hold (>5% above reserve).
+                # Otherwise show self_consumption — the battery serves load
+                # naturally to the hardware floor.
+                meaningful_hold = soc > self.backup_reserve + 0.05
+                if meaningful_hold:
                     action = "idle"
+                else:
+                    action = "self_consumption"
                 power_w = 0.0
             else:
                 # Natural self-consumption: solar charging or battery serving load

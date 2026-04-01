@@ -926,16 +926,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 effective_action = "self_consumption"
 
-            # When SOC is at the optimizer backup reserve, override IDLE →
-            # self_consumption. At the floor the battery is empty, not
-            # actively holding charge. IDLE would raise backup_reserve
-            # unnecessarily. Self-consumption lets the battery serve load
-            # naturally if there's headroom to hardware reserve.
+            # The optimizer reserve is for charge/discharge decisions only.
+            # Self-consumption can continue down to the hardware reserve.
+            # Only execute IDLE when SOC is well above the optimizer reserve
+            # (>5% above = meaningful charge to hold for later export).
+            # Otherwise use self-consumption — battery serves load naturally.
             if effective_action == "idle":
                 try:
                     soc_now, _ = await self._get_battery_state()
                     opt_reserve = self._config.backup_reserve
-                    if soc_now <= opt_reserve + 0.01:
+                    if soc_now <= opt_reserve + 0.05:
                         _LOGGER.debug(
                             "Optimizer: Overriding IDLE → self_consumption — "
                             "SOC %.1f%% at optimizer reserve %.0f%%, "
