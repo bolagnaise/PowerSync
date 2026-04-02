@@ -3625,7 +3625,7 @@ class InverterStatusView(HomeAssistantView):
                 enphase_zero_export_profile=enphase_zero_export_profile,
                 enphase_is_installer=enphase_is_installer,
                 max_export_limit_kw=entry.data.get(CONF_SIGENERGY_EXPORT_LIMIT_KW),
-                hass=hass,
+                hass=self._hass,
             )
 
             if not controller:
