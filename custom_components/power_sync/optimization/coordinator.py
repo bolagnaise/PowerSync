@@ -3539,6 +3539,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if any(k in settings for k in ("battery_capacity_wh", "max_charge_w", "max_discharge_w")):
                 self._battery_specs_source = "manual"
 
+        # Handle hardware backup reserve
+        if "hardware_backup_reserve" in settings:
+            hw_reserve = settings["hardware_backup_reserve"]
+            if hw_reserve > 1:
+                hw_reserve = hw_reserve / 100.0
+            hw_int = int(hw_reserve * 100)
+            self._startup_backup_reserve = hw_int
+            if self._optimizer:
+                self._optimizer.update_hardware_reserve(hw_reserve)
+            # Persist to config entry
+            if self._entry:
+                from ..const import CONF_HARDWARE_BACKUP_RESERVE
+                new_data = dict(self._entry.data)
+                new_data[CONF_HARDWARE_BACKUP_RESERVE] = hw_reserve
+                self.hass.config_entries.async_update_entry(self._entry, data=new_data)
+            response["changes"].append(f"hardware_backup_reserve: {hw_int}%")
+
         # Handle EV integration toggle
         if "ev_integration" in settings:
             ev_enabled = settings["ev_integration"]
