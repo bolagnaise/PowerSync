@@ -1158,9 +1158,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     # The optimizer will take back over when SOC rises above
                     # the reserve (e.g. from solar charging).
                 elif hasattr(battery, "force_discharge"):
+                    # Use max discharge power, not the LP's interval power.
+                    # The LP's power_w is the predicted export for one interval
+                    # (e.g. 370W surplus). For Modbus-controlled batteries
+                    # (Sigenergy/Sungrow/FoxESS), force_discharge sets the
+                    # grid export limit register — using the LP's small value
+                    # would cap the inverter at that low power. Max discharge
+                    # lets the inverter export at full rate.
+                    discharge_power = self._config.max_discharge_w
                     await battery.force_discharge(
                         duration_minutes=self._config.interval_minutes + 5,
-                        power_w=action.power_w,
+                        power_w=discharge_power,
                     )
                     # Don't override Tesla's hardware backup_reserve here.
                     # The optimizer's backup_reserve is a software decision
