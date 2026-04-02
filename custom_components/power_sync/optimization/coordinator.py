@@ -621,6 +621,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
 
         try:
+            # Retry battery auto-detection if still on defaults
+            # (site_info may not have been available during initial setup)
+            if self._battery_specs_source == "default":
+                await self._auto_detect_battery_specs()
+
             # Collect forecast data
             prices = await self._get_price_forecast()
             solar = await self._get_solar_forecast()
