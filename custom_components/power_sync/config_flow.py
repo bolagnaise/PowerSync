@@ -893,8 +893,9 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> FlowResult:
         """Offer optional Flow Power portal login."""
         if user_input is not None:
-            if self._handle_back(user_input):
-                return await self.async_step_flow_power_tariff()
+            back = await self._check_back(user_input)
+            if back:
+                return back
 
             if user_input.get("connect_portal", False):
                 return await self.async_step_flow_power_portal_login()
@@ -919,8 +920,9 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            if self._handle_back(user_input):
-                return await self.async_step_flow_power_portal()
+            back = await self._check_back(user_input)
+            if back:
+                return back
 
             email = user_input.get(CONF_FLOWPOWER_EMAIL, "")
             password = user_input.get(CONF_FLOWPOWER_PASSWORD, "")
@@ -959,8 +961,9 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            if self._handle_back(user_input):
-                return await self.async_step_flow_power_portal_login()
+            back = await self._check_back(user_input)
+            if back:
+                return back
 
             code = user_input.get("mfa_code", "")
             if code and hasattr(self, "_fp_client"):
