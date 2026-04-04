@@ -11455,35 +11455,39 @@ async def _ensure_lovelace_resource(hass: HomeAssistant) -> None:
             return
 
         res_collection = lovelace_data.resources
-        base_path = "/power_sync/frontend/power-sync-strategy.js"
         from .const import POWER_SYNC_VERSION, DASHBOARD_JS_VERSION
-        url = f"{base_path}?v={POWER_SYNC_VERSION}.{DASHBOARD_JS_VERSION}"
+
+        # Register both the strategy JS and the built-in energy flow card
+        js_files = [
+            "/power_sync/frontend/power-sync-strategy.js",
+            "/power_sync/frontend/power-sync-energy-flow.js",
+        ]
 
         # Safety: if the collection has no items at all, something is wrong —
         # don't create our resource to avoid wiping other resources on save.
         all_items = res_collection.async_items()
-        existing = [r for r in all_items if base_path in r.get("url", "")]
-
-        if existing:
-            # Update URL if version changed (cache-bust)
-            for r in existing:
-                if r.get("url") != url:
-                    await res_collection.async_update_item(r["id"], {"url": url})
-                    _LOGGER.info("PowerSync dashboard strategy resource updated (cache-bust)")
-        elif len(all_items) == 0:
-            # Collection appears empty — lovelace may not have loaded yet.
-            # Skip to avoid overwriting the resources file.
+        if len(all_items) == 0:
             _LOGGER.warning(
                 "Lovelace resource collection is empty — skipping auto-register "
-                "to avoid overwriting existing resources.  Add the PowerSync "
-                "strategy JS manually if needed: %s", url
+                "to avoid overwriting existing resources."
             )
-        else:
-            await res_collection.async_create_item({
-                "res_type": "module",
-                "url": url,
-            })
-            _LOGGER.info("PowerSync dashboard strategy registered as Lovelace resource")
+            return
+
+        for base_path in js_files:
+            url = f"{base_path}?v={POWER_SYNC_VERSION}.{DASHBOARD_JS_VERSION}"
+            existing = [r for r in all_items if base_path in r.get("url", "")]
+
+            if existing:
+                for r in existing:
+                    if r.get("url") != url:
+                        await res_collection.async_update_item(r["id"], {"url": url})
+                        _LOGGER.info("PowerSync resource updated (cache-bust): %s", base_path)
+            else:
+                await res_collection.async_create_item({
+                    "res_type": "module",
+                    "url": url,
+                })
+                _LOGGER.info("PowerSync resource registered: %s", base_path)
     except Exception:
         _LOGGER.debug("Could not auto-register Lovelace resource", exc_info=True)
 

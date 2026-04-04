@@ -462,7 +462,6 @@ class PowerSyncStrategy {
       { element: 'button-card', name: 'button-card', hacs: 'button-card' },
       { element: 'apexcharts-card', name: 'apexcharts-card', hacs: 'apexcharts-card' },
       { element: 'power-flow-card-plus', name: 'power-flow-card-plus', hacs: 'power-flow-card-plus' },
-      { element: 'tesla-style-energy-flow', name: 'tesla-style-energy-flow', hacs: 'tesla-style-energy-flow', optional: true },
     ];
 
     // Check if resource is registered in Lovelace (works even before element loads)
@@ -491,7 +490,8 @@ class PowerSyncStrategy {
     const hasApex = true;
     const hasButton = true;
     const hasFlowCard = true;
-    const hasTeslaFlow = loaded['tesla-style-energy-flow'] || false;
+    // Built-in energy flow card is always available (power-sync-energy-flow.js)
+    const hasTeslaFlow = true;
 
     // Entity resolver — tries power_sync_ prefixed first, then bare name.
     // Handles mixed installs where some entities have the prefix and others don't.
@@ -979,12 +979,14 @@ function _teslaStyleFlow(e, hass) {
   }
 
   const config = {
-    type: 'custom:tesla-style-energy-flow',
+    type: 'custom:power-sync-energy-flow',
     show_header: false,
     dynamic_background: true,
     language: 'en',
     grid_invert: false,
     battery_invert: false,
+    ev_hide_when_idle: false,
+    ev_min_w: 50,
     thresholds: { solar_min_w: 50, grid_min_w: 50, battery_min_w: 50 },
     entities: {
       solar_power: e('solar_power'),
@@ -1008,6 +1010,16 @@ function _teslaStyleFlow(e, hass) {
     const evBattery = e('ev_battery_level');
     if (hass.states[evBattery]) {
       config.entities.ev_battery = evBattery;
+    }
+    // Auto-detect BLE charge flap as EV presence (shows car even when idle)
+    for (const candidate of [
+      'binary_sensor.teslable_charge_flap',
+      'binary_sensor.tesla_ble_charge_flap',
+    ]) {
+      if (hass.states[candidate]) {
+        config.entities.ev_presence = candidate;
+        break;
+      }
     }
   }
 
