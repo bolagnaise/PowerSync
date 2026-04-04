@@ -840,8 +840,16 @@ async def execute_actions(
                 _LOGGER.info(f"Executed action '{action_type}'")
             else:
                 _LOGGER.warning(f"Action '{action_type}' returned False")
+                try:
+                    await _send_expo_push(hass, "⚠️ Automation Action Failed", f"Action '{action_type}' did not complete successfully")
+                except Exception:
+                    pass
         except Exception as e:
             _LOGGER.error(f"Error executing action '{action.get('action_type')}': {e}")
+            try:
+                await _send_expo_push(hass, "⚠️ Automation Error", f"Action '{action.get('action_type')}' failed: {e}")
+            except Exception:
+                pass
 
     return success_count > 0
 

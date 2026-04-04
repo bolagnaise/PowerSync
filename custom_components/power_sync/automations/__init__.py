@@ -406,6 +406,14 @@ class AutomationEngine:
                 _LOGGER.error(
                     f"Error evaluating automation '{automation.get('name')}': {e}"
                 )
+                try:
+                    from .actions import _send_expo_push
+                    await _send_expo_push(
+                        self._hass, "⚠️ Automation Error",
+                        f"'{automation.get('name', 'Unknown')}' failed to evaluate: {e}"
+                    )
+                except Exception:
+                    pass
 
         return triggered_count
 
