@@ -302,12 +302,27 @@ class BatteryOptimizer:
         #   - Imports/charging: prefer later (increasing eps) → SC first, then charge
         # 1e-7 per step is ~5e-5 across 576 steps — negligible vs real prices.
         eps = 1e-7
+
+        # Pre-compute free charging bonus: use median non-free import price
+        # so the LP sees free charging as "saving" that future import cost.
+        _nonzero_prices = sorted(p for p in import_prices if p > 0.01)
+        _free_charge_bonus = (
+            _nonzero_prices[len(_nonzero_prices) // 2] * eff * dt / cap
+            if _nonzero_prices else 0.0
+        )
+
         for t in range(n):
             c[t] = (import_prices[t] + eps * (n - t)) * dt  # grid_import: prefer later
             if export_prices[t] > 0:
                 c[n + t] = -(export_prices[t] + eps * (n - t)) * dt  # grid_export: prefer earlier
             else:
                 c[n + t] = 0.01 * dt                # chip-suppressed: small cost to avoid free exports
+
+            # Free electricity: strongly incentivize charging.
+            # Without this, the LP may idle during free windows because
+            # the near-zero import cost doesn't overcome terminal valuation.
+            if import_prices[t] <= 0.001 and _free_charge_bonus > 0:
+                c[2 * n + t] -= _free_charge_bonus
 
         # === Terminal valuation: incentivize keeping charge at end of horizon ===
         # Use the cheapest available recharge price as the replacement cost.
