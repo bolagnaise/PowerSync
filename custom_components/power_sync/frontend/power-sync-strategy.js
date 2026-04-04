@@ -462,6 +462,7 @@ class PowerSyncStrategy {
       { element: 'button-card', name: 'button-card', hacs: 'button-card' },
       { element: 'apexcharts-card', name: 'apexcharts-card', hacs: 'apexcharts-card' },
       { element: 'power-flow-card-plus', name: 'power-flow-card-plus', hacs: 'power-flow-card-plus' },
+      { element: 'tesla-style-energy-flow', name: 'tesla-style-energy-flow', hacs: 'tesla-style-energy-flow', optional: true },
     ];
 
     // Check if resource is registered in Lovelace (works even before element loads)
@@ -485,11 +486,12 @@ class PowerSyncStrategy {
       loaded[c.element] = inResources;
     }
 
-    const missing = requiredCards.filter(c => !loaded[c.element]);
+    const missing = requiredCards.filter(c => !loaded[c.element] && !c.optional);
     // Always generate cards — HA handles missing custom elements gracefully
     const hasApex = true;
     const hasButton = true;
     const hasFlowCard = true;
+    const hasTeslaFlow = loaded['tesla-style-energy-flow'] || false;
 
     // Entity resolver — tries power_sync_ prefixed first, then bare name.
     // Handles mixed installs where some entities have the prefix and others don't.
@@ -531,8 +533,10 @@ class PowerSyncStrategy {
       left.push(_optimizerStatus(e));
     }
 
-    // --- Center Column: Power Flow (requires power-flow-card-plus) ---
-    if (hasFlowCard && hasE('solar_power')) {
+    // --- Center Column: Power Flow ---
+    if (hasTeslaFlow && hasE('solar_power')) {
+      center.push(_teslaStyleFlow(e, hass));
+    } else if (hasFlowCard && hasE('solar_power')) {
       center.push(_powerFlow(e));
     }
 
@@ -954,6 +958,84 @@ function _optimizerStatus(e) {
     },
     tap_action: { action: 'more-info' },
   };
+}
+
+function _teslaStyleFlow(e, hass) {
+  // Auto-detect weather entity — try common patterns
+  let weatherEntity = null;
+  for (const candidate of [
+    'weather.home', 'weather.forecast_home',
+    'weather.openweathermap', 'weather.bom',
+  ]) {
+    if (hass.states[candidate]) {
+      weatherEntity = candidate;
+      break;
+    }
+  }
+  // Fallback: find any weather.* entity
+  if (!weatherEntity) {
+    const weatherKey = Object.keys(hass.states).find(k => k.startsWith('weather.'));
+    if (weatherKey) weatherEntity = weatherKey;
+  }
+
+  const config = {
+    type: 'custom:tesla-style-energy-flow',
+    show_header: false,
+    dynamic_background: true,
+    language: 'en',
+    grid_invert: false,
+    battery_invert: false,
+    thresholds: { solar_min_w: 50, grid_min_w: 50, battery_min_w: 50 },
+    entities: {
+      solar_power: e('solar_power'),
+      grid_power: e('grid_power'),
+      battery_power: e('battery_power'),
+      load_power: e('home_load'),
+      battery_level: e('battery_level'),
+      sun: 'sun.sun',
+    },
+  };
+
+  // Add weather if found
+  if (weatherEntity) {
+    config.entities.weather = weatherEntity;
+  }
+
+  // Add EV if sensors exist
+  const evPower = e('ev_power');
+  if (hass.states[evPower]) {
+    config.entities.ev_power = evPower;
+    const evBattery = e('ev_battery_level');
+    if (hass.states[evBattery]) {
+      config.entities.ev_battery = evBattery;
+    }
+  }
+
+  // Add PV array detail if available (FoxESS, GoodWe)
+  const pv1 = e('pv1_power');
+  const pv2 = e('pv2_power');
+  if (hass.states[pv1]) {
+    config.entities.roof_a_power = pv1;
+    config.roof_a_label = 'PV1';
+  }
+  if (hass.states[pv2]) {
+    config.entities.roof_b_power = pv2;
+    config.roof_b_label = 'PV2';
+  }
+
+  // Sigenergy DC/AC PV split
+  const pvDc = e('pv_dc_power');
+  const pvAc = e('pv_ac_power');
+  if (hass.states[pvDc] && !hass.states[pv1]) {
+    config.entities.roof_a_power = pvDc;
+    config.roof_a_label = 'DC Solar';
+  }
+  if (hass.states[pvAc] && !hass.states[pv2]) {
+    config.entities.roof_b_power = pvAc;
+    config.roof_b_label = 'AC Solar';
+  }
+
+  return config;
 }
 
 function _powerFlow(e) {
