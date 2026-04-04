@@ -18182,20 +18182,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     }
                     api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
 
-                    async with session.post(
-                        f"{api_base}/api/1/energy_sites/{site_id}/backup",
-                        headers=headers,
-                        json={"backup_reserve_percent": percent},
-                        timeout=aiohttp.ClientTimeout(total=30),
-                    ) as response:
-                        if response.status == 200:
-                            _LOGGER.info("Tesla site %s backup reserve set to %d%%", site_id, percent)
-                            if percent == 100:
-                                hass.async_create_task(_tesla_charge_kick("backup_reserve_100"))
-                        else:
-                            text = await response.text()
-                            _LOGGER.error("Failed to set Tesla backup reserve for site %s: %s - %s", site_id, response.status, text)
-                            hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "Could not set backup reserve — Tesla API error"))
+                    # Retry up to 3 times for backup reserve
+                    for attempt in range(1, 4):
+                        try:
+                            async with session.post(
+                                f"{api_base}/api/1/energy_sites/{site_id}/backup",
+                                headers=headers,
+                                json={"backup_reserve_percent": percent},
+                                timeout=aiohttp.ClientTimeout(total=30),
+                            ) as response:
+                                if response.status == 200:
+                                    _LOGGER.info("Tesla site %s backup reserve set to %d%%", site_id, percent)
+                                    if percent == 100:
+                                        hass.async_create_task(_tesla_charge_kick("backup_reserve_100"))
+                                    break
+                                elif response.status in (429, 500, 502, 503):
+                                    text = await response.text()
+                                    _LOGGER.warning(
+                                        "Tesla backup reserve attempt %d/3 failed for site %s: %s",
+                                        attempt, site_id, response.status,
+                                    )
+                                    if attempt < 3:
+                                        await asyncio.sleep(2 ** attempt)
+                                    else:
+                                        _LOGGER.error("Failed to set Tesla backup reserve for site %s after 3 attempts: %s - %s", site_id, response.status, text[:200])
+                                        hass.async_create_task(_notify_api_error(hass, "Backup Reserve Failed", f"Could not set backup reserve after 3 attempts — Tesla API {response.status}"))
+                                else:
+                                    text = await response.text()
+                                    _LOGGER.error("Failed to set Tesla backup reserve for site %s: %s - %s", site_id, response.status, text[:200])
+                                    hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "Could not set backup reserve — Tesla API error"))
+                                    break
+                        except asyncio.TimeoutError:
+                            _LOGGER.warning("Tesla backup reserve attempt %d/3 timed out for site %s", attempt, site_id)
+                            if attempt < 3:
+                                await asyncio.sleep(2 ** attempt)
 
             except Exception as e:
                 _LOGGER.error(f"Error setting Tesla backup reserve: {e}", exc_info=True)
@@ -18249,22 +18269,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 }
                 api_base = TESLEMETRY_API_BASE_URL if provider == TESLA_PROVIDER_TESLEMETRY else FLEET_API_BASE_URL
 
-                async with session.post(
-                    f"{api_base}/api/1/energy_sites/{site_id}/operation",
-                    headers=headers,
-                    json={"default_real_mode": mode},
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    if response.status == 200:
-                        _LOGGER.info("Operation mode set to %s for site %s", mode, site_id)
-                        if mode == "self_consumption":
-                            if entry.entry_id in hass.data[DOMAIN]:
-                                hass.data[DOMAIN][entry.entry_id].pop("last_force_toggle_time", None)
-                                _LOGGER.debug("Cleared last_force_toggle_time (user set self_consumption)")
-                    else:
-                        text = await response.text()
-                        _LOGGER.error("Failed to set operation mode for site %s: %s - %s", site_id, response.status, text)
-                        hass.async_create_task(_notify_api_error(hass, "Mode Change Failed", "Could not change Tesla operation mode — API error"))
+                # Retry up to 3 times for operation mode
+                for attempt in range(1, 4):
+                    try:
+                        async with session.post(
+                            f"{api_base}/api/1/energy_sites/{site_id}/operation",
+                            headers=headers,
+                            json={"default_real_mode": mode},
+                            timeout=aiohttp.ClientTimeout(total=30),
+                        ) as response:
+                            if response.status == 200:
+                                _LOGGER.info("Operation mode set to %s for site %s", mode, site_id)
+                                if mode == "self_consumption":
+                                    if entry.entry_id in hass.data[DOMAIN]:
+                                        hass.data[DOMAIN][entry.entry_id].pop("last_force_toggle_time", None)
+                                        _LOGGER.debug("Cleared last_force_toggle_time (user set self_consumption)")
+                                break
+                            elif response.status in (429, 500, 502, 503):
+                                _LOGGER.warning(
+                                    "Tesla operation mode attempt %d/3 failed for site %s: %s",
+                                    attempt, site_id, response.status,
+                                )
+                                if attempt < 3:
+                                    await asyncio.sleep(2 ** attempt)
+                                else:
+                                    text = await response.text()
+                                    _LOGGER.error("Failed to set operation mode for site %s after 3 attempts: %s - %s", site_id, response.status, text[:200])
+                                    hass.async_create_task(_notify_api_error(hass, "Mode Change Failed", f"Could not change Tesla operation mode after 3 attempts — API {response.status}"))
+                            else:
+                                text = await response.text()
+                                _LOGGER.error("Failed to set operation mode for site %s: %s - %s", site_id, response.status, text[:200])
+                                hass.async_create_task(_notify_api_error(hass, "Mode Change Failed", "Could not change Tesla operation mode — API error"))
+                                break
+                    except asyncio.TimeoutError:
+                        _LOGGER.warning("Tesla operation mode attempt %d/3 timed out for site %s", attempt, site_id)
+                        if attempt < 3:
+                            await asyncio.sleep(2 ** attempt)
 
         except Exception as e:
             _LOGGER.error(f"Error setting operation mode: {e}", exc_info=True)
