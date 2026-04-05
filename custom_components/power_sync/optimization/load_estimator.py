@@ -714,6 +714,18 @@ class SolcastForecaster:
                             n_intervals,
                         )
 
+                    # Last resort: generate synthetic profile from total kWh
+                    today_kwh = coordinator_data.get("today_forecast_kwh", 0)
+                    if today_kwh and today_kwh > 0:
+                        _LOGGER.info(
+                            "Solcast hourly data unavailable (rate-limited), "
+                            "generating synthetic solar profile from %.1fkWh total",
+                            today_kwh,
+                        )
+                        return self._generate_synthetic_solar_profile(
+                            today_kwh, start_time, n_intervals,
+                        )
+
                 # Fallback to solcast_forecast key
                 solcast_data = entry_data.get("solcast_forecast")
                 if solcast_data:
@@ -1032,6 +1044,50 @@ class SolcastForecaster:
             result.append(forecast_by_hour.get(hour, 0.0))
             current_time += timedelta(minutes=self.interval_minutes)
 
+        return result
+
+    def _generate_synthetic_solar_profile(
+        self,
+        today_kwh: float,
+        start_time: datetime,
+        n_intervals: int,
+    ) -> list[float]:
+        """Generate a bell-curve solar profile from a total kWh figure.
+
+        Used when hourly forecast data is unavailable (e.g. API rate-limited)
+        but the total daily forecast is known. Much better than zero solar.
+        """
+        import math
+
+        interval_hours = self.interval_minutes / 60.0
+        # Solar noon at 12:30, sigma ~3 hours (covers ~6am-7pm)
+        solar_noon = 12.5
+        sigma = 3.0
+
+        # Build unnormalized bell curve for a full day
+        raw = []
+        for i in range(n_intervals):
+            t = start_time + timedelta(minutes=i * self.interval_minutes)
+            hour = t.hour + t.minute / 60.0
+            # Gaussian centered on solar noon
+            value = math.exp(-0.5 * ((hour - solar_noon) / sigma) ** 2)
+            # Zero outside 5am-8pm
+            if hour < 5.0 or hour > 20.0:
+                value = 0.0
+            raw.append(value)
+
+        # Normalize so total energy = today_kwh (remaining from now)
+        total_raw = sum(raw) * interval_hours
+        if total_raw <= 0:
+            return [0.0] * n_intervals
+
+        scale = (today_kwh / total_raw) * 1000.0  # kWh → W
+        result = [r * scale for r in raw]
+
+        _LOGGER.info(
+            "Synthetic solar profile: %d intervals, peak=%.0fW, total=%.1fkWh",
+            n_intervals, max(result) if result else 0, today_kwh,
+        )
         return result
 
     def _parse_solcast_data(
