@@ -63,3 +63,33 @@ jobs:
             --title "v$VERSION" \
             --notes-file /tmp/release_notes.md
           echo "Created release v$VERSION"
+
+      - name: Notify Discord
+        if: steps.check_tag.outputs.exists == 'false'
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          NOTES=$(cat /tmp/release_notes.md | head -50)
+          RELEASE_URL="https://github.com/bolagnaise/PowerSync/releases/tag/$VERSION"
+
+          # Build Discord embed JSON
+          PAYLOAD=$(python3 -c "
+          import json, sys
+          notes = '''$NOTES'''.strip()
+          if len(notes) > 4000:
+              notes = notes[:3997] + '...'
+          payload = {
+              'embeds': [{
+                  'title': f'PowerSync v$VERSION Released',
+                  'description': notes,
+                  'color': 5025616,
+                  'url': '$RELEASE_URL',
+                  'footer': {'text': 'Update available via HACS'}
+              }]
+          }
+          print(json.dumps(payload))
+          ")
+
+          curl -s -H "Content-Type: application/json" -d "$PAYLOAD" "$DISCORD_WEBHOOK"
+          echo "Discord notified for v$VERSION"
