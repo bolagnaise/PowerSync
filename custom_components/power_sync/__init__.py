@@ -11511,9 +11511,22 @@ async def _ensure_powersync_dashboard(hass: HomeAssistant) -> None:
             _LOGGER.debug("Lovelace data not available, skipping dashboard auto-creation")
             return
 
-        # Check if dashboard already exists in the running system
+        # Check if dashboard already exists — if so, ensure it uses the strategy
         if "power-sync" in lovelace_data.dashboards:
-            _LOGGER.debug("PowerSync dashboard already exists")
+            existing = lovelace_data.dashboards["power-sync"]
+            try:
+                config = await existing.async_load(False)
+                if config and isinstance(config, dict) and "strategy" in config:
+                    _LOGGER.debug("PowerSync dashboard already uses strategy")
+                    return
+                # Dashboard exists but uses old YAML config — update to strategy
+                _LOGGER.info("Migrating PowerSync dashboard to strategy mode")
+                await existing.async_save({
+                    "strategy": {"type": "custom:power-sync-strategy"}
+                })
+                _LOGGER.info("PowerSync dashboard migrated to strategy successfully")
+            except Exception:
+                _LOGGER.debug("Could not check/migrate existing dashboard", exc_info=True)
             return
 
         _LOGGER.info("Auto-creating PowerSync dashboard...")
@@ -11562,7 +11575,7 @@ async def _ensure_powersync_dashboard(hass: HomeAssistant) -> None:
         _LOGGER.info("PowerSync dashboard auto-created successfully")
 
     except Exception:
-        _LOGGER.debug("Could not auto-create PowerSync dashboard", exc_info=True)
+        _LOGGER.warning("Could not auto-create PowerSync dashboard", exc_info=True)
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
