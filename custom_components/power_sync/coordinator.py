@@ -3467,11 +3467,12 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
         self._daily_forecast_kwh: float | None = None  # Full day's forecast
         self._daily_forecast_peak_kw: float | None = None  # Peak for the day
 
-        # Rate limiting tracking
+        # Rate limiting tracking (persisted to survive restarts)
         self._rate_limited = False
         self._last_rate_limit_time: datetime | None = None
         self._api_calls_today = 0
         self._api_calls_date: str | None = None
+        self._rate_limit_store = Store(hass, 1, f"{DOMAIN}_solcast_rate_limit")
 
         # Calculate update interval based on number of resources
         # Each resource requires 1 API call per update
@@ -3765,6 +3766,24 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
 
         return combined
 
+    async def _restore_rate_limit_state(self) -> None:
+        """Restore API call counter from persistent storage."""
+        try:
+            data = await self._rate_limit_store.async_load()
+            if data:
+                today_str = dt_util.now().strftime("%Y-%m-%d")
+                if data.get("date") == today_str:
+                    self._api_calls_today = data.get("calls", 0)
+                    self._api_calls_date = today_str
+                    if self._api_calls_today >= self.DAILY_API_LIMIT:
+                        self._rate_limited = True
+                    _LOGGER.info(
+                        f"Restored Solcast API call counter: {self._api_calls_today}/{self.DAILY_API_LIMIT} "
+                        f"(rate_limited={self._rate_limited})"
+                    )
+        except Exception:
+            pass
+
     def _track_api_call(self) -> None:
         """Track API call for rate limit awareness."""
         today_str = dt_util.now().strftime("%Y-%m-%d")
@@ -3775,6 +3794,14 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             self._rate_limited = False
 
         self._api_calls_today += 1
+
+        # Persist to survive restarts
+        self.hass.async_create_task(
+            self._rate_limit_store.async_save({
+                "date": today_str,
+                "calls": self._api_calls_today,
+            })
+        )
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch forecast data from Solcast.
@@ -3790,6 +3817,10 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
         resource requires its own call. Estimated actuals are optional - we use
         cached full-day forecasts instead.
         """
+        # Restore rate limit state on first run (persisted across restarts)
+        if self._api_calls_date is None:
+            await self._restore_rate_limit_state()
+
         # First, check if Solcast HA integration is installed and has data
         # This avoids doubling API calls if user has both integrations
         solcast_data = await self._try_read_from_solcast_integration()
@@ -3797,10 +3828,16 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Using data from Solcast HA integration (no API calls needed)")
             return solcast_data
 
-        # Check if we're rate limited
+        # Check if we're rate limited — use cached forecast data
         if self._rate_limited:
+            if self.data and self.data.get("forecasts"):
+                _LOGGER.debug(
+                    f"Solcast API rate limited - using cached forecast data. "
+                    f"API calls today: {self._api_calls_today}/{self.DAILY_API_LIMIT}"
+                )
+                return self.data
             _LOGGER.warning(
-                f"Solcast API rate limited - using cached data. "
+                f"Solcast API rate limited and no cached forecast available. "
                 f"API calls today: {self._api_calls_today}/{self.DAILY_API_LIMIT}"
             )
             return self.data or {"available": False}
