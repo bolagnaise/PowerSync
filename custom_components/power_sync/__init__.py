@@ -7227,6 +7227,70 @@ class CurrentWeatherView(HomeAssistantView):
             }, status=500)
 
 
+class WeatherSolcastSettingsView(HomeAssistantView):
+    """HTTP view to get/set weather and Solcast settings from mobile app."""
+
+    url = "/api/power_sync/weather/settings"
+    name = "api:power_sync:weather:settings"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Get current weather/solcast settings."""
+        entry = None
+        for config_entry in self._hass.config_entries.async_entries(DOMAIN):
+            entry = config_entry
+            break
+
+        if not entry:
+            return web.json_response({"success": False, "error": "Not configured"}, status=503)
+
+        opts = {**entry.data, **entry.options}
+        return web.json_response({
+            "success": True,
+            "weather_location": opts.get(CONF_WEATHER_LOCATION, ""),
+            "openweathermap_api_key": opts.get(CONF_OPENWEATHERMAP_API_KEY, ""),
+            "solcast_enabled": opts.get(CONF_SOLCAST_ENABLED, False),
+            "solcast_api_key": opts.get(CONF_SOLCAST_API_KEY, ""),
+            "solcast_resource_id": opts.get(CONF_SOLCAST_RESOURCE_ID, ""),
+        })
+
+    async def post(self, request: web.Request) -> web.Response:
+        """Update weather/solcast settings."""
+        entry = None
+        for config_entry in self._hass.config_entries.async_entries(DOMAIN):
+            entry = config_entry
+            break
+
+        if not entry:
+            return web.json_response({"success": False, "error": "Not configured"}, status=503)
+
+        try:
+            data = await request.json()
+            new_options = dict(entry.options)
+
+            if "weather_location" in data:
+                new_options[CONF_WEATHER_LOCATION] = data["weather_location"]
+            if "openweathermap_api_key" in data:
+                new_options[CONF_OPENWEATHERMAP_API_KEY] = data["openweathermap_api_key"]
+            if "solcast_enabled" in data:
+                new_options[CONF_SOLCAST_ENABLED] = bool(data["solcast_enabled"])
+            if "solcast_api_key" in data:
+                new_options[CONF_SOLCAST_API_KEY] = data["solcast_api_key"]
+            if "solcast_resource_id" in data:
+                new_options[CONF_SOLCAST_RESOURCE_ID] = data["solcast_resource_id"]
+
+            self._hass.config_entries.async_update_entry(entry, options=new_options)
+            _LOGGER.info("Weather/Solcast settings updated from mobile app")
+
+            return web.json_response({"success": True})
+        except Exception as e:
+            _LOGGER.error(f"Error updating weather/solcast settings: {e}", exc_info=True)
+            return web.json_response({"success": False, "error": str(e)}, status=500)
+
+
 class EVStatusView(HomeAssistantView):
     """HTTP view to get EV integration status for mobile app."""
 
@@ -18873,7 +18937,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Register HTTP endpoint for current weather (for mobile app dashboard)
     hass.http.register_view(CurrentWeatherView(hass))
+    hass.http.register_view(WeatherSolcastSettingsView(hass))
     _LOGGER.info("🌤️ Current weather HTTP endpoint registered at /api/power_sync/weather")
+    _LOGGER.info("🌤️ Weather/Solcast settings endpoint registered at /api/power_sync/weather/settings")
 
     # Initialize Zaptec Cloud client if standalone mode is configured
     all_opts = {**entry.data, **entry.options}
