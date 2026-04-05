@@ -645,12 +645,13 @@ class SolcastForecaster:
         if forecast:
             return forecast
 
-        # Fallback: generate simple solar curve
+        # No solar forecast available — use zero solar so LP makes
+        # purely price-based decisions rather than guessing production
         _LOGGER.warning(
-            "Solcast forecast not available — using default 5kW bell curve. "
-            "Check that the Solcast Solar integration is installed and has forecast data."
+            "Solcast forecast not available — using zero solar forecast. "
+            "Install Solcast Solar for optimal battery scheduling."
         )
-        return self._generate_default_solar_curve(start_time, n_intervals)
+        return [0.0] * n_intervals
 
     async def _get_solcast_forecast(
         self,
