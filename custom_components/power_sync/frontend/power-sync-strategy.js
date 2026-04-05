@@ -1055,7 +1055,13 @@ function _teslaStyleFlow(e, hass) {
     // e.g. binary_sensor.tessy_charge_cable → "Tessy"
     // e.g. sensor.tessy_charging → "Tessy"
     if (!config.ev_label) {
-      const evNameEntity = config.entities.ev_presence ||
+      // Prefer _charge_cable (Teslemetry/Fleet — uses vehicle name like "tessy")
+      // over _charge_flap (BLE — uses device name like "teslable")
+      const evNameEntity =
+        Object.keys(hass.states).find(eid =>
+          eid.startsWith('binary_sensor.') && eid.endsWith('_charge_cable')
+        ) ||
+        config.entities.ev_presence ||
         Object.keys(hass.states).find(eid =>
           eid.startsWith('sensor.') && eid.endsWith('_charging') &&
           !eid.includes('power_sync')
