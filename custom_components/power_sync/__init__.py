@@ -12926,7 +12926,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             bounce_ok = await _mode_bounce()
             if not bounce_ok:
                 _LOGGER.error(
-                    "Charge kick (%s): failed to restore autonomous mode after bounce",
+                    "Charge kick (%s): failed to restore autonomous mode after bounce — "
+                    "auto-restoring normal operation",
                     reason,
                 )
                 try:
@@ -12934,10 +12935,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await _send_expo_push(
                         hass,
                         "Battery Alert",
-                        f"Charge kick ({reason}): failed to restore autonomous mode - check settings",
+                        f"Charge kick ({reason}): failed — auto-restoring normal operation",
                     )
                 except Exception:
                     pass
+                # Auto-restore: the battery is stuck in wrong mode, restore to normal
+                try:
+                    await hass.services.async_call(
+                        DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True,
+                    )
+                except Exception as restore_err:
+                    _LOGGER.error("Auto-restore after charge kick failure also failed: %s", restore_err)
                 return
 
             # --- Background verification task ---
@@ -17468,6 +17476,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         context = call.context
         _LOGGER.info(f"🔄 Restore normal service called (context: user_id={context.user_id}, parent_id={context.parent_id})")
         _LOGGER.info("🔄 RESTORE NORMAL: Restoring normal operation")
+
+        # Set a cooldown so the optimizer doesn't immediately re-trigger force mode.
+        # User-initiated restores (user_id set) get a 30-min cooldown.
+        # Optimizer-initiated restores (no user_id) get no cooldown.
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        if context.user_id is not None:
+            cooldown_until = dt_util.utcnow() + timedelta(minutes=30)
+            entry_data["restore_cooldown_until"] = cooldown_until
+            _LOGGER.info("User-initiated restore — optimizer force actions suppressed until %s", cooldown_until.isoformat())
 
         # Check if optimizer is active — suppress routine notifications
         # (optimizer transitions between force modes frequently; AEMO spikes have their own notification)

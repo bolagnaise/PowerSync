@@ -1113,6 +1113,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 "(confirmed after 3 cycles)",
                             )
 
+            # User restore cooldown: if the user manually restored normal operation,
+            # suppress force charge/discharge for 30 minutes to respect their intent.
+            if effective_action in ("charge", "discharge", "export"):
+                from ..const import DOMAIN
+                entry_data = self.hass.data.get(DOMAIN, {}).get(self.entry_id, {})
+                cooldown_until = entry_data.get("restore_cooldown_until")
+                if cooldown_until and dt_util.utcnow() < cooldown_until:
+                    remaining = (cooldown_until - dt_util.utcnow()).total_seconds() / 60
+                    _LOGGER.info(
+                        "Optimizer: Suppressing %s — user restore cooldown active (%.0fmin remaining)",
+                        effective_action, remaining,
+                    )
+                    effective_action = "self_consumption"
+
             # CHARGE hysteresis: require 2 consecutive CHARGE decisions
             # before executing force_charge. This prevents oscillation at
             # decision boundaries (e.g. LP flipping CHARGE↔SC every cycle
