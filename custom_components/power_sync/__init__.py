@@ -10449,11 +10449,150 @@ class EVWidgetDataView(HomeAssistantView):
 
             # Check Tesla EV vehicles — per-vehicle data (power, SOC, connected status)
             tesla_vehicles = _get_ev_vehicles_status(self._hass, self._config_entry)
+            # Supplement connected status from BLE/Fleet presence sensors
+            # (same detection as HA dashboard strategy: charge_flap, charge_cable)
+            # The device-based scan may miss BLE entities if they're on a different device
+            for tv in tesla_vehicles:
+                if tv["is_connected"]:
+                    continue
+                # Search for presence sensors matching this vehicle's name
+                vname = (tv.get("vehicle_name") or "").lower().replace(" ", "_")
+                if not vname:
+                    continue
+                for eid_suffix in ["_charge_flap", "_charge_cable", "_charging_state"]:
+                    for prefix in [vname, vname.replace("-", "_")]:
+                        sensor_domain = "binary_sensor" if eid_suffix in ("_charge_flap", "_charge_cable") else "sensor"
+                        eid = f"{sensor_domain}.{prefix}{eid_suffix}"
+                        state = self._hass.states.get(eid)
+                        if state and state.state not in ("unknown", "unavailable"):
+                            if sensor_domain == "binary_sensor" and state.state == "on":
+                                tv["is_connected"] = True
+                                _LOGGER.debug("EV widget: %s connected via %s", tv["vehicle_name"], eid)
+                                break
+                            elif sensor_domain == "sensor" and state.state.lower() in ("charging", "connected", "stopped", "complete"):
+                                tv["is_connected"] = True
+                                _LOGGER.debug("EV widget: %s connected via %s=%s", tv["vehicle_name"], eid, state.state)
+                                break
+                    if tv["is_connected"]:
+                        break
 
-            # Fall back to Wall Connector data if no vehicles found with power
-            if not tesla_vehicles and tesla_coordinator and tesla_coordinator.data:
+            # Check Teslemetry/Fleet API sensors (binary_sensor.*_charge_cable, sensor.*_charging)
+            for state in self._hass.states.async_all():
+                eid = state.entity_id.lower()
+                if state.state in ("unknown", "unavailable"):
+                    continue
+                # charge_cable (Teslemetry/Fleet) — "on" = plugged in
+                if eid.startswith("binary_sensor.") and eid.endswith("_charge_cable") and "power_sync" not in eid:
+                    if state.state == "on":
+                        # Extract vehicle name from entity: binary_sensor.tessy_charge_cable → tessy
+                        vname = eid.replace("binary_sensor.", "").replace("_charge_cable", "")
+                        matched = False
+                        for tv in tesla_vehicles:
+                            tv_name = (tv.get("vehicle_name") or "").lower().replace(" ", "_")
+                            if tv_name == vname or vname in tv_name or tv_name in vname:
+                                if not tv["is_connected"]:
+                                    tv["is_connected"] = True
+                                    _LOGGER.debug("EV widget: %s connected via Teslemetry %s", tv["vehicle_name"], eid)
+                                matched = True
+                                break
+                        if not matched:
+                            # Check for SOC
+                            soc_eid = f"sensor.{vname}_battery_level"
+                            soc_state = self._hass.states.get(soc_eid)
+                            soc = None
+                            if soc_state and soc_state.state not in ("unknown", "unavailable"):
+                                try:
+                                    soc = int(float(soc_state.state))
+                                except (ValueError, TypeError):
+                                    pass
+                            tesla_vehicles.append({
+                                "vehicle_name": vname.replace("_", " ").title(),
+                                "ev_power_kw": 0,
+                                "ev_soc": soc,
+                                "is_connected": True,
+                                "is_charging": False,
+                            })
+                            _LOGGER.debug("EV widget: added Teslemetry vehicle %s via %s", vname, eid)
+
+            # Also check BLE prefix entities (teslable_charge_flap etc)
+            ble_prefix = self._config_entry.options.get("ble_prefix", self._config_entry.data.get("ble_prefix", ""))
+            if ble_prefix:
+                for prefix in ble_prefix.split(","):
+                    prefix = prefix.strip()
+                    if not prefix:
+                        continue
+                    flap = self._hass.states.get(f"binary_sensor.{prefix}_charge_flap")
+                    if flap and flap.state == "on":
+                        # Find matching vehicle or add as new
+                        matched = False
+                        for tv in tesla_vehicles:
+                            if not tv["is_connected"]:
+                                tv["is_connected"] = True
+                                _LOGGER.debug("EV widget: %s connected via BLE %s_charge_flap", tv["vehicle_name"], prefix)
+                                matched = True
+                                break
+                        if not matched and not any(tv["is_connected"] for tv in tesla_vehicles):
+                            # BLE shows connected but no matching vehicle — add one
+                            soc_state = self._hass.states.get(f"sensor.{prefix}_charge_level")
+                            soc = None
+                            if soc_state and soc_state.state not in ("unknown", "unavailable"):
+                                try:
+                                    soc = int(float(soc_state.state))
+                                except (ValueError, TypeError):
+                                    pass
+                            tesla_vehicles.append({
+                                "vehicle_name": prefix.replace("_", " ").title(),
+                                "ev_power_kw": 0,
+                                "ev_soc": soc,
+                                "is_connected": True,
+                                "is_charging": False,
+                            })
+                            _LOGGER.debug("EV widget: added BLE vehicle %s (connected, not charging)", prefix)
+
+            _LOGGER.debug("EV widget: found %d vehicles: %s", len(tesla_vehicles), [{k: v for k, v in tv.items() if k != 'ev_power_kw'} for tv in tesla_vehicles])
+
+            # Supplement from Wall Connector data (Tesla live_status)
+            # WC state 4 = connected/ready, state 2 = charging
+            if tesla_coordinator and tesla_coordinator.data:
+                wc_data = tesla_coordinator.data.get("wall_connectors")
                 wc_power = tesla_coordinator.data.get("ev_power", 0)
-                if wc_power > 0.05:
+                if wc_data and isinstance(wc_data, str):
+                    try:
+                        import ast
+                        wc_list = ast.literal_eval(wc_data)
+                        for wc in wc_list:
+                            wc_state = wc.get("wall_connector_state", 0)
+                            wc_pwr = wc.get("wall_connector_power", 0) / 1000 if wc.get("wall_connector_power") else 0
+                            wc_vin = wc.get("vin", "")
+                            # State 2=charging, 4=connected/ready, 6=ready, 1=disconnected
+                            wc_connected = wc_state in (2, 4, 6)
+                            wc_charging = wc_pwr > 0.05 or wc_state == 2
+
+                            if wc_connected:
+                                # Find matching vehicle by VIN or update first unconnected
+                                matched = False
+                                for tv in tesla_vehicles:
+                                    if not tv["is_connected"]:
+                                        tv["is_connected"] = True
+                                        tv["is_charging"] = tv["is_charging"] or wc_charging
+                                        if wc_pwr > tv["ev_power_kw"]:
+                                            tv["ev_power_kw"] = wc_pwr
+                                        _LOGGER.debug("EV widget: %s connected via Wall Connector (state=%d, power=%.1fkW)", tv["vehicle_name"], wc_state, wc_pwr)
+                                        matched = True
+                                        break
+                                if not matched and not any(tv["is_connected"] for tv in tesla_vehicles):
+                                    tesla_vehicles.append({
+                                        "vehicle_name": "Tesla EV",
+                                        "ev_power_kw": wc_pwr,
+                                        "ev_soc": None,
+                                        "is_connected": True,
+                                        "is_charging": wc_charging,
+                                    })
+                    except Exception as wc_err:
+                        _LOGGER.debug("Error parsing Wall Connector data: %s", wc_err)
+
+                # Legacy fallback: ev_power sensor only
+                if not tesla_vehicles and wc_power > 0.05:
                     tesla_vehicles = [{
                         "vehicle_name": "Tesla EV",
                         "ev_power_kw": wc_power,
