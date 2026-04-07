@@ -2026,8 +2026,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema_dict[vol.Optional(CONF_AUTO_SYNC_ENABLED, default=True)] = bool
             data_schema_dict[vol.Optional(CONF_AMBER_FORECAST_TYPE, default="predicted")] = vol.In({
                 "predicted": "Predicted (Default)",
-                "low": "Low (Aggressive)",
-                "high": "High (Conservative)"
+                "low": "Low (Lower prices expected)",
+                "high": "High (Higher prices expected)"
             })
             data_schema_dict[vol.Optional(CONF_BATTERY_CURTAILMENT_ENABLED, default=False)] = bool
         elif has_amber_sites and is_flow_power:
@@ -2920,8 +2920,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 default=self._get_option(CONF_AMBER_FORECAST_TYPE, "predicted"),
             ): vol.In({
                 "predicted": "Predicted (Default)",
-                "low": "Low (Aggressive)",
-                "high": "High (Conservative)"
+                "low": "Low (Lower prices expected)",
+                "high": "High (Higher prices expected)"
             }),
             vol.Optional(
                 CONF_SPIKE_PROTECTION_ENABLED,
