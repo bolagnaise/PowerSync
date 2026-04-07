@@ -896,6 +896,8 @@ async def _execute_single_action(
         return await _action_set_grid_charging(hass, config_entry, params)
     elif action_type == "restore_normal":
         return await _action_restore_normal(hass, config_entry)
+    elif action_type == "set_amber_forecast_type":
+        return await _action_set_amber_forecast_type(hass, config_entry, params)
     elif action_type == "set_charge_rate":
         return await _action_set_charge_rate(hass, config_entry, params)
     elif action_type == "set_discharge_rate":
@@ -1395,6 +1397,41 @@ async def _action_set_grid_charging(
         return True
     except Exception as e:
         _LOGGER.error(f"Failed to set grid charging: {e}")
+        return False
+
+
+async def _action_set_amber_forecast_type(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    params: Dict[str, Any]
+) -> bool:
+    """Switch the Amber forecast type (predicted/low/high).
+
+    Updates the config entry options and triggers a TOU sync so the new
+    forecast type takes effect immediately.
+    """
+    from ..const import DOMAIN, CONF_AMBER_FORECAST_TYPE
+
+    forecast_type = params.get("forecast_type", "predicted")
+    if forecast_type not in ("predicted", "low", "high"):
+        _LOGGER.error("Invalid Amber forecast type: %s (must be predicted, low, or high)", forecast_type)
+        return False
+
+    try:
+        new_options = dict(config_entry.options)
+        new_options[CONF_AMBER_FORECAST_TYPE] = forecast_type
+        hass.config_entries.async_update_entry(config_entry, options=new_options)
+        _LOGGER.info("Amber forecast type changed to '%s' via automation", forecast_type)
+
+        # Trigger a TOU sync so the new forecast type takes effect immediately
+        try:
+            await hass.services.async_call(DOMAIN, "sync_tou", {}, blocking=True)
+        except Exception:
+            pass  # Non-critical — next scheduled sync will pick it up
+
+        return True
+    except Exception as e:
+        _LOGGER.error("Failed to set Amber forecast type: %s", e)
         return False
 
 
