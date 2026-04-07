@@ -7244,6 +7244,7 @@ class WeatherSolcastSettingsView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         """Get current weather/solcast settings."""
+        from .const import CONF_WEATHER_LOCATION, CONF_OPENWEATHERMAP_API_KEY
         entry = None
         for config_entry in self._hass.config_entries.async_entries(DOMAIN):
             entry = config_entry
@@ -7273,6 +7274,7 @@ class WeatherSolcastSettingsView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         """Update weather/solcast settings."""
+        from .const import CONF_WEATHER_LOCATION, CONF_OPENWEATHERMAP_API_KEY
         entry = None
         for config_entry in self._hass.config_entries.async_entries(DOMAIN):
             entry = config_entry
