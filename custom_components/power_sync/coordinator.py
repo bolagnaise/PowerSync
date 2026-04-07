@@ -2625,6 +2625,9 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
         if daily_pv is not None:
             summary["pv_today_kwh"] = daily_pv
+        else:
+            # No daily PV register (e.g. FoxESS) — use energy accumulator
+            summary["pv_today_kwh"] = self._energy_acc.solar_kwh
         # For import/export: prefer daily register → total delta → accumulator
         if daily_import is not None and daily_import > 0:
             summary["grid_import_today_kwh"] = daily_import
