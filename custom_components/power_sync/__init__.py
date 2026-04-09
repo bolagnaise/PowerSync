@@ -17786,13 +17786,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry_data["restore_cooldown_until"] = cooldown_until
             _LOGGER.info("User-initiated restore — optimizer force actions suppressed until %s", cooldown_until.isoformat())
 
-        # Check if optimizer is active — suppress routine notifications
+        # Check if optimizer is active (and not in monitoring mode) — suppress routine notifications
         # (optimizer transitions between force modes frequently; AEMO spikes have their own notification)
+        # Monitoring mode doesn't execute actions, so notifications should still fire.
         suppress_notification = False
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         opt_coordinator = entry_data.get("optimization_coordinator")
         if opt_coordinator and getattr(opt_coordinator, '_enabled', False):
-            suppress_notification = True
+            monitoring_mode = entry.options.get(
+                CONF_MONITORING_MODE, entry.data.get(CONF_MONITORING_MODE, False)
+            )
+            if not monitoring_mode:
+                suppress_notification = True
 
         # Cancel any pending expiry timers (discharge and charge)
         if force_discharge_state.get("cancel_expiry_timer"):
