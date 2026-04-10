@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/bolagnaise/PowerSync/main/logo.png" alt="PowerSync Logo" width="200"/>
+  <img src="https://raw.githubusercontent.com/bolagnaise/PowerSync/main/logo-circle.png" alt="PowerSync Logo" width="180"/>
 
   # PowerSync
 
