@@ -11942,6 +11942,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.info("Entry state: %s", entry.state)
     _LOGGER.info("=" * 60)
 
+    # Self-heal: detect inconsistent state where the saved Tesla provider
+    # doesn't match the saved token format. This happens to users who
+    # pasted a psync_ token into the old "Update Teslemetry Token" inline
+    # field (≤ v2.8.3) — the old code saved the token but didn't change the
+    # provider, leaving them stuck calling Teslemetry's API with a
+    # PowerSync token that Teslemetry rejects as invalid.
+    _saved_provider = entry.data.get(CONF_TESLA_API_PROVIDER)
+    _saved_token = entry.data.get(CONF_TESLEMETRY_API_TOKEN, "") or ""
+    if _saved_token.startswith("psync_") and _saved_provider != TESLA_PROVIDER_POWERSYNC:
+        _LOGGER.warning(
+            "Detected stale Tesla provider config: token is psync_ but provider is %s. "
+            "Auto-correcting provider to powersync.",
+            _saved_provider,
+        )
+        new_data = dict(entry.data)
+        new_data[CONF_TESLA_API_PROVIDER] = TESLA_PROVIDER_POWERSYNC
+        hass.config_entries.async_update_entry(entry, data=new_data)
+    elif _saved_provider == TESLA_PROVIDER_POWERSYNC and _saved_token and not _saved_token.startswith("psync_"):
+        _LOGGER.warning(
+            "Detected stale Tesla provider config: provider is powersync but token "
+            "is not a psync_ token. Reverting provider to teslemetry — re-run config "
+            "flow to switch to PowerSync properly.",
+        )
+        new_data = dict(entry.data)
+        new_data[CONF_TESLA_API_PROVIDER] = TESLA_PROVIDER_TESLEMETRY
+        hass.config_entries.async_update_entry(entry, data=new_data)
+
     # Update entry title if it has an old/incorrect name
     electricity_provider = entry.options.get(
         CONF_ELECTRICITY_PROVIDER,
