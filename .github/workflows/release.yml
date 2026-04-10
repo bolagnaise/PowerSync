@@ -72,44 +72,50 @@ jobs:
             --notes-file /tmp/release_notes.md
           echo "Created release v$VERSION"
 
-      # NOTE: discord-notify.yml triggers on `release: published`, but
-      # GitHub Actions intentionally does NOT fire downstream workflows
-      # for events caused by GITHUB_TOKEN. Since `gh release create`
-      # above uses GITHUB_TOKEN, that workflow never runs. Posting to
-      # Discord directly here ensures we always get exactly one message
-      # with the populated release body.
+      # NOTE: a separate workflow listening on `release: published` would NOT
+      # fire here, because GitHub Actions intentionally suppresses downstream
+      # workflows for events triggered by GITHUB_TOKEN. Posting to Discord
+      # directly in this job is the only reliable path.
+      #
+      # We build the JSON payload in Python (safe escaping of release notes)
+      # and post it via curl. urllib's default User-Agent is blocked by
+      # Discord's webhook spam filter (returns 403), so curl is required.
       - name: Notify Discord
         if: steps.check_tag.outputs.exists == 'false'
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          RELEASE_URL="https://github.com/bolagnaise/PowerSync/releases/tag/$VERSION"
-          python3 - <<PYEOF
-          import json, os, urllib.request
+          python3 - <<'PYEOF' > /tmp/discord_payload.json
+          import json, os
 
           with open('/tmp/release_notes.md', 'r') as f:
               notes = f.read().strip()
           if len(notes) > 4000:
               notes = notes[:3997] + '...'
 
+          version = os.environ['VERSION']
           payload = {
               'embeds': [{
-                  'title': f'🚀 PowerSync v$VERSION Released',
+                  'title': f'🚀 PowerSync v{version} Released',
                   'description': notes,
                   'color': 5025616,
-                  'url': '$RELEASE_URL',
+                  'url': f'https://github.com/bolagnaise/PowerSync/releases/tag/{version}',
                   'footer': {'text': 'Update available via HACS'},
               }]
           }
-
-          req = urllib.request.Request(
-              os.environ['DISCORD_WEBHOOK'],
-              data=json.dumps(payload).encode('utf-8'),
-              headers={'Content-Type': 'application/json'},
-              method='POST',
-          )
-          with urllib.request.urlopen(req) as resp:
-              print(f'Discord webhook status: {resp.status}')
+          print(json.dumps(payload))
           PYEOF
+
+          HTTP_CODE=$(curl -s -o /tmp/discord_response.txt -w "%{http_code}" \
+            -H "Content-Type: application/json" \
+            --data-binary @/tmp/discord_payload.json \
+            "$DISCORD_WEBHOOK")
+
+          echo "Discord webhook HTTP status: $HTTP_CODE"
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "Discord webhook failed:"
+            cat /tmp/discord_response.txt
+            exit 1
+          fi
           echo "Discord notified for v$VERSION"

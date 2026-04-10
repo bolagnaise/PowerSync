@@ -51,10 +51,15 @@ Three new HTTP endpoints — `/api/power_sync/tesla/storm_watch`, `/api/power_sy
 
 ---
 
-### 2.11.2 — Discord notification reliability
+### 2.11.3 — Discord webhook reliability (final)
 
-**Discord posting is now wired directly into the release workflow**
-2.11.1 made the release workflow read from `RELEASE_NOTES.md` (good) but also removed the inline Discord block in favour of a separate `discord-notify.yml` workflow that listened to `release: published` events (broken — GitHub Actions intentionally suppresses downstream workflows for events triggered by `GITHUB_TOKEN`, so the listener never fired). 2.11.2 re-adds the inline Discord post to the release workflow itself, reading the populated `RELEASE_NOTES.md`, and removes the orphan listener. Result: exactly one Discord notification per release, with the full release body, every time.
+**Discord notifications now actually fire**
+2.11.1 → 2.11.2 → 2.11.3 is a chain of fixes for the release-notes Discord problem. 2.11.2 wired the Discord post directly into the release workflow but used Python's `urllib`, whose default `Python-urllib/3.x` User-Agent gets blocked by Discord's webhook spam filter (HTTP 403). 2.11.3 builds the JSON payload in Python (for safe escaping of release notes) but posts it via curl, which sends a normal User-Agent that Discord accepts. The full release body is now reliably delivered to Discord on every release.
+
+### 2.11.2 — Discord notification rewiring
+
+**Discord posting moved back into the release workflow**
+2.11.1 had moved Discord notification to a separate `discord-notify.yml` workflow listening for `release: published` events — but GitHub Actions intentionally suppresses downstream workflows for events triggered by `GITHUB_TOKEN`, so the listener never fired. 2.11.2 re-added the inline Discord post and removed the orphan listener so each release sends exactly one Discord message with the proper body.
 
 ### 2.11.1 — Release-notes workflow fix (incomplete — superseded by 2.11.2)
 
