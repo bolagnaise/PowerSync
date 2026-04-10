@@ -2448,31 +2448,44 @@ async def send_tariff_to_tesla(
 
 def get_tesla_api_token(hass: HomeAssistant, entry: ConfigEntry) -> tuple[str | None, str]:
     """
-    Get the current Tesla API token, fetching fresh from tesla_fleet if available.
+    Get the current Tesla API token and provider for this entry.
+
+    Honors the user's configured CONF_TESLA_API_PROVIDER:
+    - powersync: returns the saved psync_ token + powersync provider
+    - fleet_api: returns a fresh access token from the tesla_fleet HA integration
+    - teslemetry: returns the saved Teslemetry token + teslemetry provider
 
     The tesla_fleet integration handles token refresh internally and updates its
-    config entry data. This function always fetches the latest token.
+    config entry data. We always fetch the latest token.
 
     Returns:
-        tuple: (token, provider) where provider is 'fleet_api' or 'teslemetry'
+        tuple: (token, provider) where provider is 'powersync', 'fleet_api', or 'teslemetry'
     """
-    # Check if Tesla Fleet integration is configured and available
-    tesla_fleet_entries = hass.config_entries.async_entries("tesla_fleet")
-    for tesla_entry in tesla_fleet_entries:
-        if tesla_entry.state == ConfigEntryState.LOADED:
-            try:
-                if CONF_TOKEN in tesla_entry.data:
-                    token_data = tesla_entry.data[CONF_TOKEN]
-                    if CONF_ACCESS_TOKEN in token_data:
-                        return token_data[CONF_ACCESS_TOKEN], TESLA_PROVIDER_FLEET_API
-            except Exception as e:
-                _LOGGER.warning(f"Failed to extract token from Tesla Fleet integration: {e}")
+    configured_provider = entry.data.get(CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_TESLEMETRY)
 
-    # Fall back to Teslemetry
-    if CONF_TESLEMETRY_API_TOKEN in entry.data:
-        return entry.data[CONF_TESLEMETRY_API_TOKEN], TESLA_PROVIDER_TESLEMETRY
+    # PowerSync.cc cloud proxy: token is stored in the same slot as Teslemetry
+    # but the proxy speaks Tesla Fleet API on /api/proxy/api/1/...
+    if configured_provider == TESLA_PROVIDER_POWERSYNC:
+        token = entry.data.get(CONF_TESLEMETRY_API_TOKEN)
+        return (token, TESLA_PROVIDER_POWERSYNC) if token else (None, TESLA_PROVIDER_POWERSYNC)
 
-    return None, TESLA_PROVIDER_TESLEMETRY
+    # Tesla Fleet API: pull a live token from the tesla_fleet integration
+    if configured_provider == TESLA_PROVIDER_FLEET_API:
+        tesla_fleet_entries = hass.config_entries.async_entries("tesla_fleet")
+        for tesla_entry in tesla_fleet_entries:
+            if tesla_entry.state == ConfigEntryState.LOADED:
+                try:
+                    if CONF_TOKEN in tesla_entry.data:
+                        token_data = tesla_entry.data[CONF_TOKEN]
+                        if CONF_ACCESS_TOKEN in token_data:
+                            return token_data[CONF_ACCESS_TOKEN], TESLA_PROVIDER_FLEET_API
+                except Exception as e:
+                    _LOGGER.warning(f"Failed to extract token from Tesla Fleet integration: {e}")
+        return None, TESLA_PROVIDER_FLEET_API
+
+    # Teslemetry (default fallback)
+    token = entry.data.get(CONF_TESLEMETRY_API_TOKEN)
+    return (token, TESLA_PROVIDER_TESLEMETRY) if token else (None, TESLA_PROVIDER_TESLEMETRY)
 
 
 def _get_tesla_site_configs(
@@ -12294,6 +12307,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "Detected Tesla Fleet integration - using Fleet API tokens for site %s",
                 entry.data[CONF_TESLA_ENERGY_SITE_ID]
             )
+        elif tesla_api_provider == TESLA_PROVIDER_POWERSYNC:
+            _LOGGER.info("Using PowerSync.cc cloud proxy for site %s", entry.data[CONF_TESLA_ENERGY_SITE_ID])
         else:
             _LOGGER.info("Using Teslemetry API for site %s", entry.data[CONF_TESLA_ENERGY_SITE_ID])
 
