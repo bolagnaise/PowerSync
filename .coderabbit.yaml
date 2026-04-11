@@ -3,12 +3,7 @@
 
 language: en-US
 early_access: false
-tone_instructions: |
-  Be concise and direct. Focus on correctness, security, and race conditions.
-  This is a Home Assistant custom integration — flag anything that could
-  cause battery control misbehaviour, grid contention, or data corruption.
-  Cite Home Assistant best practices where relevant (e.g. dt_util, shared
-  aiohttp session, proper async cleanup on unload).
+tone_instructions: "Be concise and direct. Focus on correctness, security, and race conditions in this Home Assistant integration. Cite HA best practices: dt_util, shared aiohttp session, async cleanup on unload."
 
 reviews:
   profile: chill
