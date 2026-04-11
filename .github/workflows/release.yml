@@ -11,6 +11,9 @@ permissions:
 
 jobs:
   release:
+    # Only run on the upstream repo — forks don't have the DISCORD_WEBHOOK
+    # secret and the release isn't meant to announce fork versions anyway.
+    if: github.repository == 'bolagnaise/PowerSync'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

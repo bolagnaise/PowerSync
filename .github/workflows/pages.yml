@@ -16,6 +16,9 @@ concurrency:
 
 jobs:
   deploy:
+    # Only run on the upstream repo — forks don't have GitHub Pages enabled
+    # and fail on actions/configure-pages with "Get Pages site failed".
+    if: github.repository == 'bolagnaise/PowerSync'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
