@@ -1877,6 +1877,15 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         entities reading from the cache don't display stale values for
         up to six hours until the next natural refresh.
         """
+        # Clear the cached payload itself, not just the timestamp.
+        # async_get_site_info() checks `if self._site_info_cache and age
+        # <= 21600` — resetting _site_info_last_fetch to 0 only invalidates
+        # via the age check when time.monotonic() > 21600, i.e. after HA
+        # has been running 6+ hours. On shorter uptimes the age check
+        # still passes (time.monotonic() - 0 is small), and the stale
+        # _site_info_cache is returned anyway. Clearing _site_info_cache
+        # makes the first half of the `and` fail unconditionally.
+        self._site_info_cache = None
         self._site_info_last_fetch = 0
         self._site_info_fetch_failed = False
         _LOGGER.debug("Tesla site_info cache invalidated — next read will refetch")
