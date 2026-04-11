@@ -2054,7 +2054,14 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
                 if validation_result["success"]:
                     # Store empty Teslemetry token (we'll use Fleet API in __init__.py)
-                    self._teslemetry_data = {CONF_TESLEMETRY_API_TOKEN: ""}
+                    # AND persist the provider choice so that on HA restart the
+                    # integration remembers we picked Fleet API instead of
+                    # defaulting back to Teslemetry (which would then 401 on
+                    # the empty token and break the Tesla coordinator).
+                    self._teslemetry_data = {
+                        CONF_TESLEMETRY_API_TOKEN: "",
+                        CONF_TESLA_API_PROVIDER: TESLA_PROVIDER_FLEET_API,
+                    }
                     self._tesla_sites = validation_result.get("sites", [])
                     return await self.async_step_site_selection()
                 else:
