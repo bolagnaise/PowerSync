@@ -276,6 +276,17 @@ async def discover_all_tesla_vehicles(
     Searches the device registry for devices from known Tesla integrations
     and returns a list of all discovered vehicles with their VINs.
 
+    For users whose cars are only reachable via ESPHome Tesla BLE (no Fleet
+    API / Teslemetry / Tessie integration present), this also discovers
+    vehicles from the configured ``tesla_ble_entity_prefix`` setting. A BLE
+    vehicle is reported whenever its ``binary_sensor.{prefix}_status`` entity
+    exists in Home Assistant — the same live-presence signal that
+    ``EVVehiclesView`` uses for the mobile app. The returned ``vin`` for a
+    BLE vehicle is ``ble_{prefix}``, which downstream helpers
+    (``_resolve_vehicle_vin``, ``is_ev_plugged_in``, ``get_ev_battery_level``,
+    ``get_ev_location``) already handle via their existing
+    ``startswith("ble_")`` branches.
+
     Args:
         hass: Home Assistant instance
         config_entry: Config entry
@@ -284,10 +295,22 @@ async def discover_all_tesla_vehicles(
         List of dicts: [{"vin": str, "name": str, "device_id": str}, ...]
     """
     from homeassistant.helpers import device_registry as dr
+    from ..const import (
+        CONF_EV_PROVIDER,
+        CONF_TESLA_BLE_ENTITY_PREFIX,
+        DEFAULT_TESLA_BLE_ENTITY_PREFIX,
+        EV_PROVIDER_BOTH,
+        EV_PROVIDER_FLEET_API,
+        EV_PROVIDER_TESLA_BLE,
+        TESLA_BLE_BINARY_STATUS,
+    )
 
     device_registry = dr.async_get(hass)
     vehicles: List[Dict[str, Any]] = []
 
+    # Method 1 — HA device registry scan for Fleet API / Teslemetry / Tessie /
+    # Tesla Custom / legacy Tesla integration devices. Each such device
+    # publishes an identifier tuple ``(<integration>, <VIN>)``.
     for device in device_registry.devices.values():
         for identifier in device.identifiers:
             if len(identifier) >= 2 and identifier[0] in TESLA_INTEGRATIONS:
@@ -301,6 +324,39 @@ async def discover_all_tesla_vehicles(
                     })
                     _LOGGER.debug(f"Discovered Tesla vehicle: {device.name} (VIN: {id_str})")
                     break
+
+    # Method 2 — ESPHome Tesla BLE fallback. BLE-only setups don't register a
+    # Tesla-domain device in the HA registry (the ESPHome bridge registers under
+    # the "esphome" domain with no VIN identifier), so Method 1 never surfaces
+    # them. Discover each configured prefix whose ``binary_sensor.{prefix}_status``
+    # entity exists — that's PowerSync's canonical "BLE bridge is online" signal.
+    # Gated on ``ev_provider`` so fleet_api-only users never see spurious BLE
+    # vehicles from unrelated ESPHome devices that happen to match the default
+    # prefix.
+    opts = {**config_entry.data, **config_entry.options} if config_entry else {}
+    ev_provider = opts.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API)
+    if ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+        raw_prefix = opts.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+        ble_prefixes = [p.strip() for p in raw_prefix.split(",") if p.strip()]
+        existing_vins = {v["vin"] for v in vehicles}
+        for prefix in ble_prefixes:
+            ble_vin = f"ble_{prefix}"
+            if ble_vin in existing_vins:
+                continue  # already reported (shouldn't happen, but defensive)
+            status_entity = TESLA_BLE_BINARY_STATUS.format(prefix=prefix)
+            if hass.states.get(status_entity) is None:
+                _LOGGER.debug(
+                    f"Tesla BLE discovery: skipping prefix '{prefix}' — "
+                    f"{status_entity} not found"
+                )
+                continue
+            display_name = f"Tesla BLE ({prefix})"
+            vehicles.append({
+                "vin": ble_vin,
+                "name": display_name,
+                "device_id": ble_vin,
+            })
+            _LOGGER.debug(f"Discovered Tesla BLE vehicle: {display_name}")
 
     _LOGGER.debug(f"Discovered {len(vehicles)} Tesla vehicle(s)")
     return vehicles
