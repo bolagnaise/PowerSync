@@ -2654,6 +2654,24 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 )
                 return
             base_url = FLEET_API_BASE_URL
+        elif api_provider == TESLA_PROVIDER_POWERSYNC:
+            # PowerSync.cc proxy users store their `psync_...` token in the
+            # same CONF_TESLEMETRY_API_TOKEN slot, but it must be sent to
+            # the PowerSync proxy base URL, not the Teslemetry base URL.
+            # Prior code fell through to the `else` branch and hit the
+            # wrong endpoint — the call always 401'd silently and the
+            # export rule was never restored after curtailment.
+            # Guard `.startswith` with `isinstance(api_token, str)` so a
+            # non-string truthy value from storage doesn't raise
+            # AttributeError before the try block below.
+            api_token = self.config_entry.data.get(CONF_TESLEMETRY_API_TOKEN)
+            if not isinstance(api_token, str) or not api_token.startswith("psync_"):
+                _LOGGER.error(
+                    "Cannot restore export rule - PowerSync token missing or "
+                    "not a valid psync_ token"
+                )
+                return
+            base_url = POWERSYNC_API_BASE_URL
         else:
             # Teslemetry
             api_token = self.config_entry.data.get(CONF_TESLEMETRY_API_TOKEN)
