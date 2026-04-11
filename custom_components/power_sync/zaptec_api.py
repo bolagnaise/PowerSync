@@ -164,9 +164,7 @@ class ZaptecCloudClient:
                 _LOGGER.debug("Zaptec API: 401 received, re-authenticating")
                 self._access_token = None
                 await self.authenticate()
-                return await self._request(
-                    method, path, json_data, retry_on_401=False
-                )
+                return await self._request(method, path, json_data, retry_on_401=False)
 
             # Handle 429 — respect Retry-After
             if response.status == 429:
@@ -175,13 +173,9 @@ class ZaptecCloudClient:
                     wait = min(300, max(1, int(retry_after)))
                 except ValueError:
                     wait = 60
-                _LOGGER.warning(
-                    "Zaptec API: rate limited, waiting %ds", wait
-                )
+                _LOGGER.warning("Zaptec API: rate limited, waiting %ds", wait)
                 await asyncio.sleep(wait)
-                return await self._request(
-                    method, path, json_data, retry_on_401=False
-                )
+                return await self._request(method, path, json_data, retry_on_401=False)
 
             if response.status == 204:
                 return {}
@@ -207,9 +201,7 @@ class ZaptecCloudClient:
         if isinstance(result, dict):
             data = result.get("Data", result.get("Pages", []))
             if isinstance(data, list):
-                _LOGGER.info(
-                    "Zaptec Cloud: found %d installation(s)", len(data)
-                )
+                _LOGGER.info("Zaptec Cloud: found %d installation(s)", len(data))
                 return data
         if isinstance(result, list):
             return result
@@ -240,9 +232,7 @@ class ZaptecCloudClient:
         Returns:
             Dict of state observations with StateId, ValueAsString, etc.
         """
-        result = await self._request(
-            "GET", f"/api/chargers/{charger_id}/state"
-        )
+        result = await self._request("GET", f"/api/chargers/{charger_id}/state")
         # Parse state observations into a flat dict
         state = {}
         if isinstance(result, list):
@@ -294,9 +284,7 @@ class ZaptecCloudClient:
             f"/api/chargers/{charger_id}/SendCommand/{ZAPTEC_CMD_STOP_CHARGING}",
         )
 
-    async def set_installation_current(
-        self, installation_id: str, amps: int
-    ) -> dict:
+    async def set_installation_current(self, installation_id: str, amps: int) -> dict:
         """Set available current for all phases on an installation.
 
         Note: Zaptec limits installation current updates to once per 15 minutes.
@@ -382,12 +370,8 @@ class ZaptecCloudClient:
             chargers = await self.get_chargers()
             installations = await self.get_installations()
 
-            charger_names = [
-                c.get("DeviceName", c.get("Id", "?")) for c in chargers
-            ]
-            install_names = [
-                i.get("Name", i.get("Id", "?")) for i in installations
-            ]
+            charger_names = [c.get("DeviceName", c.get("Id", "?")) for c in chargers]
+            install_names = [i.get("Name", i.get("Id", "?")) for i in installations]
 
             return True, (
                 f"Connected. Found {len(chargers)} charger(s) "
@@ -441,22 +425,22 @@ class ZaptecCloudClient:
 
         # Power
         try:
-            parsed["total_charge_power_w"] = float(
-                state.get(513, state.get("513", 0))
-            )
+            parsed["total_charge_power_w"] = float(state.get(513, state.get("513", 0)))
         except (ValueError, TypeError):
             parsed["total_charge_power_w"] = 0.0
 
         # Session energy
         try:
-            parsed["session_energy_wh"] = float(
-                state.get(514, state.get("514", 0))
-            )
+            parsed["session_energy_wh"] = float(state.get(514, state.get("514", 0)))
         except (ValueError, TypeError):
             parsed["session_energy_wh"] = 0.0
 
         # Phase currents (StateId 507=Phase1, 508=Phase2, 509=Phase3)
-        for phase, sid in [("phase_a_current", 507), ("phase_b_current", 508), ("phase_c_current", 509)]:
+        for phase, sid in [
+            ("phase_a_current", 507),
+            ("phase_b_current", 508),
+            ("phase_c_current", 509),
+        ]:
             try:
                 parsed[phase] = float(state.get(sid, state.get(str(sid), 0)))
             except (ValueError, TypeError):

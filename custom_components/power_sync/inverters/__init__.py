@@ -3,6 +3,7 @@
 Provides a factory function to get the appropriate inverter controller
 based on the configured brand.
 """
+
 import logging
 from typing import Optional
 
@@ -210,6 +211,7 @@ SUNGROW_MODELS = {
     **SUNGROW_SH_MODELS,
 }
 
+
 def get_inverter_controller(
     brand: str,
     host: str,
@@ -256,6 +258,7 @@ def get_inverter_controller(
         model_lower = model.lower() if model else ""
         if model_lower.startswith("sh"):
             from .sungrow_sh import SungrowSHController
+
             return SungrowSHController(
                 host=host,
                 port=port,
@@ -265,6 +268,7 @@ def get_inverter_controller(
         else:
             # Default to SG series controller
             from .sungrow import SungrowController
+
             return SungrowController(
                 host=host,
                 port=port,
@@ -274,6 +278,7 @@ def get_inverter_controller(
 
     if brand_lower == "fronius":
         from .fronius import FroniusController
+
         return FroniusController(
             host=host,
             port=port,
@@ -284,6 +289,7 @@ def get_inverter_controller(
 
     if brand_lower == "goodwe":
         from .goodwe import GoodWeController
+
         # GoodWe default slave ID is 247
         if slave_id == 1:
             slave_id = 247
@@ -296,6 +302,7 @@ def get_inverter_controller(
 
     if brand_lower == "huawei":
         from .huawei import HuaweiController
+
         return HuaweiController(
             host=host,
             port=port,
@@ -305,6 +312,7 @@ def get_inverter_controller(
 
     if brand_lower == "enphase":
         from .enphase import EnphaseController
+
         # Enphase uses HTTPS on port 443, not Modbus
         if port == 502:
             port = 443
@@ -324,6 +332,7 @@ def get_inverter_controller(
 
     if brand_lower == "zeversolar":
         from .zeversolar import ZeversolarController
+
         # Zeversolar uses HTTP on port 80, not Modbus
         if port == 502:
             port = 80
@@ -336,6 +345,7 @@ def get_inverter_controller(
 
     if brand_lower == "sigenergy":
         from .sigenergy import SigenergyController
+
         return SigenergyController(
             host=host,
             port=port,
@@ -346,6 +356,7 @@ def get_inverter_controller(
 
     if brand_lower == "foxess":
         from .foxess import FoxESSController
+
         return FoxESSController(
             host=host,
             port=port,
@@ -355,6 +366,7 @@ def get_inverter_controller(
 
     if brand_lower == "solax":
         from .solax import SolaxController
+
         return SolaxController(
             host=host,
             port=port,

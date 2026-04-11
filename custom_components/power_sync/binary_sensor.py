@@ -1,4 +1,5 @@
 """Binary sensor platform for PowerSync integration — Tesla Energy Site status."""
+
 from __future__ import annotations
 
 import asyncio
@@ -89,7 +90,8 @@ class StormWatchActiveBinarySensor(_TeslaBinarySensorBase):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key="tesla_storm_watch_active",
             name="Storm Watch Active",
             icon="mdi:weather-lightning-rainy",
@@ -117,7 +119,8 @@ class ManualExportOverrideBinarySensor(_TeslaBinarySensorBase):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key="tesla_manual_export_override",
             name="Manual Export Override",
             icon="mdi:hand-back-right",

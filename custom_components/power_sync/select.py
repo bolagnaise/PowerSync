@@ -50,7 +50,9 @@ async def async_setup_entry(
 
     for key, object_id in desired_object_ids.items():
         unique_id = f"{entry.entry_id}_{key}"
-        current_entity_id = ent_reg.async_get_entity_id("select", entry.domain, unique_id)
+        current_entity_id = ent_reg.async_get_entity_id(
+            "select", entry.domain, unique_id
+        )
         if current_entity_id is None:
             continue
 
@@ -58,9 +60,14 @@ async def async_setup_entry(
         legacy_entity_id = legacy_entity_ids[key]
 
         # Only migrate the specific legacy ids -> desired ids.
-        if current_entity_id == legacy_entity_id and current_entity_id != desired_entity_id:
+        if (
+            current_entity_id == legacy_entity_id
+            and current_entity_id != desired_entity_id
+        ):
             if ent_reg.async_get(desired_entity_id) is None:
-                ent_reg.async_update_entity(current_entity_id, new_entity_id=desired_entity_id)
+                ent_reg.async_update_entity(
+                    current_entity_id, new_entity_id=desired_entity_id
+                )
 
     select_entities = [
         PowerSyncDurationSelect(
@@ -79,15 +86,18 @@ async def async_setup_entry(
 
     # Tesla Energy Site selects (universally supported — no capability probe needed)
     from .const import CONF_TESLA_ENERGY_SITE_ID
+
     tesla_site_id = entry.options.get(
         CONF_TESLA_ENERGY_SITE_ID,
         entry.data.get(CONF_TESLA_ENERGY_SITE_ID, ""),
     )
     if tesla_site_id:
-        select_entities.extend([
-            TeslaOperationModeSelect(hass=hass, entry=entry),
-            TeslaGridExportRuleSelect(hass=hass, entry=entry),
-        ])
+        select_entities.extend(
+            [
+                TeslaOperationModeSelect(hass=hass, entry=entry),
+                TeslaGridExportRuleSelect(hass=hass, entry=entry),
+            ]
+        )
 
     async_add_entities(select_entities)
 
@@ -99,7 +109,9 @@ class PowerSyncDurationSelect(SelectEntity):
     _attr_icon = "mdi:clock-outline"
     _attr_has_entity_name = True
 
-    def __init__(self, entry: ConfigEntry, key: str, name: str, suggested_object_id: str) -> None:
+    def __init__(
+        self, entry: ConfigEntry, key: str, name: str, suggested_object_id: str
+    ) -> None:
         self._entry_id = entry.entry_id
         self._key = key
         self._attr_name = name
@@ -187,7 +199,8 @@ class TeslaOperationModeSelect(_TeslaSiteSelectBase):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key="tesla_operation_mode",
             name="Operation Mode",
             icon="mdi:cog-transfer",
@@ -205,7 +218,10 @@ class TeslaOperationModeSelect(_TeslaSiteSelectBase):
 
     async def async_select_option(self, option: str) -> None:
         await self.hass.services.async_call(
-            DOMAIN, "set_operation_mode", {"mode": option}, blocking=False,
+            DOMAIN,
+            "set_operation_mode",
+            {"mode": option},
+            blocking=False,
         )
 
 
@@ -216,7 +232,8 @@ class TeslaGridExportRuleSelect(_TeslaSiteSelectBase):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key="tesla_grid_export_rule",
             name="Grid Export Rule",
             icon="mdi:transmission-tower-export",
@@ -257,5 +274,8 @@ class TeslaGridExportRuleSelect(_TeslaSiteSelectBase):
 
     async def async_select_option(self, option: str) -> None:
         await self.hass.services.async_call(
-            DOMAIN, "set_grid_export", {"rule": option}, blocking=False,
+            DOMAIN,
+            "set_grid_export",
+            {"rule": option},
+            blocking=False,
         )

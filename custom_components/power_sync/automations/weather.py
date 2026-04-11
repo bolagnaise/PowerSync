@@ -65,7 +65,7 @@ async def async_get_current_weather(
     hass: HomeAssistant,
     api_key: str,
     timezone: str = "Australia/Brisbane",
-    weather_location: Optional[str] = None
+    weather_location: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Get current weather conditions based on configured location or timezone.
@@ -105,7 +105,7 @@ async def async_get_current_weather(
                     "appid": api_key,
                     "units": "metric",
                 },
-                timeout=aiohttp.ClientTimeout(total=10)
+                timeout=aiohttp.ClientTimeout(total=10),
             ) as response:
                 response.raise_for_status()
                 data = await response.json()
@@ -144,9 +144,7 @@ async def async_get_current_weather(
 
 
 async def _get_coordinates(
-    api_key: str,
-    weather_location: Optional[str],
-    timezone: str
+    api_key: str, weather_location: Optional[str], timezone: str
 ) -> Tuple[float, float]:
     """
     Get coordinates from configured location or timezone fallback.
@@ -173,13 +171,17 @@ async def _get_coordinates(
             _location_cache[location] = coords
             return coords
 
-        _LOGGER.warning(f"Could not geocode location '{location}', falling back to timezone")
+        _LOGGER.warning(
+            f"Could not geocode location '{location}', falling back to timezone"
+        )
 
     # Fallback to timezone-based coordinates
     return _get_coordinates_for_timezone(timezone)
 
 
-async def _geocode_location(api_key: str, location: str) -> Optional[Tuple[float, float]]:
+async def _geocode_location(
+    api_key: str, location: str
+) -> Optional[Tuple[float, float]]:
     """
     Geocode a city name or postcode to coordinates using OpenWeatherMap.
 
@@ -214,7 +216,7 @@ async def _geocode_location(api_key: str, location: str) -> Optional[Tuple[float
                         "zip": f"{location},AU",
                         "appid": api_key,
                     },
-                    timeout=aiohttp.ClientTimeout(total=10)
+                    timeout=aiohttp.ClientTimeout(total=10),
                 ) as response:
                     if response.status == 200:
                         data = await response.json()
@@ -233,7 +235,7 @@ async def _geocode_location(api_key: str, location: str) -> Optional[Tuple[float
                         "limit": 1,
                         "appid": api_key,
                     },
-                    timeout=aiohttp.ClientTimeout(total=10)
+                    timeout=aiohttp.ClientTimeout(total=10),
                 ) as response:
                     if response.status == 200:
                         data = await response.json()

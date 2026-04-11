@@ -5,6 +5,7 @@ Uses export power limiting for load following curtailment.
 
 Reference: https://github.com/wlcrs/huawei-solar-lib
 """
+
 import asyncio
 import logging
 from typing import Optional
@@ -36,43 +37,43 @@ class HuaweiController(InverterController):
 
     # Read registers (Input/Holding registers)
     # PV string registers
-    REG_PV1_VOLTAGE = 32016        # PV1 voltage (V * 10)
-    REG_PV1_CURRENT = 32017        # PV1 current (A * 100)
-    REG_PV2_VOLTAGE = 32018        # PV2 voltage (V * 10)
-    REG_PV2_CURRENT = 32019        # PV2 current (A * 100)
+    REG_PV1_VOLTAGE = 32016  # PV1 voltage (V * 10)
+    REG_PV1_CURRENT = 32017  # PV1 current (A * 100)
+    REG_PV2_VOLTAGE = 32018  # PV2 voltage (V * 10)
+    REG_PV2_CURRENT = 32019  # PV2 current (A * 100)
 
     # Power registers
-    REG_INPUT_POWER = 32064        # DC input power (kW * 1000, 32-bit)
-    REG_ACTIVE_POWER = 32080       # AC active power (kW * 1000, 32-bit signed)
+    REG_INPUT_POWER = 32064  # DC input power (kW * 1000, 32-bit)
+    REG_ACTIVE_POWER = 32080  # AC active power (kW * 1000, 32-bit signed)
 
     # Temperature
-    REG_INVERTER_TEMP = 32087      # Inverter temperature (°C * 10)
+    REG_INVERTER_TEMP = 32087  # Inverter temperature (°C * 10)
 
     # Energy registers
-    REG_DAILY_YIELD = 32114        # Daily energy yield (kWh * 100, 32-bit)
-    REG_TOTAL_YIELD = 32106        # Total energy yield (kWh * 100, 32-bit)
+    REG_DAILY_YIELD = 32114  # Daily energy yield (kWh * 100, 32-bit)
+    REG_TOTAL_YIELD = 32106  # Total energy yield (kWh * 100, 32-bit)
 
     # Battery registers (for hybrid models with LUNA battery)
-    REG_BATTERY_SOC = 37004        # Battery state of charge (% * 10)
-    REG_BATTERY_POWER = 37001      # Battery charge/discharge power (W, 32-bit signed)
+    REG_BATTERY_SOC = 37004  # Battery state of charge (% * 10)
+    REG_BATTERY_POWER = 37001  # Battery charge/discharge power (W, 32-bit signed)
 
     # Grid/Meter registers (requires Huawei Smart Power Sensor)
-    REG_GRID_POWER = 37113         # Grid active power (W, 32-bit signed, +export/-import)
+    REG_GRID_POWER = 37113  # Grid active power (W, 32-bit signed, +export/-import)
 
     # Device status
-    REG_DEVICE_STATUS = 32089      # Device status code
+    REG_DEVICE_STATUS = 32089  # Device status code
 
     # Active power control registers (for export limiting)
-    REG_ACTIVE_POWER_CONTROL_MODE = 47415   # Control mode (U16)
-    REG_MAX_FEED_GRID_POWER_KW = 47416      # Max feed-in power kW (I32, gain 1000)
-    REG_MAX_FEED_GRID_POWER_PCT = 47418     # Max feed-in power % (I16, gain 10)
+    REG_ACTIVE_POWER_CONTROL_MODE = 47415  # Control mode (U16)
+    REG_MAX_FEED_GRID_POWER_KW = 47416  # Max feed-in power kW (I32, gain 1000)
+    REG_MAX_FEED_GRID_POWER_PCT = 47418  # Max feed-in power % (I16, gain 10)
 
     # Active power control mode values
-    MODE_UNLIMITED = 0              # No power limiting (default)
-    MODE_DI_SCHEDULING = 1          # DI active scheduling
-    MODE_ZERO_EXPORT = 5            # Zero power grid connection
-    MODE_LIMIT_KW = 6               # Power-limited grid connection (kW)
-    MODE_LIMIT_PERCENT = 7          # Power-limited grid connection (%)
+    MODE_UNLIMITED = 0  # No power limiting (default)
+    MODE_DI_SCHEDULING = 1  # DI active scheduling
+    MODE_ZERO_EXPORT = 5  # Zero power grid connection
+    MODE_LIMIT_KW = 6  # Power-limited grid connection (kW)
+    MODE_LIMIT_PERCENT = 7  # Power-limited grid connection (%)
 
     # Device status values
     STATUS_STANDBY = 0x0000
@@ -122,9 +123,13 @@ class HuaweiController(InverterController):
                 connected = await self._client.connect()
                 if connected:
                     self._connected = True
-                    _LOGGER.info(f"Connected to Huawei inverter at {self.host}:{self.port}")
+                    _LOGGER.info(
+                        f"Connected to Huawei inverter at {self.host}:{self.port}"
+                    )
                 else:
-                    _LOGGER.error(f"Failed to connect to Huawei inverter at {self.host}:{self.port}")
+                    _LOGGER.error(
+                        f"Failed to connect to Huawei inverter at {self.host}:{self.port}"
+                    )
 
                 return connected
 
@@ -186,7 +191,9 @@ class HuaweiController(InverterController):
                 _LOGGER.error(f"Modbus write error at register {address}: {result}")
                 return False
 
-            _LOGGER.debug(f"Successfully wrote {values} to registers starting at {address}")
+            _LOGGER.debug(
+                f"Successfully wrote {values} to registers starting at {address}"
+            )
             return True
 
         except ModbusException as e:
@@ -267,34 +274,38 @@ class HuaweiController(InverterController):
 
             if home_load_w is not None and home_load_w > 0:
                 # Load-following: use kW limit mode
-                limit_kw_scaled = int(home_load_w)  # gain 1000 → W value maps to kW×1000
-                _LOGGER.info(f"Curtailing Huawei inverter at {self.host} (load-following: {home_load_w:.0f}W)")
+                limit_kw_scaled = int(
+                    home_load_w
+                )  # gain 1000 → W value maps to kW×1000
+                _LOGGER.info(
+                    f"Curtailing Huawei inverter at {self.host} (load-following: {home_load_w:.0f}W)"
+                )
                 success = await self._write_register(
-                    self.REG_ACTIVE_POWER_CONTROL_MODE,
-                    self.MODE_LIMIT_KW
+                    self.REG_ACTIVE_POWER_CONTROL_MODE, self.MODE_LIMIT_KW
                 )
                 if success:
                     success = await self._write_registers(
                         self.REG_MAX_FEED_GRID_POWER_KW,
-                        self._i32_to_registers(limit_kw_scaled)
+                        self._i32_to_registers(limit_kw_scaled),
                     )
             else:
                 # Zero export mode
-                _LOGGER.info(f"Curtailing Huawei inverter at {self.host} (zero export mode)")
+                _LOGGER.info(
+                    f"Curtailing Huawei inverter at {self.host} (zero export mode)"
+                )
                 success = await self._write_register(
-                    self.REG_ACTIVE_POWER_CONTROL_MODE,
-                    self.MODE_ZERO_EXPORT
+                    self.REG_ACTIVE_POWER_CONTROL_MODE, self.MODE_ZERO_EXPORT
                 )
                 if not success:
-                    _LOGGER.warning("Zero export mode failed, trying kW limit mode with 0")
+                    _LOGGER.warning(
+                        "Zero export mode failed, trying kW limit mode with 0"
+                    )
                     success = await self._write_register(
-                        self.REG_ACTIVE_POWER_CONTROL_MODE,
-                        self.MODE_LIMIT_KW
+                        self.REG_ACTIVE_POWER_CONTROL_MODE, self.MODE_LIMIT_KW
                     )
                     if success:
                         success = await self._write_registers(
-                            self.REG_MAX_FEED_GRID_POWER_KW,
-                            self._i32_to_registers(0)
+                            self.REG_MAX_FEED_GRID_POWER_KW, self._i32_to_registers(0)
                         )
 
             if not success:
@@ -326,8 +337,7 @@ class HuaweiController(InverterController):
 
             # Set active power control mode to unlimited
             success = await self._write_register(
-                self.REG_ACTIVE_POWER_CONTROL_MODE,
-                self.MODE_UNLIMITED
+                self.REG_ACTIVE_POWER_CONTROL_MODE, self.MODE_UNLIMITED
             )
             if not success:
                 _LOGGER.error("Failed to disable export limiting")
@@ -380,7 +390,9 @@ class HuaweiController(InverterController):
             # Read inverter temperature
             temp = await self._read_register(self.REG_INVERTER_TEMP, 1)
             if temp:
-                attrs["inverter_temperature"] = round(self._to_signed16(temp[0]) / 10.0, 1)
+                attrs["inverter_temperature"] = round(
+                    self._to_signed16(temp[0]) / 10.0, 1
+                )
 
             # Read daily yield
             daily_yield = await self._read_register(self.REG_DAILY_YIELD, 2)
@@ -412,7 +424,9 @@ class HuaweiController(InverterController):
                 attrs["device_status_code"] = device_status[0]
 
             # Read active power control mode
-            control_mode = await self._read_register(self.REG_ACTIVE_POWER_CONTROL_MODE, 1)
+            control_mode = await self._read_register(
+                self.REG_ACTIVE_POWER_CONTROL_MODE, 1
+            )
             if control_mode:
                 mode_value = control_mode[0]
                 attrs["active_power_control_mode"] = mode_value
@@ -423,7 +437,9 @@ class HuaweiController(InverterController):
                     6: "limit_kw",
                     7: "limit_percent",
                 }
-                attrs["active_power_control_mode_name"] = mode_names.get(mode_value, f"mode_{mode_value}")
+                attrs["active_power_control_mode_name"] = mode_names.get(
+                    mode_value, f"mode_{mode_value}"
+                )
 
         except Exception as e:
             _LOGGER.warning(f"Error reading some registers: {e}")
@@ -477,7 +493,11 @@ class HuaweiController(InverterController):
             elif device_status == self.STATUS_STANDBY_NO_GRID:
                 status = InverterStatus.ONLINE
                 attrs["running_state"] = "standby_no_grid"
-            elif device_status in (self.STATUS_GRID_CONNECTED, self.STATUS_GRID_CONNECTED_LIMIT, self.STATUS_GRID_CONNECTED_EXPORT_LIMIT):
+            elif device_status in (
+                self.STATUS_GRID_CONNECTED,
+                self.STATUS_GRID_CONNECTED_LIMIT,
+                self.STATUS_GRID_CONNECTED_EXPORT_LIMIT,
+            ):
                 status = InverterStatus.ONLINE
                 attrs["running_state"] = "grid_connected"
             else:
@@ -485,7 +505,11 @@ class HuaweiController(InverterController):
 
             # Check if export limiting is active
             control_mode = attrs.get("active_power_control_mode", 0)
-            if control_mode in (self.MODE_ZERO_EXPORT, self.MODE_LIMIT_KW, self.MODE_LIMIT_PERCENT):
+            if control_mode in (
+                self.MODE_ZERO_EXPORT,
+                self.MODE_LIMIT_KW,
+                self.MODE_LIMIT_PERCENT,
+            ):
                 is_curtailed = True
                 attrs["running_state"] = "export_limited"
                 if status == InverterStatus.ONLINE:

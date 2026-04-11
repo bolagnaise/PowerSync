@@ -104,6 +104,7 @@ class FoxESSCloudClient:
         elapsed = now - self._last_request_time
         if elapsed < _MIN_REQUEST_INTERVAL:
             import asyncio
+
             await asyncio.sleep(_MIN_REQUEST_INTERVAL - elapsed)
 
         url = f"{FOXESS_CLOUD_BASE_URL}{path}"
@@ -155,7 +156,13 @@ class FoxESSCloudClient:
         device_sn = sn or self.device_sn
         payload = {
             "sn": device_sn,
-            "variables": ["pvPower", "gridConsumptionPower", "loadsPower", "batPower", "SoC"],
+            "variables": [
+                "pvPower",
+                "gridConsumptionPower",
+                "loadsPower",
+                "batPower",
+                "SoC",
+            ],
         }
         return await self._post(path, payload)
 
@@ -182,7 +189,9 @@ class FoxESSCloudClient:
 
         path = "/op/v0/device/scheduler/set"
         payload = {"sn": sn, "groups": groups}
-        _LOGGER.info("FoxESS Cloud: setting scheduler with %d groups for %s", len(groups), sn)
+        _LOGGER.info(
+            "FoxESS Cloud: setting scheduler with %d groups for %s", len(groups), sn
+        )
         return await self._post(path, payload)
 
     async def test_connection(self) -> tuple[bool, str]:
@@ -262,13 +271,15 @@ def convert_prices_to_foxess_schedule(
         else:
             mode = "SelfUse"
 
-        classified.append({
-            "start": start_str,
-            "end": end_str,
-            "mode": mode,
-            "buy": buy_price,
-            "sell": sell_price,
-        })
+        classified.append(
+            {
+                "start": start_str,
+                "end": end_str,
+                "mode": mode,
+                "buy": buy_price,
+                "sell": sell_price,
+            }
+        )
 
     if not classified:
         _LOGGER.warning("No price slots to convert to FoxESS schedule")
@@ -311,7 +322,10 @@ def convert_prices_to_foxess_schedule(
         if min_idx > 0 and merged[min_idx - 1]["mode"] == merged[min_idx]["mode"]:
             merged[min_idx - 1]["end"] = merged[min_idx]["end"]
             merged.pop(min_idx)
-        elif min_idx < len(merged) - 1 and merged[min_idx + 1]["mode"] == merged[min_idx]["mode"]:
+        elif (
+            min_idx < len(merged) - 1
+            and merged[min_idx + 1]["mode"] == merged[min_idx]["mode"]
+        ):
             merged[min_idx]["end"] = merged[min_idx + 1]["end"]
             merged.pop(min_idx + 1)
         else:
@@ -357,7 +371,12 @@ def convert_prices_to_foxess_schedule(
         groups.append(foxess_group)
         _LOGGER.debug(
             "FoxESS schedule group %d: %02d:%02d-%02d:%02d mode=%s",
-            i, sh, sm, eh, em, mode,
+            i,
+            sh,
+            sm,
+            eh,
+            em,
+            mode,
         )
 
     _LOGGER.info(

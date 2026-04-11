@@ -1,4 +1,5 @@
 """Amber Electric WebSocket client for real-time price updates (interval-based polling version)"""
+
 import asyncio
 import json
 import logging
@@ -19,7 +20,7 @@ class SensitiveDataFilter(logging.Filter):
     def obfuscate(value: str, show_chars: int = 4) -> str:
         """Obfuscate a string showing only first and last N characters."""
         if len(value) <= show_chars * 2:
-            return '*' * len(value)
+            return "*" * len(value)
         return f"{value[:show_chars]}{'*' * (len(value) - show_chars * 2)}{value[-show_chars:]}"
 
     def _obfuscate_string(self, text: str) -> str:
@@ -29,48 +30,48 @@ class SensitiveDataFilter(logging.Filter):
 
         # Handle Bearer tokens
         text = re.sub(
-            r'(Bearer\s+)([a-zA-Z0-9_-]{20,})',
+            r"(Bearer\s+)([a-zA-Z0-9_-]{20,})",
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle psk_ tokens (Amber API keys)
         text = re.sub(
-            r'(psk_)([a-zA-Z0-9]{20,})',
+            r"(psk_)([a-zA-Z0-9]{20,})",
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle authorization headers in websocket/API logs
         text = re.sub(
-            r'(authorization:\s*Bearer\s+)([a-zA-Z0-9_-]{20,})',
+            r"(authorization:\s*Bearer\s+)([a-zA-Z0-9_-]{20,})",
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle site IDs (alphanumeric, like Amber 01KAR0YMB7JQDVZ10SN1SGA0CV)
         text = re.sub(
             r'(site[_\s]?[iI][dD]["\']?[\s:=]+["\']?)([a-zA-Z0-9-]{15,})',
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
-            text
+            text,
         )
 
         # Handle "for site {id}" pattern
         text = re.sub(
-            r'(for site\s+)([a-zA-Z0-9-]{15,})',
+            r"(for site\s+)([a-zA-Z0-9-]{15,})",
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle email addresses
         text = re.sub(
-            r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})',
+            r"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})",
             lambda m: self.obfuscate(m.group(1)),
-            text
+            text,
         )
 
         # Handle Tesla energy site IDs (numeric, 13-20 digits) - in URLs and JSON
@@ -78,15 +79,15 @@ class SensitiveDataFilter(logging.Filter):
             r'(energy_site[s]?[/\s:=]+["\']?)(\d{13,})',
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle standalone long numeric IDs (Tesla energy site IDs in various contexts)
         text = re.sub(
-            r'(\bsite\s+)(\d{13,})',
+            r"(\bsite\s+)(\d{13,})",
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle VIN numbers in JSON format ('vin': 'XXX' or "vin": "XXX")
@@ -94,15 +95,15 @@ class SensitiveDataFilter(logging.Filter):
             r'(["\']vin["\']:\s*["\'])([A-HJ-NPR-Z0-9]{17})(["\'])',
             lambda m: m.group(1) + self.obfuscate(m.group(2)) + m.group(3),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle VIN numbers plain format
         text = re.sub(
-            r'(\bvin[\s:=]+)([A-HJ-NPR-Z0-9]{17})\b',
+            r"(\bvin[\s:=]+)([A-HJ-NPR-Z0-9]{17})\b",
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle DIN numbers in JSON format
@@ -110,7 +111,7 @@ class SensitiveDataFilter(logging.Filter):
             r'(["\']din["\']:\s*["\'])([A-Za-z0-9-]{15,})(["\'])',
             lambda m: m.group(1) + self.obfuscate(m.group(2)) + m.group(3),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle DIN numbers plain format
@@ -118,7 +119,7 @@ class SensitiveDataFilter(logging.Filter):
             r'(\bdin[\s:=]+["\']?)([A-Za-z0-9-]{15,})',
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle serial numbers in JSON format
@@ -126,7 +127,7 @@ class SensitiveDataFilter(logging.Filter):
             r'(["\']serial_number["\']:\s*["\'])([A-Za-z0-9-]{8,})(["\'])',
             lambda m: m.group(1) + self.obfuscate(m.group(2)) + m.group(3),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle serial numbers plain format
@@ -134,7 +135,7 @@ class SensitiveDataFilter(logging.Filter):
             r'(serial[\s_]?(?:number)?[\s:=]+["\']?)([A-Za-z0-9-]{8,})',
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle gateway IDs in JSON format
@@ -142,7 +143,7 @@ class SensitiveDataFilter(logging.Filter):
             r'(["\']gateway_id["\']:\s*["\'])([A-Za-z0-9-]{15,})(["\'])',
             lambda m: m.group(1) + self.obfuscate(m.group(2)) + m.group(3),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle gateway IDs plain format
@@ -150,7 +151,7 @@ class SensitiveDataFilter(logging.Filter):
             r'(gateway[\s_]?(?:id)?[\s:=]+["\']?)([A-Za-z0-9-]{15,})',
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle warp site numbers in JSON format
@@ -158,7 +159,7 @@ class SensitiveDataFilter(logging.Filter):
             r'(["\']warp_site_number["\']:\s*["\'])([A-Za-z0-9-]{8,})(["\'])',
             lambda m: m.group(1) + self.obfuscate(m.group(2)) + m.group(3),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle warp site numbers plain format
@@ -166,7 +167,7 @@ class SensitiveDataFilter(logging.Filter):
             r'(warp[\s_]?(?:site)?(?:[\s_]?number)?[\s:=]+["\']?)([A-Za-z0-9-]{8,})',
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle asset_site_id (UUIDs)
@@ -174,7 +175,7 @@ class SensitiveDataFilter(logging.Filter):
             r'(["\']asset_site_id["\']:\s*["\'])([a-f0-9-]{36})(["\'])',
             lambda m: m.group(1) + self.obfuscate(m.group(2)) + m.group(3),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle device_id (UUIDs)
@@ -182,7 +183,7 @@ class SensitiveDataFilter(logging.Filter):
             r'(["\']device_id["\']:\s*["\'])([a-f0-9-]{36})(["\'])',
             lambda m: m.group(1) + self.obfuscate(m.group(2)) + m.group(3),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         return text
@@ -210,7 +211,9 @@ class SensitiveDataFilter(logging.Filter):
         # This preserves numeric types for format specifiers like %d and %.3f
         if record.args:
             if isinstance(record.args, dict):
-                record.args = {k: self._obfuscate_arg(v) for k, v in record.args.items()}
+                record.args = {
+                    k: self._obfuscate_arg(v) for k, v in record.args.items()
+                }
             elif isinstance(record.args, tuple):
                 record.args = tuple(self._obfuscate_arg(a) for a in record.args)
 
@@ -273,7 +276,9 @@ class AmberWebSocketClient:
         self._last_sync_trigger: Optional[datetime] = None
         self._sync_cooldown_seconds = 60  # Minimum 60s between sync triggers
 
-        _LOGGER.info(f"AmberWebSocketClient initialized for site {site_id} (interval-based polling mode)")
+        _LOGGER.info(
+            f"AmberWebSocketClient initialized for site {site_id} (interval-based polling mode)"
+        )
 
     async def start(self):
         """Start the WebSocket client in a background thread."""
@@ -282,7 +287,9 @@ class AmberWebSocketClient:
             return
 
         self._running = True
-        self._thread = threading.Thread(target=self._run_event_loop, daemon=True, name="AmberWebSocket")
+        self._thread = threading.Thread(
+            target=self._run_event_loop, daemon=True, name="AmberWebSocket"
+        )
         self._thread.start()
         _LOGGER.info("WebSocket client thread started (interval-based polling)")
 
@@ -323,13 +330,19 @@ class AmberWebSocketClient:
         now = datetime.now(timezone.utc)
         # Round up to next 5-minute boundary
         minutes = now.minute
-        next_interval_minute = ((minutes // self.INTERVAL_MINUTES) + 1) * self.INTERVAL_MINUTES
+        next_interval_minute = (
+            (minutes // self.INTERVAL_MINUTES) + 1
+        ) * self.INTERVAL_MINUTES
 
         if next_interval_minute >= 60:
             # Roll over to next hour
-            next_time = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+            next_time = now.replace(minute=0, second=0, microsecond=0) + timedelta(
+                hours=1
+            )
         else:
-            next_time = now.replace(minute=next_interval_minute, second=0, microsecond=0)
+            next_time = now.replace(
+                minute=next_interval_minute, second=0, microsecond=0
+            )
 
         return next_time
 
@@ -377,7 +390,10 @@ class AmberWebSocketClient:
                 # Wait until next interval (check running status periodically)
                 wait_start = datetime.now(timezone.utc)
                 while self._running:
-                    remaining = wait_seconds - (datetime.now(timezone.utc) - wait_start).total_seconds()
+                    remaining = (
+                        wait_seconds
+                        - (datetime.now(timezone.utc) - wait_start).total_seconds()
+                    )
                     if remaining <= 0:
                         break
                     # Sleep in small chunks to allow clean shutdown
@@ -411,11 +427,11 @@ class AmberWebSocketClient:
         self._connection_status = "connecting"
 
         try:
-            _LOGGER.debug(f"Connecting to Amber WebSocket for price fetch #{self._fetch_count}")
+            _LOGGER.debug(
+                f"Connecting to Amber WebSocket for price fetch #{self._fetch_count}"
+            )
 
-            headers = {
-                "authorization": f"Bearer {self.api_token}"
-            }
+            headers = {"authorization": f"Bearer {self.api_token}"}
 
             # Connect with short timeout since we only need one message
             async with websockets.connect(
@@ -429,9 +445,7 @@ class AmberWebSocketClient:
                 subscribe_message = {
                     "service": "live-prices",
                     "action": "subscribe",
-                    "data": {
-                        "siteId": self.site_id
-                    }
+                    "data": {"siteId": self.site_id},
                 }
                 await websocket.send(json.dumps(subscribe_message))
                 _LOGGER.debug(f"Subscription sent for site {self.site_id}")
@@ -445,13 +459,14 @@ class AmberWebSocketClient:
                 while not price_received:
                     elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
                     if elapsed > timeout:
-                        _LOGGER.warning(f"Timeout waiting for price update after {timeout}s")
+                        _LOGGER.warning(
+                            f"Timeout waiting for price update after {timeout}s"
+                        )
                         break
 
                     try:
                         message = await asyncio.wait_for(
-                            websocket.recv(),
-                            timeout=timeout - elapsed
+                            websocket.recv(), timeout=timeout - elapsed
                         )
                         price_received = self._handle_message(message)
                     except asyncio.TimeoutError:
@@ -465,7 +480,9 @@ class AmberWebSocketClient:
             if price_received:
                 _LOGGER.info(f"Price fetch #{self._fetch_count} successful")
             else:
-                _LOGGER.warning(f"Price fetch #{self._fetch_count} completed without price update")
+                _LOGGER.warning(
+                    f"Price fetch #{self._fetch_count} completed without price update"
+                )
 
         except Exception as e:
             self._connection_status = "disconnected"
@@ -499,15 +516,17 @@ class AmberWebSocketClient:
 
             # Handle price updates
             if data.get("action") == "price-update" or (
-                "data" in data and
-                isinstance(data.get("data"), dict) and
-                "prices" in data.get("data", {})
+                "data" in data
+                and isinstance(data.get("data"), dict)
+                and "prices" in data.get("data", {})
             ):
                 price_data = data.get("data", {})
 
                 # Verify site ID matches (if siteId is present)
                 if "siteId" in price_data and price_data.get("siteId") != self.site_id:
-                    _LOGGER.warning(f"Received price update for different site: {price_data.get('siteId')}")
+                    _LOGGER.warning(
+                        f"Received price update for different site: {price_data.get('siteId')}"
+                    )
                     return False
 
                 # Convert Amber's "prices" array to general/feedIn dict format
@@ -529,7 +548,9 @@ class AmberWebSocketClient:
                 general_price = converted_prices.get("general", {}).get("perKwh")
                 feedin_price = converted_prices.get("feedIn", {}).get("perKwh")
                 if general_price is not None and feedin_price is not None:
-                    _LOGGER.info(f"Price update: buy={general_price:.2f}c/kWh, sell={feedin_price:.2f}c/kWh")
+                    _LOGGER.info(
+                        f"Price update: buy={general_price:.2f}c/kWh, sell={feedin_price:.2f}c/kWh"
+                    )
 
                 # Notify coordinator when price data arrives
                 if self._should_trigger_sync():
@@ -549,7 +570,9 @@ class AmberWebSocketClient:
                 return False
 
             else:
-                _LOGGER.debug(f"Unhandled message type: action={data.get('action')}, type={data.get('type')}")
+                _LOGGER.debug(
+                    f"Unhandled message type: action={data.get('action')}, type={data.get('type')}"
+                )
                 return False
 
         except json.JSONDecodeError as e:
@@ -576,7 +599,9 @@ class AmberWebSocketClient:
 
         elapsed = (datetime.now(timezone.utc) - self._last_sync_trigger).total_seconds()
         if elapsed < self._sync_cooldown_seconds:
-            _LOGGER.debug(f"Sync cooldown active ({elapsed:.0f}s < {self._sync_cooldown_seconds}s)")
+            _LOGGER.debug(
+                f"Sync cooldown active ({elapsed:.0f}s < {self._sync_cooldown_seconds}s)"
+            )
             return False
 
         return True
@@ -596,6 +621,7 @@ class AmberWebSocketClient:
 
             # Run callback in separate thread to avoid blocking
             from concurrent.futures import ThreadPoolExecutor
+
             executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="WS-Notify")
             executor.submit(self._sync_callback, prices_data)
 
@@ -621,14 +647,18 @@ class AmberWebSocketClient:
         """
         with self._price_lock:
             if not self._cached_prices or not self._last_update:
-                _LOGGER.debug(f"WebSocket cache empty: cached_prices={bool(self._cached_prices)}, last_update={self._last_update}")
+                _LOGGER.debug(
+                    f"WebSocket cache empty: cached_prices={bool(self._cached_prices)}, last_update={self._last_update}"
+                )
                 return None
 
             # Check if data is stale
             age = (datetime.now(timezone.utc) - self._last_update).total_seconds()
             if age > max_age_seconds:
                 if not self._stale_warning_logged:
-                    _LOGGER.info(f"Cached WebSocket data is {age:.1f}s old (max: {max_age_seconds}s) - using REST fallback")
+                    _LOGGER.info(
+                        f"Cached WebSocket data is {age:.1f}s old (max: {max_age_seconds}s) - using REST fallback"
+                    )
                     self._stale_warning_logged = True
                 return None
 
@@ -657,8 +687,14 @@ class AmberWebSocketClient:
             Dictionary with health metrics
         """
         with self._price_lock:
-            last_update_str = self._last_update.isoformat() if self._last_update else None
-            age_seconds = (datetime.now(timezone.utc) - self._last_update).total_seconds() if self._last_update else None
+            last_update_str = (
+                self._last_update.isoformat() if self._last_update else None
+            )
+            age_seconds = (
+                (datetime.now(timezone.utc) - self._last_update).total_seconds()
+                if self._last_update
+                else None
+            )
             has_cached = bool(self._cached_prices)
 
         return {
@@ -688,9 +724,7 @@ class AmberWebSocketClient:
         if self._thread is None or not self._thread.is_alive():
             _LOGGER.warning("WebSocket thread died unexpectedly - restarting...")
             self._thread = threading.Thread(
-                target=self._run_event_loop,
-                daemon=True,
-                name="AmberWebSocket"
+                target=self._run_event_loop, daemon=True, name="AmberWebSocket"
             )
             self._thread.start()
             _LOGGER.info("WebSocket thread restarted successfully")

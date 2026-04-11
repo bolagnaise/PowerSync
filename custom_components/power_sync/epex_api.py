@@ -61,9 +61,13 @@ class EPEXAPIClient:
         url = f"{EPEX_API_BASE_URL}/prices"
 
         try:
-            async with self._session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            async with self._session.get(
+                url, params=params, timeout=aiohttp.ClientTimeout(total=30)
+            ) as resp:
                 if resp.status != 200:
-                    _LOGGER.error("EPEX API returned status %d for region %s", resp.status, region)
+                    _LOGGER.error(
+                        "EPEX API returned status %d for region %s", resp.status, region
+                    )
                     return []
 
                 data = await resp.json()
@@ -72,7 +76,9 @@ class EPEXAPIClient:
 
                 _LOGGER.debug(
                     "EPEX API returned %d price entries for %s (known until %s)",
-                    len(prices), region, known_until,
+                    len(prices),
+                    region,
+                    known_until,
                 )
                 return prices
 
@@ -80,7 +86,9 @@ class EPEXAPIClient:
             _LOGGER.error("EPEX API request failed for %s: %s", region, err)
             return []
         except Exception as err:
-            _LOGGER.error("Unexpected error fetching EPEX prices for %s: %s", region, err)
+            _LOGGER.error(
+                "Unexpected error fetching EPEX prices for %s: %s", region, err
+            )
             return []
 
     async def validate_region(self, region: str) -> bool:

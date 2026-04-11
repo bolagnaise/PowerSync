@@ -1,4 +1,5 @@
 """Number platform for PowerSync integration — Tesla Energy Site controls."""
+
 from __future__ import annotations
 
 import asyncio
@@ -94,7 +95,8 @@ class BackupReserveNumber(_TeslaSiteNumberBase):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key="tesla_backup_reserve",
             name="Backup Reserve",
             icon="mdi:battery-lock",
@@ -111,7 +113,10 @@ class BackupReserveNumber(_TeslaSiteNumberBase):
 
     async def async_set_native_value(self, value: float) -> None:
         await self.hass.services.async_call(
-            DOMAIN, "set_backup_reserve", {"percent": int(value)}, blocking=False,
+            DOMAIN,
+            "set_backup_reserve",
+            {"percent": int(value)},
+            blocking=False,
         )
 
 
@@ -120,7 +125,8 @@ class OffGridEvReserveNumber(_TeslaSiteNumberBase):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key="tesla_off_grid_ev_reserve",
             name="Off-Grid EV Reserve",
             icon="mdi:car-electric",
@@ -136,5 +142,8 @@ class OffGridEvReserveNumber(_TeslaSiteNumberBase):
 
     async def async_set_native_value(self, value: float) -> None:
         await self.hass.services.async_call(
-            DOMAIN, "set_off_grid_ev_reserve", {"percent": int(value)}, blocking=False,
+            DOMAIN,
+            "set_off_grid_ev_reserve",
+            {"percent": int(value)},
+            blocking=False,
         )

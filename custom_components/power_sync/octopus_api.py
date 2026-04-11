@@ -14,6 +14,7 @@ Key products:
 
 Note: Price endpoints do not require authentication.
 """
+
 from __future__ import annotations
 
 import logging
@@ -78,7 +79,9 @@ class OctopusAPIClient:
             _LOGGER.error("Network error calling Octopus API %s: %s", endpoint, err)
             return None
         except Exception as err:
-            _LOGGER.exception("Unexpected error calling Octopus API %s: %s", endpoint, err)
+            _LOGGER.exception(
+                "Unexpected error calling Octopus API %s: %s", endpoint, err
+            )
             return None
 
     async def get_products(self) -> list[dict[str, Any]]:
@@ -245,7 +248,8 @@ class OctopusAPIClient:
                 if response.status != 200:
                     _LOGGER.debug(
                         "Could not fetch Octopus account %s: HTTP %s",
-                        account_number, response.status,
+                        account_number,
+                        response.status,
                     )
                     return (None, None)
 
@@ -266,7 +270,10 @@ class OctopusAPIClient:
                     # Check agreements for export tariff codes
                     for agreement in mp.get("agreements", []):
                         tariff_code = agreement.get("tariff_code", "")
-                        if "OUTGOING" in tariff_code.upper() or "EXPORT" in tariff_code.upper():
+                        if (
+                            "OUTGOING" in tariff_code.upper()
+                            or "EXPORT" in tariff_code.upper()
+                        ):
                             is_export = True
                             break
 
@@ -286,15 +293,14 @@ class OctopusAPIClient:
                             if tariff_code:
                                 # Extract product code from tariff code
                                 # Format: E-1R-{PRODUCT_CODE}-{REGION}
-                                match = re.match(
-                                    r"E-1R-(.+)-([A-P])$", tariff_code
-                                )
+                                match = re.match(r"E-1R-(.+)-([A-P])$", tariff_code)
                                 if match:
                                     product_code = match.group(1)
                                     _LOGGER.info(
                                         "Discovered export tariff from account: "
                                         "product=%s, tariff=%s",
-                                        product_code, tariff_code,
+                                        product_code,
+                                        tariff_code,
                                     )
                                     return (product_code, tariff_code)
 
@@ -326,9 +332,12 @@ class OctopusAPIClient:
 
         # Filter for Tracker products
         tracker_products = [
-            p for p in all_products
-            if (p.get("code", "").startswith("SILVER")
-                or "Tracker" in p.get("display_name", ""))
+            p
+            for p in all_products
+            if (
+                p.get("code", "").startswith("SILVER")
+                or "Tracker" in p.get("display_name", "")
+            )
         ]
 
         if not tracker_products:

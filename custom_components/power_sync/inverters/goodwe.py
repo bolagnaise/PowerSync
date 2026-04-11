@@ -5,6 +5,7 @@ Uses export power limiting for load following curtailment.
 
 Reference: https://github.com/marcelblijleven/goodwe
 """
+
 import asyncio
 import logging
 from typing import Optional
@@ -36,38 +37,38 @@ class GoodWeController(InverterController):
 
     # Modbus register addresses (hex -> decimal)
     # Export limiting registers
-    REG_EXPORT_LIMIT_ENABLED = 47549   # 0xB9AD - Export limit enabled (1=on, 0=off)
-    REG_EXPORT_LIMIT = 47550           # 0xB9AE - Export limit (W)
+    REG_EXPORT_LIMIT_ENABLED = 47549  # 0xB9AD - Export limit enabled (1=on, 0=off)
+    REG_EXPORT_LIMIT = 47550  # 0xB9AE - Export limit (W)
 
     # Power registers
-    REG_PV1_VOLTAGE = 35103            # 0x891F - PV1 voltage (V * 0.1)
-    REG_PV1_CURRENT = 35104            # 0x8920 - PV1 current (A * 0.1)
-    REG_PV1_POWER = 35105              # 0x8921 - PV1 power (W, 32-bit)
-    REG_PV2_VOLTAGE = 35107            # 0x8923 - PV2 voltage (V * 0.1)
-    REG_PV2_CURRENT = 35108            # 0x8924 - PV2 current (A * 0.1)
-    REG_PV2_POWER = 35109              # 0x8925 - PV2 power (W, 32-bit)
+    REG_PV1_VOLTAGE = 35103  # 0x891F - PV1 voltage (V * 0.1)
+    REG_PV1_CURRENT = 35104  # 0x8920 - PV1 current (A * 0.1)
+    REG_PV1_POWER = 35105  # 0x8921 - PV1 power (W, 32-bit)
+    REG_PV2_VOLTAGE = 35107  # 0x8923 - PV2 voltage (V * 0.1)
+    REG_PV2_CURRENT = 35108  # 0x8924 - PV2 current (A * 0.1)
+    REG_PV2_POWER = 35109  # 0x8925 - PV2 power (W, 32-bit)
 
-    REG_GRID_POWER = 35125             # 0x8935 - On-grid L1 power (W, signed)
-    REG_TOTAL_POWER = 35138            # 0x8942 - Total inverter power (W)
+    REG_GRID_POWER = 35125  # 0x8935 - On-grid L1 power (W, signed)
+    REG_TOTAL_POWER = 35138  # 0x8942 - Total inverter power (W)
 
     # Battery registers
-    REG_BATTERY_VOLTAGE = 35180        # 0x9094 - Battery voltage (V * 0.1)
-    REG_BATTERY_CURRENT = 35181        # 0x9095 - Battery current (A * 0.1, signed)
-    REG_BATTERY_POWER = 35182          # 0x9096 - Battery power (W, 32-bit signed)
-    REG_BATTERY_SOC = 37007            # 0x9D7F - Battery state of charge (%)
+    REG_BATTERY_VOLTAGE = 35180  # 0x9094 - Battery voltage (V * 0.1)
+    REG_BATTERY_CURRENT = 35181  # 0x9095 - Battery current (A * 0.1, signed)
+    REG_BATTERY_POWER = 35182  # 0x9096 - Battery power (W, 32-bit signed)
+    REG_BATTERY_SOC = 37007  # 0x9D7F - Battery state of charge (%)
 
     # Temperature registers
-    REG_TEMP_AIR = 35174               # 0x8A5E - Inverter temp air (°C * 0.1)
-    REG_TEMP_MODULE = 35175            # 0x8A5F - Inverter temp module (°C * 0.1)
+    REG_TEMP_AIR = 35174  # 0x8A5E - Inverter temp air (°C * 0.1)
+    REG_TEMP_MODULE = 35175  # 0x8A5F - Inverter temp module (°C * 0.1)
 
     # Energy registers
-    REG_DAILY_PV = 35116               # 0x892C - Daily PV generation (kWh * 0.1)
-    REG_TOTAL_PV = 35118               # 0x892E - Total PV generation (kWh * 0.1, 32-bit)
-    REG_DAILY_EXPORT = 35142           # 0x8946 - Daily export (kWh * 0.1)
-    REG_DAILY_IMPORT = 35144           # 0x8948 - Daily import (kWh * 0.1)
+    REG_DAILY_PV = 35116  # 0x892C - Daily PV generation (kWh * 0.1)
+    REG_TOTAL_PV = 35118  # 0x892E - Total PV generation (kWh * 0.1, 32-bit)
+    REG_DAILY_EXPORT = 35142  # 0x8946 - Daily export (kWh * 0.1)
+    REG_DAILY_IMPORT = 35144  # 0x8948 - Daily import (kWh * 0.1)
 
     # Status register
-    REG_WORK_MODE = 35200              # 0x8980 - Work mode
+    REG_WORK_MODE = 35200  # 0x8980 - Work mode
 
     # Work mode values
     MODE_WAIT = 0
@@ -113,9 +114,13 @@ class GoodWeController(InverterController):
                 connected = await self._client.connect()
                 if connected:
                     self._connected = True
-                    _LOGGER.info(f"Connected to GoodWe inverter at {self.host}:{self.port}")
+                    _LOGGER.info(
+                        f"Connected to GoodWe inverter at {self.host}:{self.port}"
+                    )
                 else:
-                    _LOGGER.error(f"Failed to connect to GoodWe inverter at {self.host}:{self.port}")
+                    _LOGGER.error(
+                        f"Failed to connect to GoodWe inverter at {self.host}:{self.port}"
+                    )
 
                 return connected
 
@@ -216,8 +221,14 @@ class GoodWeController(InverterController):
         Returns:
             True if curtailment successful
         """
-        export_limit_w = int(home_load_w) if home_load_w is not None and home_load_w > 0 else 0
-        mode_str = f"load-following: {export_limit_w}W" if export_limit_w > 0 else "zero export"
+        export_limit_w = (
+            int(home_load_w) if home_load_w is not None and home_load_w > 0 else 0
+        )
+        mode_str = (
+            f"load-following: {export_limit_w}W"
+            if export_limit_w > 0
+            else "zero export"
+        )
         _LOGGER.info(f"Curtailing GoodWe inverter at {self.host} ({mode_str})")
 
         try:
@@ -237,7 +248,9 @@ class GoodWeController(InverterController):
                 _LOGGER.error("Failed to enable export limiting")
                 return False
 
-            _LOGGER.info(f"Successfully curtailed GoodWe inverter at {self.host} ({mode_str})")
+            _LOGGER.info(
+                f"Successfully curtailed GoodWe inverter at {self.host} ({mode_str})"
+            )
             await asyncio.sleep(1)
             return True
 
@@ -312,11 +325,15 @@ class GoodWeController(InverterController):
 
             battery_current = await self._read_register(self.REG_BATTERY_CURRENT, 1)
             if battery_current:
-                attrs["battery_current"] = round(self._to_signed16(battery_current[0]) * 0.1, 1)
+                attrs["battery_current"] = round(
+                    self._to_signed16(battery_current[0]) * 0.1, 1
+                )
 
             battery_power = await self._read_register(self.REG_BATTERY_POWER, 2)
             if battery_power and len(battery_power) >= 2:
-                attrs["battery_power"] = self._to_signed32(battery_power[0], battery_power[1])
+                attrs["battery_power"] = self._to_signed32(
+                    battery_power[0], battery_power[1]
+                )
 
             battery_soc = await self._read_register(self.REG_BATTERY_SOC, 1)
             if battery_soc:
@@ -330,7 +347,9 @@ class GoodWeController(InverterController):
             # Read temperatures
             temp_air = await self._read_register(self.REG_TEMP_AIR, 1)
             if temp_air:
-                attrs["inverter_temperature"] = round(self._to_signed16(temp_air[0]) * 0.1, 1)
+                attrs["inverter_temperature"] = round(
+                    self._to_signed16(temp_air[0]) * 0.1, 1
+                )
 
             # Read daily energy
             daily_pv = await self._read_register(self.REG_DAILY_PV, 1)
@@ -383,7 +402,10 @@ class GoodWeController(InverterController):
                     status=InverterStatus.OFFLINE,
                     is_curtailed=False,
                     error_message="No register data (inverter sleeping)",
-                    attributes={"host": self.host, "model": self.model or "ET/EH Series"},
+                    attributes={
+                        "host": self.host,
+                        "model": self.model or "ET/EH Series",
+                    },
                 )
 
             # Read work mode
@@ -406,7 +428,10 @@ class GoodWeController(InverterController):
                     attrs["running_state"] = f"mode_{mode_value}"
 
             # Check if export limiting is active (load following mode)
-            if attrs.get("export_limit_enabled") and attrs.get("export_limit_w", 10000) == 0:
+            if (
+                attrs.get("export_limit_enabled")
+                and attrs.get("export_limit_w", 10000) == 0
+            ):
                 is_curtailed = True
                 attrs["running_state"] = "load_following"
                 if status == InverterStatus.ONLINE:

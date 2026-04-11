@@ -11,6 +11,7 @@ Sessions:
   - Saving Sessions: demand response events paying ~800-1800 octopoints/kWh
   - Free Electricity: reverse events offering free grid power during renewable surplus
 """
+
 from __future__ import annotations
 
 import logging
@@ -104,9 +105,7 @@ class OctopusSavingSessionsClient:
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
                 if resp.status != 200:
-                    _LOGGER.error(
-                        "Octopus GraphQL auth failed: HTTP %s", resp.status
-                    )
+                    _LOGGER.error("Octopus GraphQL auth failed: HTTP %s", resp.status)
                     return False
 
                 data = await resp.json()
@@ -187,7 +186,9 @@ class OctopusSavingSessionsClient:
                     return False
 
                 self._token = new_token
-                self._refresh_token = token_data.get("refreshToken") or self._refresh_token
+                self._refresh_token = (
+                    token_data.get("refreshToken") or self._refresh_token
+                )
                 self._token_expiry = datetime.now(timezone.utc) + timedelta(minutes=55)
                 _LOGGER.debug("Octopus token refreshed successfully")
                 return True
@@ -196,7 +197,9 @@ class OctopusSavingSessionsClient:
             _LOGGER.debug("Token refresh exception: %s", err)
             return False
 
-    async def _graphql_request(self, query: str, variables: dict | None = None) -> dict | None:
+    async def _graphql_request(
+        self, query: str, variables: dict | None = None
+    ) -> dict | None:
         """Make an authenticated GraphQL request.
 
         Returns:
@@ -293,14 +296,16 @@ class OctopusSavingSessionsClient:
                 joined_events = ev.get("joinedEvents") or []
                 joined = len(joined_events) > 0
 
-                results.append(SavingSession(
-                    code=code,
-                    start=start,
-                    end=end,
-                    octopoints_per_kwh=octopoints,
-                    joined=joined,
-                    session_type="saving",
-                ))
+                results.append(
+                    SavingSession(
+                        code=code,
+                        start=start,
+                        end=end,
+                        octopoints_per_kwh=octopoints,
+                        joined=joined,
+                        session_type="saving",
+                    )
+                )
             except (ValueError, KeyError) as err:
                 _LOGGER.debug("Skipping malformed saving session event: %s", err)
 
@@ -347,14 +352,16 @@ class OctopusSavingSessionsClient:
                 start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
                 end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
 
-                results.append(SavingSession(
-                    code=code,
-                    start=start,
-                    end=end,
-                    octopoints_per_kwh=0,  # Free electricity has no octopoints
-                    joined=True,  # Free electricity events are auto-enrolled
-                    session_type="free_electricity",
-                ))
+                results.append(
+                    SavingSession(
+                        code=code,
+                        start=start,
+                        end=end,
+                        octopoints_per_kwh=0,  # Free electricity has no octopoints
+                        joined=True,  # Free electricity events are auto-enrolled
+                        session_type="free_electricity",
+                    )
+                )
             except (ValueError, KeyError) as err:
                 _LOGGER.debug("Skipping malformed free electricity event: %s", err)
 

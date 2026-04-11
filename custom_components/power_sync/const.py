@@ -1,4 +1,5 @@
 """Constants for the PowerSync integration."""
+
 from datetime import timedelta
 import json
 from pathlib import Path
@@ -159,26 +160,26 @@ DEFAULT_SUNGROW_BATTERY_CAPACITY = 25.6  # kWh — one SBR256 unit
 # Sungrow Modbus Register Addresses (Battery Control)
 # Reference: https://github.com/mkaiser/Sungrow-SHx-Inverter-Modbus-Home-Assistant
 # Read Registers (Input/Holding)
-SUNGROW_REG_BATTERY_VOLTAGE = 13018      # 0.1V scale
-SUNGROW_REG_BATTERY_CURRENT = 13019      # 0.1A scale (signed)
-SUNGROW_REG_BATTERY_POWER = 13020        # 1W (signed)
-SUNGROW_REG_BATTERY_SOC = 13021          # 0.1% scale
-SUNGROW_REG_BATTERY_SOH = 13022          # 0.1% scale
-SUNGROW_REG_BATTERY_TEMP = 13023         # 0.1°C scale
-SUNGROW_REG_LOAD_POWER = 13006           # 1W (32-bit signed)
-SUNGROW_REG_EXPORT_POWER = 13008         # 1W (32-bit signed)
-SUNGROW_REG_TOTAL_ACTIVE_POWER = 13032   # 1W
+SUNGROW_REG_BATTERY_VOLTAGE = 13018  # 0.1V scale
+SUNGROW_REG_BATTERY_CURRENT = 13019  # 0.1A scale (signed)
+SUNGROW_REG_BATTERY_POWER = 13020  # 1W (signed)
+SUNGROW_REG_BATTERY_SOC = 13021  # 0.1% scale
+SUNGROW_REG_BATTERY_SOH = 13022  # 0.1% scale
+SUNGROW_REG_BATTERY_TEMP = 13023  # 0.1°C scale
+SUNGROW_REG_LOAD_POWER = 13006  # 1W (32-bit signed)
+SUNGROW_REG_EXPORT_POWER = 13008  # 1W (32-bit signed)
+SUNGROW_REG_TOTAL_ACTIVE_POWER = 13032  # 1W
 
 # Control Registers (Holding - write)
-SUNGROW_REG_EMS_MODE = 13050             # 0=Self-consumption, 2=Forced, 3=External EMS
-SUNGROW_REG_CHARGE_CMD = 13051           # 0xAA=Charge, 0xBB=Discharge, 0xCC=Stop
-SUNGROW_REG_MAX_SOC = 13058              # 0.1% scale
-SUNGROW_REG_MIN_SOC = 13059              # 0.1% scale (backup reserve)
+SUNGROW_REG_EMS_MODE = 13050  # 0=Self-consumption, 2=Forced, 3=External EMS
+SUNGROW_REG_CHARGE_CMD = 13051  # 0xAA=Charge, 0xBB=Discharge, 0xCC=Stop
+SUNGROW_REG_MAX_SOC = 13058  # 0.1% scale
+SUNGROW_REG_MIN_SOC = 13059  # 0.1% scale (backup reserve)
 SUNGROW_REG_MAX_DISCHARGE_CURRENT = 13066  # 0.001A scale (milliamps)
-SUNGROW_REG_MAX_CHARGE_CURRENT = 13067   # 0.001A scale (milliamps)
-SUNGROW_REG_EXPORT_LIMIT = 13074         # 1W
-SUNGROW_REG_EXPORT_LIMIT_ENABLED = 13087 # 0=Disabled, 1=Enabled
-SUNGROW_REG_BACKUP_RESERVE = 13100       # 0.1% scale
+SUNGROW_REG_MAX_CHARGE_CURRENT = 13067  # 0.001A scale (milliamps)
+SUNGROW_REG_EXPORT_LIMIT = 13074  # 1W
+SUNGROW_REG_EXPORT_LIMIT_ENABLED = 13087  # 0=Disabled, 1=Enabled
+SUNGROW_REG_BACKUP_RESERVE = 13100  # 0.1% scale
 
 # FoxESS Battery System Configuration (Modbus TCP / RS485 Serial)
 # Hybrid inverters with integrated battery control
@@ -259,16 +260,18 @@ SUNGROW_BATTERY_VOLTAGE_DEFAULT = 48  # Typical LFP battery pack voltage
 CONF_TESLA_API_PROVIDER = "tesla_api_provider"
 TESLA_PROVIDER_TESLEMETRY = "teslemetry"
 TESLA_PROVIDER_FLEET_API = "fleet_api"
-TESLA_PROVIDER_POWERSYNC = "powersync"  # PowerSync.cc cloud OAuth proxy (free, recommended)
+TESLA_PROVIDER_POWERSYNC = (
+    "powersync"  # PowerSync.cc cloud OAuth proxy (free, recommended)
+)
 
 # All supported Tesla/EV integrations (for device/entity discovery)
 # These are the HA integration domain names used in device identifiers
 TESLA_INTEGRATIONS = [
-    "tesla_fleet",    # Official Tesla Fleet API integration
-    "teslemetry",     # Teslemetry integration
-    "tessie",         # Tessie integration
-    "tesla_custom",   # Tesla Custom Integration
-    "tesla",          # Older Tesla integration
+    "tesla_fleet",  # Official Tesla Fleet API integration
+    "teslemetry",  # Teslemetry integration
+    "tessie",  # Tessie integration
+    "tesla_custom",  # Tesla Custom Integration
+    "tesla",  # Older Tesla integration
 ]
 
 # BYD vehicle integration (hass-byd-vehicle)
@@ -347,7 +350,9 @@ AEMO_REGIONS = {
 CONF_ELECTRICITY_PROVIDER = "electricity_provider"
 CONF_FLOW_POWER_STATE = "flow_power_state"
 CONF_FLOW_POWER_PRICE_SOURCE = "flow_power_price_source"
-CONF_AEMO_SENSOR_ENTITY = "aemo_sensor_entity"  # Legacy - kept for backwards compatibility
+CONF_AEMO_SENSOR_ENTITY = (
+    "aemo_sensor_entity"  # Legacy - kept for backwards compatibility
+)
 
 # AEMO NEM Data sensor configuration (auto-generated based on state selection)
 CONF_AEMO_SENSOR_5MIN = "aemo_sensor_5min"
@@ -379,9 +384,13 @@ LOCALVOLTS_API_BASE_URL = "https://api.localvolts.com/v1"
 
 # EPEX Day-Ahead configuration (EU markets via epexpredictor.batzill.com)
 CONF_EPEX_REGION = "epex_region"
-CONF_EPEX_SURCHARGE = "epex_surcharge"  # Fixed surcharge in ct/kWh (network fees, levies)
+CONF_EPEX_SURCHARGE = (
+    "epex_surcharge"  # Fixed surcharge in ct/kWh (network fees, levies)
+)
 CONF_EPEX_TAX_PERCENT = "epex_tax_percent"  # Tax percentage (e.g. 21% VAT in Belgium)
-CONF_EPEX_EXPORT_RATE = "epex_export_rate"  # Fixed feed-in rate in ct/kWh (0 = wholesale)
+CONF_EPEX_EXPORT_RATE = (
+    "epex_export_rate"  # Fixed feed-in rate in ct/kWh (0 = wholesale)
+)
 EPEX_API_BASE_URL = "https://epexpredictor.batzill.com"
 EPEX_REGIONS = {
     "DE": "Germany",
@@ -487,10 +496,16 @@ OCTOPUS_GSP_REGIONS = {
 
 # Octopus Saving Sessions
 CONF_OCTOPUS_SAVING_SESSIONS_ENABLED = "octopus_saving_sessions_enabled"
-CONF_OCTOPUS_SAVING_SESSIONS_SOURCE = "octopus_saving_sessions_source"  # "direct" or "entity"
-CONF_OCTOPUS_API_KEY = "octopus_api_key"  # GraphQL auth (different from public price API)
+CONF_OCTOPUS_SAVING_SESSIONS_SOURCE = (
+    "octopus_saving_sessions_source"  # "direct" or "entity"
+)
+CONF_OCTOPUS_API_KEY = (
+    "octopus_api_key"  # GraphQL auth (different from public price API)
+)
 CONF_OCTOPUS_ACCOUNT_NUMBER = "octopus_account_number"  # e.g. "A-12345678"
-CONF_OCTOPUS_SAVING_SESSIONS_ENTITY = "octopus_saving_sessions_entity"  # Bottlecap Dave entity
+CONF_OCTOPUS_SAVING_SESSIONS_ENTITY = (
+    "octopus_saving_sessions_entity"  # Bottlecap Dave entity
+)
 CONF_OCTOPUS_SAVING_SESSIONS_AUTO_JOIN = "octopus_saving_sessions_auto_join"
 CONF_OCTOPUS_OCTOPOINTS_PER_PENNY = "octopus_octopoints_per_penny"  # Default 8
 DEFAULT_OCTOPOINTS_PER_PENNY = 8
@@ -705,11 +720,11 @@ ALL_NETWORK_TARIFFS = get_all_tariff_options()
 
 # Flow Power Happy Hour export rates ($/kWh)
 FLOW_POWER_EXPORT_RATES = {
-    "NSW1": 0.45,   # 45c/kWh
-    "QLD1": 0.45,   # 45c/kWh
-    "SA1": 0.45,    # 45c/kWh
-    "VIC1": 0.35,   # 35c/kWh
-    "TAS1": 0.00,   # No Happy Hour in Tasmania
+    "NSW1": 0.45,  # 45c/kWh
+    "QLD1": 0.45,  # 45c/kWh
+    "SA1": 0.45,  # 45c/kWh
+    "VIC1": 0.35,  # 35c/kWh
+    "TAS1": 0.00,  # No Happy Hour in Tasmania
 }
 
 # Flow Power Happy Hour periods (5:30pm to 7:30pm)
@@ -729,16 +744,16 @@ CONF_FLOW_POWER_BASE_RATE = "flow_power_base_rate"
 CONF_PEA_CUSTOM_VALUE = "pea_custom_value"
 
 # Flow Power v2 tariff configuration (optional — enables corrected formula)
-CONF_FP_NETWORK = "fp_network"                # DNSP display name (e.g. "SAPN")
-CONF_FP_TARIFF_CODE = "fp_tariff_code"        # Tariff code (e.g. "RESELE")
-CONF_FP_TWAP_OVERRIDE = "fp_twap_override"    # Manual TWAP override (c/kWh)
-CONF_FP_AMBER_MARKUP = "fp_amber_markup"      # Amber comparison markup (c/kWh)
+CONF_FP_NETWORK = "fp_network"  # DNSP display name (e.g. "SAPN")
+CONF_FP_TARIFF_CODE = "fp_tariff_code"  # Tariff code (e.g. "RESELE")
+CONF_FP_TWAP_OVERRIDE = "fp_twap_override"  # Manual TWAP override (c/kWh)
+CONF_FP_AMBER_MARKUP = "fp_amber_markup"  # Amber comparison markup (c/kWh)
 
 # PEA Constants
-FLOW_POWER_GST = 1.1              # GST multiplier (10%)
-FLOW_POWER_MARKET_AVG = 8.0       # Market TWAP average (c/kWh) — fallback only
-FLOW_POWER_BENCHMARK = 1.7       # BPEA - benchmark customer performance (c/kWh)
-FLOW_POWER_PEA_OFFSET = 9.7      # Combined: MARKET_AVG + BENCHMARK (c/kWh)
+FLOW_POWER_GST = 1.1  # GST multiplier (10%)
+FLOW_POWER_MARKET_AVG = 8.0  # Market TWAP average (c/kWh) — fallback only
+FLOW_POWER_BENCHMARK = 1.7  # BPEA - benchmark customer performance (c/kWh)
+FLOW_POWER_PEA_OFFSET = 9.7  # Combined: MARKET_AVG + BENCHMARK (c/kWh)
 FLOW_POWER_DEFAULT_BASE_RATE = 34.0  # Default Flow Power base rate (c/kWh)
 
 # Flow Power Portal configuration
@@ -748,18 +763,102 @@ UPDATE_INTERVAL_FLOWPOWER = 1800  # 30 minutes
 
 # Portal account sensors — (sensor_type, name, data_key, unit, icon, source_label)
 FLOW_POWER_PORTAL_SENSORS = [
-    ("fp_account_pea", "Flow Power PEA (Actual)", "pea_actual", "c/kWh", "mdi:account-cash", "portal"),
-    ("fp_account_pea_30d", "Flow Power PEA 30-Day", "pea_30_days", "c/kWh", "mdi:calendar-month", "portal"),
-    ("fp_account_bpea", "Flow Power BPEA (Benchmark)", "bpea", "c/kWh", "mdi:target", "portal"),
-    ("fp_account_cpea", "Flow Power CPEA (Customer)", "cpea", "c/kWh", "mdi:account-arrow-right", "calculated"),
-    ("fp_account_pea_import", "Flow Power PEA Import", "pea_actual_import", "c/kWh", "mdi:import", "portal"),
-    ("fp_account_lwap", "Flow Power LWAP", "lwap", "c/kWh", "mdi:scale-balance", "portal"),
-    ("fp_account_lwap_actual", "Flow Power LWAP (Actual)", "lwap_actual", "c/kWh", "mdi:scale-balance", "portal"),
-    ("fp_account_twap", "Flow Power TWAP (Portal)", "twap", "c/kWh", "mdi:chart-timeline-variant", "portal"),
-    ("fp_account_avg_rrp", "Flow Power Avg Spot Price", "avg_rrp", "c/kWh", "mdi:lightning-bolt", "portal"),
-    ("fp_account_dlf", "Flow Power DLF (Site Losses)", "site_losses_dlf", None, "mdi:transmission-tower", "portal"),
-    ("fp_account_avg_usage", "Flow Power Avg Demand", "avg_usage_kw", "kW", "mdi:flash-outline", "portal"),
-    ("fp_account_max_usage", "Flow Power Max Demand", "max_usage_kw", "kW", "mdi:flash-alert", "portal"),
+    (
+        "fp_account_pea",
+        "Flow Power PEA (Actual)",
+        "pea_actual",
+        "c/kWh",
+        "mdi:account-cash",
+        "portal",
+    ),
+    (
+        "fp_account_pea_30d",
+        "Flow Power PEA 30-Day",
+        "pea_30_days",
+        "c/kWh",
+        "mdi:calendar-month",
+        "portal",
+    ),
+    (
+        "fp_account_bpea",
+        "Flow Power BPEA (Benchmark)",
+        "bpea",
+        "c/kWh",
+        "mdi:target",
+        "portal",
+    ),
+    (
+        "fp_account_cpea",
+        "Flow Power CPEA (Customer)",
+        "cpea",
+        "c/kWh",
+        "mdi:account-arrow-right",
+        "calculated",
+    ),
+    (
+        "fp_account_pea_import",
+        "Flow Power PEA Import",
+        "pea_actual_import",
+        "c/kWh",
+        "mdi:import",
+        "portal",
+    ),
+    (
+        "fp_account_lwap",
+        "Flow Power LWAP",
+        "lwap",
+        "c/kWh",
+        "mdi:scale-balance",
+        "portal",
+    ),
+    (
+        "fp_account_lwap_actual",
+        "Flow Power LWAP (Actual)",
+        "lwap_actual",
+        "c/kWh",
+        "mdi:scale-balance",
+        "portal",
+    ),
+    (
+        "fp_account_twap",
+        "Flow Power TWAP (Portal)",
+        "twap",
+        "c/kWh",
+        "mdi:chart-timeline-variant",
+        "portal",
+    ),
+    (
+        "fp_account_avg_rrp",
+        "Flow Power Avg Spot Price",
+        "avg_rrp",
+        "c/kWh",
+        "mdi:lightning-bolt",
+        "portal",
+    ),
+    (
+        "fp_account_dlf",
+        "Flow Power DLF (Site Losses)",
+        "site_losses_dlf",
+        None,
+        "mdi:transmission-tower",
+        "portal",
+    ),
+    (
+        "fp_account_avg_usage",
+        "Flow Power Avg Demand",
+        "avg_usage_kw",
+        "kW",
+        "mdi:flash-outline",
+        "portal",
+    ),
+    (
+        "fp_account_max_usage",
+        "Flow Power Max Demand",
+        "max_usage_kw",
+        "kW",
+        "mdi:flash-alert",
+        "portal",
+    ),
 ]
 
 # Default Amber comparison markup by region (c/kWh)
@@ -815,8 +914,8 @@ NETWORK_MODULE_NAME = {
 }
 
 # TWAP (Time Weighted Average Price) Settings
-DEFAULT_TWAP_WINDOW_DAYS = 30     # Rolling window for TWAP calculation
-MIN_TWAP_SAMPLES = 12            # Minimum samples (~1 hour) before using dynamic TWAP
+DEFAULT_TWAP_WINDOW_DAYS = 30  # Rolling window for TWAP calculation
+MIN_TWAP_SAMPLES = 12  # Minimum samples (~1 hour) before using dynamic TWAP
 
 # Data coordinator update intervals
 UPDATE_INTERVAL_PRICES = timedelta(minutes=5)  # Amber updates every 5 minutes
@@ -853,6 +952,7 @@ def get_tesla_api_base_url(provider: str | None) -> str:
     if provider == TESLA_PROVIDER_FLEET_API:
         return FLEET_API_BASE_URL
     return TESLEMETRY_API_BASE_URL
+
 
 # Services
 SERVICE_SYNC_TOU = "sync_tou_schedule"
@@ -984,7 +1084,7 @@ CONF_EXPORT_BOOST_THRESHOLD = "export_boost_threshold"  # Min price to activate 
 
 # Default values for export boost
 DEFAULT_EXPORT_PRICE_OFFSET = 0.0  # c/kWh
-DEFAULT_EXPORT_MIN_PRICE = 0.0     # c/kWh
+DEFAULT_EXPORT_MIN_PRICE = 0.0  # c/kWh
 DEFAULT_EXPORT_BOOST_START = "17:00"
 DEFAULT_EXPORT_BOOST_END = "21:00"
 DEFAULT_EXPORT_BOOST_THRESHOLD = 0.0  # c/kWh (0 = always apply boost)
@@ -1028,7 +1128,9 @@ CONF_PRICE_SPIKE_ALERT = "price_spike_alert"
 CONF_PRICE_SPIKE_IMPORT_THRESHOLD = "price_spike_import_threshold"
 CONF_PRICE_SPIKE_EXPORT_THRESHOLD = "price_spike_export_threshold"
 DEFAULT_PRICE_SPIKE_IMPORT_THRESHOLD = 100.0  # c/kWh - alert if import > $1/kWh
-DEFAULT_PRICE_SPIKE_EXPORT_THRESHOLD = 50.0  # c/kWh - alert if export > $0.50/kWh (negative = you get paid)
+DEFAULT_PRICE_SPIKE_EXPORT_THRESHOLD = (
+    50.0  # c/kWh - alert if export > $0.50/kWh (negative = you get paid)
+)
 
 # Alpha: Force tariff mode toggle
 # After uploading a tariff, briefly switch to self_consumption then back to autonomous
@@ -1054,14 +1156,24 @@ CONF_INVERTER_MODEL = "inverter_model"
 CONF_INVERTER_HOST = "inverter_host"
 CONF_INVERTER_PORT = "inverter_port"
 CONF_INVERTER_SLAVE_ID = "inverter_slave_id"
-CONF_INVERTER_TOKEN = "inverter_token"  # JWT token for Enphase IQ Gateway (firmware 7.x+)
-CONF_ENPHASE_USERNAME = "enphase_username"  # Enlighten username/email for auto token refresh
+CONF_INVERTER_TOKEN = (
+    "inverter_token"  # JWT token for Enphase IQ Gateway (firmware 7.x+)
+)
+CONF_ENPHASE_USERNAME = (
+    "enphase_username"  # Enlighten username/email for auto token refresh
+)
 CONF_ENPHASE_PASSWORD = "enphase_password"  # Enlighten password for auto token refresh
 CONF_ENPHASE_SERIAL = "enphase_serial"  # Envoy serial number (optional, auto-detected)
-CONF_ENPHASE_NORMAL_PROFILE = "enphase_normal_profile"  # Grid profile name for normal operation (fallback)
-CONF_ENPHASE_ZERO_EXPORT_PROFILE = "enphase_zero_export_profile"  # Grid profile for zero export (fallback)
+CONF_ENPHASE_NORMAL_PROFILE = (
+    "enphase_normal_profile"  # Grid profile name for normal operation (fallback)
+)
+CONF_ENPHASE_ZERO_EXPORT_PROFILE = (
+    "enphase_zero_export_profile"  # Grid profile for zero export (fallback)
+)
 CONF_ENPHASE_IS_INSTALLER = "enphase_is_installer"  # Whether to request installer-level token for grid profile access
-CONF_INVERTER_RESTORE_SOC = "inverter_restore_soc"  # Battery SOC % below which to restore inverter
+CONF_INVERTER_RESTORE_SOC = (
+    "inverter_restore_soc"  # Battery SOC % below which to restore inverter
+)
 DEFAULT_INVERTER_RESTORE_SOC = 98  # Restore inverter when battery drops below 98%
 # Fronius-specific: load following mode for users without 0W export profile
 CONF_FRONIUS_LOAD_FOLLOWING = "fronius_load_following"
@@ -1315,8 +1427,8 @@ def get_brand_defaults(brand: str) -> dict[str, int]:
 CONF_BATTERY_MANAGEMENT_MODE = "battery_management_mode"
 
 # Management modes
-BATTERY_MODE_MANUAL = "manual"        # Use automations for control
-BATTERY_MODE_TOU_SYNC = "tou_sync"    # Sync prices to battery, let battery decide
+BATTERY_MODE_MANUAL = "manual"  # Use automations for control
+BATTERY_MODE_TOU_SYNC = "tou_sync"  # Sync prices to battery, let battery decide
 BATTERY_MODE_SMART_OPT = "smart_optimization"  # Optimizer-based scheduling
 
 BATTERY_MANAGEMENT_MODES = {
@@ -1327,7 +1439,7 @@ BATTERY_MANAGEMENT_MODES = {
 
 # Optimization provider selection
 CONF_OPTIMIZATION_PROVIDER = "optimization_provider"
-OPT_PROVIDER_NATIVE = "native"           # Use battery's built-in optimization
+OPT_PROVIDER_NATIVE = "native"  # Use battery's built-in optimization
 OPT_PROVIDER_POWERSYNC = "powersync_ml"  # Use PowerSync optimization
 
 # HAFO (Home Assistant Forecaster) Integration for ML-based load prediction
@@ -1371,26 +1483,26 @@ CONF_OPTIMIZATION_WEATHER_INTEGRATION = "optimization_weather_integration"
 COST_FUNCTION_COST = "cost"
 
 # Default optimization settings
-DEFAULT_OPTIMIZATION_INTERVAL = 30     # Re-optimize every 30 minutes
-DEFAULT_OPTIMIZATION_HORIZON = 48      # 48-hour forecast horizon
+DEFAULT_OPTIMIZATION_INTERVAL = 30  # Re-optimize every 30 minutes
+DEFAULT_OPTIMIZATION_HORIZON = 48  # 48-hour forecast horizon
 DEFAULT_OPTIMIZATION_BACKUP_RESERVE = 0.20  # 20% minimum SOC
 
 # Battery capacity defaults by system (Wh)
 BATTERY_CAPACITY_DEFAULTS = {
-    BATTERY_SYSTEM_TESLA: 13500,     # Powerwall 2: 13.5 kWh
+    BATTERY_SYSTEM_TESLA: 13500,  # Powerwall 2: 13.5 kWh
     BATTERY_SYSTEM_SIGENERGY: 10000,  # Varies, default 10 kWh
-    BATTERY_SYSTEM_SUNGROW: 10000,    # Varies, default 10 kWh
-    BATTERY_SYSTEM_FOXESS: 10000,     # Varies, default 10 kWh
-    BATTERY_SYSTEM_GOODWE: 10000,     # Varies, default 10 kWh
+    BATTERY_SYSTEM_SUNGROW: 10000,  # Varies, default 10 kWh
+    BATTERY_SYSTEM_FOXESS: 10000,  # Varies, default 10 kWh
+    BATTERY_SYSTEM_GOODWE: 10000,  # Varies, default 10 kWh
 }
 
 # Max charge/discharge power defaults by system (W)
 BATTERY_POWER_DEFAULTS = {
-    BATTERY_SYSTEM_TESLA: 5000,       # Powerwall 2: 5 kW continuous
-    BATTERY_SYSTEM_SIGENERGY: 5000,   # Varies
-    BATTERY_SYSTEM_SUNGROW: 5000,     # Varies
-    BATTERY_SYSTEM_FOXESS: 5000,      # Varies by model
-    BATTERY_SYSTEM_GOODWE: 5000,      # Varies by model
+    BATTERY_SYSTEM_TESLA: 5000,  # Powerwall 2: 5 kW continuous
+    BATTERY_SYSTEM_SIGENERGY: 5000,  # Varies
+    BATTERY_SYSTEM_SUNGROW: 5000,  # Varies
+    BATTERY_SYSTEM_FOXESS: 5000,  # Varies by model
+    BATTERY_SYSTEM_GOODWE: 5000,  # Varies by model
 }
 
 # Optimization service
@@ -1422,10 +1534,10 @@ CONF_EV_PRICE_THRESHOLD = "ev_price_threshold"
 
 # EV charging modes
 EV_MODE_OFF = "off"
-EV_MODE_SMART = "smart"          # Charge during cheap periods
+EV_MODE_SMART = "smart"  # Charge during cheap periods
 EV_MODE_SOLAR_ONLY = "solar_only"  # Only charge from excess solar
-EV_MODE_IMMEDIATE = "immediate"   # Charge immediately
-EV_MODE_SCHEDULED = "scheduled"   # User-defined schedule
+EV_MODE_IMMEDIATE = "immediate"  # Charge immediately
+EV_MODE_SCHEDULED = "scheduled"  # User-defined schedule
 
 EV_CHARGING_MODES = {
     EV_MODE_OFF: "Off - Manual control only",
@@ -1436,9 +1548,9 @@ EV_CHARGING_MODES = {
 }
 
 # Default EV charging settings
-DEFAULT_EV_TARGET_SOC = 0.8          # 80%
+DEFAULT_EV_TARGET_SOC = 0.8  # 80%
 DEFAULT_EV_DEPARTURE_TIME = "07:00"
-DEFAULT_EV_PRICE_THRESHOLD = 0.15    # $0.15/kWh
+DEFAULT_EV_PRICE_THRESHOLD = 0.15  # $0.15/kWh
 
 # Zaptec EV charger configuration
 CONF_ZAPTEC_CHARGER_ENTITY = "zaptec_charger_entity"
@@ -1450,7 +1562,9 @@ CONF_ZAPTEC_STANDALONE_ENABLED = "zaptec_standalone_enabled"
 CONF_ZAPTEC_USERNAME = "zaptec_username"
 CONF_ZAPTEC_PASSWORD = "zaptec_password"
 CONF_ZAPTEC_CHARGER_ID = "zaptec_charger_id"  # API charger UUID
-CONF_ZAPTEC_INSTALLATION_ID_CLOUD = "zaptec_installation_id_cloud"  # API installation UUID
+CONF_ZAPTEC_INSTALLATION_ID_CLOUD = (
+    "zaptec_installation_id_cloud"  # API installation UUID
+)
 
 # EV sensor types
 SENSOR_TYPE_EV_CHARGING_STATUS = "ev_charging_status"

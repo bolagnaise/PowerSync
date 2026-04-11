@@ -1,4 +1,5 @@
 """Switch platform for PowerSync integration."""
+
 from __future__ import annotations
 
 import asyncio
@@ -42,20 +43,21 @@ async def async_setup_entry(
     """Set up PowerSync switch entities."""
     # Detect Tesla by checking if tesla_energy_site_id is configured
     from .const import CONF_TESLA_ENERGY_SITE_ID
+
     tesla_site_id = entry.options.get(
-        CONF_TESLA_ENERGY_SITE_ID,
-        entry.data.get(CONF_TESLA_ENERGY_SITE_ID, "")
+        CONF_TESLA_ENERGY_SITE_ID, entry.data.get(CONF_TESLA_ENERGY_SITE_ID, "")
     )
     is_tesla = bool(tesla_site_id)
 
     # Detect electricity provider for TOU sync relevance
     electricity_provider = entry.options.get(
-        CONF_ELECTRICITY_PROVIDER,
-        entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
+        CONF_ELECTRICITY_PROVIDER, entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
     )
     has_tou_sync = electricity_provider in PROVIDERS_WITH_TOU_SYNC
 
-    _LOGGER.info(f"🔋 Switch setup: is_tesla={is_tesla}, provider={electricity_provider}, has_tou_sync={has_tou_sync}")
+    _LOGGER.info(
+        f"🔋 Switch setup: is_tesla={is_tesla}, provider={electricity_provider}, has_tou_sync={has_tou_sync}"
+    )
 
     entities = []
 
@@ -88,28 +90,32 @@ async def async_setup_entry(
 
     # Add Tesla-specific switches only if Tesla is selected as battery system
     if is_tesla:
-        _LOGGER.info("Tesla battery system detected - adding force charge/discharge switches")
-        entities.extend([
-            ForceDischargeSwitch(
-                hass=hass,
-                entry=entry,
-                description=SwitchEntityDescription(
-                    key=SWITCH_TYPE_FORCE_DISCHARGE,
-                    name="Force Discharge",
-                    icon="mdi:battery-arrow-up",
+        _LOGGER.info(
+            "Tesla battery system detected - adding force charge/discharge switches"
+        )
+        entities.extend(
+            [
+                ForceDischargeSwitch(
+                    hass=hass,
+                    entry=entry,
+                    description=SwitchEntityDescription(
+                        key=SWITCH_TYPE_FORCE_DISCHARGE,
+                        name="Force Discharge",
+                        icon="mdi:battery-arrow-up",
+                    ),
                 ),
-            ),
-            ForceChargeSwitch(
-                hass=hass,
-                entry=entry,
-                description=SwitchEntityDescription(
-                    key=SWITCH_TYPE_FORCE_CHARGE,
-                    name="Force Charge",
-                    icon="mdi:battery-arrow-down",
+                ForceChargeSwitch(
+                    hass=hass,
+                    entry=entry,
+                    description=SwitchEntityDescription(
+                        key=SWITCH_TYPE_FORCE_CHARGE,
+                        name="Force Charge",
+                        icon="mdi:battery-arrow-down",
+                    ),
                 ),
-            ),
-            GridChargingSwitch(hass=hass, entry=entry),
-        ])
+                GridChargingSwitch(hass=hass, entry=entry),
+            ]
+        )
 
     async_add_entities(entities)
 
@@ -118,6 +124,7 @@ async def async_setup_entry(
     # which runs ~after the first site_info fetch. We wait for that in a
     # background task and add them once.
     if is_tesla:
+
         async def _add_capability_gated_switches() -> None:
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
             waited = 0.0
@@ -148,7 +155,9 @@ async def async_setup_entry(
                     "Adding %d capability-gated Tesla switches (storm_mode=%s, vpp=%d)",
                     len(to_add),
                     caps.get("storm_mode"),
-                    len(getattr(tesla_coord, "_vpp_programs_cache", None) or []) if tesla_coord else 0,
+                    len(getattr(tesla_coord, "_vpp_programs_cache", None) or [])
+                    if tesla_coord
+                    else 0,
                 )
                 async_add_entities(to_add)
 
@@ -201,8 +210,11 @@ class AutoSyncSwitch(SwitchEntity):
         # Log context to help debug if triggered by automation vs user
         context = kwargs.get("context")
         if context:
-            _LOGGER.info("Auto-sync switch activated (context: user_id=%s, parent_id=%s)",
-                        context.user_id, context.parent_id)
+            _LOGGER.info(
+                "Auto-sync switch activated (context: user_id=%s, parent_id=%s)",
+                context.user_id,
+                context.parent_id,
+            )
         else:
             _LOGGER.info("Auto-sync switch activated (no context - likely UI action)")
         _LOGGER.info("Enabling automatic TOU schedule syncing")
@@ -296,11 +308,18 @@ class ForceDischargeSwitch(SwitchEntity):
         # Log context to help debug if triggered by automation vs user
         context = kwargs.get("context")
         if context:
-            _LOGGER.info("Force discharge switch activated (context: user_id=%s, parent_id=%s)",
-                        context.user_id, context.parent_id)
+            _LOGGER.info(
+                "Force discharge switch activated (context: user_id=%s, parent_id=%s)",
+                context.user_id,
+                context.parent_id,
+            )
         else:
-            _LOGGER.info("Force discharge switch activated (no context - likely UI action)")
-        _LOGGER.info("Activating force discharge mode for %d minutes", self._duration_minutes)
+            _LOGGER.info(
+                "Force discharge switch activated (no context - likely UI action)"
+            )
+        _LOGGER.info(
+            "Activating force discharge mode for %d minutes", self._duration_minutes
+        )
 
         # Get the duration from service call data if provided
         duration = kwargs.get("duration", self._duration_minutes)
@@ -360,7 +379,10 @@ class ForceDischargeSwitch(SwitchEntity):
         @callback
         def _check_expiry(now: datetime) -> None:
             """Check if discharge has expired."""
-            if self._discharge_expires_at and datetime.now() >= self._discharge_expires_at:
+            if (
+                self._discharge_expires_at
+                and datetime.now() >= self._discharge_expires_at
+            ):
                 _LOGGER.info("Force discharge expired, restoring normal operation")
                 self._attr_is_on = False
                 self._discharge_expires_at = None
@@ -437,7 +459,9 @@ class ForceChargeSwitch(SwitchEntity):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn on force charge mode."""
-        _LOGGER.info("Activating force charge mode for %d minutes", self._duration_minutes)
+        _LOGGER.info(
+            "Activating force charge mode for %d minutes", self._duration_minutes
+        )
 
         # Get the duration from service call data if provided
         duration = kwargs.get("duration", self._duration_minutes)
@@ -574,7 +598,9 @@ class MonitoringModeSwitch(SwitchEntity):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Enable monitoring mode — all control commands will be logged but not executed."""
-        _LOGGER.info("Monitoring mode ENABLED — all battery/inverter commands will be blocked")
+        _LOGGER.info(
+            "Monitoring mode ENABLED — all battery/inverter commands will be blocked"
+        )
         self._attr_is_on = True
 
         new_options = {**self._entry.options}
@@ -588,7 +614,9 @@ class MonitoringModeSwitch(SwitchEntity):
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disable monitoring mode — resume normal battery/inverter control."""
-        _LOGGER.info("Monitoring mode DISABLED — normal battery/inverter control resumed")
+        _LOGGER.info(
+            "Monitoring mode DISABLED — normal battery/inverter control resumed"
+        )
         self._attr_is_on = False
 
         new_options = {**self._entry.options}
@@ -606,7 +634,9 @@ class _TeslaSiteSwitchBase(SwitchEntity):
 
     _attr_has_entity_name = True
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, key: str, name: str, icon: str) -> None:
+    def __init__(
+        self, hass: HomeAssistant, entry: ConfigEntry, key: str, name: str, icon: str
+    ) -> None:
         self.hass = hass
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_{key}"
@@ -620,7 +650,11 @@ class _TeslaSiteSwitchBase(SwitchEntity):
         return {"identifiers": {(DOMAIN, self._entry.entry_id)}}
 
     def _tesla_coord(self):
-        return self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("tesla_coordinator")
+        return (
+            self.hass.data.get(DOMAIN, {})
+            .get(self._entry.entry_id, {})
+            .get("tesla_coordinator")
+        )
 
 
 class GridChargingSwitch(_TeslaSiteSwitchBase):
@@ -628,7 +662,8 @@ class GridChargingSwitch(_TeslaSiteSwitchBase):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key="tesla_grid_charging",
             name="Grid Charging",
             icon="mdi:transmission-tower-import",
@@ -649,14 +684,20 @@ class GridChargingSwitch(_TeslaSiteSwitchBase):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         await self.hass.services.async_call(
-            DOMAIN, "set_grid_charging", {"enabled": True}, blocking=False,
+            DOMAIN,
+            "set_grid_charging",
+            {"enabled": True},
+            blocking=False,
         )
         self._attr_is_on = True
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self.hass.services.async_call(
-            DOMAIN, "set_grid_charging", {"enabled": False}, blocking=False,
+            DOMAIN,
+            "set_grid_charging",
+            {"enabled": False},
+            blocking=False,
         )
         self._attr_is_on = False
         self.async_write_ha_state()
@@ -667,7 +708,8 @@ class StormWatchSwitch(_TeslaSiteSwitchBase):
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key="tesla_storm_watch",
             name="Storm Watch",
             icon="mdi:weather-lightning",
@@ -682,12 +724,18 @@ class StormWatchSwitch(_TeslaSiteSwitchBase):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         await self.hass.services.async_call(
-            DOMAIN, "set_storm_watch", {"enabled": True}, blocking=False,
+            DOMAIN,
+            "set_storm_watch",
+            {"enabled": True},
+            blocking=False,
         )
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self.hass.services.async_call(
-            DOMAIN, "set_storm_watch", {"enabled": False}, blocking=False,
+            DOMAIN,
+            "set_storm_watch",
+            {"enabled": False},
+            blocking=False,
         )
 
 
@@ -705,7 +753,8 @@ class VppProgramSwitch(_TeslaSiteSwitchBase):
         safe_key = "".join(c if c.isalnum() else "_" for c in pid_str.lower())
         display_name = program.get("display_name") or program.get("name") or pid_str
         super().__init__(
-            hass, entry,
+            hass,
+            entry,
             key=f"tesla_vpp_{safe_key}",
             name=f"VPP: {display_name}",
             icon="mdi:transmission-tower",
@@ -719,7 +768,10 @@ class VppProgramSwitch(_TeslaSiteSwitchBase):
             return self._program
         programs = getattr(coord, "_vpp_programs_cache", None) or []
         for p in programs:
-            if str(p.get("id") or p.get("program_id") or p.get("name")) == self._program_id:
+            if (
+                str(p.get("id") or p.get("program_id") or p.get("name"))
+                == self._program_id
+            ):
                 return p
         return self._program
 
@@ -746,14 +798,16 @@ class VppProgramSwitch(_TeslaSiteSwitchBase):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         await self.hass.services.async_call(
-            DOMAIN, "set_vpp_enrollment",
+            DOMAIN,
+            "set_vpp_enrollment",
             {"program_id": self._program_id, "enrolled": True},
             blocking=False,
         )
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self.hass.services.async_call(
-            DOMAIN, "set_vpp_enrollment",
+            DOMAIN,
+            "set_vpp_enrollment",
             {"program_id": self._program_id, "enrolled": False},
             blocking=False,
         )

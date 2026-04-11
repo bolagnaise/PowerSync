@@ -11,6 +11,7 @@ Strategy:
 3. Schedules EV charging during cheap periods when battery isn't charging
 4. Avoids conflicts: if battery is charging, EV waits (unless excess solar)
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -38,6 +39,7 @@ _LOGGER = logging.getLogger(__name__)
 
 class EVChargingMode(Enum):
     """EV charging mode."""
+
     OFF = "off"
     SMART = "smart"  # Charge during cheap periods
     SOLAR_ONLY = "solar_only"  # Only charge from excess solar
@@ -47,6 +49,7 @@ class EVChargingMode(Enum):
 
 class EVChargingState(Enum):
     """Current EV charging state."""
+
     NOT_CONNECTED = "not_connected"
     CONNECTED_IDLE = "connected_idle"
     CHARGING = "charging"
@@ -60,6 +63,7 @@ class EVChargingState(Enum):
 @dataclass
 class EVConfig:
     """Configuration for an EV charger."""
+
     entity_id: str  # HA entity for the charger
     name: str
     max_charging_power_w: int = 7400  # Default 32A single phase
@@ -73,6 +77,7 @@ class EVConfig:
 @dataclass
 class EVStatus:
     """Current status of an EV."""
+
     entity_id: str
     connected: bool
     soc: float | None
@@ -85,6 +90,7 @@ class EVStatus:
 @dataclass
 class ChargingWindow:
     """A window for EV charging."""
+
     start: datetime
     end: datetime
     price: float
@@ -296,7 +302,9 @@ class EVCoordinator:
 
         # Find optimal charging windows with dynamic power sharing
         windows = self._find_charging_windows(
-            prices, battery_schedule, solar_forecast,
+            prices,
+            battery_schedule,
+            solar_forecast,
             grid_capacity_w=self._grid_capacity_w,
         )
         self._charging_plan = windows
@@ -323,7 +331,11 @@ class EVCoordinator:
             should_charge = self._should_charge_now(config, status, windows)
 
             # Get available power for dynamic amp adjustment
-            available_power = current_window.power_available_w if current_window else config.max_charging_power_w
+            available_power = (
+                current_window.power_available_w
+                if current_window
+                else config.max_charging_power_w
+            )
 
             if should_charge:
                 if not status.charging:
@@ -337,10 +349,14 @@ class EVCoordinator:
                     if abs(new_amps - current_amps) >= 2:  # Only adjust if change >= 2A
                         await self._set_charging_amps(config, new_amps)
                         self._current_charge_amps[config.entity_id] = new_amps
-                        _LOGGER.debug(f"Adjusted {config.name} charging: {current_amps}A -> {new_amps}A")
+                        _LOGGER.debug(
+                            f"Adjusted {config.name} charging: {current_amps}A -> {new_amps}A"
+                        )
             elif status.charging:
                 await self._stop_charging(config)
-                self._ev_statuses[config.entity_id].state = EVChargingState.WAITING_CHEAP_RATE
+                self._ev_statuses[
+                    config.entity_id
+                ].state = EVChargingState.WAITING_CHEAP_RATE
 
     async def _get_price_data(self) -> list[dict]:
         """Get price forecast data."""
@@ -413,7 +429,9 @@ class EVCoordinator:
                         ts = datetime.fromisoformat(ts)
                     if ts:
                         power_w = action.get("power_w", 5000)
-                        battery_power_by_time[ts.replace(second=0, microsecond=0)] = power_w
+                        battery_power_by_time[ts.replace(second=0, microsecond=0)] = (
+                            power_w
+                        )
 
         # Process price intervals
         for i, price_data in enumerate(prices):
@@ -424,7 +442,9 @@ class EVCoordinator:
 
                 start_time = price_data.get("startTime", price_data.get("time"))
                 if isinstance(start_time, str):
-                    start_time = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+                    start_time = datetime.fromisoformat(
+                        start_time.replace("Z", "+00:00")
+                    )
                 elif not isinstance(start_time, datetime):
                     start_time = now + (i * interval)
             else:
@@ -467,13 +487,15 @@ class EVCoordinator:
             power_available = max(0, min(power_available, grid_capacity_w))
 
             if power_available > 1400:  # Minimum 6A to charge
-                windows.append(ChargingWindow(
-                    start=start_time,
-                    end=end_time,
-                    price=price,
-                    power_available_w=power_available,
-                    is_solar=solar_w > 1000,
-                ))
+                windows.append(
+                    ChargingWindow(
+                        start=start_time,
+                        end=end_time,
+                        price=price,
+                        power_available_w=power_available,
+                        is_solar=solar_w > 1000,
+                    )
+                )
 
         # Sort by price (cheapest first)
         windows.sort(key=lambda w: (w.price, -w.power_available_w))
@@ -501,7 +523,10 @@ class EVCoordinator:
 
         # Mode-specific logic
         if self._mode == EVChargingMode.SOLAR_ONLY:
-            return current_window.is_solar and current_window.power_available_w > config.min_charging_power_w
+            return (
+                current_window.is_solar
+                and current_window.power_available_w > config.min_charging_power_w
+            )
 
         if self._mode == EVChargingMode.SMART:
             # Check price threshold if set
@@ -520,7 +545,9 @@ class EVCoordinator:
             # Use 0.85 efficiency factor: chargers lose ~15% to AC-DC conversion,
             # ramp-up time, and thermal throttling vs peak rated power
             charging_rate_kw = (config.max_charging_power_w / 1000) * 0.85
-            intervals_needed = math.ceil((energy_needed_kwh / charging_rate_kw) * 12)  # 12 intervals per hour
+            intervals_needed = math.ceil(
+                (energy_needed_kwh / charging_rate_kw) * 12
+            )  # 12 intervals per hour
 
             # Check if departure time requires charging now
             if config.departure_time:
@@ -535,11 +562,14 @@ class EVCoordinator:
                     if departure < now:
                         departure += timedelta(days=1)
 
-                    intervals_until_departure = int((departure - now).total_seconds() / 300)
+                    intervals_until_departure = int(
+                        (departure - now).total_seconds() / 300
+                    )
 
                     # If we don't have enough cheap windows before departure, charge now
                     cheap_windows_before_departure = [
-                        w for w in windows
+                        w
+                        for w in windows
                         if w.start < departure and w.price <= current_window.price * 1.2
                     ]
 
@@ -562,7 +592,9 @@ class EVCoordinator:
         """Check if Zaptec standalone mode is configured."""
         for entry in self.hass.config_entries.async_entries(DOMAIN):
             opts = {**entry.data, **entry.options}
-            if opts.get(CONF_ZAPTEC_STANDALONE_ENABLED) and opts.get(CONF_ZAPTEC_USERNAME):
+            if opts.get(CONF_ZAPTEC_STANDALONE_ENABLED) and opts.get(
+                CONF_ZAPTEC_USERNAME
+            ):
                 return True
         return False
 
@@ -595,11 +627,14 @@ class EVCoordinator:
 
         # Create new client
         from ..zaptec_api import ZaptecCloudClient
+
         client = ZaptecCloudClient(username, password)
         self._zaptec_client = client
         return client
 
-    async def _start_charging(self, config: EVConfig, power_w: float | None = None) -> None:
+    async def _start_charging(
+        self, config: EVConfig, power_w: float | None = None
+    ) -> None:
         """Start EV charging with dynamic amp adjustment.
 
         Args:
@@ -615,11 +650,15 @@ class EVCoordinator:
             voltage = 230
             target_amps = int(power_w / voltage)
             # Clamp to charger limits
-            target_amps = max(6, min(target_amps, config.max_charging_power_w // voltage))
+            target_amps = max(
+                6, min(target_amps, config.max_charging_power_w // voltage)
+            )
         else:
             target_amps = config.max_charging_power_w // 230
 
-        _LOGGER.info(f"Starting EV charging: {config.name} at {target_amps}A ({power_w or config.max_charging_power_w}W)")
+        _LOGGER.info(
+            f"Starting EV charging: {config.name} at {target_amps}A ({power_w or config.max_charging_power_w}W)"
+        )
 
         try:
             # Zaptec standalone takes priority over HA integration
@@ -642,13 +681,17 @@ class EVCoordinator:
                         _LOGGER.info("Zaptec already charging, skipping Resume")
                     elif charger_mode == "connected_waiting":
                         # Car just plugged in — MaxCurrent already set by _set_charging_amps
-                        _LOGGER.info("Zaptec in connected_waiting: MaxCurrent set, skipping Resume")
+                        _LOGGER.info(
+                            "Zaptec in connected_waiting: MaxCurrent set, skipping Resume"
+                        )
                     else:
                         await client.resume_charging(charger_id)
                     _LOGGER.info(f"Started Zaptec standalone charging: {charger_id}")
                     return
                 else:
-                    _LOGGER.warning("Zaptec standalone configured but missing client or charger_id")
+                    _LOGGER.warning(
+                        "Zaptec standalone configured but missing client or charger_id"
+                    )
 
             # Set charging amps first (if supported)
             await self._set_charging_amps(config, target_amps)
@@ -657,20 +700,17 @@ class EVCoordinator:
             # Then start charging
             if domain == "switch":
                 await self.hass.services.async_call(
-                    "switch", "turn_on",
-                    {"entity_id": entity_id}
+                    "switch", "turn_on", {"entity_id": entity_id}
                 )
             elif domain in ("ev_charger", "ocpp", "wallbox", "easee", "zaptec"):
                 service = "resume_charging" if domain == "zaptec" else "start_charging"
                 await self.hass.services.async_call(
-                    domain, service,
-                    {"entity_id": entity_id}
+                    domain, service, {"entity_id": entity_id}
                 )
             else:
                 # Generic turn_on
                 await self.hass.services.async_call(
-                    "homeassistant", "turn_on",
-                    {"entity_id": entity_id}
+                    "homeassistant", "turn_on", {"entity_id": entity_id}
                 )
         except Exception as e:
             _LOGGER.error(f"Failed to start EV charging: {e}")
@@ -700,12 +740,13 @@ class EVCoordinator:
 
         # Try various methods to set charging amps
         # 1. Tesla BLE number entity
-        tesla_ble_amps = entity_id.replace("switch.", "number.").replace("_charger", "_charging_amps")
+        tesla_ble_amps = entity_id.replace("switch.", "number.").replace(
+            "_charger", "_charging_amps"
+        )
         if self.hass.states.get(tesla_ble_amps):
             try:
                 await self.hass.services.async_call(
-                    "number", "set_value",
-                    {"entity_id": tesla_ble_amps, "value": amps}
+                    "number", "set_value", {"entity_id": tesla_ble_amps, "value": amps}
                 )
                 _LOGGER.debug(f"Set Tesla BLE charging amps to {amps}A")
                 return
@@ -717,8 +758,9 @@ class EVCoordinator:
         if domain == "ocpp":
             try:
                 await self.hass.services.async_call(
-                    "ocpp", "set_charge_rate",
-                    {"entity_id": entity_id, "limit_amps": amps}
+                    "ocpp",
+                    "set_charge_rate",
+                    {"entity_id": entity_id, "limit_amps": amps},
                 )
                 _LOGGER.debug(f"Set OCPP charging amps to {amps}A")
                 return
@@ -729,8 +771,9 @@ class EVCoordinator:
         if domain == "wallbox":
             try:
                 await self.hass.services.async_call(
-                    "wallbox", "set_charging_current",
-                    {"entity_id": entity_id, "charging_current": amps}
+                    "wallbox",
+                    "set_charging_current",
+                    {"entity_id": entity_id, "charging_current": amps},
                 )
                 _LOGGER.debug(f"Set Wallbox charging amps to {amps}A")
                 return
@@ -741,8 +784,9 @@ class EVCoordinator:
         if domain == "easee":
             try:
                 await self.hass.services.async_call(
-                    "easee", "set_charger_dynamic_limit",
-                    {"entity_id": entity_id, "current": amps}
+                    "easee",
+                    "set_charger_dynamic_limit",
+                    {"entity_id": entity_id, "current": amps},
                 )
                 _LOGGER.debug(f"Set Easee charging amps to {amps}A")
                 return
@@ -755,8 +799,12 @@ class EVCoordinator:
             if zaptec_installation_id:
                 try:
                     await self.hass.services.async_call(
-                        "zaptec", "limit_current",
-                        {"device_id": zaptec_installation_id, "available_current": amps}
+                        "zaptec",
+                        "limit_current",
+                        {
+                            "device_id": zaptec_installation_id,
+                            "available_current": amps,
+                        },
                     )
                     _LOGGER.debug(f"Set Zaptec charging amps to {amps}A")
                     return
@@ -769,8 +817,9 @@ class EVCoordinator:
             if self.hass.states.get(number_entity):
                 try:
                     await self.hass.services.async_call(
-                        "number", "set_value",
-                        {"entity_id": number_entity, "value": amps}
+                        "number",
+                        "set_value",
+                        {"entity_id": number_entity, "value": amps},
                     )
                     _LOGGER.debug(f"Set charging amps via {number_entity} to {amps}A")
                     return
@@ -799,18 +848,15 @@ class EVCoordinator:
 
             if domain == "switch":
                 await self.hass.services.async_call(
-                    "switch", "turn_off",
-                    {"entity_id": entity_id}
+                    "switch", "turn_off", {"entity_id": entity_id}
                 )
             elif domain in ("ev_charger", "ocpp", "wallbox", "easee", "zaptec"):
                 await self.hass.services.async_call(
-                    domain, "stop_charging",
-                    {"entity_id": entity_id}
+                    domain, "stop_charging", {"entity_id": entity_id}
                 )
             else:
                 await self.hass.services.async_call(
-                    "homeassistant", "turn_off",
-                    {"entity_id": entity_id}
+                    "homeassistant", "turn_off", {"entity_id": entity_id}
                 )
         except Exception as e:
             _LOGGER.error(f"Failed to stop EV charging: {e}")
@@ -840,10 +886,14 @@ class EVCoordinator:
         # Fallback: scan device registry for a zaptec installation device
         try:
             from homeassistant.helpers import device_registry as dr
+
             device_registry = dr.async_get(self.hass)
             for device in device_registry.devices.values():
                 for identifier in device.identifiers:
-                    if identifier[0] == "zaptec" and "installation" in str(identifier[1]).lower():
+                    if (
+                        identifier[0] == "zaptec"
+                        and "installation" in str(identifier[1]).lower()
+                    ):
                         return device.id
         except Exception as e:
             _LOGGER.debug(f"Failed to look up Zaptec installation: {e}")
@@ -864,7 +914,9 @@ class EVCoordinator:
                     "charging": status.charging,
                     "power_w": status.power_w,
                     "state": status.state.value,
-                    "estimated_completion": status.estimated_completion.isoformat() if status.estimated_completion else None,
+                    "estimated_completion": status.estimated_completion.isoformat()
+                    if status.estimated_completion
+                    else None,
                 }
                 for status in self._ev_statuses.values()
             ],

@@ -4,6 +4,7 @@ Localvolts is an Australian electricity retailer offering real-time wholesale
 pricing via their API. Provides 5-minute NEM interval data with marginal
 import/export prices.
 """
+
 from __future__ import annotations
 
 import logging
@@ -98,9 +99,7 @@ class LocalvoltsClient:
             _LOGGER.error("Localvolts API unexpected error: %s", err)
             return []
 
-    async def validate_credentials(
-        self, nmi: str
-    ) -> dict[str, Any]:
+    async def validate_credentials(self, nmi: str) -> dict[str, Any]:
         """Validate API credentials by fetching current interval.
 
         Args:
@@ -143,5 +142,7 @@ class LocalvoltsClient:
         except aiohttp.ClientError:
             return {"success": False, "error": "cannot_connect"}
         except Exception as err:
-            _LOGGER.exception("Unexpected error validating Localvolts credentials: %s", err)
+            _LOGGER.exception(
+                "Unexpected error validating Localvolts credentials: %s", err
+            )
             return {"success": False, "error": "unknown"}

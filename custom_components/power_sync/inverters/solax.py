@@ -9,6 +9,7 @@ Factory limit register 0xB5 stores the default maximum.
 
 Reference: https://github.com/wills106/homeassistant-solax-modbus
 """
+
 import asyncio
 import logging
 from typing import Optional
@@ -18,7 +19,7 @@ from .base import InverterController, InverterState, InverterStatus
 _LOGGER = logging.getLogger(__name__)
 
 # Modbus registers
-REG_EXPORT_CONTROL_USER_LIMIT = 0x42   # Holding register, writable (W)
+REG_EXPORT_CONTROL_USER_LIMIT = 0x42  # Holding register, writable (W)
 REG_EXPORT_CONTROL_FACTORY_LIMIT = 0xB5  # Input register, read-only (W)
 
 # Default entity IDs from solax-modbus integration (fallback mode)
@@ -62,6 +63,7 @@ class SolaxController(InverterController):
             try:
                 from pymodbus.client import AsyncModbusTcpClient
                 import pymodbus
+
                 try:
                     _ver = tuple(int(x) for x in pymodbus.__version__.split(".")[:2])
                     self._slave_param = "device_id" if _ver >= (3, 9) else "slave"
@@ -79,13 +81,16 @@ class SolaxController(InverterController):
                     self._use_entity_mode = False
                     _LOGGER.info(
                         "Solax connected via Modbus TCP at %s:%d (slave %d)",
-                        self.host, self.port, self.slave_id,
+                        self.host,
+                        self.port,
+                        self.slave_id,
                     )
                     return True
                 else:
                     _LOGGER.warning(
                         "Modbus TCP connection to %s:%d failed, trying entity mode",
-                        self.host, self.port,
+                        self.host,
+                        self.port,
                     )
             except ImportError:
                 _LOGGER.debug("pymodbus not available, using entity mode")
@@ -99,7 +104,8 @@ class SolaxController(InverterController):
                 self._connected = True
                 self._use_entity_mode = True
                 _LOGGER.info(
-                    "Solax connected via HA entity: %s", DEFAULT_EXPORT_LIMIT_ENTITY,
+                    "Solax connected via HA entity: %s",
+                    DEFAULT_EXPORT_LIMIT_ENTITY,
                 )
                 return True
 
@@ -143,11 +149,15 @@ class SolaxController(InverterController):
             kwargs = {self._slave_param: self.slave_id}
             result = await self._client.write_register(address, value, **kwargs)
             if result.isError():
-                _LOGGER.error("Solax write register 0x%X=%d error: %s", address, value, result)
+                _LOGGER.error(
+                    "Solax write register 0x%X=%d error: %s", address, value, result
+                )
                 return False
             return True
         except Exception as e:
-            _LOGGER.error("Solax write register 0x%X=%d exception: %s", address, value, e)
+            _LOGGER.error(
+                "Solax write register 0x%X=%d exception: %s", address, value, e
+            )
             return False
 
     async def _get_factory_limit(self) -> float:
@@ -160,7 +170,9 @@ class SolaxController(InverterController):
                 except (ValueError, TypeError):
                     pass
         else:
-            val = await self._read_register(REG_EXPORT_CONTROL_FACTORY_LIMIT, input_reg=True)
+            val = await self._read_register(
+                REG_EXPORT_CONTROL_FACTORY_LIMIT, input_reg=True
+            )
             if val is not None:
                 return float(val)
         return DEFAULT_MAX_EXPORT_W
@@ -235,13 +247,16 @@ class SolaxController(InverterController):
             if self._original_limit is None:
                 self._original_limit = await self._get_factory_limit()
 
-            target_w = max(0, int(home_load_w)) if home_load_w and home_load_w > 0 else 0
+            target_w = (
+                max(0, int(home_load_w)) if home_load_w and home_load_w > 0 else 0
+            )
 
             success = await self._set_export_limit(target_w)
             if success:
                 _LOGGER.info(
                     "Solax export limit set to %dW (factory %dW) [%s mode]",
-                    target_w, int(self._original_limit),
+                    target_w,
+                    int(self._original_limit),
                     "entity" if self._use_entity_mode else "modbus",
                 )
             return success

@@ -8,6 +8,7 @@ Supports multiple forecast sources:
 HAFO provides superior forecasting by analyzing historical patterns with ML,
 but falls back to local estimation if HAFO is not installed.
 """
+
 from __future__ import annotations
 
 import logging
@@ -92,7 +93,10 @@ class HAFOForecaster:
 
         # Search all HAFO sensors
         for state in self.hass.states.async_all():
-            if state.entity_id.startswith(HAFO_LOAD_SENSOR_PREFIX) and "load" in state.entity_id.lower():
+            if (
+                state.entity_id.startswith(HAFO_LOAD_SENSOR_PREFIX)
+                and "load" in state.entity_id.lower()
+            ):
                 _LOGGER.info(f"Found HAFO load sensor: {state.entity_id}")
                 return state.entity_id
 
@@ -138,13 +142,15 @@ class HAFOForecaster:
             if not forecast_data:
                 # Try alternative attribute names
                 forecast_data = (
-                    state.attributes.get("forecasts", []) or
-                    state.attributes.get("predictions", []) or
-                    state.attributes.get("values", [])
+                    state.attributes.get("forecasts", [])
+                    or state.attributes.get("predictions", [])
+                    or state.attributes.get("values", [])
                 )
 
             if not forecast_data:
-                _LOGGER.debug(f"HAFO sensor {self._hafo_sensor_id} has no forecast data")
+                _LOGGER.debug(
+                    f"HAFO sensor {self._hafo_sensor_id} has no forecast data"
+                )
                 return None
 
             return self._parse_hafo_forecast(forecast_data, start_time, n_intervals)
@@ -182,10 +188,10 @@ class HAFOForecaster:
             try:
                 # Try different datetime field names
                 time_str = (
-                    item.get("datetime") or
-                    item.get("time") or
-                    item.get("timestamp") or
-                    item.get("period_end")
+                    item.get("datetime")
+                    or item.get("time")
+                    or item.get("timestamp")
+                    or item.get("period_end")
                 )
 
                 if not time_str:
@@ -198,11 +204,11 @@ class HAFOForecaster:
 
                 # Try different value field names
                 value = (
-                    item.get("native_value") or
-                    item.get("value") or
-                    item.get("load") or
-                    item.get("power") or
-                    0.0
+                    item.get("native_value")
+                    or item.get("value")
+                    or item.get("load")
+                    or item.get("power")
+                    or 0.0
                 )
 
                 if value is not None:
@@ -230,7 +236,7 @@ class HAFOForecaster:
         for _ in range(n_intervals):
             # Find the closest forecast time
             closest_time = None
-            min_diff = float('inf')
+            min_diff = float("inf")
 
             for ft in sorted_times:
                 diff = abs((ft - current_time).total_seconds())
@@ -249,7 +255,9 @@ class HAFOForecaster:
 
             current_time += timedelta(minutes=self.interval_minutes)
 
-        _LOGGER.debug(f"HAFO forecast: {len(result)} intervals, avg={sum(result)/len(result):.0f}W")
+        _LOGGER.debug(
+            f"HAFO forecast: {len(result)} intervals, avg={sum(result) / len(result):.0f}W"
+        )
         return result
 
 
@@ -328,7 +336,9 @@ class LoadEstimator:
                     _LOGGER.debug("Using HAFO for load forecast")
                     # Pad if needed
                     while len(hafo_forecast) < n_intervals:
-                        hafo_forecast.append(hafo_forecast[-1] if hafo_forecast else 500.0)
+                        hafo_forecast.append(
+                            hafo_forecast[-1] if hafo_forecast else 500.0
+                        )
                     return hafo_forecast[:n_intervals]
             except Exception as e:
                 _LOGGER.warning(f"HAFO forecast failed: {e}")
@@ -341,7 +351,8 @@ class LoadEstimator:
                 avg_w = sum(forecast) / len(forecast) if forecast else 0
                 _LOGGER.info(
                     "Using historical load forecast (%d history points, avg %.0fW)",
-                    len(history), avg_w,
+                    len(history),
+                    avg_w,
                 )
                 return forecast
         except Exception as e:
@@ -352,7 +363,8 @@ class LoadEstimator:
         _LOGGER.warning(
             "Using simple forecast fallback (%.0fW base) — "
             "no load history available for %s",
-            current_load, self.load_entity_id,
+            current_load,
+            self.load_entity_id,
         )
         return self._simple_forecast(current_load, start_time, n_intervals)
 
@@ -388,7 +400,9 @@ class LoadEstimator:
                 multiplier = 1000.0
             _LOGGER.debug(
                 "Load sensor %s: unit=%s, multiplier=%.0f",
-                self.load_entity_id, unit, multiplier,
+                self.load_entity_id,
+                unit,
+                multiplier,
             )
 
         try:
@@ -433,7 +447,10 @@ class LoadEstimator:
                 avg_w = sum(v for _, v in result) / len(result)
                 _LOGGER.info(
                     "Loaded %d history points for %s (avg %.0fW, %.1f days)",
-                    len(result), self.load_entity_id, avg_w, days,
+                    len(result),
+                    self.load_entity_id,
+                    avg_w,
+                    days,
                 )
             else:
                 _LOGGER.warning(
@@ -446,7 +463,9 @@ class LoadEstimator:
             _LOGGER.warning("Recorder not available for load history")
             return []
         except Exception as e:
-            _LOGGER.error("Error fetching load history for %s: %s", self.load_entity_id, e)
+            _LOGGER.error(
+                "Error fetching load history for %s: %s", self.load_entity_id, e
+            )
             return []
 
     def _forecast_from_history(
@@ -532,7 +551,8 @@ class LoadEstimator:
                 if value > 100_000:
                     _LOGGER.warning(
                         "Load sensor %s returned implausible value %.0fW, using default",
-                        self.load_entity_id, value,
+                        self.load_entity_id,
+                        value,
                     )
                     return 500.0
                 return max(0, value)
@@ -558,10 +578,30 @@ class LoadEstimator:
         # Generic residential load pattern (multipliers by hour)
         # Lower at night, peaks in morning and evening
         hourly_pattern = {
-            0: 0.4, 1: 0.3, 2: 0.3, 3: 0.3, 4: 0.3, 5: 0.4,
-            6: 0.6, 7: 0.8, 8: 0.9, 9: 0.8, 10: 0.7, 11: 0.7,
-            12: 0.8, 13: 0.7, 14: 0.6, 15: 0.6, 16: 0.7, 17: 0.9,
-            18: 1.2, 19: 1.3, 20: 1.2, 21: 1.0, 22: 0.7, 23: 0.5,
+            0: 0.4,
+            1: 0.3,
+            2: 0.3,
+            3: 0.3,
+            4: 0.3,
+            5: 0.4,
+            6: 0.6,
+            7: 0.8,
+            8: 0.9,
+            9: 0.8,
+            10: 0.7,
+            11: 0.7,
+            12: 0.8,
+            13: 0.7,
+            14: 0.6,
+            15: 0.6,
+            16: 0.7,
+            17: 0.9,
+            18: 1.2,
+            19: 1.3,
+            20: 1.2,
+            21: 1.0,
+            22: 0.7,
+            23: 0.5,
         }
 
         for _ in range(n_intervals):
@@ -668,7 +708,8 @@ class SolcastForecaster:
                 _LOGGER.debug(
                     "Using solar forecast from Solcast sensor attributes "
                     "(%d intervals, peak=%.1fW)",
-                    len(forecast), max(forecast) if forecast else 0,
+                    len(forecast),
+                    max(forecast) if forecast else 0,
                 )
                 return forecast
 
@@ -679,7 +720,9 @@ class SolcastForecaster:
                     solcast_solar_data, start_time, n_intervals
                 )
                 if forecast:
-                    _LOGGER.debug("Using solar forecast from Solcast Solar integration hass.data")
+                    _LOGGER.debug(
+                        "Using solar forecast from Solcast Solar integration hass.data"
+                    )
                     return forecast
 
             # Fallback: Check for Solcast data in PowerSync's own coordinator
@@ -804,7 +847,11 @@ class SolcastForecaster:
             power_w = 0.0
             for i, ft in enumerate(sorted_times):
                 # Check if current_time falls within this period
-                next_ft = sorted_times[i + 1] if i + 1 < len(sorted_times) else ft + timedelta(minutes=30)
+                next_ft = (
+                    sorted_times[i + 1]
+                    if i + 1 < len(sorted_times)
+                    else ft + timedelta(minutes=30)
+                )
                 if ft <= current_time < next_ft:
                     power_w = forecast_by_time[ft]
                     break
@@ -817,13 +864,16 @@ class SolcastForecaster:
 
         # Validate: should have some non-zero values during daytime
         if not any(v > 0 for v in result):
-            _LOGGER.debug("Solcast sensor forecast is all zeros — may be nighttime or stale data")
+            _LOGGER.debug(
+                "Solcast sensor forecast is all zeros — may be nighttime or stale data"
+            )
 
         total_kwh = sum(result) * (self.interval_minutes / 60) / 1000
         _LOGGER.info(
             "Solcast sensor forecast: %d periods from %d entries, "
             "peak=%.1fW, total=%.1fkWh (48h)",
-            len(result), len(forecast_by_time),
+            len(result),
+            len(forecast_by_time),
             max(result) if result else 0,
             total_kwh,
         )
@@ -846,8 +896,10 @@ class SolcastForecaster:
             # Try common data structures used by solcast_solar integration
 
             # Check if it's a coordinator with data attribute
-            if hasattr(solcast_data, 'data') and solcast_data.data:
-                result = self._try_extract_forecast(solcast_data.data, start_time, n_intervals)
+            if hasattr(solcast_data, "data") and solcast_data.data:
+                result = self._try_extract_forecast(
+                    solcast_data.data, start_time, n_intervals
+                )
                 if result:
                     return result
 
@@ -856,21 +908,25 @@ class SolcastForecaster:
             # 2. A dict of {entry_id: coordinator} (Solcast Solar v4+ pattern)
             if isinstance(solcast_data, dict):
                 # First try as direct forecast data
-                result = self._try_extract_forecast(solcast_data, start_time, n_intervals)
+                result = self._try_extract_forecast(
+                    solcast_data, start_time, n_intervals
+                )
                 if result:
                     return result
 
                 # Not forecast data — iterate values looking for coordinators or nested dicts
                 for value in solcast_data.values():
-                    if hasattr(value, 'data') and value.data:
-                        result = self._try_extract_forecast(value.data, start_time, n_intervals)
+                    if hasattr(value, "data") and value.data:
+                        result = self._try_extract_forecast(
+                            value.data, start_time, n_intervals
+                        )
                         if result:
                             return result
                     # Also check the coordinator's solcast attribute (Solcast Solar v4+)
-                    if hasattr(value, 'solcast'):
+                    if hasattr(value, "solcast"):
                         solcast_api = value.solcast
                         # Try get_forecast_list() method if available
-                        if hasattr(solcast_api, 'get_forecast_list'):
+                        if hasattr(solcast_api, "get_forecast_list"):
                             try:
                                 forecast_list = solcast_api.get_forecast_list()
                                 if forecast_list:
@@ -882,7 +938,7 @@ class SolcastForecaster:
                             except Exception:
                                 pass
                         # Try detailedForecast attribute
-                        if hasattr(solcast_api, 'detailedForecast'):
+                        if hasattr(solcast_api, "detailedForecast"):
                             detailed = solcast_api.detailedForecast
                             if detailed and isinstance(detailed, list):
                                 parsed = self._parse_detailed_forecast(
@@ -891,15 +947,19 @@ class SolcastForecaster:
                                 if parsed and any(v > 0 for v in parsed):
                                     return parsed
                     if isinstance(value, dict):
-                        result = self._try_extract_forecast(value, start_time, n_intervals)
+                        result = self._try_extract_forecast(
+                            value, start_time, n_intervals
+                        )
                         if result:
                             return result
 
             # Non-dict, non-coordinator: try to iterate as generic iterable
-            if hasattr(solcast_data, 'items'):
+            if hasattr(solcast_data, "items"):
                 for key, value in solcast_data.items():
-                    if hasattr(value, 'data') and value.data:
-                        result = self._try_extract_forecast(value.data, start_time, n_intervals)
+                    if hasattr(value, "data") and value.data:
+                        result = self._try_extract_forecast(
+                            value.data, start_time, n_intervals
+                        )
                         if result:
                             return result
 
@@ -920,22 +980,22 @@ class SolcastForecaster:
             return None
 
         # Format 1: detailedForecast (list of period dicts with pv_estimate)
-        detailed = data.get('detailedForecast')
+        detailed = data.get("detailedForecast")
         if detailed and isinstance(detailed, list) and len(detailed) > 0:
             parsed = self._parse_detailed_forecast(detailed, start_time, n_intervals)
             if parsed and any(v > 0 for v in parsed):
                 return parsed
 
         # Format 2: forecasts (raw API response format)
-        forecasts = data.get('forecasts')
+        forecasts = data.get("forecasts")
         if forecasts and isinstance(forecasts, list) and len(forecasts) > 0:
             parsed = self._parse_solcast_data(forecasts, start_time, n_intervals)
             if parsed and any(v > 0 for v in parsed):
                 return parsed
 
         # Format 3: forecast_today / forecast_tomorrow
-        forecast_today = data.get('forecast_today', [])
-        forecast_tomorrow = data.get('forecast_tomorrow', [])
+        forecast_today = data.get("forecast_today", [])
+        forecast_tomorrow = data.get("forecast_tomorrow", [])
         combined = (forecast_today or []) + (forecast_tomorrow or [])
         if combined:
             parsed = self._parse_solcast_data(combined, start_time, n_intervals)
@@ -943,7 +1003,7 @@ class SolcastForecaster:
                 return parsed
 
         # Format 4: hourly_forecast (processed Solcast HA format)
-        hourly = data.get('hourly_forecast')
+        hourly = data.get("hourly_forecast")
         if hourly and isinstance(hourly, list) and len(hourly) > 0:
             parsed = self._parse_hourly_forecast(hourly, start_time, n_intervals)
             if parsed and any(v > 0 for v in parsed):
@@ -964,17 +1024,19 @@ class SolcastForecaster:
         for item in detailed:
             try:
                 # Parse period_end timestamp
-                period_end_str = item.get('period_end')
+                period_end_str = item.get("period_end")
                 if not period_end_str:
                     continue
 
                 if isinstance(period_end_str, datetime):
                     period_end = period_end_str
                 else:
-                    period_end = datetime.fromisoformat(period_end_str.replace('Z', '+00:00'))
+                    period_end = datetime.fromisoformat(
+                        period_end_str.replace("Z", "+00:00")
+                    )
 
                 # Get power estimate (could be pv_estimate, pv_estimate10, pv_estimate90)
-                pv_kw = item.get('pv_estimate', 0) or item.get('pv_estimate50', 0) or 0
+                pv_kw = item.get("pv_estimate", 0) or item.get("pv_estimate50", 0) or 0
                 forecast_by_time[period_end] = pv_kw * 1000  # Convert kW to W
 
             except (KeyError, ValueError, TypeError) as e:
@@ -1047,7 +1109,9 @@ class SolcastForecaster:
         for item in forecasts:
             try:
                 # Solcast provides period_end and pv_estimate (kW)
-                end_time = datetime.fromisoformat(item["period_end"].replace("Z", "+00:00"))
+                end_time = datetime.fromisoformat(
+                    item["period_end"].replace("Z", "+00:00")
+                )
                 pv_kw = item.get("pv_estimate", 0) or 0
                 forecast_by_time[end_time] = pv_kw * 1000  # Convert to W
             except (KeyError, ValueError):
@@ -1065,7 +1129,10 @@ class SolcastForecaster:
                 default=None,
             )
 
-            if closest_time and abs((closest_time - current_time).total_seconds()) < 3600:
+            if (
+                closest_time
+                and abs((closest_time - current_time).total_seconds()) < 3600
+            ):
                 result.append(forecast_by_time[closest_time])
             else:
                 result.append(0.0)
@@ -1101,6 +1168,7 @@ class SolcastForecaster:
                 # Bell curve: peak at t=0.5 (noon)
                 # Using cosine for smooth curve
                 import math
+
                 solar_factor = math.sin(t * math.pi)
                 solar_factor = max(0, solar_factor)
 

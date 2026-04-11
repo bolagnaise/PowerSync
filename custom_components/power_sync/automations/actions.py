@@ -33,7 +33,10 @@ from typing import List, Dict, Any, Optional, Callable
 from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers import entity_registry as er, device_registry as dr
-from homeassistant.helpers.event import async_track_time_interval, async_track_point_in_time
+from homeassistant.helpers.event import (
+    async_track_time_interval,
+    async_track_point_in_time,
+)
 from datetime import timedelta, datetime, time as dt_time
 
 from ..const import (
@@ -59,6 +62,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # Tesla integrations supported for EV control via Fleet API
 from ..const import TESLA_INTEGRATIONS
+
 TESLA_EV_INTEGRATIONS = TESLA_INTEGRATIONS
 
 # Global lock to prevent concurrent wake/charging attempts
@@ -105,7 +109,9 @@ def _is_api_credit_available(api_name: str = "teslemetry") -> bool:
     if datetime.now() >= cooldown_end:
         # Cooldown expired, clear the exhaustion flag
         del _api_credit_exhausted[api_name]
-        _LOGGER.info(f"✅ {api_name.title()} API credit cooldown expired, retrying commands")
+        _LOGGER.info(
+            f"✅ {api_name.title()} API credit cooldown expired, retrying commands"
+        )
         return True
 
     remaining = (cooldown_end - datetime.now()).total_seconds() / 60
@@ -118,13 +124,12 @@ def _is_api_credit_available(api_name: str = "teslemetry") -> bool:
 def _is_sigenergy(config_entry: ConfigEntry) -> bool:
     """Check if this is a Sigenergy system."""
     from ..const import CONF_SIGENERGY_STATION_ID
+
     return bool(config_entry.data.get(CONF_SIGENERGY_STATION_ID))
 
 
 async def _get_tesla_ev_entity(
-    hass: HomeAssistant,
-    entity_pattern: str,
-    vehicle_vin: Optional[str] = None
+    hass: HomeAssistant, entity_pattern: str, vehicle_vin: Optional[str] = None
 ) -> Optional[str]:
     """
     Find a Tesla EV entity by pattern.
@@ -179,7 +184,9 @@ async def _get_tesla_ev_entity(
                 id_str = str(identifier_value)
                 id_len = len(id_str)
                 is_all_digit = id_str.isdigit()
-                _LOGGER.debug(f"Tesla domain device: {device.name}, domain={domain}, id={id_str}, len={id_len}, all_digit={is_all_digit}")
+                _LOGGER.debug(
+                    f"Tesla domain device: {device.name}, domain={domain}, id={id_str}, len={id_len}, all_digit={is_all_digit}"
+                )
 
                 all_tesla_domain_devices.append((device, domain, id_str))
 
@@ -187,33 +194,49 @@ async def _get_tesla_ev_entity(
                 if id_len == 17 and not is_all_digit:
                     if vehicle_vin is None or id_str == vehicle_vin:
                         tesla_devices.append(device)
-                        _LOGGER.info(f"Found Tesla EV vehicle by VIN: {device.name}, VIN: {id_str}")
+                        _LOGGER.info(
+                            f"Found Tesla EV vehicle by VIN: {device.name}, VIN: {id_str}"
+                        )
                         break
                     else:
-                        _LOGGER.debug(f"Tesla device VIN format OK but doesn't match filter: {device.name}, VIN={id_str}, filter={vehicle_vin}")
+                        _LOGGER.debug(
+                            f"Tesla device VIN format OK but doesn't match filter: {device.name}, VIN={id_str}, filter={vehicle_vin}"
+                        )
                 else:
-                    _LOGGER.debug(f"Tesla device skipped VIN check (not VIN format): {device.name}, id={id_str} (len={id_len}, all_digit={is_all_digit})")
+                    _LOGGER.debug(
+                        f"Tesla device skipped VIN check (not VIN format): {device.name}, id={id_str} (len={id_len}, all_digit={is_all_digit})"
+                    )
 
     # Fallback: if no VIN-based devices found, check for devices with EV entities
     if not tesla_devices and all_tesla_domain_devices:
-        _LOGGER.debug(f"No VIN-based devices found, checking {len(all_tesla_domain_devices)} Tesla domain devices for EV entities")
+        _LOGGER.debug(
+            f"No VIN-based devices found, checking {len(all_tesla_domain_devices)} Tesla domain devices for EV entities"
+        )
         for device, domain, id_str in all_tesla_domain_devices:
             if _device_has_ev_entities(device.id):
                 tesla_devices.append(device)
-                _LOGGER.info(f"Found Tesla EV device by entity detection: {device.name}, domain={domain}, id={id_str}")
+                _LOGGER.info(
+                    f"Found Tesla EV device by entity detection: {device.name}, domain={domain}, id={id_str}"
+                )
                 break
 
     if not tesla_devices:
-        _LOGGER.warning(f"No Tesla EV devices found. Looking for domains {TESLA_EV_INTEGRATIONS}, found domains: {sorted(all_domains_found)}")
+        _LOGGER.warning(
+            f"No Tesla EV devices found. Looking for domains {TESLA_EV_INTEGRATIONS}, found domains: {sorted(all_domains_found)}"
+        )
         if all_tesla_domain_devices:
-            _LOGGER.warning(f"Found {len(all_tesla_domain_devices)} Tesla domain devices but none matched VIN format or had EV entities:")
+            _LOGGER.warning(
+                f"Found {len(all_tesla_domain_devices)} Tesla domain devices but none matched VIN format or had EV entities:"
+            )
             for device, domain, id_str in all_tesla_domain_devices[:5]:
                 _LOGGER.warning(f"  - {device.name}: domain={domain}, id={id_str}")
         return None
 
     # Use first vehicle if no specific VIN provided
     target_device = tesla_devices[0]
-    _LOGGER.debug(f"Found Tesla EV device: {target_device.name} (id: {target_device.id})")
+    _LOGGER.debug(
+        f"Found Tesla EV device: {target_device.name} (id: {target_device.id})"
+    )
 
     # Find matching entity for this device
     pattern = re.compile(entity_pattern, re.IGNORECASE)
@@ -227,7 +250,9 @@ async def _get_tesla_ev_entity(
 
     _LOGGER.warning(f"No entity matching pattern '{entity_pattern}' found for Tesla EV")
     if device_entities:
-        _LOGGER.debug(f"Available entities for device: {device_entities[:20]}")  # Log first 20
+        _LOGGER.debug(
+            f"Available entities for device: {device_entities[:20]}"
+        )  # Log first 20
     return None
 
 
@@ -313,7 +338,9 @@ async def _wake_tesla_ev(
 
     # Check if API credits are exhausted (cooldown period active)
     if not _is_api_credit_available("teslemetry"):
-        _LOGGER.warning("Skipping Tesla wake - API credits exhausted, in cooldown period")
+        _LOGGER.warning(
+            "Skipping Tesla wake - API credits exhausted, in cooldown period"
+        )
         return False
 
     # Generate a lock key (use VIN if available, otherwise generic)
@@ -321,7 +348,9 @@ async def _wake_tesla_ev(
 
     # Check if wake is already in progress for this vehicle
     if _ev_wake_lock.get(lock_key, False):
-        _LOGGER.info(f"Wake already in progress for Tesla EV (key={lock_key}), waiting for it to complete")
+        _LOGGER.info(
+            f"Wake already in progress for Tesla EV (key={lock_key}), waiting for it to complete"
+        )
         # Wait up to wait_timeout for the other wake to complete
         wait_start = asyncio.get_event_loop().time()
         while _ev_wake_lock.get(lock_key, False):
@@ -339,9 +368,7 @@ async def _wake_tesla_ev(
     try:
         # Find the wake up button entity
         wake_entity = await _get_tesla_ev_entity(
-            hass,
-            r"button\..*wake(_up)?$",
-            vehicle_vin
+            hass, r"button\..*wake(_up)?$", vehicle_vin
         )
 
         if not wake_entity:
@@ -372,7 +399,9 @@ async def _wake_tesla_ev(
                 status_entity = entity
                 status_type = stype
                 awake_value = awake_val
-                _LOGGER.info(f"Found Tesla status entity: {entity} (type={stype}, awake_value={awake_val})")
+                _LOGGER.info(
+                    f"Found Tesla status entity: {entity} (type={stype}, awake_value={awake_val})"
+                )
                 break
 
         if not status_entity:
@@ -403,7 +432,9 @@ async def _wake_tesla_ev(
         # Send wake command with retries
         for attempt in range(1, max_retries + 1):
             try:
-                _LOGGER.info(f"Sending wake command to Tesla EV (attempt {attempt}/{max_retries}): {wake_entity}")
+                _LOGGER.info(
+                    f"Sending wake command to Tesla EV (attempt {attempt}/{max_retries}): {wake_entity}"
+                )
                 await hass.services.async_call(
                     "button",
                     "press",
@@ -420,7 +451,9 @@ async def _wake_tesla_ev(
                     return False
 
                 if attempt == max_retries:
-                    _LOGGER.error(f"Failed to wake Tesla EV after {max_retries} attempts")
+                    _LOGGER.error(
+                        f"Failed to wake Tesla EV after {max_retries} attempts"
+                    )
                     # Still return True to attempt the charging command anyway
                     return True
                 await asyncio.sleep(5)
@@ -428,7 +461,9 @@ async def _wake_tesla_ev(
 
             # If we don't have a status sensor, just wait a fixed time
             if not status_entity:
-                _LOGGER.info(f"No status sensor available, waiting {wait_timeout // max_retries}s before proceeding")
+                _LOGGER.info(
+                    f"No status sensor available, waiting {wait_timeout // max_retries}s before proceeding"
+                )
                 await asyncio.sleep(wait_timeout // max_retries)
                 if attempt == max_retries:
                     return True
@@ -439,20 +474,28 @@ async def _wake_tesla_ev(
             poll_interval = 3
             wake_timeout_per_attempt = wait_timeout // max_retries
 
-            while (asyncio.get_event_loop().time() - start_time) < wake_timeout_per_attempt:
+            while (
+                asyncio.get_event_loop().time() - start_time
+            ) < wake_timeout_per_attempt:
                 await asyncio.sleep(poll_interval)
                 elapsed = int(asyncio.get_event_loop().time() - start_time)
 
                 if _is_awake():
-                    _LOGGER.info(f"Tesla EV is now awake after {elapsed}s ({status_entity})")
+                    _LOGGER.info(
+                        f"Tesla EV is now awake after {elapsed}s ({status_entity})"
+                    )
                     await asyncio.sleep(2)  # Extra buffer for readiness
                     return True
 
                 _LOGGER.debug(f"Waiting for Tesla EV to wake... {elapsed}s elapsed")
 
-            _LOGGER.info(f"Wake attempt {attempt} timed out after {wake_timeout_per_attempt}s, will retry...")
+            _LOGGER.info(
+                f"Wake attempt {attempt} timed out after {wake_timeout_per_attempt}s, will retry..."
+            )
 
-        _LOGGER.warning(f"Tesla EV wake timed out after {wait_timeout}s total, attempting command anyway")
+        _LOGGER.warning(
+            f"Tesla EV wake timed out after {wait_timeout}s total, attempting command anyway"
+        )
         return True
 
     finally:
@@ -464,7 +507,9 @@ async def _wake_tesla_ev(
 def _get_ev_config(config_entry: ConfigEntry) -> dict:
     """Get EV configuration from config entry."""
     return {
-        "ev_provider": config_entry.options.get(CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API),
+        "ev_provider": config_entry.options.get(
+            CONF_EV_PROVIDER, EV_PROVIDER_FLEET_API
+        ),
         "ble_prefix": config_entry.options.get(
             CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX
         ),
@@ -483,7 +528,9 @@ def _resolve_ble_prefix_for_vehicle(
         return vehicle_vin[4:]  # "ble_joanna_model_3_local" → "joanna_model_3_local"
 
     # Fall back to first configured prefix
-    raw = config_entry.options.get(CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX)
+    raw = config_entry.options.get(
+        CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX
+    )
     prefixes = [p.strip() for p in raw.split(",") if p.strip()]
     return prefixes[0] if prefixes else DEFAULT_TESLA_BLE_ENTITY_PREFIX
 
@@ -495,7 +542,9 @@ def _is_ble_available(hass: HomeAssistant, ble_prefix: str) -> bool:
     return state is not None
 
 
-async def _wake_tesla_ble(hass: HomeAssistant, ble_prefix: str, wait_timeout: int = 30) -> bool:
+async def _wake_tesla_ble(
+    hass: HomeAssistant, ble_prefix: str, wait_timeout: int = 30
+) -> bool:
     """Wake up Tesla via BLE and wait for it to be awake.
 
     Args:
@@ -535,7 +584,9 @@ async def _wake_tesla_ble(hass: HomeAssistant, ble_prefix: str, wait_timeout: in
 
             asleep_state = hass.states.get(asleep_entity)
             if asleep_state and asleep_state.state == "off":
-                _LOGGER.info(f"Tesla BLE: Car is now awake after {int(asyncio.get_event_loop().time() - start_time)}s")
+                _LOGGER.info(
+                    f"Tesla BLE: Car is now awake after {int(asyncio.get_event_loop().time() - start_time)}s"
+                )
                 # Give it a bit more time to be fully ready
                 await asyncio.sleep(2)
                 return True
@@ -544,11 +595,15 @@ async def _wake_tesla_ble(hass: HomeAssistant, ble_prefix: str, wait_timeout: in
             status_entity = TESLA_BLE_BINARY_STATUS.format(prefix=ble_prefix)
             status_state = hass.states.get(status_entity)
             if status_state and status_state.state == "on":
-                _LOGGER.info(f"Tesla BLE: Car is online after {int(asyncio.get_event_loop().time() - start_time)}s")
+                _LOGGER.info(
+                    f"Tesla BLE: Car is online after {int(asyncio.get_event_loop().time() - start_time)}s"
+                )
                 await asyncio.sleep(2)
                 return True
 
-        _LOGGER.warning(f"Tesla BLE: Timed out waiting for car to wake after {wait_timeout}s")
+        _LOGGER.warning(
+            f"Tesla BLE: Timed out waiting for car to wake after {wait_timeout}s"
+        )
         # Still return True to attempt the command anyway
         return True
     except Exception as e:
@@ -577,7 +632,9 @@ async def _start_ev_charging_ble(hass: HomeAssistant, ble_prefix: str) -> bool:
     except Exception as e:
         err_str = str(e).lower()
         if "complete" in err_str:
-            _LOGGER.info(f"EV charging is complete (at target SOC) via BLE — skipping start")
+            _LOGGER.info(
+                f"EV charging is complete (at target SOC) via BLE — skipping start"
+            )
         else:
             _LOGGER.error(f"Failed to start EV charging via BLE: {e}")
         return False
@@ -647,7 +704,9 @@ async def _set_ev_charging_amps_ble(
     entity_max = state.attributes.get("max", amps)
     capped_amps = max(int(entity_min), min(int(entity_max), int(amps)))
     if capped_amps != amps:
-        _LOGGER.debug(f"BLE amps capped from {amps}A to {capped_amps}A (entity range: {entity_min}-{entity_max})")
+        _LOGGER.debug(
+            f"BLE amps capped from {amps}A to {capped_amps}A (entity range: {entity_min}-{entity_max})"
+        )
 
     try:
         await _wake_tesla_ble(hass, ble_prefix)
@@ -657,7 +716,9 @@ async def _set_ev_charging_amps_ble(
             {"entity_id": amps_entity, "value": capped_amps},
             blocking=True,
         )
-        _LOGGER.info(f"Set EV charging amps to {capped_amps}A via Tesla BLE: {amps_entity}")
+        _LOGGER.info(
+            f"Set EV charging amps to {capped_amps}A via Tesla BLE: {amps_entity}"
+        )
         return True
     except Exception as e:
         _LOGGER.error(f"Failed to set EV charging amps via BLE: {e}")
@@ -676,6 +737,7 @@ def _resolve_teslemetry_bt_prefix(hass: HomeAssistant) -> str | None:
     alphanumeric VIN (distinguishes from ESPHome BLE which contains 'ble').
     """
     import re
+
     for state in hass.states.async_all():
         match = re.match(r"sensor\.(\w+)_charging_state$", state.entity_id)
         if match:
@@ -696,7 +758,9 @@ def _is_teslemetry_bt_available(hass: HomeAssistant, tbt_prefix: str | None) -> 
     return state is not None
 
 
-async def _start_ev_charging_teslemetry_bt(hass: HomeAssistant, tbt_prefix: str) -> bool:
+async def _start_ev_charging_teslemetry_bt(
+    hass: HomeAssistant, tbt_prefix: str
+) -> bool:
     """Start EV charging via Teslemetry Bluetooth."""
     entity_id = TESLEMETRY_BT_SWITCH_CHARGE.format(prefix=tbt_prefix)
     if hass.states.get(entity_id) is None:
@@ -704,7 +768,8 @@ async def _start_ev_charging_teslemetry_bt(hass: HomeAssistant, tbt_prefix: str)
         return False
     try:
         await hass.services.async_call(
-            "switch", "turn_on",
+            "switch",
+            "turn_on",
             {"entity_id": entity_id},
             blocking=True,
         )
@@ -713,7 +778,9 @@ async def _start_ev_charging_teslemetry_bt(hass: HomeAssistant, tbt_prefix: str)
     except Exception as e:
         err_str = str(e).lower()
         if "complete" in err_str:
-            _LOGGER.info(f"EV charging is complete (at target SOC) via Teslemetry BT — skipping start")
+            _LOGGER.info(
+                f"EV charging is complete (at target SOC) via Teslemetry BT — skipping start"
+            )
         else:
             _LOGGER.error(f"Failed to start EV charging via Teslemetry BT: {e}")
         return False
@@ -727,7 +794,8 @@ async def _stop_ev_charging_teslemetry_bt(hass: HomeAssistant, tbt_prefix: str) 
         return False
     try:
         await hass.services.async_call(
-            "switch", "turn_off",
+            "switch",
+            "turn_off",
             {"entity_id": entity_id},
             blocking=True,
         )
@@ -751,21 +819,28 @@ async def _set_ev_charging_amps_teslemetry_bt(
     max_val = float(state.attributes.get("max", 32))
     capped = max(int(min_val), min(int(max_val), int(amps)))
     if capped != amps:
-        _LOGGER.debug(f"Teslemetry BT amps capped from {amps}A to {capped}A (range: {min_val}-{max_val})")
+        _LOGGER.debug(
+            f"Teslemetry BT amps capped from {amps}A to {capped}A (range: {min_val}-{max_val})"
+        )
     try:
         await hass.services.async_call(
-            "number", "set_value",
+            "number",
+            "set_value",
             {"entity_id": entity_id, "value": capped},
             blocking=True,
         )
-        _LOGGER.info(f"Set EV charging amps to {capped}A via Teslemetry BT: {entity_id}")
+        _LOGGER.info(
+            f"Set EV charging amps to {capped}A via Teslemetry BT: {entity_id}"
+        )
         return True
     except Exception as e:
         _LOGGER.error(f"Failed to set EV charging amps via Teslemetry BT: {e}")
         return False
 
 
-async def _get_sigenergy_controller(config_entry: ConfigEntry) -> Optional["SigenergyController"]:
+async def _get_sigenergy_controller(
+    config_entry: ConfigEntry,
+) -> Optional["SigenergyController"]:
     """Get a Sigenergy controller for Modbus operations.
 
     Returns:
@@ -781,8 +856,7 @@ async def _get_sigenergy_controller(config_entry: ConfigEntry) -> Optional["Sige
 
     # Check both data and options for Modbus settings
     modbus_host = config_entry.options.get(
-        CONF_SIGENERGY_MODBUS_HOST,
-        config_entry.data.get(CONF_SIGENERGY_MODBUS_HOST)
+        CONF_SIGENERGY_MODBUS_HOST, config_entry.data.get(CONF_SIGENERGY_MODBUS_HOST)
     )
     if not modbus_host:
         _LOGGER.warning("Sigenergy Modbus host not configured")
@@ -790,11 +864,11 @@ async def _get_sigenergy_controller(config_entry: ConfigEntry) -> Optional["Sige
 
     modbus_port = config_entry.options.get(
         CONF_SIGENERGY_MODBUS_PORT,
-        config_entry.data.get(CONF_SIGENERGY_MODBUS_PORT, 502)
+        config_entry.data.get(CONF_SIGENERGY_MODBUS_PORT, 502),
     )
     modbus_slave_id = config_entry.options.get(
         CONF_SIGENERGY_MODBUS_SLAVE_ID,
-        config_entry.data.get(CONF_SIGENERGY_MODBUS_SLAVE_ID, 1)
+        config_entry.data.get(CONF_SIGENERGY_MODBUS_SLAVE_ID, 1),
     )
     export_limit_kw = config_entry.data.get(CONF_SIGENERGY_EXPORT_LIMIT_KW)
 
@@ -810,7 +884,7 @@ async def execute_actions(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     actions: List[Dict[str, Any]],
-    context: Optional[Dict[str, Any]] = None
+    context: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """
     Execute a list of automation actions.
@@ -832,22 +906,33 @@ async def execute_actions(
             params = action.get("parameters", {})
             if isinstance(params, str):
                 import json
+
                 params = json.loads(params) if params else {}
 
-            result = await _execute_single_action(hass, config_entry, action_type, params, context)
+            result = await _execute_single_action(
+                hass, config_entry, action_type, params, context
+            )
             if result:
                 success_count += 1
                 _LOGGER.info(f"Executed action '{action_type}'")
             else:
                 _LOGGER.warning(f"Action '{action_type}' returned False")
                 try:
-                    await _send_expo_push(hass, "⚠️ Automation Action Failed", f"Action '{action_type}' did not complete successfully")
+                    await _send_expo_push(
+                        hass,
+                        "⚠️ Automation Action Failed",
+                        f"Action '{action_type}' did not complete successfully",
+                    )
                 except Exception:
                     pass
         except Exception as e:
             _LOGGER.error(f"Error executing action '{action.get('action_type')}': {e}")
             try:
-                await _send_expo_push(hass, "⚠️ Automation Error", f"Action '{action.get('action_type')}' failed: {e}")
+                await _send_expo_push(
+                    hass,
+                    "⚠️ Automation Error",
+                    f"Action '{action.get('action_type')}' failed: {e}",
+                )
             except Exception:
                 pass
 
@@ -859,7 +944,7 @@ async def _execute_single_action(
     config_entry: ConfigEntry,
     action_type: str,
     params: Dict[str, Any],
-    context: Optional[Dict[str, Any]] = None
+    context: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """
     Execute a single action.
@@ -920,7 +1005,9 @@ async def _execute_single_action(
     elif action_type == "set_ev_charging_amps":
         return await _action_set_ev_charging_amps(hass, config_entry, params)
     elif action_type == "start_ev_charging_dynamic":
-        return await _action_start_ev_charging_dynamic(hass, config_entry, params, context)
+        return await _action_start_ev_charging_dynamic(
+            hass, config_entry, params, context
+        )
     elif action_type == "stop_ev_charging_dynamic":
         return await _action_stop_ev_charging_dynamic(hass, config_entry, params)
     elif action_type == "enable_optimizer":
@@ -933,9 +1020,7 @@ async def _execute_single_action(
 
 
 async def _action_set_backup_reserve(
-    hass: HomeAssistant,
-    config_entry: ConfigEntry,
-    params: Dict[str, Any]
+    hass: HomeAssistant, config_entry: ConfigEntry, params: Dict[str, Any]
 ) -> bool:
     """Set battery backup reserve percentage.
 
@@ -964,16 +1049,19 @@ async def _action_set_backup_reserve(
                 _LOGGER.info(f"set_backup_reserve succeeded on attempt {attempt + 1}")
             return True
         except Exception as e:
-            delay = min(60, 5 * (2 ** attempt))  # 5, 10, 20, 40, 60, 60...
-            _LOGGER.warning(f"set_backup_reserve attempt {attempt + 1}/10 failed: {e} — retrying in {delay}s")
+            delay = min(60, 5 * (2**attempt))  # 5, 10, 20, 40, 60, 60...
+            _LOGGER.warning(
+                f"set_backup_reserve attempt {attempt + 1}/10 failed: {e} — retrying in {delay}s"
+            )
             await asyncio.sleep(delay)
-    _LOGGER.error(f"Failed to set backup reserve to {reserve_percent}% after 10 attempts")
+    _LOGGER.error(
+        f"Failed to set backup reserve to {reserve_percent}% after 10 attempts"
+    )
     return False
 
 
 async def _action_preserve_charge(
-    hass: HomeAssistant,
-    config_entry: ConfigEntry
+    hass: HomeAssistant, config_entry: ConfigEntry
 ) -> bool:
     """Prevent battery discharge."""
     if _is_sigenergy(config_entry):
@@ -1009,9 +1097,7 @@ async def _action_preserve_charge(
 
 
 async def _action_set_operation_mode(
-    hass: HomeAssistant,
-    config_entry: ConfigEntry,
-    params: Dict[str, Any]
+    hass: HomeAssistant, config_entry: ConfigEntry, params: Dict[str, Any]
 ) -> bool:
     """Set battery operation mode (Tesla only)."""
     if _is_sigenergy(config_entry):
@@ -1042,17 +1128,17 @@ async def _action_set_operation_mode(
                 _LOGGER.info(f"set_operation_mode succeeded on attempt {attempt + 1}")
             return True
         except Exception as e:
-            delay = min(60, 5 * (2 ** attempt))  # 5, 10, 20, 40, 60, 60...
-            _LOGGER.warning(f"set_operation_mode attempt {attempt + 1}/10 failed: {e} — retrying in {delay}s")
+            delay = min(60, 5 * (2**attempt))  # 5, 10, 20, 40, 60, 60...
+            _LOGGER.warning(
+                f"set_operation_mode attempt {attempt + 1}/10 failed: {e} — retrying in {delay}s"
+            )
             await asyncio.sleep(delay)
     _LOGGER.error(f"Failed to set operation mode to {mode} after 10 attempts")
     return False
 
 
 async def _action_force_discharge(
-    hass: HomeAssistant,
-    config_entry: ConfigEntry,
-    params: Dict[str, Any]
+    hass: HomeAssistant, config_entry: ConfigEntry, params: Dict[str, Any]
 ) -> bool:
     """Force battery discharge for a specified duration."""
     # Accept both "duration" and "duration_minutes" for flexibility
@@ -1065,12 +1151,16 @@ async def _action_force_discharge(
             _LOGGER.error("force_discharge: Sigenergy Modbus not configured")
             return False
         try:
-            power_kw = params.get("power_w", 10000) / 1000 if params.get("power_w") else 10.0
+            power_kw = (
+                params.get("power_w", 10000) / 1000 if params.get("power_w") else 10.0
+            )
             result = await controller.force_discharge(power_kw)
             if result:
                 # Also restore export limit to allow discharge to grid
                 await controller.restore_export_limit()
-                _LOGGER.info(f"Sigenergy: Force discharge activated at {power_kw}kW for {duration} minutes")
+                _LOGGER.info(
+                    f"Sigenergy: Force discharge activated at {power_kw}kW for {duration} minutes"
+                )
                 return True
             else:
                 _LOGGER.error("Sigenergy force_discharge() failed")
@@ -1101,9 +1191,7 @@ async def _action_force_discharge(
 
 
 async def _action_force_charge(
-    hass: HomeAssistant,
-    config_entry: ConfigEntry,
-    params: Dict[str, Any]
+    hass: HomeAssistant, config_entry: ConfigEntry, params: Dict[str, Any]
 ) -> bool:
     """Force battery charge for a specified duration."""
     # Accept both "duration" and "duration_minutes" for flexibility
@@ -1116,10 +1204,14 @@ async def _action_force_charge(
             _LOGGER.error("force_charge: Sigenergy Modbus not configured")
             return False
         try:
-            power_kw = params.get("power_w", 10000) / 1000 if params.get("power_w") else 10.0
+            power_kw = (
+                params.get("power_w", 10000) / 1000 if params.get("power_w") else 10.0
+            )
             result = await controller.force_charge(power_kw)
             if result:
-                _LOGGER.info(f"Sigenergy: Force charge activated at {power_kw}kW for {duration} minutes")
+                _LOGGER.info(
+                    f"Sigenergy: Force charge activated at {power_kw}kW for {duration} minutes"
+                )
                 return True
             else:
                 _LOGGER.error("Sigenergy force_charge() failed")
@@ -1170,12 +1262,19 @@ async def _action_enable_optimizer(
         else:
             # Fallback: no coordinator yet, update config directly with skip flag
             entry_data["_skip_reload"] = True
-            from ..const import CONF_OPTIMIZATION_ENABLED, CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_POWERSYNC
+            from ..const import (
+                CONF_OPTIMIZATION_ENABLED,
+                CONF_OPTIMIZATION_PROVIDER,
+                OPT_PROVIDER_POWERSYNC,
+            )
+
             new_data = dict(config_entry.data)
             new_options = dict(config_entry.options)
             new_data[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_POWERSYNC
             new_options[CONF_OPTIMIZATION_ENABLED] = True
-            hass.config_entries.async_update_entry(config_entry, data=new_data, options=new_options)
+            hass.config_entries.async_update_entry(
+                config_entry, data=new_data, options=new_options
+            )
             _LOGGER.info("Optimizer enabled via automation action (direct config path)")
         return True
     except Exception as e:
@@ -1203,18 +1302,31 @@ async def _action_disable_optimizer(
         else:
             # Fallback: no coordinator, update config directly with skip flag
             entry_data["_skip_reload"] = True
-            from ..const import CONF_OPTIMIZATION_ENABLED, CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE
+            from ..const import (
+                CONF_OPTIMIZATION_ENABLED,
+                CONF_OPTIMIZATION_PROVIDER,
+                OPT_PROVIDER_NATIVE,
+            )
+
             new_data = dict(config_entry.data)
             new_options = dict(config_entry.options)
             new_data[CONF_OPTIMIZATION_PROVIDER] = OPT_PROVIDER_NATIVE
             new_options[CONF_OPTIMIZATION_ENABLED] = False
-            hass.config_entries.async_update_entry(config_entry, data=new_data, options=new_options)
-            _LOGGER.info("Optimizer disabled via automation action (direct config path)")
+            hass.config_entries.async_update_entry(
+                config_entry, data=new_data, options=new_options
+            )
+            _LOGGER.info(
+                "Optimizer disabled via automation action (direct config path)"
+            )
         # Restore normal battery operation so the battery isn't stuck in a forced mode
         try:
-            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+            await hass.services.async_call(
+                DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True
+            )
         except Exception as restore_err:
-            _LOGGER.warning(f"disable_optimizer: restore_normal failed (non-fatal): {restore_err}")
+            _LOGGER.warning(
+                f"disable_optimizer: restore_normal failed (non-fatal): {restore_err}"
+            )
         return True
     except Exception as e:
         _LOGGER.error(f"Failed to disable optimizer: {e}")
@@ -1222,9 +1334,7 @@ async def _action_disable_optimizer(
 
 
 async def _action_curtail_inverter(
-    hass: HomeAssistant,
-    config_entry: ConfigEntry,
-    params: Dict[str, Any]
+    hass: HomeAssistant, config_entry: ConfigEntry, params: Dict[str, Any]
 ) -> bool:
     """Curtail AC-coupled solar inverter (works for both Tesla and Sigenergy)."""
     from ..const import DOMAIN, SERVICE_CURTAIL_INVERTER
@@ -1248,8 +1358,7 @@ async def _action_curtail_inverter(
 
 
 async def _action_send_notification(
-    hass: HomeAssistant,
-    params: Dict[str, Any]
+    hass: HomeAssistant, params: Dict[str, Any]
 ) -> bool:
     """Send push notification via Expo Push API to the PowerSync mobile app."""
     message = params.get("message", "Automation triggered")
@@ -1269,12 +1378,16 @@ async def _send_expo_push(hass: HomeAssistant, title: str, message: str) -> None
     from ..const import DOMAIN
     import aiohttp
 
-    _LOGGER.info(f"📱 PUSH DEBUG: Attempting to send notification - Title: '{title}', Message: '{message}'")
+    _LOGGER.info(
+        f"📱 PUSH DEBUG: Attempting to send notification - Title: '{title}', Message: '{message}'"
+    )
 
     # Get registered push tokens
     push_tokens = hass.data.get(DOMAIN, {}).get("push_tokens", {})
     if not push_tokens:
-        _LOGGER.warning("📱 PUSH DEBUG: No push tokens registered in hass.data[DOMAIN]['push_tokens'], skipping notification")
+        _LOGGER.warning(
+            "📱 PUSH DEBUG: No push tokens registered in hass.data[DOMAIN]['push_tokens'], skipping notification"
+        )
         return
 
     _LOGGER.info(f"📱 PUSH DEBUG: Found {len(push_tokens)} registered push token(s)")
@@ -1287,25 +1400,35 @@ async def _send_expo_push(hass: HomeAssistant, title: str, message: str) -> None
         platform = token_data.get("platform", "unknown")
         device = token_data.get("device_name", "unknown")
         registered_at = token_data.get("registered_at", "unknown")
-        _LOGGER.info(f"📱 PUSH DEBUG: Token entry - device_id={device_id}, platform={platform}, device={device}, registered_at={registered_at}")
-        _LOGGER.info(f"📱 PUSH DEBUG: Token value = {token[:50] if token else 'None'}...")
+        _LOGGER.info(
+            f"📱 PUSH DEBUG: Token entry - device_id={device_id}, platform={platform}, device={device}, registered_at={registered_at}"
+        )
+        _LOGGER.info(
+            f"📱 PUSH DEBUG: Token value = {token[:50] if token else 'None'}..."
+        )
 
         if token and token.startswith("ExponentPushToken"):
-            messages.append({
-                "to": token,
-                "title": title,
-                "body": message,
-                "sound": "default",
-                "priority": "high",
-                "channelId": "default",  # Android channel ID
-            })
+            messages.append(
+                {
+                    "to": token,
+                    "title": title,
+                    "body": message,
+                    "sound": "default",
+                    "priority": "high",
+                    "channelId": "default",  # Android channel ID
+                }
+            )
             _LOGGER.info(f"📱 PUSH DEBUG: Including token for {device} ({platform})")
         else:
             skipped_tokens += 1
-            _LOGGER.warning(f"📱 PUSH DEBUG: Skipping non-Expo token for {device} ({platform}): {token[:30] if token else 'None'}...")
+            _LOGGER.warning(
+                f"📱 PUSH DEBUG: Skipping non-Expo token for {device} ({platform}): {token[:30] if token else 'None'}..."
+            )
 
     if not messages:
-        _LOGGER.warning(f"📱 PUSH DEBUG: No valid Expo push tokens found (skipped {skipped_tokens} invalid tokens)")
+        _LOGGER.warning(
+            f"📱 PUSH DEBUG: No valid Expo push tokens found (skipped {skipped_tokens} invalid tokens)"
+        )
         return
 
     _LOGGER.info(f"📱 PUSH DEBUG: Sending {len(messages)} message(s) to Expo Push API")
@@ -1323,7 +1446,9 @@ async def _send_expo_push(hass: HomeAssistant, title: str, message: str) -> None
                 },
             ) as response:
                 response_text = await response.text()
-                _LOGGER.info(f"📱 PUSH DEBUG: Expo API response status: {response.status}")
+                _LOGGER.info(
+                    f"📱 PUSH DEBUG: Expo API response status: {response.status}"
+                )
                 _LOGGER.info(f"📱 PUSH DEBUG: Expo API response body: {response_text}")
 
                 if response.status == 200:
@@ -1335,37 +1460,58 @@ async def _send_expo_push(hass: HomeAssistant, title: str, message: str) -> None
                             status = ticket.get("status")
                             ticket_id = ticket.get("id", "no-id")
                             if status == "ok":
-                                _LOGGER.info(f"📱 PUSH DEBUG: Ticket {i+1}/{len(data)} - SUCCESS (id={ticket_id})")
+                                _LOGGER.info(
+                                    f"📱 PUSH DEBUG: Ticket {i + 1}/{len(data)} - SUCCESS (id={ticket_id})"
+                                )
                             else:
                                 # Error in ticket
                                 error_msg = ticket.get("message", "unknown error")
                                 error_details = ticket.get("details", {})
-                                _LOGGER.error(f"📱 PUSH DEBUG: Ticket {i+1}/{len(data)} - FAILED: {error_msg}")
-                                _LOGGER.error(f"📱 PUSH DEBUG: Error details: {error_details}")
+                                _LOGGER.error(
+                                    f"📱 PUSH DEBUG: Ticket {i + 1}/{len(data)} - FAILED: {error_msg}"
+                                )
+                                _LOGGER.error(
+                                    f"📱 PUSH DEBUG: Error details: {error_details}"
+                                )
                                 # Common errors:
                                 # - DeviceNotRegistered: FCM token is invalid/expired
                                 # - MessageTooBig: Payload too large
                                 # - MessageRateExceeded: Too many messages
                                 # - MismatchSenderId: FCM sender ID mismatch
                                 # - InvalidCredentials: FCM credentials not configured in Expo
-                                if "InvalidCredentials" in str(error_details) or "InvalidCredentials" in error_msg:
-                                    _LOGGER.error("📱 PUSH DEBUG: ⚠️ FCM credentials may not be configured in Expo! "
-                                                "Upload google-services.json to Expo for Android push notifications.")
-                                if "DeviceNotRegistered" in str(error_details) or "DeviceNotRegistered" in error_msg:
-                                    _LOGGER.error("📱 PUSH DEBUG: ⚠️ Device token is no longer valid. "
-                                                "App may need to re-register for push notifications.")
+                                if (
+                                    "InvalidCredentials" in str(error_details)
+                                    or "InvalidCredentials" in error_msg
+                                ):
+                                    _LOGGER.error(
+                                        "📱 PUSH DEBUG: ⚠️ FCM credentials may not be configured in Expo! "
+                                        "Upload google-services.json to Expo for Android push notifications."
+                                    )
+                                if (
+                                    "DeviceNotRegistered" in str(error_details)
+                                    or "DeviceNotRegistered" in error_msg
+                                ):
+                                    _LOGGER.error(
+                                        "📱 PUSH DEBUG: ⚠️ Device token is no longer valid. "
+                                        "App may need to re-register for push notifications."
+                                    )
                     except Exception as parse_err:
-                        _LOGGER.error(f"📱 PUSH DEBUG: Failed to parse Expo response: {parse_err}")
+                        _LOGGER.error(
+                            f"📱 PUSH DEBUG: Failed to parse Expo response: {parse_err}"
+                        )
                 else:
-                    _LOGGER.error(f"📱 PUSH DEBUG: Expo Push API HTTP error: {response.status} - {response_text}")
+                    _LOGGER.error(
+                        f"📱 PUSH DEBUG: Expo Push API HTTP error: {response.status} - {response_text}"
+                    )
     except Exception as e:
-        _LOGGER.error(f"📱 PUSH DEBUG: Exception sending Expo push notification: {e}", exc_info=True)
+        _LOGGER.error(
+            f"📱 PUSH DEBUG: Exception sending Expo push notification: {e}",
+            exc_info=True,
+        )
 
 
 async def _action_set_grid_export(
-    hass: HomeAssistant,
-    config_entry: ConfigEntry,
-    params: Dict[str, Any]
+    hass: HomeAssistant, config_entry: ConfigEntry, params: Dict[str, Any]
 ) -> bool:
     """Set grid export rule (Tesla only)."""
     if _is_sigenergy(config_entry):
@@ -1399,9 +1545,7 @@ async def _action_set_grid_export(
 
 
 async def _action_set_grid_charging(
-    hass: HomeAssistant,
-    config_entry: ConfigEntry,
-    params: Dict[str, Any]
+    hass: HomeAssistant, config_entry: ConfigEntry, params: Dict[str, Any]
 ) -> bool:
     """Enable or disable grid charging (Tesla only)."""
     if _is_sigenergy(config_entry):
@@ -1436,7 +1580,10 @@ async def _action_set_storm_watch(
     enabled = bool(params.get("enabled", True))
     try:
         await hass.services.async_call(
-            DOMAIN, "set_storm_watch", {"enabled": enabled}, blocking=True,
+            DOMAIN,
+            "set_storm_watch",
+            {"enabled": enabled},
+            blocking=True,
         )
         return True
     except Exception as e:
@@ -1467,7 +1614,10 @@ async def _action_set_off_grid_ev_reserve(
 
     try:
         await hass.services.async_call(
-            DOMAIN, "set_off_grid_ev_reserve", {"percent": percent}, blocking=True,
+            DOMAIN,
+            "set_off_grid_ev_reserve",
+            {"percent": percent},
+            blocking=True,
         )
         return True
     except Exception as e:
@@ -1507,9 +1657,7 @@ async def _action_set_vpp_enrollment(
 
 
 async def _action_set_amber_forecast_type(
-    hass: HomeAssistant,
-    config_entry: ConfigEntry,
-    params: Dict[str, Any]
+    hass: HomeAssistant, config_entry: ConfigEntry, params: Dict[str, Any]
 ) -> bool:
     """Switch the Amber forecast type (predicted/low/high).
 
@@ -1520,14 +1668,19 @@ async def _action_set_amber_forecast_type(
 
     forecast_type = params.get("forecast_type", "predicted")
     if forecast_type not in ("predicted", "low", "high"):
-        _LOGGER.error("Invalid Amber forecast type: %s (must be predicted, low, or high)", forecast_type)
+        _LOGGER.error(
+            "Invalid Amber forecast type: %s (must be predicted, low, or high)",
+            forecast_type,
+        )
         return False
 
     try:
         new_options = dict(config_entry.options)
         new_options[CONF_AMBER_FORECAST_TYPE] = forecast_type
         hass.config_entries.async_update_entry(config_entry, options=new_options)
-        _LOGGER.info("Amber forecast type changed to '%s' via automation", forecast_type)
+        _LOGGER.info(
+            "Amber forecast type changed to '%s' via automation", forecast_type
+        )
 
         # Trigger a TOU sync so the new forecast type takes effect immediately
         try:
@@ -1542,8 +1695,7 @@ async def _action_set_amber_forecast_type(
 
 
 async def _action_restore_normal(
-    hass: HomeAssistant,
-    config_entry: ConfigEntry
+    hass: HomeAssistant, config_entry: ConfigEntry
 ) -> bool:
     """Restore normal battery operation (cancel force charge/discharge)."""
     if _is_sigenergy(config_entry):
@@ -1555,7 +1707,9 @@ async def _action_restore_normal(
         try:
             result = await controller.restore_normal()
             if result:
-                _LOGGER.info("Sigenergy: Restored normal operation (Remote EMS disabled)")
+                _LOGGER.info(
+                    "Sigenergy: Restored normal operation (Remote EMS disabled)"
+                )
                 return True
             else:
                 _LOGGER.error("Sigenergy restore_normal() failed")
@@ -1582,9 +1736,7 @@ async def _action_restore_normal(
 
 
 async def _action_set_charge_rate(
-    hass: HomeAssistant,
-    config_entry: ConfigEntry,
-    params: Dict[str, Any]
+    hass: HomeAssistant, config_entry: ConfigEntry, params: Dict[str, Any]
 ) -> bool:
     """Set charge rate limit (Sigenergy only)."""
     if not _is_sigenergy(config_entry):
@@ -1617,9 +1769,7 @@ async def _action_set_charge_rate(
 
 
 async def _action_set_discharge_rate(
-    hass: HomeAssistant,
-    config_entry: ConfigEntry,
-    params: Dict[str, Any]
+    hass: HomeAssistant, config_entry: ConfigEntry, params: Dict[str, Any]
 ) -> bool:
     """Set discharge rate limit (Sigenergy only)."""
     if not _is_sigenergy(config_entry):
@@ -1652,9 +1802,7 @@ async def _action_set_discharge_rate(
 
 
 async def _action_set_export_limit(
-    hass: HomeAssistant,
-    config_entry: ConfigEntry,
-    params: Dict[str, Any]
+    hass: HomeAssistant, config_entry: ConfigEntry, params: Dict[str, Any]
 ) -> bool:
     """Set export power limit (Sigenergy only)."""
     if not _is_sigenergy(config_entry):
@@ -1689,8 +1837,7 @@ async def _action_set_export_limit(
 
 
 async def _action_restore_inverter(
-    hass: HomeAssistant,
-    config_entry: ConfigEntry
+    hass: HomeAssistant, config_entry: ConfigEntry
 ) -> bool:
     """Restore inverter to normal operation."""
     from ..const import DOMAIN, SERVICE_RESTORE_INVERTER
@@ -1721,7 +1868,9 @@ async def _start_ocpp_charging(hass: HomeAssistant, charger_id: str) -> bool:
         _LOGGER.error("OCPP start: entity %s not found", entity_id)
         return False
     try:
-        await hass.services.async_call("switch", "turn_on", {"entity_id": entity_id}, blocking=True)
+        await hass.services.async_call(
+            "switch", "turn_on", {"entity_id": entity_id}, blocking=True
+        )
         _LOGGER.info("OCPP charger %s: start charging via %s", charger_id, entity_id)
         return True
     except Exception as e:
@@ -1737,7 +1886,9 @@ async def _stop_ocpp_charging(hass: HomeAssistant, charger_id: str) -> bool:
         _LOGGER.error("OCPP stop: entity %s not found", entity_id)
         return False
     try:
-        await hass.services.async_call("switch", "turn_off", {"entity_id": entity_id}, blocking=True)
+        await hass.services.async_call(
+            "switch", "turn_off", {"entity_id": entity_id}, blocking=True
+        )
         _LOGGER.info("OCPP charger %s: stop charging via %s", charger_id, entity_id)
         return True
     except Exception as e:
@@ -1749,7 +1900,7 @@ async def _action_start_ev_charging(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     params: Dict[str, Any],
-    context: Optional[Dict[str, Any]] = None
+    context: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """
     Start EV charging via Tesla, OCPP, or generic charger.
@@ -1777,7 +1928,9 @@ async def _action_start_ev_charging(
             _LOGGER.error("Generic charger start: no switch entity configured")
             return False
         try:
-            await hass.services.async_call("switch", "turn_on", {"entity_id": switch_entity}, blocking=True)
+            await hass.services.async_call(
+                "switch", "turn_on", {"entity_id": switch_entity}, blocking=True
+            )
             _LOGGER.info("Generic charger started via %s", switch_entity)
             return True
         except Exception as e:
@@ -1809,7 +1962,10 @@ async def _action_start_ev_charging(
                 return False
 
     # Try ESPHome BLE if configured
-    if not charging_started and ev_provider in (EV_PROVIDER_TESLA_BLE, EV_PROVIDER_BOTH):
+    if not charging_started and ev_provider in (
+        EV_PROVIDER_TESLA_BLE,
+        EV_PROVIDER_BOTH,
+    ):
         if _is_ble_available(hass, ble_prefix):
             result = await _start_ev_charging_ble(hass, ble_prefix)
             if result:
@@ -1818,12 +1974,13 @@ async def _action_start_ev_charging(
                 return False
 
     # Use Fleet API
-    if not charging_started and ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
+    if not charging_started and ev_provider in (
+        EV_PROVIDER_FLEET_API,
+        EV_PROVIDER_BOTH,
+    ):
         # Tesla Fleet uses switch.X_charge, not button.X_charge_start
         charge_switch_entity = await _get_tesla_ev_entity(
-            hass,
-            r"switch\..*_charge$",
-            vehicle_vin
+            hass, r"switch\..*_charge$", vehicle_vin
         )
 
         if not charge_switch_entity:
@@ -1833,12 +1990,16 @@ async def _action_start_ev_charging(
         try:
             # Check API credits before attempting
             if not _is_api_credit_available("teslemetry"):
-                _LOGGER.warning("Skipping EV charging start - API credits exhausted, in cooldown period")
+                _LOGGER.warning(
+                    "Skipping EV charging start - API credits exhausted, in cooldown period"
+                )
                 return False
 
             wake_success = await _wake_tesla_ev(hass, vehicle_vin)
             if not wake_success:
-                _LOGGER.warning("Wake failed (possibly due to API credits), skipping charge command")
+                _LOGGER.warning(
+                    "Wake failed (possibly due to API credits), skipping charge command"
+                )
                 return False
 
             await hass.services.async_call(
@@ -1857,7 +2018,9 @@ async def _action_start_ev_charging(
                 charging_started = True
             elif "complete" in err_str:
                 # Vehicle has reached its charge limit — not an error
-                _LOGGER.info(f"EV charging is complete (at target SOC) — skipping start")
+                _LOGGER.info(
+                    f"EV charging is complete (at target SOC) — skipping start"
+                )
                 return False
             elif "disconnected" in str(e).lower() or "not_plugged" in str(e).lower():
                 _LOGGER.info(f"EV not plugged in — skipping start charge")
@@ -1886,14 +2049,19 @@ async def _action_start_ev_charging(
             del _ev_scheduled_stop[entry_id]
 
         # Calculate when the window ends
-        end_datetime = _get_window_end_datetime(time_window_end, time_window_start, timezone)
+        end_datetime = _get_window_end_datetime(
+            time_window_end, time_window_start, timezone
+        )
         if end_datetime:
+
             async def stop_charging_at_window_end(now) -> None:
                 """Stop charging when time window ends."""
                 _LOGGER.info(f"⏰ Time window ended, stopping EV charging")
                 await _action_stop_ev_charging(hass, config_entry, params)
                 # Send notification that charging stopped
-                await _send_expo_push(hass, "EV Charging", "Stopped - time window ended")
+                await _send_expo_push(
+                    hass, "EV Charging", "Stopped - time window ended"
+                )
                 # Clean up the scheduled stop entry
                 if entry_id in _ev_scheduled_stop:
                     del _ev_scheduled_stop[entry_id]
@@ -1908,7 +2076,9 @@ async def _action_start_ev_charging(
                 "cancel": cancel_func,
                 "end_time": end_datetime,
             }
-            _LOGGER.info(f"⚡ EV charging started, will stop at {end_datetime.strftime('%H:%M')}")
+            _LOGGER.info(
+                f"⚡ EV charging started, will stop at {end_datetime.strftime('%H:%M')}"
+            )
         else:
             _LOGGER.warning("Could not parse time window for scheduled stop")
 
@@ -1916,9 +2086,7 @@ async def _action_start_ev_charging(
 
 
 async def _action_stop_ev_charging(
-    hass: HomeAssistant,
-    config_entry: ConfigEntry,
-    params: Dict[str, Any]
+    hass: HomeAssistant, config_entry: ConfigEntry, params: Dict[str, Any]
 ) -> bool:
     """
     Stop EV charging via Tesla, OCPP, or generic charger.
@@ -1953,7 +2121,9 @@ async def _action_stop_ev_charging(
             _LOGGER.error("Generic charger stop: no switch entity configured")
             return False
         try:
-            await hass.services.async_call("switch", "turn_off", {"entity_id": switch_entity}, blocking=True)
+            await hass.services.async_call(
+                "switch", "turn_off", {"entity_id": switch_entity}, blocking=True
+            )
             _LOGGER.info("Generic charger stopped via %s", switch_entity)
             return True
         except Exception as e:
@@ -1985,14 +2155,14 @@ async def _action_stop_ev_charging(
     if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
         # Check API credits before attempting
         if not _is_api_credit_available("teslemetry"):
-            _LOGGER.warning("Skipping EV charging stop - API credits exhausted, in cooldown period")
+            _LOGGER.warning(
+                "Skipping EV charging stop - API credits exhausted, in cooldown period"
+            )
             return False
 
         # Tesla Fleet uses switch.X_charge, not button.X_charge_stop
         charge_switch_entity = await _get_tesla_ev_entity(
-            hass,
-            r"switch\..*_charge$",
-            vehicle_vin
+            hass, r"switch\..*_charge$", vehicle_vin
         )
 
         if not charge_switch_entity:
@@ -2002,7 +2172,9 @@ async def _action_stop_ev_charging(
         try:
             wake_success = await _wake_tesla_ev(hass, vehicle_vin)
             if not wake_success:
-                _LOGGER.warning("Wake failed (possibly due to API credits), skipping stop charge command")
+                _LOGGER.warning(
+                    "Wake failed (possibly due to API credits), skipping stop charge command"
+                )
                 return False
 
             await hass.services.async_call(
@@ -2026,9 +2198,7 @@ async def _action_stop_ev_charging(
 
 
 async def _action_set_ev_charge_limit(
-    hass: HomeAssistant,
-    config_entry: ConfigEntry,
-    params: Dict[str, Any]
+    hass: HomeAssistant, config_entry: ConfigEntry, params: Dict[str, Any]
 ) -> bool:
     """
     Set EV charge limit percentage via Tesla Fleet/Teslemetry or Tesla BLE.
@@ -2036,7 +2206,9 @@ async def _action_set_ev_charge_limit(
     """
     charger_type = params.get("charger_type", "tesla")
     if charger_type in ("ocpp", "generic"):
-        _LOGGER.info("set_ev_charge_limit: not supported for %s chargers (no-op)", charger_type)
+        _LOGGER.info(
+            "set_ev_charge_limit: not supported for %s chargers (no-op)", charger_type
+        )
         return True
 
     ev_config = _get_ev_config(config_entry)
@@ -2045,7 +2217,11 @@ async def _action_set_ev_charge_limit(
     ble_prefix = _resolve_ble_prefix_for_vehicle(hass, config_entry, vehicle_vin)
 
     # Accept multiple parameter names for flexibility
-    percent = params.get("percent") or params.get("limit") or params.get("charge_limit_percent")
+    percent = (
+        params.get("percent")
+        or params.get("limit")
+        or params.get("charge_limit_percent")
+    )
     if percent is None:
         _LOGGER.error("set_ev_charge_limit: missing percent parameter")
         return False
@@ -2063,16 +2239,20 @@ async def _action_set_ev_charge_limit(
                 return result
 
     # Use Fleet API (also fallback for Teslemetry BT which lacks charge limit)
-    if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_TESLEMETRY_BT, EV_PROVIDER_BOTH):
+    if ev_provider in (
+        EV_PROVIDER_FLEET_API,
+        EV_PROVIDER_TESLEMETRY_BT,
+        EV_PROVIDER_BOTH,
+    ):
         # Check API credits before attempting
         if not _is_api_credit_available("teslemetry"):
-            _LOGGER.debug("Skipping set EV charge limit - API credits exhausted, in cooldown period")
+            _LOGGER.debug(
+                "Skipping set EV charge limit - API credits exhausted, in cooldown period"
+            )
             return False
 
         charge_limit_entity = await _get_tesla_ev_entity(
-            hass,
-            r"number\..*charge_limit$",
-            vehicle_vin
+            hass, r"number\..*charge_limit$", vehicle_vin
         )
 
         if not charge_limit_entity:
@@ -2082,7 +2262,9 @@ async def _action_set_ev_charge_limit(
         try:
             wake_success = await _wake_tesla_ev(hass, vehicle_vin)
             if not wake_success:
-                _LOGGER.debug("Wake failed (possibly due to API credits), skipping set charge limit command")
+                _LOGGER.debug(
+                    "Wake failed (possibly due to API credits), skipping set charge limit command"
+                )
                 return False
 
             await hass.services.async_call(
@@ -2106,9 +2288,7 @@ async def _action_set_ev_charge_limit(
 
 
 async def _action_set_ev_charging_amps(
-    hass: HomeAssistant,
-    config_entry: ConfigEntry,
-    params: Dict[str, Any]
+    hass: HomeAssistant, config_entry: ConfigEntry, params: Dict[str, Any]
 ) -> bool:
     """
     Set EV charging amperage via Tesla, OCPP, or generic charger.
@@ -2136,7 +2316,12 @@ async def _action_set_ev_charging_amps(
             _LOGGER.error("Generic charger set amps: no amps entity configured")
             return False
         try:
-            await hass.services.async_call("number", "set_value", {"entity_id": amps_entity, "value": int(amps)}, blocking=True)
+            await hass.services.async_call(
+                "number",
+                "set_value",
+                {"entity_id": amps_entity, "value": int(amps)},
+                blocking=True,
+            )
             _LOGGER.info("Generic charger set to %dA via %s", amps, amps_entity)
             return True
         except Exception as e:
@@ -2174,18 +2359,20 @@ async def _action_set_ev_charging_amps(
     if ev_provider in (EV_PROVIDER_FLEET_API, EV_PROVIDER_BOTH):
         # Check API credits before attempting
         if not _is_api_credit_available("teslemetry"):
-            _LOGGER.debug("Skipping set EV charging amps - API credits exhausted, in cooldown period")
+            _LOGGER.debug(
+                "Skipping set EV charging amps - API credits exhausted, in cooldown period"
+            )
             return False
 
         # Tesla Fleet uses charge_current, some versions use charging_amps
         charging_amps_entity = await _get_tesla_ev_entity(
-            hass,
-            r"number\..*(charging_amps|charge_current)$",
-            vehicle_vin
+            hass, r"number\..*(charging_amps|charge_current)$", vehicle_vin
         )
 
         if not charging_amps_entity:
-            _LOGGER.error("Could not find Tesla charge_current/charging_amps number entity")
+            _LOGGER.error(
+                "Could not find Tesla charge_current/charging_amps number entity"
+            )
             return False
 
         try:
@@ -2204,7 +2391,9 @@ async def _action_set_ev_charging_amps(
 
             wake_success = await _wake_tesla_ev(hass, vehicle_vin)
             if not wake_success:
-                _LOGGER.debug("Wake failed (possibly due to API credits), skipping set amps command")
+                _LOGGER.debug(
+                    "Wake failed (possibly due to API credits), skipping set amps command"
+                )
                 return False
 
             await hass.services.async_call(
@@ -2245,7 +2434,9 @@ _ev_scheduled_stop: Dict[str, Any] = {}
 DEFAULT_VEHICLE_ID = "_default"
 
 
-def _calculate_solar_surplus(live_status: dict, current_ev_power_kw: float, config: dict) -> float:
+def _calculate_solar_surplus(
+    live_status: dict, current_ev_power_kw: float, config: dict
+) -> float:
     """
     Calculate available solar surplus for EV charging.
 
@@ -2263,8 +2454,12 @@ def _calculate_solar_surplus(live_status: dict, current_ev_power_kw: float, conf
     """
     # Convert from W to kW
     solar_kw = (live_status.get("solar_power") or 0) / 1000
-    grid_kw = (live_status.get("grid_power") or 0) / 1000  # Positive = import, Negative = export
-    battery_kw = (live_status.get("battery_power") or 0) / 1000  # Positive = discharge, Negative = charge
+    grid_kw = (
+        live_status.get("grid_power") or 0
+    ) / 1000  # Positive = import, Negative = export
+    battery_kw = (
+        live_status.get("battery_power") or 0
+    ) / 1000  # Positive = discharge, Negative = charge
     load_kw = (live_status.get("load_power") or 0) / 1000
     buffer_kw = config.get("household_buffer_kw", 0.5)
 
@@ -2275,10 +2470,14 @@ def _calculate_solar_surplus(live_status: dict, current_ev_power_kw: float, conf
         # If grid_kw is negative (exporting), -grid_kw is positive (available surplus)
         # Add back current EV power (since we want to know what's available if EV wasn't charging)
         # Add battery charging power (we can redirect it to EV instead)
-        battery_charge_kw = max(0, -battery_kw)  # Only count when charging (negative = charging)
+        battery_charge_kw = max(
+            0, -battery_kw
+        )  # Only count when charging (negative = charging)
         battery_discharge_kw = max(0, battery_kw)  # Positive = discharging
         # Subtract battery discharge: grid export from battery isn't solar surplus
-        surplus = -grid_kw + current_ev_power_kw + battery_charge_kw - battery_discharge_kw
+        surplus = (
+            -grid_kw + current_ev_power_kw + battery_charge_kw - battery_discharge_kw
+        )
         _LOGGER.debug(
             f"Surplus calc (grid_based): grid={grid_kw:.2f}kW, ev={current_ev_power_kw:.2f}kW, "
             f"bat_charge={battery_charge_kw:.2f}kW, bat_discharge={battery_discharge_kw:.2f}kW → "
@@ -2289,7 +2488,9 @@ def _calculate_solar_surplus(live_status: dict, current_ev_power_kw: float, conf
         # IMPORTANT: If load sensor includes EV power (e.g., mobile connector), we need to
         # subtract it to get the "real" household load, then calculate true surplus
         battery_charge_kw = max(0, -battery_kw)
-        real_household_load_kw = load_kw - current_ev_power_kw  # Remove EV from house load
+        real_household_load_kw = (
+            load_kw - current_ev_power_kw
+        )  # Remove EV from house load
         surplus = solar_kw - real_household_load_kw - battery_charge_kw
         _LOGGER.debug(
             f"Surplus calc (direct): solar={solar_kw:.2f}kW, load={load_kw:.2f}kW (real={real_household_load_kw:.2f}kW), "
@@ -2411,7 +2612,9 @@ def get_price_recommendation(
     # Check if export price is high enough to prefer selling
     elif surplus_kw > 0 and export_price_cents >= prefer_export_threshold_cents:
         recommendation = "export"
-        reason = f"High export rate ({export_price_cents:.1f}c/kWh) - sell to grid instead"
+        reason = (
+            f"High export rate ({export_price_cents:.1f}c/kWh) - sell to grid instead"
+        )
     # Check for arbitrage opportunity (import < export is rare but possible)
     elif import_price_cents < export_price_cents:
         recommendation = "charge"
@@ -2427,7 +2630,9 @@ def get_price_recommendation(
     # High import price - wait for cheaper
     elif import_price_cents > 35:
         recommendation = "wait"
-        reason = f"High grid price ({import_price_cents:.1f}c/kWh) - wait for cheaper rates"
+        reason = (
+            f"High grid price ({import_price_cents:.1f}c/kWh) - wait for cheaper rates"
+        )
     else:
         recommendation = "wait"
         reason = f"Grid at {import_price_cents:.1f}c/kWh - consider waiting for solar or off-peak"
@@ -2441,7 +2646,9 @@ def get_price_recommendation(
     }
 
 
-def _distribute_surplus(entry_id: str, vehicle_id: str, total_surplus_kw: float, strategy: str) -> float:
+def _distribute_surplus(
+    entry_id: str, vehicle_id: str, total_surplus_kw: float, strategy: str
+) -> float:
     """
     Distribute available surplus between multiple vehicles based on strategy.
 
@@ -2456,12 +2663,15 @@ def _distribute_surplus(entry_id: str, vehicle_id: str, total_surplus_kw: float,
     """
     vehicles = _dynamic_ev_state.get(entry_id, {})
     active_vehicles = [
-        (vid, v) for vid, v in vehicles.items()
+        (vid, v)
+        for vid, v in vehicles.items()
         if v.get("active") and not v.get("paused")
     ]
 
     if len(active_vehicles) <= 1:
-        _LOGGER.debug(f"Distribute surplus: single vehicle {vehicle_id[:8]}... gets all {total_surplus_kw:.2f}kW")
+        _LOGGER.debug(
+            f"Distribute surplus: single vehicle {vehicle_id[:8]}... gets all {total_surplus_kw:.2f}kW"
+        )
         return total_surplus_kw
 
     # Get current vehicle info
@@ -2470,7 +2680,9 @@ def _distribute_surplus(entry_id: str, vehicle_id: str, total_surplus_kw: float,
     my_params = my_vehicle.get("params", {})
 
     vehicle_names = [(vid[:8], v.get("priority", 1)) for vid, v in active_vehicles]
-    _LOGGER.debug(f"Distribute surplus: {len(active_vehicles)} vehicles active: {vehicle_names}, strategy={strategy}")
+    _LOGGER.debug(
+        f"Distribute surplus: {len(active_vehicles)} vehicles active: {vehicle_names}, strategy={strategy}"
+    )
 
     allocated = 0.0
 
@@ -2485,7 +2697,9 @@ def _distribute_surplus(entry_id: str, vehicle_id: str, total_surplus_kw: float,
 
         if my_priority == 1:
             # Primary vehicle gets first allocation up to max
-            max_kw = (my_params.get("max_charge_amps", 32) * my_params.get("voltage", 240)) / 1000
+            max_kw = (
+                my_params.get("max_charge_amps", 32) * my_params.get("voltage", 240)
+            ) / 1000
             allocated = min(total_surplus_kw, max_kw)
         else:
             # Secondary vehicles get the remainder
@@ -2493,7 +2707,10 @@ def _distribute_surplus(entry_id: str, vehicle_id: str, total_surplus_kw: float,
             for vid, v in sorted_vehicles:
                 if v.get("priority", 1) < my_priority:
                     v_params = v.get("params", {})
-                    v_max_kw = (v_params.get("max_charge_amps", 32) * v_params.get("voltage", 240)) / 1000
+                    v_max_kw = (
+                        v_params.get("max_charge_amps", 32)
+                        * v_params.get("voltage", 240)
+                    ) / 1000
                     remaining = max(0, remaining - min(remaining, v_max_kw))
             allocated = remaining
 
@@ -2527,23 +2744,28 @@ async def _solar_surplus_switch_to_next_vehicle(
     """
     from .ev_charging_planner import discover_all_tesla_vehicles, is_ev_plugged_in
 
-    completed_name = _get_vehicle_name_from_vin(hass, completed_vehicle_id) or completed_vehicle_id[:8]
+    completed_name = (
+        _get_vehicle_name_from_vin(hass, completed_vehicle_id)
+        or completed_vehicle_id[:8]
+    )
 
     # Stop the completed vehicle's dynamic session (don't send stop command — it's already done)
     await _action_stop_ev_charging_dynamic(
-        hass, config_entry,
+        hass,
+        config_entry,
         {
             "vehicle_id": completed_vehicle_id,
             "stop_charging": False,
             "stop_reason": f"charge complete",
-        }
+        },
     )
 
     # Send notification about completion
     try:
         await _send_expo_push(
-            hass, "EV Charging",
-            f"{completed_name} charge complete — checking other vehicles"
+            hass,
+            "EV Charging",
+            f"{completed_name} charge complete — checking other vehicles",
         )
     except Exception:
         pass
@@ -2566,12 +2788,16 @@ async def _solar_surplus_switch_to_next_vehicle(
         # Check if plugged in
         plugged_in = await is_ev_plugged_in(hass, config_entry, vehicle_vin=vin)
         if not plugged_in:
-            _LOGGER.debug(f"Solar surplus fallback: {name} ({vin[:8]}...) not plugged in, skipping")
+            _LOGGER.debug(
+                f"Solar surplus fallback: {name} ({vin[:8]}...) not plugged in, skipping"
+            )
             continue
 
         # Check if charge is already complete
         if _is_vehicle_charge_complete(hass, vin):
-            _LOGGER.debug(f"Solar surplus fallback: {name} ({vin[:8]}...) already complete, skipping")
+            _LOGGER.debug(
+                f"Solar surplus fallback: {name} ({vin[:8]}...) already complete, skipping"
+            )
             continue
 
         # Found a candidate — start surplus charging with same params but new VIN
@@ -2583,10 +2809,11 @@ async def _solar_surplus_switch_to_next_vehicle(
         new_params["vehicle_name"] = name
 
         try:
-            await _action_start_ev_charging_dynamic(hass, config_entry, new_params, context=None)
+            await _action_start_ev_charging_dynamic(
+                hass, config_entry, new_params, context=None
+            )
             await _send_expo_push(
-                hass, "EV Charging",
-                f"Solar surplus switching to {name}"
+                hass, "EV Charging", f"Solar surplus switching to {name}"
             )
         except Exception as e:
             _LOGGER.error(f"Solar surplus fallback: Failed to start {name}: {e}")
@@ -2600,7 +2827,7 @@ async def _set_vehicle_amps(
     config_entry: ConfigEntry,
     vehicle_id: str,
     amps: int,
-    params: dict
+    params: dict,
 ) -> bool:
     """
     Set charging amps for any charger type (Tesla, OCPP, generic HA entities).
@@ -2619,11 +2846,17 @@ async def _set_vehicle_amps(
 
     if charger_type == "tesla":
         if amps == 0:
-            return await _action_stop_ev_charging(hass, config_entry, {"vehicle_vin": vehicle_id})
-        return await _action_set_ev_charging_amps(hass, config_entry, {
-            "amps": amps,
-            "vehicle_vin": vehicle_id if vehicle_id != DEFAULT_VEHICLE_ID else None
-        })
+            return await _action_stop_ev_charging(
+                hass, config_entry, {"vehicle_vin": vehicle_id}
+            )
+        return await _action_set_ev_charging_amps(
+            hass,
+            config_entry,
+            {
+                "amps": amps,
+                "vehicle_vin": vehicle_id if vehicle_id != DEFAULT_VEHICLE_ID else None,
+            },
+        )
 
     elif charger_type == "ocpp":
         ocpp_charger_id = params.get("ocpp_charger_id")
@@ -2651,31 +2884,34 @@ async def _set_vehicle_amps(
                 # Stop/pause charging
                 if amps_entity:
                     await hass.services.async_call(
-                        "number", "set_value",
+                        "number",
+                        "set_value",
                         {"entity_id": amps_entity, "value": 0},
-                        blocking=True
+                        blocking=True,
                     )
                 if switch_entity:
                     await hass.services.async_call(
-                        "switch", "turn_off",
+                        "switch",
+                        "turn_off",
                         {"entity_id": switch_entity},
-                        blocking=True
+                        blocking=True,
                     )
             else:
                 # Set amps and ensure charger is on
                 if amps_entity:
                     await hass.services.async_call(
-                        "number", "set_value",
+                        "number",
+                        "set_value",
                         {"entity_id": amps_entity, "value": amps},
-                        blocking=True
+                        blocking=True,
                     )
                 if switch_entity:
                     await hass.services.async_call(
-                        "switch", "turn_on",
-                        {"entity_id": switch_entity},
-                        blocking=True
+                        "switch", "turn_on", {"entity_id": switch_entity}, blocking=True
                     )
-            _LOGGER.info(f"Set generic charger to {amps}A via {amps_entity or switch_entity}")
+            _LOGGER.info(
+                f"Set generic charger to {amps}A via {amps_entity or switch_entity}"
+            )
             return True
         except Exception as e:
             _LOGGER.error(f"Failed to set generic charger amps: {e}")
@@ -2685,7 +2921,9 @@ async def _set_vehicle_amps(
     return False
 
 
-async def _set_ocpp_charging_amps(hass: HomeAssistant, charger_id: int, amps: int) -> bool:
+async def _set_ocpp_charging_amps(
+    hass: HomeAssistant, charger_id: int, amps: int
+) -> bool:
     """Set charging amps for an OCPP charger."""
     from ..const import DOMAIN
 
@@ -2719,9 +2957,7 @@ def _parse_time_window(time_str: str) -> Optional[dt_time]:
 
 
 def _get_window_end_datetime(
-    window_end_str: str,
-    window_start_str: str,
-    timezone_str: str
+    window_end_str: str, window_start_str: str, timezone_str: str
 ) -> Optional[datetime]:
     """Calculate the datetime when the time window ends.
 
@@ -2756,20 +2992,20 @@ def _get_window_end_datetime(
             # We're in the first part of the window (before midnight)
             # End is tomorrow
             from datetime import timedelta as td
+
             end_datetime = end_datetime + td(days=1)
 
     # If end time has already passed today, move to tomorrow
     if end_datetime <= now:
         from datetime import timedelta as td
+
         end_datetime = end_datetime + td(days=1)
 
     return end_datetime
 
 
 def _is_inside_time_window(
-    window_start_str: str,
-    window_end_str: str,
-    timezone_str: str
+    window_start_str: str, window_end_str: str, timezone_str: str
 ) -> bool:
     """Check if current time is inside the specified time window."""
     from zoneinfo import ZoneInfo
@@ -2796,7 +3032,9 @@ def _is_inside_time_window(
         return window_start <= now < window_end
 
 
-async def _get_tesla_live_status(hass: HomeAssistant, config_entry: ConfigEntry) -> Optional[Dict[str, Any]]:
+async def _get_tesla_live_status(
+    hass: HomeAssistant, config_entry: ConfigEntry
+) -> Optional[Dict[str, Any]]:
     """Get live status from Tesla API for battery and grid power.
 
     Returns:
@@ -2809,7 +3047,11 @@ async def _get_tesla_live_status(hass: HomeAssistant, config_entry: ConfigEntry)
     entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
 
     # Try coordinator data first (cached, no API call needed)
-    for coord_key in ("tesla_coordinator", "sigenergy_coordinator", "sungrow_coordinator"):
+    for coord_key in (
+        "tesla_coordinator",
+        "sigenergy_coordinator",
+        "sungrow_coordinator",
+    ):
         coordinator = entry_data.get(coord_key)
         if coordinator and coordinator.data:
             data = coordinator.data
@@ -2844,15 +3086,21 @@ async def _get_tesla_live_status(hass: HomeAssistant, config_entry: ConfigEntry)
         headers = {"Authorization": f"Bearer {current_token}"}
 
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as response:
+            async with session.get(
+                url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)
+            ) as response:
                 if response.status == 200:
                     data = await response.json()
                     site_status = data.get("response", {})
                     return {
                         "battery_soc": site_status.get("percentage_charged"),
-                        "grid_power": site_status.get("grid_power"),  # Positive = importing
+                        "grid_power": site_status.get(
+                            "grid_power"
+                        ),  # Positive = importing
                         "solar_power": site_status.get("solar_power"),
-                        "battery_power": site_status.get("battery_power"),  # Positive = discharging
+                        "battery_power": site_status.get(
+                            "battery_power"
+                        ),  # Positive = discharging
                         "load_power": site_status.get("load_power"),
                     }
                 else:
@@ -2885,9 +3133,12 @@ async def _dynamic_ev_update_surplus(
     # Re-check Tesla entity max after charging starts (Tesla reports real max only when active)
     # The entity needs a few seconds to update after the car starts drawing power,
     # so we do this on the first update cycle after charging_started=True (10-30s later).
-    if (state.get("charging_started") and not state.get("entity_max_rechecked")
-            and params.get("charger_type") == "tesla"
-            and vehicle_id != DEFAULT_VEHICLE_ID):
+    if (
+        state.get("charging_started")
+        and not state.get("entity_max_rechecked")
+        and params.get("charger_type") == "tesla"
+        and vehicle_id != DEFAULT_VEHICLE_ID
+    ):
         try:
             entity = await _get_tesla_ev_entity(
                 hass, r"number\..*(charging_amps|charge_current)$", vehicle_id
@@ -2944,9 +3195,9 @@ async def _dynamic_ev_update_surplus(
 
     # Check if parallel charging is possible (surplus exceeds what battery can absorb)
     parallel_charging_available = (
-        allow_parallel and
-        battery_soc < min_soc and
-        raw_surplus_kw > max_battery_charge_kw
+        allow_parallel
+        and battery_soc < min_soc
+        and raw_surplus_kw > max_battery_charge_kw
     )
 
     # Don't start charging until battery reaches min_soc (unless parallel charging is available)
@@ -2969,7 +3220,9 @@ async def _dynamic_ev_update_surplus(
                         f"(currently {battery_soc:.0f}%, surplus {raw_surplus_kw:.1f}kW)"
                     )
                 else:
-                    state["paused_reason"] = f"Waiting for battery to reach {min_soc}% (currently {battery_soc:.0f}%)"
+                    state["paused_reason"] = (
+                        f"Waiting for battery to reach {min_soc}% (currently {battery_soc:.0f}%)"
+                    )
                 _LOGGER.debug(f"Solar surplus EV: {state['paused_reason']}")
                 return
         else:
@@ -2996,7 +3249,9 @@ async def _dynamic_ev_update_surplus(
             # Normal mode: pause below pause_soc threshold
             if not state.get("paused"):
                 state["paused"] = True
-                state["paused_reason"] = f"Battery dropped to {battery_soc:.0f}% (pause threshold: {pause_soc}%)"
+                state["paused_reason"] = (
+                    f"Battery dropped to {battery_soc:.0f}% (pause threshold: {pause_soc}%)"
+                )
                 _LOGGER.info(f"⚡ Solar surplus EV: Pausing - {state['paused_reason']}")
                 await _set_vehicle_amps(hass, config_entry, vehicle_id, 0, params)
                 state["current_amps"] = 0
@@ -3009,11 +3264,15 @@ async def _dynamic_ev_update_surplus(
                         if not vehicle_name and vehicle_id:
                             vehicle_name = _get_vehicle_name_from_vin(hass, vehicle_id)
                         if not vehicle_name:
-                            vehicle_name = (vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id) if vehicle_id and vehicle_id != DEFAULT_VEHICLE_ID else "EV"
+                            vehicle_name = (
+                                (vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id)
+                                if vehicle_id and vehicle_id != DEFAULT_VEHICLE_ID
+                                else "EV"
+                            )
                         await _send_expo_push(
                             hass,
                             "EV Charging",
-                            f"{vehicle_name} paused - battery low ({battery_soc:.0f}%)"
+                            f"{vehicle_name} paused - battery low ({battery_soc:.0f}%)",
                         )
                     except Exception as e:
                         _LOGGER.debug(f"Could not send pause notification: {e}")
@@ -3027,14 +3286,19 @@ async def _dynamic_ev_update_surplus(
             # Battery recovered above start threshold - always resume
             can_resume = True
             state["parallel_charging_mode"] = False
-            _LOGGER.info(f"⚡ Solar surplus EV: Resuming - battery at {battery_soc:.0f}%")
+            _LOGGER.info(
+                f"⚡ Solar surplus EV: Resuming - battery at {battery_soc:.0f}%"
+            )
         elif stop_at_floor and battery_soc < pause_soc:
             # stop_at_battery_floor=True: don't resume until battery recovers above min_soc
             _LOGGER.debug(
                 f"Solar surplus EV: Not resuming - stop_at_floor=True, "
                 f"battery {battery_soc:.0f}% < floor {pause_soc}%"
             )
-        elif state.get("parallel_charging_mode") and raw_surplus_kw > max_battery_charge_kw:
+        elif (
+            state.get("parallel_charging_mode")
+            and raw_surplus_kw > max_battery_charge_kw
+        ):
             # Parallel mode: surplus recovered
             can_resume = True
             _LOGGER.info(
@@ -3056,11 +3320,13 @@ async def _dynamic_ev_update_surplus(
                         if not vehicle_name and vehicle_id:
                             vehicle_name = _get_vehicle_name_from_vin(hass, vehicle_id)
                         if not vehicle_name:
-                            vehicle_name = (vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id) if vehicle_id and vehicle_id != DEFAULT_VEHICLE_ID else "EV"
+                            vehicle_name = (
+                                (vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id)
+                                if vehicle_id and vehicle_id != DEFAULT_VEHICLE_ID
+                                else "EV"
+                            )
                         await _send_expo_push(
-                            hass,
-                            "EV Charging",
-                            f"{vehicle_name} resumed"
+                            hass, "EV Charging", f"{vehicle_name} resumed"
                         )
                     except Exception as e:
                         _LOGGER.debug(f"Could not send resume notification: {e}")
@@ -3104,9 +3370,13 @@ async def _dynamic_ev_update_surplus(
             low_surplus_start = state.get("low_surplus_start")
             if low_surplus_start is None:
                 state["low_surplus_start"] = datetime.now()
-            elif (datetime.now() - low_surplus_start).total_seconds() >= stop_delay_minutes * 60:
+            elif (
+                datetime.now() - low_surplus_start
+            ).total_seconds() >= stop_delay_minutes * 60:
                 # Stop charging after delay
-                _LOGGER.info(f"⚡ Solar surplus EV: Stopping - insufficient surplus for {stop_delay_minutes} min")
+                _LOGGER.info(
+                    f"⚡ Solar surplus EV: Stopping - insufficient surplus for {stop_delay_minutes} min"
+                )
                 new_amps = 0
             else:
                 # Keep current amps during grace period
@@ -3123,9 +3393,13 @@ async def _dynamic_ev_update_surplus(
             if high_surplus_start is None:
                 state["high_surplus_start"] = datetime.now()
                 new_amps = 0  # Don't set amps yet, wait for sustained surplus
-            elif (datetime.now() - high_surplus_start).total_seconds() >= sustained_minutes * 60:
+            elif (
+                datetime.now() - high_surplus_start
+            ).total_seconds() >= sustained_minutes * 60:
                 # Start charging after sustained surplus
-                _LOGGER.info(f"⚡ Solar surplus EV: Starting - sustained surplus for {sustained_minutes} min")
+                _LOGGER.info(
+                    f"⚡ Solar surplus EV: Starting - sustained surplus for {sustained_minutes} min"
+                )
 
                 # Check if this vehicle's charge is already complete before trying
                 if _is_vehicle_charge_complete(hass, vehicle_id):
@@ -3139,7 +3413,9 @@ async def _dynamic_ev_update_surplus(
                     return
 
                 # Send the actual start-charging command to the vehicle
-                start_success = await _action_start_ev_charging(hass, config_entry, params, context=None)
+                start_success = await _action_start_ev_charging(
+                    hass, config_entry, params, context=None
+                )
                 if not start_success:
                     # Check if failure was due to charge complete
                     if _is_vehicle_charge_complete(hass, vehicle_id):
@@ -3151,7 +3427,9 @@ async def _dynamic_ev_update_surplus(
                             hass, config_entry, entry_id, vehicle_id, params
                         )
                     else:
-                        _LOGGER.warning("⚡ Solar surplus EV: Failed to send start charging command")
+                        _LOGGER.warning(
+                            "⚡ Solar surplus EV: Failed to send start charging command"
+                        )
                     return
 
                 state["charging_started"] = True
@@ -3164,11 +3442,15 @@ async def _dynamic_ev_update_surplus(
                         if not vehicle_name and vehicle_id:
                             vehicle_name = _get_vehicle_name_from_vin(hass, vehicle_id)
                         if not vehicle_name:
-                            vehicle_name = (vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id) if vehicle_id and vehicle_id != DEFAULT_VEHICLE_ID else "EV"
+                            vehicle_name = (
+                                (vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id)
+                                if vehicle_id and vehicle_id != DEFAULT_VEHICLE_ID
+                                else "EV"
+                            )
                         await _send_expo_push(
                             hass,
                             "EV Charging",
-                            f"{vehicle_name} started - {surplus_kw:.1f}kW solar"
+                            f"{vehicle_name} started - {surplus_kw:.1f}kW solar",
                         )
                     except Exception as e:
                         _LOGGER.debug(f"Could not send solar start notification: {e}")
@@ -3189,13 +3471,16 @@ async def _dynamic_ev_update_surplus(
     if current_amps > 0:
         try:
             from .ev_charging_session import get_session_manager
+
             session_manager = get_session_manager()
             if session_manager:
                 # Determine if we're charging from solar using grid import
                 grid_power_kw = (live_status.get("grid_power") or 0) / 1000
                 is_solar = _is_ev_charging_from_solar(grid_power_kw, current_ev_kw)
 
-                import_price, export_price = _get_current_ev_prices(hass, config_entry.entry_id)
+                import_price, export_price = _get_current_ev_prices(
+                    hass, config_entry.entry_id
+                )
 
                 await session_manager.update_session(
                     vehicle_id=vehicle_id,
@@ -3215,7 +3500,9 @@ async def _dynamic_ev_update_surplus(
             f"⚡ Solar surplus EV: {current_amps}A -> {new_amps}A "
             f"(surplus={my_surplus_kw:.1f}kW, battery={battery_soc:.0f}%)"
         )
-        success = await _set_vehicle_amps(hass, config_entry, vehicle_id, new_amps, params)
+        success = await _set_vehicle_amps(
+            hass, config_entry, vehicle_id, new_amps, params
+        )
         if success:
             state["current_amps"] = new_amps
             state["target_amps"] = new_amps
@@ -3224,6 +3511,7 @@ async def _dynamic_ev_update_surplus(
             if new_amps == 0 and current_amps > 0:
                 try:
                     from .ev_charging_session import get_session_manager
+
                     session_manager = get_session_manager()
                     if session_manager:
                         reason = "insufficient_surplus"
@@ -3234,7 +3522,9 @@ async def _dynamic_ev_update_surplus(
                             reason=reason,
                             end_soc=int(battery_soc) if battery_soc else None,
                         )
-                        _LOGGER.debug(f"Solar surplus EV: Ended session for {vehicle_id} ({reason})")
+                        _LOGGER.debug(
+                            f"Solar surplus EV: Ended session for {vehicle_id} ({reason})"
+                        )
                 except Exception as e:
                     _LOGGER.debug(f"Could not end session: {e}")
 
@@ -3245,11 +3535,14 @@ def _get_phases_from_config(hass, config_entry, params):
         return params["phases"]
     try:
         from ..const import DOMAIN
+
         entry_data = hass.data.get(DOMAIN, {}).get(config_entry.entry_id, {})
         store = entry_data.get("automation_store")
         if store:
-            stored = getattr(store, '_data', {}) or {}
-            phase_type = stored.get("home_power_settings", {}).get("phase_type", "single")
+            stored = getattr(store, "_data", {}) or {}
+            phase_type = stored.get("home_power_settings", {}).get(
+                "phase_type", "single"
+            )
             return 3 if phase_type == "three" else 1
     except Exception:
         pass
@@ -3294,9 +3587,13 @@ async def _dynamic_ev_update(
         if time_window_start and time_window_end:
             if not _is_inside_time_window(time_window_start, time_window_end, timezone):
                 _LOGGER.info("⏰ Dynamic EV: Outside time window, stopping charging")
-                await _action_stop_ev_charging_dynamic(hass, config_entry, {"stop_charging": True})
+                await _action_stop_ev_charging_dynamic(
+                    hass, config_entry, {"stop_charging": True}
+                )
                 # Send notification that charging stopped
-                await _send_expo_push(hass, "EV Charging", "Stopped - time window ended")
+                await _send_expo_push(
+                    hass, "EV Charging", "Stopped - time window ended"
+                )
                 return
 
     # target_battery_charge_kw: How much we want the battery to charge (positive = charging into battery)
@@ -3306,7 +3603,9 @@ async def _dynamic_ev_update(
 
     # No grid import mode: prevent ALL grid imports by dynamically adjusting EV charge rate
     no_grid_import = params.get("no_grid_import", False)
-    grid_import_tolerance_kw = params.get("grid_import_tolerance_kw", 0.1)  # 100W buffer
+    grid_import_tolerance_kw = params.get(
+        "grid_import_tolerance_kw", 0.1
+    )  # 100W buffer
     max_inverter_kw = params.get("max_inverter_kw", 10.0)  # PW3=10kW, PW2=5kW per unit
 
     min_amps = params.get("min_charge_amps", 5)
@@ -3363,14 +3662,18 @@ async def _dynamic_ev_update(
     #   UNLESS battery has depleted (stopped discharging) — then allow grid import
     # - If battery has surplus (deficit > 0.1), use that surplus
     # - Otherwise, use grid headroom
-    battery_depleted = False  # Track whether we bypassed no_grid_import due to battery depletion
+    battery_depleted = (
+        False  # Track whether we bypassed no_grid_import due to battery depletion
+    )
     if no_grid_import:
         # Exclude intentional home battery grid-charging from the grid import figure.
         # When the LP optimizer force-charges the home battery from grid, battery_power_kw
         # is negative (charging) and grid_power_kw includes that draw.  The EV should not
         # be throttled because of intentional battery charging — only because of the EV's
         # own grid draw and household load.
-        battery_charging_kw = max(0.0, -battery_power_kw)  # positive when battery is charging
+        battery_charging_kw = max(
+            0.0, -battery_power_kw
+        )  # positive when battery is charging
         ev_relevant_grid_kw = grid_power_kw - battery_charging_kw
 
         # Check if battery has effectively depleted (stopped discharging).
@@ -3385,7 +3688,9 @@ async def _dynamic_ev_update(
                 )
                 state["_battery_depleted_logged"] = True
             # Battery depleted — use grid headroom directly (ignore inverter cap)
-            max_amps = uncapped_max_amps  # Remove inverter cap, charge at full charger rate
+            max_amps = (
+                uncapped_max_amps  # Remove inverter cap, charge at full charger rate
+            )
             available_power_kw = grid_headroom_kw
         else:
             # Battery is discharging — clear depleted flag if it was set
@@ -3412,7 +3717,10 @@ async def _dynamic_ev_update(
             # Use the more conservative of the two approaches
             # - inverter_headroom: proactive limit based on known capacity
             # - grid_reactive: reactive adjustment based on actual grid flow
-            available_power_kw = min(inverter_headroom_kw, grid_reactive_kw + current_ev_power_kw) - current_ev_power_kw
+            available_power_kw = (
+                min(inverter_headroom_kw, grid_reactive_kw + current_ev_power_kw)
+                - current_ev_power_kw
+            )
     elif battery_full:
         # Battery is full — taper is natural, not a deficit. Use grid headroom directly.
         available_power_kw = grid_headroom_kw
@@ -3445,7 +3753,11 @@ async def _dynamic_ev_update(
     # intentional home battery grid-charging by the LP optimizer
     # Skip this check if battery has depleted — grid import is expected in that case
     ev_grid_check = ev_relevant_grid_kw if no_grid_import else grid_power_kw
-    if no_grid_import and not battery_depleted and ev_grid_check > grid_import_tolerance_kw:
+    if (
+        no_grid_import
+        and not battery_depleted
+        and ev_grid_check > grid_import_tolerance_kw
+    ):
         # We're importing (beyond battery charging) - reduce aggressively
         if new_amps < current_amps:
             _LOGGER.info(
@@ -3454,7 +3766,9 @@ async def _dynamic_ev_update(
                 f"ev_relevant={ev_grid_check:.2f}kW, inverter_max={max_inverter_kw}kW), "
                 f"reducing to {new_amps}A"
             )
-            success = await _action_set_ev_charging_amps(hass, config_entry, {"amps": new_amps})
+            success = await _action_set_ev_charging_amps(
+                hass, config_entry, {"amps": new_amps}
+            )
             if success:
                 state["current_amps"] = new_amps
             return
@@ -3487,11 +3801,14 @@ async def _dynamic_ev_update(
     try:
         from ..const import DOMAIN
         from .ev_charging_session import get_session_manager
+
         session_manager = get_session_manager()
         if session_manager:
             if current_amps > 0 and new_amps > 0:
                 # Session update - still charging
-                is_solar = _is_ev_charging_from_solar(grid_power_kw, current_ev_power_kw)
+                is_solar = _is_ev_charging_from_solar(
+                    grid_power_kw, current_ev_power_kw
+                )
                 import_price, export_price = _get_current_ev_prices(hass, entry_id)
 
                 await session_manager.update_session(
@@ -3520,7 +3837,7 @@ async def _action_start_ev_charging_dynamic(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
     params: Dict[str, Any],
-    context: Optional[Dict[str, Any]] = None
+    context: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """
     Start dynamic EV charging that adjusts charge rate based on battery/grid or solar surplus.
@@ -3581,7 +3898,9 @@ async def _action_start_ev_charging_dynamic_locked(
     from ..const import DOMAIN
 
     entry_id = config_entry.entry_id
-    vehicle_id = params.get("vehicle_vin") or params.get("vehicle_id") or DEFAULT_VEHICLE_ID
+    vehicle_id = (
+        params.get("vehicle_vin") or params.get("vehicle_id") or DEFAULT_VEHICLE_ID
+    )
 
     # Determine mode
     dynamic_mode = params.get("dynamic_mode", "battery_target")
@@ -3592,9 +3911,14 @@ async def _action_start_ev_charging_dynamic_locked(
     # loops fighting over the same car's charge current.
     entry_vehicles = _dynamic_ev_state.get(entry_id, {})
     for vid, v_state in entry_vehicles.items():
-        if v_state.get("active") and v_state.get("params", {}).get("dynamic_mode") == dynamic_mode:
+        if (
+            v_state.get("active")
+            and v_state.get("params", {}).get("dynamic_mode") == dynamic_mode
+        ):
             if vid == vehicle_id:
-                _LOGGER.debug(f"Dynamic session ({dynamic_mode}) already active for vehicle {vid}, skipping duplicate")
+                _LOGGER.debug(
+                    f"Dynamic session ({dynamic_mode}) already active for vehicle {vid}, skipping duplicate"
+                )
                 return True
             # _default overlaps with any VIN (single-vehicle setup)
             if vid == DEFAULT_VEHICLE_ID or vehicle_id == DEFAULT_VEHICLE_ID:
@@ -3624,7 +3948,9 @@ async def _action_start_ev_charging_dynamic_locked(
             "pause_below_soc": params.get("pause_below_soc", 70),
             "sustained_surplus_minutes": params.get("sustained_surplus_minutes", 2),
             "stop_delay_minutes": params.get("stop_delay_minutes", 5),
-            "dual_vehicle_strategy": params.get("dual_vehicle_strategy", "priority_first"),
+            "dual_vehicle_strategy": params.get(
+                "dual_vehicle_strategy", "priority_first"
+            ),
             "allow_parallel_charging": params.get("allow_parallel_charging", False),
             "max_battery_charge_rate_kw": params.get("max_battery_charge_rate_kw", 5.0),
         }
@@ -3641,7 +3967,7 @@ async def _action_start_ev_charging_dynamic_locked(
         # Battery target mode (existing behavior)
         target_battery_charge_kw = params.get(
             "target_battery_charge_kw",
-            params.get("max_battery_discharge_kw", 5.0)  # Fallback for old param name
+            params.get("max_battery_discharge_kw", 5.0),  # Fallback for old param name
         )
         no_grid_import = params.get("no_grid_import", False)
         mode_params = {
@@ -3653,9 +3979,15 @@ async def _action_start_ev_charging_dynamic_locked(
         }
         start_amps = params.get("start_amps", max_charge_amps)
         if no_grid_import:
-            inverter_max_amps = int((mode_params["max_inverter_kw"] * 1000) / (voltage * resolved_phases))
+            inverter_max_amps = int(
+                (mode_params["max_inverter_kw"] * 1000) / (voltage * resolved_phases)
+            )
             start_amps = min(start_amps, inverter_max_amps)
-        no_grid_info = f", no_grid_import=enabled (inverter={mode_params['max_inverter_kw']}kW)" if no_grid_import else ""
+        no_grid_info = (
+            f", no_grid_import=enabled (inverter={mode_params['max_inverter_kw']}kW)"
+            if no_grid_import
+            else ""
+        )
         _LOGGER.info(
             f"⚡ Starting dynamic EV charging: target_battery_charge={target_battery_charge_kw}kW, "
             f"max_grid_import={mode_params['max_grid_import_kw']}kW, amps={min_charge_amps}-{max_charge_amps}A, "
@@ -3668,14 +4000,20 @@ async def _action_start_ev_charging_dynamic_locked(
     timezone = context.get("timezone", "UTC") if context else "UTC"
 
     # Stop any existing dynamic charging for this vehicle
-    await _action_stop_ev_charging_dynamic(hass, config_entry, {"vehicle_id": vehicle_id})
+    await _action_stop_ev_charging_dynamic(
+        hass, config_entry, {"vehicle_id": vehicle_id}
+    )
 
     # For battery_target mode, start EV charging immediately
     # For solar_surplus mode, we wait for sufficient surplus before starting
     if dynamic_mode == "battery_target":
-        start_success = await _action_start_ev_charging(hass, config_entry, params, context)
+        start_success = await _action_start_ev_charging(
+            hass, config_entry, params, context
+        )
         if not start_success:
-            _LOGGER.info("Dynamic EV: Could not start EV charging (vehicle may be disconnected)")
+            _LOGGER.info(
+                "Dynamic EV: Could not start EV charging (vehicle may be disconnected)"
+            )
             return False
 
         # Set initial amps
@@ -3684,7 +4022,9 @@ async def _action_start_ev_charging_dynamic_locked(
         )
         if not amps_success:
             # This is expected - Tesla reports lower max amps until charging actually starts
-            _LOGGER.debug(f"Dynamic EV: Could not set initial amps to {start_amps}A (will adjust once charging starts)")
+            _LOGGER.debug(
+                f"Dynamic EV: Could not set initial amps to {start_amps}A (will adjust once charging starts)"
+            )
 
     # Create the periodic update callback for this vehicle
     async def periodic_update(now) -> None:
@@ -3698,7 +4038,9 @@ async def _action_start_ev_charging_dynamic_locked(
     use_tbt = _is_teslemetry_bt_available(hass, tbt_prefix)
     use_bt = use_ble or use_tbt
     update_interval = 10 if use_bt else 30
-    _LOGGER.debug(f"Dynamic EV update interval: {update_interval}s (BLE={use_ble}, teslemetry_bt={use_tbt})")
+    _LOGGER.debug(
+        f"Dynamic EV update interval: {update_interval}s (BLE={use_ble}, teslemetry_bt={use_tbt})"
+    )
 
     cancel_timer = async_track_time_interval(
         hass,
@@ -3743,7 +4085,9 @@ async def _action_start_ev_charging_dynamic_locked(
             if entity:
                 entity_state = hass.states.get(entity)
                 if entity_state:
-                    entity_max = int(entity_state.attributes.get("max", max_charge_amps))
+                    entity_max = int(
+                        entity_state.attributes.get("max", max_charge_amps)
+                    )
                     if entity_max < full_params.get("max_charge_amps", 32):
                         _LOGGER.info(
                             f"Preliminary cap: max_charge_amps to {entity_max}A "
@@ -3762,7 +4106,8 @@ async def _action_start_ev_charging_dynamic_locked(
         "priority": priority,
         "paused": False,
         "paused_reason": None,
-        "charging_started": dynamic_mode == "battery_target",  # Already started for battery_target
+        "charging_started": dynamic_mode
+        == "battery_target",  # Already started for battery_target
         "entity_max_rechecked": False,  # Re-check Tesla entity max after charging starts
         "allocated_surplus_kw": 0,
         "reason": "",
@@ -3773,6 +4118,7 @@ async def _action_start_ev_charging_dynamic_locked(
     # Start charging session tracking
     try:
         from .ev_charging_session import get_session_manager
+
         session_manager = get_session_manager()
         if session_manager:
             # Get initial SoC if available
@@ -3795,8 +4141,12 @@ async def _action_start_ev_charging_dynamic_locked(
     if DOMAIN in hass.data and entry_id in hass.data[DOMAIN]:
         hass.data[DOMAIN][entry_id]["dynamic_ev_state"] = _dynamic_ev_state[entry_id]
 
-    mode_label = "solar surplus" if dynamic_mode == "solar_surplus" else "battery target"
-    _LOGGER.info(f"⚡ Dynamic EV charging started ({mode_label} mode, vehicle={vehicle_id})")
+    mode_label = (
+        "solar surplus" if dynamic_mode == "solar_surplus" else "battery target"
+    )
+    _LOGGER.info(
+        f"⚡ Dynamic EV charging started ({mode_label} mode, vehicle={vehicle_id})"
+    )
 
     # Send push notification if enabled
     # For solar_surplus mode, skip the immediate notification — a notification will be
@@ -3809,12 +4159,12 @@ async def _action_start_ev_charging_dynamic_locked(
             if not vehicle_name and vehicle_id:
                 vehicle_name = _get_vehicle_name_from_vin(hass, vehicle_id)
             if not vehicle_name:
-                vehicle_name = (vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id) if vehicle_id and vehicle_id != DEFAULT_VEHICLE_ID else "EV"
-            await _send_expo_push(
-                hass,
-                "EV Charging",
-                f"{vehicle_name} started"
-            )
+                vehicle_name = (
+                    (vehicle_id[:8] if len(vehicle_id) > 8 else vehicle_id)
+                    if vehicle_id and vehicle_id != DEFAULT_VEHICLE_ID
+                    else "EV"
+                )
+            await _send_expo_push(hass, "EV Charging", f"{vehicle_name} started")
         except Exception as e:
             _LOGGER.debug(f"Could not send start notification: {e}")
 
@@ -3822,9 +4172,7 @@ async def _action_start_ev_charging_dynamic_locked(
 
 
 async def _action_stop_ev_charging_dynamic(
-    hass: HomeAssistant,
-    config_entry: ConfigEntry,
-    params: Dict[str, Any]
+    hass: HomeAssistant, config_entry: ConfigEntry, params: Dict[str, Any]
 ) -> bool:
     """
     Stop dynamic EV charging and cancel the adjustment timer.
@@ -3872,12 +4220,17 @@ async def _action_stop_ev_charging_dynamic(
             # End charging session tracking
             try:
                 from .ev_charging_session import get_session_manager
+
                 session_manager = get_session_manager()
                 if session_manager and state.get("session_id"):
                     # Try to get current SoC for end_soc
                     end_soc = None
                     try:
-                        live_status = hass.data.get(DOMAIN, {}).get(entry_id, {}).get("live_status", {})
+                        live_status = (
+                            hass.data.get(DOMAIN, {})
+                            .get(entry_id, {})
+                            .get("live_status", {})
+                        )
                         if live_status.get("battery_soc"):
                             end_soc = int(live_status["battery_soc"])
                     except Exception:
@@ -3904,9 +4257,7 @@ async def _action_stop_ev_charging_dynamic(
                         vehicle_name = vid[:8] if len(vid) > 8 else vid
                     reason = params.get("stop_reason", "stopped")
                     await _send_expo_push(
-                        hass,
-                        "EV Charging",
-                        f"{vehicle_name} {reason}"
+                        hass, "EV Charging", f"{vehicle_name} {reason}"
                     )
                 except Exception as e:
                     _LOGGER.debug(f"Could not send stop notification: {e}")
@@ -3922,7 +4273,9 @@ async def _action_stop_ev_charging_dynamic(
     # Update hass.data
     if DOMAIN in hass.data and entry_id in hass.data[DOMAIN]:
         if _dynamic_ev_state.get(entry_id):
-            hass.data[DOMAIN][entry_id]["dynamic_ev_state"] = _dynamic_ev_state[entry_id]
+            hass.data[DOMAIN][entry_id]["dynamic_ev_state"] = _dynamic_ev_state[
+                entry_id
+            ]
         else:
             hass.data[DOMAIN][entry_id].pop("dynamic_ev_state", None)
 

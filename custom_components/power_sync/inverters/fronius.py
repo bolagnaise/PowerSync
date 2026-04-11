@@ -6,6 +6,7 @@ Uses power limiting (WMaxLimPct) combined with pre-configured
 
 Reference: https://www.smartmotion.life/2023/09/12/amber-electric-curtailment-with-home-assistant/
 """
+
 import asyncio
 import logging
 import re
@@ -32,26 +33,26 @@ class FroniusController(InverterController):
 
     # SunSpec Modbus register addresses
     # These are in the Immediate Controls model (Model 123)
-    REG_WMAXLIMPCT = 40232          # Power output limit (0-10000 = 0-100%)
-    REG_WMAXLIMPCT_RVRT = 40234     # Reversion timeout (seconds, 0=disabled)
-    REG_WMAXLIM_ENA = 40236         # Enable power limiting (1=on, 0=off)
+    REG_WMAXLIMPCT = 40232  # Power output limit (0-10000 = 0-100%)
+    REG_WMAXLIMPCT_RVRT = 40234  # Reversion timeout (seconds, 0=disabled)
+    REG_WMAXLIM_ENA = 40236  # Enable power limiting (1=on, 0=off)
 
     # SunSpec Common Block (Model 1) - for reading model info
-    REG_SUNSPEC_ID = 40000          # "SunS" marker (0x5375, 0x6E53)
-    REG_MODEL = 40020               # Model string (16 registers = 32 chars)
+    REG_SUNSPEC_ID = 40000  # "SunS" marker (0x5375, 0x6E53)
+    REG_MODEL = 40020  # Model string (16 registers = 32 chars)
 
     # Status registers for reading inverter state
-    REG_STATUS = 40107              # Operating state
-    REG_AC_POWER = 40083            # AC Power output (W)
-    REG_AC_POWER_SF = 40084         # AC Power scale factor
-    REG_DC_POWER = 40101            # DC Power (W)
-    REG_TEMPERATURE = 40103         # Cabinet temperature
+    REG_STATUS = 40107  # Operating state
+    REG_AC_POWER = 40083  # AC Power output (W)
+    REG_AC_POWER_SF = 40084  # AC Power scale factor
+    REG_DC_POWER = 40101  # DC Power (W)
+    REG_TEMPERATURE = 40103  # Cabinet temperature
 
     # Operating state values
     STATUS_OFF = 1
     STATUS_SLEEPING = 2
     STATUS_STARTING = 3
-    STATUS_MPPT = 4                 # Normal operation
+    STATUS_MPPT = 4  # Normal operation
     STATUS_THROTTLED = 5
     STATUS_SHUTTING_DOWN = 6
     STATUS_FAULT = 7
@@ -127,9 +128,13 @@ class FroniusController(InverterController):
                 connected = await self._client.connect()
                 if connected:
                     self._connected = True
-                    _LOGGER.info(f"Connected to Fronius inverter at {self.host}:{self.port}")
+                    _LOGGER.info(
+                        f"Connected to Fronius inverter at {self.host}:{self.port}"
+                    )
                 else:
-                    _LOGGER.error(f"Failed to connect to Fronius inverter at {self.host}:{self.port}")
+                    _LOGGER.error(
+                        f"Failed to connect to Fronius inverter at {self.host}:{self.port}"
+                    )
 
                 return connected
 
@@ -155,7 +160,7 @@ class FroniusController(InverterController):
 
         try:
             # If slave was set in client constructor (pymodbus 3.6+), don't pass it again
-            if getattr(self, '_slave_in_client', False):
+            if getattr(self, "_slave_in_client", False):
                 result = await self._client.write_register(address=address, value=value)
             else:
                 # Try different parameter names for older pymodbus versions
@@ -187,8 +192,10 @@ class FroniusController(InverterController):
 
         try:
             # If slave was set in client constructor (pymodbus 3.6+), don't pass it again
-            if getattr(self, '_slave_in_client', False):
-                result = await self._client.read_holding_registers(address=address, count=count)
+            if getattr(self, "_slave_in_client", False):
+                result = await self._client.read_holding_registers(
+                    address=address, count=count
+                )
             else:
                 # Try different parameter names for older pymodbus versions
                 result = await self._try_modbus_call(
@@ -279,7 +286,7 @@ class FroniusController(InverterController):
                     model_chars.append(chr(high_byte))
                 if low_byte:
                     model_chars.append(chr(low_byte))
-            self._model_string = ''.join(model_chars).strip('\x00').strip()
+            self._model_string = "".join(model_chars).strip("\x00").strip()
 
             if not self._model_string:
                 _LOGGER.debug("Empty model string from inverter")
@@ -289,14 +296,16 @@ class FroniusController(InverterController):
 
             # Parse capacity from model string
             # Look for patterns like "5.0", "10.0", "8.2" etc.
-            match = re.search(r'(\d+\.?\d*)', self._model_string)
+            match = re.search(r"(\d+\.?\d*)", self._model_string)
             if match:
                 capacity_kw = float(match.group(1))
                 self._rated_capacity_w = int(capacity_kw * 1000)
                 _LOGGER.info(f"Fronius rated capacity: {self._rated_capacity_w}W")
                 return self._rated_capacity_w
 
-            _LOGGER.warning(f"Could not parse capacity from model: {self._model_string}")
+            _LOGGER.warning(
+                f"Could not parse capacity from model: {self._model_string}"
+            )
             return None
 
         except Exception as e:
@@ -340,16 +349,18 @@ class FroniusController(InverterController):
                     _LOGGER.debug(f"Using auto-detected capacity: {rated_capacity_w}W")
 
             use_load_following = (
-                self._load_following and
-                home_load_w is not None and
-                rated_capacity_w is not None and
-                rated_capacity_w > 0
+                self._load_following
+                and home_load_w is not None
+                and rated_capacity_w is not None
+                and rated_capacity_w > 0
             )
 
             if use_load_following:
                 # Load following mode: Calculate power limit percentage based on home load
                 # This works for users without 0W soft export limit configured
-                target_percent = min(100, max(0, (home_load_w / rated_capacity_w) * 100))
+                target_percent = min(
+                    100, max(0, (home_load_w / rated_capacity_w) * 100)
+                )
                 target_value = int(target_percent * 100)  # SunSpec uses 0-10000 scale
 
                 _LOGGER.info(
@@ -471,7 +482,7 @@ class FroniusController(InverterController):
             if ac_power and len(ac_power) >= 2:
                 power = self._to_signed16(ac_power[0])
                 scale_factor = self._to_signed16(ac_power[1])
-                attrs["ac_power"] = int(power * (10 ** scale_factor))
+                attrs["ac_power"] = int(power * (10**scale_factor))
 
             # Read DC power
             dc_power = await self._read_register(self.REG_DC_POWER, 1)
@@ -481,7 +492,9 @@ class FroniusController(InverterController):
             # Read temperature
             temp = await self._read_register(self.REG_TEMPERATURE, 1)
             if temp:
-                attrs["inverter_temperature"] = round(self._to_signed16(temp[0]) * 0.1, 1)
+                attrs["inverter_temperature"] = round(
+                    self._to_signed16(temp[0]) * 0.1, 1
+                )
 
             # Read power limit status
             limit_ena = await self._read_register(self.REG_WMAXLIM_ENA, 1)
@@ -541,14 +554,21 @@ class FroniusController(InverterController):
                 elif state_value == self.STATUS_FAULT:
                     status = InverterStatus.ERROR
                     attrs["running_state"] = "fault"
-                elif state_value in (self.STATUS_OFF, self.STATUS_SLEEPING, self.STATUS_STANDBY):
+                elif state_value in (
+                    self.STATUS_OFF,
+                    self.STATUS_SLEEPING,
+                    self.STATUS_STANDBY,
+                ):
                     status = InverterStatus.ONLINE
                     attrs["running_state"] = "standby"
                 else:
                     attrs["running_state"] = f"state_{state_value}"
 
             # Check if power limiting is active
-            if attrs.get("power_limit_enabled") and attrs.get("power_limit_percent", 100) < 100:
+            if (
+                attrs.get("power_limit_enabled")
+                and attrs.get("power_limit_percent", 100) < 100
+            ):
                 is_curtailed = True
                 if status == InverterStatus.ONLINE:
                     status = InverterStatus.CURTAILED

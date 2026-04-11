@@ -3,6 +3,7 @@
 All inverter implementations must inherit from InverterController
 and implement the required methods.
 """
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
@@ -14,6 +15,7 @@ _LOGGER = logging.getLogger(__name__)
 
 class InverterStatus(Enum):
     """Inverter connection and operational status."""
+
     UNKNOWN = "unknown"
     ONLINE = "online"
     OFFLINE = "offline"
@@ -24,6 +26,7 @@ class InverterStatus(Enum):
 @dataclass
 class InverterState:
     """Current state of the inverter."""
+
     status: InverterStatus
     is_curtailed: bool
     power_output_w: Optional[float] = None

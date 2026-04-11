@@ -5,6 +5,7 @@ Uses the plant-level PV power limit and active power percentage registers.
 
 Reference: https://github.com/TypQxQ/Sigenergy-Local-Modbus
 """
+
 import asyncio
 import logging
 from typing import Optional
@@ -37,86 +38,100 @@ class SigenergyController(InverterController):
 
     # === PLANT-LEVEL REGISTERS (slave ID 247) ===
     # Holding registers (read/write)
-    REG_PV_MAX_POWER_LIMIT = 40036        # PV max power limit (U32, gain 1000, kW)
-    REG_ACTIVE_POWER_PCT_TARGET = 40005   # Active power % target (S16, gain 100)
-    REG_ACTIVE_POWER_FIXED_TARGET = 40001 # Active power fixed target (S32, gain 1000, kW)
-    REG_GRID_EXPORT_LIMIT = 40038         # Grid export limit (U32, gain 1000)
-    REG_PCS_EXPORT_LIMIT = 40042          # PCS export limit (U32, gain 1000)
-    REG_ESS_MAX_CHARGE_LIMIT = 40032      # ESS max charging (U32, gain 1000, kW)
-    REG_ESS_MAX_DISCHARGE_LIMIT = 40034   # ESS max discharging (U32, gain 1000, kW)
-    REG_REMOTE_EMS_ENABLE = 40029         # Remote EMS enable (U16: 0=disabled, 1=enabled)
-    REG_REMOTE_EMS_CONTROL_MODE = 40031   # Remote EMS control mode (U16, see REMOTE_EMS_MODE_* constants)
-    REG_ESS_BACKUP_SOC = 40046            # ESS backup SOC (U16, gain 10, %)
-    REG_ESS_CHARGE_CUTOFF_SOC = 40047     # ESS charge cut-off SOC (U16, gain 10, %)
+    REG_PV_MAX_POWER_LIMIT = 40036  # PV max power limit (U32, gain 1000, kW)
+    REG_ACTIVE_POWER_PCT_TARGET = 40005  # Active power % target (S16, gain 100)
+    REG_ACTIVE_POWER_FIXED_TARGET = (
+        40001  # Active power fixed target (S32, gain 1000, kW)
+    )
+    REG_GRID_EXPORT_LIMIT = 40038  # Grid export limit (U32, gain 1000)
+    REG_PCS_EXPORT_LIMIT = 40042  # PCS export limit (U32, gain 1000)
+    REG_ESS_MAX_CHARGE_LIMIT = 40032  # ESS max charging (U32, gain 1000, kW)
+    REG_ESS_MAX_DISCHARGE_LIMIT = 40034  # ESS max discharging (U32, gain 1000, kW)
+    REG_REMOTE_EMS_ENABLE = 40029  # Remote EMS enable (U16: 0=disabled, 1=enabled)
+    REG_REMOTE_EMS_CONTROL_MODE = (
+        40031  # Remote EMS control mode (U16, see REMOTE_EMS_MODE_* constants)
+    )
+    REG_ESS_BACKUP_SOC = 40046  # ESS backup SOC (U16, gain 10, %)
+    REG_ESS_CHARGE_CUTOFF_SOC = 40047  # ESS charge cut-off SOC (U16, gain 10, %)
     REG_ESS_DISCHARGE_CUTOFF_SOC = 40048  # ESS discharge cut-off SOC (U16, gain 10, %)
 
     # Input registers (read-only) - Real-time power
-    REG_PV_POWER = 30035                  # PV power (S32, gain 1000, kW) — DC-coupled only
-    REG_THIRD_PARTY_PV_POWER = 30194     # Third-party inverter power (S32, gain 1000, kW) — AC-coupled (Smart Port)
-    REG_ACTIVE_POWER = 30031              # Active power (S32, gain 1000, kW)
-    REG_ESS_SOC = 30014                   # Battery SOC (U16, gain 10, %)
-    REG_ESS_POWER = 30037                 # Battery power (S32, gain 1000, kW)
-    REG_RUNNING_STATE = 30051             # Plant running state (U16)
-    REG_GRID_SENSOR_POWER = 30005         # Grid sensor active power (S32, gain 1000, kW)
-    REG_EMS_WORK_MODE = 30003             # EMS work mode (U16)
+    REG_PV_POWER = 30035  # PV power (S32, gain 1000, kW) — DC-coupled only
+    REG_THIRD_PARTY_PV_POWER = 30194  # Third-party inverter power (S32, gain 1000, kW) — AC-coupled (Smart Port)
+    REG_ACTIVE_POWER = 30031  # Active power (S32, gain 1000, kW)
+    REG_ESS_SOC = 30014  # Battery SOC (U16, gain 10, %)
+    REG_ESS_POWER = 30037  # Battery power (S32, gain 1000, kW)
+    REG_RUNNING_STATE = 30051  # Plant running state (U16)
+    REG_GRID_SENSOR_POWER = 30005  # Grid sensor active power (S32, gain 1000, kW)
+    REG_EMS_WORK_MODE = 30003  # EMS work mode (U16)
 
     # Input registers (read-only) - Battery health
-    REG_ESS_RATED_CAPACITY = 30083        # ESS rated energy capacity (U32, gain 100, kWh)
-    REG_ESS_SOH = 30087                   # Battery State of Health (U16, gain 10, %)
+    REG_ESS_RATED_CAPACITY = 30083  # ESS rated energy capacity (U32, gain 100, kWh)
+    REG_ESS_SOH = 30087  # Battery State of Health (U16, gain 10, %)
 
     # Input registers (read-only) - Energy totals (U64 = 4 registers, gain 100)
-    REG_ACCUMULATED_PV_ENERGY = 30088     # Total PV generation (U64, gain 100, kWh)
-    REG_DAILY_CONSUMED_ENERGY = 30092     # Daily load consumption (U32, gain 100, kWh)
-    REG_ACCUMULATED_CONSUMED_ENERGY = 30094  # Total load consumption (U64, gain 100, kWh)
-    REG_ACCUMULATED_BATTERY_CHARGE = 30200   # Total battery charged (U64, gain 100, kWh)
-    REG_ACCUMULATED_BATTERY_DISCHARGE = 30204  # Total battery discharged (U64, gain 100, kWh)
-    REG_ACCUMULATED_GRID_IMPORT = 30216   # Total grid import (U64, gain 100, kWh)
-    REG_ACCUMULATED_GRID_EXPORT = 30220   # Total grid export (U64, gain 100, kWh)
+    REG_ACCUMULATED_PV_ENERGY = 30088  # Total PV generation (U64, gain 100, kWh)
+    REG_DAILY_CONSUMED_ENERGY = 30092  # Daily load consumption (U32, gain 100, kWh)
+    REG_ACCUMULATED_CONSUMED_ENERGY = (
+        30094  # Total load consumption (U64, gain 100, kWh)
+    )
+    REG_ACCUMULATED_BATTERY_CHARGE = 30200  # Total battery charged (U64, gain 100, kWh)
+    REG_ACCUMULATED_BATTERY_DISCHARGE = (
+        30204  # Total battery discharged (U64, gain 100, kWh)
+    )
+    REG_ACCUMULATED_GRID_IMPORT = 30216  # Total grid import (U64, gain 100, kWh)
+    REG_ACCUMULATED_GRID_EXPORT = 30220  # Total grid export (U64, gain 100, kWh)
 
     # === INVERTER-LEVEL REGISTERS (slave ID 1) ===
     # Fallback if plant registers don't work
-    REG_INV_SOC = 30601                   # Inverter battery SOC (U16, gain 10, %)
-    REG_INV_SOH = 30602                   # Inverter battery SOH (U16, gain 10, %)
-    REG_INV_ACTIVE_POWER = 30587          # Inverter active power (S32, gain 1000, kW)
-    REG_INV_ESS_POWER = 30599             # Inverter battery power (S32, gain 1000, kW)
-    REG_INV_PV_POWER = 31035              # Inverter PV power (S32, gain 1000, kW)
+    REG_INV_SOC = 30601  # Inverter battery SOC (U16, gain 10, %)
+    REG_INV_SOH = 30602  # Inverter battery SOH (U16, gain 10, %)
+    REG_INV_ACTIVE_POWER = 30587  # Inverter active power (S32, gain 1000, kW)
+    REG_INV_ESS_POWER = 30599  # Inverter battery power (S32, gain 1000, kW)
+    REG_INV_PV_POWER = 31035  # Inverter PV power (S32, gain 1000, kW)
 
     # Constants
     GAIN_POWER = 1000  # kW → scaled value (multiply to write, divide to read)
     GAIN_PERCENT = 100  # % → scaled value
-    GAIN_SOC = 10      # % → scaled value
+    GAIN_SOC = 10  # % → scaled value
     GAIN_ENERGY = 100  # kWh → scaled value for energy registers
 
     # Remote EMS Control Modes (register 40031)
     # Remote EMS can be left permanently enabled — mode 2 is equivalent
     # to native self-consumption and allows instant transitions to other modes.
-    REMOTE_EMS_MODE_PCS_REMOTE = 0          # PCS remote control
-    REMOTE_EMS_MODE_STANDBY = 1             # Standby
-    REMOTE_EMS_MODE_SELF_CONSUMPTION = 2    # Maximum self-consumption
-    REMOTE_EMS_MODE_CHARGE_GRID = 3         # Command charging (grid first)
-    REMOTE_EMS_MODE_CHARGE_PV = 4           # Command charging (PV first)
-    REMOTE_EMS_MODE_DISCHARGE_PV = 5        # Command discharging (PV first)
-    REMOTE_EMS_MODE_DISCHARGE_ESS = 6       # Command discharging (ESS first)
+    REMOTE_EMS_MODE_PCS_REMOTE = 0  # PCS remote control
+    REMOTE_EMS_MODE_STANDBY = 1  # Standby
+    REMOTE_EMS_MODE_SELF_CONSUMPTION = 2  # Maximum self-consumption
+    REMOTE_EMS_MODE_CHARGE_GRID = 3  # Command charging (grid first)
+    REMOTE_EMS_MODE_CHARGE_PV = 4  # Command charging (PV first)
+    REMOTE_EMS_MODE_DISCHARGE_PV = 5  # Command discharging (PV first)
+    REMOTE_EMS_MODE_DISCHARGE_ESS = 6  # Command discharging (ESS first)
 
     # ESS rated power registers (input, read-only)
-    REG_ESS_RATED_CHARGE_POWER = 30079    # ESS rated charge power (U32, gain 1000, kW)
-    REG_ESS_RATED_DISCHARGE_POWER = 30081 # ESS rated discharge power (U32, gain 1000, kW)
+    REG_ESS_RATED_CHARGE_POWER = 30079  # ESS rated charge power (U32, gain 1000, kW)
+    REG_ESS_RATED_DISCHARGE_POWER = (
+        30081  # ESS rated discharge power (U32, gain 1000, kW)
+    )
 
     # Curtailment values
     # Zero export lets the inverter self-curtail PV at hardware speed —
     # solar continues powering house and charging battery, only grid export is blocked.
-    EXPORT_LIMIT_ZERO = 0         # Zero export
+    EXPORT_LIMIT_ZERO = 0  # Zero export
     EXPORT_LIMIT_UNLIMITED = 0xFFFFFFFE  # Unlimited export (normal operation)
-    EXPORT_LIMIT_INVALID = 0xFFFFFFFF    # Invalid register value (per Sigenergy Modbus docs)
-    PV_POWER_LIMIT_ZERO = 0       # Set PV limit to 0 kW (full shutdown - not used)
-    ACTIVE_POWER_PCT_ZERO = 0     # 0% active power
+    EXPORT_LIMIT_INVALID = (
+        0xFFFFFFFF  # Invalid register value (per Sigenergy Modbus docs)
+    )
+    PV_POWER_LIMIT_ZERO = 0  # Set PV limit to 0 kW (full shutdown - not used)
+    ACTIVE_POWER_PCT_ZERO = 0  # 0% active power
 
     # Default Modbus settings
     # Sigenergy uses different slave IDs for different register levels:
     # - Plant-level registers (30001-30099): Slave ID 247
     # - Inverter-level registers (30500+): Slave ID 1 (or specific inverter address)
     DEFAULT_PORT = 502
-    DEFAULT_SLAVE_ID = 247  # Plant address - will auto-switch to 1 for inverter registers
+    DEFAULT_SLAVE_ID = (
+        247  # Plant address - will auto-switch to 1 for inverter registers
+    )
     DEFAULT_INVERTER_SLAVE_ID = 1  # Default inverter address
     TIMEOUT_SECONDS = 10.0
 
@@ -140,14 +155,24 @@ class SigenergyController(InverterController):
         super().__init__(host, port, slave_id, model)
         self._client: Optional[AsyncModbusTcpClient] = None
         self._lock = asyncio.Lock()
-        self._original_pv_limit: Optional[int] = None  # Store original limit for restore
-        self._use_inverter_registers: Optional[bool] = None  # None=unknown, True=inverter, False=plant
+        self._original_pv_limit: Optional[int] = (
+            None  # Store original limit for restore
+        )
+        self._use_inverter_registers: Optional[bool] = (
+            None  # None=unknown, True=inverter, False=plant
+        )
         self._configured_max_export_limit_kw = max_export_limit_kw
-        self._restore_backup_reserve_pct: Optional[int] = None  # Set by optimizer for restore_normal
+        self._restore_backup_reserve_pct: Optional[int] = (
+            None  # Set by optimizer for restore_normal
+        )
         # For AC Charger setups: AC Charger is slave 1, inverter is slave 2
         # Use user-configured slave_id for inverter registers instead of hardcoded default
         # This allows users with AC Chargers to specify slave 2 and have it work correctly
-        self._inverter_slave_id = slave_id if slave_id != self.DEFAULT_SLAVE_ID else self.DEFAULT_INVERTER_SLAVE_ID
+        self._inverter_slave_id = (
+            slave_id
+            if slave_id != self.DEFAULT_SLAVE_ID
+            else self.DEFAULT_INVERTER_SLAVE_ID
+        )
 
     async def connect(self) -> bool:
         """Connect to the Sigenergy system via Modbus TCP."""
@@ -170,7 +195,9 @@ class SigenergyController(InverterController):
                         f"(plant slave={self.slave_id}, inverter slave={self._inverter_slave_id})"
                     )
                 else:
-                    _LOGGER.error(f"Failed to connect to Sigenergy at {self.host}:{self.port}")
+                    _LOGGER.error(
+                        f"Failed to connect to Sigenergy at {self.host}:{self.port}"
+                    )
 
                 return connected
 
@@ -188,7 +215,9 @@ class SigenergyController(InverterController):
             self._connected = False
             _LOGGER.debug(f"Disconnected from Sigenergy at {self.host}")
 
-    async def _write_holding_registers(self, address: int, values: list[int], slave_id: Optional[int] = None) -> bool:
+    async def _write_holding_registers(
+        self, address: int, values: list[int], slave_id: Optional[int] = None
+    ) -> bool:
         """Write values to holding registers.
 
         Args:
@@ -226,7 +255,9 @@ class SigenergyController(InverterController):
             _LOGGER.error(f"Error writing to register {address}: {e}")
             return False
 
-    async def _read_holding_registers(self, address: int, count: int = 1, slave_id: Optional[int] = None) -> Optional[list]:
+    async def _read_holding_registers(
+        self, address: int, count: int = 1, slave_id: Optional[int] = None
+    ) -> Optional[list]:
         """Read values from holding registers.
 
         Args:
@@ -251,7 +282,9 @@ class SigenergyController(InverterController):
             )
 
             if result.isError():
-                _LOGGER.debug(f"Modbus read error at holding register {address}: {result}")
+                _LOGGER.debug(
+                    f"Modbus read error at holding register {address}: {result}"
+                )
                 return None
 
             return result.registers
@@ -263,7 +296,9 @@ class SigenergyController(InverterController):
             _LOGGER.debug(f"Error reading holding register {address}: {e}")
             return None
 
-    async def _read_input_registers(self, address: int, count: int = 1, slave_id: Optional[int] = None) -> Optional[list]:
+    async def _read_input_registers(
+        self, address: int, count: int = 1, slave_id: Optional[int] = None
+    ) -> Optional[list]:
         """Read values from input registers.
 
         Args:
@@ -288,16 +323,22 @@ class SigenergyController(InverterController):
             )
 
             if result.isError():
-                _LOGGER.debug(f"Modbus read error at input register {address} [slave={effective_slave}]: {result}")
+                _LOGGER.debug(
+                    f"Modbus read error at input register {address} [slave={effective_slave}]: {result}"
+                )
                 return None
 
             return result.registers
 
         except ModbusException as e:
-            _LOGGER.debug(f"Modbus exception reading input register {address} [slave={effective_slave}]: {e}")
+            _LOGGER.debug(
+                f"Modbus exception reading input register {address} [slave={effective_slave}]: {e}"
+            )
             return None
         except Exception as e:
-            _LOGGER.debug(f"Error reading input register {address} [slave={effective_slave}]: {e}")
+            _LOGGER.debug(
+                f"Error reading input register {address} [slave={effective_slave}]: {e}"
+            )
             return None
 
     def _to_signed32(self, high: int, low: int) -> int:
@@ -361,23 +402,50 @@ class SigenergyController(InverterController):
             return None
 
         # 2. ESS rated power (input registers — hardware specs)
-        rated_charge_regs = await self._read_input_registers(self.REG_ESS_RATED_CHARGE_POWER, 2)
-        rated_discharge_regs = await self._read_input_registers(self.REG_ESS_RATED_DISCHARGE_POWER, 2)
-        if rated_charge_regs and len(rated_charge_regs) >= 2 and rated_discharge_regs and len(rated_discharge_regs) >= 2:
-            rated_charge = self._to_unsigned32(rated_charge_regs[0], rated_charge_regs[1])
-            rated_discharge = self._to_unsigned32(rated_discharge_regs[0], rated_discharge_regs[1])
+        rated_charge_regs = await self._read_input_registers(
+            self.REG_ESS_RATED_CHARGE_POWER, 2
+        )
+        rated_discharge_regs = await self._read_input_registers(
+            self.REG_ESS_RATED_DISCHARGE_POWER, 2
+        )
+        if (
+            rated_charge_regs
+            and len(rated_charge_regs) >= 2
+            and rated_discharge_regs
+            and len(rated_discharge_regs) >= 2
+        ):
+            rated_charge = self._to_unsigned32(
+                rated_charge_regs[0], rated_charge_regs[1]
+            )
+            rated_discharge = self._to_unsigned32(
+                rated_discharge_regs[0], rated_discharge_regs[1]
+            )
             if rated_charge > 0 and rated_discharge > 0:
                 cap_kw = min(rated_charge, rated_discharge) / self.GAIN_POWER
                 _LOGGER.debug(f"Export safety cap from ESS rated power: {cap_kw} kW")
                 return cap_kw
 
         # 3. ESS max charge/discharge limits (holding registers — current config)
-        max_charge_regs = await self._read_holding_registers(self.REG_ESS_MAX_CHARGE_LIMIT, 2)
-        max_discharge_regs = await self._read_holding_registers(self.REG_ESS_MAX_DISCHARGE_LIMIT, 2)
-        if max_charge_regs and len(max_charge_regs) >= 2 and max_discharge_regs and len(max_discharge_regs) >= 2:
+        max_charge_regs = await self._read_holding_registers(
+            self.REG_ESS_MAX_CHARGE_LIMIT, 2
+        )
+        max_discharge_regs = await self._read_holding_registers(
+            self.REG_ESS_MAX_DISCHARGE_LIMIT, 2
+        )
+        if (
+            max_charge_regs
+            and len(max_charge_regs) >= 2
+            and max_discharge_regs
+            and len(max_discharge_regs) >= 2
+        ):
             max_charge = self._to_unsigned32(max_charge_regs[0], max_charge_regs[1])
-            max_discharge = self._to_unsigned32(max_discharge_regs[0], max_discharge_regs[1])
-            if 0 < max_charge < self.EXPORT_LIMIT_UNLIMITED and 0 < max_discharge < self.EXPORT_LIMIT_UNLIMITED:
+            max_discharge = self._to_unsigned32(
+                max_discharge_regs[0], max_discharge_regs[1]
+            )
+            if (
+                0 < max_charge < self.EXPORT_LIMIT_UNLIMITED
+                and 0 < max_discharge < self.EXPORT_LIMIT_UNLIMITED
+            ):
                 cap_kw = min(max_charge, max_discharge) / self.GAIN_POWER
                 _LOGGER.debug(f"Export safety cap from ESS max limits: {cap_kw} kW")
                 return cap_kw
@@ -386,7 +454,10 @@ class SigenergyController(InverterController):
         pcs_regs = await self._read_holding_registers(self.REG_PCS_EXPORT_LIMIT, 2)
         if pcs_regs and len(pcs_regs) >= 2:
             pcs_limit = self._to_unsigned32(pcs_regs[0], pcs_regs[1])
-            if 0 < pcs_limit < self.EXPORT_LIMIT_UNLIMITED and pcs_limit != self.EXPORT_LIMIT_INVALID:
+            if (
+                0 < pcs_limit < self.EXPORT_LIMIT_UNLIMITED
+                and pcs_limit != self.EXPORT_LIMIT_INVALID
+            ):
                 cap_kw = pcs_limit / self.GAIN_POWER
                 _LOGGER.debug(f"Export safety cap from PCS export limit: {cap_kw} kW")
                 return cap_kw
@@ -395,7 +466,10 @@ class SigenergyController(InverterController):
         export_regs = await self._read_holding_registers(self.REG_GRID_EXPORT_LIMIT, 2)
         if export_regs and len(export_regs) >= 2:
             export_limit = self._to_unsigned32(export_regs[0], export_regs[1])
-            if 0 < export_limit < self.EXPORT_LIMIT_UNLIMITED and export_limit != self.EXPORT_LIMIT_INVALID:
+            if (
+                0 < export_limit < self.EXPORT_LIMIT_UNLIMITED
+                and export_limit != self.EXPORT_LIMIT_INVALID
+            ):
                 cap_kw = export_limit / self.GAIN_POWER
                 _LOGGER.debug(f"Export safety cap from grid export limit: {cap_kw} kW")
                 return cap_kw
@@ -411,7 +485,9 @@ class SigenergyController(InverterController):
         if cap is not None:
             _LOGGER.info(f"Resolved Sigenergy export safety cap: {cap} kW")
         else:
-            _LOGGER.warning("Could not resolve Sigenergy export safety cap from any source")
+            _LOGGER.warning(
+                "Could not resolve Sigenergy export safety cap from any source"
+            )
         return cap
 
     async def curtail(
@@ -441,14 +517,20 @@ class SigenergyController(InverterController):
             if self._original_pv_limit is None:
                 self._original_pv_limit = await self._get_current_export_limit()
                 if self._original_pv_limit is not None:
-                    limit_str = f"{self._original_pv_limit / self.GAIN_POWER} kW" if self._original_pv_limit < self.EXPORT_LIMIT_UNLIMITED else "unlimited"
+                    limit_str = (
+                        f"{self._original_pv_limit / self.GAIN_POWER} kW"
+                        if self._original_pv_limit < self.EXPORT_LIMIT_UNLIMITED
+                        else "unlimited"
+                    )
                     _LOGGER.info(f"Stored original export limit: {limit_str}")
 
             _LOGGER.info(f"Curtailing Sigenergy at {self.host} (zero export)")
 
             # Set export limit to 0 — inverter self-curtails PV at hardware speed
             values = self._from_unsigned32(self.EXPORT_LIMIT_ZERO)
-            success = await self._write_holding_registers(self.REG_GRID_EXPORT_LIMIT, values)
+            success = await self._write_holding_registers(
+                self.REG_GRID_EXPORT_LIMIT, values
+            )
 
             if success:
                 _LOGGER.info(f"Successfully set zero export on Sigenergy")
@@ -477,7 +559,10 @@ class SigenergyController(InverterController):
                 return False
 
             # Use stored original limit, or fall back to safety cap, or unlimited
-            if self._original_pv_limit and self._original_pv_limit < self.EXPORT_LIMIT_UNLIMITED:
+            if (
+                self._original_pv_limit
+                and self._original_pv_limit < self.EXPORT_LIMIT_UNLIMITED
+            ):
                 restore_value = self._original_pv_limit
             else:
                 safety_cap = await self._get_effective_export_safety_cap_kw()
@@ -485,11 +570,17 @@ class SigenergyController(InverterController):
                     restore_value = int(safety_cap * self.GAIN_POWER)
                 else:
                     restore_value = self.EXPORT_LIMIT_UNLIMITED
-            limit_str = f"{restore_value / self.GAIN_POWER} kW" if restore_value < self.EXPORT_LIMIT_UNLIMITED else "unlimited"
+            limit_str = (
+                f"{restore_value / self.GAIN_POWER} kW"
+                if restore_value < self.EXPORT_LIMIT_UNLIMITED
+                else "unlimited"
+            )
             _LOGGER.info(f"Restoring export limit to: {limit_str}")
 
             values = self._from_unsigned32(restore_value)
-            success = await self._write_holding_registers(self.REG_GRID_EXPORT_LIMIT, values)
+            success = await self._write_holding_registers(
+                self.REG_GRID_EXPORT_LIMIT, values
+            )
 
             if success:
                 _LOGGER.info(f"Successfully restored Sigenergy export at {self.host}")
@@ -519,7 +610,9 @@ class SigenergyController(InverterController):
         # Read PV power (S32, 2 registers) — DC-coupled solar only
         pv_power_regs = await self._read_input_registers(self.REG_PV_POWER, 2)
         if pv_power_regs and len(pv_power_regs) >= 2:
-            pv_power_kw = self._to_signed32(pv_power_regs[0], pv_power_regs[1]) / self.GAIN_POWER
+            pv_power_kw = (
+                self._to_signed32(pv_power_regs[0], pv_power_regs[1]) / self.GAIN_POWER
+            )
             attrs["pv_power_kw"] = round(pv_power_kw, 2)
             attrs["pv_power_w"] = pv_power_kw * 1000
             success_count += 1
@@ -539,16 +632,24 @@ class SigenergyController(InverterController):
             success_count += 1
 
         # Read grid sensor power (S32, 2 registers)
-        grid_power_regs = await self._read_input_registers(self.REG_GRID_SENSOR_POWER, 2)
+        grid_power_regs = await self._read_input_registers(
+            self.REG_GRID_SENSOR_POWER, 2
+        )
         if grid_power_regs and len(grid_power_regs) >= 2:
-            grid_power_kw = self._to_signed32(grid_power_regs[0], grid_power_regs[1]) / self.GAIN_POWER
+            grid_power_kw = (
+                self._to_signed32(grid_power_regs[0], grid_power_regs[1])
+                / self.GAIN_POWER
+            )
             attrs["grid_power_kw"] = round(grid_power_kw, 2)
             success_count += 1
 
         # Read battery power (S32, 2 registers)
         ess_power_regs = await self._read_input_registers(self.REG_ESS_POWER, 2)
         if ess_power_regs and len(ess_power_regs) >= 2:
-            ess_power_kw = self._to_signed32(ess_power_regs[0], ess_power_regs[1]) / self.GAIN_POWER
+            ess_power_kw = (
+                self._to_signed32(ess_power_regs[0], ess_power_regs[1])
+                / self.GAIN_POWER
+            )
             attrs["battery_power_kw"] = round(ess_power_kw, 2)
             success_count += 1
 
@@ -560,7 +661,10 @@ class SigenergyController(InverterController):
         # Read rated capacity (U32, gain 100, kWh)
         capacity_regs = await self._read_input_registers(self.REG_ESS_RATED_CAPACITY, 2)
         if capacity_regs and len(capacity_regs) >= 2:
-            capacity_kwh = self._to_unsigned32(capacity_regs[0], capacity_regs[1]) / self.GAIN_ENERGY
+            capacity_kwh = (
+                self._to_unsigned32(capacity_regs[0], capacity_regs[1])
+                / self.GAIN_ENERGY
+            )
             attrs["battery_capacity_kwh"] = round(capacity_kwh, 2)
 
         attrs["_success_count"] = success_count
@@ -578,30 +682,46 @@ class SigenergyController(InverterController):
         _LOGGER.debug(f"Reading inverter registers with slave ID {inv_slave}")
 
         # Read inverter PV power (S32, 2 registers)
-        pv_power_regs = await self._read_input_registers(self.REG_INV_PV_POWER, 2, slave_id=inv_slave)
+        pv_power_regs = await self._read_input_registers(
+            self.REG_INV_PV_POWER, 2, slave_id=inv_slave
+        )
         if pv_power_regs and len(pv_power_regs) >= 2:
-            pv_power_kw = self._to_signed32(pv_power_regs[0], pv_power_regs[1]) / self.GAIN_POWER
+            pv_power_kw = (
+                self._to_signed32(pv_power_regs[0], pv_power_regs[1]) / self.GAIN_POWER
+            )
             attrs["pv_power_kw"] = round(pv_power_kw, 2)
             attrs["pv_power_w"] = pv_power_kw * 1000
             success_count += 1
 
         # Read inverter battery SOC (U16)
-        soc_regs = await self._read_input_registers(self.REG_INV_SOC, 1, slave_id=inv_slave)
+        soc_regs = await self._read_input_registers(
+            self.REG_INV_SOC, 1, slave_id=inv_slave
+        )
         if soc_regs:
             attrs["battery_soc"] = round(soc_regs[0] / self.GAIN_SOC, 1)
             success_count += 1
 
         # Read inverter active power (S32, 2 registers) - use as grid proxy
-        active_power_regs = await self._read_input_registers(self.REG_INV_ACTIVE_POWER, 2, slave_id=inv_slave)
+        active_power_regs = await self._read_input_registers(
+            self.REG_INV_ACTIVE_POWER, 2, slave_id=inv_slave
+        )
         if active_power_regs and len(active_power_regs) >= 2:
-            active_power_kw = self._to_signed32(active_power_regs[0], active_power_regs[1]) / self.GAIN_POWER
+            active_power_kw = (
+                self._to_signed32(active_power_regs[0], active_power_regs[1])
+                / self.GAIN_POWER
+            )
             attrs["active_power_kw"] = round(active_power_kw, 2)
             success_count += 1
 
         # Read inverter battery power (S32, 2 registers)
-        ess_power_regs = await self._read_input_registers(self.REG_INV_ESS_POWER, 2, slave_id=inv_slave)
+        ess_power_regs = await self._read_input_registers(
+            self.REG_INV_ESS_POWER, 2, slave_id=inv_slave
+        )
         if ess_power_regs and len(ess_power_regs) >= 2:
-            ess_power_kw = self._to_signed32(ess_power_regs[0], ess_power_regs[1]) / self.GAIN_POWER
+            ess_power_kw = (
+                self._to_signed32(ess_power_regs[0], ess_power_regs[1])
+                / self.GAIN_POWER
+            )
             attrs["battery_power_kw"] = round(ess_power_kw, 2)
             success_count += 1
 
@@ -623,39 +743,69 @@ class SigenergyController(InverterController):
                 return {"error": "Failed to connect to Sigenergy"}
 
             # Total PV generation (U64, 4 registers, gain 100)
-            pv_regs = await self._read_input_registers(self.REG_ACCUMULATED_PV_ENERGY, 4)
+            pv_regs = await self._read_input_registers(
+                self.REG_ACCUMULATED_PV_ENERGY, 4
+            )
             if pv_regs and len(pv_regs) >= 4:
-                energy["total_pv_energy_kwh"] = round(self._to_unsigned64(pv_regs) / self.GAIN_ENERGY, 2)
+                energy["total_pv_energy_kwh"] = round(
+                    self._to_unsigned64(pv_regs) / self.GAIN_ENERGY, 2
+                )
 
             # Daily load consumption (U32, 2 registers, gain 100)
-            daily_load_regs = await self._read_input_registers(self.REG_DAILY_CONSUMED_ENERGY, 2)
+            daily_load_regs = await self._read_input_registers(
+                self.REG_DAILY_CONSUMED_ENERGY, 2
+            )
             if daily_load_regs and len(daily_load_regs) >= 2:
-                energy["daily_load_energy_kwh"] = round(self._to_unsigned32(daily_load_regs[0], daily_load_regs[1]) / self.GAIN_ENERGY, 2)
+                energy["daily_load_energy_kwh"] = round(
+                    self._to_unsigned32(daily_load_regs[0], daily_load_regs[1])
+                    / self.GAIN_ENERGY,
+                    2,
+                )
 
             # Total load consumption (U64, 4 registers, gain 100)
-            total_load_regs = await self._read_input_registers(self.REG_ACCUMULATED_CONSUMED_ENERGY, 4)
+            total_load_regs = await self._read_input_registers(
+                self.REG_ACCUMULATED_CONSUMED_ENERGY, 4
+            )
             if total_load_regs and len(total_load_regs) >= 4:
-                energy["total_load_energy_kwh"] = round(self._to_unsigned64(total_load_regs) / self.GAIN_ENERGY, 2)
+                energy["total_load_energy_kwh"] = round(
+                    self._to_unsigned64(total_load_regs) / self.GAIN_ENERGY, 2
+                )
 
             # Total battery charged (U64, 4 registers, gain 100)
-            charge_regs = await self._read_input_registers(self.REG_ACCUMULATED_BATTERY_CHARGE, 4)
+            charge_regs = await self._read_input_registers(
+                self.REG_ACCUMULATED_BATTERY_CHARGE, 4
+            )
             if charge_regs and len(charge_regs) >= 4:
-                energy["total_battery_charged_kwh"] = round(self._to_unsigned64(charge_regs) / self.GAIN_ENERGY, 2)
+                energy["total_battery_charged_kwh"] = round(
+                    self._to_unsigned64(charge_regs) / self.GAIN_ENERGY, 2
+                )
 
             # Total battery discharged (U64, 4 registers, gain 100)
-            discharge_regs = await self._read_input_registers(self.REG_ACCUMULATED_BATTERY_DISCHARGE, 4)
+            discharge_regs = await self._read_input_registers(
+                self.REG_ACCUMULATED_BATTERY_DISCHARGE, 4
+            )
             if discharge_regs and len(discharge_regs) >= 4:
-                energy["total_battery_discharged_kwh"] = round(self._to_unsigned64(discharge_regs) / self.GAIN_ENERGY, 2)
+                energy["total_battery_discharged_kwh"] = round(
+                    self._to_unsigned64(discharge_regs) / self.GAIN_ENERGY, 2
+                )
 
             # Total grid import (U64, 4 registers, gain 100)
-            import_regs = await self._read_input_registers(self.REG_ACCUMULATED_GRID_IMPORT, 4)
+            import_regs = await self._read_input_registers(
+                self.REG_ACCUMULATED_GRID_IMPORT, 4
+            )
             if import_regs and len(import_regs) >= 4:
-                energy["total_grid_import_kwh"] = round(self._to_unsigned64(import_regs) / self.GAIN_ENERGY, 2)
+                energy["total_grid_import_kwh"] = round(
+                    self._to_unsigned64(import_regs) / self.GAIN_ENERGY, 2
+                )
 
             # Total grid export (U64, 4 registers, gain 100)
-            export_regs = await self._read_input_registers(self.REG_ACCUMULATED_GRID_EXPORT, 4)
+            export_regs = await self._read_input_registers(
+                self.REG_ACCUMULATED_GRID_EXPORT, 4
+            )
             if export_regs and len(export_regs) >= 4:
-                energy["total_grid_export_kwh"] = round(self._to_unsigned64(export_regs) / self.GAIN_ENERGY, 2)
+                energy["total_grid_export_kwh"] = round(
+                    self._to_unsigned64(export_regs) / self.GAIN_ENERGY, 2
+                )
 
             _LOGGER.debug(f"Sigenergy energy summary: {energy}")
             return energy
@@ -696,11 +846,20 @@ class SigenergyController(InverterController):
                     if inv_attrs.get("_success_count", 0) >= 2:
                         attrs = inv_attrs
                         self._use_inverter_registers = True
-                        _LOGGER.info(f"Sigenergy: Using inverter-level registers with slave ID {self._inverter_slave_id} (plant registers unavailable)")
+                        _LOGGER.info(
+                            f"Sigenergy: Using inverter-level registers with slave ID {self._inverter_slave_id} (plant registers unavailable)"
+                        )
                     else:
                         # Neither worked - return what we have
-                        attrs = plant_attrs if plant_attrs.get("_success_count", 0) > inv_attrs.get("_success_count", 0) else inv_attrs
-                        _LOGGER.warning(f"Sigenergy: Limited register access (plant={plant_attrs.get('_success_count', 0)}, inverter={inv_attrs.get('_success_count', 0)})")
+                        attrs = (
+                            plant_attrs
+                            if plant_attrs.get("_success_count", 0)
+                            > inv_attrs.get("_success_count", 0)
+                            else inv_attrs
+                        )
+                        _LOGGER.warning(
+                            f"Sigenergy: Limited register access (plant={plant_attrs.get('_success_count', 0)}, inverter={inv_attrs.get('_success_count', 0)})"
+                        )
             elif self._use_inverter_registers:
                 attrs = await self._read_inverter_registers()
             else:
@@ -714,21 +873,36 @@ class SigenergyController(InverterController):
             export_limit = None
             is_curtailed = False
             if not self._use_inverter_registers:
-                export_limit_regs = await self._read_holding_registers(self.REG_GRID_EXPORT_LIMIT, 2)
+                export_limit_regs = await self._read_holding_registers(
+                    self.REG_GRID_EXPORT_LIMIT, 2
+                )
                 if export_limit_regs and len(export_limit_regs) >= 2:
-                    export_limit = self._to_unsigned32(export_limit_regs[0], export_limit_regs[1])
+                    export_limit = self._to_unsigned32(
+                        export_limit_regs[0], export_limit_regs[1]
+                    )
                     is_curtailed = export_limit < 100  # Less than 0.1 kW threshold
                     if export_limit < self.EXPORT_LIMIT_UNLIMITED:
-                        attrs["export_limit_kw"] = round(export_limit / self.GAIN_POWER, 2)
+                        attrs["export_limit_kw"] = round(
+                            export_limit / self.GAIN_POWER, 2
+                        )
                     else:
                         attrs["export_limit_kw"] = "unlimited"
 
                 # Also read PCS export limit for diagnostics
-                pcs_limit_regs = await self._read_holding_registers(self.REG_PCS_EXPORT_LIMIT, 2)
+                pcs_limit_regs = await self._read_holding_registers(
+                    self.REG_PCS_EXPORT_LIMIT, 2
+                )
                 if pcs_limit_regs and len(pcs_limit_regs) >= 2:
-                    pcs_limit = self._to_unsigned32(pcs_limit_regs[0], pcs_limit_regs[1])
-                    if pcs_limit < self.EXPORT_LIMIT_UNLIMITED and pcs_limit != self.EXPORT_LIMIT_INVALID:
-                        attrs["pcs_export_limit_kw"] = round(pcs_limit / self.GAIN_POWER, 2)
+                    pcs_limit = self._to_unsigned32(
+                        pcs_limit_regs[0], pcs_limit_regs[1]
+                    )
+                    if (
+                        pcs_limit < self.EXPORT_LIMIT_UNLIMITED
+                        and pcs_limit != self.EXPORT_LIMIT_INVALID
+                    ):
+                        attrs["pcs_export_limit_kw"] = round(
+                            pcs_limit / self.GAIN_POWER, 2
+                        )
 
             # If we couldn't read ANY meaningful registers, the inverter is likely sleeping/offline
             if not attrs or len(attrs) == 0:
@@ -798,7 +972,9 @@ class SigenergyController(InverterController):
 
             _LOGGER.info(f"Setting Sigenergy PV limit to {limit_kw} kW")
             values = self._from_unsigned32(scaled_value)
-            return await self._write_holding_registers(self.REG_PV_MAX_POWER_LIMIT, values)
+            return await self._write_holding_registers(
+                self.REG_PV_MAX_POWER_LIMIT, values
+            )
 
         except Exception as e:
             _LOGGER.error(f"Error setting PV power limit: {e}")
@@ -833,7 +1009,9 @@ class SigenergyController(InverterController):
 
             _LOGGER.info(f"Setting Sigenergy export limit to {limit_kw} kW")
             values = self._from_unsigned32(scaled_value)
-            return await self._write_holding_registers(self.REG_GRID_EXPORT_LIMIT, values)
+            return await self._write_holding_registers(
+                self.REG_GRID_EXPORT_LIMIT, values
+            )
 
         except Exception as e:
             _LOGGER.error(f"Error setting export limit: {e}")
@@ -855,17 +1033,27 @@ class SigenergyController(InverterController):
             safety_cap = await self._get_effective_export_safety_cap_kw()
             if safety_cap is not None:
                 restore_value = int(safety_cap * self.GAIN_POWER)
-                _LOGGER.info(f"Restoring Sigenergy export limit to safety cap: {safety_cap} kW")
+                _LOGGER.info(
+                    f"Restoring Sigenergy export limit to safety cap: {safety_cap} kW"
+                )
             else:
                 restore_value = self.EXPORT_LIMIT_UNLIMITED
-                _LOGGER.info("Restoring Sigenergy export limit to unlimited (no safety cap available)")
+                _LOGGER.info(
+                    "Restoring Sigenergy export limit to unlimited (no safety cap available)"
+                )
 
             values = self._from_unsigned32(restore_value)
-            success = await self._write_holding_registers(self.REG_GRID_EXPORT_LIMIT, values)
+            success = await self._write_holding_registers(
+                self.REG_GRID_EXPORT_LIMIT, values
+            )
 
             if success:
-                limit_str = f"{safety_cap} kW" if safety_cap is not None else "unlimited"
-                _LOGGER.info(f"Successfully restored Sigenergy export limit to {limit_str}")
+                limit_str = (
+                    f"{safety_cap} kW" if safety_cap is not None else "unlimited"
+                )
+                _LOGGER.info(
+                    f"Successfully restored Sigenergy export limit to {limit_str}"
+                )
                 self._original_pv_limit = None
             else:
                 _LOGGER.error("Failed to restore Sigenergy export limit")
@@ -897,7 +1085,9 @@ class SigenergyController(InverterController):
 
             _LOGGER.info(f"Setting Sigenergy charge rate limit to {limit_kw} kW")
             values = self._from_unsigned32(scaled_value)
-            return await self._write_holding_registers(self.REG_ESS_MAX_CHARGE_LIMIT, values)
+            return await self._write_holding_registers(
+                self.REG_ESS_MAX_CHARGE_LIMIT, values
+            )
 
         except Exception as e:
             _LOGGER.error(f"Error setting charge rate limit: {e}")
@@ -924,7 +1114,9 @@ class SigenergyController(InverterController):
 
             _LOGGER.info(f"Setting Sigenergy discharge rate limit to {limit_kw} kW")
             values = self._from_unsigned32(scaled_value)
-            return await self._write_holding_registers(self.REG_ESS_MAX_DISCHARGE_LIMIT, values)
+            return await self._write_holding_registers(
+                self.REG_ESS_MAX_DISCHARGE_LIMIT, values
+            )
 
         except Exception as e:
             _LOGGER.error(f"Error setting discharge rate limit: {e}")
@@ -948,20 +1140,25 @@ class SigenergyController(InverterController):
                 return False
 
             # Enable Remote EMS (idempotent if already enabled)
-            ems_result = await self._write_holding_registers(self.REG_REMOTE_EMS_ENABLE, [1])
+            ems_result = await self._write_holding_registers(
+                self.REG_REMOTE_EMS_ENABLE, [1]
+            )
             if not ems_result:
                 _LOGGER.error("Failed to enable Remote EMS for self-consumption")
                 return False
 
             # Set mode to maximum self-consumption
             mode_result = await self._write_holding_registers(
-                self.REG_REMOTE_EMS_CONTROL_MODE, [self.REMOTE_EMS_MODE_SELF_CONSUMPTION]
+                self.REG_REMOTE_EMS_CONTROL_MODE,
+                [self.REMOTE_EMS_MODE_SELF_CONSUMPTION],
             )
             if not mode_result:
                 _LOGGER.error("Failed to set Remote EMS mode to self-consumption")
                 return False
 
-            _LOGGER.info("Sigenergy Remote EMS set to MAXIMUM_SELF_CONSUMPTION (mode 2)")
+            _LOGGER.info(
+                "Sigenergy Remote EMS set to MAXIMUM_SELF_CONSUMPTION (mode 2)"
+            )
             return True
 
         except Exception as e:
@@ -982,7 +1179,9 @@ class SigenergyController(InverterController):
             if not await self.connect():
                 return False
 
-            ems_result = await self._write_holding_registers(self.REG_REMOTE_EMS_ENABLE, [1])
+            ems_result = await self._write_holding_registers(
+                self.REG_REMOTE_EMS_ENABLE, [1]
+            )
             if not ems_result:
                 _LOGGER.error("Failed to enable Remote EMS for standby")
                 return False
@@ -1023,7 +1222,9 @@ class SigenergyController(InverterController):
                 return False
 
             # 1. Enable Remote EMS
-            ems_result = await self._write_holding_registers(self.REG_REMOTE_EMS_ENABLE, [1])
+            ems_result = await self._write_holding_registers(
+                self.REG_REMOTE_EMS_ENABLE, [1]
+            )
             if not ems_result:
                 _LOGGER.error("Failed to enable Remote EMS for force charge")
                 return False
@@ -1067,7 +1268,9 @@ class SigenergyController(InverterController):
                 return False
 
             # 1. Enable Remote EMS
-            ems_result = await self._write_holding_registers(self.REG_REMOTE_EMS_ENABLE, [1])
+            ems_result = await self._write_holding_registers(
+                self.REG_REMOTE_EMS_ENABLE, [1]
+            )
             if not ems_result:
                 _LOGGER.error("Failed to enable Remote EMS for force discharge")
                 return False
@@ -1098,7 +1301,9 @@ class SigenergyController(InverterController):
                 self.REG_ACTIVE_POWER_FIXED_TARGET, [hi, lo]
             )
             if not power_result:
-                _LOGGER.warning(f"Failed to set active power target to {-power_kw} kW, falling back to export limit only")
+                _LOGGER.warning(
+                    f"Failed to set active power target to {-power_kw} kW, falling back to export limit only"
+                )
 
             # 4. Set grid export limit directly (bypass safety cap for force discharge)
             # The safety cap reads REG_GRID_EXPORT_LIMIT which creates a circular
@@ -1106,13 +1311,19 @@ class SigenergyController(InverterController):
             # clamps it to whatever was previously written (often a low curtailment value).
             scaled_value = int(power_kw * self.GAIN_POWER)
             values = self._from_unsigned32(scaled_value)
-            rate_result = await self._write_holding_registers(self.REG_GRID_EXPORT_LIMIT, values)
+            rate_result = await self._write_holding_registers(
+                self.REG_GRID_EXPORT_LIMIT, values
+            )
             if not rate_result:
                 _LOGGER.error(f"Failed to set grid export limit to {power_kw} kW")
                 return False
-            _LOGGER.info(f"Sigenergy grid export limit set to {power_kw} kW (direct, bypassed safety cap)")
+            _LOGGER.info(
+                f"Sigenergy grid export limit set to {power_kw} kW (direct, bypassed safety cap)"
+            )
 
-            _LOGGER.info(f"Sigenergy FORCE DISCHARGE active — target {power_kw} kW, export limit {power_kw} kW")
+            _LOGGER.info(
+                f"Sigenergy FORCE DISCHARGE active — target {power_kw} kW, export limit {power_kw} kW"
+            )
             return True
 
         except Exception as e:
@@ -1126,22 +1337,38 @@ class SigenergyController(InverterController):
         them to the hardware-rated values so normal operation isn't constrained.
         """
         try:
-            rated_charge_regs = await self._read_input_registers(self.REG_ESS_RATED_CHARGE_POWER, 2)
-            rated_discharge_regs = await self._read_input_registers(self.REG_ESS_RATED_DISCHARGE_POWER, 2)
+            rated_charge_regs = await self._read_input_registers(
+                self.REG_ESS_RATED_CHARGE_POWER, 2
+            )
+            rated_discharge_regs = await self._read_input_registers(
+                self.REG_ESS_RATED_DISCHARGE_POWER, 2
+            )
 
             if rated_charge_regs and len(rated_charge_regs) >= 2:
-                rated_charge = self._to_unsigned32(rated_charge_regs[0], rated_charge_regs[1])
+                rated_charge = self._to_unsigned32(
+                    rated_charge_regs[0], rated_charge_regs[1]
+                )
                 if 0 < rated_charge < self.EXPORT_LIMIT_UNLIMITED:
                     values = self._from_unsigned32(rated_charge)
-                    await self._write_holding_registers(self.REG_ESS_MAX_CHARGE_LIMIT, values)
-                    _LOGGER.debug(f"Restored ESS max charge limit to rated: {rated_charge / self.GAIN_POWER} kW")
+                    await self._write_holding_registers(
+                        self.REG_ESS_MAX_CHARGE_LIMIT, values
+                    )
+                    _LOGGER.debug(
+                        f"Restored ESS max charge limit to rated: {rated_charge / self.GAIN_POWER} kW"
+                    )
 
             if rated_discharge_regs and len(rated_discharge_regs) >= 2:
-                rated_discharge = self._to_unsigned32(rated_discharge_regs[0], rated_discharge_regs[1])
+                rated_discharge = self._to_unsigned32(
+                    rated_discharge_regs[0], rated_discharge_regs[1]
+                )
                 if 0 < rated_discharge < self.EXPORT_LIMIT_UNLIMITED:
                     values = self._from_unsigned32(rated_discharge)
-                    await self._write_holding_registers(self.REG_ESS_MAX_DISCHARGE_LIMIT, values)
-                    _LOGGER.debug(f"Restored ESS max discharge limit to rated: {rated_discharge / self.GAIN_POWER} kW")
+                    await self._write_holding_registers(
+                        self.REG_ESS_MAX_DISCHARGE_LIMIT, values
+                    )
+                    _LOGGER.debug(
+                        f"Restored ESS max discharge limit to rated: {rated_discharge / self.GAIN_POWER} kW"
+                    )
 
         except Exception as e:
             _LOGGER.warning(f"Failed to restore ESS max limits to rated: {e}")
@@ -1187,7 +1414,9 @@ class SigenergyController(InverterController):
                     self._restore_backup_reserve_pct,
                 )
 
-            _LOGGER.info("Sigenergy restored to self-consumption (Remote EMS mode 2, export limit restored)")
+            _LOGGER.info(
+                "Sigenergy restored to self-consumption (Remote EMS mode 2, export limit restored)"
+            )
             return True
 
         except Exception as e:
@@ -1241,10 +1470,14 @@ class SigenergyController(InverterController):
             scaled_value = int(percent * self.GAIN_SOC)
 
             _LOGGER.info(f"Setting Sigenergy backup reserve to {percent}%")
-            success = await self._write_holding_registers(self.REG_ESS_BACKUP_SOC, [scaled_value])
+            success = await self._write_holding_registers(
+                self.REG_ESS_BACKUP_SOC, [scaled_value]
+            )
 
             if success:
-                _LOGGER.info(f"✅ Successfully set Sigenergy backup reserve to {percent}%")
+                _LOGGER.info(
+                    f"✅ Successfully set Sigenergy backup reserve to {percent}%"
+                )
             else:
                 _LOGGER.error(f"Failed to set Sigenergy backup reserve")
 
@@ -1264,7 +1497,9 @@ class SigenergyController(InverterController):
             if not await self.connect():
                 return None
 
-            regs = await self._read_holding_registers(self.REG_ESS_DISCHARGE_CUTOFF_SOC, 1)
+            regs = await self._read_holding_registers(
+                self.REG_ESS_DISCHARGE_CUTOFF_SOC, 1
+            )
             if regs and len(regs) >= 1:
                 cutoff_pct = regs[0] / self.GAIN_SOC
                 _LOGGER.debug(f"Sigenergy discharge cut-off SOC: {cutoff_pct}%")
@@ -1298,10 +1533,14 @@ class SigenergyController(InverterController):
             scaled_value = int(percent * self.GAIN_SOC)
 
             _LOGGER.info(f"Setting Sigenergy discharge cut-off SOC to {percent}%")
-            success = await self._write_holding_registers(self.REG_ESS_DISCHARGE_CUTOFF_SOC, [scaled_value])
+            success = await self._write_holding_registers(
+                self.REG_ESS_DISCHARGE_CUTOFF_SOC, [scaled_value]
+            )
 
             if success:
-                _LOGGER.info(f"✅ Successfully set Sigenergy discharge cut-off SOC to {percent}%")
+                _LOGGER.info(
+                    f"✅ Successfully set Sigenergy discharge cut-off SOC to {percent}%"
+                )
             else:
                 _LOGGER.error(f"Failed to set Sigenergy discharge cut-off SOC")
 

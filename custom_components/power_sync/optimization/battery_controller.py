@@ -6,6 +6,7 @@ Provides unified interface for controlling different battery systems:
 - Sigenergy: Uses Modbus commands
 - Sungrow: Uses Modbus commands
 """
+
 from __future__ import annotations
 
 import logging
@@ -38,7 +39,12 @@ class BatteryControllerWrapper:
         self.hass = hass
         self.battery_system = battery_system
 
-    async def force_charge(self, duration_minutes: int = 60, power_w: float = 5000, _extend_hardware: bool = False) -> bool:
+    async def force_charge(
+        self,
+        duration_minutes: int = 60,
+        power_w: float = 5000,
+        _extend_hardware: bool = False,
+    ) -> bool:
         """
         Command battery to charge.
 
@@ -53,13 +59,20 @@ class BatteryControllerWrapper:
             True if command was sent successfully
         """
         try:
-            _LOGGER.info(f"🔋 Optimizer: Force charge {duration_minutes}min at {power_w}W")
+            _LOGGER.info(
+                f"🔋 Optimizer: Force charge {duration_minutes}min at {power_w}W"
+            )
 
-            service_data = {"duration": duration_minutes, "power_w": power_w, "source": "optimizer"}
+            service_data = {
+                "duration": duration_minutes,
+                "power_w": power_w,
+                "source": "optimizer",
+            }
             if _extend_hardware:
                 service_data["_extend_hardware"] = True
             await self.hass.services.async_call(
-                "power_sync", "force_charge",
+                "power_sync",
+                "force_charge",
                 service_data,
                 blocking=True,
             )
@@ -69,7 +82,12 @@ class BatteryControllerWrapper:
             _LOGGER.error(f"Force charge failed: {e}", exc_info=True)
             return False
 
-    async def force_discharge(self, duration_minutes: int = 60, power_w: float = 5000, _extend_hardware: bool = False) -> bool:
+    async def force_discharge(
+        self,
+        duration_minutes: int = 60,
+        power_w: float = 5000,
+        _extend_hardware: bool = False,
+    ) -> bool:
         """
         Command battery to discharge.
 
@@ -84,13 +102,20 @@ class BatteryControllerWrapper:
             True if command was sent successfully
         """
         try:
-            _LOGGER.info(f"🔋 Optimizer: Force discharge {duration_minutes}min at {power_w}W")
+            _LOGGER.info(
+                f"🔋 Optimizer: Force discharge {duration_minutes}min at {power_w}W"
+            )
 
-            service_data = {"duration": duration_minutes, "power_w": power_w, "source": "optimizer"}
+            service_data = {
+                "duration": duration_minutes,
+                "power_w": power_w,
+                "source": "optimizer",
+            }
             if _extend_hardware:
                 service_data["_extend_hardware"] = True
             await self.hass.services.async_call(
-                "power_sync", "force_discharge",
+                "power_sync",
+                "force_discharge",
                 service_data,
                 blocking=True,
             )
@@ -114,7 +139,8 @@ class BatteryControllerWrapper:
             _LOGGER.info("🔋 Optimizer: Restoring normal operation")
 
             await self.hass.services.async_call(
-                "power_sync", "restore_normal",
+                "power_sync",
+                "restore_normal",
                 {},
                 blocking=True,
             )
@@ -141,10 +167,13 @@ class BatteryControllerWrapper:
             True if command was sent successfully
         """
         try:
-            _LOGGER.info("🔋 Optimizer: Setting pure self-consumption mode (battery→home, no TOU)")
+            _LOGGER.info(
+                "🔋 Optimizer: Setting pure self-consumption mode (battery→home, no TOU)"
+            )
 
             await self.hass.services.async_call(
-                "power_sync", "set_self_consumption",
+                "power_sync",
+                "set_self_consumption",
                 {},
                 blocking=True,
             )
@@ -170,7 +199,8 @@ class BatteryControllerWrapper:
             _LOGGER.info("🔋 Optimizer: Setting autonomous (TOU) mode")
 
             await self.hass.services.async_call(
-                "power_sync", "set_autonomous",
+                "power_sync",
+                "set_autonomous",
                 {},
                 blocking=True,
             )
@@ -190,17 +220,33 @@ class BatteryControllerWrapper:
         """
         try:
             from ..const import DOMAIN
+
             for entry_id, entry_data in self.hass.data.get(DOMAIN, {}).items():
                 if not isinstance(entry_data, dict):
                     continue
                 # Modbus-based batteries: read from controller
-                for coord_key in ("sigenergy_coordinator", "sungrow_coordinator", "foxess_coordinator", "goodwe_coordinator"):
+                for coord_key in (
+                    "sigenergy_coordinator",
+                    "sungrow_coordinator",
+                    "foxess_coordinator",
+                    "goodwe_coordinator",
+                ):
                     coord = entry_data.get(coord_key)
-                    if coord and hasattr(coord, "_controller") and hasattr(coord._controller, "get_backup_reserve"):
+                    if (
+                        coord
+                        and hasattr(coord, "_controller")
+                        and hasattr(coord._controller, "get_backup_reserve")
+                    ):
                         return await coord._controller.get_backup_reserve()
                 # Tesla: read from cached site_info (refreshed every 6 hours)
-                tesla_coord = entry_data.get("tesla_coordinator") or entry_data.get("coordinator")
-                if tesla_coord and hasattr(tesla_coord, "_site_info_cache") and tesla_coord._site_info_cache:
+                tesla_coord = entry_data.get("tesla_coordinator") or entry_data.get(
+                    "coordinator"
+                )
+                if (
+                    tesla_coord
+                    and hasattr(tesla_coord, "_site_info_cache")
+                    and tesla_coord._site_info_cache
+                ):
                     reserve = tesla_coord._site_info_cache.get("backup_reserve_percent")
                     if reserve is not None:
                         return int(reserve)
@@ -225,7 +271,8 @@ class BatteryControllerWrapper:
         """
         try:
             await self.hass.services.async_call(
-                "power_sync", "set_backup_reserve",
+                "power_sync",
+                "set_backup_reserve",
                 {"percent": percent},
                 blocking=True,
             )

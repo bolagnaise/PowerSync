@@ -28,7 +28,11 @@ class AutomationStore:
     def __init__(self, hass: HomeAssistant):
         self._hass = hass
         self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
-        self._data: Dict[str, Any] = {"automations": [], "next_id": 1, "push_tokens": {}}
+        self._data: Dict[str, Any] = {
+            "automations": [],
+            "next_id": 1,
+            "push_tokens": {},
+        }
 
     async def async_load(self) -> None:
         """Load automations from storage."""
@@ -38,8 +42,12 @@ class AutomationStore:
             # Ensure push_tokens exists (for upgrades from older versions)
             if "push_tokens" not in self._data:
                 self._data["push_tokens"] = {}
-        _LOGGER.debug(f"Loaded {len(self._data.get('automations', []))} automations from storage")
-        _LOGGER.debug(f"Loaded {len(self._data.get('push_tokens', {}))} push tokens from storage")
+        _LOGGER.debug(
+            f"Loaded {len(self._data.get('automations', []))} automations from storage"
+        )
+        _LOGGER.debug(
+            f"Loaded {len(self._data.get('push_tokens', {}))} push tokens from storage"
+        )
 
     async def async_save(self) -> None:
         """Save automations to storage."""
@@ -79,7 +87,9 @@ class AutomationStore:
 
         if_conditions = automation_data.get("if_conditions", [])
         if if_conditions:
-            _LOGGER.debug(f"Creating automation with {len(if_conditions)} IF condition(s)")
+            _LOGGER.debug(
+                f"Creating automation with {len(if_conditions)} IF condition(s)"
+            )
 
         automation = {
             "id": automation_id,
@@ -104,7 +114,9 @@ class AutomationStore:
         self._data["automations"].append(automation)
         return automation
 
-    def update(self, automation_id: int, automation_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def update(
+        self, automation_id: int, automation_data: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
         """Update an existing automation."""
         for i, auto in enumerate(self._data.get("automations", [])):
             if auto.get("id") == automation_id:
@@ -128,15 +140,23 @@ class AutomationStore:
                     # Reset trigger state when trigger config changes
                     # This allows re-evaluation with fresh state (e.g., after changing time window)
                     auto["last_evaluated_value"] = None
-                    _LOGGER.debug(f"Reset trigger state for automation {automation_id} due to trigger config change")
+                    _LOGGER.debug(
+                        f"Reset trigger state for automation {automation_id} due to trigger config change"
+                    )
                 if "actions" in automation_data:
-                    _LOGGER.debug(f"Updating automation {automation_id} with {len(automation_data['actions'])} action(s): {automation_data['actions']}")
+                    _LOGGER.debug(
+                        f"Updating automation {automation_id} with {len(automation_data['actions'])} action(s): {automation_data['actions']}"
+                    )
                     auto["actions"] = automation_data["actions"]
                 if "conditions" in automation_data:
-                    _LOGGER.debug(f"Updating automation {automation_id} with {len(automation_data.get('conditions', []))} condition(s)")
+                    _LOGGER.debug(
+                        f"Updating automation {automation_id} with {len(automation_data.get('conditions', []))} condition(s)"
+                    )
                     auto["conditions"] = automation_data["conditions"]
                 if "if_conditions" in automation_data:
-                    _LOGGER.debug(f"Updating automation {automation_id} with {len(automation_data.get('if_conditions', []))} IF condition(s)")
+                    _LOGGER.debug(
+                        f"Updating automation {automation_id} with {len(automation_data.get('if_conditions', []))} IF condition(s)"
+                    )
                     auto["if_conditions"] = automation_data["if_conditions"]
 
                 auto["updated_at"] = datetime.utcnow().isoformat() + "Z"
@@ -209,7 +229,9 @@ class AutomationStore:
         return sorted(list(groups))
 
     # Push token management (persisted to disk)
-    def register_push_token(self, push_token: str, platform: str, device_name: str) -> None:
+    def register_push_token(
+        self, push_token: str, platform: str, device_name: str
+    ) -> None:
         """Register a push notification token."""
         if "push_tokens" not in self._data:
             self._data["push_tokens"] = {}
@@ -276,7 +298,9 @@ class AutomationStore:
         vehicle_socs = self._data.get("vehicle_socs", {})
         return vehicle_socs.get(vehicle_id)
 
-    def set_vehicle_soc(self, vehicle_id: str, soc: int, charging_state: Optional[str] = None) -> None:
+    def set_vehicle_soc(
+        self, vehicle_id: str, soc: int, charging_state: Optional[str] = None
+    ) -> None:
         """Persist vehicle SOC data.
 
         Args:
@@ -332,7 +356,8 @@ class AutomationEngine:
 
         # Get all enabled, non-paused automations sorted by priority
         automations = [
-            auto for auto in self._store.get_all()
+            auto
+            for auto in self._store.get_all()
             if auto.get("enabled") and not auto.get("paused")
         ]
         automations.sort(key=lambda x: x.get("priority", 50), reverse=True)
@@ -361,7 +386,7 @@ class AutomationEngine:
                     current_state,
                     automation.get("last_evaluated_value"),
                     self._store,
-                    automation.get("id")
+                    automation.get("id"),
                 )
 
                 if result.triggered:
@@ -378,19 +403,25 @@ class AutomationEngine:
                                 f"Automation '{automation.get('name')}' IF conditions not met: {if_result.reason}"
                             )
                             continue
-                        _LOGGER.debug(f"Automation '{automation.get('name')}' IF conditions passed")
+                        _LOGGER.debug(
+                            f"Automation '{automation.get('name')}' IF conditions passed"
+                        )
 
                     # Check conditions (if any)
                     conditions = automation.get("conditions", [])
                     if conditions:
-                        conditions_result = evaluate_conditions(conditions, current_state)
+                        conditions_result = evaluate_conditions(
+                            conditions, current_state
+                        )
                         if not conditions_result.triggered:
                             _LOGGER.info(
                                 f"Automation '{automation.get('name')}' conditions not met: {conditions_result.reason}"
                             )
                             continue  # Skip execution, conditions not met
 
-                        _LOGGER.debug(f"Automation '{automation.get('name')}' conditions passed")
+                        _LOGGER.debug(
+                            f"Automation '{automation.get('name')}' conditions passed"
+                        )
 
                     # Execute actions (pass current_state for time window context)
                     actions_executed = await self._async_execute_automation(
@@ -408,9 +439,11 @@ class AutomationEngine:
                 )
                 try:
                     from .actions import _send_expo_push
+
                     await _send_expo_push(
-                        self._hass, "⚠️ Automation Error",
-                        f"'{automation.get('name', 'Unknown')}' failed to evaluate: {e}"
+                        self._hass,
+                        "⚠️ Automation Error",
+                        f"'{automation.get('name', 'Unknown')}' failed to evaluate: {e}",
                     )
                 except Exception:
                     pass
@@ -433,8 +466,7 @@ class AutomationEngine:
 
         # Default timezone - will be overridden by site info or NEM region
         user_timezone = self._config_entry.options.get(
-            "timezone",
-            self._config_entry.data.get("timezone", "Australia/Sydney")
+            "timezone", self._config_entry.data.get("timezone", "Australia/Sydney")
         )
 
         # Try to get timezone from coordinator's site info (most accurate for Tesla)
@@ -444,7 +476,7 @@ class AutomationEngine:
             data = self._hass.data[DOMAIN][entry_id]
             # Coordinator is stored as "tesla_coordinator" for Tesla users
             coordinator = data.get("tesla_coordinator")
-            if coordinator and hasattr(coordinator, 'async_get_site_info'):
+            if coordinator and hasattr(coordinator, "async_get_site_info"):
                 try:
                     site_info = await coordinator.async_get_site_info()
                     if site_info:
@@ -452,19 +484,22 @@ class AutomationEngine:
                         if site_tz:
                             user_timezone = site_tz
                             got_timezone_from_site_info = True
-                            _LOGGER.debug(f"Using timezone from Tesla site info: {user_timezone}")
+                            _LOGGER.debug(
+                                f"Using timezone from Tesla site info: {user_timezone}"
+                            )
                 except Exception as e:
                     _LOGGER.debug("Could not get timezone from site info: %s", e)
 
         # Fallback: Try to get timezone from NEM region (for Sigenergy/AEMO users)
         if not got_timezone_from_site_info:
             nem_region = self._config_entry.options.get(
-                CONF_AEMO_REGION,
-                self._config_entry.data.get(CONF_AEMO_REGION)
+                CONF_AEMO_REGION, self._config_entry.data.get(CONF_AEMO_REGION)
             )
             if nem_region and nem_region in NEM_REGION_TIMEZONES:
                 user_timezone = NEM_REGION_TIMEZONES[nem_region]
-                _LOGGER.debug(f"Using timezone from NEM region ({nem_region}): {user_timezone}")
+                _LOGGER.debug(
+                    f"Using timezone from NEM region ({nem_region}): {user_timezone}"
+                )
 
         # Get current time in user's timezone for time-based triggers
         try:
@@ -493,7 +528,7 @@ class AutomationEngine:
             "ocpp_state": {},
             "solcast_forecast": {},
             "battery_mode": "normal",  # normal, force_charge, force_discharge
-            "spike_status": "none",    # none, potential, spike
+            "spike_status": "none",  # none, potential, spike
         }
 
         # Get data from coordinator
@@ -501,11 +536,15 @@ class AutomationEngine:
         if DOMAIN in self._hass.data and entry_id in self._hass.data[DOMAIN]:
             data = self._hass.data[DOMAIN][entry_id]
             # Use tesla_coordinator for Tesla users, sigenergy_coordinator for Sigenergy users
-            coordinator = data.get("tesla_coordinator") or data.get("sigenergy_coordinator")
+            coordinator = data.get("tesla_coordinator") or data.get(
+                "sigenergy_coordinator"
+            )
 
             if coordinator and coordinator.data:
                 coord_data = coordinator.data
-                _LOGGER.debug(f"Coordinator data keys: {list(coord_data.keys())}, battery_level={coord_data.get('battery_level')}")
+                _LOGGER.debug(
+                    f"Coordinator data keys: {list(coord_data.keys())}, battery_level={coord_data.get('battery_level')}"
+                )
 
                 # Battery state
                 state["battery_percent"] = coord_data.get("battery_level")
@@ -538,7 +577,9 @@ class AutomationEngine:
 
                 # Grid status
                 grid_status = coord_data.get("grid_status", "Active")
-                state["grid_status"] = "off_grid" if grid_status == "Islanded" else "on_grid"
+                state["grid_status"] = (
+                    "off_grid" if grid_status == "Islanded" else "on_grid"
+                )
 
                 # Get prices for price-based triggers (settled prices from WebSocket or REST API)
                 # - Amber users: Amber API prices
@@ -638,7 +679,7 @@ class AutomationEngine:
         # Get API key from config
         api_key = self._config_entry.options.get(
             CONF_OPENWEATHERMAP_API_KEY,
-            self._config_entry.data.get(CONF_OPENWEATHERMAP_API_KEY)
+            self._config_entry.data.get(CONF_OPENWEATHERMAP_API_KEY),
         )
 
         if not api_key:
@@ -646,17 +687,17 @@ class AutomationEngine:
 
         # Get weather location from config (city name or postcode)
         weather_location = self._config_entry.options.get(
-            CONF_WEATHER_LOCATION,
-            self._config_entry.data.get(CONF_WEATHER_LOCATION)
+            CONF_WEATHER_LOCATION, self._config_entry.data.get(CONF_WEATHER_LOCATION)
         )
 
         # Get timezone from config for location fallback
         timezone = self._config_entry.options.get(
-            "timezone",
-            self._config_entry.data.get("timezone", "Australia/Brisbane")
+            "timezone", self._config_entry.data.get("timezone", "Australia/Brisbane")
         )
 
-        weather_data = await async_get_current_weather(self._hass, api_key, timezone, weather_location)
+        weather_data = await async_get_current_weather(
+            self._hass, api_key, timezone, weather_location
+        )
         if weather_data:
             self._weather_cache = weather_data
             self._weather_cache_time = datetime.utcnow()
@@ -695,7 +736,9 @@ class AutomationEngine:
             if tariff_schedule:
                 # Use real-time TOU calculation for accurate period pricing
                 if tariff_schedule.get("tou_periods"):
-                    buy_cents, sell_cents, current_period = get_current_price_from_tariff_schedule(tariff_schedule)
+                    buy_cents, sell_cents, current_period = (
+                        get_current_price_from_tariff_schedule(tariff_schedule)
+                    )
                     import_price = buy_cents / 100  # Convert cents to $/kWh
                     export_price = sell_cents / 100
 
@@ -707,7 +750,9 @@ class AutomationEngine:
 
                     self._tariff_cache = result
                     self._tariff_cache_time = datetime.utcnow()
-                    _LOGGER.debug(f"Tariff prices (TOU calc): import=${import_price:.4f}, export=${export_price:.4f}, period={current_period}")
+                    _LOGGER.debug(
+                        f"Tariff prices (TOU calc): import=${import_price:.4f}, export=${export_price:.4f}, period={current_period}"
+                    )
 
                     return result
 
@@ -723,18 +768,25 @@ class AutomationEngine:
 
                     self._tariff_cache = result
                     self._tariff_cache_time = datetime.utcnow()
-                    _LOGGER.debug(f"Tariff prices (cached): import=${import_price:.4f}, export=${export_price:.4f}")
+                    _LOGGER.debug(
+                        f"Tariff prices (cached): import=${import_price:.4f}, export=${export_price:.4f}"
+                    )
 
                     return result
 
             # Fallback: Fetch fresh from Tesla API using the shared function
             from ..__init__ import fetch_tesla_tariff_schedule
-            tariff_data = await fetch_tesla_tariff_schedule(self._hass, self._config_entry)
+
+            tariff_data = await fetch_tesla_tariff_schedule(
+                self._hass, self._config_entry
+            )
 
             if tariff_data:
                 # Use real-time TOU calculation if available
                 if tariff_data.get("tou_periods"):
-                    buy_cents, sell_cents, current_period = get_current_price_from_tariff_schedule(tariff_data)
+                    buy_cents, sell_cents, current_period = (
+                        get_current_price_from_tariff_schedule(tariff_data)
+                    )
                     import_price = buy_cents / 100
                     export_price = sell_cents / 100
                 else:
@@ -748,7 +800,9 @@ class AutomationEngine:
 
                 self._tariff_cache = result
                 self._tariff_cache_time = datetime.utcnow()
-                _LOGGER.debug(f"Tariff prices (from API): import=${import_price:.4f}, export=${export_price:.4f}")
+                _LOGGER.debug(
+                    f"Tariff prices (from API): import=${import_price:.4f}, export=${export_price:.4f}"
+                )
 
                 return result
 
@@ -762,25 +816,29 @@ class AutomationEngine:
         self,
         automation: Dict[str, Any],
         executed_actions: set,
-        current_state: Dict[str, Any]
+        current_state: Dict[str, Any],
     ) -> bool:
         """Execute an automation's actions.
 
         If notification_only is True, sends a notification and skips actions.
         Otherwise, executes the configured actions (which may include send_notification).
         """
-        automation_name = automation.get('name', 'Unnamed')
+        automation_name = automation.get("name", "Unnamed")
 
         # If notification_only, send notification and skip actions
         if automation.get("notification_only"):
             await self._async_send_notification(
                 f"Automation '{automation_name}' triggered"
             )
-            _LOGGER.info(f"Automation '{automation_name}' is notification-only, skipping actions")
+            _LOGGER.info(
+                f"Automation '{automation_name}' is notification-only, skipping actions"
+            )
             return True
 
         actions = automation.get("actions", [])
-        _LOGGER.debug(f"Automation '{automation_name}' has {len(actions)} action(s): {[a.get('action_type') for a in actions]}")
+        _LOGGER.debug(
+            f"Automation '{automation_name}' has {len(actions)} action(s): {[a.get('action_type') for a in actions]}"
+        )
 
         # Filter out conflicting actions
         actions_to_execute = []
@@ -807,10 +865,7 @@ class AutomationEngine:
         }
 
         result = await execute_actions(
-            self._hass,
-            self._config_entry,
-            actions_to_execute,
-            context
+            self._hass, self._config_entry, actions_to_execute, context
         )
         return result
 
@@ -829,7 +884,9 @@ class AutomationEngine:
         # Send push notification to PowerSync mobile app via Expo Push API
         await self._async_send_expo_push(message)
 
-    async def _async_send_expo_push(self, message: str, title: str = "PowerSync") -> None:
+    async def _async_send_expo_push(
+        self, message: str, title: str = "PowerSync"
+    ) -> None:
         """Send push notification via Expo Push API."""
         from ..const import DOMAIN
         import aiohttp
@@ -850,20 +907,26 @@ class AutomationEngine:
             platform = token_data.get("platform", "unknown")
             device = token_data.get("device_name", "unknown")
             if token and token.startswith("ExponentPushToken"):
-                messages.append({
-                    "to": token,
-                    "title": title,
-                    "body": message,
-                    "sound": "default",
-                    "priority": "high",
-                })
+                messages.append(
+                    {
+                        "to": token,
+                        "title": title,
+                        "body": message,
+                        "sound": "default",
+                        "priority": "high",
+                    }
+                )
                 _LOGGER.debug(f"📱 Including token for {device} ({platform})")
             else:
                 skipped_tokens += 1
-                _LOGGER.warning(f"📱 Skipping non-Expo token for {device} ({platform}): {token[:30] if token else 'None'}...")
+                _LOGGER.warning(
+                    f"📱 Skipping non-Expo token for {device} ({platform}): {token[:30] if token else 'None'}..."
+                )
 
         if not messages:
-            _LOGGER.warning(f"📱 No valid Expo push tokens found (skipped {skipped_tokens} invalid tokens)")
+            _LOGGER.warning(
+                f"📱 No valid Expo push tokens found (skipped {skipped_tokens} invalid tokens)"
+            )
             return
 
         # Send to Expo Push API
@@ -876,11 +939,15 @@ class AutomationEngine:
                 ) as response:
                     if response.status == 200:
                         result = await response.json()
-                        _LOGGER.info(f"📱 Push notification sent to {len(messages)} device(s)")
+                        _LOGGER.info(
+                            f"📱 Push notification sent to {len(messages)} device(s)"
+                        )
                         _LOGGER.debug(f"Expo Push response: {result}")
                     else:
                         text = await response.text()
-                        _LOGGER.error(f"Expo Push API error: {response.status} - {text}")
+                        _LOGGER.error(
+                            f"Expo Push API error: {response.status} - {text}"
+                        )
         except Exception as e:
             _LOGGER.error(f"Failed to send Expo push notification: {e}")
 
@@ -900,16 +967,21 @@ class AutomationEngine:
         # immediately. This prevents Tesla sensor regex from matching a Zaptec HA
         # integration entity and short-circuiting into the Tesla code path.
         from ..const import DOMAIN, CONF_ZAPTEC_STANDALONE_ENABLED, CONF_ZAPTEC_USERNAME
+
         for entry in self._hass.config_entries.async_entries(DOMAIN):
             opts = {**entry.data, **entry.options}
-            if opts.get(CONF_ZAPTEC_STANDALONE_ENABLED) and opts.get(CONF_ZAPTEC_USERNAME):
+            if opts.get(CONF_ZAPTEC_STANDALONE_ENABLED) and opts.get(
+                CONF_ZAPTEC_USERNAME
+            ):
                 entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 zaptec_cached = entry_data.get("zaptec_cached_state")
                 if zaptec_cached:
                     mode = zaptec_cached.get("charger_operation_mode", "")
                     power_w = zaptec_cached.get("total_charge_power_w", 0)
                     ev_state["is_charging"] = mode == "charging" or power_w > 50
-                    ev_state["is_plugged_in"] = mode in ("charging", "connected_waiting") or power_w > 50
+                    ev_state["is_plugged_in"] = (
+                        mode in ("charging", "connected_waiting") or power_w > 50
+                    )
                     ev_state["charging_state"] = mode
                     ev_state["location"] = "home"
                     _LOGGER.debug("EV state from Zaptec standalone: %s", ev_state)
@@ -938,7 +1010,9 @@ class AutomationEngine:
                 break
 
         if not vehicle_prefix:
-            _LOGGER.debug("No Tesla EV charging sensor found (sensor.*_charging or sensor.*_charging_state)")
+            _LOGGER.debug(
+                "No Tesla EV charging sensor found (sensor.*_charging or sensor.*_charging_state)"
+            )
             return ev_state
 
         # Check if this is a BLE integration (prefix contains "ble")
@@ -958,9 +1032,11 @@ class AutomationEngine:
             # Tesla Fleet: binary_sensor.tessy_charger
             # Teslemetry: binary_sensor.tessy_charge_cable
             # Tesla BLE: binary_sensor.tesla_ble_charge_flap
-            if entity_id in (f"binary_sensor.{vehicle_prefix}_charger",
-                            f"binary_sensor.{vehicle_prefix}_charge_cable",
-                            f"binary_sensor.{vehicle_prefix}_charge_flap"):
+            if entity_id in (
+                f"binary_sensor.{vehicle_prefix}_charger",
+                f"binary_sensor.{vehicle_prefix}_charge_cable",
+                f"binary_sensor.{vehicle_prefix}_charge_flap",
+            ):
                 ev_state["is_plugged_in"] = state_value.lower() == "on"
                 _LOGGER.debug(f"EV plugged in from {entity_id}: {state_value}")
 
@@ -968,9 +1044,11 @@ class AutomationEngine:
             # Tesla Fleet: sensor.tessy_battery
             # Teslemetry: sensor.tessy_battery_level
             # Tesla BLE: sensor.tesla_ble_charge_level
-            elif entity_id in (f"sensor.{vehicle_prefix}_battery",
-                              f"sensor.{vehicle_prefix}_battery_level",
-                              f"sensor.{vehicle_prefix}_charge_level"):
+            elif entity_id in (
+                f"sensor.{vehicle_prefix}_battery",
+                f"sensor.{vehicle_prefix}_battery_level",
+                f"sensor.{vehicle_prefix}_charge_level",
+            ):
                 try:
                     level = float(state_value)
                     if 0 <= level <= 100:
@@ -1002,15 +1080,24 @@ class AutomationEngine:
         # assume "home" since BLE only works when car is nearby
         if is_ble and ev_state["location"] == "unknown":
             ev_state["location"] = "home"
-            _LOGGER.debug(f"Tesla BLE detected (prefix={vehicle_prefix}), no Teslemetry location found, assuming location=home")
+            _LOGGER.debug(
+                f"Tesla BLE detected (prefix={vehicle_prefix}), no Teslemetry location found, assuming location=home"
+            )
 
         # Infer plugged in from charging state if not already determined
         # If car is charging/stopped/complete, it must be plugged in
         if not ev_state["is_plugged_in"] and ev_state["charging_state"]:
-            charging_implies_plugged = ev_state["charging_state"] in ("charging", "stopped", "complete", "starting")
+            charging_implies_plugged = ev_state["charging_state"] in (
+                "charging",
+                "stopped",
+                "complete",
+                "starting",
+            )
             if charging_implies_plugged:
                 ev_state["is_plugged_in"] = True
-                _LOGGER.debug(f"Inferred is_plugged_in=True from charging_state={ev_state['charging_state']}")
+                _LOGGER.debug(
+                    f"Inferred is_plugged_in=True from charging_state={ev_state['charging_state']}"
+                )
 
         _LOGGER.debug(f"EV state collected: {ev_state}")
         return ev_state
@@ -1035,9 +1122,15 @@ class AutomationEngine:
                 continue
 
             # OCPP status sensor (e.g., sensor.evse_status, sensor.*_charger_status)
-            if re.match(r"sensor\.\w*(ocpp|evse|charger).*_status$", entity_id, re.IGNORECASE):
+            if re.match(
+                r"sensor\.\w*(ocpp|evse|charger).*_status$", entity_id, re.IGNORECASE
+            ):
                 ocpp_state["status"] = state_value.lower()
-                ocpp_state["is_connected"] = state_value.lower() not in ("unavailable", "disconnected", "")
+                ocpp_state["is_connected"] = state_value.lower() not in (
+                    "unavailable",
+                    "disconnected",
+                    "",
+                )
                 _LOGGER.debug(f"OCPP status from {entity_id}: {state_value}")
 
             # OCPP energy sensor
@@ -1073,15 +1166,21 @@ class AutomationEngine:
                 try:
                     forecast["today_kwh"] = float(state_value)
                     forecast["today_forecast_kwh"] = float(state_value)
-                    _LOGGER.debug(f"Solcast today forecast from {entity_id}: {state_value} kWh")
+                    _LOGGER.debug(
+                        f"Solcast today forecast from {entity_id}: {state_value} kWh"
+                    )
                 except (ValueError, TypeError):
                     pass
 
             # Solcast forecast tomorrow
-            elif re.match(r"sensor\.solcast.*forecast.*tomorrow", entity_id, re.IGNORECASE):
+            elif re.match(
+                r"sensor\.solcast.*forecast.*tomorrow", entity_id, re.IGNORECASE
+            ):
                 try:
                     forecast["tomorrow_kwh"] = float(state_value)
-                    _LOGGER.debug(f"Solcast tomorrow forecast from {entity_id}: {state_value} kWh")
+                    _LOGGER.debug(
+                        f"Solcast tomorrow forecast from {entity_id}: {state_value} kWh"
+                    )
                 except (ValueError, TypeError):
                     pass
 

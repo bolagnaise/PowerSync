@@ -21,6 +21,7 @@ _LOGGER = logging.getLogger(__name__)
 
 class ChargingSource(Enum):
     """Source of charging energy."""
+
     SOLAR_SURPLUS = "solar_surplus"
     GRID_OFFPEAK = "grid_offpeak"
     GRID_PEAK = "grid_peak"
@@ -30,6 +31,7 @@ class ChargingSource(Enum):
 @dataclass
 class ChargingSegment:
     """A continuous charging segment with consistent source."""
+
     start_time: str  # ISO format
     end_time: Optional[str] = None
     source: str = "solar_surplus"  # ChargingSource value
@@ -54,6 +56,7 @@ class ChargingSegment:
 @dataclass
 class ChargingSession:
     """A complete EV charging session from start to stop."""
+
     id: str
     vehicle_id: str
     start_time: str  # ISO format
@@ -79,7 +82,9 @@ class ChargingSession:
     # Session metadata
     mode: str = "solar_surplus"  # or "battery_target", "scheduled", "boost"
     completed: bool = False
-    stopped_reason: Optional[str] = None  # "target_reached", "unplugged", "manual", "time_window"
+    stopped_reason: Optional[str] = (
+        None  # "target_reached", "unplugged", "manual", "time_window"
+    )
 
     # Detailed segments
     segments: List[ChargingSegment] = field(default_factory=list)
@@ -114,7 +119,10 @@ class ChargingSession:
             "completed": self.completed,
             "stopped_reason": self.stopped_reason,
             "last_reading_time": self.last_reading_time,
-            "segments": [s.to_dict() if isinstance(s, ChargingSegment) else s for s in self.segments],
+            "segments": [
+                s.to_dict() if isinstance(s, ChargingSegment) else s
+                for s in self.segments
+            ],
         }
         return data
 
@@ -193,7 +201,11 @@ class ChargingSession:
 
         if not self._current_segment_start:
             # Auto-start a segment
-            source = ChargingSource.SOLAR_SURPLUS.value if is_solar else ChargingSource.GRID_PEAK.value
+            source = (
+                ChargingSource.SOLAR_SURPLUS.value
+                if is_solar
+                else ChargingSource.GRID_PEAK.value
+            )
             self.start_segment(source)
 
         # Calculate elapsed time from last reading
@@ -230,16 +242,18 @@ class ChargingSession:
             grid_kwh = energy_kwh
 
         # Store reading for segment aggregation
-        self._current_segment_readings.append({
-            "timestamp": datetime.now().isoformat(),
-            "power_kw": power_kw,
-            "amps": amps,
-            "energy_kwh": energy_kwh,
-            "solar_kwh": solar_kwh,
-            "grid_kwh": grid_kwh,
-            "cost_cents": cost_cents,
-            "savings_cents": savings_cents,
-        })
+        self._current_segment_readings.append(
+            {
+                "timestamp": datetime.now().isoformat(),
+                "power_kw": power_kw,
+                "amps": amps,
+                "energy_kwh": energy_kwh,
+                "solar_kwh": solar_kwh,
+                "grid_kwh": grid_kwh,
+                "cost_cents": cost_cents,
+                "savings_cents": savings_cents,
+            }
+        )
 
         # Update session totals
         self.total_energy_kwh += energy_kwh
@@ -254,10 +268,14 @@ class ChargingSession:
 
         # Update solar percentage
         if self.total_energy_kwh > 0:
-            self.solar_percentage = (self.solar_energy_kwh / self.total_energy_kwh) * 100
+            self.solar_percentage = (
+                self.solar_energy_kwh / self.total_energy_kwh
+            ) * 100
 
         # Calculate net savings
-        self.net_savings_cents = self.grid_cost_avoided_cents - self.export_revenue_lost_cents
+        self.net_savings_cents = (
+            self.grid_cost_avoided_cents - self.export_revenue_lost_cents
+        )
 
     def end_segment(self) -> Optional[ChargingSegment]:
         """End the current segment and return it."""
@@ -272,8 +290,12 @@ class ChargingSession:
             end_time=datetime.now().isoformat(),
             source=self._current_segment_source or ChargingSource.MIXED.value,
             energy_kwh=sum(r["energy_kwh"] for r in readings),
-            avg_power_kw=statistics.mean(r["power_kw"] for r in readings) if readings else 0,
-            avg_amps=int(statistics.mean(r["amps"] for r in readings)) if readings else 0,
+            avg_power_kw=statistics.mean(r["power_kw"] for r in readings)
+            if readings
+            else 0,
+            avg_amps=int(statistics.mean(r["amps"] for r in readings))
+            if readings
+            else 0,
             solar_power_kwh=sum(r["solar_kwh"] for r in readings),
             grid_power_kwh=sum(r["grid_kwh"] for r in readings),
             cost_cents=sum(r["cost_cents"] for r in readings),
@@ -324,6 +346,7 @@ class ChargingSessionManager:
 
         try:
             if self.storage_path.exists():
+
                 def _read_file():
                     with open(self.storage_path, "r") as f:
                         return json.load(f)
@@ -332,7 +355,9 @@ class ChargingSessionManager:
                 self._sessions_cache = [
                     ChargingSession.from_dict(s) for s in data.get("sessions", [])
                 ]
-                _LOGGER.info(f"Loaded {len(self._sessions_cache)} charging sessions from storage")
+                _LOGGER.info(
+                    f"Loaded {len(self._sessions_cache)} charging sessions from storage"
+                )
             self._cache_loaded = True
         except Exception as e:
             _LOGGER.error(f"Failed to load sessions from storage: {e}")
@@ -347,8 +372,7 @@ class ChargingSessionManager:
             cutoff_str = cutoff.isoformat()
 
             sessions_to_save = [
-                s for s in self._sessions_cache
-                if s.start_time >= cutoff_str
+                s for s in self._sessions_cache if s.start_time >= cutoff_str
             ]
 
             def _write_file():
@@ -396,7 +420,9 @@ class ChargingSessionManager:
             )
 
             self.active_sessions[vehicle_id] = session
-            _LOGGER.info(f"Started charging session {session.id} for {vehicle_id} (mode={mode})")
+            _LOGGER.info(
+                f"Started charging session {session.id} for {vehicle_id} (mode={mode})"
+            )
 
             return session
 
@@ -431,10 +457,17 @@ class ChargingSessionManager:
             return None
 
         # Determine source from is_solar flag
-        source = ChargingSource.SOLAR_SURPLUS.value if is_solar else ChargingSource.GRID_PEAK.value
+        source = (
+            ChargingSource.SOLAR_SURPLUS.value
+            if is_solar
+            else ChargingSource.GRID_PEAK.value
+        )
 
         # Check if source changed - if so, end current segment and start new one
-        if session._current_segment_source and session._current_segment_source != source:
+        if (
+            session._current_segment_source
+            and session._current_segment_source != source
+        ):
             session.end_segment()
             session.start_segment(source)
         elif not session._current_segment_start:
@@ -498,8 +531,8 @@ class ChargingSessionManager:
             f"Ended charging session {session.id}: "
             f"{session.total_energy_kwh:.2f} kWh "
             f"({session.solar_percentage:.0f}% solar), "
-            f"cost=${session.total_cost_cents/100:.2f}, "
-            f"saved=${session.net_savings_cents/100:.2f}"
+            f"cost=${session.total_cost_cents / 100:.2f}, "
+            f"saved=${session.net_savings_cents / 100:.2f}"
         )
 
         return session
@@ -530,8 +563,10 @@ class ChargingSessionManager:
         cutoff_str = cutoff.isoformat()
 
         sessions = [
-            s for s in self._sessions_cache
-            if s.completed and s.start_time >= cutoff_str
+            s
+            for s in self._sessions_cache
+            if s.completed
+            and s.start_time >= cutoff_str
             and (vehicle_id is None or s.vehicle_id == vehicle_id)
         ]
 
@@ -599,7 +634,9 @@ class ChargingSessionManager:
         # Add solar percentage to each vehicle
         for vid, stats in by_vehicle.items():
             if stats["energy_kwh"] > 0:
-                stats["solar_percentage"] = (stats["solar_energy_kwh"] / stats["energy_kwh"]) * 100
+                stats["solar_percentage"] = (
+                    stats["solar_energy_kwh"] / stats["energy_kwh"]
+                ) * 100
             else:
                 stats["solar_percentage"] = 0
 
@@ -631,20 +668,34 @@ class ChargingSessionManager:
             "total_energy_kwh": round(total_energy, 2),
             "solar_energy_kwh": round(solar_energy, 2),
             "grid_energy_kwh": round(grid_energy, 2),
-            "solar_percentage": round((solar_energy / total_energy * 100) if total_energy > 0 else 0, 1),
+            "solar_percentage": round(
+                (solar_energy / total_energy * 100) if total_energy > 0 else 0, 1
+            ),
             "total_cost_dollars": round(total_cost / 100, 2),
             "total_savings_dollars": round(total_savings / 100, 2),
-            "avg_cost_per_kwh_cents": round((total_cost / total_energy) if total_energy > 0 else 0, 1),
-            "avg_session_duration_minutes": round(statistics.mean(durations) if durations else 0, 1),
-            "avg_session_energy_kwh": round(statistics.mean(energies) if energies else 0, 2),
+            "avg_cost_per_kwh_cents": round(
+                (total_cost / total_energy) if total_energy > 0 else 0, 1
+            ),
+            "avg_session_duration_minutes": round(
+                statistics.mean(durations) if durations else 0, 1
+            ),
+            "avg_session_energy_kwh": round(
+                statistics.mean(energies) if energies else 0, 2
+            ),
             "by_vehicle": by_vehicle,
             "by_day": daily_list,
             "environmental": {
-                "co2_avoided_kg": round(solar_energy * 0.5, 1),  # ~0.5kg CO2 per kWh from grid
-                "trees_equivalent": round(solar_energy * 0.5 / 21, 1),  # ~21kg CO2 per tree per year
+                "co2_avoided_kg": round(
+                    solar_energy * 0.5, 1
+                ),  # ~0.5kg CO2 per kWh from grid
+                "trees_equivalent": round(
+                    solar_energy * 0.5 / 21, 1
+                ),  # ~21kg CO2 per tree per year
             },
             "cost_comparison": {
-                "equivalent_petrol_dollars": round(self._calculate_petrol_equivalent(total_energy), 2),
+                "equivalent_petrol_dollars": round(
+                    self._calculate_petrol_equivalent(total_energy), 2
+                ),
             },
         }
 

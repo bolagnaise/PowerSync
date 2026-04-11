@@ -9,6 +9,7 @@ Key parameters:
 - ac_value1: 0-100 percentage of max power
 - ac_sys: Inverter AC capacity in watts (informational only)
 """
+
 import logging
 import math
 from typing import Optional
@@ -58,7 +59,11 @@ class ZeversolarController(InverterController):
     @property
     def base_url(self) -> str:
         """Get the base URL for the inverter."""
-        return f"http://{self.host}:{self.port}" if self.port != 80 else f"http://{self.host}"
+        return (
+            f"http://{self.host}:{self.port}"
+            if self.port != 80
+            else f"http://{self.host}"
+        )
 
     async def connect(self) -> bool:
         """Establish connection to the inverter.
@@ -106,11 +111,17 @@ class ZeversolarController(InverterController):
         [15] em_ml
         """
         try:
-            lines = text.strip().split('\n')
+            lines = text.strip().split("\n")
             if len(lines) >= 15:
-                self.ac_capacity_w = int(lines[10]) if lines[10].isdigit() else self.ac_capacity_w
-                self._current_power_percent = int(lines[11]) if lines[11].isdigit() else 100
-                _LOGGER.debug(f"Zeversolar settings: ac_sys={self.ac_capacity_w}W, power_limit={self._current_power_percent}%")
+                self.ac_capacity_w = (
+                    int(lines[10]) if lines[10].isdigit() else self.ac_capacity_w
+                )
+                self._current_power_percent = (
+                    int(lines[11]) if lines[11].isdigit() else 100
+                )
+                _LOGGER.debug(
+                    f"Zeversolar settings: ac_sys={self.ac_capacity_w}W, power_limit={self._current_power_percent}%"
+                )
         except Exception as e:
             _LOGGER.warning(f"Failed to parse Zeversolar settings: {e}")
 
@@ -164,7 +175,9 @@ class ZeversolarController(InverterController):
                     _LOGGER.info(f"Zeversolar power limit set to {percent}%")
                     return True
                 else:
-                    _LOGGER.error(f"Failed to set power limit, status: {response.status}")
+                    _LOGGER.error(
+                        f"Failed to set power limit, status: {response.status}"
+                    )
                     return False
 
         except aiohttp.ClientError as e:
@@ -196,7 +209,9 @@ class ZeversolarController(InverterController):
         # math.ceil gives proper rounding: 200W on 5kW = ceil(4.0) = 4%, not 5%
         percent = min(100, math.ceil((watts / self.ac_capacity_w) * 100))
 
-        _LOGGER.info(f"Setting Zeversolar power limit to {watts}W ({percent}% of {self.ac_capacity_w}W)")
+        _LOGGER.info(
+            f"Setting Zeversolar power limit to {watts}W ({percent}% of {self.ac_capacity_w}W)"
+        )
         return await self._set_power_limit(percent)
 
     async def curtail(
@@ -217,7 +232,9 @@ class ZeversolarController(InverterController):
             True if successful, False otherwise
         """
         if home_load_w is not None and home_load_w > 0:
-            _LOGGER.info(f"Load-following curtailment: limiting to {home_load_w}W for {self.host}")
+            _LOGGER.info(
+                f"Load-following curtailment: limiting to {home_load_w}W for {self.host}"
+            )
             return await self.set_power_limit_watts(home_load_w)
         else:
             _LOGGER.info(f"Full curtailment: setting to 0% for {self.host}")
@@ -276,7 +293,10 @@ class ZeversolarController(InverterController):
             if await self.connect():
                 state = await self.get_status()
                 await self.disconnect()
-                return True, f"Connected to Zeversolar. Power limit: {state.power_limit_percent}%"
+                return (
+                    True,
+                    f"Connected to Zeversolar. Power limit: {state.power_limit_percent}%",
+                )
             return False, "Failed to connect to Zeversolar"
         except Exception as e:
             _LOGGER.error(f"Zeversolar connection test failed: {e}")

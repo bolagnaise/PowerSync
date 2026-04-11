@@ -3,6 +3,7 @@
 Fetches real-time electricity pricing data from the National Electricity Market (NEM).
 No authentication required - uses public API endpoints.
 """
+
 from __future__ import annotations
 
 import csv
@@ -29,7 +30,9 @@ class AEMOAPIClient:
     No authentication required - uses public API endpoints.
     """
 
-    BASE_URL = "https://visualisations.aemo.com.au/aemo/apps/api/report/ELEC_NEM_SUMMARY"
+    BASE_URL = (
+        "https://visualisations.aemo.com.au/aemo/apps/api/report/ELEC_NEM_SUMMARY"
+    )
     DISPATCH_URL = "https://nemweb.com.au/Reports/Current/DispatchIS_Reports/"
     PREDISPATCH_URL = "https://nemweb.com.au/Reports/Current/Predispatch_Reports/"
 
@@ -61,7 +64,9 @@ class AEMOAPIClient:
         """
         self._session = session
         self._last_dispatch_file: str | None = None
-        self._dispatch_cache: dict[str, dict[str, dict[str, Any]]] = {}  # filename -> parsed prices
+        self._dispatch_cache: dict[
+            str, dict[str, dict[str, Any]]
+        ] = {}  # filename -> parsed prices
         _LOGGER.info("AEMOAPIClient initialized")
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -99,7 +104,9 @@ class AEMOAPIClient:
 
             # Step 1: Get directory listing from NEMWEB dispatch reports
             async with session.get(
-                self.DISPATCH_URL, headers=self.HEADERS, timeout=aiohttp.ClientTimeout(total=15)
+                self.DISPATCH_URL,
+                headers=self.HEADERS,
+                timeout=aiohttp.ClientTimeout(total=15),
             ) as response:
                 response.raise_for_status()
                 index_html = await response.text()
@@ -107,7 +114,9 @@ class AEMOAPIClient:
             # Step 2: Find latest dispatch ZIP file
             files = re.findall(r"PUBLIC_DISPATCHIS_\d{12}_\d+\.zip", index_html)
             if not files:
-                _LOGGER.warning("No dispatch files found in NEMWEB directory, using JSON fallback")
+                _LOGGER.warning(
+                    "No dispatch files found in NEMWEB directory, using JSON fallback"
+                )
                 return await self._get_current_prices_json_fallback(), False, ""
 
             latest_file = sorted(files)[-1]
@@ -128,7 +137,9 @@ class AEMOAPIClient:
             # Step 4: Parse dispatch prices from ZIP
             prices = self._parse_dispatch_zip(zip_content)
             if not prices:
-                _LOGGER.warning("No prices parsed from NEMWEB dispatch ZIP, using JSON fallback")
+                _LOGGER.warning(
+                    "No prices parsed from NEMWEB dispatch ZIP, using JSON fallback"
+                )
                 return await self._get_current_prices_json_fallback(), False, ""
 
             # Cache the result and evict any previous entry (only keep latest)
@@ -139,7 +150,9 @@ class AEMOAPIClient:
             return prices, True, latest_file
 
         except Exception as err:
-            _LOGGER.warning("NEMWEB dispatch fetch failed (%s), using JSON fallback", err)
+            _LOGGER.warning(
+                "NEMWEB dispatch fetch failed (%s), using JSON fallback", err
+            )
             return await self._get_current_prices_json_fallback(), False, ""
 
     def _parse_dispatch_zip(self, content: bytes) -> dict[str, dict[str, Any]] | None:
@@ -209,7 +222,9 @@ class AEMOAPIClient:
 
         return prices if prices else None
 
-    async def _get_current_prices_json_fallback(self) -> dict[str, dict[str, Any]] | None:
+    async def _get_current_prices_json_fallback(
+        self,
+    ) -> dict[str, dict[str, Any]] | None:
         """Get current prices from AEMO JSON API (fallback).
 
         Returns:
@@ -219,7 +234,9 @@ class AEMOAPIClient:
             _LOGGER.info("Fetching current AEMO NEM prices via JSON API fallback")
             session = await self._get_session()
 
-            async with session.get(self.BASE_URL, timeout=aiohttp.ClientTimeout(total=15)) as response:
+            async with session.get(
+                self.BASE_URL, timeout=aiohttp.ClientTimeout(total=15)
+            ) as response:
                 response.raise_for_status()
                 data = await response.json()
 
@@ -237,7 +254,9 @@ class AEMOAPIClient:
                             "region_name": self.REGIONS[region],
                         }
 
-            _LOGGER.info("JSON fallback fetched AEMO prices for %d regions", len(prices))
+            _LOGGER.info(
+                "JSON fallback fetched AEMO prices for %d regions", len(prices)
+            )
             return prices
 
         except aiohttp.ClientError as err:
@@ -257,7 +276,11 @@ class AEMOAPIClient:
             dict: Price data for the region or None
         """
         if region not in self.REGIONS:
-            _LOGGER.error("Invalid region: %s. Must be one of %s", region, list(self.REGIONS.keys()))
+            _LOGGER.error(
+                "Invalid region: %s. Must be one of %s",
+                region,
+                list(self.REGIONS.keys()),
+            )
             return None
 
         prices = await self.get_current_prices()
@@ -287,12 +310,16 @@ class AEMOAPIClient:
         if is_spike:
             _LOGGER.warning(
                 "PRICE SPIKE DETECTED in %s: $%s/MWh (threshold: $%s/MWh)",
-                region, current_price, threshold_dollars_per_mwh
+                region,
+                current_price,
+                threshold_dollars_per_mwh,
             )
         else:
             _LOGGER.debug(
                 "Normal price in %s: $%s/MWh (threshold: $%s/MWh)",
-                region, current_price, threshold_dollars_per_mwh
+                region,
+                current_price,
+                threshold_dollars_per_mwh,
             )
 
         return is_spike, current_price, price_data
@@ -326,7 +353,11 @@ class AEMOAPIClient:
             ]
         """
         if region not in self.REGIONS:
-            _LOGGER.error("Invalid region: %s. Must be one of %s", region, list(self.REGIONS.keys()))
+            _LOGGER.error(
+                "Invalid region: %s. Must be one of %s",
+                region,
+                list(self.REGIONS.keys()),
+            )
             return None
 
         try:
@@ -334,7 +365,9 @@ class AEMOAPIClient:
 
             # Step 1: Get list of available pre-dispatch files from NEMWeb
             async with session.get(
-                self.PREDISPATCH_URL, headers=self.HEADERS, timeout=aiohttp.ClientTimeout(total=30)
+                self.PREDISPATCH_URL,
+                headers=self.HEADERS,
+                timeout=aiohttp.ClientTimeout(total=30),
             ) as response:
                 response.raise_for_status()
                 index_html = await response.text()
@@ -353,16 +386,24 @@ class AEMOAPIClient:
                 cached_intervals = cache["data"][region]
                 _LOGGER.info(
                     "Using cached AEMO forecast for %s (%d periods, file: %s)",
-                    region, len(cached_intervals) // 2, latest_file
+                    region,
+                    len(cached_intervals) // 2,
+                    latest_file,
                 )
                 # Return requested number of periods (or all if fewer available)
-                return cached_intervals[: periods * 2] if len(cached_intervals) > periods * 2 else cached_intervals
+                return (
+                    cached_intervals[: periods * 2]
+                    if len(cached_intervals) > periods * 2
+                    else cached_intervals
+                )
 
             # Step 4: Download the ZIP file (cache miss or new file)
             file_url = f"{self.PREDISPATCH_URL}{latest_file}"
             _LOGGER.info("Downloading AEMO pre-dispatch: %s", latest_file)
 
-            async with session.get(file_url, headers=self.HEADERS, timeout=aiohttp.ClientTimeout(total=60)) as response:
+            async with session.get(
+                file_url, headers=self.HEADERS, timeout=aiohttp.ClientTimeout(total=60)
+            ) as response:
                 response.raise_for_status()
                 zip_content = await response.read()
 
@@ -372,7 +413,9 @@ class AEMOAPIClient:
 
             with zipfile.ZipFile(io.BytesIO(zip_content)) as zf:
                 # The ZIP contains a single CSV file with all data tables
-                csv_files = [f for f in zf.namelist() if f.endswith(".CSV") or f.endswith(".csv")]
+                csv_files = [
+                    f for f in zf.namelist() if f.endswith(".CSV") or f.endswith(".csv")
+                ]
                 if not csv_files:
                     _LOGGER.error("No CSV file in pre-dispatch ZIP: %s", zf.namelist())
                     return None
@@ -425,23 +468,27 @@ class AEMOAPIClient:
                             price_cents = rrp / 10.0  # $/MWh / 10 = c/kWh
 
                             # Add import (general) price
-                            region_data[row_region].append({
-                                "nemTime": dt.isoformat(),
-                                "perKwh": price_cents,
-                                "channelType": "general",
-                                "type": "ForecastInterval",
-                                "duration": 30,
-                            })
+                            region_data[row_region].append(
+                                {
+                                    "nemTime": dt.isoformat(),
+                                    "perKwh": price_cents,
+                                    "channelType": "general",
+                                    "type": "ForecastInterval",
+                                    "duration": 30,
+                                }
+                            )
 
                             # Add export (feedIn) price - same as import for AEMO
                             # (will be overridden by Flow Power Happy Hour rates)
-                            region_data[row_region].append({
-                                "nemTime": dt.isoformat(),
-                                "perKwh": -price_cents,  # Amber convention: negative = you get paid
-                                "channelType": "feedIn",
-                                "type": "ForecastInterval",
-                                "duration": 30,
-                            })
+                            region_data[row_region].append(
+                                {
+                                    "nemTime": dt.isoformat(),
+                                    "perKwh": -price_cents,  # Amber convention: negative = you get paid
+                                    "channelType": "feedIn",
+                                    "type": "ForecastInterval",
+                                    "duration": 30,
+                                }
+                            )
 
                         except (ValueError, IndexError) as err:
                             _LOGGER.debug("Skipping row due to parse error: %s", err)
@@ -465,11 +512,19 @@ class AEMOAPIClient:
             # Return requested region's data
             intervals = region_data.get(region, [])
             if not intervals:
-                _LOGGER.error("No price data found for region %s in pre-dispatch file", region)
+                _LOGGER.error(
+                    "No price data found for region %s in pre-dispatch file", region
+                )
                 return None
 
-            _LOGGER.info("Successfully parsed %d AEMO forecast periods for %s", len(intervals) // 2, region)
-            return intervals[: periods * 2] if len(intervals) > periods * 2 else intervals
+            _LOGGER.info(
+                "Successfully parsed %d AEMO forecast periods for %s",
+                len(intervals) // 2,
+                region,
+            )
+            return (
+                intervals[: periods * 2] if len(intervals) > periods * 2 else intervals
+            )
 
         except aiohttp.ClientError as err:
             _LOGGER.error("Network error fetching AEMO pre-dispatch: %s", err)

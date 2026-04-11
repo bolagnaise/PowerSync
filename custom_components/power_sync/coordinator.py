@@ -1,4 +1,5 @@
 """Data update coordinators for PowerSync with improved error handling."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
@@ -92,15 +93,21 @@ class EnergyAccumulator:
             _LOGGER.info(
                 "Restored energy accumulator: solar=%.2f grid_in=%.2f grid_out=%.2f "
                 "charge=%.2f discharge=%.2f load=%.2f kWh, cost=$%.2f earn=$%.2f (date=%s)",
-                self.solar_kwh, self.grid_import_kwh, self.grid_export_kwh,
-                self.battery_charge_kwh, self.battery_discharge_kwh, self.load_kwh,
-                self.import_cost_today, self.export_earnings_today,
+                self.solar_kwh,
+                self.grid_import_kwh,
+                self.grid_export_kwh,
+                self.battery_charge_kwh,
+                self.battery_discharge_kwh,
+                self.load_kwh,
+                self.import_cost_today,
+                self.export_earnings_today,
                 stored_date,
             )
         else:
             _LOGGER.debug(
                 "Energy accumulator data from %s (today=%s), starting fresh",
-                stored_date, today,
+                stored_date,
+                today,
             )
 
     async def async_flush(self) -> None:
@@ -164,9 +171,14 @@ class EnergyAccumulator:
             _LOGGER.info(
                 "Energy accumulator midnight reset: solar=%.2f grid_in=%.2f grid_out=%.2f "
                 "charge=%.2f discharge=%.2f load=%.2f kWh, cost=$%.2f earn=$%.2f",
-                self.solar_kwh, self.grid_import_kwh, self.grid_export_kwh,
-                self.battery_charge_kwh, self.battery_discharge_kwh, self.load_kwh,
-                self.import_cost_today, self.export_earnings_today,
+                self.solar_kwh,
+                self.grid_import_kwh,
+                self.grid_export_kwh,
+                self.battery_charge_kwh,
+                self.battery_discharge_kwh,
+                self.load_kwh,
+                self.import_cost_today,
+                self.export_earnings_today,
             )
             self.solar_kwh = 0.0
             self.grid_import_kwh = 0.0
@@ -189,9 +201,13 @@ class EnergyAccumulator:
                 self.load_kwh += max(0, load_kw) * delta_h
                 # Accumulate costs if prices available
                 if buy_price_per_kwh is not None:
-                    self.import_cost_today += max(0, grid_kw) * buy_price_per_kwh * delta_h
+                    self.import_cost_today += (
+                        max(0, grid_kw) * buy_price_per_kwh * delta_h
+                    )
                 if sell_price_per_kwh is not None:
-                    self.export_earnings_today += max(0, -grid_kw) * sell_price_per_kwh * delta_h
+                    self.export_earnings_today += (
+                        max(0, -grid_kw) * sell_price_per_kwh * delta_h
+                    )
                 self._schedule_save()
 
         self._last_update = now
@@ -211,7 +227,9 @@ class EnergyAccumulator:
         }
 
 
-def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | None, float | None]:
+def _get_current_prices(
+    hass: HomeAssistant, entry_id: str
+) -> tuple[float | None, float | None]:
     """Get current buy/sell prices in $/kWh for cost tracking.
 
     Tries Amber coordinator data first, then falls back to tariff schedule.
@@ -243,7 +261,10 @@ def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | Non
         tariff_schedule = entry_data.get("tariff_schedule")
         if tariff_schedule:
             from . import get_current_price_from_tariff_schedule
-            buy_cents, sell_cents, _ = get_current_price_from_tariff_schedule(tariff_schedule)
+
+            buy_cents, sell_cents, _ = get_current_price_from_tariff_schedule(
+                tariff_schedule
+            )
             return (buy_cents / 100.0, sell_cents / 100.0)
 
     except Exception as exc:
@@ -262,7 +283,7 @@ class SensitiveDataFilter(logging.Filter):
     def obfuscate(value: str, show_chars: int = 4) -> str:
         """Obfuscate a string showing only first and last N characters."""
         if len(value) <= show_chars * 2:
-            return '*' * len(value)
+            return "*" * len(value)
         return f"{value[:show_chars]}{'*' * (len(value) - show_chars * 2)}{value[-show_chars:]}"
 
     def _obfuscate_string(self, text: str) -> str:
@@ -272,48 +293,48 @@ class SensitiveDataFilter(logging.Filter):
 
         # Handle Bearer tokens
         text = re.sub(
-            r'(Bearer\s+)([a-zA-Z0-9_-]{20,})',
+            r"(Bearer\s+)([a-zA-Z0-9_-]{20,})",
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle psk_ tokens (Amber API keys)
         text = re.sub(
-            r'(psk_)([a-zA-Z0-9]{20,})',
+            r"(psk_)([a-zA-Z0-9]{20,})",
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle authorization headers in websocket/API logs
         text = re.sub(
-            r'(authorization:\s*Bearer\s+)([a-zA-Z0-9_-]{20,})',
+            r"(authorization:\s*Bearer\s+)([a-zA-Z0-9_-]{20,})",
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle site IDs (alphanumeric, like Amber 01KAR0YMB7JQDVZ10SN1SGA0CV)
         text = re.sub(
             r'(site[_\s]?[iI][dD]["\']?[\s:=]+["\']?)([a-zA-Z0-9-]{15,})',
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
-            text
+            text,
         )
 
         # Handle "for site {id}" pattern
         text = re.sub(
-            r'(for site\s+)([a-zA-Z0-9-]{15,})',
+            r"(for site\s+)([a-zA-Z0-9-]{15,})",
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle email addresses
         text = re.sub(
-            r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})',
+            r"([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})",
             lambda m: self.obfuscate(m.group(1)),
-            text
+            text,
         )
 
         # Handle Tesla energy site IDs (numeric, 13-20 digits) - in URLs and JSON
@@ -321,15 +342,15 @@ class SensitiveDataFilter(logging.Filter):
             r'(energy_site[s]?[/\s:=]+["\']?)(\d{13,})',
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle standalone long numeric IDs (Tesla energy site IDs in various contexts)
         text = re.sub(
-            r'(\bsite\s+)(\d{13,})',
+            r"(\bsite\s+)(\d{13,})",
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle VIN numbers in JSON format ('vin': 'XXX' or "vin": "XXX")
@@ -337,15 +358,15 @@ class SensitiveDataFilter(logging.Filter):
             r'(["\']vin["\']:\s*["\'])([A-HJ-NPR-Z0-9]{17})(["\'])',
             lambda m: m.group(1) + self.obfuscate(m.group(2)) + m.group(3),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle VIN numbers plain format
         text = re.sub(
-            r'(\bvin[\s:=]+)([A-HJ-NPR-Z0-9]{17})\b',
+            r"(\bvin[\s:=]+)([A-HJ-NPR-Z0-9]{17})\b",
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle DIN numbers in JSON format
@@ -353,7 +374,7 @@ class SensitiveDataFilter(logging.Filter):
             r'(["\']din["\']:\s*["\'])([A-Za-z0-9-]{15,})(["\'])',
             lambda m: m.group(1) + self.obfuscate(m.group(2)) + m.group(3),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle DIN numbers plain format
@@ -361,7 +382,7 @@ class SensitiveDataFilter(logging.Filter):
             r'(\bdin[\s:=]+["\']?)([A-Za-z0-9-]{15,})',
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle serial numbers in JSON format
@@ -369,7 +390,7 @@ class SensitiveDataFilter(logging.Filter):
             r'(["\']serial_number["\']:\s*["\'])([A-Za-z0-9-]{8,})(["\'])',
             lambda m: m.group(1) + self.obfuscate(m.group(2)) + m.group(3),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle serial numbers plain format
@@ -377,7 +398,7 @@ class SensitiveDataFilter(logging.Filter):
             r'(serial[\s_]?(?:number)?[\s:=]+["\']?)([A-Za-z0-9-]{8,})',
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle gateway IDs in JSON format
@@ -385,7 +406,7 @@ class SensitiveDataFilter(logging.Filter):
             r'(["\']gateway_id["\']:\s*["\'])([A-Za-z0-9-]{15,})(["\'])',
             lambda m: m.group(1) + self.obfuscate(m.group(2)) + m.group(3),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle gateway IDs plain format
@@ -393,7 +414,7 @@ class SensitiveDataFilter(logging.Filter):
             r'(gateway[\s_]?(?:id)?[\s:=]+["\']?)([A-Za-z0-9-]{15,})',
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle warp site numbers in JSON format
@@ -401,7 +422,7 @@ class SensitiveDataFilter(logging.Filter):
             r'(["\']warp_site_number["\']:\s*["\'])([A-Za-z0-9-]{8,})(["\'])',
             lambda m: m.group(1) + self.obfuscate(m.group(2)) + m.group(3),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle warp site numbers plain format
@@ -409,7 +430,7 @@ class SensitiveDataFilter(logging.Filter):
             r'(warp[\s_]?(?:site)?(?:[\s_]?number)?[\s:=]+["\']?)([A-Za-z0-9-]{8,})',
             lambda m: m.group(1) + self.obfuscate(m.group(2)),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle asset_site_id (UUIDs)
@@ -417,7 +438,7 @@ class SensitiveDataFilter(logging.Filter):
             r'(["\']asset_site_id["\']:\s*["\'])([a-f0-9-]{36})(["\'])',
             lambda m: m.group(1) + self.obfuscate(m.group(2)) + m.group(3),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         # Handle device_id (UUIDs)
@@ -425,7 +446,7 @@ class SensitiveDataFilter(logging.Filter):
             r'(["\']device_id["\']:\s*["\'])([a-f0-9-]{36})(["\'])',
             lambda m: m.group(1) + self.obfuscate(m.group(2)) + m.group(3),
             text,
-            flags=re.IGNORECASE
+            flags=re.IGNORECASE,
         )
 
         return text
@@ -453,7 +474,9 @@ class SensitiveDataFilter(logging.Filter):
         # This preserves numeric types for format specifiers like %d and %.3f
         if record.args:
             if isinstance(record.args, dict):
-                record.args = {k: self._obfuscate_arg(v) for k, v in record.args.items()}
+                record.args = {
+                    k: self._obfuscate_arg(v) for k, v in record.args.items()
+                }
             elif isinstance(record.args, tuple):
                 record.args = tuple(self._obfuscate_arg(a) for a in record.args)
 
@@ -481,8 +504,10 @@ def _parse_retry_after(response: aiohttp.ClientResponse) -> float | None:
     try:
         # Try HTTP-date format (e.g. "Tue, 11 Feb 2026 03:00:00 GMT")
         from email.utils import parsedate_to_datetime
+
         retry_date = parsedate_to_datetime(retry_after)
         from homeassistant.util import dt as dt_util
+
         delay = (retry_date - dt_util.utcnow()).total_seconds()
         return max(1.0, min(delay, 300.0))  # Clamp 1-300s
     except (ValueError, TypeError):
@@ -495,7 +520,7 @@ async def _fetch_with_retry(
     headers: dict,
     max_retries: int = 3,
     timeout_seconds: int = 60,
-    **kwargs
+    **kwargs,
 ) -> dict[str, Any]:
     """Fetch data with exponential backoff retry logic.
 
@@ -523,11 +548,13 @@ async def _fetch_with_retry(
         try:
             if attempt > 0:
                 # Use Retry-After delay if available, otherwise exponential backoff
-                wait_time = retry_after_delay or (2 ** attempt)
+                wait_time = retry_after_delay or (2**attempt)
                 retry_after_delay = None  # Reset for next attempt
                 _LOGGER.info(
                     "Retry attempt %d/%d after %.0fs delay",
-                    attempt + 1, max_retries, wait_time,
+                    attempt + 1,
+                    max_retries,
+                    wait_time,
                 )
                 await asyncio.sleep(wait_time)
 
@@ -535,7 +562,7 @@ async def _fetch_with_retry(
                 url,
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=timeout_seconds),
-                **kwargs
+                **kwargs,
             ) as response:
                 if response.status == 200:
                     return await response.json()
@@ -547,7 +574,9 @@ async def _fetch_with_retry(
                     retry_after_delay = _parse_retry_after(response)
                     _LOGGER.warning(
                         "Rate limited 429 (attempt %d/%d): %s (retry-after: %s)",
-                        attempt + 1, max_retries, error_text[:200],
+                        attempt + 1,
+                        max_retries,
+                        error_text[:200],
                         f"{retry_after_delay:.0f}s" if retry_after_delay else "not set",
                     )
                     last_error = UpdateFailed(f"Rate limited: 429")
@@ -558,7 +587,10 @@ async def _fetch_with_retry(
                     retry_after_delay = _parse_retry_after(response)
                     _LOGGER.warning(
                         "Server error (attempt %d/%d): %s - %s",
-                        attempt + 1, max_retries, response.status, error_text[:200],
+                        attempt + 1,
+                        max_retries,
+                        response.status,
+                        error_text[:200],
                     )
                     last_error = UpdateFailed(f"Server error: {response.status}")
                     continue
@@ -571,7 +603,9 @@ async def _fetch_with_retry(
                         "Authentication failed (401) — triggering reauth: %s",
                         error_text[:200],
                     )
-                    raise ConfigEntryAuthFailed(f"Token rejected by upstream: {error_text[:200]}")
+                    raise ConfigEntryAuthFailed(
+                        f"Token rejected by upstream: {error_text[:200]}"
+                    )
 
                 # Other 4xx client errors — don't retry
                 raise UpdateFailed(f"Client error {response.status}: {error_text}")
@@ -579,7 +613,9 @@ async def _fetch_with_retry(
         except aiohttp.ClientError as err:
             _LOGGER.warning(
                 "Network error (attempt %d/%d): %s",
-                attempt + 1, max_retries, err,
+                attempt + 1,
+                max_retries,
+                err,
             )
             last_error = UpdateFailed(f"Network error: {err}")
             continue
@@ -587,7 +623,9 @@ async def _fetch_with_retry(
         except asyncio.TimeoutError:
             _LOGGER.warning(
                 "Timeout error (attempt %d/%d): Request exceeded %ds",
-                attempt + 1, max_retries, timeout_seconds,
+                attempt + 1,
+                max_retries,
+                timeout_seconds,
             )
             last_error = UpdateFailed(f"Timeout after {timeout_seconds}s")
             continue
@@ -675,27 +713,37 @@ class AmberPriceCoordinator(DataUpdateCoordinator):
                 retry_interval = 2  # seconds
 
                 for attempt in range(retry_attempts):
-                    current_prices = self.ws_client.get_latest_prices(max_age_seconds=max_age_seconds)
+                    current_prices = self.ws_client.get_latest_prices(
+                        max_age_seconds=max_age_seconds
+                    )
 
                     if current_prices:
                         # Get health status to log data age
                         health = self.ws_client.get_health_status()
-                        age = health.get('age_seconds', 'unknown')
-                        _LOGGER.info(f"✓ Using WebSocket prices (age: {age}s, attempt: {attempt + 1}/{retry_attempts})")
+                        age = health.get("age_seconds", "unknown")
+                        _LOGGER.info(
+                            f"✓ Using WebSocket prices (age: {age}s, attempt: {attempt + 1}/{retry_attempts})"
+                        )
                         break
 
                     # If not last attempt, wait before retry
                     if attempt < retry_attempts - 1:
-                        _LOGGER.debug(f"WebSocket data unavailable/stale, retrying in {retry_interval}s (attempt {attempt + 1}/{retry_attempts})")
+                        _LOGGER.debug(
+                            f"WebSocket data unavailable/stale, retrying in {retry_interval}s (attempt {attempt + 1}/{retry_attempts})"
+                        )
                         await asyncio.sleep(retry_interval)
 
                 # All retries exhausted
                 if not current_prices:
-                    _LOGGER.info(f"WebSocket prices unavailable after {retry_attempts} attempts ({max_age_seconds}s staleness threshold), falling back to REST API")
+                    _LOGGER.info(
+                        f"WebSocket prices unavailable after {retry_attempts} attempts ({max_age_seconds}s staleness threshold), falling back to REST API"
+                    )
 
             # Fall back to REST API if WebSocket unavailable
             if not current_prices:
-                _LOGGER.info("⚠ Using REST API for current prices (WebSocket unavailable)")
+                _LOGGER.info(
+                    "⚠ Using REST API for current prices (WebSocket unavailable)"
+                )
                 current_prices = await _fetch_with_retry(
                     self.session,
                     f"{AMBER_API_BASE_URL}/sites/{self.site_id}/prices/current",
@@ -747,6 +795,7 @@ class AmberPriceCoordinator(DataUpdateCoordinator):
 # ============================================================
 # Localvolts Price Coordinator
 # ============================================================
+
 
 def _parse_localvolts_price(value) -> float:
     """Parse a Localvolts price value, handling 'N/A' and non-numeric values.
@@ -836,7 +885,9 @@ class LocalvoltsPriceCoordinator(DataUpdateCoordinator):
                     "nemTime": nem_time,
                     "perKwh": import_ckwh,
                     "channelType": "general",
-                    "type": "CurrentInterval" if quality in ("Act", "Exp") else "ForecastInterval",
+                    "type": "CurrentInterval"
+                    if quality in ("Act", "Exp")
+                    else "ForecastInterval",
                     "duration": 5,
                     "startTime": start_time,
                 }
@@ -890,14 +941,14 @@ _QUALITY_RANK = {"estimated": 0, "mixed": 1, "billable": 2}
 class DayUsage:
     """Actual metered usage and cost for a single day from Amber."""
 
-    date: str                   # "YYYY-MM-DD"
-    import_kwh: float           # general channel total
-    export_kwh: float           # feedIn channel (absolute)
+    date: str  # "YYYY-MM-DD"
+    import_kwh: float  # general channel total
+    export_kwh: float  # feedIn channel (absolute)
     controlled_load_kwh: float
-    import_cost: float          # $ gross import
-    export_earnings: float      # $ gross export earnings
-    net_cost: float             # import_cost - export_earnings
-    quality: str                # "estimated", "billable", or "mixed"
+    import_cost: float  # $ gross import
+    export_earnings: float  # $ gross export earnings
+    net_cost: float  # import_cost - export_earnings
+    quality: str  # "estimated", "billable", or "mixed"
 
 
 class AmberUsageCoordinator:
@@ -922,7 +973,9 @@ class AmberUsageCoordinator:
         self._entry_id = entry_id
         self._monthly_supply_fee = monthly_supply_fee
         self._session = async_get_clientsession(hass)
-        self._store = Store(hass, USAGE_STORAGE_VERSION, f"{USAGE_STORAGE_KEY}.{entry_id}")
+        self._store = Store(
+            hass, USAGE_STORAGE_VERSION, f"{USAGE_STORAGE_KEY}.{entry_id}"
+        )
 
         # In-memory state
         self._days: dict[str, DayUsage] = {}
@@ -946,12 +999,17 @@ class AmberUsageCoordinator:
         # Delay initial fetch 30-90s to avoid competing with price coordinator
         # at startup for Amber API rate limit budget
         import random
+
         delay = 30 + random.randint(0, 60)
-        _LOGGER.info("Amber usage: first fetch in %ds (avoiding startup rate limit contention)", delay)
+        _LOGGER.info(
+            "Amber usage: first fetch in %ds (avoiding startup rate limit contention)",
+            delay,
+        )
         self._cancel_initial = self.hass.loop.call_later(
             delay, lambda: self.hass.async_create_task(self._fetch_usage())
         )
         from homeassistant.helpers.event import async_track_time_interval
+
         self._cancel_timer = async_track_time_interval(
             self.hass, self._scheduled_fetch, USAGE_FETCH_INTERVAL
         )
@@ -1088,19 +1146,36 @@ class AmberUsageCoordinator:
                 total_updated += updated
                 _LOGGER.debug(
                     "Amber usage chunk %s to %s: %d days updated",
-                    chunk_start, chunk_end, updated,
+                    chunk_start,
+                    chunk_end,
+                    updated,
                 )
             except UpdateFailed as err:
-                _LOGGER.warning("Amber usage fetch failed for %s to %s: %s", chunk_start, chunk_end, err)
+                _LOGGER.warning(
+                    "Amber usage fetch failed for %s to %s: %s",
+                    chunk_start,
+                    chunk_end,
+                    err,
+                )
             except Exception as err:
-                _LOGGER.warning("Amber usage fetch failed unexpectedly for %s to %s: %s", chunk_start, chunk_end, err)
+                _LOGGER.warning(
+                    "Amber usage fetch failed unexpectedly for %s to %s: %s",
+                    chunk_start,
+                    chunk_end,
+                    err,
+                )
 
             chunk_start = chunk_end + timedelta(days=1)
 
         self._last_fetch = now
         self._prune_old_days()
         self._save_store()
-        _LOGGER.info("Amber usage fetched: %d days updated (range %s to %s)", total_updated, start_date, end_date)
+        _LOGGER.info(
+            "Amber usage fetched: %d days updated (range %s to %s)",
+            total_updated,
+            start_date,
+            end_date,
+        )
 
     def _process_intervals(self, intervals: list[dict]) -> int:
         """Aggregate 30-min intervals into daily DayUsage records.
@@ -1199,7 +1274,9 @@ class AmberUsageCoordinator:
         """Record the optimizer's baseline cost for a completed day."""
         self._baselines[date_str] = round(baseline_cost, 4)
         self._save_store()
-        _LOGGER.info("Amber usage: recorded baseline $%.2f for %s", baseline_cost, date_str)
+        _LOGGER.info(
+            "Amber usage: recorded baseline $%.2f for %s", baseline_cost, date_str
+        )
 
     # ------------------------------------------------------------------
     # Aggregation
@@ -1231,8 +1308,14 @@ class AmberUsageCoordinator:
                 baseline_total += bl
                 baseline_days += 1
 
-        result["baseline_cost"] = round(baseline_total + supply_total, 2) if baseline_days > 0 else None
-        result["savings"] = round(baseline_total - (result["net_cost"] - result["supply_charge"]), 2) if baseline_days > 0 else None
+        result["baseline_cost"] = (
+            round(baseline_total + supply_total, 2) if baseline_days > 0 else None
+        )
+        result["savings"] = (
+            round(baseline_total - (result["net_cost"] - result["supply_charge"]), 2)
+            if baseline_days > 0
+            else None
+        )
         result["baseline_days"] = baseline_days
         return result
 
@@ -1275,10 +1358,7 @@ class AmberUsageCoordinator:
         else:
             return []
 
-        return [
-            self._days[k] for k in sorted(self._days.keys())
-            if start <= k <= end
-        ]
+        return [self._days[k] for k in sorted(self._days.keys()) if start <= k <= end]
 
     def _daily_supply_fee(self, date_str: str) -> float:
         """Calculate the daily supply fee for a given date.
@@ -1289,6 +1369,7 @@ class AmberUsageCoordinator:
         if self._monthly_supply_fee <= 0:
             return 0.0
         import calendar
+
         try:
             d = date.fromisoformat(date_str)
             days_in_month = calendar.monthrange(d.year, d.month)[1]
@@ -1368,7 +1449,9 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         self.session = async_get_clientsession(hass)
         self._site_info_cache = None  # Cache site_info (refreshed every 6 hours)
         self._site_info_last_fetch: float = 0  # Timestamp of last successful fetch
-        self._site_info_fetch_failed = False  # Negative cache to avoid retrying on every sync cycle
+        self._site_info_fetch_failed = (
+            False  # Negative cache to avoid retrying on every sync cycle
+        )
         self._energy_acc = EnergyAccumulator(hass, "tesla")
         self._firmware = None  # Extracted from site_info gateways
 
@@ -1378,7 +1461,9 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         # (either Tesla returned 4xx on probe, or the feature is not available in this country).
         self.tesla_capabilities: dict[str, bool] = {}
         self._capabilities_probed = False
-        self._site_country: str | None = None  # From site_info (used to gate region-locked features)
+        self._site_country: str | None = (
+            None  # From site_info (used to gate region-locked features)
+        )
 
         # Cached current-state values for new energy-site controls (populated opportunistically)
         self._storm_mode_enabled: bool | None = None
@@ -1397,13 +1482,19 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         # Determine API base URL based on provider
         if api_provider == TESLA_PROVIDER_POWERSYNC:
             self.api_base_url = POWERSYNC_API_BASE_URL
-            _LOGGER.info(f"TeslaEnergyCoordinator initialized with PowerSync.cc proxy for site {site_id}")
+            _LOGGER.info(
+                f"TeslaEnergyCoordinator initialized with PowerSync.cc proxy for site {site_id}"
+            )
         elif api_provider == TESLA_PROVIDER_FLEET_API:
             self.api_base_url = FLEET_API_BASE_URL
-            _LOGGER.info(f"TeslaEnergyCoordinator initialized with Fleet API for site {site_id}")
+            _LOGGER.info(
+                f"TeslaEnergyCoordinator initialized with Fleet API for site {site_id}"
+            )
         else:
             self.api_base_url = TESLEMETRY_API_BASE_URL
-            _LOGGER.info(f"TeslaEnergyCoordinator initialized with Teslemetry for site {site_id}")
+            _LOGGER.info(
+                f"TeslaEnergyCoordinator initialized with Teslemetry for site {site_id}"
+            )
 
         super().__init__(
             hass,
@@ -1472,6 +1563,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                     # wall_connectors can be a JSON string or a list
                     if isinstance(wall_connectors_raw, str):
                         import ast
+
                         wall_connectors = ast.literal_eval(wall_connectors_raw)
                     else:
                         wall_connectors = wall_connectors_raw
@@ -1490,7 +1582,9 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
 
             # Accumulate daily energy from power readings (with cost tracking)
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+            self._energy_acc.update(
+                max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell
+            )
 
             # Fetch site_info periodically to detect firmware updates (every 6 hours)
             _site_info_stale = (time.monotonic() - self._site_info_last_fetch) > 21600
@@ -1509,6 +1603,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 self._last_grid_status = grid_status
                 try:
                     from .automations.actions import _send_expo_push
+
                     if grid_status == "Islanded":
                         _LOGGER.warning(
                             "Grid outage detected — Powerwall islanding (site %s)",
@@ -1550,10 +1645,12 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 outage_mins = int((time.monotonic() - self._outage_start) / 60)
                 _LOGGER.warning(
                     "Tesla API recovered after %d min outage (site %s)",
-                    outage_mins, self.site_id,
+                    outage_mins,
+                    self.site_id,
                 )
                 try:
                     from .automations.actions import _send_expo_push
+
                     await _send_expo_push(
                         self.hass,
                         "Tesla Server Recovered",
@@ -1580,10 +1677,12 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 self._last_outage_notification = now
                 _LOGGER.error(
                     "Tesla server outage detected: %d consecutive failures (site %s)",
-                    self._consecutive_failures, self.site_id,
+                    self._consecutive_failures,
+                    self.site_id,
                 )
                 try:
                     from .automations.actions import _send_expo_push
+
                     await _send_expo_push(
                         self.hass,
                         "Tesla Server Outage",
@@ -1591,12 +1690,15 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                     )
                 except Exception:
                     pass
-            elif self._outage_notified and (now - self._last_outage_notification) > 1800:
+            elif (
+                self._outage_notified and (now - self._last_outage_notification) > 1800
+            ):
                 # Repeat notification every 30 min during ongoing outage
                 outage_mins = int((now - self._outage_start) / 60)
                 self._last_outage_notification = now
                 try:
                     from .automations.actions import _send_expo_push
+
                     await _send_expo_push(
                         self.hass,
                         "Tesla Server Outage",
@@ -1607,7 +1709,9 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
 
             if isinstance(err, UpdateFailed):
                 raise
-            raise UpdateFailed(f"Unexpected error fetching Tesla energy data: {err}") from err
+            raise UpdateFailed(
+                f"Unexpected error fetching Tesla energy data: {err}"
+            ) from err
 
     async def async_get_site_info(self) -> dict[str, Any] | None:
         """
@@ -1620,7 +1724,10 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             Site info dict containing installation_time_zone, or None if fetch fails
         """
         # Return cached value if still fresh (< 6 hours old)
-        if self._site_info_cache and (time.monotonic() - self._site_info_last_fetch) <= 21600:
+        if (
+            self._site_info_cache
+            and (time.monotonic() - self._site_info_last_fetch) <= 21600
+        ):
             _LOGGER.debug("Returning cached site_info")
             return self._site_info_cache
 
@@ -1661,12 +1768,21 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             if components:
                 _LOGGER.debug(f"Site info components keys: {list(components.keys())}")
                 # Log battery-related fields
-                battery_fields = {k: v for k, v in site_info.items()
-                                 if 'battery' in k.lower() or 'pack' in k.lower() or 'energy' in k.lower() or 'power' in k.lower()}
+                battery_fields = {
+                    k: v
+                    for k, v in site_info.items()
+                    if "battery" in k.lower()
+                    or "pack" in k.lower()
+                    or "energy" in k.lower()
+                    or "power" in k.lower()
+                }
                 if battery_fields:
                     _LOGGER.debug(f"Site info battery fields: {battery_fields}")
-                component_battery = {k: v for k, v in components.items()
-                                    if 'battery' in k.lower() or 'nameplate' in k.lower()}
+                component_battery = {
+                    k: v
+                    for k, v in components.items()
+                    if "battery" in k.lower() or "nameplate" in k.lower()
+                }
                 if component_battery:
                     _LOGGER.debug(f"Components battery fields: {component_battery}")
 
@@ -1739,11 +1855,16 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             return site_info
 
         except UpdateFailed as err:
-            _LOGGER.warning("Failed to fetch site_info: %s (will not retry until next restart)", err)
+            _LOGGER.warning(
+                "Failed to fetch site_info: %s (will not retry until next restart)", err
+            )
             self._site_info_fetch_failed = True
             return None
         except Exception as err:
-            _LOGGER.warning("Unexpected error fetching site_info: %s (will not retry until next restart)", err)
+            _LOGGER.warning(
+                "Unexpected error fetching site_info: %s (will not retry until next restart)",
+                err,
+            )
             self._site_info_fetch_failed = True
             return None
 
@@ -1781,17 +1902,24 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         }
 
         try:
-            _LOGGER.info(f"Setting grid charging {'enabled' if enabled else 'disabled'} for site {self.site_id}")
+            _LOGGER.info(
+                f"Setting grid charging {'enabled' if enabled else 'disabled'} for site {self.site_id}"
+            )
 
             url = f"{self.api_base_url}/api/1/energy_sites/{self.site_id}/grid_import_export"
-            payload = {
-                "disallow_charge_from_grid_with_solar_installed": disallow_value
-            }
+            payload = {"disallow_charge_from_grid_with_solar_installed": disallow_value}
 
-            async with self.session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=30)) as response:
+            async with self.session.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as response:
                 if response.status not in [200, 201, 202]:
                     text = await response.text()
-                    _LOGGER.error(f"Failed to set grid charging: {response.status} - {text}")
+                    _LOGGER.error(
+                        f"Failed to set grid charging: {response.status} - {text}"
+                    )
                     return False
 
                 data = await response.json()
@@ -1805,7 +1933,9 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                         _LOGGER.error(f"Set grid charging failed: {reason}")
                         return False
 
-                _LOGGER.info(f"✅ Grid charging {'enabled' if enabled else 'disabled'} successfully for site {self.site_id}")
+                _LOGGER.info(
+                    f"✅ Grid charging {'enabled' if enabled else 'disabled'} successfully for site {self.site_id}"
+                )
                 self.invalidate_site_info_cache()
                 return True
 
@@ -1851,7 +1981,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         for attempt in range(max_retries):
             try:
                 if attempt > 0:
-                    wait_time = retry_after_delay or (2 ** attempt)
+                    wait_time = retry_after_delay or (2**attempt)
                     retry_after_delay = None
                     await asyncio.sleep(wait_time)
 
@@ -1875,7 +2005,11 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                         retry_after_delay = _parse_retry_after(response)
                         _LOGGER.warning(
                             "Tesla %s %s attempt %d/%d: %s",
-                            method, path, attempt + 1, max_retries, response.status,
+                            method,
+                            path,
+                            attempt + 1,
+                            max_retries,
+                            response.status,
                         )
                         continue
 
@@ -1888,13 +2022,20 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             except asyncio.TimeoutError:
                 _LOGGER.warning(
                     "Tesla %s %s attempt %d/%d timed out",
-                    method, path, attempt + 1, max_retries,
+                    method,
+                    path,
+                    attempt + 1,
+                    max_retries,
                 )
                 continue
             except aiohttp.ClientError as err:
                 _LOGGER.warning(
                     "Tesla %s %s attempt %d/%d network error: %s",
-                    method, path, attempt + 1, max_retries, err,
+                    method,
+                    path,
+                    attempt + 1,
+                    max_retries,
+                    err,
                 )
                 continue
 
@@ -1918,7 +2059,9 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         _LOGGER.info("Probing Tesla Energy Site capabilities for site %s", self.site_id)
 
         async def _probe(name: str, path: str) -> bool:
-            status, _body = await self._tesla_api_call("GET", path, max_retries=1, timeout_seconds=15)
+            status, _body = await self._tesla_api_call(
+                "GET", path, max_retries=1, timeout_seconds=15
+            )
             if status == 200:
                 _LOGGER.info("Tesla capability '%s' supported (200)", name)
                 return True
@@ -1927,14 +2070,16 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 return False
             _LOGGER.info(
                 "Tesla capability '%s' probe inconclusive (%d) — assuming supported",
-                name, status,
+                name,
+                status,
             )
             return True
 
         # Run probes sequentially to be gentle on Tesla rate limits.
         base = f"/api/1/energy_sites/{self.site_id}"
         self.tesla_capabilities["storm_mode"] = await _probe(
-            "storm_mode", f"{base}/storm_mode",
+            "storm_mode",
+            f"{base}/storm_mode",
         )
         self.tesla_capabilities["off_grid_vehicle_charging_reserve"] = await _probe(
             "off_grid_vehicle_charging_reserve",
@@ -1943,14 +2088,19 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         # VPP programs endpoint returns the list of programs the site is eligible for.
         # An empty list still means the endpoint is supported (just no programs).
         status, body = await self._tesla_api_call(
-            "GET", f"{base}/programs", max_retries=1, timeout_seconds=15,
+            "GET",
+            f"{base}/programs",
+            max_retries=1,
+            timeout_seconds=15,
         )
         if status == 200:
             programs = []
             if isinstance(body, dict):
                 resp = body.get("response", body)
                 if isinstance(resp, dict):
-                    programs = resp.get("programs") or resp.get("enrolled_programs") or []
+                    programs = (
+                        resp.get("programs") or resp.get("enrolled_programs") or []
+                    )
                 elif isinstance(resp, list):
                     programs = resp
             self._vpp_programs_cache = programs if isinstance(programs, list) else []
@@ -2009,22 +2159,30 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
 
         if self.tesla_capabilities.get("storm_mode") is False:
             _remove_by_unique_id("switch", f"{self._entry_id}_tesla_storm_watch")
-            _remove_by_unique_id("binary_sensor", f"{self._entry_id}_tesla_storm_watch_active")
+            _remove_by_unique_id(
+                "binary_sensor", f"{self._entry_id}_tesla_storm_watch_active"
+            )
 
         if self.tesla_capabilities.get("off_grid_vehicle_charging_reserve") is False:
-            _remove_by_unique_id("number", f"{self._entry_id}_tesla_off_grid_ev_reserve")
+            _remove_by_unique_id(
+                "number", f"{self._entry_id}_tesla_off_grid_ev_reserve"
+            )
 
         if self.tesla_capabilities.get("vpp_programs") is False:
             # Remove every vpp_* switch created under this entry
             try:
                 for reg_entry in list(ent_reg.entities.values()):
-                    if (reg_entry.config_entry_id == self._entry_id
+                    if (
+                        reg_entry.config_entry_id == self._entry_id
                         and reg_entry.domain == "switch"
                         and reg_entry.platform == DOMAIN
-                        and "_tesla_vpp_" in (reg_entry.unique_id or "")):
+                        and "_tesla_vpp_" in (reg_entry.unique_id or "")
+                    ):
                         ent_reg.async_remove(reg_entry.entity_id)
                         removed += 1
-                        _LOGGER.debug("Removed orphaned VPP switch %s", reg_entry.entity_id)
+                        _LOGGER.debug(
+                            "Removed orphaned VPP switch %s", reg_entry.entity_id
+                        )
             except Exception as err:
                 _LOGGER.debug("Failed to scan VPP switches: %s", err)
 
@@ -2042,14 +2200,22 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         """Enable or disable Tesla Storm Watch (predictive pre-charging)."""
         path = f"/api/1/energy_sites/{self.site_id}/storm_mode"
         status, _body = await self._tesla_api_call(
-            "POST", path, json_body={"enabled": bool(enabled)},
+            "POST",
+            path,
+            json_body={"enabled": bool(enabled)},
         )
         if status == 200:
             self._storm_mode_enabled = bool(enabled)
             self.invalidate_site_info_cache()
-            _LOGGER.info("Storm Watch %s for site %s", "enabled" if enabled else "disabled", self.site_id)
+            _LOGGER.info(
+                "Storm Watch %s for site %s",
+                "enabled" if enabled else "disabled",
+                self.site_id,
+            )
             return True
-        _LOGGER.error("Failed to set storm mode for site %s: HTTP %s", self.site_id, status)
+        _LOGGER.error(
+            "Failed to set storm mode for site %s: HTTP %s", self.site_id, status
+        )
         return False
 
     async def async_get_storm_watch_status(self) -> dict | None:
@@ -2075,14 +2241,22 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         percent = max(0, min(100, percent))
         path = f"/api/1/energy_sites/{self.site_id}/off_grid_vehicle_charging_reserve"
         status, _body = await self._tesla_api_call(
-            "POST", path, json_body={"off_grid_vehicle_charging_reserve_percent": percent},
+            "POST",
+            path,
+            json_body={"off_grid_vehicle_charging_reserve_percent": percent},
         )
         if status == 200:
             self._off_grid_reserve_percent = percent
             self.invalidate_site_info_cache()
-            _LOGGER.info("Off-grid EV reserve set to %d%% for site %s", percent, self.site_id)
+            _LOGGER.info(
+                "Off-grid EV reserve set to %d%% for site %s", percent, self.site_id
+            )
             return True
-        _LOGGER.error("Failed to set off-grid EV reserve for site %s: HTTP %s", self.site_id, status)
+        _LOGGER.error(
+            "Failed to set off-grid EV reserve for site %s: HTTP %s",
+            self.site_id,
+            status,
+        )
         return False
 
     async def async_get_vpp_programs(self, force_refresh: bool = False) -> list[dict]:
@@ -2126,12 +2300,16 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             self.invalidate_site_info_cache()
             _LOGGER.info(
                 "VPP program %s %s for site %s",
-                program_id, "enrolled" if enrolled else "unenrolled", self.site_id,
+                program_id,
+                "enrolled" if enrolled else "unenrolled",
+                self.site_id,
             )
             return True
         _LOGGER.error(
             "Failed to set VPP enrollment for site %s program %s: HTTP %s",
-            self.site_id, program_id, status,
+            self.site_id,
+            program_id,
+            status,
         )
         return False
 
@@ -2169,12 +2347,15 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             # Calculate end_date in site's timezone
             from zoneinfo import ZoneInfo
             from datetime import timedelta
+
             user_tz = ZoneInfo(timezone)
 
             # Use provided end_date or default to now
             if end_date:
                 try:
-                    reference_date = datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=user_tz)
+                    reference_date = datetime.strptime(end_date, "%Y-%m-%d").replace(
+                        tzinfo=user_tz
+                    )
                 except ValueError:
                     reference_date = datetime.now(user_tz)
             else:
@@ -2183,7 +2364,9 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             end_dt = reference_date.replace(hour=23, minute=59, second=59)
             end_date_iso = end_dt.isoformat()
 
-            _LOGGER.info(f"Fetching calendar history for site {self.site_id}: period={period}, kind={kind}, end_date={end_date}")
+            _LOGGER.info(
+                f"Fetching calendar history for site {self.site_id}: period={period}, kind={kind}, end_date={end_date}"
+            )
 
             params = {
                 "kind": kind,
@@ -2202,30 +2385,44 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             ) as response:
                 if response.status != 200:
                     text = await response.text()
-                    _LOGGER.error(f"Failed to fetch calendar history: {response.status} - {text}")
+                    _LOGGER.error(
+                        f"Failed to fetch calendar history: {response.status} - {text}"
+                    )
                     return None
 
                 data = await response.json()
                 result = data.get("response", {})
                 time_series = result.get("time_series", [])
 
-                _LOGGER.info(f"Fetched {len(time_series)} raw records from Tesla for period='{period}'")
+                _LOGGER.info(
+                    f"Fetched {len(time_series)} raw records from Tesla for period='{period}'"
+                )
 
                 # Tesla API often returns all historical data regardless of period
                 # Filter client-side based on requested period and end_date
                 if time_series and period in ["day", "week", "month", "year"]:
                     # Calculate cutoff date based on period, relative to reference_date
                     if period == "day":
-                        cutoff = reference_date.replace(hour=0, minute=0, second=0, microsecond=0)
+                        cutoff = reference_date.replace(
+                            hour=0, minute=0, second=0, microsecond=0
+                        )
                     elif period == "week":
-                        cutoff = (reference_date - timedelta(days=7)).replace(hour=0, minute=0, second=0, microsecond=0)
+                        cutoff = (reference_date - timedelta(days=7)).replace(
+                            hour=0, minute=0, second=0, microsecond=0
+                        )
                     elif period == "month":
-                        cutoff = (reference_date - timedelta(days=30)).replace(hour=0, minute=0, second=0, microsecond=0)
+                        cutoff = (reference_date - timedelta(days=30)).replace(
+                            hour=0, minute=0, second=0, microsecond=0
+                        )
                     elif period == "year":
-                        cutoff = (reference_date - timedelta(days=365)).replace(hour=0, minute=0, second=0, microsecond=0)
+                        cutoff = (reference_date - timedelta(days=365)).replace(
+                            hour=0, minute=0, second=0, microsecond=0
+                        )
 
                     # End of reference day as upper bound
-                    end_of_day = reference_date.replace(hour=23, minute=59, second=59, microsecond=999999)
+                    end_of_day = reference_date.replace(
+                        hour=23, minute=59, second=59, microsecond=999999
+                    )
 
                     filtered_series = []
                     for entry in time_series:
@@ -2236,13 +2433,19 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                                 if cutoff <= entry_dt <= end_of_day:
                                     filtered_series.append(entry)
                         except (ValueError, TypeError) as e:
-                            _LOGGER.warning(f"Failed to parse timestamp: {entry.get('timestamp')}: {e}")
+                            _LOGGER.warning(
+                                f"Failed to parse timestamp: {entry.get('timestamp')}: {e}"
+                            )
                             continue
 
-                    _LOGGER.info(f"Filtered calendar history from {len(time_series)} to {len(filtered_series)} records for period='{period}' (cutoff={cutoff.date()}, end={end_of_day.date()})")
+                    _LOGGER.info(
+                        f"Filtered calendar history from {len(time_series)} to {len(filtered_series)} records for period='{period}' (cutoff={cutoff.date()}, end={end_of_day.date()})"
+                    )
                     time_series = filtered_series
 
-                _LOGGER.info(f"Successfully fetched calendar history: {len(time_series)} records for period='{period}'")
+                _LOGGER.info(
+                    f"Successfully fetched calendar history: {len(time_series)} records for period='{period}'"
+                )
 
                 return {
                     "period": period,
@@ -2349,7 +2552,9 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
             # Check if we've passed the billing day since last check
             last_check_day = self._last_billing_day_check.day
             if current_day == self.billing_day and last_check_day != self.billing_day:
-                _LOGGER.info("Billing cycle reset triggered on day %d", self.billing_day)
+                _LOGGER.info(
+                    "Billing cycle reset triggered on day %d", self.billing_day
+                )
                 self.reset_peak_demand()
 
         self._last_billing_day_check = now
@@ -2384,7 +2589,9 @@ class DemandChargeCoordinator(DataUpdateCoordinator):
         daily_supply_cost = self.daily_supply_charge * days_elapsed
 
         # Calculate total monthly cost
-        total_monthly_cost = estimated_demand_cost + daily_supply_cost + self.monthly_supply_charge
+        total_monthly_cost = (
+            estimated_demand_cost + daily_supply_cost + self.monthly_supply_charge
+        )
 
         return {
             "in_peak_period": in_peak_period,
@@ -2470,11 +2677,11 @@ class AEMOPriceCoordinator(DataUpdateCoordinator):
     """
 
     # Adaptive polling thresholds (seconds relative to the next 5-minute boundary)
-    _WAIT_INTERVAL = 45       # Poll interval while well away from the boundary (s)
-    _PRE_ACTIVE_WINDOW = 10   # Start gentle polling this many seconds before boundary
+    _WAIT_INTERVAL = 45  # Poll interval while well away from the boundary (s)
+    _PRE_ACTIVE_WINDOW = 10  # Start gentle polling this many seconds before boundary
     _PRE_ACTIVE_INTERVAL = 5  # Poll interval in the pre-active window (s)
-    _ACTIVE_WINDOW = 15       # Switch to rapid polling this many seconds after boundary
-    _ACTIVE_INTERVAL = 1      # Poll interval during active file search (s)
+    _ACTIVE_WINDOW = 15  # Switch to rapid polling this many seconds after boundary
+    _ACTIVE_INTERVAL = 1  # Poll interval during active file search (s)
 
     def __init__(
         self,
@@ -2517,12 +2724,15 @@ class AEMOPriceCoordinator(DataUpdateCoordinator):
             return None
         try:
             from datetime import timezone as _tz, timedelta as _td
+
             aest = _tz(_td(hours=10))
             dt_naive = datetime.strptime(timestamp_str, "%Y/%m/%d %H:%M:%S")
             dt_aest = dt_naive.replace(tzinfo=aest)
             return dt_aest.astimezone().replace(tzinfo=None)
         except (ValueError, TypeError) as e:
-            _LOGGER.debug("Failed to parse dispatch timestamp '%s': %s", timestamp_str, e)
+            _LOGGER.debug(
+                "Failed to parse dispatch timestamp '%s': %s", timestamp_str, e
+            )
             return None
 
     @staticmethod
@@ -2570,7 +2780,9 @@ class AEMOPriceCoordinator(DataUpdateCoordinator):
         # ACTIVE mode - new file could appear any second
         if self._polling_mode != "active":
             self._polling_mode = "active"
-            _LOGGER.info("AEMO: ACTIVE mode (1 s intervals) - searching for new dispatch file")
+            _LOGGER.info(
+                "AEMO: ACTIVE mode (1 s intervals) - searching for new dispatch file"
+            )
         self.update_interval = timedelta(seconds=self._ACTIVE_INTERVAL)
         return True
 
@@ -2604,9 +2816,11 @@ class AEMOPriceCoordinator(DataUpdateCoordinator):
 
         try:
             # Fetch current price (5-min dispatch price) with file metadata
-            current_prices_all, is_new_dispatch, dispatch_file = (
-                await self._client.get_current_prices_with_file()
-            )
+            (
+                current_prices_all,
+                is_new_dispatch,
+                dispatch_file,
+            ) = await self._client.get_current_prices_with_file()
 
             current_price_data = None
             if current_prices_all:
@@ -2623,7 +2837,11 @@ class AEMOPriceCoordinator(DataUpdateCoordinator):
                             "AEMO: New dispatch - next boundary %s",
                             self._next_boundary.strftime("%H:%M:%S"),
                         )
-            elif not is_new_dispatch and self._next_boundary is None and current_price_data:
+            elif (
+                not is_new_dispatch
+                and self._next_boundary is None
+                and current_price_data
+            ):
                 # First run - file already cached but we still need a boundary
                 timestamp = current_price_data.get("timestamp")
                 if timestamp:
@@ -2644,7 +2862,9 @@ class AEMOPriceCoordinator(DataUpdateCoordinator):
             # updates every ~30 min, no point hammering it every second in ACTIVE)
             forecast = None
             if is_new_dispatch:
-                forecast = await self._client.get_price_forecast(self.region, periods=96)
+                forecast = await self._client.get_price_forecast(
+                    self.region, periods=96
+                )
 
             # If no new forecast, preserve existing
             if not forecast and self.data:
@@ -2681,7 +2901,10 @@ class AEMOPriceCoordinator(DataUpdateCoordinator):
             if is_new_dispatch:
                 _LOGGER.info(
                     "AEMO API data for %s: current=%.2fc/kWh (%s), forecast_periods=%d",
-                    self.region, current_price_cents, price_source, len(forecast) // 2
+                    self.region,
+                    current_price_cents,
+                    price_source,
+                    len(forecast) // 2,
                 )
 
             return {
@@ -2759,7 +2982,9 @@ class EPEXPriceCoordinator(DataUpdateCoordinator):
             )
 
             if not prices:
-                raise UpdateFailed(f"No prices returned from EPEX API for {self.region}")
+                raise UpdateFailed(
+                    f"No prices returned from EPEX API for {self.region}"
+                )
 
             now = dt_util.utcnow()
             current_prices = []
@@ -2874,7 +3099,9 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
         self.port = port
         self.slave_id = slave_id
         self._entry_id = entry_id
-        self._controller = SigenergyController(host, port, slave_id, max_export_limit_kw=max_export_limit_kw)
+        self._controller = SigenergyController(
+            host, port, slave_id, max_export_limit_kw=max_export_limit_kw
+        )
         self._energy_acc = EnergyAccumulator(hass, "sigenergy")
 
         super().__init__(
@@ -2901,14 +3128,20 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
                         "Sigenergy Modbus returned no battery data — keeping previous readings"
                     )
                     return self.data
-                raise UpdateFailed("Sigenergy Modbus connection failed — no data available")
+                raise UpdateFailed(
+                    "Sigenergy Modbus connection failed — no data available"
+                )
 
             # Map Sigenergy data to standard format (same as Tesla)
             # Power values in kW from Modbus, we keep them in kW for sensors
             dc_solar_kw = attrs.get("pv_power_kw", 0)
-            ac_solar_kw = attrs.get("third_party_pv_power_kw", 0)  # AC-coupled via Smart Port
+            ac_solar_kw = attrs.get(
+                "third_party_pv_power_kw", 0
+            )  # AC-coupled via Smart Port
             solar_kw = dc_solar_kw + ac_solar_kw
-            grid_kw = attrs.get("grid_power_kw", 0)  # Positive = importing, negative = exporting
+            grid_kw = attrs.get(
+                "grid_power_kw", 0
+            )  # Positive = importing, negative = exporting
 
             # Sigenergy battery sign convention is OPPOSITE to Tesla:
             # Sigenergy Modbus: Positive = charging (into battery), Negative = discharging (out of battery)
@@ -2925,7 +3158,9 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
 
             # Accumulate daily energy from power readings (with cost tracking)
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+            self._energy_acc.update(
+                max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell
+            )
 
             energy_data = {
                 "solar_power": solar_kw,  # kW (DC + AC-coupled)
@@ -2942,7 +3177,9 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
                 "third_party_pv_power_kw": ac_solar_kw,  # AC-coupled solar via Smart Port
                 # Battery health data
                 "battery_soh": attrs.get("battery_soh"),  # % State of Health
-                "battery_capacity_kwh": attrs.get("battery_capacity_kwh"),  # kWh rated capacity
+                "battery_capacity_kwh": attrs.get(
+                    "battery_capacity_kwh"
+                ),  # kWh rated capacity
                 "energy_summary": self._energy_acc.as_dict(),
             }
 
@@ -3045,7 +3282,8 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             self._baseline_date = today
             _LOGGER.info(
                 "Sungrow daily baseline reset: import=%.1f export=%.1f kWh (total)",
-                self._total_import_baseline or 0, self._total_export_baseline or 0,
+                self._total_import_baseline or 0,
+                self._total_export_baseline or 0,
             )
 
     def _build_energy_summary(self, data: dict) -> dict:
@@ -3113,9 +3351,17 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
         # Calculate daily load from energy balance (no register for this)
         if all(v is not None for v in (daily_pv, daily_discharge, daily_charge)):
-            summary["load_today_kwh"] = round(max(0,
-                daily_pv + final_import + (daily_discharge or 0) - final_export - (daily_charge or 0)
-            ), 2)
+            summary["load_today_kwh"] = round(
+                max(
+                    0,
+                    daily_pv
+                    + final_import
+                    + (daily_discharge or 0)
+                    - final_export
+                    - (daily_charge or 0),
+                ),
+                2,
+            )
 
         return summary
 
@@ -3135,17 +3381,25 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                         "Sungrow Modbus returned no battery data — keeping previous readings"
                     )
                     return self.data
-                raise UpdateFailed("Sungrow Modbus connection failed — no data available")
+                raise UpdateFailed(
+                    "Sungrow Modbus connection failed — no data available"
+                )
 
             # Map Sungrow data to standard format
-            battery_power_w = data.get("battery_power", 0)  # Signed: positive = discharging
+            battery_power_w = data.get(
+                "battery_power", 0
+            )  # Signed: positive = discharging
             export_power_w = data.get("export_power", 0)  # Signed: positive = exporting
             load_power_w = data.get("load_power", 0)
-            pv_power_w = data.get("pv_power")  # Direct PV DC power from register 5017-5018
+            pv_power_w = data.get(
+                "pv_power"
+            )  # Direct PV DC power from register 5017-5018
 
             # Convert to kW for consistency with other coordinators
             battery_kw = battery_power_w / 1000
-            grid_kw = -export_power_w / 1000  # Invert: positive = importing, negative = exporting
+            grid_kw = (
+                -export_power_w / 1000
+            )  # Invert: positive = importing, negative = exporting
             load_kw = load_power_w / 1000
 
             # Use direct PV reading if available; otherwise calculate from energy balance
@@ -3163,7 +3417,9 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
 
             # Accumulate daily energy from power readings (with cost tracking)
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+            self._energy_acc.update(
+                max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell
+            )
 
             # Sanity-check SOC — 0xFFFF (6553.5%) means Modbus returned invalid data
             raw_soc = data.get("battery_soc", 0)
@@ -3176,7 +3432,9 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 raw_soc = 0
 
             energy_data = {
-                "solar_power": max(0, solar_kw),  # kW, clamp to 0 if calculated negative
+                "solar_power": max(
+                    0, solar_kw
+                ),  # kW, clamp to 0 if calculated negative
                 "grid_power": grid_kw,  # kW, positive = importing, negative = exporting
                 "battery_power": battery_kw,  # kW, positive = discharging, negative = charging
                 "load_power": load_kw,  # kW
@@ -3223,7 +3481,9 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(f"Error fetching Sungrow energy data: {err}") from err
 
     # Battery control methods - delegate to controller
-    async def force_charge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
+    async def force_charge(
+        self, duration_minutes: int = 30, power_w: float = 0
+    ) -> bool:
         """Set Sungrow to forced charge mode.
 
         Args:
@@ -3238,7 +3498,9 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 await self._controller.set_charge_rate_limit(power_w / 1000)
             return await self._controller.force_charge()
 
-    async def force_discharge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
+    async def force_discharge(
+        self, duration_minutes: int = 30, power_w: float = 0
+    ) -> bool:
         """Set Sungrow to forced discharge mode.
 
         Args:
@@ -3371,7 +3633,9 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
     # SOC-proportional power splitting
     # ------------------------------------------------------------------
 
-    async def _split_power(self, total_kw: float, prefer_lower_soc: bool) -> tuple[float, float]:
+    async def _split_power(
+        self, total_kw: float, prefer_lower_soc: bool
+    ) -> tuple[float, float]:
         """Split power between inverters proportionally to SOC.
 
         prefer_lower_soc=True for charging (fill the emptier one faster).
@@ -3398,7 +3662,14 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
         p2 = total_kw * w2 / total_w
         _LOGGER.debug(
             "Split %.2f kW: inv1=%.2f kW (soc=%.0f%%, cap=%.1f), inv2=%.2f kW (soc=%.0f%%, cap=%.1f), prefer_lower=%s",
-            total_kw, p1, soc1, self._cap1, p2, soc2, self._cap2, prefer_lower_soc,
+            total_kw,
+            p1,
+            soc1,
+            self._cap1,
+            p2,
+            soc2,
+            self._cap2,
+            prefer_lower_soc,
         )
         return p1, p2
 
@@ -3424,13 +3695,17 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
         # Capacity-weighted SOC
         soc1 = d1.get("battery_level", 0) or 0
         soc2 = d2.get("battery_level", 0) or 0
-        combined_soc = (soc1 * self._cap1 + soc2 * self._cap2) / (self._cap1 + self._cap2)
+        combined_soc = (soc1 * self._cap1 + soc2 * self._cap2) / (
+            self._cap1 + self._cap2
+        )
 
         # SOC divergence warning
         if abs(soc1 - soc2) > 5:
             _LOGGER.info(
                 "Sungrow dual SOC divergence: inv1=%.1f%%, inv2=%.1f%% (delta=%.1f%%)",
-                soc1, soc2, abs(soc1 - soc2),
+                soc1,
+                soc2,
+                abs(soc1 - soc2),
             )
 
         # Enforce grid-forming inverter SOC cap
@@ -3439,7 +3714,8 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
             if max_soc1 is None or abs(max_soc1 - self._soc_cap) > 1:
                 _LOGGER.info(
                     "Enforcing SOC cap: setting inv1 max_soc to %d%% (current register: %s)",
-                    self._soc_cap, max_soc1,
+                    self._soc_cap,
+                    max_soc1,
                 )
                 await self._coord1.set_max_soc(self._soc_cap)
 
@@ -3448,9 +3724,14 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
         es2 = d2.get("energy_summary", {}) or {}
         combined_energy = {}
         for key in (
-            "pv_today_kwh", "grid_import_today_kwh", "grid_export_today_kwh",
-            "charge_today_kwh", "discharge_today_kwh", "load_today_kwh",
-            "import_cost_today", "export_earnings_today",
+            "pv_today_kwh",
+            "grid_import_today_kwh",
+            "grid_export_today_kwh",
+            "charge_today_kwh",
+            "discharge_today_kwh",
+            "load_today_kwh",
+            "import_cost_today",
+            "export_earnings_today",
         ):
             combined_energy[key] = round(
                 (es1.get(key, 0) or 0) + (es2.get(key, 0) or 0), 4
@@ -3488,7 +3769,9 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
     # Command splitting — delegate to both sub-coordinators
     # ------------------------------------------------------------------
 
-    async def force_charge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
+    async def force_charge(
+        self, duration_minutes: int = 30, power_w: float = 0
+    ) -> bool:
         """Force charge on both inverters with SOC-proportional power split."""
         if power_w > 0:
             p1, p2 = await self._split_power(power_w / 1000, prefer_lower_soc=True)
@@ -3499,7 +3782,9 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
             r2 = await self._coord2.force_charge(duration_minutes)
         return r1 and r2
 
-    async def force_discharge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
+    async def force_discharge(
+        self, duration_minutes: int = 30, power_w: float = 0
+    ) -> bool:
         """Force discharge on both inverters with SOC-proportional power split."""
         if power_w > 0:
             p1, p2 = await self._split_power(power_w / 1000, prefer_lower_soc=False)
@@ -3641,14 +3926,20 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
 
             # Accumulate daily energy from power readings (with cost tracking)
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            self._energy_acc.update(total_solar_kw, grid_kw, battery_kw, load_kw, buy, sell)
+            self._energy_acc.update(
+                total_solar_kw, grid_kw, battery_kw, load_kw, buy, sell
+            )
 
             # Merge Modbus energy registers (charge/discharge) with accumulated values
             acc = self._energy_acc.as_dict()
             if energy_summary:
                 # Prefer Modbus registers for charge/discharge (more accurate)
-                acc["charge_today_kwh"] = energy_summary.get("charge_today_kwh", acc["charge_today_kwh"])
-                acc["discharge_today_kwh"] = energy_summary.get("discharge_today_kwh", acc["discharge_today_kwh"])
+                acc["charge_today_kwh"] = energy_summary.get(
+                    "charge_today_kwh", acc["charge_today_kwh"]
+                )
+                acc["discharge_today_kwh"] = energy_summary.get(
+                    "discharge_today_kwh", acc["discharge_today_kwh"]
+                )
 
             energy_data = {
                 "solar_power": max(0, total_solar_kw),
@@ -3685,7 +3976,9 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
         except Exception as err:
             raise UpdateFailed(f"Error fetching FoxESS energy data: {err}") from err
 
-    async def force_charge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
+    async def force_charge(
+        self, duration_minutes: int = 30, power_w: float = 0
+    ) -> bool:
         """Set FoxESS to force charge mode.
 
         Args:
@@ -3699,12 +3992,20 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
                 max_charge_a = self.data.get("max_charge_current_a")
                 if max_charge_a and max_charge_a > 0:
                     power_w = max_charge_a * 300  # Conservative voltage estimate
-                    _LOGGER.info("FoxESS force_charge using inverter max: %.0fA → %.0fW", max_charge_a, power_w)
+                    _LOGGER.info(
+                        "FoxESS force_charge using inverter max: %.0fA → %.0fW",
+                        max_charge_a,
+                        power_w,
+                    )
             if power_w <= 0:
                 power_w = 5000  # Fallback default
-            return await self._controller.force_charge(duration_minutes, power_w=power_w)
+            return await self._controller.force_charge(
+                duration_minutes, power_w=power_w
+            )
 
-    async def force_discharge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
+    async def force_discharge(
+        self, duration_minutes: int = 30, power_w: float = 0
+    ) -> bool:
         """Set FoxESS to force discharge mode.
 
         Args:
@@ -3718,10 +4019,16 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
                 max_discharge_a = self.data.get("max_discharge_current_a")
                 if max_discharge_a and max_discharge_a > 0:
                     power_w = max_discharge_a * 300  # Conservative voltage estimate
-                    _LOGGER.info("FoxESS force_discharge using inverter max: %.0fA → %.0fW", max_discharge_a, power_w)
+                    _LOGGER.info(
+                        "FoxESS force_discharge using inverter max: %.0fA → %.0fW",
+                        max_discharge_a,
+                        power_w,
+                    )
             if power_w <= 0:
                 power_w = 5000  # Fallback default
-            return await self._controller.force_discharge(duration_minutes, power_w=power_w)
+            return await self._controller.force_discharge(
+                duration_minutes, power_w=power_w
+            )
 
     async def restore_normal(self) -> bool:
         """Restore FoxESS to normal (Self Use) operation."""
@@ -3815,7 +4122,9 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
 
             # Accumulate daily energy from power readings (with cost tracking)
             buy, sell = _get_current_prices(self.hass, self._entry_id)
-            self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+            self._energy_acc.update(
+                max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell
+            )
 
             energy_data = {
                 "solar_power": solar_kw,
@@ -3848,7 +4157,9 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
             self._connected = False
             raise UpdateFailed(f"Error fetching GoodWe data: {err}") from err
 
-    async def force_charge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
+    async def force_charge(
+        self, duration_minutes: int = 30, power_w: float = 0
+    ) -> bool:
         """Set GoodWe to force charge mode via ECO_CHARGE."""
         if not self._connected:
             await self._controller.connect()
@@ -3858,7 +4169,9 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
         pct = min(100, max(10, int((power_w / rated) * 100))) if power_w > 0 else 100
         return await self._controller.force_charge(power_pct=pct)
 
-    async def force_discharge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
+    async def force_discharge(
+        self, duration_minutes: int = 30, power_w: float = 0
+    ) -> bool:
         """Set GoodWe to force discharge mode via ECO_DISCHARGE."""
         if not self._connected:
             await self._controller.connect()
@@ -3921,7 +4234,9 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
         """
         self._api_key = api_key
         # Support comma-separated resource IDs for split arrays
-        self._resource_ids = [rid.strip() for rid in resource_id.split(",") if rid.strip()]
+        self._resource_ids = [
+            rid.strip() for rid in resource_id.split(",") if rid.strip()
+        ]
         self._capacity_kw = capacity_kw
         self._session = async_get_clientsession(hass)
 
@@ -3997,49 +4312,84 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                 return None
 
             # Get all the sensor values - try multiple naming patterns
-            tomorrow_state = self._find_solcast_sensor([
-                "sensor.solcast_pv_forecast_forecast_tomorrow",
-                "sensor.solcast_forecast_tomorrow",
-                "sensor.solcast_pv_forecast_tomorrow",
-            ])
-            remaining_state = self._find_solcast_sensor([
-                "sensor.solcast_pv_forecast_forecast_remaining_today",
-                "sensor.solcast_forecast_remaining_today",
-                "sensor.solcast_pv_forecast_remaining_today",
-            ])
-            peak_today_state = self._find_solcast_sensor([
-                "sensor.solcast_pv_forecast_peak_forecast_today",
-                "sensor.solcast_peak_forecast_today",
-                "sensor.solcast_pv_forecast_peak_today",
-            ])
-            peak_tomorrow_state = self._find_solcast_sensor([
-                "sensor.solcast_pv_forecast_peak_forecast_tomorrow",
-                "sensor.solcast_peak_forecast_tomorrow",
-                "sensor.solcast_pv_forecast_peak_tomorrow",
-            ])
-            power_now_state = self._find_solcast_sensor([
-                "sensor.solcast_pv_forecast_power_now",
-                "sensor.solcast_power_now",
-                "sensor.solcast_pv_forecast_now",
-            ])
+            tomorrow_state = self._find_solcast_sensor(
+                [
+                    "sensor.solcast_pv_forecast_forecast_tomorrow",
+                    "sensor.solcast_forecast_tomorrow",
+                    "sensor.solcast_pv_forecast_tomorrow",
+                ]
+            )
+            remaining_state = self._find_solcast_sensor(
+                [
+                    "sensor.solcast_pv_forecast_forecast_remaining_today",
+                    "sensor.solcast_forecast_remaining_today",
+                    "sensor.solcast_pv_forecast_remaining_today",
+                ]
+            )
+            peak_today_state = self._find_solcast_sensor(
+                [
+                    "sensor.solcast_pv_forecast_peak_forecast_today",
+                    "sensor.solcast_peak_forecast_today",
+                    "sensor.solcast_pv_forecast_peak_today",
+                ]
+            )
+            peak_tomorrow_state = self._find_solcast_sensor(
+                [
+                    "sensor.solcast_pv_forecast_peak_forecast_tomorrow",
+                    "sensor.solcast_peak_forecast_tomorrow",
+                    "sensor.solcast_pv_forecast_peak_tomorrow",
+                ]
+            )
+            power_now_state = self._find_solcast_sensor(
+                [
+                    "sensor.solcast_pv_forecast_power_now",
+                    "sensor.solcast_power_now",
+                    "sensor.solcast_pv_forecast_now",
+                ]
+            )
 
             # Parse values - these are already in kWh
             today_forecast = float(today_state.state) if today_state.state else 0
-            tomorrow_forecast = float(tomorrow_state.state) if tomorrow_state and tomorrow_state.state not in ("unavailable", "unknown", None, "") else 0
-            remaining = float(remaining_state.state) if remaining_state and remaining_state.state not in ("unavailable", "unknown", None, "") else today_forecast
+            tomorrow_forecast = (
+                float(tomorrow_state.state)
+                if tomorrow_state
+                and tomorrow_state.state not in ("unavailable", "unknown", None, "")
+                else 0
+            )
+            remaining = (
+                float(remaining_state.state)
+                if remaining_state
+                and remaining_state.state not in ("unavailable", "unknown", None, "")
+                else today_forecast
+            )
 
             # Peak values are in W - convert to kW
             today_peak = None
-            if peak_today_state and peak_today_state.state not in ("unavailable", "unknown", None, ""):
+            if peak_today_state and peak_today_state.state not in (
+                "unavailable",
+                "unknown",
+                None,
+                "",
+            ):
                 today_peak = float(peak_today_state.state) / 1000.0  # W to kW
 
             tomorrow_peak = None
-            if peak_tomorrow_state and peak_tomorrow_state.state not in ("unavailable", "unknown", None, ""):
+            if peak_tomorrow_state and peak_tomorrow_state.state not in (
+                "unavailable",
+                "unknown",
+                None,
+                "",
+            ):
                 tomorrow_peak = float(peak_tomorrow_state.state) / 1000.0  # W to kW
 
             # Current power estimate is in W - convert to kW
             current_estimate = None
-            if power_now_state and power_now_state.state not in ("unavailable", "unknown", None, ""):
+            if power_now_state and power_now_state.state not in (
+                "unavailable",
+                "unknown",
+                None,
+                "",
+            ):
                 current_estimate = float(power_now_state.state) / 1000.0  # W to kW
 
             # Try to get detailed hourly forecast from sensor attributes
@@ -4048,10 +4398,10 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             if today_state.attributes:
                 # Try common attribute names used by Solcast HA integration
                 detailed_forecast = (
-                    today_state.attributes.get("detailedForecast") or
-                    today_state.attributes.get("forecast_today") or
-                    today_state.attributes.get("detailedHourly") or
-                    today_state.attributes.get("forecasts")
+                    today_state.attributes.get("detailedForecast")
+                    or today_state.attributes.get("forecast_today")
+                    or today_state.attributes.get("detailedHourly")
+                    or today_state.attributes.get("forecasts")
                 )
 
             # Build hourly forecast data for chart overlay
@@ -4059,7 +4409,9 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             if detailed_forecast and isinstance(detailed_forecast, list):
                 now = dt_util.now()
                 today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-                today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+                today_end = now.replace(
+                    hour=23, minute=59, second=59, microsecond=999999
+                )
 
                 for period in detailed_forecast:
                     try:
@@ -4068,33 +4420,39 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                         pv_estimate = period.get("pv_estimate", 0) or 0
 
                         if period_end_str:
-                            period_end = datetime.fromisoformat(period_end_str.replace("Z", "+00:00"))
+                            period_end = datetime.fromisoformat(
+                                period_end_str.replace("Z", "+00:00")
+                            )
                             period_local = dt_util.as_local(period_end)
 
                             # Only include today's data for the chart
                             if today_start <= period_local <= today_end:
-                                hourly_forecast.append({
-                                    "time": period_local.strftime("%H:%M"),
-                                    "hour": period_local.hour,
-                                    "pv_estimate_kw": round(pv_estimate, 2),
-                                })
+                                hourly_forecast.append(
+                                    {
+                                        "time": period_local.strftime("%H:%M"),
+                                        "hour": period_local.hour,
+                                        "pv_estimate_kw": round(pv_estimate, 2),
+                                    }
+                                )
                     except (ValueError, TypeError, KeyError):
                         continue
 
             # Try to also get tomorrow's detailed forecast for optimizer (48h horizon)
             # Check the tomorrow forecast sensor for detailed data
             tomorrow_detailed = None
-            tomorrow_state_obj = self._find_solcast_sensor([
-                "sensor.solcast_pv_forecast_forecast_tomorrow",
-                "sensor.solcast_forecast_tomorrow",
-                "sensor.solcast_pv_forecast_tomorrow",
-            ])
+            tomorrow_state_obj = self._find_solcast_sensor(
+                [
+                    "sensor.solcast_pv_forecast_forecast_tomorrow",
+                    "sensor.solcast_forecast_tomorrow",
+                    "sensor.solcast_pv_forecast_tomorrow",
+                ]
+            )
             if tomorrow_state_obj and tomorrow_state_obj.attributes:
                 tomorrow_detailed = (
-                    tomorrow_state_obj.attributes.get("detailedForecast") or
-                    tomorrow_state_obj.attributes.get("forecast_tomorrow") or
-                    tomorrow_state_obj.attributes.get("detailedHourly") or
-                    tomorrow_state_obj.attributes.get("forecasts")
+                    tomorrow_state_obj.attributes.get("detailedForecast")
+                    or tomorrow_state_obj.attributes.get("forecast_tomorrow")
+                    or tomorrow_state_obj.attributes.get("detailedHourly")
+                    or tomorrow_state_obj.attributes.get("forecasts")
                 )
 
             # Combine today and tomorrow forecasts for optimizer
@@ -4118,10 +4476,16 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                 "tomorrow_total_kwh": round(tomorrow_forecast, 2),
                 "today_peak_kw": round(today_peak, 2) if today_peak else None,
                 "tomorrow_peak_kw": round(tomorrow_peak, 2) if tomorrow_peak else None,
-                "current_estimate_kw": round(current_estimate, 2) if current_estimate else None,
+                "current_estimate_kw": round(current_estimate, 2)
+                if current_estimate
+                else None,
                 "hourly_forecast": hourly_forecast,  # For chart overlay
-                "forecasts": full_forecasts if full_forecasts else None,  # Raw periods for optimizer
-                "forecast_periods": len(full_forecasts) if full_forecasts else len(hourly_forecast),
+                "forecasts": full_forecasts
+                if full_forecasts
+                else None,  # Raw periods for optimizer
+                "forecast_periods": len(full_forecasts)
+                if full_forecasts
+                else len(hourly_forecast),
                 "last_update": dt_util.utcnow(),
                 "source": "solcast_integration",
             }
@@ -4161,10 +4525,12 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                     )
                     self._api_calls_today = self.DAILY_API_LIMIT
                     self.hass.async_create_task(
-                        self._rate_limit_store.async_save({
-                            "date": dt_util.utcnow().strftime("%Y-%m-%d"),
-                            "calls": self._api_calls_today,
-                        })
+                        self._rate_limit_store.async_save(
+                            {
+                                "date": dt_util.utcnow().strftime("%Y-%m-%d"),
+                                "calls": self._api_calls_today,
+                            }
+                        )
                     )
                 _LOGGER.warning(
                     f"Solcast API rate limit hit for resource {resource_id[:8]}... "
@@ -4173,13 +4539,17 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                 )
                 return None
             if response.status != 200:
-                _LOGGER.error(f"Solcast API error for resource {resource_id[:8]}: {response.status}")
+                _LOGGER.error(
+                    f"Solcast API error for resource {resource_id[:8]}: {response.status}"
+                )
                 return None
 
             data = await response.json()
             return data.get("forecasts", [])
 
-    async def _fetch_estimated_actuals_for_resource(self, resource_id: str) -> list[dict] | None:
+    async def _fetch_estimated_actuals_for_resource(
+        self, resource_id: str
+    ) -> list[dict] | None:
         """Fetch estimated actuals (past production) for a single resource ID.
 
         Args:
@@ -4197,15 +4567,21 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
         params = {"hours": 24, "format": "json"}
 
         try:
-            async with self._session.get(url, headers=headers, params=params) as response:
+            async with self._session.get(
+                url, headers=headers, params=params
+            ) as response:
                 if response.status == 401:
                     _LOGGER.warning("Solcast estimated_actuals auth failed")
                     return None
                 if response.status == 429:
-                    _LOGGER.warning(f"Solcast API rate limit for estimated_actuals {resource_id[:8]}...")
+                    _LOGGER.warning(
+                        f"Solcast API rate limit for estimated_actuals {resource_id[:8]}..."
+                    )
                     return None
                 if response.status != 200:
-                    _LOGGER.debug(f"Solcast estimated_actuals error for {resource_id[:8]}: {response.status}")
+                    _LOGGER.debug(
+                        f"Solcast estimated_actuals error for {resource_id[:8]}: {response.status}"
+                    )
                     return None
 
                 data = await response.json()
@@ -4214,7 +4590,9 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             _LOGGER.debug(f"Error fetching estimated_actuals: {e}")
             return None
 
-    def _combine_forecasts(self, base: list[dict], additional: list[dict]) -> list[dict]:
+    def _combine_forecasts(
+        self, base: list[dict], additional: list[dict]
+    ) -> list[dict]:
         """Combine forecasts from multiple resources by summing pv_estimate values.
 
         Args:
@@ -4233,12 +4611,25 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
 
             if period_end in additional_lookup:
                 add_f = additional_lookup[period_end]
-                if result.get("pv_estimate") is not None and add_f.get("pv_estimate") is not None:
+                if (
+                    result.get("pv_estimate") is not None
+                    and add_f.get("pv_estimate") is not None
+                ):
                     result["pv_estimate"] = result["pv_estimate"] + add_f["pv_estimate"]
-                if result.get("pv_estimate10") is not None and add_f.get("pv_estimate10") is not None:
-                    result["pv_estimate10"] = result["pv_estimate10"] + add_f["pv_estimate10"]
-                if result.get("pv_estimate90") is not None and add_f.get("pv_estimate90") is not None:
-                    result["pv_estimate90"] = result["pv_estimate90"] + add_f["pv_estimate90"]
+                if (
+                    result.get("pv_estimate10") is not None
+                    and add_f.get("pv_estimate10") is not None
+                ):
+                    result["pv_estimate10"] = (
+                        result["pv_estimate10"] + add_f["pv_estimate10"]
+                    )
+                if (
+                    result.get("pv_estimate90") is not None
+                    and add_f.get("pv_estimate90") is not None
+                ):
+                    result["pv_estimate90"] = (
+                        result["pv_estimate90"] + add_f["pv_estimate90"]
+                    )
 
             combined.append(result)
 
@@ -4318,7 +4709,8 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             )
             _LOGGER.info(
                 "Solcast: restored full-day forecast cache for %s: %.1fkWh",
-                self._daily_forecast_date, self._daily_forecast_kwh or 0,
+                self._daily_forecast_date,
+                self._daily_forecast_kwh or 0,
             )
         except Exception:
             pass
@@ -4400,7 +4792,9 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             # Second: query recorder history for last non-zero value today
             try:
                 from homeassistant.components.recorder import get_instance
-                from homeassistant.components.recorder.history import state_changes_during_period
+                from homeassistant.components.recorder.history import (
+                    state_changes_during_period,
+                )
 
                 now = dt_util.now()
                 start = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -4465,10 +4859,12 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
 
         # Persist to survive restarts
         self.hass.async_create_task(
-            self._rate_limit_store.async_save({
-                "date": today_str,
-                "calls": self._api_calls_today,
-            })
+            self._rate_limit_store.async_save(
+                {
+                    "date": today_str,
+                    "calls": self._api_calls_today,
+                }
+            )
         )
 
     async def _async_update_data(self) -> dict[str, Any]:
@@ -4509,7 +4905,9 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                     f"{cached_kwh:.1f}kWh — likely rate-limited, using cached data"
                 )
                 return self.data
-            _LOGGER.debug("Using data from Solcast HA integration (no API calls needed)")
+            _LOGGER.debug(
+                "Using data from Solcast HA integration (no API calls needed)"
+            )
             # Persist good data so it survives restarts
             self.hass.async_create_task(self._save_forecast_cache(solcast_data))
             return solcast_data
@@ -4585,7 +4983,9 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
 
                 # Fetch forecasts from first resource
                 self._track_api_call()
-                forecasts = await self._fetch_forecast_for_resource(self._resource_ids[0])
+                forecasts = await self._fetch_forecast_for_resource(
+                    self._resource_ids[0]
+                )
                 if not forecasts:
                     _LOGGER.warning("No forecasts from Solcast API")
                     if self.data and self.data.get("today_forecast_kwh", 0) > 0:
@@ -4593,12 +4993,16 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                     # Try persistent cache (survives restarts)
                     restored = await self._restore_forecast_cache()
                     if restored:
-                        _LOGGER.info("Restored solar forecast from persistent cache after API failure")
+                        _LOGGER.info(
+                            "Restored solar forecast from persistent cache after API failure"
+                        )
                         return restored
                     # Last resort: read last known sensor state from HA
                     restored = await self._restore_from_ha_state()
                     if restored:
-                        _LOGGER.info("Restored solar forecast from HA sensor state after API failure")
+                        _LOGGER.info(
+                            "Restored solar forecast from HA sensor state after API failure"
+                        )
                         return restored
                     return {"available": False}
 
@@ -4616,13 +5020,21 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                             )
                             break
                         self._track_api_call()
-                        additional_forecasts = await self._fetch_forecast_for_resource(resource_id)
+                        additional_forecasts = await self._fetch_forecast_for_resource(
+                            resource_id
+                        )
                         if additional_forecasts:
-                            forecasts = self._combine_forecasts(forecasts, additional_forecasts)
+                            forecasts = self._combine_forecasts(
+                                forecasts, additional_forecasts
+                            )
                         else:
-                            _LOGGER.warning(f"Failed to fetch forecast from resource {resource_id[:8]}...")
+                            _LOGGER.warning(
+                                f"Failed to fetch forecast from resource {resource_id[:8]}..."
+                            )
 
-                    _LOGGER.info(f"Combined data from {len(self._resource_ids)} Solcast sites")
+                    _LOGGER.info(
+                        f"Combined data from {len(self._resource_ids)} Solcast sites"
+                    )
 
             if not forecasts:
                 return {"available": False}
@@ -4633,7 +5045,9 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
             tomorrow_end = today_end + timedelta(days=1)
 
-            today_past = 0.0  # Production that already happened today (from estimated_actuals)
+            today_past = (
+                0.0  # Production that already happened today (from estimated_actuals)
+            )
             today_remaining = 0.0  # Future production today (from forecasts)
             tomorrow_total = 0.0
             today_peak = 0.0
@@ -4648,7 +5062,9 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                     pv_estimate = actual.get("pv_estimate", 0) or 0
 
                     try:
-                        period_end = datetime.fromisoformat(period_end_str.replace("Z", "+00:00"))
+                        period_end = datetime.fromisoformat(
+                            period_end_str.replace("Z", "+00:00")
+                        )
                         period_end_local = dt_util.as_local(period_end)
 
                         # Only count today's past production
@@ -4664,7 +5080,9 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                 pv_estimate = forecast.get("pv_estimate", 0) or 0
 
                 try:
-                    period_end = datetime.fromisoformat(period_end_str.replace("Z", "+00:00"))
+                    period_end = datetime.fromisoformat(
+                        period_end_str.replace("Z", "+00:00")
+                    )
                     period_end_local = dt_util.as_local(period_end)
 
                     # Set current estimate to first forecast period
@@ -4713,7 +5131,8 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                             "forecast because no full-day cache was restored. "
                             "If this is a restart after %02d:00, the forecast will be "
                             "under-reported until the next UTC day rollover.",
-                            today_remaining, now.hour,
+                            today_remaining,
+                            now.hour,
                         )
                     self._daily_forecast_date = today_str
                     self._daily_forecast_kwh = today_remaining
@@ -4736,13 +5155,19 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
 
             result = {
                 "available": True,
-                "today_forecast_kwh": round(today_forecast, 2),  # Full day (actuals + forecast)
+                "today_forecast_kwh": round(
+                    today_forecast, 2
+                ),  # Full day (actuals + forecast)
                 "today_remaining_kwh": round(today_remaining, 2),  # Remaining from now
-                "today_total_kwh": round(today_forecast, 2),  # Alias for backward compat
+                "today_total_kwh": round(
+                    today_forecast, 2
+                ),  # Alias for backward compat
                 "tomorrow_total_kwh": round(tomorrow_total, 2),
                 "today_peak_kw": round(today_peak, 2),
                 "tomorrow_peak_kw": round(tomorrow_peak, 2),
-                "current_estimate_kw": round(current_estimate, 2) if current_estimate else None,
+                "current_estimate_kw": round(current_estimate, 2)
+                if current_estimate
+                else None,
                 "forecast_periods": len(forecasts),
                 "forecasts": forecasts,  # Raw forecast periods for optimizer
                 "last_update": dt_util.utcnow(),
@@ -4757,7 +5182,9 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
         except aiohttp.ClientError as err:
             raise UpdateFailed(f"Error fetching Solcast forecast: {err}") from err
         except Exception as err:
-            raise UpdateFailed(f"Unexpected error fetching Solcast forecast: {err}") from err
+            raise UpdateFailed(
+                f"Unexpected error fetching Solcast forecast: {err}"
+            ) from err
 
 
 class OctopusPriceCoordinator(DataUpdateCoordinator):
@@ -4808,7 +5235,9 @@ class OctopusPriceCoordinator(DataUpdateCoordinator):
             hass,
             _LOGGER,
             name=f"{DOMAIN}_octopus_prices",
-            update_interval=timedelta(minutes=30),  # Octopus updates less frequently than Amber
+            update_interval=timedelta(
+                minutes=30
+            ),  # Octopus updates less frequently than Amber
         )
 
     @staticmethod
@@ -4904,8 +5333,16 @@ class OctopusPriceCoordinator(DataUpdateCoordinator):
                 if not meters:
                     continue
 
-                serial = meters[0].get("serial_number", "") if isinstance(meters[0], dict) else ""
-                is_export = meters[0].get("is_export", False) if isinstance(meters[0], dict) else False
+                serial = (
+                    meters[0].get("serial_number", "")
+                    if isinstance(meters[0], dict)
+                    else ""
+                )
+                is_export = (
+                    meters[0].get("is_export", False)
+                    if isinstance(meters[0], dict)
+                    else False
+                )
 
                 # Get rates from coordinator
                 rates_key = f"ELECTRICITY_RATES_{mpan}_{serial}"
@@ -4913,7 +5350,9 @@ class OctopusPriceCoordinator(DataUpdateCoordinator):
                 if not rates_result:
                     continue
 
-                rates = getattr(rates_result, "rates", None) or getattr(rates_result, "original_rates", None)
+                rates = getattr(rates_result, "rates", None) or getattr(
+                    rates_result, "original_rates", None
+                )
                 if not rates or not isinstance(rates, list):
                     continue
 
@@ -5112,8 +5551,12 @@ class OctopusPriceCoordinator(DataUpdateCoordinator):
 
                 # Parse timestamps
                 try:
-                    valid_from = datetime.fromisoformat(valid_from_str.replace("Z", "+00:00"))
-                    valid_to = datetime.fromisoformat(valid_to_str.replace("Z", "+00:00"))
+                    valid_from = datetime.fromisoformat(
+                        valid_from_str.replace("Z", "+00:00")
+                    )
+                    valid_to = datetime.fromisoformat(
+                        valid_to_str.replace("Z", "+00:00")
+                    )
                 except ValueError:
                     continue
 
@@ -5154,8 +5597,12 @@ class OctopusPriceCoordinator(DataUpdateCoordinator):
                     continue
 
                 try:
-                    valid_from = datetime.fromisoformat(valid_from_str.replace("Z", "+00:00"))
-                    valid_to = datetime.fromisoformat(valid_to_str.replace("Z", "+00:00"))
+                    valid_from = datetime.fromisoformat(
+                        valid_from_str.replace("Z", "+00:00")
+                    )
+                    valid_to = datetime.fromisoformat(
+                        valid_to_str.replace("Z", "+00:00")
+                    )
                 except ValueError:
                     continue
 
@@ -5194,8 +5641,12 @@ class OctopusPriceCoordinator(DataUpdateCoordinator):
                         continue
 
                     try:
-                        valid_from = datetime.fromisoformat(valid_from_str.replace("Z", "+00:00"))
-                        valid_to = datetime.fromisoformat(valid_to_str.replace("Z", "+00:00"))
+                        valid_from = datetime.fromisoformat(
+                            valid_from_str.replace("Z", "+00:00")
+                        )
+                        valid_to = datetime.fromisoformat(
+                            valid_to_str.replace("Z", "+00:00")
+                        )
                     except ValueError:
                         continue
 
@@ -5322,7 +5773,9 @@ class OctopusSavingSessionCoordinator(DataUpdateCoordinator):
                                 s.joined = True
                                 _LOGGER.info(
                                     "Auto-joined saving session: %s (%s - %s)",
-                                    s.code, s.start, s.end,
+                                    s.code,
+                                    s.start,
+                                    s.end,
                                 )
                 sessions = raw
             except Exception as err:
@@ -5343,7 +5796,8 @@ class OctopusSavingSessionCoordinator(DataUpdateCoordinator):
                             _LOGGER.info(
                                 "🐙 Auto-joining saving session via octopus_energy: %s "
                                 "(octopoints=%s/kWh)",
-                                code, ev.get("octopoints_per_kwh", "?"),
+                                code,
+                                ev.get("octopoints_per_kwh", "?"),
                             )
                             await self.hass.services.async_call(
                                 "octopus_energy",
@@ -5353,11 +5807,14 @@ class OctopusSavingSessionCoordinator(DataUpdateCoordinator):
                                 blocking=True,
                             )
                             _LOGGER.info(
-                                "✅ Joined saving session %s via octopus_energy", code,
+                                "✅ Joined saving session %s via octopus_energy",
+                                code,
                             )
                         except Exception as err:
                             _LOGGER.error(
-                                "Failed to auto-join saving session %s: %s", code, err,
+                                "Failed to auto-join saving session %s: %s",
+                                code,
+                                err,
                             )
 
                 # Parse joined_events from entity attributes
@@ -5369,14 +5826,16 @@ class OctopusSavingSessionCoordinator(DataUpdateCoordinator):
                             continue
                         start = datetime.fromisoformat(str(start_str))
                         end = datetime.fromisoformat(str(end_str))
-                        sessions.append(SavingSession(
-                            code=str(ev.get("id", "")),
-                            start=start,
-                            end=end,
-                            octopoints_per_kwh=ev.get("octopoints_per_kwh", 800),
-                            joined=True,
-                            session_type="saving",
-                        ))
+                        sessions.append(
+                            SavingSession(
+                                code=str(ev.get("id", "")),
+                                start=start,
+                                end=end,
+                                octopoints_per_kwh=ev.get("octopoints_per_kwh", 800),
+                                joined=True,
+                                session_type="saving",
+                            )
+                        )
                     except (ValueError, KeyError, TypeError) as err:
                         _LOGGER.debug("Skipping malformed entity event: %s", err)
             else:
@@ -5437,7 +5896,9 @@ class FlowPowerTWAPTracker:
         if self._price_history:
             if now - self._price_history[-1]["ts"] < 240:
                 return
-        self._price_history.append({"ts": round(now), "price": round(wholesale_cents, 2)})
+        self._price_history.append(
+            {"ts": round(now), "price": round(wholesale_cents, 2)}
+        )
         self._prune_history()
         self._twap = self._calculate_twap()
         # Save periodically (every 10 minutes)
@@ -5462,10 +5923,12 @@ class FlowPowerTWAPTracker:
     async def _async_save(self) -> None:
         """Save price history to persistent storage."""
         try:
-            await self._store.async_save({
-                "price_history": self._price_history,
-                "region": self.region,
-            })
+            await self._store.async_save(
+                {
+                    "price_history": self._price_history,
+                    "region": self.region,
+                }
+            )
         except Exception as err:
             _LOGGER.warning("Failed to save TWAP history: %s", err)
 

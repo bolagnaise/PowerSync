@@ -5,6 +5,7 @@ Uses the goodwe library for auto-detection, protocol handling, and battery contr
 
 Separate from inverters/goodwe.py which handles AC-coupled curtailment via pymodbus.
 """
+
 import asyncio
 import logging
 from typing import Any
@@ -90,7 +91,9 @@ class GoodWeBatteryController:
             eco_mode_power=power_pct,
             eco_mode_soc=soc_target,
         )
-        _LOGGER.info("GoodWe force charge: power=%d%%, target_soc=%d%%", power_pct, soc_target)
+        _LOGGER.info(
+            "GoodWe force charge: power=%d%%, target_soc=%d%%", power_pct, soc_target
+        )
         return True
 
     async def force_discharge(self, power_pct: int = 100, soc_floor: int = 10) -> bool:
@@ -102,7 +105,9 @@ class GoodWeBatteryController:
             eco_mode_power=power_pct,
             eco_mode_soc=soc_floor,
         )
-        _LOGGER.info("GoodWe force discharge: power=%d%%, floor_soc=%d%%", power_pct, soc_floor)
+        _LOGGER.info(
+            "GoodWe force discharge: power=%d%%, floor_soc=%d%%", power_pct, soc_floor
+        )
         return True
 
     async def restore_normal(self) -> bool:

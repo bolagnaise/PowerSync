@@ -28,6 +28,7 @@ _LOGGER = logging.getLogger(__name__)
 @dataclass
 class TriggerResult:
     """Result of trigger evaluation."""
+
     triggered: bool
     reason: str = ""
 
@@ -37,7 +38,7 @@ def evaluate_trigger(
     current_state: Dict[str, Any],
     last_evaluated_value: Optional[float],
     store: "AutomationStore",
-    automation_id: int
+    automation_id: int,
 ) -> TriggerResult:
     """
     Evaluate a trigger against current state.
@@ -63,7 +64,9 @@ def evaluate_trigger(
         # Mark that we're outside the time window
         # For EV triggers, preserve state bits but clear window flag
         if trigger_type == "ev" and last_evaluated_value is not None:
-            new_value = float(int(last_evaluated_value) & 3)  # Keep bits 0-1, clear bit 2
+            new_value = float(
+                int(last_evaluated_value) & 3
+            )  # Keep bits 0-1, clear bit 2
             store.update_trigger_state(automation_id, new_value)
         else:
             # For other triggers, use sentinel value
@@ -74,33 +77,69 @@ def evaluate_trigger(
     # EV triggers handle this internally with bit 2
     just_entered_window = (
         last_evaluated_value == OUTSIDE_WINDOW_SENTINEL
-        if trigger_type != "ev" else False
+        if trigger_type != "ev"
+        else False
     )
 
     if trigger_type == "time":
         return _evaluate_time_trigger(trigger, current_state, store, automation_id)
     elif trigger_type == "battery":
-        return _evaluate_battery_trigger(trigger, current_state, last_evaluated_value, store, automation_id, just_entered_window)
+        return _evaluate_battery_trigger(
+            trigger,
+            current_state,
+            last_evaluated_value,
+            store,
+            automation_id,
+            just_entered_window,
+        )
     elif trigger_type == "flow":
-        return _evaluate_flow_trigger(trigger, current_state, last_evaluated_value, store, automation_id, just_entered_window)
+        return _evaluate_flow_trigger(
+            trigger,
+            current_state,
+            last_evaluated_value,
+            store,
+            automation_id,
+            just_entered_window,
+        )
     elif trigger_type == "price":
-        return _evaluate_price_trigger(trigger, current_state, last_evaluated_value, store, automation_id, just_entered_window)
+        return _evaluate_price_trigger(
+            trigger,
+            current_state,
+            last_evaluated_value,
+            store,
+            automation_id,
+            just_entered_window,
+        )
     elif trigger_type == "grid":
-        return _evaluate_grid_trigger(trigger, current_state, last_evaluated_value, store, automation_id)
+        return _evaluate_grid_trigger(
+            trigger, current_state, last_evaluated_value, store, automation_id
+        )
     elif trigger_type == "weather":
-        return _evaluate_weather_trigger(trigger, current_state, last_evaluated_value, store, automation_id)
+        return _evaluate_weather_trigger(
+            trigger, current_state, last_evaluated_value, store, automation_id
+        )
     elif trigger_type == "solar_forecast":
-        return _evaluate_solar_forecast_trigger(trigger, current_state, last_evaluated_value, store, automation_id)
+        return _evaluate_solar_forecast_trigger(
+            trigger, current_state, last_evaluated_value, store, automation_id
+        )
     elif trigger_type == "ev":
-        return _evaluate_ev_trigger(trigger, current_state, last_evaluated_value, store, automation_id)
+        return _evaluate_ev_trigger(
+            trigger, current_state, last_evaluated_value, store, automation_id
+        )
     elif trigger_type == "ocpp":
-        return _evaluate_ocpp_trigger(trigger, current_state, last_evaluated_value, store, automation_id)
+        return _evaluate_ocpp_trigger(
+            trigger, current_state, last_evaluated_value, store, automation_id
+        )
     else:
         _LOGGER.warning(f"Unknown trigger type: {trigger_type}")
-        return TriggerResult(triggered=False, reason=f"Unknown trigger type: {trigger_type}")
+        return TriggerResult(
+            triggered=False, reason=f"Unknown trigger type: {trigger_type}"
+        )
 
 
-def _is_within_time_window(trigger: Dict[str, Any], current_state: Dict[str, Any]) -> bool:
+def _is_within_time_window(
+    trigger: Dict[str, Any], current_state: Dict[str, Any]
+) -> bool:
     """Check if current time is within the optional time window (uses user's local timezone)."""
     start_str = trigger.get("time_window_start")
     end_str = trigger.get("time_window_end")
@@ -136,7 +175,7 @@ def _evaluate_time_trigger(
     trigger: Dict[str, Any],
     current_state: Dict[str, Any],
     store: "AutomationStore",
-    automation_id: int
+    automation_id: int,
 ) -> TriggerResult:
     """
     Evaluate time-based trigger.
@@ -168,11 +207,13 @@ def _evaluate_time_trigger(
         day_of_week = (now.weekday() + 1) % 7  # Convert to Sunday=0
         allowed_days = [int(d) for d in repeat_days.split(",") if d.strip().isdigit()]
         if day_of_week not in allowed_days:
-            return TriggerResult(triggered=False, reason=f"Day {day_of_week} not in repeat_days")
+            return TriggerResult(
+                triggered=False, reason=f"Day {day_of_week} not in repeat_days"
+            )
 
     # Check if current time matches (within 1 minute tolerance)
     # Create trigger datetime in user's timezone
-    if hasattr(now, 'tzinfo') and now.tzinfo is not None:
+    if hasattr(now, "tzinfo") and now.tzinfo is not None:
         trigger_datetime = datetime.combine(now.date(), trigger_time, tzinfo=now.tzinfo)
     else:
         trigger_datetime = datetime.combine(now.date(), trigger_time)
@@ -190,26 +231,34 @@ def _evaluate_time_trigger(
                 # Stored format is: datetime.utcnow().isoformat() + "Z" (e.g., "2026-01-24T04:00:00.123456Z")
                 if last_eval_str.endswith("Z"):
                     # Parse as UTC and make timezone-aware
-                    last_eval = datetime.fromisoformat(last_eval_str.rstrip("Z")).replace(tzinfo=ZoneInfo('UTC'))
+                    last_eval = datetime.fromisoformat(
+                        last_eval_str.rstrip("Z")
+                    ).replace(tzinfo=ZoneInfo("UTC"))
                 else:
                     # Try parsing with timezone info, or assume UTC if naive
                     try:
                         last_eval = datetime.fromisoformat(last_eval_str)
                         if last_eval.tzinfo is None:
-                            last_eval = last_eval.replace(tzinfo=ZoneInfo('UTC'))
+                            last_eval = last_eval.replace(tzinfo=ZoneInfo("UTC"))
                     except ValueError:
-                        last_eval = datetime.fromisoformat(last_eval_str).replace(tzinfo=ZoneInfo('UTC'))
+                        last_eval = datetime.fromisoformat(last_eval_str).replace(
+                            tzinfo=ZoneInfo("UTC")
+                        )
 
                 # Convert now to UTC for consistent comparison
-                if hasattr(now, 'tzinfo') and now.tzinfo is not None:
-                    now_utc = now.astimezone(ZoneInfo('UTC'))
+                if hasattr(now, "tzinfo") and now.tzinfo is not None:
+                    now_utc = now.astimezone(ZoneInfo("UTC"))
                     since_last = (now_utc - last_eval).total_seconds()
                 else:
                     # now is naive, treat as UTC
-                    since_last = (now.replace(tzinfo=ZoneInfo('UTC')) - last_eval).total_seconds()
+                    since_last = (
+                        now.replace(tzinfo=ZoneInfo("UTC")) - last_eval
+                    ).total_seconds()
 
                 if since_last < 300:
-                    return TriggerResult(triggered=False, reason="Already triggered recently")
+                    return TriggerResult(
+                        triggered=False, reason="Already triggered recently"
+                    )
             except ValueError:
                 pass
 
@@ -222,7 +271,7 @@ def _evaluate_time_trigger(
 
         return TriggerResult(
             triggered=True,
-            reason=f"Time trigger at {trigger_time.strftime('%H:%M')} ({user_timezone})"
+            reason=f"Time trigger at {trigger_time.strftime('%H:%M')} ({user_timezone})",
         )
 
     return TriggerResult(triggered=False, reason="Not yet time")
@@ -234,7 +283,7 @@ def _evaluate_battery_trigger(
     last_value: Optional[float],
     store: "AutomationStore",
     automation_id: int,
-    just_entered_window: bool = False
+    just_entered_window: bool = False,
 ) -> TriggerResult:
     """Evaluate battery state trigger (SOC-based or mode-based)."""
     # Check if this is a battery mode trigger (force_charge/force_discharge state)
@@ -261,11 +310,17 @@ def _evaluate_battery_trigger(
 
         if battery_percent >= threshold:
             # Trigger if: crossed threshold OR just entered time window while above
-            if (last_value is not None and last_value < threshold) or just_entered_window:
+            if (
+                last_value is not None and last_value < threshold
+            ) or just_entered_window:
                 store.update_trigger_state(automation_id, battery_percent)
-                reason = f"Battery charged to {battery_percent}% (threshold: {threshold}%)"
+                reason = (
+                    f"Battery charged to {battery_percent}% (threshold: {threshold}%)"
+                )
                 if just_entered_window:
-                    reason = f"Battery already at {battery_percent}% (entered time window)"
+                    reason = (
+                        f"Battery already at {battery_percent}% (entered time window)"
+                    )
                 return TriggerResult(triggered=True, reason=reason)
             elif last_value is None:
                 store.update_trigger_state(automation_id, battery_percent)
@@ -279,11 +334,15 @@ def _evaluate_battery_trigger(
 
         if battery_percent <= threshold:
             # Trigger if: crossed threshold OR just entered time window while below
-            if (last_value is not None and last_value > threshold) or just_entered_window:
+            if (
+                last_value is not None and last_value > threshold
+            ) or just_entered_window:
                 store.update_trigger_state(automation_id, battery_percent)
                 reason = f"Battery discharged to {battery_percent}% (threshold: {threshold}%)"
                 if just_entered_window:
-                    reason = f"Battery already at {battery_percent}% (entered time window)"
+                    reason = (
+                        f"Battery already at {battery_percent}% (entered time window)"
+                    )
                 return TriggerResult(triggered=True, reason=reason)
             elif last_value is None:
                 store.update_trigger_state(automation_id, battery_percent)
@@ -297,7 +356,9 @@ def _evaluate_battery_trigger(
 
         if battery_percent <= backup_reserve + 1:
             # Trigger if: crossed threshold OR just entered time window while at reserve
-            if (last_value is not None and last_value > backup_reserve + 1) or just_entered_window:
+            if (
+                last_value is not None and last_value > backup_reserve + 1
+            ) or just_entered_window:
                 store.update_trigger_state(automation_id, battery_percent)
                 reason = f"Battery at reserve ({battery_percent}%, reserve: {backup_reserve}%)"
                 if just_entered_window:
@@ -317,7 +378,7 @@ def _evaluate_battery_mode_trigger(
     current_state: Dict[str, Any],
     last_value: Optional[float],
     store: "AutomationStore",
-    automation_id: int
+    automation_id: int,
 ) -> TriggerResult:
     """Evaluate battery mode trigger (normal/force_charge/force_discharge).
 
@@ -334,10 +395,14 @@ def _evaluate_battery_mode_trigger(
         - exits: Trigger when battery exits the specified mode
     """
     mode_condition = trigger.get("battery_mode_condition")  # enters or exits
-    target_mode = trigger.get("battery_mode_state")  # normal, force_charge, force_discharge
+    target_mode = trigger.get(
+        "battery_mode_state"
+    )  # normal, force_charge, force_discharge
 
     if not mode_condition or not target_mode:
-        return TriggerResult(triggered=False, reason="Incomplete battery mode trigger config")
+        return TriggerResult(
+            triggered=False, reason="Incomplete battery mode trigger config"
+        )
 
     # Get current battery mode from state
     current_mode = current_state.get("battery_mode", "normal")
@@ -348,7 +413,7 @@ def _evaluate_battery_mode_trigger(
     current_mode_value = mode_map.get(current_mode, 0)
     target_mode_value = mode_map.get(target_mode, 0)
 
-    is_in_target_mode = (current_mode == target_mode)
+    is_in_target_mode = current_mode == target_mode
 
     if mode_condition == "enters":
         # Trigger when entering the target mode (was not in mode, now is)
@@ -358,14 +423,16 @@ def _evaluate_battery_mode_trigger(
                 store.update_trigger_state(automation_id, float(current_mode_value))
                 return TriggerResult(
                     triggered=True,
-                    reason=f"Battery entered {target_mode.replace('_', ' ')} mode"
+                    reason=f"Battery entered {target_mode.replace('_', ' ')} mode",
                 )
             elif last_value is None:
                 # First evaluation - don't trigger, just record state
                 store.update_trigger_state(automation_id, float(current_mode_value))
 
         store.update_trigger_state(automation_id, float(current_mode_value))
-        return TriggerResult(triggered=False, reason=f"Battery in {current_mode.replace('_', ' ')} mode")
+        return TriggerResult(
+            triggered=False, reason=f"Battery in {current_mode.replace('_', ' ')} mode"
+        )
 
     elif mode_condition == "exits":
         # Trigger when exiting the target mode (was in mode, now is not)
@@ -375,16 +442,20 @@ def _evaluate_battery_mode_trigger(
                 store.update_trigger_state(automation_id, float(current_mode_value))
                 return TriggerResult(
                     triggered=True,
-                    reason=f"Battery exited {target_mode.replace('_', ' ')} mode (now {current_mode.replace('_', ' ')})"
+                    reason=f"Battery exited {target_mode.replace('_', ' ')} mode (now {current_mode.replace('_', ' ')})",
                 )
             elif last_value is None:
                 # First evaluation - don't trigger, just record state
                 store.update_trigger_state(automation_id, float(current_mode_value))
 
         store.update_trigger_state(automation_id, float(current_mode_value))
-        return TriggerResult(triggered=False, reason=f"Battery in {current_mode.replace('_', ' ')} mode")
+        return TriggerResult(
+            triggered=False, reason=f"Battery in {current_mode.replace('_', ' ')} mode"
+        )
 
-    return TriggerResult(triggered=False, reason=f"Unknown battery mode condition: {mode_condition}")
+    return TriggerResult(
+        triggered=False, reason=f"Unknown battery mode condition: {mode_condition}"
+    )
 
 
 def _evaluate_flow_trigger(
@@ -393,7 +464,7 @@ def _evaluate_flow_trigger(
     last_value: Optional[float],
     store: "AutomationStore",
     automation_id: int,
-    just_entered_window: bool = False
+    just_entered_window: bool = False,
 ) -> TriggerResult:
     """Evaluate power flow trigger."""
     source = trigger.get("flow_source")
@@ -423,7 +494,9 @@ def _evaluate_flow_trigger(
     if transition == "rises_above":
         if current_value >= threshold_kw:
             # Trigger if: crossed threshold OR just entered time window while above
-            if (last_value is not None and last_value < threshold_kw) or just_entered_window:
+            if (
+                last_value is not None and last_value < threshold_kw
+            ) or just_entered_window:
                 store.update_trigger_state(automation_id, current_value)
                 reason = f"{source} rose to {current_value:.2f}kW (threshold: {threshold_kw}kW)"
                 if just_entered_window:
@@ -435,7 +508,9 @@ def _evaluate_flow_trigger(
     elif transition == "drops_below":
         if current_value <= threshold_kw:
             # Trigger if: crossed threshold OR just entered time window while below
-            if (last_value is not None and last_value > threshold_kw) or just_entered_window:
+            if (
+                last_value is not None and last_value > threshold_kw
+            ) or just_entered_window:
                 store.update_trigger_state(automation_id, current_value)
                 reason = f"{source} dropped to {current_value:.2f}kW (threshold: {threshold_kw}kW)"
                 if just_entered_window:
@@ -454,7 +529,7 @@ def _evaluate_price_trigger(
     last_value: Optional[float],
     store: "AutomationStore",
     automation_id: int,
-    just_entered_window: bool = False
+    just_entered_window: bool = False,
 ) -> TriggerResult:
     """Evaluate price trigger (threshold-based or spike-based)."""
     # Check if this is a price spike trigger
@@ -481,7 +556,9 @@ def _evaluate_price_trigger(
     if transition == "rises_above":
         if current_price >= threshold:
             # Trigger if: price crossed threshold OR just entered time window while above
-            if (last_value is not None and last_value < threshold) or just_entered_window:
+            if (
+                last_value is not None and last_value < threshold
+            ) or just_entered_window:
                 store.update_trigger_state(automation_id, current_price)
                 reason = f"{price_type} price rose to ${current_price:.4f}/kWh"
                 if just_entered_window:
@@ -493,7 +570,9 @@ def _evaluate_price_trigger(
     elif transition == "drops_below":
         if current_price <= threshold:
             # Trigger if: price crossed threshold OR just entered time window while below
-            if (last_value is not None and last_value > threshold) or just_entered_window:
+            if (
+                last_value is not None and last_value > threshold
+            ) or just_entered_window:
                 store.update_trigger_state(automation_id, current_price)
                 reason = f"{price_type} price dropped to ${current_price:.4f}/kWh"
                 if just_entered_window:
@@ -503,7 +582,9 @@ def _evaluate_price_trigger(
                 store.update_trigger_state(automation_id, current_price)
 
     store.update_trigger_state(automation_id, current_price)
-    return TriggerResult(triggered=False, reason=f"{price_type} price at ${current_price:.4f}/kWh")
+    return TriggerResult(
+        triggered=False, reason=f"{price_type} price at ${current_price:.4f}/kWh"
+    )
 
 
 def _evaluate_price_spike_trigger(
@@ -511,7 +592,7 @@ def _evaluate_price_spike_trigger(
     current_state: Dict[str, Any],
     last_value: Optional[float],
     store: "AutomationStore",
-    automation_id: int
+    automation_id: int,
 ) -> TriggerResult:
     """Evaluate price spike trigger (Amber/AEMO spike detection).
 
@@ -575,14 +656,18 @@ def _evaluate_price_spike_trigger(
         if spike_status == "potential":
             if last_value is not None and int(last_value) != 1:
                 store.update_trigger_state(automation_id, float(current_status_value))
-                return TriggerResult(triggered=True, reason="Potential price spike detected")
+                return TriggerResult(
+                    triggered=True, reason="Potential price spike detected"
+                )
             elif last_value is None:
                 store.update_trigger_state(automation_id, float(current_status_value))
 
         store.update_trigger_state(automation_id, float(current_status_value))
         return TriggerResult(triggered=False, reason=f"Spike status: {spike_status}")
 
-    return TriggerResult(triggered=False, reason=f"Unknown spike condition: {spike_condition}")
+    return TriggerResult(
+        triggered=False, reason=f"Unknown spike condition: {spike_condition}"
+    )
 
 
 def _evaluate_grid_trigger(
@@ -590,7 +675,7 @@ def _evaluate_grid_trigger(
     current_state: Dict[str, Any],
     last_value: Optional[float],
     store: "AutomationStore",
-    automation_id: int
+    automation_id: int,
 ) -> TriggerResult:
     """Evaluate grid status trigger."""
     condition = trigger.get("grid_condition")
@@ -625,7 +710,7 @@ def _evaluate_weather_trigger(
     current_state: Dict[str, Any],
     last_value: Optional[float],
     store: "AutomationStore",
-    automation_id: int
+    automation_id: int,
 ) -> TriggerResult:
     """Evaluate weather trigger."""
     condition = trigger.get("weather_condition")
@@ -643,7 +728,9 @@ def _evaluate_weather_trigger(
     if current_weather == condition:
         if last_value is not None and last_value != target_value:
             store.update_trigger_state(automation_id, current_value)
-            return TriggerResult(triggered=True, reason=f"Weather changed to {condition}")
+            return TriggerResult(
+                triggered=True, reason=f"Weather changed to {condition}"
+            )
         elif last_value is None:
             store.update_trigger_state(automation_id, current_value)
 
@@ -656,7 +743,7 @@ def _evaluate_solar_forecast_trigger(
     current_state: Dict[str, Any],
     last_value: Optional[float],
     store: "AutomationStore",
-    automation_id: int
+    automation_id: int,
 ) -> TriggerResult:
     """
     Evaluate solar forecast trigger.
@@ -672,7 +759,9 @@ def _evaluate_solar_forecast_trigger(
     threshold_kwh = trigger.get("solar_forecast_threshold_kwh")
 
     if not period or not condition or threshold_kwh is None:
-        return TriggerResult(triggered=False, reason="Incomplete solar forecast trigger config")
+        return TriggerResult(
+            triggered=False, reason="Incomplete solar forecast trigger config"
+        )
 
     # Get solar forecast from current state
     solcast = current_state.get("solcast_forecast", {})
@@ -685,7 +774,9 @@ def _evaluate_solar_forecast_trigger(
     elif period == "tomorrow":
         forecast_kwh = solcast.get("tomorrow_kwh")
     else:
-        return TriggerResult(triggered=False, reason=f"Unknown forecast period: {period}")
+        return TriggerResult(
+            triggered=False, reason=f"Unknown forecast period: {period}"
+        )
 
     if forecast_kwh is None:
         return TriggerResult(triggered=False, reason=f"No {period} forecast available")
@@ -700,7 +791,7 @@ def _evaluate_solar_forecast_trigger(
     if last_date_encoded == current_date_encoded:
         return TriggerResult(
             triggered=False,
-            reason=f"Already evaluated {period} forecast today ({forecast_kwh:.1f} kWh)"
+            reason=f"Already evaluated {period} forecast today ({forecast_kwh:.1f} kWh)",
         )
 
     # Evaluate the condition
@@ -718,12 +809,12 @@ def _evaluate_solar_forecast_trigger(
     if triggered:
         return TriggerResult(
             triggered=True,
-            reason=f"{period.capitalize()} solar forecast {forecast_kwh:.1f} kWh is {condition} {threshold_kwh:.1f} kWh"
+            reason=f"{period.capitalize()} solar forecast {forecast_kwh:.1f} kWh is {condition} {threshold_kwh:.1f} kWh",
         )
 
     return TriggerResult(
         triggered=False,
-        reason=f"{period.capitalize()} forecast {forecast_kwh:.1f} kWh (threshold: {condition} {threshold_kwh:.1f} kWh)"
+        reason=f"{period.capitalize()} forecast {forecast_kwh:.1f} kWh (threshold: {condition} {threshold_kwh:.1f} kWh)",
     )
 
 
@@ -732,7 +823,7 @@ def _evaluate_ev_trigger(
     current_state: Dict[str, Any],
     last_value: Optional[float],
     store: "AutomationStore",
-    automation_id: int
+    automation_id: int,
 ) -> TriggerResult:
     """
     Evaluate EV charging trigger.
@@ -773,11 +864,23 @@ def _evaluate_ev_trigger(
     ev_location = trigger.get("ev_location", "any")
     if ev_location and ev_location != "any":
         if ev_location == "home" and location != "home":
-            return TriggerResult(triggered=False, reason=f"EV not at home (location: {location})")
+            return TriggerResult(
+                triggered=False, reason=f"EV not at home (location: {location})"
+            )
         elif ev_location == "work" and location != "work":
-            return TriggerResult(triggered=False, reason=f"EV not at work (location: {location})")
-        elif ev_location == "other" and location in ("home", "work", "unknown", "not_home"):
-            return TriggerResult(triggered=False, reason=f"EV not at other location (location: {location})")
+            return TriggerResult(
+                triggered=False, reason=f"EV not at work (location: {location})"
+            )
+        elif ev_location == "other" and location in (
+            "home",
+            "work",
+            "unknown",
+            "not_home",
+        ):
+            return TriggerResult(
+                triggered=False,
+                reason=f"EV not at other location (location: {location})",
+            )
 
     # Encode state for edge detection
     # Bits: 0=plugged_in, 1=charging, 2=was_in_time_window
@@ -785,9 +888,9 @@ def _evaluate_ev_trigger(
     # This allows triggering when entering time window while condition is already met
     was_in_window = (int(last_value) & 4) != 0 if last_value is not None else False
     current_value = float(
-        (1 if is_plugged_in else 0) +
-        (2 if is_charging else 0) +
-        4  # Always set bit 2 since we're now in time window (check happens before this)
+        (1 if is_plugged_in else 0)
+        + (2 if is_charging else 0)
+        + 4  # Always set bit 2 since we're now in time window (check happens before this)
     )
 
     # Check if we just entered the time window
@@ -796,9 +899,15 @@ def _evaluate_ev_trigger(
     if condition == "connected":
         if is_plugged_in:
             # Trigger if: state changed OR just entered time window OR initial with trigger_on_initial
-            was_plugged_in = (int(last_value) & 1) != 0 if last_value is not None else False
+            was_plugged_in = (
+                (int(last_value) & 1) != 0 if last_value is not None else False
+            )
             is_initial = last_value is None
-            if (last_value is not None and not was_plugged_in) or just_entered_window or (is_initial and trigger_on_initial):
+            if (
+                (last_value is not None and not was_plugged_in)
+                or just_entered_window
+                or (is_initial and trigger_on_initial)
+            ):
                 store.update_trigger_state(automation_id, current_value)
                 if is_initial and trigger_on_initial:
                     reason = "EV already plugged in (initial trigger)"
@@ -813,9 +922,15 @@ def _evaluate_ev_trigger(
     elif condition == "disconnected":
         if not is_plugged_in:
             # Trigger if: state changed OR just entered time window OR initial with trigger_on_initial
-            was_plugged_in = (int(last_value) & 1) != 0 if last_value is not None else False
+            was_plugged_in = (
+                (int(last_value) & 1) != 0 if last_value is not None else False
+            )
             is_initial = last_value is None
-            if (last_value is not None and was_plugged_in) or just_entered_window or (is_initial and trigger_on_initial):
+            if (
+                (last_value is not None and was_plugged_in)
+                or just_entered_window
+                or (is_initial and trigger_on_initial)
+            ):
                 store.update_trigger_state(automation_id, current_value)
                 if is_initial and trigger_on_initial:
                     reason = "EV already unplugged (initial trigger)"
@@ -830,9 +945,15 @@ def _evaluate_ev_trigger(
     elif condition == "charging_starts":
         if is_charging or charging_state == "charging":
             # Trigger if: state changed OR just entered time window OR initial with trigger_on_initial
-            was_charging = (int(last_value) & 2) != 0 if last_value is not None else False
+            was_charging = (
+                (int(last_value) & 2) != 0 if last_value is not None else False
+            )
             is_initial = last_value is None
-            if (last_value is not None and not was_charging) or just_entered_window or (is_initial and trigger_on_initial):
+            if (
+                (last_value is not None and not was_charging)
+                or just_entered_window
+                or (is_initial and trigger_on_initial)
+            ):
                 store.update_trigger_state(automation_id, current_value)
                 if is_initial and trigger_on_initial:
                     reason = "EV already charging (initial trigger)"
@@ -847,9 +968,15 @@ def _evaluate_ev_trigger(
     elif condition == "charging_stops":
         if not is_charging and charging_state != "charging":
             # Trigger if: state changed OR just entered time window OR initial with trigger_on_initial
-            was_charging = (int(last_value) & 2) != 0 if last_value is not None else False
+            was_charging = (
+                (int(last_value) & 2) != 0 if last_value is not None else False
+            )
             is_initial = last_value is None
-            if (last_value is not None and was_charging) or just_entered_window or (is_initial and trigger_on_initial):
+            if (
+                (last_value is not None and was_charging)
+                or just_entered_window
+                or (is_initial and trigger_on_initial)
+            ):
                 store.update_trigger_state(automation_id, current_value)
                 if is_initial and trigger_on_initial:
                     reason = "EV already stopped (initial trigger)"
@@ -874,7 +1001,7 @@ def _evaluate_ev_trigger(
                 store.update_trigger_state(automation_id, float(battery_level))
                 return TriggerResult(
                     triggered=True,
-                    reason=f"EV battery reached {battery_level}% (threshold: {threshold}%)"
+                    reason=f"EV battery reached {battery_level}% (threshold: {threshold}%)",
                 )
             elif last_value is None:
                 store.update_trigger_state(automation_id, float(battery_level))
@@ -891,7 +1018,7 @@ def _evaluate_ocpp_trigger(
     current_state: Dict[str, Any],
     last_value: Optional[float],
     store: "AutomationStore",
-    automation_id: int
+    automation_id: int,
 ) -> TriggerResult:
     """
     Evaluate OCPP charger trigger.
@@ -917,7 +1044,13 @@ def _evaluate_ocpp_trigger(
     energy_kwh = ocpp_state.get("energy_kwh", 0)
 
     # Encode state for edge detection
-    status_values = {"available": 1, "preparing": 2, "charging": 3, "finishing": 4, "faulted": 5}
+    status_values = {
+        "available": 1,
+        "preparing": 2,
+        "charging": 3,
+        "finishing": 4,
+        "faulted": 5,
+    }
     current_value = float(status_values.get(status, 0))
 
     if condition == "connected":
@@ -978,21 +1111,24 @@ def _evaluate_ocpp_trigger(
                 store.update_trigger_state(automation_id, float(energy_kwh))
                 return TriggerResult(
                     triggered=True,
-                    reason=f"OCPP energy reached {energy_kwh:.1f} kWh (threshold: {threshold} kWh)"
+                    reason=f"OCPP energy reached {energy_kwh:.1f} kWh (threshold: {threshold} kWh)",
                 )
             elif last_value is None:
                 store.update_trigger_state(automation_id, float(energy_kwh))
 
         store.update_trigger_state(automation_id, float(energy_kwh))
-        return TriggerResult(triggered=False, reason=f"OCPP energy at {energy_kwh:.1f} kWh")
+        return TriggerResult(
+            triggered=False, reason=f"OCPP energy at {energy_kwh:.1f} kWh"
+        )
 
     store.update_trigger_state(automation_id, current_value)
-    return TriggerResult(triggered=False, reason=f"OCPP condition '{condition}' not met")
+    return TriggerResult(
+        triggered=False, reason=f"OCPP condition '{condition}' not met"
+    )
 
 
 def evaluate_conditions(
-    conditions: List[Dict[str, Any]],
-    current_state: Dict[str, Any]
+    conditions: List[Dict[str, Any]], current_state: Dict[str, Any]
 ) -> TriggerResult:
     """
     Evaluate all conditions. All must be true for the result to be True.
@@ -1010,15 +1146,16 @@ def evaluate_conditions(
     for i, condition in enumerate(conditions):
         result = _evaluate_single_condition(condition, current_state)
         if not result.triggered:
-            _LOGGER.debug(f"Condition {i+1} failed: {result.reason}")
-            return TriggerResult(triggered=False, reason=f"Condition {i+1} not met: {result.reason}")
+            _LOGGER.debug(f"Condition {i + 1} failed: {result.reason}")
+            return TriggerResult(
+                triggered=False, reason=f"Condition {i + 1} not met: {result.reason}"
+            )
 
     return TriggerResult(triggered=True, reason="All conditions met")
 
 
 def _evaluate_single_condition(
-    condition: Dict[str, Any],
-    current_state: Dict[str, Any]
+    condition: Dict[str, Any], current_state: Dict[str, Any]
 ) -> TriggerResult:
     """
     Evaluate a single condition (different from trigger - no edge detection).
@@ -1044,18 +1181,28 @@ def _evaluate_single_condition(
     elif condition_type == "time":
         return _evaluate_time_condition(condition, current_state)
     else:
-        return TriggerResult(triggered=False, reason=f"Unknown condition type: {condition_type}")
+        return TriggerResult(
+            triggered=False, reason=f"Unknown condition type: {condition_type}"
+        )
 
 
-def _evaluate_battery_condition(condition: Dict[str, Any], current_state: Dict[str, Any]) -> TriggerResult:
+def _evaluate_battery_condition(
+    condition: Dict[str, Any], current_state: Dict[str, Any]
+) -> TriggerResult:
     """Evaluate battery condition (level-based or mode-based)."""
     # Check if this is a battery mode condition
     battery_mode_is = condition.get("battery_mode_is")
     if battery_mode_is:
         current_mode = current_state.get("battery_mode", "normal")
         if current_mode == battery_mode_is:
-            return TriggerResult(triggered=True, reason=f"Battery is in {battery_mode_is.replace('_', ' ')} mode")
-        return TriggerResult(triggered=False, reason=f"Battery is in {current_mode.replace('_', ' ')} mode (not {battery_mode_is.replace('_', ' ')})")
+            return TriggerResult(
+                triggered=True,
+                reason=f"Battery is in {battery_mode_is.replace('_', ' ')} mode",
+            )
+        return TriggerResult(
+            triggered=False,
+            reason=f"Battery is in {current_mode.replace('_', ' ')} mode (not {battery_mode_is.replace('_', ' ')})",
+        )
 
     # Otherwise, evaluate as level-based condition
     battery_percent = current_state.get("battery_percent")
@@ -1067,15 +1214,27 @@ def _evaluate_battery_condition(condition: Dict[str, Any], current_state: Dict[s
 
     if battery_condition == "charged_up_to":  # Above
         if battery_percent >= threshold:
-            return TriggerResult(triggered=True, reason=f"Battery at {battery_percent}% (>= {threshold}%)")
-        return TriggerResult(triggered=False, reason=f"Battery at {battery_percent}% (< {threshold}%)")
+            return TriggerResult(
+                triggered=True,
+                reason=f"Battery at {battery_percent}% (>= {threshold}%)",
+            )
+        return TriggerResult(
+            triggered=False, reason=f"Battery at {battery_percent}% (< {threshold}%)"
+        )
     else:  # Below (discharged_down_to)
         if battery_percent <= threshold:
-            return TriggerResult(triggered=True, reason=f"Battery at {battery_percent}% (<= {threshold}%)")
-        return TriggerResult(triggered=False, reason=f"Battery at {battery_percent}% (> {threshold}%)")
+            return TriggerResult(
+                triggered=True,
+                reason=f"Battery at {battery_percent}% (<= {threshold}%)",
+            )
+        return TriggerResult(
+            triggered=False, reason=f"Battery at {battery_percent}% (> {threshold}%)"
+        )
 
 
-def _evaluate_flow_condition(condition: Dict[str, Any], current_state: Dict[str, Any]) -> TriggerResult:
+def _evaluate_flow_condition(
+    condition: Dict[str, Any], current_state: Dict[str, Any]
+) -> TriggerResult:
     """Evaluate power flow condition."""
     source = condition.get("flow_source", "solar")
     comparison = condition.get("flow_comparison", "above")
@@ -1101,15 +1260,25 @@ def _evaluate_flow_condition(condition: Dict[str, Any], current_state: Dict[str,
 
     if comparison == "above":
         if value >= threshold:
-            return TriggerResult(triggered=True, reason=f"{source} at {value:.1f} kW (>= {threshold} kW)")
-        return TriggerResult(triggered=False, reason=f"{source} at {value:.1f} kW (< {threshold} kW)")
+            return TriggerResult(
+                triggered=True, reason=f"{source} at {value:.1f} kW (>= {threshold} kW)"
+            )
+        return TriggerResult(
+            triggered=False, reason=f"{source} at {value:.1f} kW (< {threshold} kW)"
+        )
     else:  # below
         if value <= threshold:
-            return TriggerResult(triggered=True, reason=f"{source} at {value:.1f} kW (<= {threshold} kW)")
-        return TriggerResult(triggered=False, reason=f"{source} at {value:.1f} kW (> {threshold} kW)")
+            return TriggerResult(
+                triggered=True, reason=f"{source} at {value:.1f} kW (<= {threshold} kW)"
+            )
+        return TriggerResult(
+            triggered=False, reason=f"{source} at {value:.1f} kW (> {threshold} kW)"
+        )
 
 
-def _evaluate_price_condition(condition: Dict[str, Any], current_state: Dict[str, Any]) -> TriggerResult:
+def _evaluate_price_condition(
+    condition: Dict[str, Any], current_state: Dict[str, Any]
+) -> TriggerResult:
     """Evaluate price condition (threshold-based or spike-based)."""
     # Check if this is a spike status condition
     price_spike_is = condition.get("price_spike_is")
@@ -1121,39 +1290,64 @@ def _evaluate_price_condition(condition: Dict[str, Any], current_state: Dict[str
             spike_status = spike_map.get(int(spike_status), "none")
 
         if spike_status == price_spike_is:
-            return TriggerResult(triggered=True, reason=f"Spike status is {price_spike_is}")
-        return TriggerResult(triggered=False, reason=f"Spike status is {spike_status} (not {price_spike_is})")
+            return TriggerResult(
+                triggered=True, reason=f"Spike status is {price_spike_is}"
+            )
+        return TriggerResult(
+            triggered=False,
+            reason=f"Spike status is {spike_status} (not {price_spike_is})",
+        )
 
     # Otherwise, evaluate as threshold-based condition
     price_type = condition.get("price_type", "import")
     comparison = condition.get("price_comparison", "below")
     threshold = condition.get("price_threshold", 0)
 
-    price = current_state.get("import_price" if price_type == "import" else "export_price")
+    price = current_state.get(
+        "import_price" if price_type == "import" else "export_price"
+    )
     if price is None:
         return TriggerResult(triggered=False, reason=f"{price_type} price unavailable")
 
     if comparison == "above":
         if price >= threshold:
-            return TriggerResult(triggered=True, reason=f"{price_type} price ${price:.2f} (>= ${threshold:.2f})")
-        return TriggerResult(triggered=False, reason=f"{price_type} price ${price:.2f} (< ${threshold:.2f})")
+            return TriggerResult(
+                triggered=True,
+                reason=f"{price_type} price ${price:.2f} (>= ${threshold:.2f})",
+            )
+        return TriggerResult(
+            triggered=False,
+            reason=f"{price_type} price ${price:.2f} (< ${threshold:.2f})",
+        )
     else:  # below
         if price <= threshold:
-            return TriggerResult(triggered=True, reason=f"{price_type} price ${price:.2f} (<= ${threshold:.2f})")
-        return TriggerResult(triggered=False, reason=f"{price_type} price ${price:.2f} (> ${threshold:.2f})")
+            return TriggerResult(
+                triggered=True,
+                reason=f"{price_type} price ${price:.2f} (<= ${threshold:.2f})",
+            )
+        return TriggerResult(
+            triggered=False,
+            reason=f"{price_type} price ${price:.2f} (> ${threshold:.2f})",
+        )
 
 
-def _evaluate_grid_condition(condition: Dict[str, Any], current_state: Dict[str, Any]) -> TriggerResult:
+def _evaluate_grid_condition(
+    condition: Dict[str, Any], current_state: Dict[str, Any]
+) -> TriggerResult:
     """Evaluate grid status condition."""
     required_status = condition.get("grid_condition", "on_grid")
     current_status = current_state.get("grid_status", "on_grid")
 
     if current_status == required_status:
         return TriggerResult(triggered=True, reason=f"Grid is {current_status}")
-    return TriggerResult(triggered=False, reason=f"Grid is {current_status}, need {required_status}")
+    return TriggerResult(
+        triggered=False, reason=f"Grid is {current_status}, need {required_status}"
+    )
 
 
-def _evaluate_weather_condition(condition: Dict[str, Any], current_state: Dict[str, Any]) -> TriggerResult:
+def _evaluate_weather_condition(
+    condition: Dict[str, Any], current_state: Dict[str, Any]
+) -> TriggerResult:
     """Evaluate weather condition."""
     required_weather = condition.get("weather_condition", "sunny")
     current_weather = current_state.get("weather")
@@ -1165,10 +1359,14 @@ def _evaluate_weather_condition(condition: Dict[str, Any], current_state: Dict[s
     current_weather_normalized = current_weather.lower().replace(" ", "_")
     if current_weather_normalized == required_weather:
         return TriggerResult(triggered=True, reason=f"Weather is {current_weather}")
-    return TriggerResult(triggered=False, reason=f"Weather is {current_weather}, need {required_weather}")
+    return TriggerResult(
+        triggered=False, reason=f"Weather is {current_weather}, need {required_weather}"
+    )
 
 
-def _evaluate_ev_condition(condition: Dict[str, Any], current_state: Dict[str, Any]) -> TriggerResult:
+def _evaluate_ev_condition(
+    condition: Dict[str, Any], current_state: Dict[str, Any]
+) -> TriggerResult:
     """Evaluate EV condition."""
     ev_state = current_state.get("ev_state", {})
 
@@ -1177,11 +1375,23 @@ def _evaluate_ev_condition(condition: Dict[str, Any], current_state: Dict[str, A
     location = ev_state.get("location", "unknown")
     if ev_location and ev_location != "any":
         if ev_location == "home" and location != "home":
-            return TriggerResult(triggered=False, reason=f"EV not at home (location: {location})")
+            return TriggerResult(
+                triggered=False, reason=f"EV not at home (location: {location})"
+            )
         elif ev_location == "work" and location != "work":
-            return TriggerResult(triggered=False, reason=f"EV not at work (location: {location})")
-        elif ev_location == "other" and location in ("home", "work", "unknown", "not_home"):
-            return TriggerResult(triggered=False, reason=f"EV not at other location (location: {location})")
+            return TriggerResult(
+                triggered=False, reason=f"EV not at work (location: {location})"
+            )
+        elif ev_location == "other" and location in (
+            "home",
+            "work",
+            "unknown",
+            "not_home",
+        ):
+            return TriggerResult(
+                triggered=False,
+                reason=f"EV not at other location (location: {location})",
+            )
 
     # Check plugged in status
     ev_plugged_in = condition.get("ev_is_plugged_in")
@@ -1190,7 +1400,9 @@ def _evaluate_ev_condition(condition: Dict[str, Any], current_state: Dict[str, A
         if ev_plugged_in and not is_plugged:
             return TriggerResult(triggered=False, reason="EV is not plugged in")
         if not ev_plugged_in and is_plugged:
-            return TriggerResult(triggered=False, reason="EV is plugged in (expected unplugged)")
+            return TriggerResult(
+                triggered=False, reason="EV is plugged in (expected unplugged)"
+            )
 
     # Check charging status
     ev_charging = condition.get("ev_is_charging")
@@ -1199,7 +1411,9 @@ def _evaluate_ev_condition(condition: Dict[str, Any], current_state: Dict[str, A
         if ev_charging and not is_charging:
             return TriggerResult(triggered=False, reason="EV is not charging")
         if not ev_charging and is_charging:
-            return TriggerResult(triggered=False, reason="EV is charging (expected not charging)")
+            return TriggerResult(
+                triggered=False, reason="EV is charging (expected not charging)"
+            )
 
     # Check SOC
     soc_comparison = condition.get("ev_soc_comparison")
@@ -1211,15 +1425,23 @@ def _evaluate_ev_condition(condition: Dict[str, Any], current_state: Dict[str, A
 
         if soc_comparison == "above":
             if battery_level < threshold:
-                return TriggerResult(triggered=False, reason=f"EV battery at {battery_level}% (< {threshold}%)")
+                return TriggerResult(
+                    triggered=False,
+                    reason=f"EV battery at {battery_level}% (< {threshold}%)",
+                )
         else:  # below
             if battery_level > threshold:
-                return TriggerResult(triggered=False, reason=f"EV battery at {battery_level}% (> {threshold}%)")
+                return TriggerResult(
+                    triggered=False,
+                    reason=f"EV battery at {battery_level}% (> {threshold}%)",
+                )
 
     return TriggerResult(triggered=True, reason="EV condition met")
 
 
-def _evaluate_solar_forecast_condition(condition: Dict[str, Any], current_state: Dict[str, Any]) -> TriggerResult:
+def _evaluate_solar_forecast_condition(
+    condition: Dict[str, Any], current_state: Dict[str, Any]
+) -> TriggerResult:
     """Evaluate solar forecast condition."""
     forecast = current_state.get("solcast_forecast", {})
     period = condition.get("solar_forecast_period", "today")
@@ -1228,19 +1450,35 @@ def _evaluate_solar_forecast_condition(condition: Dict[str, Any], current_state:
 
     forecast_value = forecast.get(f"{period}_kwh")
     if forecast_value is None:
-        return TriggerResult(triggered=False, reason=f"Solar forecast for {period} unavailable")
+        return TriggerResult(
+            triggered=False, reason=f"Solar forecast for {period} unavailable"
+        )
 
     if comparison == "above":
         if forecast_value >= threshold:
-            return TriggerResult(triggered=True, reason=f"{period} forecast {forecast_value:.0f} kWh (>= {threshold} kWh)")
-        return TriggerResult(triggered=False, reason=f"{period} forecast {forecast_value:.0f} kWh (< {threshold} kWh)")
+            return TriggerResult(
+                triggered=True,
+                reason=f"{period} forecast {forecast_value:.0f} kWh (>= {threshold} kWh)",
+            )
+        return TriggerResult(
+            triggered=False,
+            reason=f"{period} forecast {forecast_value:.0f} kWh (< {threshold} kWh)",
+        )
     else:  # below
         if forecast_value <= threshold:
-            return TriggerResult(triggered=True, reason=f"{period} forecast {forecast_value:.0f} kWh (<= {threshold} kWh)")
-        return TriggerResult(triggered=False, reason=f"{period} forecast {forecast_value:.0f} kWh (> {threshold} kWh)")
+            return TriggerResult(
+                triggered=True,
+                reason=f"{period} forecast {forecast_value:.0f} kWh (<= {threshold} kWh)",
+            )
+        return TriggerResult(
+            triggered=False,
+            reason=f"{period} forecast {forecast_value:.0f} kWh (> {threshold} kWh)",
+        )
 
 
-def _evaluate_time_condition(condition: Dict[str, Any], current_state: Dict[str, Any]) -> TriggerResult:
+def _evaluate_time_condition(
+    condition: Dict[str, Any], current_state: Dict[str, Any]
+) -> TriggerResult:
     """Evaluate time condition (before/after/between, weekday filter)."""
     current_datetime = current_state.get("current_time", datetime.now())
     current_time = current_datetime.time()
@@ -1250,24 +1488,36 @@ def _evaluate_time_condition(condition: Dict[str, Any], current_state: Dict[str,
     if weekdays:
         current_weekday = (current_datetime.weekday() + 1) % 7  # Python Mon=0 → Sun=0
         if current_weekday not in weekdays:
-            return TriggerResult(triggered=False, reason=f"Weekday {current_weekday} not in {weekdays}")
+            return TriggerResult(
+                triggered=False, reason=f"Weekday {current_weekday} not in {weekdays}"
+            )
 
     # Time mode: "before", "after", "between"
     time_mode = condition.get("time_mode", "between")
-    time_after = condition.get("time_after")   # "HH:MM"
+    time_after = condition.get("time_after")  # "HH:MM"
     time_before = condition.get("time_before")  # "HH:MM"
 
     if time_mode == "after" and time_after:
         after = datetime.strptime(time_after, "%H:%M").time()
         if current_time >= after:
-            return TriggerResult(triggered=True, reason=f"Time {current_time:%H:%M} is after {time_after}")
-        return TriggerResult(triggered=False, reason=f"Time {current_time:%H:%M} is before {time_after}")
+            return TriggerResult(
+                triggered=True,
+                reason=f"Time {current_time:%H:%M} is after {time_after}",
+            )
+        return TriggerResult(
+            triggered=False, reason=f"Time {current_time:%H:%M} is before {time_after}"
+        )
 
     elif time_mode == "before" and time_before:
         before = datetime.strptime(time_before, "%H:%M").time()
         if current_time <= before:
-            return TriggerResult(triggered=True, reason=f"Time {current_time:%H:%M} is before {time_before}")
-        return TriggerResult(triggered=False, reason=f"Time {current_time:%H:%M} is after {time_before}")
+            return TriggerResult(
+                triggered=True,
+                reason=f"Time {current_time:%H:%M} is before {time_before}",
+            )
+        return TriggerResult(
+            triggered=False, reason=f"Time {current_time:%H:%M} is after {time_before}"
+        )
 
     elif time_mode == "between" and time_after and time_before:
         after = datetime.strptime(time_after, "%H:%M").time()
@@ -1278,7 +1528,13 @@ def _evaluate_time_condition(condition: Dict[str, Any], current_state: Dict[str,
             # Overnight window (e.g., 22:00 - 06:00)
             is_within = current_time >= after or current_time <= before
         if is_within:
-            return TriggerResult(triggered=True, reason=f"Time {current_time:%H:%M} is between {time_after}-{time_before}")
-        return TriggerResult(triggered=False, reason=f"Time {current_time:%H:%M} is not between {time_after}-{time_before}")
+            return TriggerResult(
+                triggered=True,
+                reason=f"Time {current_time:%H:%M} is between {time_after}-{time_before}",
+            )
+        return TriggerResult(
+            triggered=False,
+            reason=f"Time {current_time:%H:%M} is not between {time_after}-{time_before}",
+        )
 
     return TriggerResult(triggered=True, reason="No time constraint specified")

@@ -4,6 +4,7 @@ Provides functions to look up network tariff rates, compute daily averages,
 and discover available tariff codes — all while suppressing the library's
 internal print() statements.
 """
+
 from __future__ import annotations
 
 import importlib
@@ -63,7 +64,10 @@ def get_network_tariff_rate(
     except Exception as err:
         _LOGGER.warning(
             "Failed to get network tariff rate for %s/%s at %s: %s",
-            network, tariff_code, dt, err,
+            network,
+            tariff_code,
+            dt,
+            err,
         )
         return None
 
@@ -114,13 +118,18 @@ def compute_avg_daily_tariff(
         avg = round(total / count, 4)
         _LOGGER.debug(
             "Average daily tariff for %s/%s: %.4f c/kWh (%d slots)",
-            network, tariff_code, avg, count,
+            network,
+            tariff_code,
+            avg,
+            count,
         )
         return avg
     except Exception as err:
         _LOGGER.warning(
             "Failed to compute avg daily tariff for %s/%s: %s",
-            network, tariff_code, err,
+            network,
+            tariff_code,
+            err,
         )
         return None
 
@@ -157,7 +166,9 @@ def get_tariff_codes_for_network(network_display: str) -> dict[str, str]:
     except Exception as err:
         _LOGGER.warning(
             "Failed to load tariff codes for %s (module=%s): %s",
-            network_display, module_name, err,
+            network_display,
+            module_name,
+            err,
         )
         return {}
 

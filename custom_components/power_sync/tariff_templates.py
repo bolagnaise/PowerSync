@@ -62,20 +62,19 @@ TARIFF_TEMPLATES: Dict[str, Dict[str, Any]] = {
         },
         "energy_charges": {
             "All Year": {
-                "PEAK": 0.42,       # 42c/kWh
-                "SHOULDER": 0.25,   # 25c/kWh
-                "OFF_PEAK": 0.14,   # 14c/kWh
+                "PEAK": 0.42,  # 42c/kWh
+                "SHOULDER": 0.25,  # 25c/kWh
+                "OFF_PEAK": 0.14,  # 14c/kWh
             }
         },
         "sell_tariff": {
             "energy_charges": {
                 "All Year": {
-                    "ALL": 0.05,    # 5c/kWh flat FiT
+                    "ALL": 0.05,  # 5c/kWh flat FiT
                 }
             }
         },
     },
-
     "agl_solar_savers": {
         "id": "agl_solar_savers",
         "name": "AGL Solar Savers",
@@ -89,10 +88,30 @@ TARIFF_TEMPLATES: Dict[str, Dict[str, Any]] = {
                     "SUPER_OFF_PEAK": SOLAR_SOAK_10AM_2PM,
                     "PEAK": WEEKDAY_PEAK_3PM_9PM,
                     "OFF_PEAK": [
-                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 21, "toHour": 24},
-                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 0, "toHour": 7},
-                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 7, "toHour": 10},
-                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 14, "toHour": 15},
+                        {
+                            "fromDayOfWeek": 1,
+                            "toDayOfWeek": 5,
+                            "fromHour": 21,
+                            "toHour": 24,
+                        },
+                        {
+                            "fromDayOfWeek": 1,
+                            "toDayOfWeek": 5,
+                            "fromHour": 0,
+                            "toHour": 7,
+                        },
+                        {
+                            "fromDayOfWeek": 1,
+                            "toDayOfWeek": 5,
+                            "fromHour": 7,
+                            "toHour": 10,
+                        },
+                        {
+                            "fromDayOfWeek": 1,
+                            "toDayOfWeek": 5,
+                            "fromHour": 14,
+                            "toHour": 15,
+                        },
                         *WEEKEND_ALL_DAY,
                     ],
                 },
@@ -101,19 +120,18 @@ TARIFF_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "energy_charges": {
             "All Year": {
                 "SUPER_OFF_PEAK": 0.0,  # Free solar soak period
-                "PEAK": 0.48,           # 48c/kWh
-                "OFF_PEAK": 0.20,       # 20c/kWh
+                "PEAK": 0.48,  # 48c/kWh
+                "OFF_PEAK": 0.20,  # 20c/kWh
             }
         },
         "sell_tariff": {
             "energy_charges": {
                 "All Year": {
-                    "ALL": 0.05,    # 5c/kWh flat FiT
+                    "ALL": 0.05,  # 5c/kWh flat FiT
                 }
             }
         },
     },
-
     "origin_solar_boost": {
         "id": "origin_solar_boost",
         "name": "Origin Solar Boost",
@@ -135,20 +153,19 @@ TARIFF_TEMPLATES: Dict[str, Dict[str, Any]] = {
         },
         "energy_charges": {
             "All Year": {
-                "PEAK": 0.45,       # 45c/kWh
-                "SHOULDER": 0.28,   # 28c/kWh
-                "OFF_PEAK": 0.16,   # 16c/kWh
+                "PEAK": 0.45,  # 45c/kWh
+                "SHOULDER": 0.28,  # 28c/kWh
+                "OFF_PEAK": 0.16,  # 16c/kWh
             }
         },
         "sell_tariff": {
             "energy_charges": {
                 "All Year": {
-                    "ALL": 0.07,    # 7c/kWh flat FiT
+                    "ALL": 0.07,  # 7c/kWh flat FiT
                 }
             }
         },
     },
-
     "energyaustralia_tou": {
         "id": "energyaustralia_tou",
         "name": "EnergyAustralia Time of Use",
@@ -160,37 +177,71 @@ TARIFF_TEMPLATES: Dict[str, Dict[str, Any]] = {
                 "toMonth": 12,
                 "tou_periods": {
                     "PEAK": [
-                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 14, "toHour": 20}
+                        {
+                            "fromDayOfWeek": 1,
+                            "toDayOfWeek": 5,
+                            "fromHour": 14,
+                            "toHour": 20,
+                        }
                     ],
                     "SHOULDER": [
-                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 7, "toHour": 14},
-                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 20, "toHour": 22},
-                        {"fromDayOfWeek": 6, "toDayOfWeek": 6, "fromHour": 7, "toHour": 22},
-                        {"fromDayOfWeek": 0, "toDayOfWeek": 0, "fromHour": 7, "toHour": 22},
+                        {
+                            "fromDayOfWeek": 1,
+                            "toDayOfWeek": 5,
+                            "fromHour": 7,
+                            "toHour": 14,
+                        },
+                        {
+                            "fromDayOfWeek": 1,
+                            "toDayOfWeek": 5,
+                            "fromHour": 20,
+                            "toHour": 22,
+                        },
+                        {
+                            "fromDayOfWeek": 6,
+                            "toDayOfWeek": 6,
+                            "fromHour": 7,
+                            "toHour": 22,
+                        },
+                        {
+                            "fromDayOfWeek": 0,
+                            "toDayOfWeek": 0,
+                            "fromHour": 7,
+                            "toHour": 22,
+                        },
                     ],
                     "OFF_PEAK": [
-                        {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 22, "toHour": 24},
-                        {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 0, "toHour": 7},
+                        {
+                            "fromDayOfWeek": 0,
+                            "toDayOfWeek": 6,
+                            "fromHour": 22,
+                            "toHour": 24,
+                        },
+                        {
+                            "fromDayOfWeek": 0,
+                            "toDayOfWeek": 6,
+                            "fromHour": 0,
+                            "toHour": 7,
+                        },
                     ],
                 },
             }
         },
         "energy_charges": {
             "All Year": {
-                "PEAK": 0.52,       # 52c/kWh
-                "SHOULDER": 0.28,   # 28c/kWh
-                "OFF_PEAK": 0.18,   # 18c/kWh
+                "PEAK": 0.52,  # 52c/kWh
+                "SHOULDER": 0.28,  # 28c/kWh
+                "OFF_PEAK": 0.18,  # 18c/kWh
             }
         },
         "sell_tariff": {
             "energy_charges": {
                 "All Year": {
-                    "ALL": 0.05,    # 5c/kWh flat FiT
+                    "ALL": 0.05,  # 5c/kWh flat FiT
                 }
             }
         },
     },
-
     "flat_rate": {
         "id": "flat_rate",
         "name": "Flat Rate Tariff",
@@ -202,25 +253,29 @@ TARIFF_TEMPLATES: Dict[str, Dict[str, Any]] = {
                 "toMonth": 12,
                 "tou_periods": {
                     "ALL": [
-                        {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 0, "toHour": 24}
+                        {
+                            "fromDayOfWeek": 0,
+                            "toDayOfWeek": 6,
+                            "fromHour": 0,
+                            "toHour": 24,
+                        }
                     ],
                 },
             }
         },
         "energy_charges": {
             "All Year": {
-                "ALL": 0.30,        # 30c/kWh flat rate
+                "ALL": 0.30,  # 30c/kWh flat rate
             }
         },
         "sell_tariff": {
             "energy_charges": {
                 "All Year": {
-                    "ALL": 0.05,    # 5c/kWh flat FiT
+                    "ALL": 0.05,  # 5c/kWh flat FiT
                 }
             }
         },
     },
-
     "simple_tou": {
         "id": "simple_tou",
         "name": "Simple Time of Use",
@@ -233,8 +288,18 @@ TARIFF_TEMPLATES: Dict[str, Dict[str, Any]] = {
                 "tou_periods": {
                     "PEAK": WEEKDAY_PEAK_3PM_9PM,
                     "OFF_PEAK": [
-                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 0, "toHour": 15},
-                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 21, "toHour": 24},
+                        {
+                            "fromDayOfWeek": 1,
+                            "toDayOfWeek": 5,
+                            "fromHour": 0,
+                            "toHour": 15,
+                        },
+                        {
+                            "fromDayOfWeek": 1,
+                            "toDayOfWeek": 5,
+                            "fromHour": 21,
+                            "toHour": 24,
+                        },
                         *WEEKEND_ALL_DAY,
                     ],
                 },
@@ -242,19 +307,18 @@ TARIFF_TEMPLATES: Dict[str, Dict[str, Any]] = {
         },
         "energy_charges": {
             "All Year": {
-                "PEAK": 0.45,       # 45c/kWh
-                "OFF_PEAK": 0.15,   # 15c/kWh
+                "PEAK": 0.45,  # 45c/kWh
+                "OFF_PEAK": 0.15,  # 15c/kWh
             }
         },
         "sell_tariff": {
             "energy_charges": {
                 "All Year": {
-                    "ALL": 0.05,    # 5c/kWh flat FiT
+                    "ALL": 0.05,  # 5c/kWh flat FiT
                 }
             }
         },
     },
-
     "solar_sponge": {
         "id": "solar_sponge",
         "name": "Solar Sponge (Free Daytime)",
@@ -266,16 +330,51 @@ TARIFF_TEMPLATES: Dict[str, Dict[str, Any]] = {
                 "toMonth": 12,
                 "tou_periods": {
                     "SUPER_OFF_PEAK": [
-                        {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 9, "toHour": 15}
+                        {
+                            "fromDayOfWeek": 0,
+                            "toDayOfWeek": 6,
+                            "fromHour": 9,
+                            "toHour": 15,
+                        }
                     ],
                     "PEAK": WEEKDAY_PEAK_3PM_9PM,
                     "OFF_PEAK": [
-                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 0, "toHour": 9},
-                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 21, "toHour": 24},
-                        {"fromDayOfWeek": 0, "toDayOfWeek": 0, "fromHour": 0, "toHour": 9},
-                        {"fromDayOfWeek": 0, "toDayOfWeek": 0, "fromHour": 15, "toHour": 24},
-                        {"fromDayOfWeek": 6, "toDayOfWeek": 6, "fromHour": 0, "toHour": 9},
-                        {"fromDayOfWeek": 6, "toDayOfWeek": 6, "fromHour": 15, "toHour": 24},
+                        {
+                            "fromDayOfWeek": 1,
+                            "toDayOfWeek": 5,
+                            "fromHour": 0,
+                            "toHour": 9,
+                        },
+                        {
+                            "fromDayOfWeek": 1,
+                            "toDayOfWeek": 5,
+                            "fromHour": 21,
+                            "toHour": 24,
+                        },
+                        {
+                            "fromDayOfWeek": 0,
+                            "toDayOfWeek": 0,
+                            "fromHour": 0,
+                            "toHour": 9,
+                        },
+                        {
+                            "fromDayOfWeek": 0,
+                            "toDayOfWeek": 0,
+                            "fromHour": 15,
+                            "toHour": 24,
+                        },
+                        {
+                            "fromDayOfWeek": 6,
+                            "toDayOfWeek": 6,
+                            "fromHour": 0,
+                            "toHour": 9,
+                        },
+                        {
+                            "fromDayOfWeek": 6,
+                            "toDayOfWeek": 6,
+                            "fromHour": 15,
+                            "toHour": 24,
+                        },
                     ],
                 },
             }
@@ -283,19 +382,18 @@ TARIFF_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "energy_charges": {
             "All Year": {
                 "SUPER_OFF_PEAK": 0.0,  # Free solar sponge period
-                "PEAK": 0.50,           # 50c/kWh
-                "OFF_PEAK": 0.20,       # 20c/kWh
+                "PEAK": 0.50,  # 50c/kWh
+                "OFF_PEAK": 0.20,  # 20c/kWh
             }
         },
         "sell_tariff": {
             "energy_charges": {
                 "All Year": {
-                    "ALL": 0.0,     # No FiT on solar sponge plans
+                    "ALL": 0.0,  # No FiT on solar sponge plans
                 }
             }
         },
     },
-
     "ev_friendly": {
         "id": "ev_friendly",
         "name": "EV Friendly (Cheap Night)",
@@ -307,14 +405,29 @@ TARIFF_TEMPLATES: Dict[str, Dict[str, Any]] = {
                 "toMonth": 12,
                 "tou_periods": {
                     "SUPER_OFF_PEAK": [
-                        {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 0, "toHour": 6}
+                        {
+                            "fromDayOfWeek": 0,
+                            "toDayOfWeek": 6,
+                            "fromHour": 0,
+                            "toHour": 6,
+                        }
                     ],
                     "PEAK": WEEKDAY_PEAK_3PM_9PM,
                     "SHOULDER": [
-                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 6, "toHour": 15},
+                        {
+                            "fromDayOfWeek": 1,
+                            "toDayOfWeek": 5,
+                            "fromHour": 6,
+                            "toHour": 15,
+                        },
                     ],
                     "OFF_PEAK": [
-                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 21, "toHour": 24},
+                        {
+                            "fromDayOfWeek": 1,
+                            "toDayOfWeek": 5,
+                            "fromHour": 21,
+                            "toHour": 24,
+                        },
                         *WEEKEND_ALL_DAY,
                     ],
                 },
@@ -322,16 +435,16 @@ TARIFF_TEMPLATES: Dict[str, Dict[str, Any]] = {
         },
         "energy_charges": {
             "All Year": {
-                "SUPER_OFF_PEAK": 0.08, # 8c/kWh overnight
-                "PEAK": 0.45,           # 45c/kWh
-                "SHOULDER": 0.28,       # 28c/kWh
-                "OFF_PEAK": 0.18,       # 18c/kWh
+                "SUPER_OFF_PEAK": 0.08,  # 8c/kWh overnight
+                "PEAK": 0.45,  # 45c/kWh
+                "SHOULDER": 0.28,  # 28c/kWh
+                "OFF_PEAK": 0.18,  # 18c/kWh
             }
         },
         "sell_tariff": {
             "energy_charges": {
                 "All Year": {
-                    "ALL": 0.05,    # 5c/kWh flat FiT
+                    "ALL": 0.05,  # 5c/kWh flat FiT
                 }
             }
         },
@@ -387,22 +500,21 @@ NZ_TARIFF_TEMPLATES: Dict[str, Dict[str, Any]] = {
         },
         "energy_charges": {
             "All Year": {
-                "PEAK": 0.46,       # 46 NZD c/kWh
-                "SHOULDER": 0.28,   # 28 NZD c/kWh
-                "OFF_PEAK": 0.15,   # 15 NZD c/kWh
+                "PEAK": 0.46,  # 46 NZD c/kWh
+                "SHOULDER": 0.28,  # 28 NZD c/kWh
+                "OFF_PEAK": 0.15,  # 15 NZD c/kWh
             }
         },
         "sell_tariff": {
             "energy_charges": {
                 "All Year": {
-                    "PEAK": 0.17,       # 17 NZD c/kWh peak export
-                    "SHOULDER": 0.10,   # 10 NZD c/kWh shoulder export
-                    "OFF_PEAK": 0.08,   # 8 NZD c/kWh off-peak export
+                    "PEAK": 0.17,  # 17 NZD c/kWh peak export
+                    "SHOULDER": 0.10,  # 10 NZD c/kWh shoulder export
+                    "OFF_PEAK": 0.08,  # 8 NZD c/kWh off-peak export
                 }
             }
         },
     },
-
     "electric_kiwi": {
         "id": "electric_kiwi",
         "name": "Electric Kiwi TOU",
@@ -424,20 +536,19 @@ NZ_TARIFF_TEMPLATES: Dict[str, Dict[str, Any]] = {
         },
         "energy_charges": {
             "All Year": {
-                "PEAK": 0.44,       # 44 NZD c/kWh
-                "SHOULDER": 0.26,   # 26 NZD c/kWh
-                "OFF_PEAK": 0.14,   # 14 NZD c/kWh
+                "PEAK": 0.44,  # 44 NZD c/kWh
+                "SHOULDER": 0.26,  # 26 NZD c/kWh
+                "OFF_PEAK": 0.14,  # 14 NZD c/kWh
             }
         },
         "sell_tariff": {
             "energy_charges": {
                 "All Year": {
-                    "ALL": 0.08,    # 8 NZD c/kWh flat buyback
+                    "ALL": 0.08,  # 8 NZD c/kWh flat buyback
                 }
             }
         },
     },
-
     "contact_good_weekends": {
         "id": "contact_good_weekends",
         "name": "Contact Energy - Good Weekends",
@@ -449,35 +560,59 @@ NZ_TARIFF_TEMPLATES: Dict[str, Dict[str, Any]] = {
                 "toMonth": 12,
                 "tou_periods": {
                     "PEAK": [
-                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 7, "toHour": 21},
+                        {
+                            "fromDayOfWeek": 1,
+                            "toDayOfWeek": 5,
+                            "fromHour": 7,
+                            "toHour": 21,
+                        },
                     ],
                     "OFF_PEAK": [
-                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 21, "toHour": 24},
-                        {"fromDayOfWeek": 1, "toDayOfWeek": 5, "fromHour": 0, "toHour": 7},
+                        {
+                            "fromDayOfWeek": 1,
+                            "toDayOfWeek": 5,
+                            "fromHour": 21,
+                            "toHour": 24,
+                        },
+                        {
+                            "fromDayOfWeek": 1,
+                            "toDayOfWeek": 5,
+                            "fromHour": 0,
+                            "toHour": 7,
+                        },
                     ],
                     "SUPER_OFF_PEAK": [
-                        {"fromDayOfWeek": 0, "toDayOfWeek": 0, "fromHour": 0, "toHour": 24},  # Sunday
-                        {"fromDayOfWeek": 6, "toDayOfWeek": 6, "fromHour": 0, "toHour": 24},  # Saturday
+                        {
+                            "fromDayOfWeek": 0,
+                            "toDayOfWeek": 0,
+                            "fromHour": 0,
+                            "toHour": 24,
+                        },  # Sunday
+                        {
+                            "fromDayOfWeek": 6,
+                            "toDayOfWeek": 6,
+                            "fromHour": 0,
+                            "toHour": 24,
+                        },  # Saturday
                     ],
                 },
             }
         },
         "energy_charges": {
             "All Year": {
-                "PEAK": 0.38,           # 38 NZD c/kWh weekday daytime
-                "OFF_PEAK": 0.18,       # 18 NZD c/kWh weekday overnight
+                "PEAK": 0.38,  # 38 NZD c/kWh weekday daytime
+                "OFF_PEAK": 0.18,  # 18 NZD c/kWh weekday overnight
                 "SUPER_OFF_PEAK": 0.0,  # Free weekends
             }
         },
         "sell_tariff": {
             "energy_charges": {
                 "All Year": {
-                    "ALL": 0.08,    # 8 NZD c/kWh flat buyback
+                    "ALL": 0.08,  # 8 NZD c/kWh flat buyback
                 }
             }
         },
     },
-
     "contact_good_nights": {
         "id": "contact_good_nights",
         "name": "Contact Energy - Good Nights",
@@ -494,32 +629,46 @@ NZ_TARIFF_TEMPLATES: Dict[str, Dict[str, Any]] = {
                         *NZ_WEEKEND_SHOULDER,
                     ],
                     "SUPER_OFF_PEAK": [
-                        {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 21, "toHour": 24},
+                        {
+                            "fromDayOfWeek": 0,
+                            "toDayOfWeek": 6,
+                            "fromHour": 21,
+                            "toHour": 24,
+                        },
                     ],
                     "OFF_PEAK": [
-                        {"fromDayOfWeek": 0, "toDayOfWeek": 6, "fromHour": 0, "toHour": 7},
-                        {"fromDayOfWeek": 0, "toDayOfWeek": 0, "fromHour": 21, "toHour": 24},  # Weekend overlap handled by SUPER_OFF_PEAK priority
+                        {
+                            "fromDayOfWeek": 0,
+                            "toDayOfWeek": 6,
+                            "fromHour": 0,
+                            "toHour": 7,
+                        },
+                        {
+                            "fromDayOfWeek": 0,
+                            "toDayOfWeek": 0,
+                            "fromHour": 21,
+                            "toHour": 24,
+                        },  # Weekend overlap handled by SUPER_OFF_PEAK priority
                     ],
                 },
             }
         },
         "energy_charges": {
             "All Year": {
-                "PEAK": 0.42,           # 42 NZD c/kWh
-                "SHOULDER": 0.26,       # 26 NZD c/kWh
+                "PEAK": 0.42,  # 42 NZD c/kWh
+                "SHOULDER": 0.26,  # 26 NZD c/kWh
                 "SUPER_OFF_PEAK": 0.0,  # Free 9pm-midnight
-                "OFF_PEAK": 0.15,       # 15 NZD c/kWh overnight
+                "OFF_PEAK": 0.15,  # 15 NZD c/kWh overnight
             }
         },
         "sell_tariff": {
             "energy_charges": {
                 "All Year": {
-                    "ALL": 0.08,    # 8 NZD c/kWh flat buyback
+                    "ALL": 0.08,  # 8 NZD c/kWh flat buyback
                 }
             }
         },
     },
-
     "contact_good_charge": {
         "id": "contact_good_charge",
         "name": "Contact Energy - Good Charge",
@@ -541,20 +690,19 @@ NZ_TARIFF_TEMPLATES: Dict[str, Dict[str, Any]] = {
         },
         "energy_charges": {
             "All Year": {
-                "PEAK": 0.44,       # 44 NZD c/kWh
-                "SHOULDER": 0.26,   # 26 NZD c/kWh
-                "OFF_PEAK": 0.10,   # 10 NZD c/kWh cheap overnight for EV charging
+                "PEAK": 0.44,  # 44 NZD c/kWh
+                "SHOULDER": 0.26,  # 26 NZD c/kWh
+                "OFF_PEAK": 0.10,  # 10 NZD c/kWh cheap overnight for EV charging
             }
         },
         "sell_tariff": {
             "energy_charges": {
                 "All Year": {
-                    "ALL": 0.08,    # 8 NZD c/kWh flat buyback
+                    "ALL": 0.08,  # 8 NZD c/kWh flat buyback
                 }
             }
         },
     },
-
     "nz_custom": {
         "id": "nz_custom",
         "name": "Custom NZ TOU",
@@ -576,15 +724,15 @@ NZ_TARIFF_TEMPLATES: Dict[str, Dict[str, Any]] = {
         },
         "energy_charges": {
             "All Year": {
-                "PEAK": 0.40,       # Placeholder
-                "SHOULDER": 0.25,   # Placeholder
-                "OFF_PEAK": 0.15,   # Placeholder
+                "PEAK": 0.40,  # Placeholder
+                "SHOULDER": 0.25,  # Placeholder
+                "OFF_PEAK": 0.15,  # Placeholder
             }
         },
         "sell_tariff": {
             "energy_charges": {
                 "All Year": {
-                    "ALL": 0.08,    # Placeholder
+                    "ALL": 0.08,  # Placeholder
                 }
             }
         },

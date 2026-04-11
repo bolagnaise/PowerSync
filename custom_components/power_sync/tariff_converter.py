@@ -1,4 +1,5 @@
 """Convert Amber Electric pricing to Tesla tariff format."""
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -8,6 +9,7 @@ from typing import Any
 # Import aemo_to_tariff library for automatic network tariff calculation
 try:
     from aemo_to_tariff import spot_to_tariff, get_daily_fee
+
     AEMO_TARIFF_AVAILABLE = True
 except ImportError:
     AEMO_TARIFF_AVAILABLE = False
@@ -37,7 +39,7 @@ def _round_price(price: float) -> float:
 
 
 def extract_most_recent_actual_interval(
-    forecast_data: list[dict[str, Any]]
+    forecast_data: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
     """
     Extract the most recent live pricing from 5-minute forecast data.
@@ -87,7 +89,9 @@ def extract_most_recent_actual_interval(
 
         if result["general"] or result["feedIn"]:
             latest_time = current_intervals[0].get("nemTime", "unknown")
-            general_price = result["general"].get("perKwh") if result["general"] else None
+            general_price = (
+                result["general"].get("perKwh") if result["general"] else None
+            )
             feedin_price = result["feedIn"].get("perKwh") if result["feedIn"] else None
 
             _LOGGER.info("Using CurrentInterval (real-time price) at %s", latest_time)
@@ -201,15 +205,19 @@ def compare_forecast_types(
         differences.append(diff)
 
         nem_time = point.get("nemTime", "")
-        details.append({
-            "time": nem_time,
-            "predicted": round(predicted, 2),
-            "conservative": round(conservative, 2),
-            "diff": round(diff, 2),
-        })
+        details.append(
+            {
+                "time": nem_time,
+                "predicted": round(predicted, 2),
+                "conservative": round(conservative, 2),
+                "diff": round(diff, 2),
+            }
+        )
 
     if not differences:
-        _LOGGER.debug("Forecast discrepancy check: No comparable intervals found (missing predicted/conservative data)")
+        _LOGGER.debug(
+            "Forecast discrepancy check: No comparable intervals found (missing predicted/conservative data)"
+        )
         return {
             "has_discrepancy": False,
             "avg_difference": 0.0,
@@ -230,12 +238,17 @@ def compare_forecast_types(
     if has_discrepancy:
         _LOGGER.warning(
             "⚠️ Forecast discrepancy detected: avg=%.1fc/kWh, max=%.1fc/kWh (threshold=%.1fc)",
-            avg_diff, max_diff, threshold
+            avg_diff,
+            max_diff,
+            threshold,
         )
         for d in top_details:
             _LOGGER.warning(
                 "   %s: predicted=%.1fc, conservative=%.1fc, diff=%.1fc",
-                d["time"], d["predicted"], d["conservative"], d["diff"]
+                d["time"],
+                d["predicted"],
+                d["conservative"],
+                d["diff"],
             )
     else:
         # Log the max prices seen even when no discrepancy
@@ -244,7 +257,11 @@ def compare_forecast_types(
         _LOGGER.debug(
             "Forecast types aligned: avg_diff=%.1fc/kWh, max_diff=%.1fc/kWh "
             "(max_predicted=%.1fc, max_conservative=%.1fc, %d samples)",
-            avg_diff, max_diff, max_predicted, max_conservative, len(differences)
+            avg_diff,
+            max_diff,
+            max_predicted,
+            max_conservative,
+            len(differences),
         )
 
     return {
@@ -310,11 +327,9 @@ def detect_price_spikes(
         if channel_type == "general":
             max_import = max(max_import, price)
             if price > import_threshold:
-                import_spikes.append({
-                    "time": nem_time,
-                    "price": round(price, 2),
-                    "type": "import"
-                })
+                import_spikes.append(
+                    {"time": nem_time, "price": round(price, 2), "type": "import"}
+                )
 
         # Check export (feedIn) channel
         elif channel_type == "feedIn":
@@ -323,11 +338,9 @@ def detect_price_spikes(
             actual_export = abs(price)  # Handle both positive and negative
             max_export = max(max_export, actual_export)
             if actual_export > export_threshold:
-                export_spikes.append({
-                    "time": nem_time,
-                    "price": round(price, 2),
-                    "type": "export"
-                })
+                export_spikes.append(
+                    {"time": nem_time, "price": round(price, 2), "type": "export"}
+                )
 
     has_import_spike = len(import_spikes) > 0
     has_export_spike = len(export_spikes) > 0
@@ -336,7 +349,10 @@ def detect_price_spikes(
     if has_import_spike:
         _LOGGER.warning(
             "⚠️ Import price spike: %d intervals exceed %.0fc/kWh (max=%.0fc = $%.2f/kWh)",
-            len(import_spikes), import_threshold, max_import, max_import / 100
+            len(import_spikes),
+            import_threshold,
+            max_import,
+            max_import / 100,
         )
         for s in import_spikes[:5]:
             _LOGGER.warning("   %s: %.1fc/kWh", s["time"], s["price"])
@@ -344,7 +360,10 @@ def detect_price_spikes(
     if has_export_spike:
         _LOGGER.warning(
             "⚠️ Export price spike: %d intervals exceed %.0fc/kWh (max=%.0fc = $%.2f/kWh)",
-            len(export_spikes), export_threshold, max_export, max_export / 100
+            len(export_spikes),
+            export_threshold,
+            max_export,
+            max_export / 100,
         )
         for s in export_spikes[:5]:
             _LOGGER.warning("   %s: %.1fc/kWh", s["time"], s["price"])
@@ -352,7 +371,10 @@ def detect_price_spikes(
     if not has_spike:
         _LOGGER.debug(
             "No price spikes: max_import=%.1fc, max_export=%.1fc (thresholds: import=%.0fc, export=%.0fc)",
-            max_import, max_export, import_threshold, export_threshold
+            max_import,
+            max_export,
+            import_threshold,
+            export_threshold,
         )
 
     return {
@@ -419,7 +441,9 @@ def _build_demand_charge_rates(
             # Handle overnight periods (e.g., 22:00 to 06:00)
             if end_minutes <= start_minutes:
                 # Peak period wraps around midnight
-                is_peak = period_minutes >= start_minutes or period_minutes < end_minutes
+                is_peak = (
+                    period_minutes >= start_minutes or period_minutes < end_minutes
+                )
             else:
                 # Normal daytime peak period
                 is_peak = start_minutes <= period_minutes < end_minutes
@@ -495,9 +519,12 @@ def convert_amber_to_tesla_tariff(
     detected_tz = None
     if powerwall_timezone:
         from zoneinfo import ZoneInfo
+
         try:
             detected_tz = ZoneInfo(powerwall_timezone)
-            _LOGGER.info("✓ Using Powerwall timezone from site_info: %s", powerwall_timezone)
+            _LOGGER.info(
+                "✓ Using Powerwall timezone from site_info: %s", powerwall_timezone
+            )
         except Exception as err:
             _LOGGER.warning(
                 "Invalid Powerwall timezone '%s': %s, falling back to auto-detection",
@@ -514,7 +541,9 @@ def convert_amber_to_tesla_tariff(
                 try:
                     timestamp = datetime.fromisoformat(nem_time.replace("Z", "+00:00"))
                     detected_tz = timestamp.tzinfo
-                    _LOGGER.info("Auto-detected timezone from price data: %s", detected_tz)
+                    _LOGGER.info(
+                        "Auto-detected timezone from price data: %s", detected_tz
+                    )
                     break
                 except Exception:
                     continue
@@ -529,7 +558,9 @@ def convert_amber_to_tesla_tariff(
             nem_time = point.get("nemTime", "")
             timestamp = datetime.fromisoformat(nem_time.replace("Z", "+00:00"))
             channel_type = point.get("channelType", "")
-            duration = point.get("duration", 30)  # Get actual interval duration (usually 5 or 30 minutes)
+            duration = point.get(
+                "duration", 30
+            )  # Get actual interval duration (usually 5 or 30 minutes)
 
             # Price extraction logic:
             # - ActualInterval (past): Use perKwh (actual settled price)
@@ -558,12 +589,21 @@ def convert_amber_to_tesla_tariff(
                             raise ValueError(error_msg)
 
                         per_kwh_cents = advanced_price[forecast_type]
-                        _LOGGER.debug("%s [ForecastInterval]: advancedPrice.%s=%.2fc/kWh", nem_time, forecast_type, per_kwh_cents)
+                        _LOGGER.debug(
+                            "%s [ForecastInterval]: advancedPrice.%s=%.2fc/kWh",
+                            nem_time,
+                            forecast_type,
+                            per_kwh_cents,
+                        )
 
                     # Handle simple number format (legacy)
                     elif isinstance(advanced_price, (int, float)):
                         per_kwh_cents = advanced_price
-                        _LOGGER.debug("%s [ForecastInterval]: advancedPrice=%.2fc/kWh (numeric)", nem_time, per_kwh_cents)
+                        _LOGGER.debug(
+                            "%s [ForecastInterval]: advancedPrice=%.2fc/kWh (numeric)",
+                            nem_time,
+                            per_kwh_cents,
+                        )
 
                     else:
                         error_msg = f"Invalid advancedPrice format at {nem_time}: {type(advanced_price).__name__}"
@@ -576,13 +616,17 @@ def convert_amber_to_tesla_tariff(
                         # Using perKwh (AEMO wholesale) would give incorrect low/negative values
                         _LOGGER.debug(
                             "%s [ForecastInterval]: No advancedPrice - skipping (forward-fill will use last retail price)",
-                            nem_time
+                            nem_time,
                         )
                         continue
                     else:
                         # For AEMO/other users: Use perKwh directly (wholesale is the correct price)
                         per_kwh_cents = point.get("perKwh", 0)
-                        _LOGGER.debug("%s [ForecastInterval]: perKwh=%.2fc/kWh (AEMO/wholesale)", nem_time, per_kwh_cents)
+                        _LOGGER.debug(
+                            "%s [ForecastInterval]: perKwh=%.2fc/kWh (AEMO/wholesale)",
+                            nem_time,
+                            per_kwh_cents,
+                        )
 
             # For CurrentInterval: Prefer advancedPrice (Amber retail forecast) over perKwh (AEMO wholesale)
             # For ActualInterval: Use perKwh (actual settled retail price)
@@ -590,15 +634,30 @@ def convert_amber_to_tesla_tariff(
                 if interval_type == "CurrentInterval" and advanced_price:
                     # CurrentInterval has advancedPrice during first 25 mins - use it for Amber retail forecast
                     if isinstance(advanced_price, dict):
-                        per_kwh_cents = advanced_price.get(forecast_type, advanced_price.get("predicted", 0))
-                        _LOGGER.debug("%s [CurrentInterval]: advancedPrice.%s=%.2fc/kWh (Amber retail forecast)", nem_time, forecast_type, per_kwh_cents)
+                        per_kwh_cents = advanced_price.get(
+                            forecast_type, advanced_price.get("predicted", 0)
+                        )
+                        _LOGGER.debug(
+                            "%s [CurrentInterval]: advancedPrice.%s=%.2fc/kWh (Amber retail forecast)",
+                            nem_time,
+                            forecast_type,
+                            per_kwh_cents,
+                        )
                     else:
                         per_kwh_cents = advanced_price
-                        _LOGGER.debug("%s [CurrentInterval]: advancedPrice=%.2fc/kWh (Amber retail forecast)", nem_time, per_kwh_cents)
+                        _LOGGER.debug(
+                            "%s [CurrentInterval]: advancedPrice=%.2fc/kWh (Amber retail forecast)",
+                            nem_time,
+                            per_kwh_cents,
+                        )
                 elif interval_type == "ActualInterval":
                     # ActualInterval: Use perKwh (actual settled retail price) - this IS the correct retail price
                     per_kwh_cents = point.get("perKwh", 0)
-                    _LOGGER.debug("%s [ActualInterval]: perKwh=%.2fc/kWh (actual settled retail)", nem_time, per_kwh_cents)
+                    _LOGGER.debug(
+                        "%s [ActualInterval]: perKwh=%.2fc/kWh (actual settled retail)",
+                        nem_time,
+                        per_kwh_cents,
+                    )
                 else:
                     # CurrentInterval without advancedPrice (last 5 mins of 30-min period)
                     if electricity_provider == "amber":
@@ -606,13 +665,17 @@ def convert_amber_to_tesla_tariff(
                         # Using perKwh (AEMO wholesale) would give incorrect low/negative values
                         _LOGGER.debug(
                             "%s [CurrentInterval]: No advancedPrice - skipping (forward-fill will use last retail price)",
-                            nem_time
+                            nem_time,
                         )
                         continue
                     else:
                         # For AEMO/other users: Use perKwh directly (wholesale is the correct price)
                         per_kwh_cents = point.get("perKwh", 0)
-                        _LOGGER.debug("%s [CurrentInterval]: perKwh=%.2fc/kWh (AEMO/wholesale)", nem_time, per_kwh_cents)
+                        _LOGGER.debug(
+                            "%s [CurrentInterval]: perKwh=%.2fc/kWh (AEMO/wholesale)",
+                            nem_time,
+                            per_kwh_cents,
+                        )
 
             # Amber convention: feedIn prices are negative when you get paid
             # Tesla convention: sell prices are positive when you get paid
@@ -668,12 +731,20 @@ def convert_amber_to_tesla_tariff(
 
     # Log any spike periods detected
     if spike_lookup:
-        _LOGGER.info("Amber spike status detected for %d periods: %s", len(spike_lookup), spike_lookup)
+        _LOGGER.info(
+            "Amber spike status detected for %d periods: %s",
+            len(spike_lookup),
+            spike_lookup,
+        )
 
     # Build the rolling 24-hour tariff
     general_prices, feedin_prices = _build_rolling_24h_tariff(
-        general_lookup, feedin_lookup, detected_tz, current_actual_interval,
-        spike_protection_enabled=spike_protection_enabled, spike_lookup=spike_lookup,
+        general_lookup,
+        feedin_lookup,
+        detected_tz,
+        current_actual_interval,
+        spike_protection_enabled=spike_protection_enabled,
+        spike_lookup=spike_lookup,
         export_boost_enabled=export_boost_enabled,
         export_price_offset=export_price_offset,
         export_min_price=export_min_price,
@@ -698,8 +769,10 @@ def convert_amber_to_tesla_tariff(
             demand_charge_end_time,
             demand_charge_rate,
         )
-        _LOGGER.info("Demand charge schedule: %d peak periods in tariff",
-                     sum(1 for rate in demand_charge_rates.values() if rate > 0))
+        _LOGGER.info(
+            "Demand charge schedule: %d peak periods in tariff",
+            sum(1 for rate in demand_charge_rates.values() if rate > 0),
+        )
 
     # Apply artificial price increase during demand periods if enabled (ALPHA feature)
     if demand_artificial_price_enabled and demand_charge_enabled:
@@ -719,9 +792,15 @@ def convert_amber_to_tesla_tariff(
         if day_is_valid:
             # Parse demand period times
             start_parts = demand_charge_start_time.split(":")
-            start_hour, start_minute = int(start_parts[0]), int(start_parts[1]) if len(start_parts) > 1 else 0
+            start_hour, start_minute = (
+                int(start_parts[0]),
+                int(start_parts[1]) if len(start_parts) > 1 else 0,
+            )
             end_parts = demand_charge_end_time.split(":")
-            end_hour, end_minute = int(end_parts[0]), int(end_parts[1]) if len(end_parts) > 1 else 0
+            end_hour, end_minute = (
+                int(end_parts[0]),
+                int(end_parts[1]) if len(end_parts) > 1 else 0,
+            )
 
             for period_key in general_prices.keys():
                 # Extract hour/minute from PERIOD_HH_MM
@@ -736,7 +815,9 @@ def convert_amber_to_tesla_tariff(
 
                 # Handle overnight periods
                 if end_minutes <= start_minutes:
-                    in_peak = time_minutes >= start_minutes or time_minutes < end_minutes
+                    in_peak = (
+                        time_minutes >= start_minutes or time_minutes < end_minutes
+                    )
                 else:
                     in_peak = start_minutes <= time_minutes < end_minutes
 
@@ -746,18 +827,23 @@ def convert_amber_to_tesla_tariff(
                     periods_modified += 1
                     _LOGGER.debug(
                         "%s: Artificial price increase applied: $%.4f -> $%.4f (+$%.2f)",
-                        period_key, original_price, general_prices[period_key], artificial_increase
+                        period_key,
+                        original_price,
+                        general_prices[period_key],
+                        artificial_increase,
                     )
 
             if periods_modified > 0:
                 _LOGGER.info(
                     "🔺 ALPHA: Artificial price increase (+$%.2f/kWh) applied to %d demand periods",
-                    artificial_increase, periods_modified
+                    artificial_increase,
+                    periods_modified,
                 )
         else:
             _LOGGER.debug(
                 "Artificial price increase skipped - today (%d) not in demand_charge_days (%s)",
-                weekday, demand_charge_days
+                weekday,
+                demand_charge_days,
             )
 
     # Create the Tesla tariff structure
@@ -845,7 +931,9 @@ def _build_rolling_24h_tariff(
             if period_key == current_period_key and current_actual_interval:
                 # Use live 5-min ActualInterval price for current period
                 if current_actual_interval.get("general"):
-                    actual_price_cents = current_actual_interval["general"].get("perKwh", 0)
+                    actual_price_cents = current_actual_interval["general"].get(
+                        "perKwh", 0
+                    )
                     buy_price = _round_price(actual_price_cents / 100)
                     buy_price = max(0, buy_price)  # Tesla restriction: no negatives
                     general_prices[period_key] = buy_price
@@ -856,14 +944,17 @@ def _build_rolling_24h_tariff(
                     )
                 else:
                     _LOGGER.warning(
-                        "%s: No general ActualInterval, falling back to forecast", period_key
+                        "%s: No general ActualInterval, falling back to forecast",
+                        period_key,
                     )
                     # Will fall through to normal lookup below
                     current_actual_interval = None  # Disable for this iteration
 
                 # Use live 5-min ActualInterval sell price for current period
                 if current_actual_interval and current_actual_interval.get("feedIn"):
-                    actual_feedin_cents = current_actual_interval["feedIn"].get("perKwh", 0)
+                    actual_feedin_cents = current_actual_interval["feedIn"].get(
+                        "perKwh", 0
+                    )
                     # Amber convention: feedIn is negative, Tesla convention: positive
                     sell_price = _round_price(-actual_feedin_cents / 100)
                     sell_price = max(0, sell_price)  # No negatives
@@ -882,12 +973,15 @@ def _build_rolling_24h_tariff(
                 else:
                     if current_actual_interval:
                         _LOGGER.warning(
-                            "%s: No feedIn ActualInterval, falling back to forecast", period_key
+                            "%s: No feedIn ActualInterval, falling back to forecast",
+                            period_key,
                         )
 
             # NORMAL CASE: Use forecast data for all other periods
             # Determine if this period has already passed
-            if (hour < current_hour) or (hour == current_hour and minute < current_minute):
+            if (hour < current_hour) or (
+                hour == current_hour and minute < current_minute
+            ):
                 # Past period - use tomorrow's price
                 date_to_use = tomorrow
             else:
@@ -931,7 +1025,8 @@ def _build_rolling_24h_tariff(
                     general_prices[period_key] = last_valid_buy_price
                     _LOGGER.info(
                         "%s: Using fallback buy price $%.4f (AEMO forecast gap)",
-                        period_key, last_valid_buy_price
+                        period_key,
+                        last_valid_buy_price,
                     )
                 else:
                     # Mark as missing - will be counted below
@@ -971,7 +1066,8 @@ def _build_rolling_24h_tariff(
                     feedin_prices[period_key] = last_valid_sell_price
                     _LOGGER.info(
                         "%s: Using fallback sell price $%.4f (AEMO forecast gap)",
-                        period_key, last_valid_sell_price
+                        period_key,
+                        last_valid_sell_price,
                     )
                 else:
                     # Mark as missing - will be counted below
@@ -987,7 +1083,9 @@ def _build_rolling_24h_tariff(
     if total_missing > 0:
         _LOGGER.warning(
             "Missing price data: %d buy periods, %d sell periods (total: %d/96)",
-            missing_buy, missing_sell, total_missing
+            missing_buy,
+            missing_sell,
+            total_missing,
         )
 
     # If more than 10 periods are missing, abort - keep using last good tariff
@@ -996,7 +1094,8 @@ def _build_rolling_24h_tariff(
         _LOGGER.error(
             "❌ Too many missing price periods (%d > %d) - ABORTING sync to preserve last good tariff. "
             "This usually indicates Amber API is unreachable.",
-            total_missing, MAX_MISSING_PERIODS
+            total_missing,
+            MAX_MISSING_PERIODS,
         )
         return None, None
 
@@ -1027,11 +1126,16 @@ def _build_rolling_24h_tariff(
             export_offset_dollars = export_price_offset / 100  # cents to dollars
             export_min_dollars = export_min_price / 100  # cents to dollars
             # Calculate what the max boosted sell price will be after export boost is applied
-            max_boosted_sell = max(max_sell_price + export_offset_dollars, export_min_dollars)
+            max_boosted_sell = max(
+                max_sell_price + export_offset_dollars, export_min_dollars
+            )
             _LOGGER.info(
                 "Export boost enabled - adjusting spike protection: "
                 "max_sell $%.4f -> max_boosted $%.4f (offset=$%.4f, min=$%.4f)",
-                max_sell_price, max_boosted_sell, export_offset_dollars, export_min_dollars
+                max_sell_price,
+                max_boosted_sell,
+                export_offset_dollars,
+                export_min_dollars,
             )
             max_sell_price = max_boosted_sell
 
@@ -1048,7 +1152,8 @@ def _build_rolling_24h_tariff(
 
         _LOGGER.info(
             "Spike protection active for %d periods (from Amber spikeStatus): %s",
-            len(spike_period_keys), sorted(spike_period_keys)
+            len(spike_period_keys),
+            sorted(spike_period_keys),
         )
 
         for period_key, buy_price in list(general_prices.items()):
@@ -1059,7 +1164,10 @@ def _build_rolling_24h_tariff(
             if override_buy > buy_price:
                 _LOGGER.info(
                     "%s: SPIKE OVERRIDE - BUY $%.4f -> $%.4f (max_sell=$%.4f)",
-                    period_key, buy_price, override_buy, max_sell_price
+                    period_key,
+                    buy_price,
+                    override_buy,
+                    max_sell_price,
                 )
                 general_prices[period_key] = override_buy
                 periods_overridden += 1
@@ -1067,7 +1175,9 @@ def _build_rolling_24h_tariff(
         _LOGGER.warning(
             "SPIKE PROTECTION ACTIVE: Overriding %d buy prices to $%.4f/kWh "
             "(max_sell=$%.4f + $1.00 margin)",
-            periods_overridden, override_buy, max_sell_price
+            periods_overridden,
+            override_buy,
+            max_sell_price,
         )
 
     return general_prices, feedin_prices
@@ -1100,7 +1210,9 @@ def _build_tariff_structure(
         "globird": "Globird",  # Added for safety, though TOU sync should be skipped for Globird
         "octopus": "Octopus Energy",
     }
-    provider_name = provider_names.get(electricity_provider, electricity_provider.title())
+    provider_name = provider_names.get(
+        electricity_provider, electricity_provider.title()
+    )
     # Build TOU periods
     tou_periods = _build_tou_periods(general_prices.keys())
 
@@ -1109,15 +1221,11 @@ def _build_tariff_structure(
     apply_to_sell = demand_charge_apply_to in ["Sell Only", "Both"]
 
     buy_demand_charges = (
-        {"rates": demand_charge_rates}
-        if demand_charge_rates and apply_to_buy
-        else {}
+        {"rates": demand_charge_rates} if demand_charge_rates and apply_to_buy else {}
     )
 
     sell_demand_charges = (
-        {"rates": demand_charge_rates}
-        if demand_charge_rates and apply_to_sell
-        else {}
+        {"rates": demand_charge_rates} if demand_charge_rates and apply_to_sell else {}
     )
 
     tariff = {
@@ -1234,11 +1342,11 @@ def _build_tou_periods(period_keys: Any) -> dict[str, Any]:
 
 # Happy Hour export rates by NEM region (in $/kWh)
 FLOW_POWER_EXPORT_RATES = {
-    "NSW1": 0.45,   # 45c/kWh
-    "QLD1": 0.45,   # 45c/kWh
-    "SA1": 0.45,    # 45c/kWh
-    "VIC1": 0.35,   # 35c/kWh
-    "TAS1": 0.00,   # No Happy Hour in Tasmania
+    "NSW1": 0.45,  # 45c/kWh
+    "QLD1": 0.45,  # 45c/kWh
+    "SA1": 0.45,  # 45c/kWh
+    "VIC1": 0.35,  # 35c/kWh
+    "TAS1": 0.00,  # No Happy Hour in Tasmania
 }
 
 # Happy Hour periods (5:30pm to 7:30pm)
@@ -1251,10 +1359,7 @@ FLOW_POWER_HAPPY_HOUR_PERIODS = [
 ]
 
 
-def apply_flow_power_export(
-    tariff: dict[str, Any],
-    state: str
-) -> dict[str, Any]:
+def apply_flow_power_export(tariff: dict[str, Any], state: str) -> dict[str, Any]:
     """
     Apply Flow Power export rates to a tariff structure.
 
@@ -1274,7 +1379,9 @@ def apply_flow_power_export(
         return tariff
 
     # Get the happy hour export rate for this state
-    export_rate = FLOW_POWER_EXPORT_RATES.get(state, 0.0)  # Default to 0c for unknown regions
+    export_rate = FLOW_POWER_EXPORT_RATES.get(
+        state, 0.0
+    )  # Default to 0c for unknown regions
 
     _LOGGER.info(
         "Applying Flow Power export rates for %s: %.0fc during Happy Hour, 0c otherwise",
@@ -1365,7 +1472,8 @@ def apply_network_tariff(
     if AEMO_TARIFF_AVAILABLE and not use_manual_rates and distributor and tariff_code:
         _LOGGER.info(
             "Using aemo_to_tariff library: distributor=%s, tariff=%s",
-            distributor, tariff_code
+            distributor,
+            tariff_code,
         )
         return _apply_network_tariff_library(tariff, distributor, tariff_code)
     else:
@@ -1374,10 +1482,22 @@ def apply_network_tariff(
         elif not AEMO_TARIFF_AVAILABLE:
             _LOGGER.warning("aemo_to_tariff library not available, using manual rates")
         else:
-            _LOGGER.info("Using manual network rates (no distributor/tariff configured)")
+            _LOGGER.info(
+                "Using manual network rates (no distributor/tariff configured)"
+            )
         return _apply_network_tariff_manual(
-            tariff, tariff_type, flat_rate, peak_rate, shoulder_rate, offpeak_rate,
-            peak_start, peak_end, offpeak_start, offpeak_end, other_fees, include_gst
+            tariff,
+            tariff_type,
+            flat_rate,
+            peak_rate,
+            shoulder_rate,
+            offpeak_rate,
+            peak_start,
+            peak_end,
+            offpeak_start,
+            offpeak_end,
+            other_fees,
+            include_gst,
         )
 
 
@@ -1433,8 +1553,12 @@ def _apply_network_tariff_library(
             # The library uses interval_time for TOU period detection
             now = datetime.now()
             interval_time = datetime(
-                now.year, now.month, now.day, hour, minute,
-                tzinfo=timezone(timedelta(hours=10))  # AEST
+                now.year,
+                now.month,
+                now.day,
+                hour,
+                minute,
+                tzinfo=timezone(timedelta(hours=10)),  # AEST
             )
 
             # Convert wholesale $/kWh to $/MWh for the library
@@ -1447,7 +1571,7 @@ def _apply_network_tariff_library(
                     interval_time=interval_time,
                     network=library_distributor,
                     tariff=tariff_code,
-                    rrp=wholesale_mwh  # RRP in $/MWh
+                    rrp=wholesale_mwh,  # RRP in $/MWh
                 )
 
                 # Convert c/kWh back to $/kWh
@@ -1460,19 +1584,22 @@ def _apply_network_tariff_library(
                     modified_count += 1
                     _LOGGER.debug(
                         "%s: wholesale $%.4f -> retail $%.4f (%.2fc/kWh)",
-                        period, price, new_price, retail_cents
+                        period,
+                        price,
+                        new_price,
+                        retail_cents,
                     )
                     rates[period] = new_price
 
             except Exception as err:
                 _LOGGER.warning(
-                    "%s: Library calculation failed, keeping wholesale: %s",
-                    period, err
+                    "%s: Library calculation failed, keeping wholesale: %s", period, err
                 )
 
         _LOGGER.info(
             "Network tariff (library) applied to %d periods in %s",
-            modified_count, season
+            modified_count,
+            season,
         )
 
     return tariff
@@ -1517,7 +1644,9 @@ def _apply_network_tariff_manual(
     """
     _LOGGER.info(
         "Applying manual network tariff: type=%s, other_fees=%.1fc/kWh, gst=%s",
-        tariff_type, other_fees, include_gst
+        tariff_type,
+        other_fees,
+        include_gst,
     )
 
     # Parse TOU time periods
@@ -1530,9 +1659,13 @@ def _apply_network_tariff_manual(
 
             _LOGGER.info(
                 "Network TOU: peak=%.1fc (%s-%s), shoulder=%.1fc, offpeak=%.1fc (%s-%s)",
-                peak_rate, peak_start, peak_end,
+                peak_rate,
+                peak_start,
+                peak_end,
                 shoulder_rate,
-                offpeak_rate, offpeak_start, offpeak_end
+                offpeak_rate,
+                offpeak_start,
+                offpeak_end,
             )
         except (ValueError, AttributeError) as err:
             _LOGGER.error("Invalid time format for network tariff: %s", err)
@@ -1598,19 +1731,24 @@ def _apply_network_tariff_manual(
                 modified_count += 1
                 _LOGGER.debug(
                     "%s: $%.4f + %.2fc network = $%.4f",
-                    period, price, total_charge_cents, new_price
+                    period,
+                    price,
+                    total_charge_cents,
+                    new_price,
                 )
                 rates[period] = new_price
 
-        _LOGGER.info("Manual network tariff applied to %d periods in %s", modified_count, season)
+        _LOGGER.info(
+            "Manual network tariff applied to %d periods in %s", modified_count, season
+        )
 
     return tariff
 
 
 # Flow Power PEA (Price Efficiency Adjustment) Constants
 # These are also defined in const.py but duplicated here for tariff_converter independence
-FLOW_POWER_MARKET_AVG = 8.0       # Fallback market TWAP average (c/kWh)
-FLOW_POWER_BENCHMARK = 1.7        # BPEA - benchmark customer performance (c/kWh)
+FLOW_POWER_MARKET_AVG = 8.0  # Fallback market TWAP average (c/kWh)
+FLOW_POWER_BENCHMARK = 1.7  # BPEA - benchmark customer performance (c/kWh)
 FLOW_POWER_DEFAULT_BASE_RATE = 34.0  # Default Flow Power base rate (c/kWh)
 
 
@@ -1661,7 +1799,9 @@ def apply_flow_power_pea(
         f"{custom_pea:.1f}c" if custom_pea is not None else "auto",
         market_avg,
         "dynamic" if twap is not None else "fallback",
-        f", avg_daily_tariff=%.2fc" % avg_daily_tariff if avg_daily_tariff is not None else "",
+        f", avg_daily_tariff=%.2fc" % avg_daily_tariff
+        if avg_daily_tariff is not None
+        else "",
     )
 
     # Track statistics for logging
@@ -1684,7 +1824,9 @@ def apply_flow_power_pea(
                 pea = custom_pea
             else:
                 # Get wholesale price for this period ($/kWh -> c/kWh)
-                wholesale_dollars = wholesale_prices.get(period, 0.08)  # Default 8c if missing
+                wholesale_dollars = wholesale_prices.get(
+                    period, 0.08
+                )  # Default 8c if missing
                 wholesale_cents = wholesale_dollars * 100
 
                 if has_tariff:
@@ -1716,12 +1858,18 @@ def apply_flow_power_pea(
                 modified_count += 1
                 _LOGGER.debug(
                     "%s: base=%.1fc + PEA=%.1fc = %.1fc ($%.4f/kWh)",
-                    period, base_rate, pea, final_cents, final_dollars
+                    period,
+                    base_rate,
+                    pea,
+                    final_cents,
+                    final_dollars,
                 )
 
             rates[period] = final_dollars
 
-        _LOGGER.info("Flow Power PEA applied to %d periods in %s", modified_count, season)
+        _LOGGER.info(
+            "Flow Power PEA applied to %d periods in %s", modified_count, season
+        )
 
     # Log summary statistics
     if pea_values:
@@ -1732,7 +1880,11 @@ def apply_flow_power_pea(
 
         _LOGGER.info(
             "Flow Power PEA summary (%s): avg_pea=%.1fc, range=[%.1fc to %.1fc], avg_final=%.1fc/kWh",
-            formula, avg_pea, min_pea, max_pea, avg_final
+            formula,
+            avg_pea,
+            min_pea,
+            max_pea,
+            avg_final,
         )
 
     return tariff
@@ -1864,7 +2016,9 @@ def apply_export_boost(
 
             # Handle overnight windows (e.g., 22:00 to 06:00)
             if end_minutes <= start_minutes:
-                in_window = period_minutes >= start_minutes or period_minutes < end_minutes
+                in_window = (
+                    period_minutes >= start_minutes or period_minutes < end_minutes
+                )
             else:
                 in_window = start_minutes <= period_minutes < end_minutes
 
@@ -1873,7 +2027,12 @@ def apply_export_boost(
 
     _LOGGER.debug(
         "Export boost active for %d periods (%s to %s): offset=%.1fc, min=%.1fc, threshold=%.1fc",
-        len(boost_periods), boost_start, boost_end, offset_cents, min_price_cents, activation_threshold_cents
+        len(boost_periods),
+        boost_start,
+        boost_end,
+        offset_cents,
+        min_price_cents,
+        activation_threshold_cents,
     )
 
     modified_count = 0
@@ -1894,11 +2053,16 @@ def apply_export_boost(
             original_cents = original_dollars * 100
 
             # Skip boost if actual price is below activation threshold
-            if activation_threshold_cents > 0 and original_cents < activation_threshold_cents:
+            if (
+                activation_threshold_cents > 0
+                and original_cents < activation_threshold_cents
+            ):
                 skipped_count += 1
                 _LOGGER.debug(
                     "%s: Boost skipped - actual price %.2fc below threshold %.1fc",
-                    period, original_cents, activation_threshold_cents
+                    period,
+                    original_cents,
+                    activation_threshold_cents,
                 )
                 continue
 
@@ -1918,7 +2082,11 @@ def apply_export_boost(
                 boosted_prices.append(boosted_cents)
                 _LOGGER.debug(
                     "%s: Export boost %.2fc → %.2fc (offset=%.1fc, min=%.1fc)",
-                    period, original_cents, boosted_dollars * 100, offset_cents, min_price_cents
+                    period,
+                    original_cents,
+                    boosted_dollars * 100,
+                    offset_cents,
+                    min_price_cents,
                 )
 
             sell_prices[period] = boosted_dollars
@@ -1926,15 +2094,22 @@ def apply_export_boost(
     # Log summary
     if boosted_prices:
         avg_boost = sum(boosted_prices) / len(boosted_prices)
-        skip_msg = f", {skipped_count} skipped (below threshold)" if skipped_count > 0 else ""
+        skip_msg = (
+            f", {skipped_count} skipped (below threshold)" if skipped_count > 0 else ""
+        )
         _LOGGER.info(
             "Export boost applied to %d periods%s: avg=%.1fc/kWh, range=[%.1fc to %.1fc]",
-            modified_count, skip_msg, avg_boost, min(boosted_prices), max(boosted_prices)
+            modified_count,
+            skip_msg,
+            avg_boost,
+            min(boosted_prices),
+            max(boosted_prices),
         )
     elif skipped_count > 0:
         _LOGGER.info(
             "Export boost: %d periods skipped (below threshold %.1fc)",
-            skipped_count, activation_threshold_cents
+            skipped_count,
+            activation_threshold_cents,
         )
     else:
         _LOGGER.info("Export boost: no periods modified (prices already meet criteria)")
@@ -1988,7 +2163,9 @@ def apply_chip_mode(
 
             # Handle overnight windows (e.g., 22:00 to 06:00)
             if end_minutes <= start_minutes:
-                in_window = period_minutes >= start_minutes or period_minutes < end_minutes
+                in_window = (
+                    period_minutes >= start_minutes or period_minutes < end_minutes
+                )
             else:
                 in_window = start_minutes <= period_minutes < end_minutes
 
@@ -1997,7 +2174,10 @@ def apply_chip_mode(
 
     _LOGGER.debug(
         "Chip Mode active for %d periods (%s to %s): threshold=%.1fc",
-        len(chip_periods), chip_start, chip_end, threshold_cents
+        len(chip_periods),
+        chip_start,
+        chip_end,
+        threshold_cents,
     )
 
     suppressed_count = 0
@@ -2020,7 +2200,9 @@ def apply_chip_mode(
                 allowed_count += 1
                 _LOGGER.debug(
                     "%s: Chip Mode ALLOW - price %.2fc >= threshold %.1fc",
-                    period, original_cents, threshold_cents
+                    period,
+                    original_cents,
+                    threshold_cents,
                 )
                 continue
 
@@ -2028,7 +2210,9 @@ def apply_chip_mode(
             suppressed_count += 1
             _LOGGER.debug(
                 "%s: Chip Mode SUPPRESS - price %.2fc < threshold %.1fc → 0c",
-                period, original_cents, threshold_cents
+                period,
+                original_cents,
+                threshold_cents,
             )
             sell_prices[period] = 0.0
 
@@ -2036,7 +2220,9 @@ def apply_chip_mode(
     if suppressed_count > 0 or allowed_count > 0:
         _LOGGER.info(
             "Chip Mode: %d periods suppressed (export blocked), %d periods allowed (above %.1fc threshold)",
-            suppressed_count, allowed_count, threshold_cents
+            suppressed_count,
+            allowed_count,
+            threshold_cents,
         )
     else:
         _LOGGER.info("Chip Mode: no periods in configured window")

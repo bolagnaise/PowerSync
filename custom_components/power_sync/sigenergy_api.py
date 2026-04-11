@@ -133,7 +133,9 @@ class SigenergyAPIClient:
             session = await self._get_session()
             _LOGGER.info(f"Authenticating with Sigenergy for user: {self.username}")
 
-            async with session.post(url, headers=headers, data=data, timeout=30) as response:
+            async with session.post(
+                url, headers=headers, data=data, timeout=30
+            ) as response:
                 if response.status != 200:
                     _LOGGER.error(f"Sigenergy auth failed: {response.status}")
                     return {"error": f"Authentication failed: {response.status}"}
@@ -144,14 +146,19 @@ class SigenergyAPIClient:
                 token_data = result.get("data", result)
 
                 if "access_token" not in token_data:
-                    _LOGGER.error("Sigenergy auth response missing access_token (keys: %s)", list(token_data.keys()))
+                    _LOGGER.error(
+                        "Sigenergy auth response missing access_token (keys: %s)",
+                        list(token_data.keys()),
+                    )
                     return {"error": "Invalid response - no access token"}
 
                 self.access_token = token_data["access_token"]
                 self.refresh_token = token_data.get("refresh_token")
 
                 expires_in = token_data.get("expires_in", 3600)
-                self.token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+                self.token_expires_at = datetime.utcnow() + timedelta(
+                    seconds=expires_in
+                )
 
                 _LOGGER.info("Sigenergy authentication successful")
 
@@ -203,7 +210,9 @@ class SigenergyAPIClient:
             session = await self._get_session()
             _LOGGER.info("Refreshing Sigenergy access token")
 
-            async with session.post(url, headers=headers, data=data, timeout=30) as response:
+            async with session.post(
+                url, headers=headers, data=data, timeout=30
+            ) as response:
                 if response.status != 200:
                     _LOGGER.error(f"Token refresh failed: {response.status}")
                     return {"error": f"Token refresh failed: {response.status}"}
@@ -218,7 +227,9 @@ class SigenergyAPIClient:
                 self.refresh_token = token_data.get("refresh_token", self.refresh_token)
 
                 expires_in = token_data.get("expires_in", 3600)
-                self.token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+                self.token_expires_at = datetime.utcnow() + timedelta(
+                    seconds=expires_in
+                )
 
                 _LOGGER.info("Token refresh successful")
 
@@ -264,7 +275,9 @@ class SigenergyAPIClient:
                 result = await self.refresh_access_token()
                 if "error" in result:
                     # Refresh failed - try full re-authentication
-                    _LOGGER.warning("Token refresh failed, attempting full re-authentication...")
+                    _LOGGER.warning(
+                        "Token refresh failed, attempting full re-authentication..."
+                    )
                     result = await self.authenticate()
                     if "error" in result:
                         _LOGGER.error(f"Re-authentication failed: {result['error']}")
@@ -300,7 +313,9 @@ class SigenergyAPIClient:
                 result = await response.json()
                 stations = result.get("data", result.get("rows", []))
 
-                _LOGGER.info(f"Found {len(stations) if isinstance(stations, list) else 0} stations")
+                _LOGGER.info(
+                    f"Found {len(stations) if isinstance(stations, list) else 0} stations"
+                )
                 return {"stations": stations if isinstance(stations, list) else []}
 
         except Exception as e:
@@ -389,7 +404,9 @@ class SigenergyAPIClient:
             session = await self._get_session()
             _LOGGER.info(f"Setting tariff for Sigenergy station {station_id}")
 
-            async with session.post(url, headers=headers, json=payload, timeout=30) as response:
+            async with session.post(
+                url, headers=headers, json=payload, timeout=30
+            ) as response:
                 if response.status != 200:
                     _LOGGER.error(f"Set tariff failed: {response.status}")
                     return {"error": f"Failed to set tariff: {response.status}"}
@@ -398,10 +415,14 @@ class SigenergyAPIClient:
 
                 # Check for success in response
                 if result.get("code") == 0 or result.get("success"):
-                    _LOGGER.info(f"Tariff updated successfully for station {station_id}")
+                    _LOGGER.info(
+                        f"Tariff updated successfully for station {station_id}"
+                    )
                     return {"success": True, "message": "Tariff updated"}
                 else:
-                    error_msg = result.get("msg", result.get("message", "Unknown error"))
+                    error_msg = result.get(
+                        "msg", result.get("message", "Unknown error")
+                    )
                     _LOGGER.error(f"Set tariff API error: {error_msg}")
                     return {"error": error_msg}
 
@@ -458,8 +479,8 @@ def convert_amber_prices_to_sigenergy(
     NEM_REGION_TIMEZONES = {
         "NSW1": "Australia/Sydney",
         "VIC1": "Australia/Melbourne",
-        "QLD1": "Australia/Brisbane",      # No DST
-        "SA1": "Australia/Adelaide",       # UTC+9:30/+10:30
+        "QLD1": "Australia/Brisbane",  # No DST
+        "SA1": "Australia/Adelaide",  # UTC+9:30/+10:30
         "TAS1": "Australia/Hobart",
     }
 
@@ -497,7 +518,9 @@ def convert_amber_prices_to_sigenergy(
     # Get timezone from NEM region, default to Sydney
     tz_name = NEM_REGION_TIMEZONES.get(detected_region, "Australia/Sydney")
     detected_tz = ZoneInfo(tz_name)
-    _LOGGER.debug(f"Using timezone: {detected_tz} (NEM region: {detected_region or 'default Sydney'})")
+    _LOGGER.debug(
+        f"Using timezone: {detected_tz} (NEM region: {detected_region or 'default Sydney'})"
+    )
 
     # Calculate current 30-min slot for ActualInterval injection (using local time)
     now = datetime.now(detected_tz)
@@ -549,7 +572,9 @@ def convert_amber_prices_to_sigenergy(
             # ForecastInterval: Prefer advancedPrice with forecast type selection
             if isinstance(advanced_price, dict):
                 # Dict format: {predicted, low, high}
-                per_kwh_cents = advanced_price.get(forecast_type, advanced_price.get("predicted", 0))
+                per_kwh_cents = advanced_price.get(
+                    forecast_type, advanced_price.get("predicted", 0)
+                )
                 _LOGGER.debug(
                     f"{nem_time} [{interval_type}]: advancedPrice.{forecast_type}={per_kwh_cents:.2f}c/kWh → slot {slot_key}"
                 )
@@ -567,9 +592,15 @@ def convert_amber_prices_to_sigenergy(
         elif interval_type == "CurrentInterval" and advanced_price:
             # CurrentInterval with advancedPrice available
             if isinstance(advanced_price, dict):
-                per_kwh_cents = advanced_price.get(forecast_type, advanced_price.get("predicted", 0))
+                per_kwh_cents = advanced_price.get(
+                    forecast_type, advanced_price.get("predicted", 0)
+                )
             else:
-                per_kwh_cents = advanced_price if isinstance(advanced_price, (int, float)) else price.get("perKwh", 0)
+                per_kwh_cents = (
+                    advanced_price
+                    if isinstance(advanced_price, (int, float))
+                    else price.get("perKwh", 0)
+                )
             _LOGGER.debug(
                 f"{nem_time} [{interval_type}]: {per_kwh_cents:.2f}c/kWh → slot {slot_key}"
             )
@@ -633,10 +664,12 @@ def convert_amber_prices_to_sigenergy(
                         f"Using ActualInterval for current {price_type} period {time_range}: {actual_price:.2f}c/kWh"
                     )
                     last_valid_price = actual_price  # Track for fallback
-                    result.append({
-                        "timeRange": time_range,
-                        "price": round(actual_price, 2),
-                    })
+                    result.append(
+                        {
+                            "timeRange": time_range,
+                            "price": round(actual_price, 2),
+                        }
+                    )
                     continue
 
             # Get average price for this slot
@@ -657,10 +690,12 @@ def convert_amber_prices_to_sigenergy(
                     f"No {price_type} price data for {time_range}, defaulting to 0"
                 )
 
-            result.append({
-                "timeRange": time_range,
-                "price": round(avg_price, 2),
-            })
+            result.append(
+                {
+                    "timeRange": time_range,
+                    "price": round(avg_price, 2),
+                }
+            )
 
     # Log summary of converted prices
     if result:
@@ -676,13 +711,22 @@ def convert_amber_prices_to_sigenergy(
 
         # Log full pricing schedule for debugging/app display
         # Format: "00:00=15.2, 00:30=14.8, 01:00=13.5, ..."
-        slot_str = ", ".join([f"{p['timeRange'].split('-')[0]}={p['price']:.1f}" for p in result])
+        slot_str = ", ".join(
+            [f"{p['timeRange'].split('-')[0]}={p['price']:.1f}" for p in result]
+        )
         _LOGGER.debug(f"Sigenergy {price_type} schedule: {slot_str}")
 
     return result
 
 
-def _is_time_in_window(hour: int, minute: int, start_hour: int, start_minute: int, end_hour: int, end_minute: int) -> bool:
+def _is_time_in_window(
+    hour: int,
+    minute: int,
+    start_hour: int,
+    start_minute: int,
+    end_hour: int,
+    end_minute: int,
+) -> bool:
     """Check if a time slot falls within a time window.
 
     Handles overnight windows (e.g., 22:00 to 06:00).
@@ -753,15 +797,22 @@ def apply_export_boost_sigenergy(
             continue
 
         # Check if slot is within boost window
-        if not _is_time_in_window(hour, minute, start_hour, start_minute, end_hour, end_minute):
+        if not _is_time_in_window(
+            hour, minute, start_hour, start_minute, end_hour, end_minute
+        ):
             continue
 
         # Skip boost if actual price is below activation threshold
-        if activation_threshold_cents > 0 and original_price < activation_threshold_cents:
+        if (
+            activation_threshold_cents > 0
+            and original_price < activation_threshold_cents
+        ):
             skipped_count += 1
             _LOGGER.debug(
                 "%s: Export boost skipped - price %.2fc below threshold %.1fc",
-                time_range, original_price, activation_threshold_cents
+                time_range,
+                original_price,
+                activation_threshold_cents,
             )
             continue
 
@@ -776,7 +827,9 @@ def apply_export_boost_sigenergy(
             boosted_prices.append(boosted_price)
             _LOGGER.debug(
                 "%s: Export boost %.2fc → %.2fc",
-                time_range, original_price, boosted_price
+                time_range,
+                original_price,
+                boosted_price,
             )
 
         slot["price"] = round(boosted_price, 2)
@@ -787,12 +840,17 @@ def apply_export_boost_sigenergy(
         skip_msg = f", {skipped_count} skipped" if skipped_count > 0 else ""
         _LOGGER.info(
             "Sigenergy export boost applied to %d periods%s: avg=%.1fc, range=[%.1f-%.1fc]",
-            modified_count, skip_msg, avg_boost, min(boosted_prices), max(boosted_prices)
+            modified_count,
+            skip_msg,
+            avg_boost,
+            min(boosted_prices),
+            max(boosted_prices),
         )
     elif skipped_count > 0:
         _LOGGER.info(
             "Sigenergy export boost: %d periods skipped (below threshold %.1fc)",
-            skipped_count, activation_threshold_cents
+            skipped_count,
+            activation_threshold_cents,
         )
 
     return sell_prices
@@ -844,7 +902,9 @@ def apply_chip_mode_sigenergy(
             continue
 
         # Check if slot is within chip mode window
-        if not _is_time_in_window(hour, minute, start_hour, start_minute, end_hour, end_minute):
+        if not _is_time_in_window(
+            hour, minute, start_hour, start_minute, end_hour, end_minute
+        ):
             continue
 
         # If price is above threshold, preserve it (capture spikes)
@@ -852,21 +912,24 @@ def apply_chip_mode_sigenergy(
             preserved_count += 1
             _LOGGER.debug(
                 "%s: Chip Mode preserved - price %.2fc >= threshold %.1fc",
-                time_range, original_price, threshold_cents
+                time_range,
+                original_price,
+                threshold_cents,
             )
             continue
 
         # Suppress export by setting price to 0
         suppressed_count += 1
         _LOGGER.debug(
-            "%s: Chip Mode suppressed - price %.2fc → 0c",
-            time_range, original_price
+            "%s: Chip Mode suppressed - price %.2fc → 0c", time_range, original_price
         )
         slot["price"] = 0.0
 
     _LOGGER.info(
         "Sigenergy Chip Mode: %d periods suppressed, %d preserved (threshold=%.1fc)",
-        suppressed_count, preserved_count, threshold_cents
+        suppressed_count,
+        preserved_count,
+        threshold_cents,
     )
 
     return sell_prices
@@ -901,14 +964,19 @@ def apply_spike_protection_sigenergy(
             protected_count += 1
             _LOGGER.debug(
                 "%s: Spike protection - price %.2fc → %.2fc (threshold=%.1fc)",
-                time_range, original_price, replacement_cents, threshold_cents
+                time_range,
+                original_price,
+                replacement_cents,
+                threshold_cents,
             )
             slot["price"] = round(replacement_cents, 2)
 
     if protected_count > 0:
         _LOGGER.info(
             "Sigenergy spike protection: %d periods capped (threshold=%.1fc, replacement=%.1fc)",
-            protected_count, threshold_cents, replacement_cents
+            protected_count,
+            threshold_cents,
+            replacement_cents,
         )
 
     return buy_prices

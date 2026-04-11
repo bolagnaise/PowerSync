@@ -5,6 +5,7 @@ connected via WiNet-S dongle.
 
 Reference: https://github.com/Artic0din/sungrow-sg5-price-curtailment
 """
+
 import asyncio
 import logging
 from typing import Optional
@@ -24,7 +25,9 @@ logging.getLogger("pymodbus").setLevel(logging.WARNING)
 # Detect which parameter name to use based on version
 _pymodbus_version = tuple(int(x) for x in pymodbus.__version__.split(".")[:2])
 _SLAVE_PARAM = "device_id" if _pymodbus_version >= (3, 9) else "slave"
-_LOGGER.debug(f"pymodbus version {pymodbus.__version__}, using '{_SLAVE_PARAM}' parameter")
+_LOGGER.debug(
+    f"pymodbus version {pymodbus.__version__}, using '{_SLAVE_PARAM}' parameter"
+)
 
 
 # Register maps for different Sungrow model families
@@ -33,35 +36,35 @@ _LOGGER.debug(f"pymodbus version {pymodbus.__version__}, using '{_SLAVE_PARAM}' 
 REGISTER_MAPS = {
     # SG10RS and newer models (tested on SG10RS)
     "sg10rs": {
-        "daily_yield": (5002, 1, 0.1),       # kWh
-        "total_yield": (5003, 2, 0.1),       # kWh, 32-bit LE
-        "dc_power": (5016, 2, 1),            # W, 32-bit LE
-        "mppt1_voltage": (5010, 1, 0.1),     # V
-        "mppt1_current": (5011, 1, 0.1),     # A
-        "mppt2_voltage": (5012, 1, 0.1),     # V
-        "mppt2_current": (5013, 1, 0.1),     # A
-        "temperature": (5007, 1, 0.1),       # °C (signed)
-        "grid_voltage": (5018, 1, 0.1),      # V
-        "grid_frequency": (5035, 1, 0.1),    # Hz
-        "running_state": (5037, 1, 1),       # State code
+        "daily_yield": (5002, 1, 0.1),  # kWh
+        "total_yield": (5003, 2, 0.1),  # kWh, 32-bit LE
+        "dc_power": (5016, 2, 1),  # W, 32-bit LE
+        "mppt1_voltage": (5010, 1, 0.1),  # V
+        "mppt1_current": (5011, 1, 0.1),  # A
+        "mppt2_voltage": (5012, 1, 0.1),  # V
+        "mppt2_current": (5013, 1, 0.1),  # A
+        "temperature": (5007, 1, 0.1),  # °C (signed)
+        "grid_voltage": (5018, 1, 0.1),  # V
+        "grid_frequency": (5035, 1, 0.1),  # Hz
+        "running_state": (5037, 1, 1),  # State code
         "power_limit_toggle": (5006, 1, 1),  # Holding register
         "power_limit_percent": (5007, 1, 0.1),  # Holding register, /10
     },
     # SG.05RS and older models (tested on SG.05RS)
     "sg05rs": {
-        "daily_yield": (5003, 1, 0.1),       # kWh
-        "total_yield": (5004, 1, 0.1),       # kWh, 16-bit only
-        "dc_power": (5031, 1, 1),            # W, 16-bit (active power)
-        "mppt1_voltage": (5011, 1, 0.1),     # V
-        "mppt1_current": (5012, 1, 0.1),     # A
-        "mppt2_voltage": (5013, 1, 0.1),     # V
-        "mppt2_current": (5014, 1, 0.1),     # A
-        "temperature": (5001, 1, 1),         # °C (no scale)
-        "grid_voltage": (5019, 1, 0.1),      # V
-        "grid_frequency": (5036, 1, 0.1),    # Hz
-        "running_state": None,               # Not available - infer from power
+        "daily_yield": (5003, 1, 0.1),  # kWh
+        "total_yield": (5004, 1, 0.1),  # kWh, 16-bit only
+        "dc_power": (5031, 1, 1),  # W, 16-bit (active power)
+        "mppt1_voltage": (5011, 1, 0.1),  # V
+        "mppt1_current": (5012, 1, 0.1),  # A
+        "mppt2_voltage": (5013, 1, 0.1),  # V
+        "mppt2_current": (5014, 1, 0.1),  # A
+        "temperature": (5001, 1, 1),  # °C (no scale)
+        "grid_voltage": (5019, 1, 0.1),  # V
+        "grid_frequency": (5036, 1, 0.1),  # Hz
+        "running_state": None,  # Not available - infer from power
         "power_limit_toggle": (5147, 1, 1),  # Holding register (different!)
-        "power_limit_percent": None,         # Not found in scan
+        "power_limit_percent": None,  # Not found in scan
     },
 }
 
@@ -73,27 +76,27 @@ MODEL_MAP = {
     "sg10rs": "sg10rs",
     "sg10": "sg10rs",
     "sg8rs": "sg10rs",
-    "sg80rs": "sg10rs",    # Normalized SG8.0RS
-    "sg100rs": "sg10rs",   # Normalized SG10.0RS
+    "sg80rs": "sg10rs",  # Normalized SG8.0RS
+    "sg100rs": "sg10rs",  # Normalized SG10.0RS
     "sg12rs": "sg10rs",
-    "sg120rs": "sg10rs",   # Normalized SG12RS
+    "sg120rs": "sg10rs",  # Normalized SG12RS
     "sg15rs": "sg10rs",
-    "sg150rs": "sg10rs",   # Normalized SG15RS
+    "sg150rs": "sg10rs",  # Normalized SG15RS
     "sg17rs": "sg10rs",
-    "sg170rs": "sg10rs",   # Normalized SG17RS
+    "sg170rs": "sg10rs",  # Normalized SG17RS
     "sg20rs": "sg10rs",
-    "sg200rs": "sg10rs",   # Normalized SG20RS
+    "sg200rs": "sg10rs",  # Normalized SG20RS
     # Smaller residential models - SAME register layout as sg10rs
     "sg5rs": "sg10rs",
-    "sg50rs": "sg10rs",    # Normalized SG5.0RS
+    "sg50rs": "sg10rs",  # Normalized SG5.0RS
     "sg05rs": "sg10rs",
     "sg3rs": "sg10rs",
-    "sg30rs": "sg10rs",    # Normalized SG3.0RS
-    "sg36rs": "sg10rs",    # Normalized SG3.6RS
-    "sg25rs": "sg10rs",    # Normalized SG2.5RS
-    "sg40rs": "sg10rs",    # Normalized SG4.0RS
-    "sg60rs": "sg10rs",    # Normalized SG6.0RS
-    "sg70rs": "sg10rs",    # Normalized SG7.0RS
+    "sg30rs": "sg10rs",  # Normalized SG3.0RS
+    "sg36rs": "sg10rs",  # Normalized SG3.6RS
+    "sg25rs": "sg10rs",  # Normalized SG2.5RS
+    "sg40rs": "sg10rs",  # Normalized SG4.0RS
+    "sg60rs": "sg10rs",  # Normalized SG6.0RS
+    "sg70rs": "sg10rs",  # Normalized SG7.0RS
 }
 
 
@@ -110,15 +113,15 @@ class SungrowController(InverterController):
 
     # Run mode values (for curtailment control)
     RUN_MODE_SHUTDOWN = 206  # Stop inverter
-    RUN_MODE_ENABLED = 207   # Normal operation
+    RUN_MODE_ENABLED = 207  # Normal operation
 
     # Power limit toggle values
-    POWER_LIMIT_DISABLED = 85   # 0x55
-    POWER_LIMIT_ENABLED = 170   # 0xAA
+    POWER_LIMIT_DISABLED = 85  # 0x55
+    POWER_LIMIT_ENABLED = 170  # 0xAA
 
     # Running state values (varies by model)
-    STATE_RUNNING = 0x0000       # Normal operation (SG10RS)
-    STATE_RUNNING_ALT = 0x0002   # Normal operation (some models)
+    STATE_RUNNING = 0x0000  # Normal operation (SG10RS)
+    STATE_RUNNING_ALT = 0x0002  # Normal operation (some models)
     STATE_RUNNING_ALT2 = 0x8200  # Normal operation (SG5.0RS and others)
     STATE_STOP = 0x8000
     STATE_STANDBY = 0xA000
@@ -126,7 +129,7 @@ class SungrowController(InverterController):
     STATE_SHUTDOWN = 0x1200
     STATE_FAULT = 0x1300
     STATE_MAINTAIN = 0x1500
-    STATE_STARTUP = 0x1600       # Startup/initializing after restore
+    STATE_STARTUP = 0x1600  # Startup/initializing after restore
 
     # Run mode register (common across models)
     REGISTER_RUN_MODE = 5005
@@ -155,13 +158,17 @@ class SungrowController(InverterController):
         self._lock = asyncio.Lock()
 
         # Select register map based on model
-        model_key = (model or "").lower().replace(".", "").replace("-", "").replace(" ", "")
+        model_key = (
+            (model or "").lower().replace(".", "").replace("-", "").replace(" ", "")
+        )
         map_name = MODEL_MAP.get(model_key, "sg10rs")  # Default to sg10rs
         self._reg_map = REGISTER_MAPS[map_name]
 
         # Parse rated capacity from model name for load-following
         self._rated_capacity_w = self._parse_capacity_from_model(model)
-        _LOGGER.info(f"Sungrow controller using register map '{map_name}' for model '{model}' (capacity: {self._rated_capacity_w}W)")
+        _LOGGER.info(
+            f"Sungrow controller using register map '{map_name}' for model '{model}' (capacity: {self._rated_capacity_w}W)"
+        )
 
     def _parse_capacity_from_model(self, model: Optional[str]) -> int:
         """Parse rated capacity in watts from model name.
@@ -173,18 +180,19 @@ class SungrowController(InverterController):
             SH8.0RT -> 8000W
         """
         import re
+
         if not model:
             return 5000  # Default to 5kW
 
         # Try to extract number from model (e.g., "5.0" from "SG5.0RS", "10" from "SG10RS")
         # Match patterns like: SG5.0RS, SG10RS, SH8.0RT, etc.
-        match = re.search(r'[A-Z]{2}(\d+\.?\d*)(?:RS|RT|T)?', model.upper())
+        match = re.search(r"[A-Z]{2}(\d+\.?\d*)(?:RS|RT|T)?", model.upper())
         if match:
             capacity_kw = float(match.group(1))
             return int(capacity_kw * 1000)
 
         # Fallback: try to find any number in the model
-        match = re.search(r'(\d+\.?\d*)', model)
+        match = re.search(r"(\d+\.?\d*)", model)
         if match:
             capacity_kw = float(match.group(1))
             # If it's a small number, assume kW
@@ -214,20 +222,25 @@ class SungrowController(InverterController):
                 # Use asyncio.wait_for to enforce a strict connection timeout
                 try:
                     connected = await asyncio.wait_for(
-                        self._client.connect(),
-                        timeout=self.CONNECT_TIMEOUT_SECONDS
+                        self._client.connect(), timeout=self.CONNECT_TIMEOUT_SECONDS
                     )
                 except asyncio.TimeoutError:
-                    _LOGGER.debug(f"Connection timeout to Sungrow inverter at {self.host}:{self.port}")
+                    _LOGGER.debug(
+                        f"Connection timeout to Sungrow inverter at {self.host}:{self.port}"
+                    )
                     self._client.close()
                     self._client = None
                     return False
 
                 if connected:
                     self._connected = True
-                    _LOGGER.info(f"Connected to Sungrow inverter at {self.host}:{self.port}")
+                    _LOGGER.info(
+                        f"Connected to Sungrow inverter at {self.host}:{self.port}"
+                    )
                 else:
-                    _LOGGER.debug(f"Failed to connect to Sungrow inverter at {self.host}:{self.port}")
+                    _LOGGER.debug(
+                        f"Failed to connect to Sungrow inverter at {self.host}:{self.port}"
+                    )
                     if self._client:
                         self._client.close()
                         self._client = None
@@ -308,7 +321,9 @@ class SungrowController(InverterController):
             )
 
             if result.isError():
-                _LOGGER.debug(f"Modbus holding read error at register {address}: {result}")
+                _LOGGER.debug(
+                    f"Modbus holding read error at register {address}: {result}"
+                )
                 return None
 
             return result.registers
@@ -320,7 +335,9 @@ class SungrowController(InverterController):
             _LOGGER.debug(f"Error reading holding register {address}: {e}")
             return None
 
-    async def _read_input_register(self, address: int, count: int = 1) -> Optional[list]:
+    async def _read_input_register(
+        self, address: int, count: int = 1
+    ) -> Optional[list]:
         """Read values from Modbus input registers (for status/measurement values).
 
         Sungrow inverters use input registers (function code 0x04) for data
@@ -345,7 +362,9 @@ class SungrowController(InverterController):
             )
 
             if result.isError():
-                _LOGGER.debug(f"Modbus input read error at register {address}: {result}")
+                _LOGGER.debug(
+                    f"Modbus input read error at register {address}: {result}"
+                )
                 return None
 
             return result.registers
@@ -383,10 +402,14 @@ class SungrowController(InverterController):
             return result
 
         # Fall back to holding registers
-        _LOGGER.debug(f"Input register read failed at {address}, trying holding registers")
+        _LOGGER.debug(
+            f"Input register read failed at {address}, trying holding registers"
+        )
         return await self._read_register(address, count)
 
-    async def _read_register_from_map(self, key: str, use_holding: bool = False) -> Optional[tuple]:
+    async def _read_register_from_map(
+        self, key: str, use_holding: bool = False
+    ) -> Optional[tuple]:
         """Read a register using the model-specific register map.
 
         Args:
@@ -453,14 +476,18 @@ class SungrowController(InverterController):
             if mppt1_v and mppt1_i:
                 attrs["mppt1_voltage"] = round(mppt1_v[1], 1)
                 attrs["mppt1_current"] = round(mppt1_i[1], 1)
-                attrs["mppt1_power"] = round(attrs["mppt1_voltage"] * attrs["mppt1_current"], 0)
+                attrs["mppt1_power"] = round(
+                    attrs["mppt1_voltage"] * attrs["mppt1_current"], 0
+                )
 
             mppt2_v = await self._read_register_from_map("mppt2_voltage")
             mppt2_i = await self._read_register_from_map("mppt2_current")
             if mppt2_v and mppt2_i:
                 attrs["mppt2_voltage"] = round(mppt2_v[1], 1)
                 attrs["mppt2_current"] = round(mppt2_i[1], 1)
-                attrs["mppt2_power"] = round(attrs["mppt2_voltage"] * attrs["mppt2_current"], 0)
+                attrs["mppt2_power"] = round(
+                    attrs["mppt2_voltage"] * attrs["mppt2_current"], 0
+                )
 
             # Read temperature
             temp_result = await self._read_register_from_map("temperature")
@@ -468,7 +495,9 @@ class SungrowController(InverterController):
                 # Some models use signed values
                 temp_scale = self._reg_map["temperature"][2]
                 if temp_scale < 1:  # If scaled, treat as signed
-                    attrs["inverter_temperature"] = round(self._to_signed16(temp_result[0]) * temp_scale, 1)
+                    attrs["inverter_temperature"] = round(
+                        self._to_signed16(temp_result[0]) * temp_scale, 1
+                    )
                 else:
                     attrs["inverter_temperature"] = temp_result[1]
 
@@ -483,17 +512,27 @@ class SungrowController(InverterController):
                 attrs["grid_frequency"] = round(freq_result[1], 2)
 
             # Read power limit settings (holding registers)
-            limit_toggle = await self._read_register_from_map("power_limit_toggle", use_holding=True)
+            limit_toggle = await self._read_register_from_map(
+                "power_limit_toggle", use_holding=True
+            )
             if limit_toggle:
-                attrs["power_limit_enabled"] = limit_toggle[0] == self.POWER_LIMIT_ENABLED
+                attrs["power_limit_enabled"] = (
+                    limit_toggle[0] == self.POWER_LIMIT_ENABLED
+                )
                 _LOGGER.debug(f"Sungrow power limit toggle: {limit_toggle[0]}")
 
-            limit_percent = await self._read_register_from_map("power_limit_percent", use_holding=True)
+            limit_percent = await self._read_register_from_map(
+                "power_limit_percent", use_holding=True
+            )
             if limit_percent:
                 attrs["power_limit_percent"] = min(limit_percent[1], 100)
-                _LOGGER.debug(f"Sungrow power limit percent: {attrs['power_limit_percent']}%")
+                _LOGGER.debug(
+                    f"Sungrow power limit percent: {attrs['power_limit_percent']}%"
+                )
 
-            _LOGGER.info(f"Sungrow register read complete: {len(attrs)} attributes collected")
+            _LOGGER.info(
+                f"Sungrow register read complete: {len(attrs)} attributes collected"
+            )
 
         except Exception as e:
             _LOGGER.warning(f"Error reading some registers: {e}")
@@ -523,9 +562,13 @@ class SungrowController(InverterController):
         # Calculate target percentage
         if home_load_w and home_load_w > 0 and self._rated_capacity_w > 0:
             # Load-following: set limit to match home load
-            target_percent = min(100, max(1, int((home_load_w / self._rated_capacity_w) * 100)))
+            target_percent = min(
+                100, max(1, int((home_load_w / self._rated_capacity_w) * 100))
+            )
             target_value = target_percent * 10  # Register uses /10 scale
-            _LOGGER.info(f"Sungrow load-following: {home_load_w}W / {self._rated_capacity_w}W = {target_percent}%")
+            _LOGGER.info(
+                f"Sungrow load-following: {home_load_w}W / {self._rated_capacity_w}W = {target_percent}%"
+            )
         else:
             # Full curtailment
             target_percent = 0
@@ -553,7 +596,9 @@ class SungrowController(InverterController):
                     self.RUN_MODE_SHUTDOWN,
                 )
                 if success:
-                    _LOGGER.debug(f"Run mode shutdown (wrote {self.RUN_MODE_SHUTDOWN} to {self.REGISTER_RUN_MODE})")
+                    _LOGGER.debug(
+                        f"Run mode shutdown (wrote {self.RUN_MODE_SHUTDOWN} to {self.REGISTER_RUN_MODE})"
+                    )
             elif power_limit_toggle_reg and power_limit_percent_reg:
                 # Use power limiting for load-following (>0%)
                 # First enable power limiting
@@ -562,7 +607,9 @@ class SungrowController(InverterController):
                     self.POWER_LIMIT_ENABLED,
                 )
                 if toggle_success:
-                    _LOGGER.debug(f"Power limit enabled (wrote {self.POWER_LIMIT_ENABLED} to {power_limit_toggle_reg[0]})")
+                    _LOGGER.debug(
+                        f"Power limit enabled (wrote {self.POWER_LIMIT_ENABLED} to {power_limit_toggle_reg[0]})"
+                    )
 
                 # Then set limit percentage
                 percent_success = await self._write_register(
@@ -570,12 +617,16 @@ class SungrowController(InverterController):
                     target_value,
                 )
                 if percent_success:
-                    _LOGGER.debug(f"Power limit set to {target_percent}% (wrote {target_value} to {power_limit_percent_reg[0]})")
+                    _LOGGER.debug(
+                        f"Power limit set to {target_percent}% (wrote {target_value} to {power_limit_percent_reg[0]})"
+                    )
 
                 success = toggle_success and percent_success
             else:
                 # Fallback to run mode shutdown (no load-following possible)
-                _LOGGER.debug("Power limit registers not available, using run mode shutdown")
+                _LOGGER.debug(
+                    "Power limit registers not available, using run mode shutdown"
+                )
                 success = await self._write_register(
                     self.REGISTER_RUN_MODE,
                     self.RUN_MODE_SHUTDOWN,
@@ -583,9 +634,13 @@ class SungrowController(InverterController):
 
             if success:
                 if target_percent > 0:
-                    _LOGGER.info(f"Sungrow load-following curtailment to {target_percent}% ({home_load_w}W)")
+                    _LOGGER.info(
+                        f"Sungrow load-following curtailment to {target_percent}% ({home_load_w}W)"
+                    )
                 else:
-                    _LOGGER.info(f"Successfully curtailed Sungrow inverter at {self.host} (0%)")
+                    _LOGGER.info(
+                        f"Successfully curtailed Sungrow inverter at {self.host} (0%)"
+                    )
             else:
                 _LOGGER.error(f"Failed to curtail Sungrow inverter at {self.host}")
 
@@ -625,9 +680,13 @@ class SungrowController(InverterController):
                 self.RUN_MODE_ENABLED,
             )
             if run_mode_success:
-                _LOGGER.debug(f"Run mode enabled (wrote {self.RUN_MODE_ENABLED} to {self.REGISTER_RUN_MODE})")
+                _LOGGER.debug(
+                    f"Run mode enabled (wrote {self.RUN_MODE_ENABLED} to {self.REGISTER_RUN_MODE})"
+                )
             else:
-                _LOGGER.debug("Could not set run mode (may not be supported on this model)")
+                _LOGGER.debug(
+                    "Could not set run mode (may not be supported on this model)"
+                )
 
             if power_limit_toggle_reg and power_limit_percent_reg:
                 # Use power limiting - set to 100%
@@ -637,7 +696,9 @@ class SungrowController(InverterController):
                     1000,  # 100% output (1000/10 = 100)
                 )
                 if percent_success:
-                    _LOGGER.debug(f"Power limit set to 100% (wrote 1000 to {power_limit_percent_reg[0]})")
+                    _LOGGER.debug(
+                        f"Power limit set to 100% (wrote 1000 to {power_limit_percent_reg[0]})"
+                    )
 
                 success = percent_success or run_mode_success
             else:
@@ -652,7 +713,9 @@ class SungrowController(InverterController):
                 if not state.is_curtailed:
                     _LOGGER.info("Restore verified - inverter at full output")
                 else:
-                    _LOGGER.warning("Restore command sent but state not verified - may take time to start")
+                    _LOGGER.warning(
+                        "Restore command sent but state not verified - may take time to start"
+                    )
             else:
                 _LOGGER.error(f"Failed to restore Sungrow inverter at {self.host}")
 
@@ -703,7 +766,9 @@ class SungrowController(InverterController):
                 state_regs = await self._read_input_register(running_state_reg[0], 1)
                 if state_regs:
                     running_state = state_regs[0]
-                    _LOGGER.debug(f"Sungrow running_state register {running_state_reg[0]}: 0x{running_state:04X} ({running_state})")
+                    _LOGGER.debug(
+                        f"Sungrow running_state register {running_state_reg[0]}: 0x{running_state:04X} ({running_state})"
+                    )
 
             # Determine status based on running state (if available) or power output
             if running_state is not None:
@@ -715,7 +780,11 @@ class SungrowController(InverterController):
                     self.STATE_INITIAL_STANDBY,
                 )
 
-                if running_state in (self.STATE_RUNNING, self.STATE_RUNNING_ALT, self.STATE_RUNNING_ALT2):
+                if running_state in (
+                    self.STATE_RUNNING,
+                    self.STATE_RUNNING_ALT,
+                    self.STATE_RUNNING_ALT2,
+                ):
                     status = InverterStatus.ONLINE
                     attrs["running_state"] = "running"
                 elif running_state in (self.STATE_STARTUP, self.STATE_MAINTAIN):
@@ -725,7 +794,9 @@ class SungrowController(InverterController):
                     _LOGGER.debug(f"Sungrow starting up: 0x{running_state:04X}")
                 elif running_state == self.STATE_FAULT:
                     # Log the fault state for debugging
-                    _LOGGER.warning(f"Sungrow running_state=0x{running_state:04X} (fault), power={power_output}W")
+                    _LOGGER.warning(
+                        f"Sungrow running_state=0x{running_state:04X} (fault), power={power_output}W"
+                    )
                     status = InverterStatus.ERROR
                     attrs["running_state"] = "fault"
                 elif is_stopped:
@@ -747,7 +818,9 @@ class SungrowController(InverterController):
                     if power_output is not None and power_output > 50:
                         status = InverterStatus.ONLINE
                         attrs["running_state"] = "running"
-                        _LOGGER.debug(f"Sungrow unknown state 0x{running_state:04X} but producing {power_output}W - treating as online")
+                        _LOGGER.debug(
+                            f"Sungrow unknown state 0x{running_state:04X} but producing {power_output}W - treating as online"
+                        )
                     else:
                         status = InverterStatus.UNKNOWN
                         attrs["running_state"] = f"unknown (0x{running_state:04X})"
