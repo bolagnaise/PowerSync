@@ -4199,8 +4199,50 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                 "tomorrow_peak_kw": data.get("tomorrow_peak_kw"),
                 "source": data.get("source"),
                 "forecasts": data.get("forecasts"),
+                # Also persist the in-memory full-day forecast cache so that
+                # restarting mid-day doesn't reset it and force the coordinator
+                # into the "today_remaining becomes today_forecast" fallback
+                # that makes the forecast sensor show partial-day numbers.
+                "_daily_forecast_date": self._daily_forecast_date,
+                "_daily_forecast_kwh": self._daily_forecast_kwh,
+                "_daily_forecast_peak_kw": self._daily_forecast_peak_kw,
             }
             await self._forecast_store.async_save(cache)
+        except Exception:
+            pass
+
+    async def _restore_daily_forecast_cache(self) -> None:
+        """Restore the in-memory _daily_forecast_* fields from disk.
+
+        Ensures that a mid-day HA restart doesn't reset the cached full-day
+        forecast back to None and then overwrite it with `today_remaining`
+        on the next fetch (which would make the sensor show only the
+        rest-of-day forecast as if it were the full day).
+        """
+        try:
+            cache = await self._forecast_store.async_load()
+            if not cache:
+                return
+            cached_date = cache.get("_daily_forecast_date")
+            if cached_date != dt_util.now().strftime("%Y-%m-%d"):
+                return
+            self._daily_forecast_date = cached_date
+            # Prefer the explicit full-day cache if persisted; fall back to
+            # today_forecast_kwh which older releases stored under that key.
+            self._daily_forecast_kwh = (
+                cache.get("_daily_forecast_kwh")
+                if cache.get("_daily_forecast_kwh") is not None
+                else cache.get("today_forecast_kwh")
+            )
+            self._daily_forecast_peak_kw = (
+                cache.get("_daily_forecast_peak_kw")
+                if cache.get("_daily_forecast_peak_kw") is not None
+                else cache.get("today_peak_kw")
+            )
+            _LOGGER.info(
+                "Solcast: restored full-day forecast cache for %s: %.1fkWh",
+                self._daily_forecast_date, self._daily_forecast_kwh or 0,
+            )
         except Exception:
             pass
 
@@ -4369,6 +4411,11 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
         # Restore rate limit state on first run (persisted across restarts)
         if self._api_calls_date is None:
             await self._restore_rate_limit_state()
+            # Restore the full-day forecast cache too. Without this, restarting
+            # mid-day leaves _daily_forecast_date == None and the fetch logic
+            # below falls into the "new day → cache today_remaining" fallback
+            # that makes the sensor display only the rest-of-day forecast.
+            await self._restore_daily_forecast_cache()
 
         # First, check if Solcast HA integration is installed and has data
         # This avoids doubling API calls if user has both integrations
@@ -4575,7 +4622,22 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             else:
                 # No estimated actuals - use cached full-day or remaining as fallback
                 if self._daily_forecast_date != today_str:
-                    # New day - cache the current remaining as the full-day estimate
+                    # Cached date doesn't match today — either a genuine new day
+                    # (midnight rollover) or a restart where _restore_daily_forecast_cache
+                    # couldn't find a valid cache. In the genuine new-day case
+                    # `now` is early morning and `today_remaining` ≈ today_total,
+                    # so caching it is fine. In the restart-mid-day case the
+                    # value will be suspiciously low — log a hint so users can
+                    # tell the two apart.
+                    is_likely_partial_day = now.hour >= 10 and today_remaining < 5.0
+                    if is_likely_partial_day:
+                        _LOGGER.warning(
+                            "Solcast: caching partial-day remaining (%.1fkWh) as today's "
+                            "forecast because no full-day cache was restored. "
+                            "If this is a restart after %02d:00, the forecast will be "
+                            "under-reported until the next UTC day rollover.",
+                            today_remaining, now.hour,
+                        )
                     self._daily_forecast_date = today_str
                     self._daily_forecast_kwh = today_remaining
                     self._daily_forecast_peak_kw = today_peak
@@ -4584,7 +4646,10 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                         f"Solcast: New day, cached forecast for {today_str}: {today_remaining:.1f}kWh"
                     )
                 else:
-                    # Use cached value (from earlier fetch today)
+                    # Use cached value (from earlier fetch today or restored
+                    # full-day cache from persistent storage). Never downgrade
+                    # the cached full-day total to the current remaining — it's
+                    # always an under-estimate after mid-morning.
                     today_forecast = self._daily_forecast_kwh or today_remaining
                     today_peak = self._daily_forecast_peak_kw or today_peak
                     _LOGGER.info(
