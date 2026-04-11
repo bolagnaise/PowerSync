@@ -1,0 +1,73 @@
+# CodeRabbit configuration for Artic0din/PowerSync fork
+# Docs: https://docs.coderabbit.ai/guides/configure-coderabbit
+
+language: en-US
+early_access: false
+tone_instructions: |
+  Be concise and direct. Focus on correctness, security, and race conditions.
+  This is a Home Assistant custom integration — flag anything that could
+  cause battery control misbehaviour, grid contention, or data corruption.
+  Cite Home Assistant best practices where relevant (e.g. dt_util, shared
+  aiohttp session, proper async cleanup on unload).
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    ignore_title_keywords:
+      - WIP
+      - wip
+      - DRAFT
+      - draft
+    labels: []
+    drafts: false
+  path_filters:
+    - "!**/*.min.js"
+    - "!**/vendor/**"
+    - "!**/*.lock"
+    - "!docs/**/*.html"
+  path_instructions:
+    - path: "custom_components/power_sync/**/*.py"
+      instructions: |
+        Home Assistant integration code. Check for:
+        - Async/await correctness and cleanup on config entry unload
+        - Proper use of dt_util.now() and timezone-aware datetimes
+        - Safe use of hass.data and config_entry.runtime_data
+        - Shared aiohttp session (async_get_clientsession) not per-request sessions
+        - Thread safety around coordinator state
+        - No secrets, tokens, or PII in logs
+    - path: "custom_components/power_sync/optimization/**/*.py"
+      instructions: |
+        LP optimizer and executor. Extra scrutiny on:
+        - Numerical correctness (SoC bounds, efficiency, time-step math)
+        - Thread-safety of shared state
+        - Lifecycle (enable/disable, price listener reattachment)
+        - Fallback paths not causing aggressive grid charging
+    - path: "custom_components/power_sync/inverters/**/*.py"
+      instructions: |
+        Modbus/HTTP inverter drivers. Check register addresses, lock scopes,
+        partial-write rollback, connection lifecycle, and redact any PII.
+    - path: "custom_components/power_sync/automations/**/*.py"
+      instructions: |
+        Internal rule engine. Check trigger/condition/action evaluation,
+        timezone handling, and secret redaction in logs.
+    - path: "custom_components/power_sync/frontend/**/*.js"
+      instructions: |
+        Lovelace frontend. Flag any innerHTML/innerText without escaping,
+        and any user-supplied values rendered without sanitisation.
+
+chat:
+  auto_reply: true
+
+knowledge_base:
+  opt_out: false
+  learnings:
+    scope: auto
+  issues:
+    scope: auto
