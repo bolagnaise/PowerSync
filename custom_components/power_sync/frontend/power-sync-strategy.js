@@ -516,37 +516,44 @@ class PowerSyncStrategy {
     // Domain-aware entity finder used by the Tesla Energy Site controls section.
     // The new Tesla entities use _attr_has_entity_name=True, so HA composes
     // their entity_ids from the device name (e.g. "Home" → home_backup_reserve)
-    // rather than the suggested object_id. This helper scans both hass.states
-    // AND hass.entities (registry) for any entity_id in the given domain whose
-    // object_id contains the suffix, tolerating any device-name prefix.
+    // rather than the suggested object_id. This helper scans hass.states for
+    // an AVAILABLE match first, to avoid surfacing orphaned entities that
+    // HA left in the registry from a prior capability-probe result but which
+    // are now unavailable because the feature is no longer supported.
+    const isAvailable = (id) => {
+      const s = (hass.states || {})[id];
+      return s && s.state !== 'unavailable' && s.state !== 'unknown';
+    };
     const findEntity = (domain, suffix) => {
       const direct = `${domain}.power_sync_${suffix}`;
-      if (hass.states[direct]) return direct;
+      if (isAvailable(direct)) return direct;
       const prefix = `${domain}.`;
       const tail = `_${suffix}`;
       const exact = `${domain}.${suffix}`;
-      // First pass: states (only keeps available entities)
+      // First pass: prefer available states in hass.states
       for (const key of Object.keys(hass.states || {})) {
         if (!key.startsWith(prefix)) continue;
-        if (key === exact || key.endsWith(tail)) return key;
+        if (key !== exact && !key.endsWith(tail)) continue;
+        if (isAvailable(key)) return key;
       }
-      // Second pass: entity registry (includes unavailable entities too)
-      const registry = hass.entities || {};
-      for (const key of Object.keys(registry)) {
+      // Second pass: fall back to any matching state (temporarily unavailable
+      // during coordinator startup), but still skip orphans that exist only in
+      // the registry — those are the "phantom unavailable" entities we want
+      // to hide from the dashboard.
+      for (const key of Object.keys(hass.states || {})) {
         if (!key.startsWith(prefix)) continue;
         if (key === exact || key.endsWith(tail)) return key;
       }
       return null;
     };
 
-    // Find every VPP program switch (one switch per Tesla program enrollment).
+    // Find every VPP program switch (one switch per Tesla program enrollment),
+    // filtering out orphaned unavailable registry entries.
     const findVppSwitches = () => {
       const matches = new Set();
       for (const key of Object.keys(hass.states || {})) {
-        if (key.startsWith('switch.') && key.includes('_vpp_')) matches.add(key);
-      }
-      for (const key of Object.keys(hass.entities || {})) {
-        if (key.startsWith('switch.') && key.includes('_vpp_')) matches.add(key);
+        if (!key.startsWith('switch.') || !key.includes('_vpp_')) continue;
+        if (isAvailable(key)) matches.add(key);
       }
       return Array.from(matches);
     };

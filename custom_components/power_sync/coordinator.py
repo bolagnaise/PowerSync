@@ -1747,6 +1747,19 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             self._site_info_fetch_failed = True
             return None
 
+    def invalidate_site_info_cache(self) -> None:
+        """Force the next async_get_site_info() call to re-fetch from Tesla.
+
+        Call this after any write that modifies site_info-level fields
+        (backup reserve, operation mode, grid export rule, grid charging,
+        storm mode, off-grid EV reserve, VPP enrollment) so that HA
+        entities reading from the cache don't display stale values for
+        up to six hours until the next natural refresh.
+        """
+        self._site_info_last_fetch = 0
+        self._site_info_fetch_failed = False
+        _LOGGER.debug("Tesla site_info cache invalidated — next read will refetch")
+
     async def set_grid_charging_enabled(self, enabled: bool) -> bool:
         """
         Enable or disable grid charging (imports) for the Powerwall.
@@ -1793,6 +1806,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                         return False
 
                 _LOGGER.info(f"✅ Grid charging {'enabled' if enabled else 'disabled'} successfully for site {self.site_id}")
+                self.invalidate_site_info_cache()
                 return True
 
         except asyncio.TimeoutError:
@@ -1960,6 +1974,66 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         entry_data["tesla_capabilities"] = dict(self.tesla_capabilities)
         entry_data["tesla_site_country"] = self._site_country
 
+        # Prune orphaned entities from prior sessions where a capability was
+        # supported at the time but is no longer. Without this, the entity
+        # registry keeps stale unique_ids which HA displays as "unavailable"
+        # and the dashboard strategy will surface them as broken controls.
+        self._cleanup_unsupported_tesla_entities()
+
+    def _cleanup_unsupported_tesla_entities(self) -> None:
+        """Remove registry entries for Tesla capabilities that the current
+        site does not support. Called after every capability probe so that
+        upgrading from a version where a capability was incorrectly detected
+        (or switching sites) cleans up the orphans automatically."""
+        try:
+            from homeassistant.helpers import entity_registry as er
+        except Exception:
+            return
+        try:
+            ent_reg = er.async_get(self.hass)
+        except Exception:
+            return
+
+        removed = 0
+
+        def _remove_by_unique_id(domain: str, unique_id: str) -> None:
+            nonlocal removed
+            eid = ent_reg.async_get_entity_id(domain, DOMAIN, unique_id)
+            if eid:
+                try:
+                    ent_reg.async_remove(eid)
+                    removed += 1
+                    _LOGGER.debug("Removed orphaned Tesla entity %s", eid)
+                except Exception as err:
+                    _LOGGER.debug("Failed to remove %s: %s", eid, err)
+
+        if self.tesla_capabilities.get("storm_mode") is False:
+            _remove_by_unique_id("switch", f"{self._entry_id}_tesla_storm_watch")
+            _remove_by_unique_id("binary_sensor", f"{self._entry_id}_tesla_storm_watch_active")
+
+        if self.tesla_capabilities.get("off_grid_vehicle_charging_reserve") is False:
+            _remove_by_unique_id("number", f"{self._entry_id}_tesla_off_grid_ev_reserve")
+
+        if self.tesla_capabilities.get("vpp_programs") is False:
+            # Remove every vpp_* switch created under this entry
+            try:
+                for reg_entry in list(ent_reg.entities.values()):
+                    if (reg_entry.config_entry_id == self._entry_id
+                        and reg_entry.domain == "switch"
+                        and reg_entry.platform == DOMAIN
+                        and "_tesla_vpp_" in (reg_entry.unique_id or "")):
+                        ent_reg.async_remove(reg_entry.entity_id)
+                        removed += 1
+                        _LOGGER.debug("Removed orphaned VPP switch %s", reg_entry.entity_id)
+            except Exception as err:
+                _LOGGER.debug("Failed to scan VPP switches: %s", err)
+
+        if removed > 0:
+            _LOGGER.info(
+                "Cleaned up %d orphaned Tesla capability entities (site no longer supports them)",
+                removed,
+            )
+
     # ------------------------------------------------------------------
     # New Energy Site controls (storm mode, off-grid EV reserve, VPP programs)
     # ------------------------------------------------------------------
@@ -1972,6 +2046,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         )
         if status == 200:
             self._storm_mode_enabled = bool(enabled)
+            self.invalidate_site_info_cache()
             _LOGGER.info("Storm Watch %s for site %s", "enabled" if enabled else "disabled", self.site_id)
             return True
         _LOGGER.error("Failed to set storm mode for site %s: HTTP %s", self.site_id, status)
@@ -2004,6 +2079,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         )
         if status == 200:
             self._off_grid_reserve_percent = percent
+            self.invalidate_site_info_cache()
             _LOGGER.info("Off-grid EV reserve set to %d%% for site %s", percent, self.site_id)
             return True
         _LOGGER.error("Failed to set off-grid EV reserve for site %s: HTTP %s", self.site_id, status)
@@ -2045,8 +2121,9 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         }
         status, _body = await self._tesla_api_call("POST", path, json_body=payload)
         if status == 200:
-            # Invalidate cache so next read picks up new state.
+            # Invalidate caches so next reads pick up new state.
             self._vpp_programs_cache = None
+            self.invalidate_site_info_cache()
             _LOGGER.info(
                 "VPP program %s %s for site %s",
                 program_id, "enrolled" if enrolled else "unenrolled", self.site_id,

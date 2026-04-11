@@ -16724,21 +16724,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _command_generation[0] += 1
         _restore_gen = _command_generation[0]
 
-        # Mutual exclusion: clear any lingering force_charge state.
-        # handle_force_charge has had per-branch clearing of force_discharge
-        # state since forever, but the reverse direction was missing — so
-        # force_charge → force_discharge would leave force_charge_state["active"]
-        # stuck True, confusing downstream checks (optimizer mode eval, TariffPriceView,
-        # automation triggers). Force commands are mutually exclusive; clear the
-        # opposite state here at a single chokepoint.
-        if force_charge_state.get("active"):
-            _LOGGER.info("force_discharge: clearing active force_charge state (transition)")
+        # Mutual exclusion + baseline inheritance: if a force_charge is
+        # active when this command lands, we transition directly without
+        # re-saving the current (charge-modified) state as the baseline.
+        # Instead we inherit force_charge's saved_* values so that the
+        # eventual auto-restore reverts to the TRUE pre-force state rather
+        # than the intermediate force_charge state. This also flips
+        # was_already_force_discharging to True so the Tesla save-baseline
+        # block further down is skipped.
+        _transitioning_from_force_charge = force_charge_state.get("active", False)
+        if _transitioning_from_force_charge:
+            _LOGGER.info(
+                "force_discharge: transitioning from active force_charge, "
+                "inheriting saved baseline (tariff/mode/reserve)"
+            )
+            force_discharge_state["saved_tariff"] = force_charge_state.get("saved_tariff")
+            force_discharge_state["saved_operation_mode"] = force_charge_state.get("saved_operation_mode")
+            force_discharge_state["saved_backup_reserve"] = force_charge_state.get("saved_backup_reserve")
+            # saved_export_rule is left as-is; force_charge doesn't modify
+            # the export rule, so any pre-existing value on
+            # force_discharge_state is still accurate. If it's None (fresh
+            # discharge), auto-restore will skip the export rule which is
+            # the same no-op behavior as before.
             force_charge_state["active"] = False
+            force_charge_state["saved_tariff"] = None
+            force_charge_state["saved_operation_mode"] = None
+            force_charge_state["saved_backup_reserve"] = None
             force_charge_state["expires_at"] = None
 
         # Set force discharge state IMMEDIATELY so the optimizer sees it
         # before the async Modbus/API call completes (same race fix as force_charge).
-        was_already_force_discharging = force_discharge_state.get("active", False)
+        # Treat a force_charge transition as "already force discharging" so
+        # the save-baseline block is skipped (otherwise it'd overwrite the
+        # saved_* fields we just inherited with the current force_charge state).
+        was_already_force_discharging = (
+            force_discharge_state.get("active", False) or _transitioning_from_force_charge
+        )
         force_discharge_state["active"] = True
         force_discharge_state["source"] = source
         force_discharge_state["duration"] = duration
@@ -17481,13 +17502,41 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _command_generation[0] += 1
         _restore_gen = _command_generation[0]
 
+        # Mutual exclusion + baseline inheritance: if a force_discharge is
+        # active when this command lands, transition directly without
+        # re-saving the current (discharge-modified) state as the baseline.
+        # Inherit force_discharge's saved_* values so the eventual auto-restore
+        # reverts to the TRUE pre-force state. Also clears discharge state
+        # here at the single chokepoint rather than relying on the per-battery
+        # clearing scattered through each branch below (that stays in place as
+        # a defence-in-depth belt-and-braces).
+        _transitioning_from_force_discharge = force_discharge_state.get("active", False)
+        if _transitioning_from_force_discharge:
+            _LOGGER.info(
+                "force_charge: transitioning from active force_discharge, "
+                "inheriting saved baseline (tariff/mode/reserve)"
+            )
+            force_charge_state["saved_tariff"] = force_discharge_state.get("saved_tariff")
+            force_charge_state["saved_operation_mode"] = force_discharge_state.get("saved_operation_mode")
+            force_charge_state["saved_backup_reserve"] = force_discharge_state.get("saved_backup_reserve")
+            force_discharge_state["active"] = False
+            force_discharge_state["saved_tariff"] = None
+            force_discharge_state["saved_operation_mode"] = None
+            force_discharge_state["saved_backup_reserve"] = None
+            force_discharge_state["saved_export_rule"] = None
+            force_discharge_state["expires_at"] = None
+
         # Set force charge state IMMEDIATELY so the optimizer sees it
         # before the async Modbus/API call completes.  Prevents a race
         # where the optimizer finishes its LP cycle during the Modbus
         # write and overrides the mode (e.g. FoxESS Backup → Self Use).
         # Each battery branch sets expires_at on success or clears
-        # active on failure.
-        was_already_force_charging = force_charge_state.get("active", False)
+        # active on failure. Treating a discharge transition as
+        # "already force charging" skips the per-branch re-save that would
+        # otherwise overwrite our inherited baseline.
+        was_already_force_charging = (
+            force_charge_state.get("active", False) or _transitioning_from_force_discharge
+        )
         force_charge_state["active"] = True
         force_charge_state["source"] = source
         force_charge_state["duration"] = duration
@@ -19017,6 +19066,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             ) as response:
                                 if response.status == 200:
                                     _LOGGER.info("Tesla site %s backup reserve set to %d%%", site_id, percent)
+                                    _tesla_coord_for_cache = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("tesla_coordinator")
+                                    if _tesla_coord_for_cache is not None:
+                                        _tesla_coord_for_cache.invalidate_site_info_cache()
                                     if percent == 100:
                                         hass.async_create_task(_tesla_charge_kick("backup_reserve_100"))
                                     break
@@ -19104,6 +19156,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         ) as response:
                             if response.status == 200:
                                 _LOGGER.info("Operation mode set to %s for site %s", mode, site_id)
+                                _tesla_coord_for_cache = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("tesla_coordinator")
+                                if _tesla_coord_for_cache is not None:
+                                    _tesla_coord_for_cache.invalidate_site_info_cache()
                                 if mode == "self_consumption":
                                     if entry.entry_id in hass.data[DOMAIN]:
                                         hass.data[DOMAIN][entry.entry_id].pop("last_force_toggle_time", None)
@@ -19164,6 +19219,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 ) as response:
                     if response.status == 200:
                         _LOGGER.info("Grid export rule set to %s for site %s", rule, site_id)
+                        _tesla_coord_for_cache = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("tesla_coordinator")
+                        if _tesla_coord_for_cache is not None:
+                            _tesla_coord_for_cache.invalidate_site_info_cache()
                         solar_curtailment_enabled = entry.options.get(
                             CONF_BATTERY_CURTAILMENT_ENABLED,
                             entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)

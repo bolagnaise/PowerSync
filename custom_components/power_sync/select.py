@@ -225,10 +225,22 @@ class TeslaGridExportRuleSelect(_TeslaSiteSelectBase):
 
     @property
     def current_option(self) -> str | None:
+        # Prefer the cached value written when the user last set the rule
+        # via a service call — this survives even when the Tesla API's
+        # site_info response omits customer_preferred_export_rule (which
+        # happens on VPP / non-export-configured sites). Without this
+        # fallback, the select used to show as "unknown" for any such site.
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        cached = entry_data.get("cached_export_rule")
+        if cached in self._OPTIONS:
+            return cached
+
         coord = self._tesla_coord()
         site_info = getattr(coord, "_site_info_cache", None) if coord else None
         if not site_info:
-            return None
+            # No site info yet and no cached value — default to battery_ok
+            # so the entity is always selectable rather than stuck unknown.
+            return "battery_ok"
         components = site_info.get("components", {}) or {}
         rule = components.get(
             "customer_preferred_export_rule",
@@ -238,7 +250,10 @@ class TeslaGridExportRuleSelect(_TeslaSiteSelectBase):
             return rule
         if components.get("non_export_configured"):
             return "never"
-        return None
+        # Same fallback as PowerwallSettingsView: when the API omits the
+        # rule (typical for VPP users), default to battery_ok so the entity
+        # always has a valid value rather than reporting unknown.
+        return "battery_ok"
 
     async def async_select_option(self, option: str) -> None:
         await self.hass.services.async_call(
