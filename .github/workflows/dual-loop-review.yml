@@ -1,0 +1,140 @@
+name: Dual-Loop PR Review
+
+# Loop 1: Automated first-pass review on every PR open/update
+# Loop 2: Deep review triggered by @claude review in PR comments
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+    branches: [main, develop]
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  # ── LOOP 1: Automatic first-pass on every PR push ──────────────────────────
+  auto-review:
+    name: Automated First-Pass Review
+    if: |
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Auto Review via Claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: --model claude-sonnet-4-6 --max-turns 5
+          direct_prompt: |
+            Review this pull request as a first-pass automated check.
+            Focus only on concrete, actionable issues. Skip nitpicks.
+
+            Check for:
+            1. SECURITY: secrets/tokens in diff, SQL injection, XSS, input validation gaps
+            2. CORRECTNESS: logic errors, unhandled edge cases, wrong API usage
+            3. STACK RULES:
+               - Next.js/TS: no `any`, server/client boundary violations, Prisma destructive migrations
+               - Swift: force unwraps without JUSTIFIED comment, non-MainActor UI updates, retain cycles
+               - Python: bare except:, missing type hints on public functions, no APScheduler error handling
+               - JS date bug: toISOString().split('T')[0] for AEST dates (must use local date components)
+            4. BREAKING: anything that could break production or HA integrations
+            5. DOCS: CHANGELOG.md missing entry, public API changed without doc update
+
+            Format your response as:
+            ## Automated Review — First Pass
+
+            ### 🔴 Must Fix (blocks merge)
+            [list or "None"]
+
+            ### 🟡 Should Fix (important)
+            [list or "None"]
+
+            ### ✅ Looks Good
+            [brief confirmation of what was done well]
+
+            Keep it concise. CodeRabbit will do the detailed line-by-line review.
+            Do not approve or request changes — this is informational only.
+
+  # ── LOOP 2: Deep review on @claude review trigger ──────────────────────────
+  deep-review:
+    name: Deep Review on Demand
+    if: |
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, '@claude review')) ||
+      (github.event_name == 'pull_request_review_comment' &&
+       contains(github.event.comment.body, '@claude review'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Deep Review via Claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: --model claude-sonnet-4-6 --max-turns 10
+          direct_prompt: |
+            Perform a thorough deep review of this PR. Use the linus-code-reviewer
+            standard: direct, merciless, fair. Technical arguments only.
+
+            Review all changed files for:
+
+            SECURITY & RELIABILITY
+            - Input validation on all external data
+            - Error handling completeness
+            - No secrets or credentials in code
+            - Race conditions and async correctness
+
+            CORRECTNESS
+            - Logic errors and edge cases
+            - API contract compliance
+            - Data transformation accuracy
+
+            STACK-SPECIFIC (apply to detected stack):
+
+            Next.js/TypeScript:
+            - Strict TypeScript (no any, correct generics)
+            - App Router patterns (server vs client boundary)
+            - Prisma: additive migrations only, parameterised queries
+            - React: unnecessary re-renders, hook rules, Suspense boundaries
+
+            Swift/SwiftUI:
+            - Actor isolation and MainActor correctness
+            - No force unwraps without // JUSTIFIED: comment
+            - Memory: weak self in escaping closures
+            - Async: proper cancellation, no blocking main thread
+
+            Python/Flask:
+            - Type hints on all public functions
+            - No bare except: clauses
+            - Flask Blueprint structure respected
+            - APScheduler jobs have try/except wrappers
+            - GridWise: EMHASS plan validation, Modbus TCP close in finally
+
+            RYAN'S SPECIFIC RULES:
+            - Never toISOString().split('T')[0] for AEST dates in JS
+            - Never commit to main directly
+            - HA: never edit .storage/*.json, never SSH background processes
+
+            DOCS & QUALITY:
+            - CHANGELOG.md updated
+            - Public APIs documented
+            - Tests cover acceptance criteria
+
+            Score 1-10. List Critical (must fix), Serious (should fix), Minor (nice to fix).
+            State BLOCK / NEEDS WORK / LGTM as final verdict.

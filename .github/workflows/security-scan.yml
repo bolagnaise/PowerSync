@@ -1,0 +1,27 @@
+name: Security Scan
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    name: Secret Detection
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          LATEST=$(curl -sI https://github.com/gitleaks/gitleaks/releases/latest | grep -i '^location:' | sed 's|.*/tag/v||;s/\r//')
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${LATEST}/gitleaks_${LATEST}_linux_x64.tar.gz" | tar xz
+          sudo mv gitleaks /usr/local/bin/
+      - name: Run gitleaks
+        run: gitleaks detect --source . --verbose --redact --no-banner

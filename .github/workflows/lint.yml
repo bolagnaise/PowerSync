@@ -1,0 +1,241 @@
+name: Lint
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  # ── Detect which stacks are present ────────────────────────────────────────
+  detect:
+    name: Detect Stack
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      nextjs: ${{ steps.detect.outputs.nextjs }}
+      swift: ${{ steps.detect.outputs.swift }}
+      python: ${{ steps.detect.outputs.python }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: detect
+        run: |
+          echo "nextjs=$(test -f package.json && ls next.config.* 2>/dev/null && echo true || echo false)" >> $GITHUB_OUTPUT
+          echo "swift=$(ls *.swift *.xcodeproj Package.swift 2>/dev/null | head -1 | grep -q . && echo true || echo false)" >> $GITHUB_OUTPUT
+          echo "python=$(test -f requirements.txt || test -f pyproject.toml || test -f app.py && echo true || echo false)" >> $GITHUB_OUTPUT
+
+  # ── Next.js / TypeScript ───────────────────────────────────────────────────
+  lint-nextjs:
+    name: ESLint + TypeScript
+    needs: detect
+    if: needs.detect.outputs.nextjs == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+
+      - name: ESLint
+        run: npm run lint 2>&1 | tee eslint-output.txt
+        continue-on-error: true
+
+      - name: TypeScript
+        run: npx tsc --noEmit 2>&1 | tee tsc-output.txt
+        continue-on-error: true
+
+      - name: Fail if errors
+        run: |
+          ESLINT_ERRORS=$(grep -c "error" eslint-output.txt 2>/dev/null || echo 0)
+          TSC_ERRORS=$(grep -c "error TS" tsc-output.txt 2>/dev/null || echo 0)
+          if [ "$ESLINT_ERRORS" -gt 0 ] || [ "$TSC_ERRORS" -gt 0 ]; then
+            echo "❌ Lint failed: $ESLINT_ERRORS ESLint errors, $TSC_ERRORS TypeScript errors"
+            cat eslint-output.txt
+            cat tsc-output.txt
+            exit 1
+          fi
+          echo "✅ ESLint and TypeScript clean"
+
+      - name: Prettier check
+        run: |
+          if npx prettier --check . 2>/dev/null; then
+            echo "✅ Prettier clean"
+          else
+            echo "⚠️ Prettier formatting issues found (run: npx prettier --write .)"
+            exit 1
+          fi
+
+  # ── Swift ──────────────────────────────────────────────────────────────────
+  lint-swift:
+    name: SwiftLint
+    needs: detect
+    if: needs.detect.outputs.swift == 'true'
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SwiftLint
+        run: brew install swiftlint
+
+      - name: SwiftLint strict
+        run: |
+          swiftlint --strict --reporter github-actions-logging 2>&1 | tee swiftlint-output.txt
+          EXIT_CODE=$?
+          VIOLATIONS=$(grep -c "error:" swiftlint-output.txt 2>/dev/null || echo 0)
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "❌ SwiftLint: $VIOLATIONS violations"
+            exit 1
+          fi
+          echo "✅ SwiftLint clean"
+
+      - name: Check for force unwraps without justification
+        run: |
+          UNJUSTIFIED=$(grep -rn '!' --include='*.swift' . \
+            | grep -v '// JUSTIFIED:' \
+            | grep -v '//.*!' \
+            | grep -v 'test\|Test\|spec\|Spec\|mock\|Mock' \
+            | grep -v 'node_modules\|.build\|Pods' \
+            | grep -E '!\s*$|!\.' \
+            | wc -l | tr -d ' ')
+          if [ "$UNJUSTIFIED" -gt 0 ]; then
+            echo "⚠️ $UNJUSTIFIED force unwrap(s) without // JUSTIFIED: comment:"
+            grep -rn '!' --include='*.swift' . \
+              | grep -v '// JUSTIFIED:' \
+              | grep -v '//.*!' \
+              | grep -v 'test\|Test\|mock\|Mock' \
+              | grep -v 'node_modules\|.build\|Pods' \
+              | grep -E '!\s*$|!\.'
+          else
+            echo "✅ No unjustified force unwraps"
+          fi
+
+  # ── Python ─────────────────────────────────────────────────────────────────
+  lint-python:
+    name: Ruff + MyPy + Bandit
+    needs: detect
+    if: needs.detect.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install linters
+        run: |
+          pip install ruff mypy bandit 2>/dev/null
+          if [ -f requirements.txt ]; then pip install -r requirements.txt 2>/dev/null || true; fi
+
+      - name: Ruff
+        run: |
+          ruff check . 2>&1 | tee ruff-output.txt
+          EXIT_CODE=$?
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "❌ Ruff errors found"
+            exit 1
+          fi
+          echo "✅ Ruff clean"
+
+      - name: MyPy
+        run: |
+          mypy . --ignore-missing-imports 2>&1 | tee mypy-output.txt
+          ERRORS=$(grep -c "error:" mypy-output.txt 2>/dev/null || echo 0)
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "❌ MyPy: $ERRORS type errors"
+            cat mypy-output.txt
+            exit 1
+          fi
+          echo "✅ MyPy clean"
+
+      - name: Bandit security scan
+        run: |
+          bandit -r . -ll -x ./tests 2>&1 | tee bandit-output.txt
+          EXIT_CODE=$?
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "❌ Bandit found security issues"
+            cat bandit-output.txt
+            exit 1
+          fi
+          echo "✅ Bandit clean"
+
+      - name: Check for bare except clauses
+        run: |
+          BARE=$(grep -rn "except:" --include='*.py' . \
+            | grep -v 'test\|Test\|#.*except' \
+            | grep -v node_modules \
+            | wc -l | tr -d ' ')
+          if [ "$BARE" -gt 0 ]; then
+            echo "❌ $BARE bare except: clause(s) found — always catch specific exceptions:"
+            grep -rn "except:" --include='*.py' . | grep -v 'test\|Test\|#.*except'
+            exit 1
+          fi
+          echo "✅ No bare except: clauses"
+
+      - name: Check for missing type hints on public functions
+        run: |
+          MISSING=$(grep -rn "^def " --include='*.py' . \
+            | grep -v 'test\|Test\|__\|#' \
+            | grep -v node_modules \
+            | grep -v ") ->" \
+            | wc -l | tr -d ' ')
+          if [ "$MISSING" -gt 0 ]; then
+            echo "⚠️ $MISSING public function(s) missing return type hints:"
+            grep -rn "^def " --include='*.py' . \
+              | grep -v 'test\|Test\|__\|#' \
+              | grep -v node_modules \
+              | grep -v ") ->"
+            exit 1
+          fi
+          echo "✅ All public functions have return type hints"
+
+  # ── Universal: AEST date gotcha check ─────────────────────────────────────
+  lint-aest-date:
+    name: AEST Date Bug Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for toISOString date bug
+        run: |
+          MATCHES=$(grep -rn "toISOString.*split.*T\|\.split('T')\[0\]" \
+            --include='*.ts' --include='*.tsx' --include='*.js' \
+            --exclude-dir=node_modules --exclude-dir='.next' \
+            . 2>/dev/null | wc -l | tr -d ' ')
+          if [ "$MATCHES" -gt 0 ]; then
+            echo "❌ AEST date bug detected — toISOString().split('T')[0] returns wrong date in AEST:"
+            grep -rn "toISOString.*split.*T\|\.split('T')\[0\]" \
+              --include='*.ts' --include='*.tsx' --include='*.js' \
+              --exclude-dir=node_modules --exclude-dir='.next' .
+            echo ""
+            echo "Fix: use local date components instead:"
+            echo "  const y = d.getFullYear();"
+            echo "  const m = String(d.getMonth() + 1).padStart(2, '0');"
+            echo "  const day = String(d.getDate()).padStart(2, '0');"
+            echo "  return \`\${y}-\${m}-\${day}\`;"
+            exit 1
+          fi
+          echo "✅ No AEST date bugs found"
+
+  # ── Universal: secrets scan ────────────────────────────────────────────────
+  lint-secrets:
+    name: Secret Detection
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

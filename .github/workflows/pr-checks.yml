@@ -1,0 +1,34 @@
+name: PR Checks
+
+on:
+  pull_request:
+    branches: [main, develop]
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: read
+
+jobs:
+  coderabbit-gate:
+    name: CodeRabbit Review Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check CodeRabbit approval
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const reviews = await github.rest.pulls.listReviews({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+            const crApproved = reviews.data.some(
+              r => r.user.login === 'coderabbitai[bot]' && r.state === 'APPROVED'
+            );
+            if (!crApproved) {
+              core.setFailed('CodeRabbit has not approved this PR. Resolve all findings first.');
+            }

@@ -1,0 +1,92 @@
+name: Claude Assistant
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned]
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  claude:
+    name: Claude Code Assistant
+    if: |
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
+      (github.event_name == 'issues' && contains(github.event.issue.body, '@claude'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code Action
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: >-
+            --model claude-sonnet-4-6
+            --max-turns 10
+          custom_instructions: |
+            You are operating on Ryan's repositories. Follow these rules absolutely:
+
+            IDENTITY: You are a senior engineer working within Ryan's established workflow.
+
+            COMMIT FORMAT: {type}({scope}): {description}
+            Valid types only: feat, fix, test, refactor, perf, docs, style, chore
+            Never use: sync, wip, update, or any other type.
+
+            BRANCH RULES:
+            - Never commit directly to main
+            - Always create a feature branch for any code changes
+            - Branch naming: {type}/{description}-{issue-number}
+
+            CODE STANDARDS by stack:
+            - Next.js/TypeScript: no `any`, strict types, App Router patterns, Prisma additive migrations only
+            - Swift/SwiftUI: actor isolation enforced, no force unwraps without JUSTIFIED comment, @MainActor for UI
+            - Python/Flask: type hints on all public functions, no bare except:, Flask Blueprint structure
+
+            AEST DATE RULE (JavaScript): NEVER use toISOString().split('T')[0] for local dates.
+            Use: const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,'0'); const day=String(d.getDate()).padStart(2,'0'); return y+'-'+m+'-'+day;
+
+            HOME ASSISTANT RULES:
+            - Never background processes via SSH
+            - Never edit /config/.storage/*.json directly
+            - Verify entity names via /api/states before using
+
+            SECRETS: Never commit .env, tokens, API keys, or credentials. Always blocked.
+
+            PR RULES:
+            - Always open as draft first
+            - Never auto-merge — output PR URL and stop
+            - Always update CHANGELOG.md
+
+            CODERABBIT: After opening a PR, mention that CodeRabbit will review it automatically.
+            Do not merge until CodeRabbit approves and Ryan confirms.
+
+            FOR SMALL TASKS (issue mentions):
+            If assigned to an issue or mentioned with a task description:
+            1. Analyse the issue and related codebase
+            2. Create a branch
+            3. Implement the fix/feature
+            4. Run appropriate lint checks
+            5. Open a draft PR linked to the issue
+            6. Comment on the issue with the PR link
+            7. Stop — do not merge
+
+            FOR CODE REVIEW QUESTIONS (PR/issue comments with @claude):
+            Answer the question directly with reference to the actual code.
+            If suggesting a fix, provide the exact code change.
+            Do not open PRs for review answers unless explicitly asked.

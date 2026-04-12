@@ -12,6 +12,10 @@
   <a href="https://testflight.apple.com/join/FhnUtSFy"><img src="https://img.shields.io/badge/iOS-TestFlight-blue?logo=apple&logoColor=white" alt="iOS TestFlight"></a>
   <a href="https://play.google.com/apps/testing/com.powersync.mobile"><img src="https://img.shields.io/badge/Android-Beta-3DDC84?logo=android&logoColor=white" alt="Android Beta"></a>
 
+  [![CI](https://github.com/Artic0din/PowerSync/actions/workflows/python-ci.yml/badge.svg)](https://github.com/Artic0din/PowerSync/actions/workflows/python-ci.yml)
+  [![CodeRabbit](https://img.shields.io/badge/CodeRabbit-AI%20Review-blue?logo=github)](https://github.com/Artic0din/PowerSync)
+  [![Security Scan](https://github.com/Artic0din/PowerSync/actions/workflows/security-scan.yml/badge.svg)](https://github.com/Artic0din/PowerSync/actions/workflows/security-scan.yml)
+
 </div>
 
 > **Disclaimer:** This is an unofficial integration and is not affiliated with or endorsed by Tesla, Sigenergy, Sungrow, FoxESS, GoodWe, Amber Electric, Localvolts, Octopus Energy, or EPEX/ENTSO-E. Use at your own risk.
@@ -151,6 +155,36 @@ Remote monitoring and control via iOS and Android.
 
 - **Discord:** https://discord.gg/eaWDWxEWE3 — bug reports, feature requests, and support
 - **Wiki:** https://github.com/bolagnaise/PowerSync/wiki
+
+## Development
+
+### Prerequisites
+
+- Python 3.12+
+- [ruff](https://docs.astral.sh/ruff/) — linter and formatter
+- [mypy](https://mypy-lang.org/) — static type checker
+- [bandit](https://bandit.readthedocs.io/) — security linter
+- [pytest](https://docs.pytest.org/) — test runner
+
+### Local checks
+
+```bash
+pip install -r requirements.txt ruff mypy bandit pytest pytest-cov
+ruff check .
+mypy . --ignore-missing-imports
+bandit -r . -ll -x ./tests
+pytest --tb=short -q
+```
+
+### Branch strategy
+
+- All changes via feature branches and pull requests to `main`
+- CodeRabbit AI review required before merge
+- `CHANGELOG.md` must be updated in every PR
+
+### Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
