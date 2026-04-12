@@ -1505,21 +1505,24 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             # Grid status: "Active" (on-grid) or "Islanded" (off-grid/blackout)
             grid_status = live_status.get("grid_status", "Active")
 
-            # Detect grid status transitions and send push notifications
+            # Detect grid status transitions and send push notifications.
+            # Tesla API returns grid_status "Active" (on-grid) or "Inactive"
+            # (off-grid). Only notify on real transitions, not initial load.
+            is_on_grid = grid_status == "Active"
             prev_status = self._last_grid_status
-            if grid_status != prev_status:
-                self._last_grid_status = grid_status
+            self._last_grid_status = grid_status
+            if prev_status is not None and grid_status != prev_status:
                 try:
                     from .automations.actions import _send_expo_push
-                    if grid_status == "Islanded":
+                    if not is_on_grid:
                         _LOGGER.warning(
-                            "Grid outage detected — Powerwall islanding (site %s)",
+                            "Grid outage detected — Powerwall off-grid (site %s)",
                             self.site_id,
                         )
                         await _send_expo_push(
                             self.hass,
                             "Grid Outage Detected",
-                            "Your Powerwall is running off-grid (islanded). Grid power is unavailable.",
+                            "Your Powerwall is running off-grid. Grid power is unavailable.",
                         )
                     else:
                         _LOGGER.info(

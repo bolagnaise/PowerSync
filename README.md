@@ -24,7 +24,7 @@
 
 | System | Connection | Control |
 |--------|-----------|---------|
-| **Tesla Powerwall** | PowerSync.cc, Fleet API, or Teslemetry | TOU tariff sync, force charge/discharge, export rules |
+| **Tesla Powerwall** | PowerSync.cc, Fleet API, or Teslemetry | TOU tariff sync, force charge/discharge, export rules, **off-grid/reconnect** |
 | **FoxESS** (H1, H3, H3-Pro, H3 Smart, KH + OEM rebrands) | Modbus TCP or RS485 | Work mode, force charge/discharge, backup reserve |
 | **Sigenergy** | Cloud API + Modbus TCP | Remote EMS control, force charge/discharge, DC solar curtailment |
 | **Solax** | Modbus TCP or HA entity | Export control, curtailment (GEN2-GEN6) |
@@ -103,9 +103,9 @@ Or manually:
 | **Battery System Setup** | Tesla, FoxESS, Sigenergy, GoodWe, Sungrow connection guides | [Setup Guide](https://github.com/bolagnaise/PowerSync/wiki/Battery-System-Setup) |
 | **Smart Optimization** | Built-in LP optimizer calculates optimal charge/discharge schedule using prices, solar, and load. **Solar forecasting (Solcast) must be configured for accurate scheduling.** | [Details](https://github.com/bolagnaise/PowerSync/wiki/Smart-Optimization) |
 | **EV Smart Charging** | Coordinate EV charging with battery optimization — Solar, Cheapest, Deadline modes | [Details](https://github.com/bolagnaise/PowerSync/wiki/EV-Smart-Charging) |
-| **Advanced Features** | AEMO spike detection, solar curtailment, spike protection, export boost, chip mode | [Details](https://github.com/bolagnaise/PowerSync/wiki/Advanced-Features) |
+| **Advanced Features** | AEMO spike detection, solar curtailment, spike protection, export boost, **off-grid control** | [Details](https://github.com/bolagnaise/PowerSync/wiki/Advanced-Features) |
 | **Sensors** | Core power sensors, daily energy tracking, FoxESS Modbus sensors, optimizer status | [Full List](https://github.com/bolagnaise/PowerSync/wiki/Sensors) |
-| **Services** | Force charge/discharge, TOU sync, backup reserve, inverter curtailment | [Reference](https://github.com/bolagnaise/PowerSync/wiki/Services-Reference) |
+| **Services** | Force charge/discharge, TOU sync, backup reserve, inverter curtailment, **off-grid/reconnect** | [Reference](https://github.com/bolagnaise/PowerSync/wiki/Services-Reference) |
 | **Troubleshooting** | Connection issues, debug logging, common fixes | [Guide](https://github.com/bolagnaise/PowerSync/wiki/Troubleshooting) |
 
 ---
@@ -125,8 +125,10 @@ Remote monitoring and control via iOS and Android.
 ### Features
 
 - **Dashboard** — Live pricing, power flow, energy summary
+- **Controls** — Force charge/discharge, backup reserve, off-grid/reconnect
 - **Smart Optimization** — 24-hour battery schedule, action plan, cost tracking
 - **EV Charging** — Smart scheduling, solar surplus, price-level charging
+- **Automations** — Time, price, and grid-status triggers with battery/EV/grid actions
 - **Settings** — Battery, EV, provider, and optimization configuration
 - **Demo Mode** — Try the app without a Home Assistant connection using simulated data
 

@@ -285,6 +285,9 @@ class TeslaSignalingClient:
 
     async def start(self) -> None:
         """Start the persistent connection loop as a background task."""
+        if self._auth_denied:
+            _LOGGER.debug("signaling: skipping — previously got auth denied")
+            return
         if self._task is not None and not self._task.done():
             _LOGGER.debug("signaling: already running")
             return

@@ -531,6 +531,11 @@ class PowerwallOffGridView(HomeAssistantView):
                     {"success": False, "error": str(err)}, status=502
                 )
 
+        # The off-grid/reconnect command is sent via the cloud and the
+        # physical contactor takes a few seconds to change state. Delay
+        # the local refresh so the snapshot reflects the new state.
+        import asyncio
+        await asyncio.sleep(5)
         await coordinator.async_request_refresh()
         return web.json_response(
             {"success": ok, "action": action, "snapshot": coordinator.snapshot_as_api()}
