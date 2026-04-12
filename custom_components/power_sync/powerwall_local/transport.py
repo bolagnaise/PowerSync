@@ -240,12 +240,19 @@ class TEDAPIv1rTransport:
         payload = routable.SerializeToString()
         headers = {"Content-Type": "application/octet-stream"}
 
+        _LOGGER.info(
+            "v1r POST to %s with DIN=%s, envelope=%d bytes",
+            url, din, len(payload),
+        )
         try:
             async with await self._session() as sess:
                 async with sess.post(url, data=payload, headers=headers) as resp:
                     http_status = resp.status
                     if http_status != 200:
-                        _LOGGER.debug("v1r POST non-200: %s", http_status)
+                        body_text = await resp.text()
+                        _LOGGER.warning(
+                            "v1r POST non-200: %s — %s", http_status, body_text[:300]
+                        )
                         return TEDAPIResponse(False, None, http_status=http_status)
                     raw = await resp.read()
         except aiohttp.ClientError as err:
@@ -260,6 +267,7 @@ class TEDAPIv1rTransport:
         fault = resp_msg.signed_message_status.message_fault
         if fault != combined_pb2.MESSAGEFAULT_ERROR_NONE:
             fault_name = combined_pb2.MessageFault_E.Name(fault)
+            _LOGGER.warning("v1r response fault: %s (code %s)", fault_name, fault)
             if fault == combined_pb2.MESSAGEFAULT_ERROR_UNKNOWN_KEY_ID:
                 raise PowerwallSignatureError(
                     "Gateway does not recognise our RSA key — re-pairing required"
@@ -353,6 +361,69 @@ class TEDAPIv1rTransport:
             return wenv.HasField("filestore")
         except Exception:
             return False
+
+    async def set_island_mode(self, din: str, *, off_grid: bool) -> bool:
+        """Send ``TEGAPISetIslandModeRequest`` to the gateway.
+
+        This is the real islanding command — it physically opens or closes
+        the grid contactor. Uses the ``teslapower`` proto schema (from
+        pypowerwall's ``tesla_pb2.py``) because it defines
+        ``setIslandModeRequest`` at field 3 in ``TEGMessages``, which the
+        ``tedapi_combined`` proto didn't include. The wire format is
+        identical: same field numbers, same message layout. The gateway
+        processes it the same way regardless of which proto package
+        generated the bytes.
+
+        Args:
+            din: Full gateway DIN (part--serial)
+            off_grid: True to island, False to reconnect
+        """
+        from . import tesla_local_pb2 as tp
+
+        mode = 2 if off_grid else 1
+        env = tp.MessageEnvelope()
+        env.deliveryChannel = 2  # HERMES_COMMAND
+        env.sender.authorizedClient = 1
+        env.recipient.din = din
+        env.teg.setIslandModeRequest.mode = mode
+        env.teg.setIslandModeRequest.force = True
+
+        _LOGGER.info(
+            "set_island_mode: mode=%s (%s) din=%s",
+            mode, "off_grid" if off_grid else "on_grid", din,
+        )
+        resp = await self.post_v1r(env.SerializeToString(), din)
+        if not resp.ok or not resp.inner_bytes:
+            _LOGGER.warning(
+                "set_island_mode failed: ok=%s fault=%s http=%s",
+                resp.ok, resp.fault_name, resp.http_status,
+            )
+            return False
+        try:
+            reply = tp.MessageEnvelope()
+            reply.ParseFromString(resp.inner_bytes)
+            _LOGGER.info(
+                "set_island_mode: response envelope: deliveryChannel=%s "
+                "has_teg=%s has_common=%s payload_case=%s raw_hex=%s",
+                reply.deliveryChannel,
+                reply.HasField("teg") if True else "?",
+                reply.HasField("common") if True else "?",
+                reply.WhichOneof("payload"),
+                resp.inner_bytes[:200].hex(),
+            )
+            if reply.HasField("teg"):
+                teg_field = reply.teg.WhichOneof("message")
+                _LOGGER.info("set_island_mode: TEG oneof field = %s", teg_field)
+                if teg_field == "setIslandModeResponse":
+                    result = reply.teg.setIslandModeResponse.result
+                    _LOGGER.info("set_island_mode response: result=%s", result)
+                    return result == 0
+            _LOGGER.warning(
+                "set_island_mode: unexpected response payload (no setIslandModeResponse)"
+            )
+        except Exception as err:
+            _LOGGER.warning("set_island_mode: response parse error: %s", err)
+        return False
 
     async def schedule_manual_backup(self, din: str, duration_s: int) -> bool:
         """Trigger Tesla's "Storm Watch Manual Backup" — holds SOC, stops export.

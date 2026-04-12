@@ -195,14 +195,22 @@ class PowerwallPairingManager:
                 encryption_algorithm=serialization.NoEncryption(),
             )
 
-            # Step 2: discover site + DIN if caller didn't provide one.
+            # Step 2: discover site + DIN. The caller may provide
+            # energy_site_id from the existing config entry but the DIN
+            # must always come from the products endpoint because it's the
+            # full {part_number}--{serial_number} that the TEDAPI v1r
+            # transport needs for TLV signature personalization. Using
+            # just the serial (or an empty string) causes
+            # MESSAGEFAULT_ERROR_WRONG_PERSONALIZATION at the gateway.
             energy_site_id = self._energy_site_id
             din: str | None = None
+            fetched_site_id, fetched_din = await self._fetch_first_energy_site()
             if energy_site_id is None:
-                energy_site_id, din = await self._fetch_first_energy_site()
-                if energy_site_id is None:
-                    self._fail("No energy site found on this Tesla account")
-                    return
+                energy_site_id = fetched_site_id
+            if energy_site_id is None:
+                self._fail("No energy site found on this Tesla account")
+                return
+            din = fetched_din
             self._status.energy_site_id = energy_site_id
             self._status.din = din
 
@@ -216,13 +224,17 @@ class PowerwallPairingManager:
                 self._fail("Tesla Fleet API rejected the registration request")
                 return
 
-            # Cloud sometimes verifies automatically if the user is logged in
-            # to the Tesla app recently.
+            # Tesla cloud sometimes reports state=VERIFIED immediately if the
+            # user toggled the switch recently (grace window from a prior
+            # pairing attempt or Netzero). But cloud-verified does NOT mean
+            # the gateway itself has accepted the key — the gateway only
+            # confirms after a physical toggle that happens AFTER our key
+            # was registered. Trusting the cloud auto-verify led to a
+            # "client authorization not verified" error on the first real
+            # TEDAPI command. Always require the physical toggle regardless
+            # of what the cloud says.
             state = _extract_client_state(register_resp)
             self._status.key_state = state
-            if state == _KEY_STATE_VERIFIED:
-                await self._complete(private_pem, public_key_der, din or "", energy_site_id)
-                return
 
             # Step 4: ask the user to toggle the switch, poll for state change.
             self._status.state = PairingState.WAITING_FOR_TOGGLE

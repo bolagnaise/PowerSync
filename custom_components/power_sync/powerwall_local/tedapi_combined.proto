@@ -253,8 +253,27 @@ message BackupEvent {
   ControlEventSchedulingInfo scheduling_info = 3;
 }
 
+// Island mode control — field numbers 3/4 match the teslapower.TEGMessages
+// schema from pypowerwall's local/tesla.proto. The gateway firmware uses
+// one internal TEG handler regardless of whether the message arrives via
+// WiFi TEDAPI (teslapower package) or v1r RSA-signed transport
+// (tedapi_combined package), so the wire-format field numbers are the
+// same and the gateway processes them identically.
+message TEGAPISetIslandModeRequest {
+  int32 mode  = 1;  // 1 = on_grid, 2 = off_grid (intentional islanding)
+  bool  force = 2;
+}
+
+message TEGAPISetIslandModeResponse {
+  int32 result = 1;  // 0 = success
+}
+
 message TEGMessages {
   oneof message {
+    // Island mode control (fields 3-4, from teslapower schema)
+    TEGAPISetIslandModeRequest  set_island_mode_request  = 3;
+    TEGAPISetIslandModeResponse set_island_mode_response = 4;
+    // Manual backup / storm watch events (fields 45-50)
     TEGAPIScheduleManualBackupEventRequest schedule_manual_backup_event_request   = 45;
     TEGAPIScheduleManualBackupEventResponse schedule_manual_backup_event_response = 46;
     TEGAPICancelManualBackupEventRequest cancel_manual_backup_event_request       = 47;

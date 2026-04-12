@@ -125,8 +125,14 @@ class PowerwallLocalClient:
     async def login(self) -> bool:
         if self._transport is not None:
             ok = await self._transport.login()
-            if ok and not self._din:
-                self._din = await self._transport.fetch_din()
+            if ok:
+                # Always refresh the DIN from the gateway — the stored
+                # value might be a partial serial instead of the full
+                # {part_number}--{serial_number} the TEDAPI v1r transport
+                # needs for TLV signature personalization.
+                fetched = await self._transport.fetch_din()
+                if fetched:
+                    self._din = fetched
             return ok
         assert self._unsigned is not None
         return await self._unsigned.login()
@@ -171,12 +177,19 @@ class PowerwallLocalClient:
         """Disconnect from the grid (islanding).
 
         Attempts in order:
-        1. REST ``POST /api/v2/islanding/mode`` with ``intentional_reconnect_failsafe``
-           — known to work on PW2 and reported working on some PW3 firmware.
-        2. On PW3 with a TEDAPI transport available, fall back to a 24h
-           Storm Watch Manual Backup, which stops grid export/import even if
-           it does not physically open the grid contactor.
+        1. PW3 TEDAPI ``setIslandModeRequest(mode=2, force=True)`` — the
+           real islanding command that physically opens the grid contactor.
+           Uses the ``teslapower`` proto's ``TEGMessages.setIslandModeRequest``
+           at field 3.
+        2. REST ``POST /api/v2/islanding/mode`` with ``intentional_reconnect_failsafe``
+           — works on PW2.
         """
+        # PW3: use the TEDAPI island mode command (the correct command)
+        if self._version == PowerwallVersion.PW3 and self._transport and self._din:
+            _LOGGER.info("go_off_grid: using TEDAPI setIslandMode(off_grid)")
+            return await self._transport.set_island_mode(self._din, off_grid=True)
+
+        # PW2: use REST
         body = {"island_mode": ISLAND_MODE_OFFGRID}
         result = await self._post(ISLAND_MODE_PATH, body)
         if result is not None:
@@ -186,24 +199,21 @@ class PowerwallLocalClient:
             )
             return True
 
-        if self._version == PowerwallVersion.PW3 and self._transport and self._din:
-            _LOGGER.info(
-                "go_off_grid: REST path unavailable, falling back to manual backup"
-            )
-            return await self._transport.schedule_manual_backup(self._din, 86400)
-
         _LOGGER.warning("go_off_grid: all paths failed on %s", self._host)
         return False
 
     async def reconnect_grid(self) -> bool:
         """Reconnect to the grid after an intentional islanding."""
+        # PW3: use the TEDAPI island mode command
+        if self._version == PowerwallVersion.PW3 and self._transport and self._din:
+            _LOGGER.info("reconnect_grid: using TEDAPI setIslandMode(on_grid)")
+            return await self._transport.set_island_mode(self._din, off_grid=False)
+
+        # PW2: use REST
         body = {"island_mode": ISLAND_MODE_ONGRID}
         result = await self._post(ISLAND_MODE_PATH, body)
         if result is not None:
             return True
-
-        if self._version == PowerwallVersion.PW3 and self._transport and self._din:
-            return await self._transport.cancel_manual_backup(self._din)
 
         return False
 
