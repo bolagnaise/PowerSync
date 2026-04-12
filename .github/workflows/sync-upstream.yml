@@ -1,0 +1,81 @@
+name: Sync Fork with Upstream
+
+# Runs daily at 06:00 AEST (20:00 UTC previous day) and on manual trigger
+on:
+  schedule:
+    - cron: '0 20 * * *'
+  workflow_dispatch:
+
+# Only run on the fork — skip if this IS the upstream repo
+# Update 'bolagnaise/PowerSync' if the upstream repo name changes
+jobs:
+  sync:
+    name: Sync with upstream
+    runs-on: ubuntu-latest
+    if: github.repository != 'bolagnaise/PowerSync'
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/bolagnaise/PowerSync.git
+          git fetch upstream main
+
+      - name: Check if behind
+        id: check
+        run: |
+          BEHIND=$(git rev-list --count HEAD..upstream/main)
+          echo "behind=$BEHIND" >> $GITHUB_OUTPUT
+          echo "Upstream is $BEHIND commits ahead"
+
+      - name: Fast-forward merge (no conflicts)
+        if: steps.check.outputs.behind != '0'
+        id: merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git merge upstream/main --no-edit 2>&1 | tee /tmp/merge-output.txt
+          echo "conflict=$?" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Push if clean merge
+        if: steps.check.outputs.behind != '0' && steps.merge.outcome == 'success'
+        run: git push origin main
+
+      - name: Create PR if conflicts
+        if: steps.check.outputs.behind != '0' && steps.merge.outcome == 'failure'
+        run: |
+          git merge --abort
+          git checkout -b sync/upstream-$(date +%Y%m%d)
+          git merge upstream/main --no-commit --no-ff || true
+          git add -A
+          git commit -m "chore(sync): merge upstream bolagnaise/PowerSync — conflicts need manual resolution" || true
+          git push origin sync/upstream-$(date +%Y%m%d)
+
+          gh pr create \
+            --title "chore(sync): merge upstream — conflicts need resolution" \
+            --body "$(cat <<'EOF'
+          ## Upstream Sync
+
+          Automated daily sync found merge conflicts between upstream
+          (`bolagnaise/PowerSync`) and this fork.
+
+          **Action required**: Resolve conflicts manually, then merge.
+
+          Commits from upstream:
+          $(git log --oneline HEAD..upstream/main | head -20)
+          EOF
+          )" \
+            --base main \
+            --head sync/upstream-$(date +%Y%m%d) \
+            --label "sync"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
