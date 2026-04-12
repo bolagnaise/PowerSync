@@ -27,8 +27,11 @@ jobs:
       - name: Check if tag already exists
         id: check_tag
         run: |
-          if git rev-parse "${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+          VERSION="${{ steps.version.outputs.version }}"
+          # Check both v-prefixed and bare tags to avoid duplicates
+          if git rev-parse "v$VERSION" >/dev/null 2>&1 || git rev-parse "$VERSION" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag v$VERSION or $VERSION already exists — skipping release"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
@@ -37,35 +40,38 @@ jobs:
         if: steps.check_tag.outputs.exists == 'false'
         id: notes
         run: |
-          # Always generate from commits between previous tag and HEAD.
-          # Never use a committed RELEASE_NOTES.md — it's a stale-content
-          # footgun that caused every release from 2.11.12 to 2.11.20 to
-          # ship with the same PR #25 notes from 2.11.11.
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          if [ -n "$PREV_TAG" ]; then
-            RANGE="$PREV_TAG..HEAD"
-            echo "Generating notes from $RANGE"
+          # Prefer a hand-written RELEASE_NOTES.md if it exists (for
+          # feature releases with user-friendly descriptions). Fall back
+          # to auto-generating from commit messages for patch releases.
+          if [ -f "RELEASE_NOTES.md" ] && [ -s "RELEASE_NOTES.md" ]; then
+            echo "Using hand-written RELEASE_NOTES.md"
+            cp RELEASE_NOTES.md /tmp/release_notes.md
           else
-            RANGE="HEAD~20..HEAD"
-            echo "No previous tag found, using last 20 commits"
+            echo "No RELEASE_NOTES.md found, generating from commits"
+            PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+            if [ -n "$PREV_TAG" ]; then
+              RANGE="$PREV_TAG..HEAD"
+              echo "Generating notes from $RANGE"
+            else
+              RANGE="HEAD~20..HEAD"
+              echo "No previous tag found, using last 20 commits"
+            fi
+
+            echo "## What's Changed" > /tmp/release_notes.md
+            echo "" >> /tmp/release_notes.md
+
+            git log --pretty=format:"### %s%n%n%b" "$RANGE" -- custom_components/ \
+              | grep -v "^### Bump version" \
+              | grep -v "^### docs(release)" \
+              | grep -v "^### chore(manifest)" \
+              | sed '/^$/N;/^\n$/d' >> /tmp/release_notes.md
+
+            echo "" >> /tmp/release_notes.md
+            echo "Update available via HACS" >> /tmp/release_notes.md
           fi
 
-          echo "## What's Changed" > /tmp/release_notes.md
-          echo "" >> /tmp/release_notes.md
-
-          # Build a clean summary from commit subjects + bodies, excluding
-          # version-bump-only commits and empty lines.
-          git log --pretty=format:"### %s%n%n%b" "$RANGE" -- custom_components/ \
-            | grep -v "^### Bump version" \
-            | grep -v "^### docs(release)" \
-            | grep -v "^### chore(manifest)" \
-            | sed '/^$/N;/^\n$/d' >> /tmp/release_notes.md
-
-          echo "" >> /tmp/release_notes.md
-          echo "Update available via HACS" >> /tmp/release_notes.md
-
-          echo "--- Generated release notes ---"
-          head -20 /tmp/release_notes.md
+          echo "--- Release notes ---"
+          head -30 /tmp/release_notes.md
 
       - name: Create tag and release
         if: steps.check_tag.outputs.exists == 'false'
@@ -73,10 +79,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          git tag "$VERSION"
-          git push origin "$VERSION"
-          gh release create "$VERSION" \
-            --title "v$VERSION" \
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+          gh release create "v$VERSION" \
+            --title "PowerSync v$VERSION" \
             --notes-file /tmp/release_notes.md
           echo "Created release v$VERSION"
 
@@ -108,7 +114,7 @@ jobs:
                   'title': f'🚀 PowerSync v{version} Released',
                   'description': notes,
                   'color': 5025616,
-                  'url': f'https://github.com/bolagnaise/PowerSync/releases/tag/{version}',
+                  'url': f'https://github.com/bolagnaise/PowerSync/releases/tag/v{version}',
                   'footer': {'text': 'Update available via HACS'},
               }]
           }
