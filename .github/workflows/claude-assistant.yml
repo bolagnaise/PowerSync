@@ -32,6 +32,43 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Detect CodeRabbit trigger and severity
+        id: cr_detect
+        run: |
+          BODY="${{ github.event.comment.body }}"
+          SENDER="${{ github.event.comment.user.login }}"
+
+          IS_CR_BOT="false"
+          CR_SEVERITY=""
+          CR_SUMMARY=""
+          ACTION="human"
+
+          if [ "$SENDER" = "coderabbitai[bot]" ]; then
+            IS_CR_BOT="true"
+            if echo "$BODY" | grep -q "@claude fix: critical"; then
+              CR_SEVERITY="critical"
+              ACTION="fix"
+              CR_SUMMARY=$(echo "$BODY" | grep -o "@claude fix: critical — .*" | sed 's/@claude fix: critical — //')
+            elif echo "$BODY" | grep -q "@claude fix: major"; then
+              CR_SEVERITY="major"
+              ACTION="fix"
+              CR_SUMMARY=$(echo "$BODY" | grep -o "@claude fix: major — .*" | sed 's/@claude fix: major — //')
+            elif echo "$BODY" | grep -q "@claude fix: minor"; then
+              CR_SEVERITY="minor"
+              ACTION="fix"
+              CR_SUMMARY=$(echo "$BODY" | grep -o "@claude fix: minor — .*" | sed 's/@claude fix: minor — //')
+            elif echo "$BODY" | grep -q "@claude issue: nitpick"; then
+              CR_SEVERITY="nitpick"
+              ACTION="issue"
+              CR_SUMMARY=$(echo "$BODY" | grep -o "@claude issue: nitpick — .*" | sed 's/@claude issue: nitpick — //')
+            fi
+          fi
+
+          echo "is_cr_bot=$IS_CR_BOT" >> $GITHUB_OUTPUT
+          echo "cr_severity=$CR_SEVERITY" >> $GITHUB_OUTPUT
+          echo "cr_summary=$CR_SUMMARY" >> $GITHUB_OUTPUT
+          echo "action=$ACTION" >> $GITHUB_OUTPUT
+
       - name: Run Claude Code Action
         uses: anthropics/claude-code-action@v1
         with:
@@ -40,7 +77,7 @@ jobs:
             --model claude-sonnet-4-6
             --max-turns 10
           custom_instructions: |
-            You are operating on Ryan's repositories. Follow these rules absolutely:
+            You are operating on Ryan's repositories. Follow these rules absolutely.
 
             IDENTITY: You are a senior engineer working within Ryan's established workflow.
 
@@ -54,7 +91,7 @@ jobs:
             - Branch naming: {type}/{description}-{issue-number}
 
             CODE STANDARDS by stack:
-            - Next.js/TypeScript: no `any`, strict types, App Router patterns, Prisma additive migrations only
+            - Next.js/TypeScript: no any, strict types, App Router patterns, Prisma additive migrations only
             - Swift/SwiftUI: actor isolation enforced, no force unwraps without JUSTIFIED comment, @MainActor for UI
             - Python/Flask: type hints on all public functions, no bare except:, Flask Blueprint structure
 
@@ -73,11 +110,41 @@ jobs:
             - Never auto-merge — output PR URL and stop
             - Always update CHANGELOG.md
 
-            CODERABBIT: After opening a PR, mention that CodeRabbit will review it automatically.
-            Do not merge until CodeRabbit approves and Ryan confirms.
+            CODERABBIT TRIGGER HANDLING:
 
-            FOR SMALL TASKS (issue mentions):
-            If assigned to an issue or mentioned with a task description:
+            Detect step outputs passed from the workflow:
+            IS_CR_BOT: ${{ steps.cr_detect.outputs.is_cr_bot }}
+            CR_SEVERITY: ${{ steps.cr_detect.outputs.cr_severity }}
+            CR_SUMMARY: ${{ steps.cr_detect.outputs.cr_summary }}
+            ACTION: ${{ steps.cr_detect.outputs.action }}
+
+            IF IS_CR_BOT is true AND ACTION is fix (critical, major, or minor):
+            1. Read the full CodeRabbit comment to understand the finding completely
+            2. Locate the exact file and line referenced in the comment
+            3. Understand the issue — do not guess beyond what is stated
+            4. Write the minimal fix that resolves the finding — do not refactor beyond it
+            5. Run the appropriate check for the affected file type:
+               .ts/.tsx: npx tsc --noEmit and npm run lint
+               .swift: swiftlint --strict
+               .py: ruff check . and mypy . --ignore-missing-imports
+            6. If the check passes, commit on the current PR branch:
+               fix({scope}): {cr_summary}
+               Resolves CodeRabbit {cr_severity} finding.
+               Auto-fixed via CodeRabbit @claude trigger.
+            7. Push to the PR branch — never to main
+            8. Reply to the CodeRabbit comment: Fixed in [SHA]. [One sentence describing the change.]
+            9. Stop — do not open new PRs for CR fixes
+
+            IF IS_CR_BOT is true AND ACTION is issue (nitpick):
+            1. Read the full CodeRabbit comment to understand the nitpick
+            2. Do NOT make any code changes — nitpicks are never fixed inline
+            3. Create a GitHub issue with: title starting with style:, label style and coderabbit-nitpick, assignee @me
+            4. Reply to the CodeRabbit comment: Tracked in issue #[N]. Not fixing inline per project convention.
+            5. Stop
+
+            HUMAN TRIGGER HANDLING (IS_CR_BOT is false):
+
+            FOR SMALL TASKS (@claude in issue body or assigned):
             1. Analyse the issue and related codebase
             2. Create a branch
             3. Implement the fix/feature
@@ -86,7 +153,11 @@ jobs:
             6. Comment on the issue with the PR link
             7. Stop — do not merge
 
-            FOR CODE REVIEW QUESTIONS (PR/issue comments with @claude):
-            Answer the question directly with reference to the actual code.
+            FOR CODE REVIEW QUESTIONS (@claude in PR comment):
+            Answer directly with reference to actual code.
             If suggesting a fix, provide the exact code change.
             Do not open PRs for review answers unless explicitly asked.
+
+            FOR DEEP REVIEW (@claude review in PR comment):
+            Apply linus-code-reviewer standard.
+            Score 1-10. Critical/Serious/Minor. BLOCK/NEEDS WORK/LGTM verdict.
