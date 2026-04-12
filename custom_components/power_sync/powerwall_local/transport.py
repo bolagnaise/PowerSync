@@ -43,18 +43,59 @@ _TAG_END = 0xFF
 _SIGNATURE_TTL_SECONDS = 12
 
 
-def _insecure_ssl_context() -> ssl.SSLContext:
+def _build_insecure_ssl_context() -> ssl.SSLContext:
     """Build an SSL context that accepts the gateway's self-signed cert.
 
     The gateway ships with a Tesla-issued self-signed cert tied to its DIN.
     There's no way to pre-trust it without shipping Tesla's CA bundle, so we
     disable verification on this specific connector. All sensitive auth
     happens inside the TLS session via RSA signatures, not cert pinning.
+
+    Blocking — ``ssl.create_default_context()`` calls ``load_default_certs()``
+    which reads from disk. Callers must invoke this via
+    ``hass.async_add_executor_job`` to avoid blocking the HA event loop.
     """
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     return ctx
+
+
+# Module-level cache — context construction is expensive and the resulting
+# object is safe to share across sessions (no per-request state). Built
+# lazily on first use, always off the event loop.
+_SSL_CONTEXT: ssl.SSLContext | None = None
+
+
+async def get_insecure_ssl_context(hass: Any | None = None) -> ssl.SSLContext:
+    """Return a cached insecure SSL context, building it off-loop on first use.
+
+    When called with a HomeAssistant instance the build runs via
+    ``async_add_executor_job`` so it doesn't trip HA's "blocking call in
+    the event loop" detector. When called without hass (eg from tests)
+    falls back to a sync build.
+    """
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is not None:
+        return _SSL_CONTEXT
+    if hass is not None:
+        _SSL_CONTEXT = await hass.async_add_executor_job(_build_insecure_ssl_context)
+    else:
+        _SSL_CONTEXT = _build_insecure_ssl_context()
+    return _SSL_CONTEXT
+
+
+def _insecure_ssl_context() -> ssl.SSLContext:
+    """Sync helper retained for non-async call sites (client init).
+
+    Prefer ``get_insecure_ssl_context(hass)`` when possible — this path
+    will still trip the blocking-call detector on the event loop. The
+    module-level cache means at most one expensive build per HA process.
+    """
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is None:
+        _SSL_CONTEXT = _build_insecure_ssl_context()
+    return _SSL_CONTEXT
 
 
 @dataclass

@@ -150,12 +150,20 @@ async def ensure_coordinator(
     if existing is not None:
         return existing
 
+    # Warm up the shared insecure SSL context off the event loop before we
+    # construct the client — otherwise transport.__init__ hits
+    # ssl.create_default_context() synchronously on the loop and HA logs
+    # a blocking-call warning. The context is module-cached so this only
+    # pays the cost on first pair / first restart after pair.
+    from .transport import get_insecure_ssl_context
+    await get_insecure_ssl_context(hass)
+
     client = await _build_client(hass, entry)
     if client is None:
         return None
 
     runtime["client"] = client
-    coordinator = PowerwallLocalCoordinator(hass, client, entry_id=entry.entry_id)
+    coordinator = PowerwallLocalCoordinator(hass, client, entry=entry)
     runtime["coordinator"] = coordinator
     try:
         await coordinator.async_config_entry_first_refresh()

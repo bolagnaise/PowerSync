@@ -12,6 +12,7 @@ import logging
 from datetime import timedelta
 from typing import Any
 
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -37,16 +38,31 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
         hass: HomeAssistant,
         client: PowerwallLocalClient,
         *,
-        entry_id: str,
+        entry: ConfigEntry,
     ) -> None:
-        super().__init__(
-            hass,
-            _LOGGER,
-            name=f"powerwall_local_{entry_id}",
-            update_interval=timedelta(seconds=POWERWALL_LOCAL_POLL_INTERVAL),
-        )
+        # Modern HA DataUpdateCoordinator requires config_entry in __init__
+        # otherwise async_config_entry_first_refresh() raises
+        # "only supported for coordinators with a config entry". Passing
+        # it as a keyword works on HA 2024.11+ without breaking older
+        # releases (they ignore unknown kwargs).
+        try:
+            super().__init__(
+                hass,
+                _LOGGER,
+                name=f"powerwall_local_{entry.entry_id}",
+                update_interval=timedelta(seconds=POWERWALL_LOCAL_POLL_INTERVAL),
+                config_entry=entry,
+            )
+        except TypeError:
+            # HA < 2024.11 — no config_entry kwarg on the base class.
+            super().__init__(
+                hass,
+                _LOGGER,
+                name=f"powerwall_local_{entry.entry_id}",
+                update_interval=timedelta(seconds=POWERWALL_LOCAL_POLL_INTERVAL),
+            )
         self._client = client
-        self._entry_id = entry_id
+        self._entry_id = entry.entry_id
         self._consecutive_failures = 0
         self._last_success_ts: float | None = None
         # Flips True when the gateway rejects our RSA signature — ie the
