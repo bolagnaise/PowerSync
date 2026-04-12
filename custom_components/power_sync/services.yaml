@@ -280,3 +280,30 @@ sync_battery_health:
       example: "2024-12-23T10:30:00Z"
       selector:
         text:
+
+powerwall_go_off_grid:
+  name: Go Off-Grid (Local)
+  description: >-
+    Disconnect the Tesla Powerwall from the grid using direct local control.
+    Requires the gateway to be paired via the mobile app's Battery Setup
+    section. Refuses to run when battery SOC is below the configured safety
+    floor (default 20%) unless bypass_soc_check is explicitly set. Works on
+    Powerwall 2 (REST) and Powerwall 3 (TEDAPI v1r).
+  fields:
+    bypass_soc_check:
+      name: Bypass SOC Safety Check
+      description: >-
+        Override the minimum-SOC refusal. Only use this if you know exactly
+        what you're doing — you can strand your house on an empty battery.
+      required: false
+      default: false
+      selector:
+        boolean:
+
+powerwall_reconnect_grid:
+  name: Reconnect to Grid (Local)
+  description: >-
+    Reconnect the Tesla Powerwall to the grid after an intentional islanding.
+    Works on paired Powerwall 2 (REST) and Powerwall 3 (TEDAPI v1r). Safe to
+    call while already on-grid — the gateway will no-op.
+  fields: {}

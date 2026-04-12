@@ -779,8 +779,8 @@ def convert_amber_to_tesla_tariff(
         artificial_increase = 2.0  # $2/kWh increase during demand periods
         periods_modified = 0
 
-        # Check if today is a valid day for demand charges
-        weekday = datetime.now().weekday()  # 0=Monday, 6=Sunday
+        # Check if today is a valid day for demand charges (use detected tz, not system tz)
+        weekday = (datetime.now(detected_tz) if detected_tz else datetime.now()).weekday()
 
         day_is_valid = True
         if demand_charge_days == "Weekdays Only" and weekday >= 5:  # Saturday or Sunday

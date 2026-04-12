@@ -15,7 +15,11 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, CONF_TESLA_ENERGY_SITE_ID
+from .const import (
+    DOMAIN,
+    CONF_TESLA_ENERGY_SITE_ID,
+    CONF_POWERWALL_LOCAL_PAIRED,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,6 +39,11 @@ async def async_setup_entry(
 
     # Manual export override is always available for Tesla sites.
     async_add_entities([ManualExportOverrideBinarySensor(hass, entry)])
+
+    # Local pairing state — always exposed so the dashboard can gate the
+    # Local Control section on it, and the mobile app can subscribe.
+    async_add_entities([PowerwallLocalPairedBinarySensor(hass, entry)])
+    async_add_entities([PowerwallLocalIslandedBinarySensor(hass, entry)])
 
     async def _add_capability_gated_binary_sensors() -> None:
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
@@ -137,3 +146,57 @@ class ManualExportOverrideBinarySensor(_TeslaBinarySensorBase):
         return {
             "manual_export_rule": entry_data.get("manual_export_rule"),
         }
+
+
+class PowerwallLocalPairedBinarySensor(_TeslaBinarySensorBase):
+    """True when the Powerwall gateway has a verified local-control key.
+
+    Driven purely from ``entry.data`` so the state is available immediately
+    on entry load (no polling required). The strategy dashboard uses this
+    entity to gate the Local Control section.
+    """
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        super().__init__(
+            hass, entry,
+            key="powerwall_local_paired",
+            name="Powerwall Local Paired",
+            icon="mdi:key-variant",
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        return bool(self._entry.data.get(CONF_POWERWALL_LOCAL_PAIRED, False))
+
+
+class PowerwallLocalIslandedBinarySensor(_TeslaBinarySensorBase):
+    """True when the Powerwall reports it is running off-grid (islanded).
+
+    Reads the latest snapshot from ``PowerwallLocalCoordinator``. None when
+    the coordinator hasn't produced a sample yet (eg before first refresh or
+    when the gateway is unreachable).
+    """
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        super().__init__(
+            hass, entry,
+            key="powerwall_local_islanded",
+            name="Powerwall Off-Grid",
+            icon="mdi:transmission-tower-off",
+        )
+
+    @property
+    def is_on(self) -> bool | None:
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        runtime = entry_data.get("powerwall_local") or {}
+        coord = runtime.get("coordinator")
+        if coord is None:
+            return None
+        snap = coord.data
+        if snap is None or snap.grid_status is None:
+            return None
+        return "island" in snap.grid_status.lower()

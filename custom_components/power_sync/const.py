@@ -284,6 +284,47 @@ CONF_FLEET_API_TOKEN_EXPIRES_AT = "fleet_api_token_expires_at"
 CONF_FLEET_API_CLIENT_ID = "fleet_api_client_id"
 CONF_FLEET_API_CLIENT_SECRET = "fleet_api_client_secret"
 
+# Powerwall local control (LAN / TEDAPI v1r)
+# Set only after the pairing flow completes. Stored in entry.data so HA
+# encrypts the private key at rest. The IP and customer password are
+# mirrored from the mobile app so local monitoring works device-independently.
+CONF_POWERWALL_LOCAL_PAIRED = "powerwall_local_paired"
+CONF_POWERWALL_LOCAL_PRIVATE_KEY = "powerwall_local_private_key_pem"
+CONF_POWERWALL_LOCAL_PUBLIC_KEY = "powerwall_local_public_key_der"
+CONF_POWERWALL_LOCAL_DIN = "powerwall_local_din"
+CONF_POWERWALL_LOCAL_IP = "powerwall_local_ip"
+CONF_POWERWALL_LOCAL_VERSION = "powerwall_local_version"  # "pw2" | "pw3"
+CONF_POWERWALL_LOCAL_CUSTOMER_PASSWORD = "powerwall_local_customer_password"
+CONF_POWERWALL_LOCAL_WIFI_SSID = "powerwall_local_wifi_ssid"
+CONF_POWERWALL_LOCAL_WIFI_PASSWORD = "powerwall_local_wifi_password"
+CONF_POWERWALL_LOCAL_ENERGY_SITE_ID = "powerwall_local_energy_site_id"
+CONF_POWERWALL_LOCAL_PAIRED_AT = "powerwall_local_paired_at"
+# Minimum battery SOC (%) below which off-grid commands are refused.
+CONF_POWERWALL_OFF_GRID_MIN_SOC = "powerwall_off_grid_min_soc"
+DEFAULT_POWERWALL_OFF_GRID_MIN_SOC = 20
+# Local poll interval for meters/SOC/grid_status when paired.
+POWERWALL_LOCAL_POLL_INTERVAL = 10  # seconds
+# Pairing window the user has to toggle the Powerwall switch.
+POWERWALL_PAIRING_WINDOW_SECONDS = 120
+
+# Powerwall off-grid as a curtailment fallback — opt-in feature for users
+# with inverters that can't curtail (Enphase AGF profile, no inverter
+# configured, etc). When the normal curtailment path is unavailable AND
+# excess solar would be exported at negative prices, the integration can
+# instead physically open the Powerwall grid contactor so the house runs
+# islanded until the trigger condition clears.
+CONF_POWERWALL_OFFGRID_AS_CURTAILMENT = "powerwall_offgrid_as_curtailment"
+DEFAULT_POWERWALL_OFFGRID_AS_CURTAILMENT = False
+# Higher SOC floor than manual off-grid — the house will be running off
+# battery for potentially hours, so we need more headroom.
+CONF_POWERWALL_OFFGRID_CURTAILMENT_MIN_SOC = "powerwall_offgrid_curtailment_min_soc"
+DEFAULT_POWERWALL_OFFGRID_CURTAILMENT_MIN_SOC = 40
+# Cumulative daily cap on off-grid-as-curtailment duration (seconds).
+# Prevents a runaway loop when the price trigger is sticky or when the
+# battery is being drained faster than solar can refill it.
+CONF_POWERWALL_OFFGRID_CURTAILMENT_MAX_SECONDS = "powerwall_offgrid_curtailment_max_seconds"
+DEFAULT_POWERWALL_OFFGRID_CURTAILMENT_MAX_SECONDS = 6 * 60 * 60  # 6h
+
 # Sigenergy Cloud API configuration
 CONF_SIGENERGY_USERNAME = "sigenergy_username"
 CONF_SIGENERGY_PASSWORD = "sigenergy_password"  # Plain password (will be encoded)

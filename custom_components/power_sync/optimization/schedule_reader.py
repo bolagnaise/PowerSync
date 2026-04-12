@@ -4,7 +4,6 @@ Schedule data models for PowerSync optimization.
 Provides the ScheduleAction and OptimizationSchedule dataclasses used by
 the built-in LP optimizer and the execution layer.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -15,11 +14,8 @@ from typing import Any
 @dataclass
 class ScheduleAction:
     """Single action in the optimization schedule."""
-
     timestamp: datetime
-    action: (
-        str  # "idle", "charge", "discharge", "consume", "export", "self_consumption"
-    )
+    action: str  # "idle", "charge", "discharge", "consume", "export", "self_consumption", "off_grid"
     power_w: float
     soc: float | None = None
     battery_charge_w: float = 0.0
@@ -38,7 +34,6 @@ class ScheduleAction:
 @dataclass
 class OptimizationSchedule:
     """Complete optimization schedule."""
-
     actions: list[ScheduleAction]
     predicted_cost: float
     predicted_savings: float
@@ -52,17 +47,12 @@ class OptimizationSchedule:
     @property
     def charge_w(self) -> list[float]:
         """Get battery charge power schedule (positive = charging)."""
-        return [
-            a.battery_charge_w if a.action == "charge" else 0.0 for a in self.actions
-        ]
+        return [a.battery_charge_w if a.action == "charge" else 0.0 for a in self.actions]
 
     @property
     def discharge_w(self) -> list[float]:
         """Get battery discharge power schedule (positive = discharging)."""
-        return [
-            a.battery_discharge_w if a.action in ("discharge", "export") else 0.0
-            for a in self.actions
-        ]
+        return [a.battery_discharge_w if a.action in ("discharge", "export") else 0.0 for a in self.actions]
 
     @property
     def soc(self) -> list[float]:
@@ -83,3 +73,5 @@ class OptimizationSchedule:
             "grid_import_w": [],
             "grid_export_w": [],
         }
+
+

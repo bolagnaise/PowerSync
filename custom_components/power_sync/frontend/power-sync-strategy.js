@@ -694,6 +694,13 @@ class PowerSyncStrategy {
       left.push(_aemoSpike(e));
     }
 
+    // --- Left Column: Powerwall Local Control (only when paired) ---
+    // Gated on the binary_sensor.powerwall_local_paired entity so the card
+    // stays hidden until the user completes the pairing flow in the app.
+    if (hasE('powerwall_local_paired')) {
+      left.push(_powerwallLocalControl(e));
+    }
+
     // --- Left Column: Flow Power ---
     if (hasE('flow_power_price')) {
       left.push(_flowPower(e));
@@ -1881,6 +1888,67 @@ function _demandCharge(e) {
       { entity: e('in_demand_charge_period'), name: 'In Demand Period' },
       { entity: e('peak_demand_this_cycle'), name: 'Peak Demand (This Cycle)' },
       { entity: e('demand_charge_cost'), name: 'Demand Charge Cost' },
+    ],
+  };
+}
+
+function _powerwallLocalControl(e) {
+  return {
+    type: 'vertical-stack',
+    cards: [
+      {
+        type: 'entities',
+        title: 'Powerwall Local Control',
+        show_header_toggle: false,
+        state_color: true,
+        entities: [
+          {
+            entity: e('powerwall_local_paired'),
+            name: 'Paired',
+            icon: 'mdi:key-variant',
+          },
+          {
+            entity: e('powerwall_local_islanded'),
+            name: 'Off-Grid',
+            icon: 'mdi:transmission-tower-off',
+          },
+        ],
+      },
+      {
+        type: 'conditional',
+        conditions: [
+          { entity: e('powerwall_local_paired'), state: 'on' },
+        ],
+        card: {
+          type: 'horizontal-stack',
+          cards: [
+            {
+              type: 'button',
+              name: 'Go Off-Grid',
+              icon: 'mdi:transmission-tower-off',
+              tap_action: {
+                action: 'call-service',
+                service: 'power_sync.powerwall_go_off_grid',
+                confirmation: {
+                  text: 'Disconnect the Powerwall from the grid?',
+                },
+              },
+            },
+            {
+              type: 'button',
+              name: 'Reconnect',
+              icon: 'mdi:transmission-tower',
+              tap_action: {
+                action: 'call-service',
+                service: 'power_sync.powerwall_reconnect_grid',
+                confirmation: {
+                  text: 'Reconnect the Powerwall to the grid?',
+                },
+              },
+            },
+          ],
+        },
+      },
     ],
   };
 }

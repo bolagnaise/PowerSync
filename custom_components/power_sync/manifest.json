@@ -1,7 +1,7 @@
 {
   "domain": "power_sync",
   "name": "PowerSync",
-  "after_dependencies": ["lovelace", "recorder", "tesla_fleet"],
+  "after_dependencies": ["lovelace", "recorder", "tesla_fleet", "zeroconf"],
   "codeowners": ["@benboller"],
   "config_flow": true,
   "dependencies": ["frontend", "http"],
@@ -9,6 +9,6 @@
   "integration_type": "hub",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/bolagnaise/PowerSync/issues",
-  "requirements": ["aiohttp>=3.9.0", "aemo-to-tariff>=0.7.8", "cryptography>=42.0.0", "goodwe>=0.4.9", "scipy>=1.11.0"],
-  "version": "2.11.10"
+  "requirements": ["aiohttp>=3.9.0", "aemo-to-tariff>=0.7.8", "cryptography>=42.0.0", "goodwe>=0.4.9", "protobuf>=4.25.0", "scipy>=1.11.0"],
+  "version": "2.12.3"
 }

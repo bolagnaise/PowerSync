@@ -1014,8 +1014,35 @@ async def _execute_single_action(
         return await _action_enable_optimizer(hass, config_entry)
     elif action_type == "disable_optimizer":
         return await _action_disable_optimizer(hass, config_entry)
+    elif action_type == "powerwall_go_off_grid":
+        return await _action_powerwall_off_grid(hass, config_entry, "go_off_grid")
+    elif action_type == "powerwall_reconnect_grid":
+        return await _action_powerwall_off_grid(hass, config_entry, "reconnect")
     else:
         _LOGGER.warning(f"Unknown action type: {action_type}")
+        return False
+
+
+async def _action_powerwall_off_grid(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    action: str,
+) -> bool:
+    """Dispatch an automation into the Powerwall local off-grid service.
+
+    Wraps ``power_sync.powerwall_go_off_grid`` / ``powerwall_reconnect_grid``
+    with a single retry. Raises no exceptions — returns False on failure so
+    the automation engine can surface a notification.
+    """
+    from ..const import DOMAIN
+    service = (
+        "powerwall_go_off_grid" if action == "go_off_grid" else "powerwall_reconnect_grid"
+    )
+    try:
+        await hass.services.async_call(DOMAIN, service, {}, blocking=True)
+        return True
+    except Exception as e:
+        _LOGGER.error(f"powerwall local {action} failed: {e}")
         return False
 
 

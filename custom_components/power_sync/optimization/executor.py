@@ -4,7 +4,6 @@ Schedule executor for battery optimization.
 Executes battery commands based on the optimization schedule from external optimizer.
 Simplified from previous MPC implementation - external optimizer now handles optimization.
 """
-
 from __future__ import annotations
 
 import logging
@@ -22,17 +21,16 @@ _LOGGER = logging.getLogger(__name__)
 
 class BatteryAction(Enum):
     """Battery control actions."""
-
     IDLE = "idle"
     CHARGE = "charge"
     DISCHARGE = "discharge"  # Legacy - generic discharge
-    CONSUME = "consume"  # Battery -> Home load (powering home)
-    EXPORT = "export"  # Battery -> Grid (exporting to grid)
+    CONSUME = "consume"      # Battery -> Home load (powering home)
+    EXPORT = "export"        # Battery -> Grid (exporting to grid)
+    OFF_GRID = "off_grid"    # Physically disconnect from grid (contactor open)
 
 
 class CostFunction(Enum):
     """Cost optimization functions."""
-
     COST_MINIMIZATION = "cost"
     PROFIT_MAXIMIZATION = "profit"
     SELF_CONSUMPTION = "self_consumption"
@@ -41,7 +39,6 @@ class CostFunction(Enum):
 @dataclass
 class ExecutionStatus:
     """Status of the schedule executor."""
-
     enabled: bool = False
     last_optimization: datetime | None = None
     last_execution: datetime | None = None
@@ -169,9 +166,7 @@ class ScheduleExecutor:
                 minute=aligned_minutes,
                 second=0,
             )
-            _LOGGER.info(
-                f"Executor started with timer (interval: {self.interval_minutes}min)"
-            )
+            _LOGGER.info(f"Executor started with timer (interval: {self.interval_minutes}min)")
         else:
             _LOGGER.info("Executor started (optimizer-controlled mode)")
 
@@ -218,9 +213,7 @@ class ScheduleExecutor:
 
         duration = duration_minutes or (self.interval_minutes + 5)
 
-        _LOGGER.info(
-            f"Executing action: {action.value} @ {power_w:.0f}W for {duration}min"
-        )
+        _LOGGER.info(f"Executing action: {action.value} @ {power_w:.0f}W for {duration}min")
 
         previous_action = self._status.current_action
         self._status.current_action = action
@@ -262,9 +255,7 @@ class ScheduleExecutor:
 
     async def _command_discharge(self, power_w: float, duration_minutes: int) -> None:
         """Command battery to discharge/export to grid."""
-        _LOGGER.info(
-            f"Commanding discharge/export at {power_w:.0f}W for {duration_minutes}min"
-        )
+        _LOGGER.info(f"Commanding discharge/export at {power_w:.0f}W for {duration_minutes}min")
 
         if hasattr(self.battery_controller, "force_discharge"):
             await self.battery_controller.force_discharge(
@@ -335,11 +326,7 @@ class ScheduleExecutor:
             "current_action": self._status.current_action.value,
             "current_power_w": self._status.current_power_w,
             "next_action": self._status.next_action.value,
-            "next_action_time": self._status.next_action_time.isoformat()
-            if self._status.next_action_time
-            else None,
-            "last_optimization": self._status.last_optimization.isoformat()
-            if self._status.last_optimization
-            else None,
+            "next_action_time": self._status.next_action_time.isoformat() if self._status.next_action_time else None,
+            "last_optimization": self._status.last_optimization.isoformat() if self._status.last_optimization else None,
             "cost_function": self._cost_function.value,
         }
