@@ -1,0 +1,86 @@
+name: Update Wiki on Merge
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  update-wiki:
+    name: Update Wiki
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Clone wiki
+        run: |
+          git clone \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.wiki.git" \
+            wiki
+        continue-on-error: true
+
+      - name: Init wiki if clone failed
+        run: |
+          if [ ! -d wiki ]; then
+            mkdir wiki
+            cd wiki
+            git init
+            git checkout -b master
+          fi
+
+      - name: Update wiki with PR context
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: --model claude-sonnet-4-6 --max-turns 8
+          direct_prompt: |
+            Update the GitHub wiki for this repository to reflect the changes
+            introduced by the merged PR.
+
+            PR number: ${{ github.event.pull_request.number }}
+            PR title: ${{ github.event.pull_request.title }}
+            PR body: ${{ github.event.pull_request.body }}
+            Author: ${{ github.event.pull_request.user.login }}
+
+            Wiki directory: ./wiki/
+            Repo root: ./
+
+            Instructions:
+            1. Read the merged PR diff using git diff to understand what changed
+            2. Read each wiki file: wiki/Home.md, wiki/User-Guide.md,
+               wiki/Setup-Guide.md, wiki/Technical-Reference.md
+            3. Update ONLY the sections that are affected by this PR:
+               - New feature or behaviour → User-Guide.md: features + usage
+               - New env variable or config → Setup-Guide.md: environment variables table
+               - New dependency → Technical-Reference.md: dependencies table
+               - Architecture change → Technical-Reference.md: architecture section
+               - New API route or HA entity → Technical-Reference.md: API surface
+               - Breaking change → Setup-Guide.md: add migration note
+            4. Do NOT rewrite, restructure, or rename any wiki pages
+            5. Do NOT modify sections unrelated to this PR's changes
+            6. On every page you modify, update the footer line to:
+               "Last updated: PR #${{ github.event.pull_request.number }} — ${{ github.event.pull_request.title }}"
+            7. Write all changes directly to files in the ./wiki/ directory
+
+      - name: Commit and push wiki
+        run: |
+          cd wiki
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No wiki changes needed for this PR"
+          else
+            git commit -m "docs(wiki): update from PR #${{ github.event.pull_request.number }}
+
+            ${{ github.event.pull_request.title }}"
+            git push origin master 2>/dev/null || git push origin main 2>/dev/null
+            echo "Wiki updated successfully"
+          fi

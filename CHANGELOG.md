@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Wiki auto-update workflow on PR merge
 - Claude Code workflow: GitHub Actions CI, PR templates, CodeRabbit gate, security scanning
 - Python CI pipeline (ruff, mypy, bandit, pytest)
 - PR checks workflow with CodeRabbit approval gate
