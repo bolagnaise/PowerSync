@@ -1537,6 +1537,45 @@ async def _send_expo_push(hass: HomeAssistant, title: str, message: str) -> None
         )
 
 
+async def _send_savings_notification(
+    hass: HomeAssistant,
+    title: str,
+    message: str,
+    entry_id: str | None = None,
+) -> None:
+    """Send savings notification via Expo Push (primary) and optionally HA notify.
+
+    Expo Push is always sent (reaches iOS/Android PowerSync app).
+    HA notify is only sent if ha_notify_savings is enabled in config options.
+    """
+    from ..const import DOMAIN, CONF_HA_NOTIFY_SAVINGS, CONF_NOTIFICATION_DEVICE
+
+    # Primary: Expo Push (always)
+    await _send_expo_push(hass, title, message)
+
+    # Optional: HA notify service
+    if entry_id:
+        entry_data = hass.data.get(DOMAIN, {}).get(entry_id, {})
+        config_entry = entry_data.get("config_entry")
+        if config_entry:
+            ha_notify = config_entry.options.get(CONF_HA_NOTIFY_SAVINGS, False)
+            device = config_entry.options.get(CONF_NOTIFICATION_DEVICE)
+            if ha_notify and device:
+                try:
+                    await hass.services.async_call(
+                        "notify",
+                        f"mobile_app_{device}",
+                        {
+                            "title": title,
+                            "message": message,
+                        },
+                        blocking=True,
+                    )
+                    _LOGGER.info("Savings notification sent via HA notify to %s", device)
+                except Exception as e:
+                    _LOGGER.debug("HA notify failed (non-critical): %s", e)
+
+
 async def _action_set_grid_export(
     hass: HomeAssistant, config_entry: ConfigEntry, params: Dict[str, Any]
 ) -> bool:

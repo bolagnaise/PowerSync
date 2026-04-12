@@ -4922,6 +4922,65 @@ class GoodWeSettingsView(HomeAssistantView):
             )
 
 
+class DecisionLogView(HomeAssistantView):
+    """HTTP view for optimizer decision log entries."""
+
+    url = "/api/power_sync/decision_log"
+    name = "api:power_sync:decision_log"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request for decision log entries."""
+        # Support ?entry_id= for multi-entry installs; fall back to first entry
+        requested_entry_id = request.query.get("entry_id")
+        entry = None
+        for config_entry in self._hass.config_entries.async_entries(DOMAIN):
+            if requested_entry_id and config_entry.entry_id == requested_entry_id:
+                entry = config_entry
+                break
+            if entry is None:
+                entry = config_entry  # Default to first if no match
+
+        if not entry:
+            return web.json_response(
+                {"success": False, "error": "PowerSync not configured"},
+                status=503,
+            )
+
+        entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        opt_coordinator = entry_data.get("optimization_coordinator")
+        if not opt_coordinator:
+            return web.json_response(
+                {"success": False, "error": "Optimization coordinator not available"},
+                status=404,
+            )
+
+        try:
+            limit_str = request.query.get("limit", "288")
+            try:
+                limit = max(0, min(int(limit_str), 288))
+            except ValueError:
+                limit = 288
+
+            entries = opt_coordinator.get_decision_log_entries(limit)
+            return web.json_response(
+                {
+                    "entries": entries,
+                    "count": len(entries),
+                }
+            )
+        except Exception as e:
+            _LOGGER.error("Error fetching decision log: %s", e, exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500,
+            )
+
+
 class AEMOSpikeView(HomeAssistantView):
     """HTTP view to manage AEMO spike detection for all battery systems.
 
@@ -12029,6 +12088,7 @@ async def _ensure_lovelace_resource(hass: HomeAssistant) -> None:
         js_files = [
             "/power_sync/frontend/power-sync-strategy.js",
             "/power_sync/frontend/power-sync-energy-flow.js",
+            "/power_sync/frontend/power-sync-savings.js",
         ]
 
         all_items = res_collection.async_items()
@@ -19892,6 +19952,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.http.register_view(GoodWeSettingsView(hass))
     _LOGGER.info("GoodWe settings HTTP endpoint registered at /api/power_sync/goodwe_settings")
 
+    # Register HTTP endpoint for optimizer decision log
+    hass.http.register_view(DecisionLogView(hass))
+    _LOGGER.info("Decision log HTTP endpoint registered at /api/power_sync/decision_log")
+
     # Register HTTP endpoint for AEMO spike settings (for mobile app - all battery systems)
     hass.http.register_view(AEMOSpikeView(hass))
     _LOGGER.info("⚡ AEMO spike HTTP endpoint registered at /api/power_sync/aemo_spike")
@@ -21510,9 +21574,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Clean up stale optimizer/LP forecast entities from the registry
         _optimizer_sensor_keys = {
-            "optimization_status", "optimization_next_action", "optimization_savings",
-            "lp_solar_forecast", "lp_load_forecast",
-            "lp_import_price_forecast", "lp_export_price_forecast",
+            "optimization_status",
+            "optimization_next_action",
+            "optimization_savings",
+            "lp_solar_forecast",
+            "lp_load_forecast",
+            "lp_import_price_forecast",
+            "lp_export_price_forecast",
+            "savings_today",
+            "savings_this_week",
+            "savings_this_month",
+            "savings_lifetime",
+            "daily_cost_total",
+            "daily_baseline",
+            "roi_percentage",
+            "last_decision",
         }
         ent_reg = er.async_get(hass)
         for entity_entry in er.async_entries_for_config_entry(ent_reg, entry.entry_id):

@@ -2,6 +2,9 @@ name: Dual-Loop PR Review
 
 # Loop 1: Automated first-pass review on every PR open/update
 # Loop 2: Deep review triggered by @claude review in PR comments
+#
+# This workflow is repo-agnostic — all repo references use Actions context
+# variables. Copy to any repo without modification.
 
 on:
   pull_request:
@@ -16,7 +19,6 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
-  id-token: write
 
 jobs:
   # ── LOOP 1: Automatic first-pass on every PR push ──────────────────────────
@@ -24,7 +26,8 @@ jobs:
     name: Automated First-Pass Review
     if: |
       github.event_name == 'pull_request' &&
-      github.event.pull_request.draft == false
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -32,40 +35,218 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Auto Review via Claude
-        uses: anthropics/claude-code-action@v1
+      - name: Assemble review context
+        id: context
+        uses: actions/github-script@v7
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          claude_args: --model claude-sonnet-4-6 --max-turns 5
-          direct_prompt: |
-            Review this pull request as a first-pass automated check.
-            Focus only on concrete, actionable issues. Skip nitpicks.
+          script: |
+            const fs = require('fs');
+            const pr = context.payload.pull_request;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const prNumber = pr.number;
+            const headSha = pr.head.sha;
 
-            Check for:
-            1. SECURITY: secrets/tokens in diff, SQL injection, XSS, input validation gaps
-            2. CORRECTNESS: logic errors, unhandled edge cases, wrong API usage
-            3. STACK RULES:
-               - Next.js/TS: no `any`, server/client boundary violations, Prisma destructive migrations
-               - Swift: force unwraps without JUSTIFIED comment, non-MainActor UI updates, retain cycles
-               - Python: bare except:, missing type hints on public functions, no APScheduler error handling
-               - JS date bug: toISOString().split('T')[0] for AEST dates (must use local date components)
-            4. BREAKING: anything that could break production or HA integrations
-            5. DOCS: CHANGELOG.md missing entry, public API changed without doc update
+            // ── 1. FULL FILE FETCH ──────────────────────────────────────
+            // Fetch the diff to know which files changed, then get full content
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner, repo, pull_number: prNumber, per_page: 100,
+            });
 
-            Format your response as:
-            ## Automated Review — First Pass
+            let fileContents = '';
+            for (const file of files) {
+              if (file.status === 'removed') continue;
+              fileContents += `\n### FILE: ${file.filename} (${file.status}, +${file.additions}/-${file.deletions})\n`;
+              fileContents += `#### Patch (changed lines):\n\`\`\`diff\n${file.patch || '(binary or too large)'}\n\`\`\`\n`;
 
-            ### 🔴 Must Fix (blocks merge)
-            [list or "None"]
+              // Fetch full file content at PR head SHA (fall back to patch for >100KB)
+              if (file.size && file.size > 100000) {
+                fileContents += `#### Full content: skipped (${file.size} bytes > 100KB limit)\n`;
+                continue;
+              }
+              try {
+                const { data: content } = await github.rest.repos.getContent({
+                  owner, repo, path: file.filename, ref: headSha,
+                });
+                if (content.encoding === 'base64' && content.content) {
+                  const decoded = Buffer.from(content.content, 'base64').toString('utf-8');
+                  const ext = file.filename.split('.').pop() || '';
+                  fileContents += `#### Full content:\n\`\`\`${ext}\n${decoded}\n\`\`\`\n`;
+                }
+              } catch (e) {
+                fileContents += `#### Full content: fetch failed (${e.message})\n`;
+              }
+            }
 
-            ### 🟡 Should Fix (important)
-            [list or "None"]
+            // ── 2. UNRESOLVED REVIEW COMMENTS (paginated) ───────────────
+            let unresolvedComments = '';
+            let page = 1;
+            let hasMore = true;
+            const threads = [];
 
-            ### ✅ Looks Good
-            [brief confirmation of what was done well]
+            while (hasMore) {
+              const { data: comments } = await github.rest.pulls.listReviewComments({
+                owner, repo, pull_number: prNumber, per_page: 100, page,
+              });
+              if (comments.length === 0) { hasMore = false; break; }
+              threads.push(...comments);
+              page++;
+              if (comments.length < 100) hasMore = false;
+            }
 
-            Keep it concise. CodeRabbit will do the detailed line-by-line review.
-            Do not approve or request changes — this is informational only.
+            // Group by thread (in_reply_to_id) and filter unresolved
+            const threadMap = new Map();
+            for (const c of threads) {
+              const threadId = c.in_reply_to_id || c.id;
+              if (!threadMap.has(threadId)) threadMap.set(threadId, []);
+              threadMap.get(threadId).push(c);
+            }
+
+            let unresolvedCount = 0;
+            for (const [threadId, comments] of threadMap) {
+              const root = comments.find(c => c.id === threadId) || comments[0];
+              // Skip resolved threads (heuristic: last comment contains resolution marker)
+              const lastComment = comments[comments.length - 1];
+              if (lastComment.body && lastComment.body.includes('<!-- <review_comment_addressed>')) continue;
+
+              // ── 4. STRIP COLLAPSED CONTENT ────────────────────────────
+              let body = root.body || '';
+              body = body.replace(/<details[^>]*>[\s\S]*?<\/details>/gi, '[collapsed section removed]');
+              body = body.replace(/<summary[^>]*>[\s\S]*?<\/summary>/gi, '');
+
+              unresolvedCount++;
+              unresolvedComments += `\n${unresolvedCount}. **${root.path}:${root.line || root.original_line || '?'}** (by @${root.user.login}, thread node_id: ${root.node_id})\n`;
+              unresolvedComments += `   ${body.substring(0, 500)}\n`;
+            }
+
+            if (unresolvedCount === 0) {
+              unresolvedComments = 'None — no unresolved review threads.\n';
+            }
+
+            // Write context file for the review step
+            const lines = [
+              `## PR: #${prNumber} — ${pr.title}`,
+              `Author: ${pr.user.login} | Base: ${pr.base.ref} | Head: ${pr.head.ref} (${headSha})`,
+              `Files changed: ${files.length}`,
+              '',
+              '## Changed Files with Full Content',
+              fileContents,
+              '',
+              '## Existing Unresolved Review Comments',
+              unresolvedComments,
+            ];
+            fs.writeFileSync('/tmp/review-context.md', lines.join('\n'));
+            core.setOutput('has_unresolved', unresolvedCount > 0 ? 'true' : 'false');
+            core.setOutput('unresolved_count', unresolvedCount.toString());
+            console.log('Context assembled: ' + files.length + ' files, ' + unresolvedCount + ' unresolved threads');
+
+      - name: Run Claude review
+        id: review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        shell: bash
+        run: |
+          CONTEXT=$(cat /tmp/review-context.md)
+
+          # Build the request payload
+          cat > /tmp/review-request.json << 'SYSPROMPT'
+          {
+            "model": "claude-sonnet-4-6-20250514",
+            "max_tokens": 8192,
+            "system": "You are a senior code reviewer performing an automated first-pass review of a pull request. You review INDEPENDENTLY of any other review tools (CodeRabbit, Dependabot, etc.) — their status is irrelevant to your analysis.\n\nYou MUST explicitly address every item listed under 'Existing Unresolved Review Comments'. For each one, state whether it has been fixed in the current diff, is still outstanding, or is no longer applicable. Do not skip any. Return your verdict for each as structured data in the THREAD VERDICTS section.\n\nFormat your response EXACTLY as:\n\n## Automated Review — First Pass\n\n### 🔴 Must Fix (blocks merge)\n[list or \"None\"]\n\n### 🟡 Should Fix (important)\n[list or \"None\"]\n\n### ✅ Looks Good\n[brief confirmation]\n\n### Thread Verdicts\nFor each unresolved thread, output ONE line:\nTHREAD:<node_id>|<FIXED|OUTSTANDING|NOT_APPLICABLE>|<brief reason>\n\nIf no unresolved threads exist, output: THREAD:NONE",
+            "messages": [{"role": "user", "content": "PLACEHOLDER"}]
+          }
+          SYSPROMPT
+
+          # Inject the actual context (escape for JSON)
+          ESCAPED=$(echo "$CONTEXT" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')
+          python3 -c "
+          import json
+          with open('/tmp/review-request.json') as f:
+              data = json.load(f)
+          with open('/tmp/review-context.md') as f:
+              context = f.read()
+          data['messages'][0]['content'] = context
+          with open('/tmp/review-request.json', 'w') as f:
+              json.dump(data, f)
+          "
+
+          # Call Claude API
+          RESPONSE=$(curl -s -X POST https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d @/tmp/review-request.json)
+
+          # Extract the text response
+          REVIEW=$(echo "$RESPONSE" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          if 'content' in data and len(data['content']) > 0:
+              print(data['content'][0].get('text', 'Review failed: empty response'))
+          elif 'error' in data:
+              print(f'Review failed: {data[\"error\"].get(\"message\", str(data[\"error\"]))}')
+          else:
+              print('Review failed: unexpected response format')
+          ")
+
+          echo "$REVIEW" > /tmp/review-output.md
+          echo "Review complete ($(wc -c < /tmp/review-output.md) bytes)"
+
+      - name: Post review comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const review = fs.readFileSync('/tmp/review-output.md', 'utf-8');
+            const pr = context.payload.pull_request;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              body: review,
+            });
+
+      - name: Resolve addressed threads
+        if: steps.context.outputs.has_unresolved == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // ── 6. CONVERSATION RESOLUTION via GraphQL ──────────────────
+            const fs = require('fs');
+            const review = fs.readFileSync('/tmp/review-output.md', 'utf-8');
+
+            // Parse THREAD:<node_id>|<verdict>|<reason> lines
+            const threadLines = review.split('\n').filter(l => l.startsWith('THREAD:') && l !== 'THREAD:NONE');
+            let resolved = 0;
+            let outstanding = 0;
+
+            for (const line of threadLines) {
+              const match = line.match(/^THREAD:([^|]+)\|([^|]+)\|(.*)$/);
+              if (!match) continue;
+              const [, nodeId, verdict, reason] = match;
+
+              if (verdict.trim() === 'FIXED' || verdict.trim() === 'NOT_APPLICABLE') {
+                try {
+                  await github.graphql(`
+                    mutation($threadId: ID!) {
+                      resolveReviewThread(input: { threadId: $threadId }) {
+                        thread { isResolved }
+                      }
+                    }
+                  `, { threadId: nodeId.trim() });
+                  resolved++;
+                  console.log(`Resolved thread ${nodeId}: ${reason}`);
+                } catch (e) {
+                  console.log(`Failed to resolve ${nodeId}: ${e.message}`);
+                }
+              } else {
+                outstanding++;
+                console.log(`Left open: ${nodeId} — ${reason}`);
+              }
+            }
+            console.log(`Thread resolution: ${resolved} resolved, ${outstanding} outstanding`);
 
   # ── LOOP 2: Deep review on @claude review trigger ──────────────────────────
   deep-review:
@@ -73,9 +254,11 @@ jobs:
     if: |
       (github.event_name == 'issue_comment' &&
        github.event.issue.pull_request != null &&
-       contains(github.event.comment.body, '@claude review')) ||
+       contains(github.event.comment.body, '@claude review') &&
+       github.event.comment.author_association != 'NONE') ||
       (github.event_name == 'pull_request_review_comment' &&
-       contains(github.event.comment.body, '@claude review'))
+       contains(github.event.comment.body, '@claude review') &&
+       github.event.comment.author_association != 'NONE')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -83,58 +266,251 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Deep Review via Claude
-        uses: anthropics/claude-code-action@v1
+      - name: Get PR number
+        id: pr
+        uses: actions/github-script@v7
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          claude_args: --model claude-sonnet-4-6 --max-turns 10
-          direct_prompt: |
-            Perform a thorough deep review of this PR. Use the linus-code-reviewer
-            standard: direct, merciless, fair. Technical arguments only.
+          script: |
+            let prNumber;
+            if (context.payload.issue && context.payload.issue.pull_request) {
+              prNumber = context.payload.issue.number;
+            } else if (context.payload.pull_request) {
+              prNumber = context.payload.pull_request.number;
+            } else {
+              core.setFailed('Could not determine PR number');
+              return;
+            }
+            core.setOutput('number', prNumber.toString());
 
-            Review all changed files for:
+      - name: Assemble deep review context
+        id: context
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const prNumber = parseInt('${{ steps.pr.outputs.number }}');
 
-            SECURITY & RELIABILITY
-            - Input validation on all external data
-            - Error handling completeness
-            - No secrets or credentials in code
-            - Race conditions and async correctness
+            const { data: pr } = await github.rest.pulls.get({
+              owner, repo, pull_number: prNumber,
+            });
+            const headSha = pr.head.sha;
 
-            CORRECTNESS
-            - Logic errors and edge cases
-            - API contract compliance
-            - Data transformation accuracy
+            // ── 1. FULL FILE FETCH ──────────────────────────────────────
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner, repo, pull_number: prNumber, per_page: 100,
+            });
 
-            STACK-SPECIFIC (apply to detected stack):
+            let fileContents = '';
+            for (const file of files) {
+              if (file.status === 'removed') continue;
+              fileContents += `\n### FILE: ${file.filename} (${file.status}, +${file.additions}/-${file.deletions})\n`;
+              fileContents += `#### Patch:\n\`\`\`diff\n${file.patch || '(binary or too large)'}\n\`\`\`\n`;
 
-            Next.js/TypeScript:
-            - Strict TypeScript (no any, correct generics)
-            - App Router patterns (server vs client boundary)
-            - Prisma: additive migrations only, parameterised queries
-            - React: unnecessary re-renders, hook rules, Suspense boundaries
+              if (file.size && file.size > 100000) {
+                fileContents += `#### Full content: skipped (${file.size} bytes > 100KB)\n`;
+                continue;
+              }
+              try {
+                const { data: content } = await github.rest.repos.getContent({
+                  owner, repo, path: file.filename, ref: headSha,
+                });
+                if (content.encoding === 'base64' && content.content) {
+                  const decoded = Buffer.from(content.content, 'base64').toString('utf-8');
+                  const ext = file.filename.split('.').pop() || '';
+                  fileContents += `#### Full content:\n\`\`\`${ext}\n${decoded}\n\`\`\`\n`;
+                }
+              } catch (e) {
+                fileContents += `#### Full content: fetch failed (${e.message})\n`;
+              }
+            }
 
-            Swift/SwiftUI:
-            - Actor isolation and MainActor correctness
-            - No force unwraps without // JUSTIFIED: comment
-            - Memory: weak self in escaping closures
-            - Async: proper cancellation, no blocking main thread
+            // ── 2. UNRESOLVED REVIEW COMMENTS (paginated) ───────────────
+            let unresolvedComments = '';
+            let page = 1;
+            let hasMore = true;
+            const threads = [];
 
-            Python/Flask:
-            - Type hints on all public functions
-            - No bare except: clauses
-            - Flask Blueprint structure respected
-            - APScheduler jobs have try/except wrappers
-            - GridWise: EMHASS plan validation, Modbus TCP close in finally
+            while (hasMore) {
+              const { data: comments } = await github.rest.pulls.listReviewComments({
+                owner, repo, pull_number: prNumber, per_page: 100, page,
+              });
+              if (comments.length === 0) { hasMore = false; break; }
+              threads.push(...comments);
+              page++;
+              if (comments.length < 100) hasMore = false;
+            }
 
-            RYAN'S SPECIFIC RULES:
-            - Never toISOString().split('T')[0] for AEST dates in JS
-            - Never commit to main directly
-            - HA: never edit .storage/*.json, never SSH background processes
+            const threadMap = new Map();
+            for (const c of threads) {
+              const threadId = c.in_reply_to_id || c.id;
+              if (!threadMap.has(threadId)) threadMap.set(threadId, []);
+              threadMap.get(threadId).push(c);
+            }
 
-            DOCS & QUALITY:
-            - CHANGELOG.md updated
-            - Public APIs documented
-            - Tests cover acceptance criteria
+            let unresolvedCount = 0;
+            for (const [threadId, comments] of threadMap) {
+              const root = comments.find(c => c.id === threadId) || comments[0];
+              const lastComment = comments[comments.length - 1];
+              if (lastComment.body && lastComment.body.includes('<!-- <review_comment_addressed>')) continue;
 
-            Score 1-10. List Critical (must fix), Serious (should fix), Minor (nice to fix).
-            State BLOCK / NEEDS WORK / LGTM as final verdict.
+              // ── 4. STRIP COLLAPSED CONTENT ────────────────────────────
+              let body = root.body || '';
+              body = body.replace(/<details[^>]*>[\s\S]*?<\/details>/gi, '[collapsed section removed]');
+              body = body.replace(/<summary[^>]*>[\s\S]*?<\/summary>/gi, '');
+
+              unresolvedCount++;
+              unresolvedComments += `\n${unresolvedCount}. **${root.path}:${root.line || root.original_line || '?'}** (by @${root.user.login}, thread node_id: ${root.node_id})\n`;
+              unresolvedComments += `   ${body.substring(0, 1000)}\n`;
+            }
+
+            if (unresolvedCount === 0) {
+              unresolvedComments = 'None — no unresolved review threads.\n';
+            }
+
+            const lines = [
+              `## PR: #${prNumber} — ${pr.title}`,
+              `Author: ${pr.user.login} | Base: ${pr.base.ref} | Head: ${pr.head.ref} (${headSha})`,
+              `Files changed: ${files.length}`,
+              '',
+              '## Changed Files with Full Content',
+              fileContents,
+              '',
+              '## Existing Unresolved Review Comments',
+              unresolvedComments,
+            ];
+            fs.writeFileSync('/tmp/review-context.md', lines.join('\n'));
+            core.setOutput('has_unresolved', unresolvedCount > 0 ? 'true' : 'false');
+            core.setOutput('unresolved_count', unresolvedCount.toString());
+
+      - name: Run Claude deep review
+        id: review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        shell: bash
+        run: |
+          # Build request with deep review system prompt
+          python3 -c "
+          import json
+
+          with open('/tmp/review-context.md') as f:
+              context = f.read()
+
+          system_prompt = '''You are a senior code reviewer performing a thorough deep review. Use the linus-code-reviewer standard: direct, merciless, fair. Technical arguments only.
+
+          You review INDEPENDENTLY — the status of CodeRabbit, Dependabot, or any other bot check is IRRELEVANT. Your review runs unconditionally.
+
+          You MUST explicitly address every item listed under 'Existing Unresolved Review Comments'. For each one, state whether it has been fixed in the current diff, is still outstanding, or is no longer applicable. Do not skip any.
+
+          Review ALL changed files (you have full file content, not just patches) for:
+
+          SECURITY & RELIABILITY
+          - Input validation on all external data
+          - Error handling completeness
+          - No secrets or credentials in code
+          - Race conditions and async correctness
+
+          CORRECTNESS
+          - Logic errors and edge cases
+          - API contract compliance
+          - Data transformation accuracy
+
+          STACK-SPECIFIC (apply to detected stack):
+          - Next.js/TS: strict TypeScript, App Router patterns, Prisma additive migrations
+          - Swift/SwiftUI: actor isolation, no force unwraps without JUSTIFIED, weak self
+          - Python/Flask: type hints, no bare except, Blueprint structure, APScheduler error handling
+          - JS: never toISOString().split('T')[0] for AEST dates
+
+          DOCS & QUALITY
+          - CHANGELOG.md updated
+          - Public APIs documented
+
+          Score 1-10. List Critical (must fix), Serious (should fix), Minor (nice to fix).
+          State BLOCK / NEEDS WORK / LGTM as final verdict.
+
+          ### Thread Verdicts
+          For each unresolved thread listed above, output ONE line:
+          THREAD:<node_id>|<FIXED|OUTSTANDING|NOT_APPLICABLE>|<brief reason>
+
+          If no unresolved threads exist, output: THREAD:NONE'''
+
+          data = {
+              'model': 'claude-sonnet-4-6-20250514',
+              'max_tokens': 16384,
+              'system': system_prompt,
+              'messages': [{'role': 'user', 'content': context}],
+          }
+          with open('/tmp/review-request.json', 'w') as f:
+              json.dump(data, f)
+          "
+
+          RESPONSE=$(curl -s -X POST https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d @/tmp/review-request.json)
+
+          echo "$RESPONSE" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          if 'content' in data and len(data['content']) > 0:
+              print(data['content'][0].get('text', 'Review failed: empty response'))
+          elif 'error' in data:
+              print(f'Review failed: {data[\"error\"].get(\"message\", str(data[\"error\"]))}')
+          else:
+              print('Review failed: unexpected response format')
+          " > /tmp/review-output.md
+
+      - name: Post deep review comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const review = fs.readFileSync('/tmp/review-output.md', 'utf-8');
+            const prNumber = parseInt('${{ steps.pr.outputs.number }}');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: `## Deep Review — Claude\n\n${review}`,
+            });
+
+      - name: Resolve addressed threads
+        if: steps.context.outputs.has_unresolved == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const review = fs.readFileSync('/tmp/review-output.md', 'utf-8');
+
+            const threadLines = review.split('\n').filter(l => l.startsWith('THREAD:') && l !== 'THREAD:NONE');
+            let resolved = 0;
+            let outstanding = 0;
+
+            for (const line of threadLines) {
+              const match = line.match(/^THREAD:([^|]+)\|([^|]+)\|(.*)$/);
+              if (!match) continue;
+              const [, nodeId, verdict, reason] = match;
+
+              if (verdict.trim() === 'FIXED' || verdict.trim() === 'NOT_APPLICABLE') {
+                try {
+                  await github.graphql(`
+                    mutation($threadId: ID!) {
+                      resolveReviewThread(input: { threadId: $threadId }) {
+                        thread { isResolved }
+                      }
+                    }
+                  `, { threadId: nodeId.trim() });
+                  resolved++;
+                  console.log(`Resolved thread ${nodeId}: ${reason}`);
+                } catch (e) {
+                  console.log(`Failed to resolve ${nodeId}: ${e.message}`);
+                }
+              } else {
+                outstanding++;
+                console.log(`Left open: ${nodeId} — ${reason}`);
+              }
+            }
+            console.log(`Thread resolution: ${resolved} resolved, ${outstanding} outstanding`);

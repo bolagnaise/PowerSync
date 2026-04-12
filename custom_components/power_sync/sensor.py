@@ -95,6 +95,15 @@ from .const import (
     SENSOR_TYPE_BATTERY_LEVEL_2,
     SENSOR_TYPE_OPTIMIZATION_STATUS,
     SENSOR_TYPE_OPTIMIZATION_NEXT_ACTION,
+    SENSOR_TYPE_SAVINGS_TODAY,
+    SENSOR_TYPE_SAVINGS_THIS_WEEK,
+    SENSOR_TYPE_SAVINGS_THIS_MONTH,
+    SENSOR_TYPE_SAVINGS_LIFETIME,
+    SENSOR_TYPE_DAILY_COST_TOTAL,
+    SENSOR_TYPE_DAILY_BASELINE,
+    SENSOR_TYPE_ROI_PERCENTAGE,
+    SENSOR_TYPE_LAST_DECISION,
+    CONF_SYSTEM_COST,
     SENSOR_TYPE_LP_SOLAR_FORECAST,
     SENSOR_TYPE_LP_LOAD_FORECAST,
     SENSOR_TYPE_LP_IMPORT_PRICE_FORECAST,
@@ -612,6 +621,125 @@ OPTIMIZER_ACTION_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
             if data
             else {}
         ),
+    ),
+)
+
+SAVINGS_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_SAVINGS_TODAY,
+        name="Savings Today",
+        native_unit_of_measurement=CURRENCY_DOLLAR,
+        device_class=SensorDeviceClass.MONETARY,
+        state_class=SensorStateClass.TOTAL,
+        suggested_display_precision=2,
+        icon="mdi:piggy-bank-outline",
+        value_fn=lambda data: data.get("predicted_savings") if data else None,
+        attr_fn=lambda data: (
+            {
+                **data.get("daily_cost_detail", {}),
+                "predicted_cost": data.get("predicted_cost"),
+                "predicted_savings": data.get("predicted_savings"),
+                "actual_savings": data.get("daily_cost_breakdown", {}).get(
+                    "actual_savings"
+                ),
+            }
+            if data
+            else {}
+        ),
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_SAVINGS_THIS_WEEK,
+        name="Savings This Week",
+        native_unit_of_measurement=CURRENCY_DOLLAR,
+        device_class=SensorDeviceClass.MONETARY,
+        state_class=SensorStateClass.TOTAL,
+        suggested_display_precision=2,
+        icon="mdi:calendar-week",
+        value_fn=lambda data: (
+            data.get("savings_periods", {}).get("week", {}).get("total_savings")
+            if data
+            else None
+        ),
+        attr_fn=lambda data: (
+            data.get("savings_periods", {}).get("week", {}) if data else {}
+        ),
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_SAVINGS_THIS_MONTH,
+        name="Savings This Month",
+        native_unit_of_measurement=CURRENCY_DOLLAR,
+        device_class=SensorDeviceClass.MONETARY,
+        state_class=SensorStateClass.TOTAL,
+        suggested_display_precision=2,
+        icon="mdi:calendar-month",
+        value_fn=lambda data: (
+            data.get("savings_periods", {}).get("month", {}).get("total_savings")
+            if data
+            else None
+        ),
+        attr_fn=lambda data: (
+            data.get("savings_periods", {}).get("month", {}) if data else {}
+        ),
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_SAVINGS_LIFETIME,
+        name="Savings Lifetime",
+        native_unit_of_measurement=CURRENCY_DOLLAR,
+        device_class=SensorDeviceClass.MONETARY,
+        state_class=SensorStateClass.TOTAL,
+        suggested_display_precision=2,
+        icon="mdi:chart-line",
+        value_fn=lambda data: (
+            data.get("savings_periods", {}).get("all_time", {}).get("total_savings")
+            if data
+            else None
+        ),
+        attr_fn=lambda data: (
+            data.get("savings_periods", {}).get("all_time", {}) if data else {}
+        ),
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_DAILY_COST_TOTAL,
+        name="Daily Cost",
+        native_unit_of_measurement=CURRENCY_DOLLAR,
+        device_class=SensorDeviceClass.MONETARY,
+        state_class=SensorStateClass.TOTAL,
+        suggested_display_precision=2,
+        icon="mdi:cash",
+        value_fn=lambda data: data.get("predicted_cost") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_DAILY_BASELINE,
+        name="Daily Baseline Cost",
+        native_unit_of_measurement=CURRENCY_DOLLAR,
+        device_class=SensorDeviceClass.MONETARY,
+        state_class=SensorStateClass.TOTAL,
+        suggested_display_precision=2,
+        icon="mdi:cash-remove",
+        value_fn=lambda data: (
+            data.get("daily_cost_breakdown", {}).get("actual_baseline", 0)
+            + data.get("daily_cost_breakdown", {}).get(
+                "predicted_baseline_remaining", 0
+            )
+            if data
+            else None
+        ),
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_ROI_PERCENTAGE,
+        name="Battery ROI",
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.TOTAL,
+        suggested_display_precision=1,
+        icon="mdi:percent-circle-outline",
+        # ROI calculated from lifetime savings / system cost — requires system_cost config
+        value_fn=lambda data: None,  # Overridden in ROISensor class
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_LAST_DECISION,
+        name="Last Optimizer Decision",
+        icon="mdi:head-lightbulb-outline",
+        value_fn=lambda data: None,  # Overridden in LastDecisionSensor class
     ),
 )
 
@@ -1148,6 +1276,39 @@ async def async_setup_entry(
                 )
             )
         _LOGGER.info("Optimizer action sensors added (current action, next action)")
+
+        # Add savings sensors (Trust & Transparency Phase 1)
+        for description in SAVINGS_SENSORS:
+            if description.key == SENSOR_TYPE_ROI_PERCENTAGE:
+                system_cost = entry.options.get(
+                    CONF_SYSTEM_COST, entry.data.get(CONF_SYSTEM_COST, 0)
+                )
+                if system_cost and float(system_cost) > 0:
+                    entities.append(
+                        ROISensor(
+                            coordinator=optimization_coordinator,
+                            description=description,
+                            entry=entry,
+                            system_cost=float(system_cost),
+                        )
+                    )
+            elif description.key == SENSOR_TYPE_LAST_DECISION:
+                entities.append(
+                    LastDecisionSensor(
+                        coordinator=optimization_coordinator,
+                        description=description,
+                        entry=entry,
+                    )
+                )
+            else:
+                entities.append(
+                    SavingsSensor(
+                        coordinator=optimization_coordinator,
+                        description=description,
+                        entry=entry,
+                    )
+                )
+        _LOGGER.info("Savings sensors added (today, week, month, lifetime, cost, baseline)")
     else:
         # Store callback for deferred LP forecast + optimizer action sensor creation
         domain_data["sensor_async_add_entities"] = async_add_entities
@@ -1456,6 +1617,159 @@ class OptimizerActionSensor(CoordinatorEntity, SensorEntity):
         """Return additional attributes."""
         if self.entity_description.attr_fn:
             return self.entity_description.attr_fn(self.coordinator.data)
+        return {}
+
+
+class SavingsSensor(CoordinatorEntity, SensorEntity):
+    """Sensor for savings data (reads from OptimizationCoordinator.data)."""
+
+    entity_description: PowerSyncSensorEntityDescription
+
+    def __init__(
+        self,
+        coordinator,
+        description: PowerSyncSensorEntityDescription,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator)
+        self.entity_description = description
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        self._attr_has_entity_name = True
+        self._attr_suggested_object_id = f"power_sync_{description.key}"
+
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
+
+    @property
+    def native_value(self) -> Any:
+        """Return the state of the sensor."""
+        if self.entity_description.value_fn:
+            return self.entity_description.value_fn(self.coordinator.data)
+        return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return additional attributes."""
+        if self.entity_description.attr_fn:
+            return self.entity_description.attr_fn(self.coordinator.data)
+        return {}
+
+
+class ROISensor(CoordinatorEntity, SensorEntity):
+    """ROI percentage sensor — requires system_cost in config options."""
+
+    entity_description: PowerSyncSensorEntityDescription
+
+    def __init__(
+        self,
+        coordinator,
+        description: PowerSyncSensorEntityDescription,
+        entry: ConfigEntry,
+        system_cost: float,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator)
+        self.entity_description = description
+        self._entry = entry
+        self._system_cost = system_cost
+        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        self._attr_has_entity_name = True
+        self._attr_suggested_object_id = f"power_sync_{description.key}"
+
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
+
+    @property
+    def native_value(self) -> Any:
+        """Return ROI as percentage of system cost recovered."""
+        if not self.coordinator.data or self._system_cost <= 0:
+            return None
+        lifetime = (
+            self.coordinator.data.get("savings_periods", {})
+            .get("all_time", {})
+            .get("total_savings", 0)
+        )
+        return round(lifetime / self._system_cost * 100, 1)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return additional attributes."""
+        if not self.coordinator.data:
+            return {}
+        lifetime = (
+            self.coordinator.data.get("savings_periods", {})
+            .get("all_time", {})
+            .get("total_savings", 0)
+        )
+        return {
+            "system_cost": self._system_cost,
+            "lifetime_savings": lifetime,
+            "days_tracked": (
+                self.coordinator.data.get("savings_periods", {})
+                .get("all_time", {})
+                .get("days_tracked", 0)
+            ),
+        }
+
+
+class LastDecisionSensor(CoordinatorEntity, SensorEntity):
+    """Sensor showing the last optimizer decision with human-readable reason."""
+
+    entity_description: PowerSyncSensorEntityDescription
+
+    def __init__(
+        self,
+        coordinator,
+        description: PowerSyncSensorEntityDescription,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator)
+        self.entity_description = description
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        self._attr_has_entity_name = True
+        self._attr_suggested_object_id = f"power_sync_{description.key}"
+
+    @property
+    def device_info(self):
+        """Return device info to link to the PowerSync device."""
+        return {
+            "identifiers": {(DOMAIN, self._entry.entry_id)},
+        }
+
+    @property
+    def native_value(self) -> Any:
+        """Return the human-readable decision reason."""
+        if not self.coordinator.data:
+            return None
+        decision = self.coordinator.data.get("last_decision")
+        if decision:
+            return decision.get("reason", "No decision yet")
+        return "No decision yet"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the full decision entry as attributes."""
+        if not self.coordinator.data:
+            return {}
+        decision = self.coordinator.data.get("last_decision")
+        if decision:
+            return {
+                k: v
+                for k, v in decision.items()
+                if k != "reason"  # reason is the state value
+            }
         return {}
 
 

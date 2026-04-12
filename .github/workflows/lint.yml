@@ -8,8 +8,8 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
-  checks: write
+  pull-requests: read
+  checks: read
 
 jobs:
   # ── Detect which stacks are present ────────────────────────────────────────
@@ -25,7 +25,7 @@ jobs:
       - uses: actions/checkout@v4
       - id: detect
         run: |
-          echo "nextjs=$(test -f package.json && ls next.config.* 2>/dev/null && echo true || echo false)" >> $GITHUB_OUTPUT
+          echo "nextjs=$(test -f package.json && (ls next.config.* 2>/dev/null || grep -q '"next"' package.json 2>/dev/null) && echo true || echo false)" >> $GITHUB_OUTPUT
           echo "swift=$(ls *.swift *.xcodeproj Package.swift 2>/dev/null | head -1 | grep -q . && echo true || echo false)" >> $GITHUB_OUTPUT
           echo "python=$(test -f requirements.txt || test -f pyproject.toml || test -f app.py && echo true || echo false)" >> $GITHUB_OUTPUT
 
@@ -114,6 +114,7 @@ jobs:
               | grep -v 'test\|Test\|mock\|Mock' \
               | grep -v 'node_modules\|.build\|Pods' \
               | grep -E '!\s*$|!\.'
+            exit 1
           else
             echo "✅ No unjustified force unwraps"
           fi

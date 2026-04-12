@@ -22,12 +22,19 @@ from .battery_optimizer import BatteryOptimizer, OptimizerResult
 from .schedule_reader import OptimizationSchedule
 from .executor import ScheduleExecutor, ExecutionStatus, BatteryAction
 from .load_estimator import LoadEstimator, SolcastForecaster
+from .decision_log import (
+    DecisionLog,
+    DecisionEntry,
+    generate_decision_reason,
+    generate_override_reason,
+)
 from .ev_coordinator import EVCoordinator, EVConfig, EVChargingMode
 
 _LOGGER = logging.getLogger(__name__)
 
-COST_STORE_VERSION = 1
+COST_STORE_VERSION = 2
 COST_STORE_SAVE_DELAY = 300  # Coalesce writes — flush at most every 5 minutes
+SAVINGS_HISTORY_MAX_DAYS = 90  # Rolling window for in-Store history
 
 
 @dataclass
@@ -183,6 +190,16 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             COST_STORE_VERSION,
             f"power_sync.costs.{entry_id}",
         )
+        self._savings_history: dict[str, dict] = {}  # date_str -> daily summary
+        # Cumulative all-time totals (not pruned, survives 90-day history rotation)
+        self._cumulative_savings = 0.0
+        self._cumulative_cost = 0.0
+        self._cumulative_baseline = 0.0
+        self._cumulative_days = 0
+        self._notification_unsubs: list = []  # Savings notification timer unsubs
+
+        # Decision log — ring buffer of optimizer actions with human-readable reasons
+        self._decision_log = DecisionLog(hass, entry_id)
 
         # Saving sessions coordinator (set from __init__.py when configured)
         self._saving_session_coordinator = None
@@ -310,6 +327,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Restore persisted daily cost data (survives HA restarts)
         await self._restore_cost_data()
+
+        # Restore persisted decision log (survives HA restarts)
+        await self._decision_log.restore()
 
         _LOGGER.info(
             "Optimization coordinator setup complete (built-in LP). "
@@ -465,6 +485,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._polling_task = self.hass.async_create_background_task(
             self._schedule_polling_loop(), "powersync_schedule_polling"
         )
+
+        # Schedule savings notifications (daily at 21:00, weekly on Sundays)
+        self._notification_unsubs = self.schedule_savings_notifications()
 
         # Start EV coordination if enabled
         if self._ev_coordinator and self._ev_configs:
@@ -648,14 +671,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._price_listener_unsub()
             self._price_listener_unsub = None
 
+        # Cancel savings notification timers
+        for unsub in self._notification_unsubs:
+            unsub()
+        self._notification_unsubs = []
+
         if self._executor:
             await self._executor.stop()
 
         if self._ev_coordinator:
             await self._ev_coordinator.stop()
 
-        # Flush cost data to disk before shutdown
+        # Flush cost data and decision log to disk before shutdown
         await self._cost_store.async_save(self._cost_data_to_save())
+        await self._decision_log.async_save()
 
         _LOGGER.info("Optimization disabled")
 
@@ -928,6 +957,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "[MONITORING] Optimizer would execute: %s (power=%sW) — blocked by monitoring mode",
                 action.action, getattr(action, 'power_w', 'N/A'),
             )
+            await self._record_decision(
+                action.action, action.action, "Blocked by monitoring mode"
+            )
             return
 
         battery = self._executor.battery_controller
@@ -948,6 +980,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "Optimizer: force %s active (user) — skipping action execution "
                         "(LP wants %s)",
                         force_type, action.action,
+                    )
+                    await self._record_decision(
+                        force_type, action.action,
+                        f"Skipped — user-triggered force {force_type} active",
                     )
                     return
 
@@ -1015,6 +1051,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "Optimizer: force %s active (optimizer) — LP still wants %s, "
                         "extended expiry to %s",
                         force_type, action.action, new_expiry.isoformat(),
+                    )
+                    await self._record_decision(
+                        force_type, action.action,
+                        f"Maintained force {force_type} — LP still agrees, extended expiry",
                     )
                     return
 
@@ -1596,8 +1636,125 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             self._last_executed_action = effective_action
 
+            # Record decision via shared helper (logs + notifications)
+            await self._record_decision(effective_action, action.action)
+
         except Exception as e:
             _LOGGER.error("Failed to execute optimizer action: %s", e)
+
+    async def _record_decision(
+        self,
+        effective_action: str,
+        original_action: str,
+        override_reason_str: str | None = None,
+    ) -> None:
+        """Record a decision to the decision log with full context.
+
+        Shared helper called from all exit paths of _execute_optimizer_action
+        so decisions are logged consistently (including monitoring mode,
+        force mode, and early returns).
+        """
+        try:
+            dec_import_price = 0.0
+            dec_export_price = 0.0
+            if self._last_import_prices:
+                dec_import_price = self._last_import_prices[0]
+            if self._last_export_prices:
+                dec_export_price = self._last_export_prices[0]
+
+            dec_soc = 0.5
+            try:
+                dec_soc, _ = await self._get_battery_state()
+            except Exception:
+                pass
+
+            dec_solar_kw = 0.0
+            dec_load_kw = 0.0
+            if self.energy_coordinator and self.energy_coordinator.data:
+                ec_data = self.energy_coordinator.data
+                dec_solar_kw = float(ec_data.get("solar_power", 0) or 0)
+                dec_grid_kw = float(ec_data.get("grid_power", 0) or 0)
+                dec_batt_kw = float(ec_data.get("battery_power", 0) or 0)
+                dec_load_kw = max(0.0, dec_grid_kw + dec_solar_kw + dec_batt_kw)
+
+            # Find next significant price change
+            next_price_change: tuple[str, float] | None = None
+            if self._last_import_prices and len(self._last_import_prices) > 1:
+                now = dt_util.now()
+                threshold = dec_import_price * 0.2
+                for i, price in enumerate(self._last_import_prices[1:], start=1):
+                    if abs(price - dec_import_price) > threshold:
+                        future_time = now + timedelta(
+                            minutes=i * self._config.interval_minutes
+                        )
+                        next_price_change = (future_time.strftime("%H:%M"), price)
+                        break
+
+            # Get upcoming schedule actions
+            schedule_actions: list[str] | None = None
+            if self._current_schedule and self._current_schedule.actions:
+                schedule_actions = [a.action for a in self._current_schedule.actions[:6]]
+
+            reason = generate_decision_reason(
+                action=effective_action,
+                original_action=original_action,
+                import_price=dec_import_price,
+                export_price=dec_export_price,
+                soc=dec_soc,
+                solar_power_kw=dec_solar_kw,
+                load_kw=dec_load_kw,
+                next_price_change=next_price_change,
+                schedule_actions=schedule_actions,
+            )
+
+            override_reason = override_reason_str
+            if not override_reason and original_action != effective_action:
+                override_reason = (
+                    f"LP planned {original_action}, overridden to {effective_action}"
+                )
+
+            # Estimate savings impact
+            dt_hours = self._config.interval_minutes / 60.0
+            net_load_kw = max(0.0, dec_load_kw - dec_solar_kw)
+            savings_impact = 0.0
+            if effective_action == "charge":
+                savings_impact = -(dec_import_price * net_load_kw * dt_hours)
+            elif effective_action in ("discharge", "export"):
+                savings_impact = dec_export_price * net_load_kw * dt_hours
+            elif effective_action == "self_consumption":
+                avoided_kw = min(dec_load_kw, dec_solar_kw)
+                savings_impact = dec_import_price * avoided_kw * dt_hours
+            savings_impact = round(savings_impact, 4)
+
+            entry = DecisionEntry(
+                timestamp=dt_util.now().isoformat(),
+                action=effective_action,
+                original_action=original_action,
+                reason=reason,
+                override_reason=override_reason,
+                import_price=dec_import_price,
+                export_price=dec_export_price,
+                soc=dec_soc,
+                solar_power_kw=dec_solar_kw,
+                load_kw=dec_load_kw,
+                savings_impact=savings_impact,
+            )
+            self._decision_log.log(entry)
+
+            # Send notification on significant action changes
+            previous_action = self._last_executed_action
+            if (
+                previous_action
+                and effective_action != previous_action
+                and effective_action in ("charge", "export")
+                and abs(savings_impact) >= 0.50
+            ):
+                self.hass.async_create_background_task(
+                    self._send_action_change_notification(entry),
+                    "powersync_action_notification",
+                )
+        except Exception as exc:
+            _LOGGER.debug("Decision logging failed (non-fatal): %s", exc)
 
     def _apply_export_boost(
         self,
@@ -3089,6 +3246,26 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         stored_date = data.get("date")
         today = dt_util.now().strftime("%Y-%m-%d")
 
+        # Restore savings history (rolling 90-day window)
+        self._savings_history = data.get("history", {})
+        if self._savings_history:
+            _LOGGER.info(
+                "Restored %d days of savings history", len(self._savings_history)
+            )
+
+        # Restore cumulative all-time totals (not pruned)
+        cumulative = data.get("cumulative", {})
+        self._cumulative_savings = float(cumulative.get("savings", 0.0))
+        self._cumulative_cost = float(cumulative.get("cost", 0.0))
+        self._cumulative_baseline = float(cumulative.get("baseline", 0.0))
+        self._cumulative_days = int(cumulative.get("days", 0))
+        if self._cumulative_days > 0:
+            _LOGGER.info(
+                "Restored cumulative totals: savings=$%.2f over %d days",
+                self._cumulative_savings,
+                self._cumulative_days,
+            )
+
         if stored_date == today:
             self._actual_cost_today = float(data.get("actual_cost", 0.0))
             self._actual_baseline_today = float(data.get("baseline_cost", 0.0))
@@ -3109,6 +3286,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 stored_date,
             )
         else:
+            # Day changed since last save — archive the stored day's data
+            if stored_date and data.get("actual_cost") is not None:
+                self._archive_day_to_history(
+                    stored_date,
+                    float(data.get("actual_cost", 0.0)),
+                    float(data.get("baseline_cost", 0.0)),
+                    float(data.get("import_kwh", 0.0)),
+                    float(data.get("export_kwh", 0.0)),
+                    float(data.get("import_cost", 0.0)),
+                    float(data.get("export_earnings", 0.0)),
+                )
             _LOGGER.info(
                 "Persisted cost data is from %s (today=%s), starting fresh",
                 stored_date, today,
@@ -3133,7 +3321,153 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "discharge_kwh": round(self._actual_discharge_kwh_today, 4),
             "import_cost": round(self._actual_import_cost_today, 4),
             "export_earnings": round(self._actual_export_earnings_today, 4),
+            "history": self._savings_history,
+            "cumulative": {
+                "savings": round(self._cumulative_savings, 4),
+                "cost": round(self._cumulative_cost, 4),
+                "baseline": round(self._cumulative_baseline, 4),
+                "days": self._cumulative_days,
+            },
         }
+
+    def _archive_day_to_history(
+        self,
+        date_str: str,
+        actual_cost: float,
+        baseline_cost: float,
+        import_kwh: float,
+        export_kwh: float,
+        import_cost: float,
+        export_earnings: float,
+    ) -> None:
+        """Archive a completed day's data into the rolling savings history."""
+        savings = baseline_cost - actual_cost
+
+        # Only add to cumulative if this day wasn't already archived
+        # (protects against double-counting on restart)
+        if date_str not in self._savings_history:
+            self._cumulative_savings += savings
+            self._cumulative_cost += actual_cost
+            self._cumulative_baseline += baseline_cost
+            self._cumulative_days += 1
+
+        self._savings_history[date_str] = {
+            "actual_cost": round(actual_cost, 4),
+            "baseline_cost": round(baseline_cost, 4),
+            "savings": round(savings, 4),
+            "import_kwh": round(import_kwh, 4),
+            "export_kwh": round(export_kwh, 4),
+            "import_cost": round(import_cost, 4),
+            "export_earnings": round(export_earnings, 4),
+        }
+        # Prune entries older than 90 days (cumulative totals are unaffected)
+        cutoff = (
+            dt_util.now() - timedelta(days=SAVINGS_HISTORY_MAX_DAYS)
+        ).strftime("%Y-%m-%d")
+        self._savings_history = {
+            k: v for k, v in self._savings_history.items() if k >= cutoff
+        }
+        _LOGGER.info(
+            "Archived %s to savings history (savings=$%.2f, %d days stored, "
+            "cumulative=$%.2f over %d days)",
+            date_str,
+            savings,
+            len(self._savings_history),
+            self._cumulative_savings,
+            self._cumulative_days,
+        )
+
+    def _get_today_live_summary(self) -> dict:
+        """Get today's live (in-progress) savings data for period merging."""
+        today_savings = self._actual_baseline_today - self._actual_cost_today
+        return {
+            "savings": today_savings,
+            "actual_cost": self._actual_cost_today,
+            "baseline_cost": self._actual_baseline_today,
+        }
+
+    def get_savings_period(self, period: str) -> dict:
+        """Get aggregated savings for a time period.
+
+        Merges completed days from _savings_history with today's live
+        in-progress data. For "all_time", uses the separate cumulative
+        store that is not pruned by the 90-day history rotation.
+
+        Args:
+            period: One of "week", "month", "year", "all_time"
+
+        Returns:
+            Dict with total_savings, total_cost, total_baseline, days_tracked
+        """
+        # For all_time, use cumulative store (not pruned) + today's live data
+        if period == "all_time":
+            today = self._get_today_live_summary()
+            return {
+                "total_savings": round(
+                    self._cumulative_savings + today["savings"], 2
+                ),
+                "total_cost": round(
+                    self._cumulative_cost + today["actual_cost"], 2
+                ),
+                "total_baseline": round(
+                    self._cumulative_baseline + today["baseline_cost"], 2
+                ),
+                "days_tracked": self._cumulative_days + 1,  # +1 for today
+            }
+
+        now = dt_util.now()
+        today_str = now.strftime("%Y-%m-%d")
+        if period == "week":
+            start = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
+        elif period == "month":
+            start = now.strftime("%Y-%m-01")
+        elif period == "year":
+            start = now.strftime("%Y-01-01")
+        else:
+            start = "0000-00-00"
+
+        total_savings = 0.0
+        total_cost = 0.0
+        total_baseline = 0.0
+        days_tracked = 0
+
+        for date_str, day_data in self._savings_history.items():
+            if date_str >= start:
+                total_savings += day_data.get("savings", 0.0)
+                total_cost += day_data.get("actual_cost", 0.0)
+                total_baseline += day_data.get("baseline_cost", 0.0)
+                days_tracked += 1
+
+        # Merge today's live data if today falls within the period
+        # and isn't already archived in history
+        if today_str >= start and today_str not in self._savings_history:
+            today = self._get_today_live_summary()
+            total_savings += today["savings"]
+            total_cost += today["actual_cost"]
+            total_baseline += today["baseline_cost"]
+            days_tracked += 1
+
+        return {
+            "total_savings": round(total_savings, 2),
+            "total_cost": round(total_cost, 2),
+            "total_baseline": round(total_baseline, 2),
+            "days_tracked": days_tracked,
+        }
+
+    def get_daily_savings_history(self, days: int = 30) -> list[dict]:
+        """Get daily savings breakdown for charting.
+
+        Args:
+            days: Number of days to return (most recent first)
+
+        Returns:
+            List of dicts with date, savings, actual_cost, baseline_cost
+        """
+        sorted_dates = sorted(self._savings_history.keys(), reverse=True)[:days]
+        return [
+            {"date": d, **self._savings_history[d]}
+            for d in sorted_dates
+        ]
 
     def _get_forecast_offset(self) -> int:
         """Get number of steps elapsed since last LP run.
@@ -3304,11 +3638,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Reset at midnight
         if self._last_cost_date != today:
             if self._last_cost_date is not None:
+                savings = self._actual_baseline_today - self._actual_cost_today
                 _LOGGER.info(
                     "Daily cost reset (new day). Yesterday actual=$%.2f, baseline=$%.2f, savings=$%.2f",
                     self._actual_cost_today,
                     self._actual_baseline_today,
-                    self._actual_baseline_today - self._actual_cost_today,
+                    savings,
+                )
+                # Archive yesterday to savings history
+                self._archive_day_to_history(
+                    self._last_cost_date,
+                    self._actual_cost_today,
+                    self._actual_baseline_today,
+                    self._actual_import_kwh_today,
+                    self._actual_export_kwh_today,
+                    self._actual_import_cost_today,
+                    self._actual_export_earnings_today,
                 )
                 # Record baseline to Amber usage coordinator for savings tracking
                 try:
@@ -3511,6 +3856,153 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         total_baseline = self._actual_baseline_today + baseline_remaining
         return round(total_baseline - total_cost, 2)
 
+    def get_decision_log_entries(self, limit: int = 288) -> list[dict]:
+        """Get decision log entries for API/frontend."""
+        return self._decision_log.get_entries(limit)
+
+    def get_last_decision(self) -> dict | None:
+        """Get the most recent decision entry."""
+        from dataclasses import asdict as _asdict
+
+        entry = self._decision_log.get_latest()
+        return _asdict(entry) if entry else None
+
+    async def _send_daily_savings_notification(self, _now=None) -> None:
+        """Send daily savings summary notification at 21:00."""
+        from ..const import DOMAIN, CONF_SAVINGS_NOTIFICATIONS
+
+        # Check if notifications are enabled
+        if self._entry:
+            enabled = self._entry.options.get(CONF_SAVINGS_NOTIFICATIONS, True)
+            if not enabled:
+                return
+
+        savings = self._get_daily_savings()
+        cost = self._get_daily_cost()
+        baseline = self._actual_baseline_today + self._get_predicted_cost_to_midnight()[1]
+        charge_kwh = self._actual_charge_kwh_today
+        discharge_kwh = self._actual_discharge_kwh_today
+
+        title = "PowerSync Daily Summary"
+        message = (
+            f"Saved ${savings:.2f} today "
+            f"(baseline: ${baseline:.2f}, actual: ${cost:.2f}). "
+            f"Battery cycled {charge_kwh + discharge_kwh:.1f} kWh."
+        )
+
+        try:
+            from ..automations.actions import _send_savings_notification
+
+            await _send_savings_notification(
+                self.hass, title, message, self.entry_id
+            )
+            _LOGGER.info("Daily savings notification sent: savings=$%.2f", savings)
+        except Exception as e:
+            _LOGGER.debug("Failed to send daily savings notification: %s", e)
+
+    async def _send_weekly_savings_notification(self, _now=None) -> None:
+        """Send weekly savings summary notification on Sunday at 21:00."""
+        now = dt_util.now()
+        if now.weekday() != 6:  # Sunday = 6
+            return
+
+        from ..const import DOMAIN, CONF_SAVINGS_NOTIFICATIONS
+
+        if self._entry:
+            enabled = self._entry.options.get(CONF_SAVINGS_NOTIFICATIONS, True)
+            if not enabled:
+                return
+
+        week = self.get_savings_period("week")
+        month = self.get_savings_period("month")
+
+        title = "PowerSync Weekly Summary"
+        message = (
+            f"This week: ${week['total_savings']:.2f} saved. "
+            f"Month to date: ${month['total_savings']:.2f}."
+        )
+
+        # Add ROI if system cost is configured
+        from ..const import CONF_SYSTEM_COST
+
+        if self._entry:
+            system_cost = self._entry.options.get(CONF_SYSTEM_COST, 0)
+            if system_cost and float(system_cost) > 0:
+                all_time = self.get_savings_period("all_time")
+                roi = all_time["total_savings"] / float(system_cost) * 100
+                message += f" ROI: {roi:.1f}% of system cost recovered."
+
+        try:
+            from ..automations.actions import _send_savings_notification
+
+            await _send_savings_notification(
+                self.hass, title, message, self.entry_id
+            )
+            _LOGGER.info("Weekly savings notification sent")
+        except Exception as e:
+            _LOGGER.debug("Failed to send weekly savings notification: %s", e)
+
+    async def _send_action_change_notification(self, decision: DecisionEntry) -> None:
+        """Send notification when optimizer makes a significant action change."""
+        from ..const import CONF_SAVINGS_NOTIFICATIONS
+
+        if self._entry:
+            enabled = self._entry.options.get(CONF_SAVINGS_NOTIFICATIONS, True)
+            if not enabled:
+                return
+
+        # Cooldown: don't send more than once per 30 minutes
+        now = dt_util.now()
+        last_notif = getattr(self, "_last_action_notification_time", None)
+        if last_notif and (now - last_notif).total_seconds() < 1800:
+            return
+        self._last_action_notification_time = now
+
+        title = f"PowerSync: {decision.action.replace('_', ' ').title()}"
+        message = decision.reason
+        if decision.savings_impact > 0:
+            message += f" (est. ${decision.savings_impact:.2f} benefit)"
+
+        try:
+            from ..automations.actions import _send_savings_notification
+
+            await _send_savings_notification(
+                self.hass, title, message, self.entry_id
+            )
+        except Exception as e:
+            _LOGGER.debug("Failed to send action change notification: %s", e)
+
+    def schedule_savings_notifications(self) -> list:
+        """Schedule daily and weekly savings notifications at 21:00.
+
+        Returns list of unsub callbacks for cleanup.
+        """
+        from homeassistant.helpers.event import async_track_time_change
+
+        unsubs = []
+        # Daily at 21:00
+        unsubs.append(
+            async_track_time_change(
+                self.hass,
+                self._send_daily_savings_notification,
+                hour=21,
+                minute=0,
+                second=0,
+            )
+        )
+        # Weekly check also at 21:00 (filters to Sunday inside the method)
+        unsubs.append(
+            async_track_time_change(
+                self.hass,
+                self._send_weekly_savings_notification,
+                hour=21,
+                minute=0,
+                second=0,
+            )
+        )
+        _LOGGER.info("Savings notifications scheduled at 21:00 daily")
+        return unsubs
+
     def set_cost_function(self, cost_function: str | CostFunction) -> None:
         """Set the optimization cost function."""
         if isinstance(cost_function, str):
@@ -3680,6 +4172,28 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "actual_import_cost": round(self._actual_import_cost_today, 2),
             "actual_export_earnings": round(self._actual_export_earnings_today, 2),
         }
+
+        # Add savings period rollups
+        data["savings_periods"] = {
+            "week": self.get_savings_period("week"),
+            "month": self.get_savings_period("month"),
+            "all_time": self.get_savings_period("all_time"),
+        }
+        data["daily_cost_detail"] = {
+            "import_cost": round(self._actual_import_cost_today, 2),
+            "export_earnings": round(self._actual_export_earnings_today, 2),
+            "net_cost": round(
+                self._actual_import_cost_today - self._actual_export_earnings_today, 2
+            ),
+            "baseline_cost": round(self._actual_baseline_today, 2),
+            "battery_charge_kwh": round(self._actual_charge_kwh_today, 2),
+            "battery_discharge_kwh": round(self._actual_discharge_kwh_today, 2),
+            "import_kwh": round(self._actual_import_kwh_today, 2),
+            "export_kwh": round(self._actual_export_kwh_today, 2),
+        }
+
+        # Add last decision from decision log
+        data["last_decision"] = self.get_last_decision()
 
         # Add EV status if EV coordination is active
         if self._ev_coordinator:

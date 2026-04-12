@@ -1554,6 +1554,22 @@ SENSOR_TYPE_OPTIMIZATION_STATUS = "optimization_status"
 SENSOR_TYPE_OPTIMIZATION_SAVINGS = "optimization_savings"
 SENSOR_TYPE_OPTIMIZATION_NEXT_ACTION = "optimization_next_action"
 
+# Savings & trust sensors (Phase 1: Trust & Transparency)
+SENSOR_TYPE_SAVINGS_TODAY = "savings_today"
+SENSOR_TYPE_SAVINGS_THIS_WEEK = "savings_this_week"
+SENSOR_TYPE_SAVINGS_THIS_MONTH = "savings_this_month"
+SENSOR_TYPE_SAVINGS_LIFETIME = "savings_lifetime"
+SENSOR_TYPE_DAILY_COST_TOTAL = "daily_cost_total"
+SENSOR_TYPE_DAILY_BASELINE = "daily_baseline"
+SENSOR_TYPE_ROI_PERCENTAGE = "roi_percentage"
+SENSOR_TYPE_LAST_DECISION = "last_decision"
+
+# Config keys for trust & transparency
+CONF_SYSTEM_COST = "system_cost"
+CONF_SAVINGS_NOTIFICATIONS = "savings_notifications_enabled"
+CONF_HA_NOTIFY_SAVINGS = "ha_notify_savings"
+CONF_NOTIFICATION_DEVICE = "savings_notification_device"
+
 # LP forecast sensors (populated from built-in optimizer data each cycle)
 SENSOR_TYPE_LP_SOLAR_FORECAST = "lp_solar_forecast"
 SENSOR_TYPE_LP_LOAD_FORECAST = "lp_load_forecast"

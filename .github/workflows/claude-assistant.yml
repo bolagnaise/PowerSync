@@ -20,10 +20,20 @@ jobs:
   claude:
     name: Claude Code Assistant
     if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
-      (github.event_name == 'issues' && contains(github.event.issue.body, '@claude'))
+      (github.event_name == 'issue_comment' &&
+       contains(github.event.comment.body, '@claude') &&
+       !contains(github.event.comment.body, '@claude review') &&
+       github.event.comment.author_association != 'NONE') ||
+      (github.event_name == 'pull_request_review_comment' &&
+       contains(github.event.comment.body, '@claude') &&
+       !contains(github.event.comment.body, '@claude review') &&
+       github.event.comment.author_association != 'NONE') ||
+      (github.event_name == 'pull_request_review' &&
+       contains(github.event.review.body, '@claude') &&
+       github.event.review.author_association != 'NONE') ||
+      (github.event_name == 'issues' &&
+       contains(github.event.issue.body, '@claude') &&
+       github.event.issue.author_association != 'NONE')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -79,7 +89,7 @@ jobs:
           custom_instructions: |
             You are operating on Ryan's repositories. Follow these rules absolutely.
 
-            IDENTITY: You are a senior engineer working within Ryan's established workflow.
+            IDENTITY: You are a senior engineer working within the established workflow.
 
             COMMIT FORMAT: {type}({scope}): {description}
             Valid types only: feat, fix, test, refactor, perf, docs, style, chore
