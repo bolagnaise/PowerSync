@@ -850,9 +850,19 @@ class _UnsignedRESTClient:
                         headers["Authorization"] = f"Bearer {self._token}"
                         async with sess.post(url, json=body, headers=headers) as r2:
                             if r2.status not in (200, 201, 204):
+                                text = await r2.text()
+                                _LOGGER.warning(
+                                    "POST %s retry returned %s: %s",
+                                    path, r2.status, text[:300],
+                                )
                                 return None
                             return {} if r2.status == 204 else await r2.json()
                     if resp.status not in (200, 201, 204):
+                        text = await resp.text()
+                        _LOGGER.warning(
+                            "POST %s returned %s: %s",
+                            path, resp.status, text[:300],
+                        )
                         return None
                     return {} if resp.status == 204 else await resp.json()
         except self._aiohttp.ClientError as err:
