@@ -60,6 +60,7 @@ class OptimizationConfig:
     max_charge_w: int = 5000
     max_discharge_w: int = 5000
     backup_reserve: float = 0.2
+    max_soc: float = 1.0
     interval_minutes: int = 5
     horizon_hours: int = 48
     cost_function: str = "cost"
@@ -198,6 +199,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._cumulative_days = 0
         self._notification_unsubs: list = []  # Savings notification timer unsubs
 
+        # Forecast accuracy tracking
+        self._forecast_errors: list[dict] = []
+        self._forecast_error_max = 288  # 24h of 5-min intervals
+
         # Decision log — ring buffer of optimizer actions with human-readable reasons
         self._decision_log = DecisionLog(hass, entry_id)
 
@@ -284,6 +289,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             max_discharge_w=self._config.max_discharge_w,
             efficiency=0.92,
             backup_reserve=self._config.backup_reserve,
+            max_soc=self._config.max_soc,
             hardware_reserve=hw_reserve_pct,
             interval_minutes=self._config.interval_minutes,
             horizon_hours=self._config.horizon_hours,
@@ -3267,6 +3273,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._cumulative_days,
             )
 
+        # Restore calibration factors for load estimator
+        cal_data = data.get("calibration_factors", {})
+        if cal_data and self._load_estimator and hasattr(self._load_estimator, '_calibration_factors'):
+            for key_str, value in cal_data.items():
+                try:
+                    parts = key_str.split(",")
+                    key = (int(parts[0]), int(parts[1]), int(parts[2]))
+                    self._load_estimator._calibration_factors[key] = float(value)
+                except (ValueError, IndexError):
+                    pass
+            if self._load_estimator._calibration_factors:
+                _LOGGER.info(
+                    "Restored %d calibration factors for load estimator",
+                    len(self._load_estimator._calibration_factors),
+                )
+
         if stored_date == today:
             self._actual_cost_today = float(data.get("actual_cost", 0.0))
             self._actual_baseline_today = float(data.get("baseline_cost", 0.0))
@@ -3329,6 +3351,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "baseline": round(self._cumulative_baseline, 4),
                 "days": self._cumulative_days,
             },
+            "calibration_factors": {
+                f"{k[0]},{k[1]},{k[2]}": v
+                for k, v in self._load_estimator._calibration_factors.items()
+            } if self._load_estimator and hasattr(self._load_estimator, '_calibration_factors') else {},
         }
 
     def _archive_day_to_history(
@@ -3764,6 +3790,35 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Persist cost data (coalesced — writes at most every 5 minutes)
         self._schedule_cost_save()
 
+        # --- Forecast accuracy tracking ---
+        if self._last_load_forecast and self._last_update_time:
+            try:
+                offset = self._get_forecast_offset()
+                if 0 <= offset < len(self._last_load_forecast):
+                    forecast_load_kw = self._last_load_forecast[offset]
+                    actual_load_kw = max(0.0, grid_power_kw + solar_power_kw + battery_power_kw)
+                    error_kw = forecast_load_kw - actual_load_kw
+
+                    self._forecast_errors.append({
+                        "timestamp": now.isoformat(),
+                        "forecast_kw": round(forecast_load_kw, 3),
+                        "actual_kw": round(actual_load_kw, 3),
+                        "error_kw": round(error_kw, 3),
+                        "abs_error_kw": round(abs(error_kw), 3),
+                    })
+                    if len(self._forecast_errors) > self._forecast_error_max:
+                        self._forecast_errors = self._forecast_errors[-self._forecast_error_max:]
+
+                    # Feed to load estimator for auto-calibration
+                    if self._load_estimator and hasattr(self._load_estimator, 'update_calibration'):
+                        self._load_estimator.update_calibration(
+                            forecast_kw=forecast_load_kw,
+                            actual_kw=actual_load_kw,
+                            timestamp=now,
+                        )
+            except Exception:  # noqa: BLE001
+                pass
+
     def _get_predicted_cost_to_midnight(self) -> tuple[float, float]:
         """Calculate predicted cost and baseline from now until midnight.
 
@@ -3849,6 +3904,31 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Get today's total cost: actual (midnight→now) + predicted (now→midnight)."""
         predicted_remaining, _ = self._get_predicted_cost_to_midnight()
         return round(self._actual_cost_today + predicted_remaining, 2)
+
+    def get_forecast_accuracy(self) -> dict:
+        """Get forecast accuracy metrics from recent error history."""
+        if not self._forecast_errors:
+            return {"mae_kw": None, "rmse_kw": None, "bias_kw": None, "mape_percent": None, "samples": 0}
+
+        errors = self._forecast_errors
+        n = len(errors)
+        abs_errors = [e["abs_error_kw"] for e in errors]
+        signed_errors = [e["error_kw"] for e in errors]
+
+        mae = sum(abs_errors) / n
+        rmse = (sum(e ** 2 for e in signed_errors) / n) ** 0.5
+        bias = sum(signed_errors) / n
+
+        mape_pairs = [(abs(e["error_kw"]), e["actual_kw"]) for e in errors if e["actual_kw"] > 0.1]
+        mape = (sum(ae / a for ae, a in mape_pairs) / len(mape_pairs) * 100) if mape_pairs else None
+
+        return {
+            "mae_kw": round(mae, 3),
+            "rmse_kw": round(rmse, 3),
+            "bias_kw": round(bias, 3),
+            "mape_percent": round(mape, 1) if mape is not None else None,
+            "samples": n,
+        }
 
     def _get_daily_savings(self) -> float:
         """Get today's total savings vs baseline without battery."""
@@ -4027,6 +4107,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 max_charge_w=self._config.max_charge_w,
                 max_discharge_w=self._config.max_discharge_w,
                 backup_reserve=self._config.backup_reserve,
+                max_soc=self._config.max_soc,
             )
 
     async def force_reoptimize(self) -> Any:
@@ -4180,6 +4261,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "month": self.get_savings_period("month"),
             "all_time": self.get_savings_period("all_time"),
         }
+
+        # Forecast accuracy metrics
+        data["forecast_accuracy"] = self.get_forecast_accuracy()
+
         data["daily_cost_detail"] = {
             "import_cost": round(self._actual_import_cost_today, 2),
             "export_earnings": round(self._actual_export_earnings_today, 2),
@@ -4409,6 +4494,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if self._entry:
                 from ..const import (
                     CONF_OPTIMIZATION_BACKUP_RESERVE,
+                    CONF_OPTIMIZATION_MAX_SOC,
                     CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,
                     CONF_OPTIMIZATION_MAX_CHARGE_W,
                     CONF_OPTIMIZATION_MAX_DISCHARGE_W,
@@ -4419,6 +4505,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if reserve_pct <= 1:
                         reserve_pct = int(reserve_pct * 100)
                     new_options[CONF_OPTIMIZATION_BACKUP_RESERVE] = reserve_pct
+                if "max_soc" in settings:
+                    max_soc_pct = settings["max_soc"]
+                    if max_soc_pct <= 1:
+                        max_soc_pct = int(max_soc_pct * 100)
+                    new_options[CONF_OPTIMIZATION_MAX_SOC] = max_soc_pct
                 if "battery_capacity_wh" in settings:
                     new_options[CONF_OPTIMIZATION_BATTERY_CAPACITY_WH] = int(settings["battery_capacity_wh"])
                 if "max_charge_w" in settings:

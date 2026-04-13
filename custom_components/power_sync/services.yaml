@@ -111,6 +111,29 @@ set_backup_reserve:
           step: 1
           unit_of_measurement: "%"
 
+set_max_soc:
+  name: Set Max Charge SOC
+  description: Set the maximum state of charge the LP optimizer will target when charging the battery (50-100%).
+  fields:
+    percent:
+      name: Percent
+      description: Maximum charge SOC percentage
+      required: true
+      example: 80
+      selector:
+        number:
+          min: 50
+          max: 100
+          step: 5
+          unit_of_measurement: "%"
+    entry_id:
+      name: Entry ID
+      description: Config entry ID to target (optional, defaults to first entry)
+      required: false
+      example: "abcdef1234567890"
+      selector:
+        text:
+
 set_operation_mode:
   name: Set Operation Mode
   description: Set Powerwall operation mode (Time-Based Control or Self-Consumption)

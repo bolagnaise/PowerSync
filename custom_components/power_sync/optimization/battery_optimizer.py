@@ -80,6 +80,7 @@ class BatteryOptimizer:
         max_discharge_w: float = 5000,
         efficiency: float = DEFAULT_EFFICIENCY,
         backup_reserve: float = 0.20,
+        max_soc: float = 1.0,
         hardware_reserve: float = 0.0,
         interval_minutes: int = 5,
         horizon_hours: int = 48,
@@ -89,6 +90,7 @@ class BatteryOptimizer:
         self.max_discharge_w = max_discharge_w
         self.efficiency = efficiency
         self.backup_reserve = backup_reserve
+        self.max_soc = max_soc
         self.hardware_reserve = hardware_reserve
         self.interval_minutes = interval_minutes
         self.horizon_hours = horizon_hours
@@ -106,6 +108,7 @@ class BatteryOptimizer:
         max_discharge_w: float | None = None,
         efficiency: float | None = None,
         backup_reserve: float | None = None,
+        max_soc: float | None = None,
     ) -> None:
         """Update optimizer configuration."""
         if capacity_wh is not None:
@@ -121,6 +124,8 @@ class BatteryOptimizer:
             self.efficiency = efficiency
         if backup_reserve is not None:
             self.backup_reserve = backup_reserve
+        if max_soc is not None:
+            self.max_soc = max_soc
 
     def update_hardware_reserve(self, hardware_reserve: float) -> None:
         """Update hardware reserve (from manufacturer's app setting)."""
@@ -425,7 +430,7 @@ class BatteryOptimizer:
                 row_upper[2 * n + i] = eff * dt / cap  # charge adds SOC
                 row_upper[3 * n + i] = -dt / (eff * cap)  # discharge removes SOC
             A_ub.append(row_upper)
-            b_ub.append(1.0 - soc_0)
+            b_ub.append(self.max_soc - soc_0)
 
             # Lower SOC bound: -cumulative energy <= (soc_0 - backup_reserve)
             row_lower = [0.0] * (4 * n)
@@ -660,7 +665,7 @@ class BatteryOptimizer:
                     soc_tracker -= discharge_kw * dt / (eff * cap)
             else:
                 # Cheap to charge
-                charge_room = (1.0 - soc_tracker) * cap / (eff * dt)
+                charge_room = (self.max_soc - soc_tracker) * cap / (eff * dt)
                 charge_kw = min(self.max_charge_kw, max(0, charge_room))
                 if charge_kw > 0.01:
                     actions[t] = (charge_kw, 0.0)
@@ -683,7 +688,7 @@ class BatteryOptimizer:
                 grid_export[t] = -net_grid
 
             soc += (charge_kw * eff - discharge_kw / eff) * dt / cap
-            soc = max(self.backup_reserve, min(1.0, soc))
+            soc = max(self.backup_reserve, min(self.max_soc, soc))
 
         # Build schedule
         schedule = self._build_schedule(
@@ -775,16 +780,16 @@ class BatteryOptimizer:
             # Update SOC — override charge rate during free electricity
             # so the SOC projection matches the forced max charge action
             effective_charge_kw = charge_kw
-            if import_prices is not None and import_prices[t] <= 0.001 and soc < 0.99:
+            if import_prices is not None and import_prices[t] <= 0.001 and soc < self.max_soc:
                 effective_charge_kw = max(charge_kw, self.max_charge_kw)
             soc += (effective_charge_kw * eff - discharge_kw / eff) * dt / cap
-            soc = max(self.backup_reserve, min(1.0, soc))
+            soc = max(self.backup_reserve, min(self.max_soc, soc))
 
             # Determine action
             if (
                 import_prices is not None
                 and import_prices[t] <= 0.001
-                and soc < 0.99
+                and soc < self.max_soc
                 and (charge_kw > 0 or effective_charge_kw > 0)
             ):
                 # Free electricity and battery not full — always force charge

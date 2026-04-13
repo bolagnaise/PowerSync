@@ -15,6 +15,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Documentation check workflow (CHANGELOG enforcement)
 - Security scan workflow (gitleaks, dependency review)
 - Development section in README
+- Max SOC limit: number entity (50-100%), LP optimizer constraint, set_max_soc service, config flow
+- Forecast accuracy tracking: MAE, bias, MAPE sensors from 24h error ring buffer
+- Load forecast auto-calibration: adaptive pattern weights with exponential decay, persisted across restarts
 
 ### Fixed
 

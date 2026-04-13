@@ -301,7 +301,9 @@ from .const import (
     CONF_OPTIMIZATION_COST_FUNCTION,
     CONF_OPTIMIZATION_INTERVAL,
     CONF_OPTIMIZATION_BACKUP_RESERVE,
+    CONF_OPTIMIZATION_MAX_SOC,
     DEFAULT_OPTIMIZATION_BACKUP_RESERVE,
+    DEFAULT_OPTIMIZATION_MAX_SOC,
 )
 from .inverters import get_inverter_controller
 from .optimization.coordinator import OptimizationCoordinator
@@ -19543,7 +19545,55 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if persisted_force_state:
         hass.async_create_task(restore_force_mode_from_persistence())
 
+    async def handle_set_max_soc(call: ServiceCall) -> None:
+        """Set the maximum charge SOC for the LP optimizer."""
+        raw_percent = call.data.get("percent")
+        if raw_percent is None:
+            _LOGGER.error("Missing 'percent' parameter for set_max_soc")
+            return
+
+        try:
+            percent = float(raw_percent)
+        except (ValueError, TypeError):
+            _LOGGER.error("set_max_soc: invalid percent value: %s", raw_percent)
+            return
+
+        # Clamp to valid range (50-100%)
+        percent = max(50, min(100, int(percent)))
+        fraction = percent / 100.0
+
+        # Scope to a specific entry if entry_id provided, else first entry
+        target_entry_id = call.data.get("entry_id")
+        entries_to_update: list[tuple[str, dict]] = []
+        for eid, entry_data in hass.data.get(DOMAIN, {}).items():
+            if not isinstance(entry_data, dict):
+                continue
+            if target_entry_id and eid != target_entry_id:
+                continue
+            entries_to_update.append((eid, entry_data))
+
+        if not entries_to_update and target_entry_id:
+            # Fallback to first entry if specified entry_id not found
+            for eid, entry_data in hass.data.get(DOMAIN, {}).items():
+                if isinstance(entry_data, dict):
+                    entries_to_update.append((eid, entry_data))
+                    break
+
+        for eid, entry_data in entries_to_update:
+            entry_obj = entry_data.get("entry") or hass.config_entries.async_get_entry(eid)
+            if entry_obj:
+                new_options = dict(entry_obj.options)
+                new_options[CONF_OPTIMIZATION_MAX_SOC] = percent
+                entry_data["_skip_reload"] = True
+                hass.config_entries.async_update_entry(entry_obj, options=new_options)
+
+            opt_coord = entry_data.get("optimization_coordinator")
+            if opt_coord:
+                opt_coord.update_config(max_soc=fraction)
+                _LOGGER.info("Max charge SOC set to %d%%", percent)
+
     # Register Powerwall settings services
+    hass.services.async_register(DOMAIN, "set_max_soc", handle_set_max_soc)
     hass.services.async_register(DOMAIN, SERVICE_SET_BACKUP_RESERVE, handle_set_backup_reserve)
     hass.services.async_register(DOMAIN, SERVICE_SET_OPERATION_MODE, handle_set_operation_mode)
     hass.services.async_register(DOMAIN, SERVICE_SET_GRID_EXPORT, handle_set_grid_export)
@@ -21344,6 +21394,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             else:
                 saved_backup_reserve = DEFAULT_OPTIMIZATION_BACKUP_RESERVE  # 0.20
 
+            saved_max_soc_pct = entry.options.get(
+                CONF_OPTIMIZATION_MAX_SOC,
+                entry.data.get(CONF_OPTIMIZATION_MAX_SOC))
+            if saved_max_soc_pct is not None:
+                # Same convention as backup_reserve: >1 is percentage, <=1 is decimal
+                if saved_max_soc_pct > 1:
+                    saved_max_soc = saved_max_soc_pct / 100
+                else:
+                    saved_max_soc = saved_max_soc_pct
+            else:
+                saved_max_soc = DEFAULT_OPTIMIZATION_MAX_SOC  # 1.0
+            # Clamp to valid range (0.5-1.0) to guard against corrupt config
+            saved_max_soc = max(0.5, min(1.0, float(saved_max_soc)))
+
             optimization_coordinator = OptimizationCoordinator(
                 hass=hass,
                 entry_id=entry.entry_id,
@@ -21366,8 +21430,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             optimization_coordinator.update_config(
                 interval_minutes=saved_interval_minutes,
                 backup_reserve=saved_backup_reserve,
+                max_soc=saved_max_soc,
             )
-            _LOGGER.info(f"Smart Optimization cost function: {saved_cost_function}, interval: {saved_interval_minutes}min, backup_reserve: {saved_backup_reserve:.0%}")
+            _LOGGER.info(f"Smart Optimization cost function: {saved_cost_function}, interval: {saved_interval_minutes}min, backup_reserve: {saved_backup_reserve:.0%}, max_soc: {saved_max_soc:.0%}")
 
             # Load hardware backup reserve (user-configured restore target)
             from .const import CONF_HARDWARE_BACKUP_RESERVE
@@ -21409,7 +21474,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # the async_add_entities callback for us to call here.
             sensor_add_entities = hass.data[DOMAIN][entry.entry_id].pop("sensor_async_add_entities", None)
             if sensor_add_entities:
-                from .sensor import LP_FORECAST_SENSORS, LPForecastSensor, OPTIMIZER_ACTION_SENSORS, OptimizerActionSensor
+                from .sensor import (
+                    LP_FORECAST_SENSORS, LPForecastSensor,
+                    OPTIMIZER_ACTION_SENSORS, OptimizerActionSensor,
+                    FORECAST_ACCURACY_SENSORS, SavingsSensor,
+                )
                 from .const import CONF_ELECTRICITY_PROVIDER as _CEP
                 _ep = entry.options.get(_CEP, entry.data.get(_CEP, ""))
                 _fixed = ("globird", "nz_retailer", "nz_custom")
@@ -21433,9 +21502,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         entry=entry,
                     )
                     for desc in OPTIMIZER_ACTION_SENSORS
+                ] + [
+                    SavingsSensor(
+                        coordinator=optimization_coordinator,
+                        description=desc,
+                        entry=entry,
+                    )
+                    for desc in FORECAST_ACCURACY_SENSORS
                 ]
                 sensor_add_entities(deferred_sensors)
-                _LOGGER.info("LP optimizer active - adding forecast + action sensors (deferred)")
+                _LOGGER.info("LP optimizer active - adding forecast + action + accuracy sensors (deferred)")
 
             # If using Globird/AEMO VPP provider, set up AEMO price fetching and spike response
             # This handles Globird VPP spike detection - discharge at $3000/MWh

@@ -49,7 +49,7 @@
 
 ---
 
-## Phase 4 — Smarter Forecasting + SOC Control (Weeks 11-18) `PLANNED`
+## Phase 4 — Smarter Forecasting + SOC Control (Weeks 11-18) `COMPLETED`
 
 **Goal**: Give users SOC control, make the optimizer self-improving with accuracy tracking and auto-calibration.
 

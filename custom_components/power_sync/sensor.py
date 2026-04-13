@@ -108,6 +108,9 @@ from .const import (
     SENSOR_TYPE_LP_LOAD_FORECAST,
     SENSOR_TYPE_LP_IMPORT_PRICE_FORECAST,
     SENSOR_TYPE_LP_EXPORT_PRICE_FORECAST,
+    SENSOR_TYPE_FORECAST_MAE,
+    SENSOR_TYPE_FORECAST_BIAS,
+    SENSOR_TYPE_FORECAST_MAPE,
     SENSOR_TYPE_AMBER_USAGE_YESTERDAY_COST,
     SENSOR_TYPE_AMBER_USAGE_YESTERDAY_SAVINGS,
     SENSOR_TYPE_AMBER_USAGE_MONTH_COST,
@@ -743,6 +746,39 @@ SAVINGS_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     ),
 )
 
+FORECAST_ACCURACY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_FORECAST_MAE,
+        name="Load Forecast MAE",
+        native_unit_of_measurement=UnitOfPower.KILO_WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=3,
+        icon="mdi:chart-bell-curve",
+        value_fn=lambda data: data.get("forecast_accuracy", {}).get("mae_kw") if data else None,
+        attr_fn=lambda data: data.get("forecast_accuracy", {}) if data else {},
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_FORECAST_BIAS,
+        name="Load Forecast Bias",
+        native_unit_of_measurement=UnitOfPower.KILO_WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=3,
+        icon="mdi:arrow-up-down",
+        value_fn=lambda data: data.get("forecast_accuracy", {}).get("bias_kw") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_FORECAST_MAPE,
+        name="Load Forecast MAPE",
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        icon="mdi:percent-outline",
+        value_fn=lambda data: data.get("forecast_accuracy", {}).get("mape_percent") if data else None,
+    ),
+)
+
 DEMAND_CHARGE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_IN_DEMAND_CHARGE_PERIOD,
@@ -1309,6 +1345,17 @@ async def async_setup_entry(
                     )
                 )
         _LOGGER.info("Savings sensors added (today, week, month, lifetime, cost, baseline)")
+
+        # Add forecast accuracy sensors (Phase 4)
+        for description in FORECAST_ACCURACY_SENSORS:
+            entities.append(
+                SavingsSensor(
+                    coordinator=optimization_coordinator,
+                    description=description,
+                    entry=entry,
+                )
+            )
+        _LOGGER.info("Forecast accuracy sensors added (MAE, bias, MAPE)")
     else:
         # Store callback for deferred LP forecast + optimizer action sensor creation
         domain_data["sensor_async_add_entities"] = async_add_entities

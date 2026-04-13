@@ -15,7 +15,15 @@ from homeassistant.const import EntityCategory, PERCENTAGE
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN, CONF_TESLA_ENERGY_SITE_ID
+from .const import (
+    DOMAIN,
+    CONF_OPTIMIZATION_ENABLED,
+    CONF_OPTIMIZATION_MAX_SOC,
+    CONF_OPTIMIZATION_PROVIDER,
+    CONF_TESLA_ENERGY_SITE_ID,
+    DEFAULT_OPTIMIZATION_MAX_SOC,
+    OPT_PROVIDER_POWERSYNC,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,7 +43,20 @@ async def async_setup_entry(
 
     # Backup reserve is universally supported for any Tesla energy site, so
     # we add it immediately without waiting for the capability probe.
-    async_add_entities([BackupReserveNumber(hass, entry)])
+    entities: list[NumberEntity] = [BackupReserveNumber(hass, entry)]
+
+    # Add MaxSOCNumber when Smart Optimization is enabled
+    optimization_enabled = (
+        entry.options.get(
+            CONF_OPTIMIZATION_PROVIDER,
+            entry.data.get(CONF_OPTIMIZATION_PROVIDER),
+        ) == OPT_PROVIDER_POWERSYNC
+        and entry.options.get(CONF_OPTIMIZATION_ENABLED, entry.data.get(CONF_OPTIMIZATION_ENABLED, False))
+    )
+    if optimization_enabled:
+        entities.append(MaxSOCNumber(hass, entry))
+
+    async_add_entities(entities)
 
     async def _add_capability_gated_numbers() -> None:
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
@@ -145,5 +166,40 @@ class OffGridEvReserveNumber(_TeslaSiteNumberBase):
             DOMAIN,
             "set_off_grid_ev_reserve",
             {"percent": int(value)},
+            blocking=False,
+        )
+
+
+class MaxSOCNumber(_TeslaSiteNumberBase):
+    """Max charge SOC % for LP optimizer."""
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        super().__init__(
+            hass,
+            entry,
+            key="max_soc",
+            name="Max Charge SOC",
+            icon="mdi:battery-arrow-up",
+        )
+        self._attr_native_min_value = 50
+        self._attr_native_max_value = 100
+        self._attr_native_step = 5
+
+    @property
+    def native_value(self) -> float | None:
+        stored = self._entry.options.get(CONF_OPTIMIZATION_MAX_SOC)
+        if stored is not None:
+            # Stored as percentage (50-100) or fraction (0.5-1.0)
+            val = float(stored)
+            if val <= 1.0:
+                return val * 100
+            return val
+        return DEFAULT_OPTIMIZATION_MAX_SOC * 100
+
+    async def async_set_native_value(self, value: float) -> None:
+        await self.hass.services.async_call(
+            DOMAIN,
+            "set_max_soc",
+            {"percent": int(value), "entry_id": self._entry.entry_id},
             blocking=False,
         )

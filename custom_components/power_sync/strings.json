@@ -586,6 +586,7 @@
       "optimizer_not_installed": "Smart Optimization requires scipy. Check Home Assistant logs for installation details.",
       "invalid_tariff": "Could not validate this tariff code for the selected network. Check that the tariff code matches your electricity bill.",
       "invalid_token_format": "Token is not in the expected format. PowerSync tokens start with 'psync_'.",
+      "max_soc_below_reserve": "Max charge SOC must be greater than backup reserve.",
       "unknown": "An unexpected error occurred. Please try again."
     },
     "abort": {

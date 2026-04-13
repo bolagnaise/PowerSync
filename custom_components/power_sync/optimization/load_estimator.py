@@ -299,6 +299,11 @@ class LoadEstimator:
         self._hafo = HAFOForecaster(hass, load_entity_id, interval_minutes)
         self._hafo_available: bool | None = None
 
+        # Calibration: per-pattern multiplicative adjustment factors
+        # Key: (day_of_week, hour, half_hour), Value: multiplier (1.0 = no adjustment)
+        self._calibration_factors: dict[tuple[int, int, int], float] = {}
+        self._calibration_decay = 0.9  # Exponential decay — 10% weight to each new observation
+
     @property
     def hafo_available(self) -> bool:
         """Check if HAFO is available for load forecasting."""
@@ -509,7 +514,7 @@ class LoadEstimator:
             key = (dow, hour, half_hour)
 
             if key in averages:
-                forecast.append(averages[key])
+                value = averages[key]
             else:
                 # Fallback: use same time any day
                 fallback_values = [
@@ -518,13 +523,19 @@ class LoadEstimator:
                     if (d, hour, half_hour) in averages
                 ]
                 if fallback_values:
-                    forecast.append(sum(fallback_values) / len(fallback_values))
+                    value = sum(fallback_values) / len(fallback_values)
                 else:
                     # Last resort: use overall average or default
                     if averages:
-                        forecast.append(sum(averages.values()) / len(averages))
+                        value = sum(averages.values()) / len(averages)
                     else:
-                        forecast.append(500.0)  # Default 500W
+                        value = 500.0  # Default 500W
+
+            # Apply calibration adjustment
+            cal_factor = self._calibration_factors.get((dow, hour, half_hour), 1.0)
+            value = value * cal_factor
+
+            forecast.append(value)
 
             current_time += timedelta(minutes=self.interval_minutes)
 
@@ -532,6 +543,39 @@ class LoadEstimator:
         forecast = self._smooth_forecast(forecast)
 
         return forecast
+
+    def update_calibration(self, forecast_kw: float, actual_kw: float, timestamp: datetime | object) -> None:
+        """Update calibration factors based on forecast vs actual comparison.
+
+        Uses exponential moving average. Forecast of 2.0kW vs actual 1.5kW
+        moves the factor toward 0.75 for that time pattern.
+        """
+        if forecast_kw < 0.05 or actual_kw < 0.0:
+            return  # Skip near-zero forecasts
+
+        if not isinstance(timestamp, datetime):
+            try:
+                timestamp = datetime.fromisoformat(str(timestamp))
+            except (ValueError, TypeError):
+                return
+
+        # Use local time to match _forecast_from_history() bucket keys
+        try:
+            local_ts = dt_util.as_local(timestamp) if hasattr(timestamp, 'tzinfo') and timestamp.tzinfo else timestamp
+        except Exception:
+            local_ts = timestamp
+        dow = local_ts.weekday()
+        hour = local_ts.hour
+        half_hour = 1 if local_ts.minute >= 30 else 0
+        key = (dow, hour, half_hour)
+
+        target_ratio = actual_kw / forecast_kw if forecast_kw > 0.05 else 1.0
+        target_ratio = max(0.5, min(2.0, target_ratio))  # Clamp to prevent extreme swings
+
+        current = self._calibration_factors.get(key, 1.0)
+        alpha = 1.0 - self._calibration_decay  # 0.1
+        updated = current * self._calibration_decay + target_ratio * alpha
+        self._calibration_factors[key] = round(updated, 4)
 
     def _get_current_load(self) -> float:
         """Get current load from Home Assistant state."""

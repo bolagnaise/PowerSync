@@ -268,8 +268,10 @@ from .const import (
     CONF_OPTIMIZATION_ENABLED,
     CONF_OPTIMIZATION_COST_FUNCTION,
     CONF_OPTIMIZATION_BACKUP_RESERVE,
+    CONF_OPTIMIZATION_MAX_SOC,
     COST_FUNCTION_COST,
     DEFAULT_OPTIMIZATION_BACKUP_RESERVE,
+    DEFAULT_OPTIMIZATION_MAX_SOC,
     # Optimization provider selection
     CONF_OPTIMIZATION_PROVIDER,
     OPT_PROVIDER_NATIVE,
@@ -1426,7 +1428,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_ml_options(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Configure Smart Optimization options - backup reserve."""
+        """Configure Smart Optimization options - backup reserve and max SOC."""
+        errors: dict[str, str] = {}
         if user_input is not None:
             self._ml_options = {
                 CONF_OPTIMIZATION_COST_FUNCTION: COST_FUNCTION_COST,
@@ -1435,9 +1438,20 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
                 )
                 / 100.0,
+                CONF_OPTIMIZATION_MAX_SOC: user_input.get(
+                    CONF_OPTIMIZATION_MAX_SOC,
+                    int(DEFAULT_OPTIMIZATION_MAX_SOC * 100),
+                )
+                / 100.0,
             }
-            # Proceed to electricity provider selection
-            return await self.async_step_provider_selection()
+            # Cross-validate: backup_reserve must be less than max_soc
+            backup_reserve = self._ml_options[CONF_OPTIMIZATION_BACKUP_RESERVE]
+            max_soc = self._ml_options[CONF_OPTIMIZATION_MAX_SOC]
+            if backup_reserve >= max_soc:
+                errors["base"] = "max_soc_below_reserve"
+            else:
+                # Proceed to electricity provider selection
+                return await self.async_step_provider_selection()
 
         return self.async_show_form(
             step_id="ml_options",
@@ -1455,8 +1469,21 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             mode=NumberSelectorMode.SLIDER,
                         )
                     ),
+                    vol.Required(
+                        CONF_OPTIMIZATION_MAX_SOC,
+                        default=int(DEFAULT_OPTIMIZATION_MAX_SOC * 100),
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=50,
+                            max=100,
+                            step=5,
+                            unit_of_measurement="%",
+                            mode=NumberSelectorMode.SLIDER,
+                        )
+                    ),
                 }
             ),
+            errors=errors,
             description_placeholders={},
         )
 

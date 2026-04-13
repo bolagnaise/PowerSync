@@ -1508,6 +1508,7 @@ OPTIMIZATION_PROVIDERS = {
 CONF_OPTIMIZATION_ENABLED = "optimization_enabled"
 CONF_OPTIMIZATION_COST_FUNCTION = "optimization_cost_function"
 CONF_OPTIMIZATION_BACKUP_RESERVE = "optimization_backup_reserve"
+CONF_OPTIMIZATION_MAX_SOC = "optimization_max_soc"
 CONF_HARDWARE_BACKUP_RESERVE = "hardware_backup_reserve"
 CONF_OPTIMIZATION_INTERVAL = "optimization_interval"
 CONF_OPTIMIZATION_HORIZON = "optimization_horizon"
@@ -1527,6 +1528,7 @@ COST_FUNCTION_COST = "cost"
 DEFAULT_OPTIMIZATION_INTERVAL = 30  # Re-optimize every 30 minutes
 DEFAULT_OPTIMIZATION_HORIZON = 48  # 48-hour forecast horizon
 DEFAULT_OPTIMIZATION_BACKUP_RESERVE = 0.20  # 20% minimum SOC
+DEFAULT_OPTIMIZATION_MAX_SOC = 1.0  # 100% max charge SOC
 
 # Battery capacity defaults by system (Wh)
 BATTERY_CAPACITY_DEFAULTS = {
@@ -1575,6 +1577,11 @@ SENSOR_TYPE_LP_SOLAR_FORECAST = "lp_solar_forecast"
 SENSOR_TYPE_LP_LOAD_FORECAST = "lp_load_forecast"
 SENSOR_TYPE_LP_IMPORT_PRICE_FORECAST = "lp_import_price_forecast"
 SENSOR_TYPE_LP_EXPORT_PRICE_FORECAST = "lp_export_price_forecast"
+
+# Forecast accuracy sensors (Phase 4: Forecast Accuracy Tracking)
+SENSOR_TYPE_FORECAST_MAE = "forecast_mae"
+SENSOR_TYPE_FORECAST_BIAS = "forecast_bias"
+SENSOR_TYPE_FORECAST_MAPE = "forecast_mape"
 
 # ============================================================
 # EV Smart Charging Configuration
