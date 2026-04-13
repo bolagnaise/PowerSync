@@ -67,18 +67,22 @@
 
 ---
 
-## Phase 5 — EV Expansion (Weeks 23-30) `PLANNED`
+## Phase 5 — Multi-Vehicle EV Queuing (Weeks 23-26) `PLANNED`
 
-**Goal**: Unlock the entire non-Tesla EV market with brand-agnostic charging.
+**Goal**: Add priority-based charging when multiple EVs compete for limited supply.
 
 | Area | Problem | Improvement |
 |------|---------|-------------|
-| OCPP support | Only Tesla EVs supported natively | OCPP protocol for any OCPP-compliant charger |
-| Zaptec integration | Zaptec API exists but inactive | Activate Zaptec cloud API for charger control |
-| Solar-surplus charging | No solar-aware EV throttling | Auto-throttle EVSE amps to match available solar surplus |
-| Multi-vehicle queuing | Single EV assumption | Priority queue for multiple vehicles with configurable rules |
+| Priority queue | All vehicles charge simultaneously, no ordering | Configurable vehicle priority (number entity), highest-priority charges first when supply constrained |
+| Concurrent charger limits | No main supply amperage cap | `max_concurrent_chargers` config + main supply amp limit, enforced in dynamic update |
+| Load rebalancing | Freed amps not redistributed when a vehicle finishes | Re-run dynamic update on disconnect, redistribute to queued vehicles |
 
-**Effort**: MEDIUM | **Impact**: HIGH
+**Skipped from original scope** (already upstream):
+- OCPP support (start/stop/amps via HA entities)
+- Zaptec integration (full cloud API, OAuth, control)
+- Solar-surplus charging (solar-only, solar-preferred, dynamic throttle)
+
+**Effort**: MEDIUM | **Impact**: MEDIUM
 
 ---
 
