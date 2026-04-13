@@ -200,16 +200,20 @@ class PowerwallLocalClient:
     async def go_off_grid(self) -> bool:
         """Physically disconnect from the grid (contactor open).
 
-        Both PW2 and PW3 require a signed RoutableMessage via the cloud
-        ``device_command`` endpoint. The unsigned ``command`` (grpc_command)
-        path returns "signature required" on both generations.
+        PW3: signed RoutableMessage via device_command (mode=6).
+        PW2: unsigned energy_device_message via device_command ("MgQqAggC").
+
+        Discovered via mitmproxy: PW2 uses energy_device_message (unsigned,
+        mode=2) while PW3 uses routable_message (RSA-signed, mode=6).
         """
-        if self._din and self._transport:
-            _LOGGER.info("go_off_grid: sending signed device_command (mode=6)")
+        # PW3: signed routable_message (requires RSA transport)
+        if self._version == PowerwallVersion.PW3 and self._din and self._transport:
+            _LOGGER.info("go_off_grid: PW3 signed device_command (mode=6)")
             return await self._send_signed_device_command(off_grid=True)
 
+        # PW2 (and PW3 fallback): unsigned energy_device_message
         if self._din:
-            _LOGGER.warning("go_off_grid: no transport for signing, trying unsigned")
+            _LOGGER.info("go_off_grid: unsigned device_command (energy_device_message)")
             return await self._send_device_command(off_grid=True)
 
         # Local REST fallback (requires installer auth on PW2).
@@ -224,12 +228,14 @@ class PowerwallLocalClient:
 
     async def reconnect_grid(self) -> bool:
         """Reconnect to the grid (contactor close)."""
-        if self._din and self._transport:
-            _LOGGER.info("reconnect_grid: sending signed device_command (mode=1)")
+        # PW3: signed routable_message
+        if self._version == PowerwallVersion.PW3 and self._din and self._transport:
+            _LOGGER.info("reconnect_grid: PW3 signed device_command (mode=1)")
             return await self._send_signed_device_command(off_grid=False)
 
+        # PW2 (and PW3 fallback): unsigned energy_device_message
         if self._din:
-            _LOGGER.warning("reconnect_grid: no transport for signing, trying unsigned")
+            _LOGGER.info("reconnect_grid: unsigned device_command (energy_device_message)")
             return await self._send_device_command(off_grid=False)
 
         body = {"island_mode": ISLAND_MODE_ONGRID}
