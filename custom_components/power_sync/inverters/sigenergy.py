@@ -1301,9 +1301,11 @@ class SigenergyController(InverterController):
                 self.REG_ACTIVE_POWER_FIXED_TARGET, [hi, lo]
             )
             if not power_result:
-                _LOGGER.warning(
-                    f"Failed to set active power target to {-power_kw} kW, falling back to export limit only"
+                _LOGGER.error(
+                    "Failed to set active power target to %s kW — aborting force discharge",
+                    -power_kw,
                 )
+                return False
 
             # 4. Set grid export limit directly (bypass safety cap for force discharge)
             # The safety cap reads REG_GRID_EXPORT_LIMIT which creates a circular
@@ -1398,8 +1400,10 @@ class SigenergyController(InverterController):
             # 2. Restore grid export limit to safety cap
             # force_discharge sets this to a specific value — need to clear it
             export_result = await self.restore_export_limit()
+            restore_ok = True
             if not export_result:
-                _LOGGER.warning("Failed to restore grid export limit")
+                _LOGGER.error("Failed to restore grid export limit — system may have incorrect export settings")
+                restore_ok = False
 
             # 3. Restore ESS max limits to rated values
             await self._restore_ess_max_limits_to_rated()
@@ -1414,10 +1418,15 @@ class SigenergyController(InverterController):
                     self._restore_backup_reserve_pct,
                 )
 
-            _LOGGER.info(
-                "Sigenergy restored to self-consumption (Remote EMS mode 2, export limit restored)"
-            )
-            return True
+            if restore_ok:
+                _LOGGER.info(
+                    "Sigenergy restored to self-consumption (Remote EMS mode 2, export limit restored)"
+                )
+            else:
+                _LOGGER.warning(
+                    "Sigenergy partially restored — export limit failed but ESS limits and backup reserve recovered"
+                )
+            return restore_ok
 
         except Exception as e:
             _LOGGER.error(f"Error restoring Sigenergy normal operation: {e}")

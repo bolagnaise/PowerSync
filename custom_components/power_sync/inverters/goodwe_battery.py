@@ -86,29 +86,37 @@ class GoodWeBatteryController:
         """Force charge from grid using ECO_CHARGE mode."""
         import goodwe
 
-        await self._inverter.set_operation_mode(
-            goodwe.OperationMode.ECO_CHARGE,
-            eco_mode_power=power_pct,
-            eco_mode_soc=soc_target,
-        )
-        _LOGGER.info(
-            "GoodWe force charge: power=%d%%, target_soc=%d%%", power_pct, soc_target
-        )
-        return True
+        try:
+            await self._inverter.set_operation_mode(
+                goodwe.OperationMode.ECO_CHARGE,
+                eco_mode_power=power_pct,
+                eco_mode_soc=soc_target,
+            )
+            _LOGGER.info(
+                "GoodWe force charge: power=%d%%, target_soc=%d%%", power_pct, soc_target
+            )
+            return True
+        except Exception as e:
+            _LOGGER.error("GoodWe force charge failed: %s", e)
+            return False
 
     async def force_discharge(self, power_pct: int = 100, soc_floor: int = 10) -> bool:
         """Force discharge to grid using ECO_DISCHARGE mode."""
         import goodwe
 
-        await self._inverter.set_operation_mode(
-            goodwe.OperationMode.ECO_DISCHARGE,
-            eco_mode_power=power_pct,
-            eco_mode_soc=soc_floor,
-        )
-        _LOGGER.info(
-            "GoodWe force discharge: power=%d%%, floor_soc=%d%%", power_pct, soc_floor
-        )
-        return True
+        try:
+            await self._inverter.set_operation_mode(
+                goodwe.OperationMode.ECO_DISCHARGE,
+                eco_mode_power=power_pct,
+                eco_mode_soc=soc_floor,
+            )
+            _LOGGER.info(
+                "GoodWe force discharge: power=%d%%, floor_soc=%d%%", power_pct, soc_floor
+            )
+            return True
+        except Exception as e:
+            _LOGGER.error("GoodWe force discharge failed: %s", e)
+            return False
 
     async def restore_normal(self) -> bool:
         """Restore to normal (GENERAL) operation mode."""

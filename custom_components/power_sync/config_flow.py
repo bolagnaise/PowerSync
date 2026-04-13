@@ -15,6 +15,14 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
+    BooleanSelector,
+    NumberSelector,
+    NumberSelectorConfig,
+    NumberSelectorMode,
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
@@ -520,18 +528,18 @@ def _build_tesla_ev_provider_choices(hass: HomeAssistant) -> dict[str, str]:
     detected = _detect_tesla_ev_integrations(hass)
     fleet_label = "Tesla Fleet API"
     if detected["tesla_fleet"]:
-        fleet_label += " ✓ detected"
+        fleet_label += " — detected in Home Assistant"
     else:
-        fleet_label += " (install Tesla Fleet HA integration first)"
+        fleet_label += " — requires Tesla Fleet integration (not installed)"
 
-    teslemetry_label = "Teslemetry"
+    teslemetry_label = "Teslemetry (~$4/month)"
     if detected["teslemetry"]:
-        teslemetry_label += " ✓ detected"
+        teslemetry_label += " — detected in Home Assistant"
     else:
-        teslemetry_label += " (will prompt for API token)"
+        teslemetry_label += " — will ask for API token"
 
     return {
-        TESLA_EV_API_PROVIDER_NONE: "None — no Tesla cloud vehicle commands",
+        TESLA_EV_API_PROVIDER_NONE: "None — Powerwall only, no vehicle commands",
         TESLA_EV_API_PROVIDER_FLEET_API: fleet_label,
         TESLA_EV_API_PROVIDER_TESLEMETRY: teslemetry_label,
     }
@@ -914,19 +922,17 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="provider_selection",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_ELECTRICITY_PROVIDER, default="amber"): vol.In(
-                        ELECTRICITY_PROVIDERS
+                    vol.Required(CONF_ELECTRICITY_PROVIDER, default="amber"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=k, label=v)
+                                for k, v in ELECTRICITY_PROVIDERS.items()
+                            ],
+                            mode=SelectSelectorMode.LIST,
+                        )
                     ),
                 }
             ),
-            description_placeholders={
-                "amber_desc": "Full price sync with Amber Electric API",
-                "flow_power_desc": "Flow Power with AEMO wholesale or Amber pricing",
-                "globird_desc": "AEMO spike detection for static tariff users",
-                "aemo_vpp_desc": "AEMO spike detection for VPP exports (AGL, Engie, etc.)",
-                "octopus_desc": "Octopus Energy UK with dynamic Agile pricing",
-                "nz_desc": "New Zealand TOU tariffs (Octopus NZ, Electric Kiwi, Contact Energy, etc.)",
-            },
         )
 
     async def async_step_flow_power_setup(
@@ -1267,10 +1273,30 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         data_schema = vol.Schema(
             {
-                vol.Required(CONF_EPEX_REGION, default="DE"): vol.In(EPEX_REGIONS),
-                vol.Optional(CONF_EPEX_SURCHARGE, default=0.0): vol.Coerce(float),
-                vol.Optional(CONF_EPEX_TAX_PERCENT, default=0.0): vol.Coerce(float),
-                vol.Optional(CONF_EPEX_EXPORT_RATE, default=0.0): vol.Coerce(float),
+                vol.Required(CONF_EPEX_REGION, default="DE"): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in EPEX_REGIONS.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(CONF_EPEX_SURCHARGE, default=0.0): NumberSelector(
+                    NumberSelectorConfig(
+                        min=0, max=50, step=0.1, unit_of_measurement="ct/kWh",
+                    )
+                ),
+                vol.Optional(CONF_EPEX_TAX_PERCENT, default=0.0): NumberSelector(
+                    NumberSelectorConfig(
+                        min=0, max=50, step=0.5, unit_of_measurement="%",
+                    )
+                ),
+                vol.Optional(CONF_EPEX_EXPORT_RATE, default=0.0): NumberSelector(
+                    NumberSelectorConfig(
+                        min=0, max=50, step=0.1, unit_of_measurement="ct/kWh",
+                    )
+                ),
             }
         )
 
@@ -1334,15 +1360,17 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required(
                         CONF_BATTERY_SYSTEM, default=BATTERY_SYSTEM_TESLA
-                    ): vol.In(BATTERY_SYSTEMS),
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=k, label=v)
+                                for k, v in BATTERY_SYSTEMS.items()
+                            ],
+                            mode=SelectSelectorMode.LIST,
+                        )
+                    ),
                 }
             ),
-            description_placeholders={
-                "tesla_desc": "Tesla Powerwall with Fleet API or Teslemetry",
-                "sigenergy_desc": "Sigenergy via Cloud API + optional Modbus curtailment",
-                "sungrow_desc": "Sungrow SH-series hybrid inverters via Modbus TCP",
-                "foxess_desc": "FoxESS H1/H3/H3-Pro/KH inverters via Modbus TCP or RS485",
-            },
         )
 
     async def async_step_optimization_provider(
@@ -1378,7 +1406,15 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required(
                         CONF_OPTIMIZATION_PROVIDER, default=OPT_PROVIDER_POWERSYNC
-                    ): vol.In(providers),
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=k, label=v)
+                                for k, v in providers.items()
+                            ],
+                            mode=SelectSelectorMode.LIST,
+                        )
+                    ),
                 }
             ),
             errors=errors,
@@ -1410,7 +1446,15 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(
                         CONF_OPTIMIZATION_BACKUP_RESERVE,
                         default=int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=0, max=100)),
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0,
+                            max=100,
+                            step=5,
+                            unit_of_measurement="%",
+                            mode=NumberSelectorMode.SLIDER,
+                        )
+                    ),
                 }
             ),
             description_placeholders={},
@@ -1578,11 +1622,11 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Optional(
                         CONF_SIGENERGY_MODBUS_PORT,
                         default=DEFAULT_SIGENERGY_MODBUS_PORT,
-                    ): int,
+                    ): vol.All(int, vol.Range(min=1, max=65535)),
                     vol.Optional(
                         CONF_SIGENERGY_MODBUS_SLAVE_ID,
                         default=DEFAULT_SIGENERGY_MODBUS_SLAVE_ID,
-                    ): int,
+                    ): vol.All(int, vol.Range(min=0, max=247)),
                 }
             ),
             errors=errors,
@@ -1630,10 +1674,12 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_SUNGROW_HOST): str,
-                    vol.Optional(CONF_SUNGROW_PORT, default=DEFAULT_SUNGROW_PORT): int,
+                    vol.Optional(CONF_SUNGROW_PORT, default=DEFAULT_SUNGROW_PORT): vol.All(
+                        int, vol.Range(min=1, max=65535)
+                    ),
                     vol.Optional(
                         CONF_SUNGROW_SLAVE_ID, default=DEFAULT_SUNGROW_SLAVE_ID
-                    ): int,
+                    ): vol.All(int, vol.Range(min=1, max=247)),
                 }
             ),
             errors=errors,
@@ -1720,10 +1766,12 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_FOXESS_HOST): str,
-                    vol.Optional(CONF_FOXESS_PORT, default=DEFAULT_FOXESS_PORT): int,
+                    vol.Optional(CONF_FOXESS_PORT, default=DEFAULT_FOXESS_PORT): vol.All(
+                        int, vol.Range(min=1, max=65535)
+                    ),
                     vol.Optional(
                         CONF_FOXESS_SLAVE_ID, default=DEFAULT_FOXESS_SLAVE_ID
-                    ): int,
+                    ): vol.All(int, vol.Range(min=1, max=247)),
                 }
             ),
             errors=errors,
@@ -1789,7 +1837,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ): int,
                     vol.Optional(
                         CONF_FOXESS_SLAVE_ID, default=DEFAULT_FOXESS_SLAVE_ID
-                    ): int,
+                    ): vol.All(int, vol.Range(min=1, max=247)),
                 }
             ),
             errors=errors,
@@ -1964,23 +2012,50 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         ev_provider_choices = _build_tesla_ev_provider_choices(self.hass)
 
         def _build_schema(include_fleet: bool) -> vol.Schema:
-            energy_choices: dict[str, str] = {
-                TESLA_PROVIDER_POWERSYNC: "PowerSync (Free - sign in with Tesla, recommended)",
-            }
+            energy_options: list[SelectOptionDict] = [
+                SelectOptionDict(
+                    value=TESLA_PROVIDER_POWERSYNC,
+                    label="PowerSync (Free - sign in with Tesla, recommended)",
+                ),
+            ]
             if include_fleet:
-                energy_choices[TESLA_PROVIDER_FLEET_API] = (
-                    "Tesla Fleet API (Free - uses existing Tesla Fleet integration)"
+                energy_options.append(
+                    SelectOptionDict(
+                        value=TESLA_PROVIDER_FLEET_API,
+                        label="Tesla Fleet API (Free - uses existing Tesla Fleet integration)",
+                    )
                 )
-            energy_choices[TESLA_PROVIDER_TESLEMETRY] = "Teslemetry (~$4/month)"
+            energy_options.append(
+                SelectOptionDict(
+                    value=TESLA_PROVIDER_TESLEMETRY,
+                    label="Teslemetry (~$4/month)",
+                )
+            )
+
+            ev_options = [
+                SelectOptionDict(value=k, label=v)
+                for k, v in ev_provider_choices.items()
+            ]
+
             return vol.Schema(
                 {
                     vol.Required(
                         CONF_TESLA_API_PROVIDER, default=TESLA_PROVIDER_POWERSYNC
-                    ): vol.In(energy_choices),
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=energy_options,
+                            mode=SelectSelectorMode.LIST,
+                        )
+                    ),
                     vol.Required(
                         CONF_TESLA_EV_API_PROVIDER,
                         default=TESLA_EV_API_PROVIDER_NONE,
-                    ): vol.In(ev_provider_choices),
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=ev_options,
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
                 }
             )
 
@@ -2235,7 +2310,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_AEMO_SPIKE_ENABLED: True,
                         CONF_AEMO_REGION: region,
                         CONF_AEMO_SPIKE_THRESHOLD: user_input.get(
-                            CONF_AEMO_SPIKE_THRESHOLD, 300.0
+                            CONF_AEMO_SPIKE_THRESHOLD, 3000.0
                         ),
                     }
 
@@ -2249,18 +2324,31 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self._route_to_battery_setup()
 
         # Build region choices
-        region_choices = {"": "Select Region..."}
-        region_choices.update(AEMO_REGIONS)
+        region_options = [
+            SelectOptionDict(value=k, label=v)
+            for k, v in AEMO_REGIONS.items()
+        ]
 
         # Default to enabled if in AEMO-only mode
         default_enabled = self._aemo_only_mode
 
         data_schema = vol.Schema(
             {
-                vol.Optional(CONF_AEMO_SPIKE_ENABLED, default=default_enabled): bool,
-                vol.Optional(CONF_AEMO_REGION, default=""): vol.In(region_choices),
-                vol.Optional(CONF_AEMO_SPIKE_THRESHOLD, default=3000.0): vol.All(
-                    vol.Coerce(float), vol.Range(min=0.0, max=20000.0)
+                vol.Optional(CONF_AEMO_SPIKE_ENABLED, default=default_enabled): BooleanSelector(),
+                vol.Optional(CONF_AEMO_REGION): SelectSelector(
+                    SelectSelectorConfig(
+                        options=region_options,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(CONF_AEMO_SPIKE_THRESHOLD, default=3000.0): NumberSelector(
+                    NumberSelectorConfig(
+                        min=0,
+                        max=20000,
+                        step=100,
+                        unit_of_measurement="$/MWh",
+                        mode=NumberSelectorMode.BOX,
+                    )
                 ),
             }
         )
@@ -2530,14 +2618,19 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if self._tesla_sites:
             # Build Tesla site options from Teslemetry API response
-            tesla_site_options = {}
-            for site in self._tesla_sites:
-                site_id = str(site.get("energy_site_id"))
-                site_name = site.get("site_name", f"Tesla Energy Site {site_id}")
-                tesla_site_options[site_id] = f"{site_name} ({site_id})"
+            tesla_site_options = [
+                SelectOptionDict(
+                    value=str(site.get("energy_site_id")),
+                    label=f"{site.get('site_name', 'Tesla Energy Site ' + str(site.get('energy_site_id')))} ({site.get('energy_site_id')})",
+                )
+                for site in self._tesla_sites
+            ]
 
-            data_schema_dict[vol.Required(CONF_TESLA_ENERGY_SITE_ID)] = vol.In(
-                tesla_site_options
+            data_schema_dict[vol.Required(CONF_TESLA_ENERGY_SITE_ID)] = SelectSelector(
+                SelectSelectorConfig(
+                    options=tesla_site_options,
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
             )
         else:
             # No sites found - should not happen if validation worked
@@ -2547,7 +2640,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Only add Amber-specific options for Amber provider with Amber sites
         if show_amber_options:
             # Build Amber site options with status indicator
-            amber_site_options = {}
+            amber_site_list: list[SelectOptionDict] = []
             default_amber_site = None
             for site in self._amber_sites:
                 site_id = site["id"]
@@ -2557,7 +2650,6 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # Add status indicator to help users identify active vs closed sites
                 if site_status == "active":
                     label = f"{site_nmi} (Active)"
-                    # Default to active site
                     if default_amber_site is None:
                         default_amber_site = site_id
                 elif site_status == "closed":
@@ -2565,30 +2657,38 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 else:
                     label = f"{site_nmi} ({site_status})"
 
-                amber_site_options[site_id] = label
+                amber_site_list.append(SelectOptionDict(value=site_id, label=label))
 
             # Always show Amber site selection dropdown (so user can see status)
-            if amber_site_options:
+            if amber_site_list:
                 data_schema_dict[
                     vol.Required(CONF_AMBER_SITE_ID, default=default_amber_site)
-                ] = vol.In(amber_site_options)
+                ] = SelectSelector(
+                    SelectSelectorConfig(
+                        options=amber_site_list,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                )
 
-            data_schema_dict[vol.Optional(CONF_AUTO_SYNC_ENABLED, default=True)] = bool
+            data_schema_dict[vol.Optional(CONF_AUTO_SYNC_ENABLED, default=True)] = BooleanSelector()
             data_schema_dict[
                 vol.Optional(CONF_AMBER_FORECAST_TYPE, default="predicted")
-            ] = vol.In(
-                {
-                    "predicted": "Predicted (Default)",
-                    "low": "Low (Lower prices expected)",
-                    "high": "High (Higher prices expected)",
-                }
+            ] = SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(value="predicted", label="Predicted (Default)"),
+                        SelectOptionDict(value="low", label="Low (Lower prices expected)"),
+                        SelectOptionDict(value="high", label="High (Higher prices expected)"),
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
             )
             data_schema_dict[
                 vol.Optional(CONF_BATTERY_CURTAILMENT_ENABLED, default=False)
-            ] = bool
+            ] = BooleanSelector()
         elif has_amber_sites and is_flow_power:
             # Flow Power with Amber pricing - show Amber site selection only
-            amber_site_options = {}
+            amber_site_list_fp: list[SelectOptionDict] = []
             default_amber_site = None
             for site in self._amber_sites:
                 site_id = site["id"]
@@ -2602,12 +2702,17 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     label = f"{site_nmi} (Closed)"
                 else:
                     label = f"{site_nmi} ({site_status})"
-                amber_site_options[site_id] = label
+                amber_site_list_fp.append(SelectOptionDict(value=site_id, label=label))
 
-            if amber_site_options:
+            if amber_site_list_fp:
                 data_schema_dict[
                     vol.Required(CONF_AMBER_SITE_ID, default=default_amber_site)
-                ] = vol.In(amber_site_options)
+                ] = SelectSelector(
+                    SelectSelectorConfig(
+                        options=amber_site_list_fp,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                )
 
         data_schema = vol.Schema(data_schema_dict)
 
@@ -3103,11 +3208,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_SIGENERGY_MODBUS_PORT,
                         default=current_modbus_port,
-                    ): int,
+                    ): vol.All(int, vol.Range(min=1, max=65535)),
                     vol.Optional(
                         CONF_SIGENERGY_MODBUS_SLAVE_ID,
                         default=current_modbus_slave_id,
-                    ): int,
+                    ): vol.All(int, vol.Range(min=0, max=247)),
                     vol.Optional(
                         CONF_SIGENERGY_DC_CURTAILMENT_ENABLED,
                         default=current_dc_curtailment,
@@ -3291,11 +3396,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_SUNGROW_PORT,
                         default=current_port,
-                    ): int,
+                    ): vol.All(int, vol.Range(min=1, max=65535)),
                     vol.Optional(
                         CONF_SUNGROW_SLAVE_ID,
                         default=current_slave_id,
-                    ): int,
+                    ): vol.All(int, vol.Range(min=1, max=247)),
                     vol.Optional(
                         CONF_SUNGROW_HOST_2,
                         default=current_host_2,
@@ -3303,11 +3408,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_SUNGROW_PORT_2,
                         default=current_port_2,
-                    ): int,
+                    ): vol.All(int, vol.Range(min=1, max=65535)),
                     vol.Optional(
                         CONF_SUNGROW_SLAVE_ID_2,
                         default=current_slave_id_2,
-                    ): int,
+                    ): vol.All(int, vol.Range(min=1, max=247)),
                     vol.Optional(
                         CONF_SUNGROW_GRID_INVERTER_SOC_CAP,
                         default=current_soc_cap,
@@ -3455,11 +3560,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_FOXESS_PORT,
                         default=current_port,
-                    ): int,
+                    ): vol.All(int, vol.Range(min=1, max=65535)),
                     vol.Optional(
                         CONF_FOXESS_SLAVE_ID,
                         default=current_slave_id,
-                    ): int,
+                    ): vol.All(int, vol.Range(min=1, max=247)),
                     vol.Optional(
                         CONF_FOXESS_SERIAL_PORT,
                         default=current_serial_port,
@@ -5689,7 +5794,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Required("export_rate", default=5): vol.All(
                         vol.Coerce(float), vol.Range(min=0, max=200)
                     ),
-                    vol.Optional("add_another", default=True): bool,
+                    vol.Optional("add_another", default=False): bool,
                 }
             ),
             errors=errors,

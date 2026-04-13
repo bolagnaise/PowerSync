@@ -1000,10 +1000,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     _ext_state = _ext_data.get(
                         "force_discharge_state" if force_type == "discharge" else "force_charge_state", {}
                     )
-                    if _ext_state.get("cancel_expiry_timer"):
-                        _ext_state["cancel_expiry_timer"]()  # Cancel old timer
+                    # Save old timer — only cancel after successful Modbus write
+                    _old_cancel = _ext_state.get("cancel_expiry_timer")
                     new_expiry = dt_util.utcnow() + timedelta(minutes=self._config.interval_minutes + 5)
-                    _ext_state["expires_at"] = new_expiry
 
                     # Re-issue Modbus writes for hardware-controlled inverters
                     # (FoxESS, Sigenergy, Sungrow). Their hardware countdown
@@ -1033,7 +1032,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 force_type, extend_mins,
                             )
                         except Exception as ext_err:
-                            _LOGGER.warning("Optimizer: failed to re-issue Modbus %s for extension: %s", force_type, ext_err)
+                            _LOGGER.error(
+                                "Optimizer: failed to re-issue Modbus %s for extension: %s — "
+                                "NOT extending software timer (old timer preserved)",
+                                force_type,
+                                ext_err,
+                            )
+                            # Old timer still active — don't cancel it, don't set new expiry
+                            return
+
+                    # Modbus succeeded (or Tesla/no hardware) — now safe to cancel old timer
+                    if _old_cancel:
+                        _old_cancel()
+                    _ext_state["expires_at"] = new_expiry
 
                     async def _auto_restore_extended(_now):
                         if _ext_state.get("active"):

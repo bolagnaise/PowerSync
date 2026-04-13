@@ -215,13 +215,17 @@ class ChargingSession:
                 last = datetime.fromisoformat(self.last_reading_time)
                 interval_seconds = (now - last).total_seconds()
                 # Cap at 120s to avoid huge energy spikes from delayed readings
-                interval_seconds = min(interval_seconds, 120.0)
+                interval_seconds = max(0.0, min(interval_seconds, 120.0))
             except (ValueError, TypeError):
                 interval_seconds = 30.0
         else:
             # First reading — default to 30s
             interval_seconds = 30.0
         self.last_reading_time = now.isoformat()
+
+        if interval_seconds <= 0:
+            _LOGGER.debug("Skipping zero/negative interval (%.1fs)", interval_seconds)
+            return
 
         # Calculate energy for this interval
         energy_kwh = (power_kw * interval_seconds) / 3600
@@ -454,6 +458,11 @@ class ChargingSessionManager:
         """
         session = self.active_sessions.get(vehicle_id)
         if not session:
+            _LOGGER.warning(
+                "EV session update for %s but no active session — readings lost. "
+                "Call start_session() first.",
+                vehicle_id,
+            )
             return None
 
         # Determine source from is_solar flag
@@ -536,6 +545,28 @@ class ChargingSessionManager:
         )
 
         return session
+
+    async def cleanup_stale_sessions(self, timeout_minutes: int = 30) -> list[str]:
+        """End sessions that haven't received an update in timeout_minutes."""
+        now = datetime.now()
+        stale: list[str] = []
+        for vehicle_id, session in list(self.active_sessions.items()):
+            last_time_str = session.last_reading_time or session.start_time
+            if last_time_str:
+                try:
+                    last = datetime.fromisoformat(last_time_str)
+                    if (now - last).total_seconds() > timeout_minutes * 60:
+                        stale.append(vehicle_id)
+                except (ValueError, TypeError):
+                    pass
+        for vehicle_id in stale:
+            _LOGGER.warning(
+                "EV session for %s stale (>%d min since last update) — auto-ending",
+                vehicle_id,
+                timeout_minutes,
+            )
+            await self.end_session(vehicle_id, reason="stale_timeout")
+        return stale
 
     async def get_active_session(self, vehicle_id: str) -> Optional[ChargingSession]:
         """Get the active session for a vehicle."""

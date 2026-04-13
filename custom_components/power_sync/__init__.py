@@ -20067,11 +20067,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             elif ed.get("tariff_schedule"):
                                 import_price = ed["tariff_schedule"].get("buy_price", 30.0)
                                 export_price = ed["tariff_schedule"].get("sell_price", 8.0)
+                            # Detect solar: if grid import < 20% of charger power, consider it solar
+                            # Default to grid (False) unless a coordinator actually reports grid_power
+                            _grid_power_kw = None
+                            for _coord_key in ("tesla_coordinator", "sigenergy_coordinator", "sungrow_coordinator", "foxess_coordinator", "goodwe_coordinator"):
+                                _coord = ed.get(_coord_key)
+                                if _coord and _coord.data and "grid_power" in _coord.data:
+                                    _grid_power_kw = float(_coord.data.get("grid_power", 0) or 0)
+                                    break
+                            _charger_power_kw = power_w / 1000 if power_w else 0
+                            _is_solar = (
+                                _grid_power_kw is not None
+                                and _charger_power_kw > 0.1
+                                and _grid_power_kw < (_charger_power_kw * 0.2)
+                            )
+
                             await sm.update_session(
                                 vehicle_id=vid,
                                 power_kw=power_kw,
                                 amps=amps,
-                                is_solar=False,
+                                is_solar=_is_solar,
                                 import_price_cents=import_price,
                                 export_price_cents=export_price,
                             )

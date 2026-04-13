@@ -28,7 +28,7 @@
 
 ---
 
-## Phase 2 — Reliability (Weeks 5-10) `PLANNED`
+## Phase 2 — Reliability (Weeks 5-10) `COMPLETED`
 
 **Goal**: Fix the bugs that erode confidence. Stable dashboard, smooth onboarding, reliable battery control.
 

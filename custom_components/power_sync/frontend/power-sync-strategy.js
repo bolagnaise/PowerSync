@@ -493,14 +493,25 @@ class PowerSyncStrategy {
     // Built-in energy flow card is always available (power-sync-energy-flow.js)
     const hasTeslaFlow = true;
 
-    // Entity resolver — tries power_sync_ prefixed first, then bare name.
+    // Entity resolver — tries configured prefix first, then power_sync_, then bare name.
     // Handles mixed installs where some entities have the prefix and others don't.
-    const e = (name) => {
-      const prefixed = `sensor.power_sync_${name}`;
+    // Accepts an optional domain parameter (default: 'sensor') for non-sensor entities.
+    const cfgPrefix = config.entity_prefix || 'power_sync';
+    const _isUsable = (id) => {
+      const s = hass.states[id];
+      return s && s.state !== 'unavailable' && s.state !== 'unknown';
+    };
+    const e = (name, domain = 'sensor') => {
+      const prefixed = `${domain}.${cfgPrefix}_${name}`;
+      if (_isUsable(prefixed)) return prefixed;
+      if (cfgPrefix !== 'power_sync') {
+        const ps = `${domain}.power_sync_${name}`;
+        if (_isUsable(ps)) return ps;
+      }
+      const bare = `${domain}.${name}`;
+      if (_isUsable(bare)) return bare;
+      // Fallback: return prefixed even if unavailable (card will show error state)
       if (hass.states[prefixed]) return prefixed;
-      const bare = `sensor.${name}`;
-      if (hass.states[bare]) return bare;
-      // Default to prefixed (modern convention)
       return prefixed;
     };
 
@@ -565,12 +576,22 @@ class PowerSyncStrategy {
 
     // --- Left Column: Price Gauges ---
     if (hasE('current_import_price')) {
-      left.push(_priceGauges(e));
+      try {
+        left.push(_priceGauges(e));
+      } catch (err) {
+        console.error('PowerSync: Failed to build price gauges card:', err);
+        left.push({ type: 'markdown', content: 'Warning: Price gauges card error: ' + err.message });
+      }
     }
 
     // --- Left Column: Battery Controls (requires button-card) ---
     if (hasButton && (hasE('battery_level') || hasE('battery_power'))) {
-      left.push(_batteryControls());
+      try {
+        left.push(_batteryControls(e));
+      } catch (err) {
+        console.error('PowerSync: Failed to build battery controls card:', err);
+        left.push({ type: 'markdown', content: 'Warning: Battery controls card error: ' + err.message });
+      }
     }
 
     // --- Left Column: Tesla Energy Site Controls (v2.10.0+) ---
@@ -579,131 +600,232 @@ class PowerSyncStrategy {
     // card. Each row is only added if the corresponding entity exists, so the
     // section gracefully scales from a basic Powerwall (4 rows) to a US site
     // with VPP enrollment (8+ rows).
-    const teslaSection = _teslaEnergySiteControls(findEntity, findVppSwitches);
-    if (teslaSection) {
-      left.push(teslaSection);
+    try {
+      const teslaSection = _teslaEnergySiteControls(findEntity, findVppSwitches);
+      if (teslaSection) {
+        left.push(teslaSection);
+      }
+    } catch (err) {
+      console.error('PowerSync: Failed to build Tesla energy site controls card:', err);
+      left.push({ type: 'markdown', content: 'Warning: Tesla energy site controls card error: ' + err.message });
     }
 
     // --- Left Column: Optimizer Status (requires button-card) ---
     if (hasButton && hasE('optimization_status')) {
-      left.push(_optimizerStatus(e));
+      try {
+        left.push(_optimizerStatus(e));
+      } catch (err) {
+        console.error('PowerSync: Failed to build optimizer status card:', err);
+        left.push({ type: 'markdown', content: 'Warning: Optimizer status card error: ' + err.message });
+      }
     }
 
     // --- Center Column: Power Flow ---
     if (hasTeslaFlow && hasE('solar_power')) {
-      center.push(_teslaStyleFlow(e, hass));
+      try {
+        center.push(_teslaStyleFlow(e, hass));
+      } catch (err) {
+        console.error('PowerSync: Failed to build energy flow card:', err);
+        center.push({ type: 'markdown', content: 'Warning: Energy flow card error: ' + err.message });
+      }
     } else if (hasFlowCard && hasE('solar_power')) {
-      center.push(_powerFlow(e));
+      try {
+        center.push(_powerFlow(e));
+      } catch (err) {
+        console.error('PowerSync: Failed to build power flow card:', err);
+        center.push({ type: 'markdown', content: 'Warning: Power flow card error: ' + err.message });
+      }
     }
 
     // --- Right Column: Price Chart (Amber/Octopus 24h) — requires apexcharts ---
     if (hasApex && hasE('current_import_price')) {
-      right.push(_priceChart(e));
+      try {
+        right.push(_priceChart(e));
+      } catch (err) {
+        console.error('PowerSync: Failed to build price chart card:', err);
+        right.push({ type: 'markdown', content: 'Warning: Price chart card error: ' + err.message });
+      }
     }
 
     // --- Right Column: TOU Schedule (uses PowerSyncChart) ---
     if (hasE('tariff_schedule')) {
-      right.push(_touSchedule(e));
+      try {
+        right.push(_touSchedule(e));
+      } catch (err) {
+        console.error('PowerSync: Failed to build TOU schedule card:', err);
+        right.push({ type: 'markdown', content: 'Warning: TOU schedule card error: ' + err.message });
+      }
     }
 
     // --- Center Column: LP Forecast Summary ---
     if (hasE('lp_solar_forecast')) {
-      center.push(_lpForecastSummary(e, has));
+      try {
+        center.push(_lpForecastSummary(e, has));
+      } catch (err) {
+        console.error('PowerSync: Failed to build LP forecast summary card:', err);
+        center.push({ type: 'markdown', content: 'Warning: LP forecast summary card error: ' + err.message });
+      }
     }
 
     // --- Center Column: LP Price Chart (48h) ---
     if (hasE('lp_import_price_forecast')) {
-      center.push(_lpPriceChart(e));
+      try {
+        center.push(_lpPriceChart(e));
+      } catch (err) {
+        console.error('PowerSync: Failed to build LP price chart card:', err);
+        center.push({ type: 'markdown', content: 'Warning: LP price chart card error: ' + err.message });
+      }
     }
 
     // --- Right Column: LP Solar & Load Chart (48h) ---
     if (hasE('lp_solar_forecast')) {
-      right.push(_lpSolarLoadChart(e));
+      try {
+        right.push(_lpSolarLoadChart(e));
+      } catch (err) {
+        console.error('PowerSync: Failed to build LP solar/load chart card:', err);
+        right.push({ type: 'markdown', content: 'Warning: LP solar/load chart card error: ' + err.message });
+      }
     }
 
     // --- Left Column: Curtailment Status (requires button-card) ---
     const hasDC = hasE('solar_curtailment');
     const hasAC = hasE('inverter_status');
     if (hasButton && (hasDC || hasAC)) {
-      left.push(_curtailmentStatus(e, hasDC, hasAC));
+      try {
+        left.push(_curtailmentStatus(e, hasDC, hasAC));
+      } catch (err) {
+        console.error('PowerSync: Failed to build curtailment status card:', err);
+        left.push({ type: 'markdown', content: 'Warning: Curtailment status card error: ' + err.message });
+      }
     }
 
     // --- Left Column: AC Inverter Controls (requires button-card) ---
     if (hasButton && hasAC) {
-      left.push(_acInverterControls(e));
+      try {
+        left.push(_acInverterControls(e));
+      } catch (err) {
+        console.error('PowerSync: Failed to build AC inverter controls card:', err);
+        left.push({ type: 'markdown', content: 'Warning: AC inverter controls card error: ' + err.message });
+      }
     }
 
     // --- Left Column: FoxESS Sensors ---
-    if (hasE('pv1_power')) {
-      left.push(_foxessSensors(e));
+    {
+      try {
+        const foxCard = _foxessSensors(e, has);
+        if (foxCard) left.push(foxCard);
+      } catch (err) {
+        console.error('PowerSync: Failed to build FoxESS sensors card:', err);
+        left.push({ type: 'markdown', content: 'Warning: FoxESS sensors card error: ' + err.message });
+      }
     }
 
     // --- Left Column: Battery Health (requires button-card) ---
     if (hasButton && hasE('battery_health')) {
-      left.push(_batteryHealth(e));
+      try {
+        left.push(_batteryHealth(e));
+      } catch (err) {
+        console.error('PowerSync: Failed to build battery health card:', err);
+        left.push({ type: 'markdown', content: 'Warning: Battery health card error: ' + err.message });
+      }
     }
 
     // --- Center Column: Combined Energy Chart ---
     if (hasApex && hasE('solar_power')) {
-      center.push(_combinedEnergyChart(e, hasE('home_load')));
+      try {
+        center.push(_combinedEnergyChart(e, hasE('home_load')));
+      } catch (err) {
+        console.error('PowerSync: Failed to build combined energy chart card:', err);
+        center.push({ type: 'markdown', content: 'Warning: Combined energy chart card error: ' + err.message });
+      }
     }
 
     // --- Center Column: Daily Energy Summary ---
     if (hasE('daily_solar_energy')) {
-      const dailyEntities = [
-        { entity: e('daily_solar_energy'), name: 'Solar', icon: 'mdi:solar-power' },
-        { entity: e('daily_grid_import'), name: 'Grid Import', icon: 'mdi:transmission-tower-import' },
-        { entity: e('daily_grid_export'), name: 'Grid Export', icon: 'mdi:transmission-tower-export' },
-        { entity: e('daily_battery_charge'), name: 'Battery Charge', icon: 'mdi:battery-charging' },
-        { entity: e('daily_battery_discharge'), name: 'Battery Discharge', icon: 'mdi:battery-arrow-down' },
-      ];
-      if (hasE('daily_load')) {
-        dailyEntities.push({ entity: e('daily_load'), name: 'Home Consumption', icon: 'mdi:home-lightning-bolt' });
+      try {
+        const dailyEntities = [
+          { entity: e('daily_solar_energy'), name: 'Solar', icon: 'mdi:solar-power' },
+          { entity: e('daily_grid_import'), name: 'Grid Import', icon: 'mdi:transmission-tower-import' },
+          { entity: e('daily_grid_export'), name: 'Grid Export', icon: 'mdi:transmission-tower-export' },
+          { entity: e('daily_battery_charge'), name: 'Battery Charge', icon: 'mdi:battery-charging' },
+          { entity: e('daily_battery_discharge'), name: 'Battery Discharge', icon: 'mdi:battery-arrow-down' },
+        ];
+        if (hasE('daily_load')) {
+          dailyEntities.push({ entity: e('daily_load'), name: 'Home Consumption', icon: 'mdi:home-lightning-bolt' });
+        }
+        center.push({
+          type: 'entities',
+          title: 'Daily Energy (kWh)',
+          show_header_toggle: false,
+          entities: dailyEntities,
+        });
+      } catch (err) {
+        console.error('PowerSync: Failed to build daily energy summary card:', err);
+        center.push({ type: 'markdown', content: 'Warning: Daily energy summary card error: ' + err.message });
       }
-      center.push({
-        type: 'entities',
-        title: 'Daily Energy (kWh)',
-        show_header_toggle: false,
-        entities: dailyEntities,
-      });
     }
 
     // --- Center Column: Daily Cost Tracking ---
     if (hasE('daily_import_cost')) {
-      const costEntities = [
-        { entity: e('daily_import_cost'), name: 'Import Cost Today', icon: 'mdi:cash-minus' },
-      ];
-      if (hasE('daily_export_earnings')) {
-        costEntities.push({ entity: e('daily_export_earnings'), name: 'Export Earnings Today', icon: 'mdi:cash-plus' });
+      try {
+        const costEntities = [
+          { entity: e('daily_import_cost'), name: 'Import Cost Today', icon: 'mdi:cash-minus' },
+        ];
+        if (hasE('daily_export_earnings')) {
+          costEntities.push({ entity: e('daily_export_earnings'), name: 'Export Earnings Today', icon: 'mdi:cash-plus' });
+        }
+        center.push({
+          type: 'entities',
+          title: 'Daily Cost Tracking',
+          show_header_toggle: false,
+          entities: costEntities,
+        });
+      } catch (err) {
+        console.error('PowerSync: Failed to build daily cost tracking card:', err);
+        center.push({ type: 'markdown', content: 'Warning: Daily cost tracking card error: ' + err.message });
       }
-      center.push({
-        type: 'entities',
-        title: 'Daily Cost Tracking',
-        show_header_toggle: false,
-        entities: costEntities,
-      });
     }
 
     // --- Left Column: Demand Charge ---
     if (hasE('in_demand_charge_period')) {
-      left.push(_demandCharge(e));
+      try {
+        left.push(_demandCharge(e));
+      } catch (err) {
+        console.error('PowerSync: Failed to build demand charge card:', err);
+        left.push({ type: 'markdown', content: 'Warning: Demand charge card error: ' + err.message });
+      }
     }
 
     // --- Left Column: AEMO Spike ---
     if (hasE('aemo_price')) {
-      left.push(_aemoSpike(e));
+      try {
+        left.push(_aemoSpike(e));
+      } catch (err) {
+        console.error('PowerSync: Failed to build AEMO spike card:', err);
+        left.push({ type: 'markdown', content: 'Warning: AEMO spike card error: ' + err.message });
+      }
     }
 
     // --- Left Column: Powerwall Local Control (only when paired) ---
     // Gated on the binary_sensor.powerwall_local_paired entity so the card
     // stays hidden until the user completes the pairing flow in the app.
     if (hasE('powerwall_local_paired')) {
-      left.push(_powerwallLocalControl(e));
+      try {
+        left.push(_powerwallLocalControl(e));
+      } catch (err) {
+        console.error('PowerSync: Failed to build Powerwall local control card:', err);
+        left.push({ type: 'markdown', content: 'Warning: Powerwall local control card error: ' + err.message });
+      }
     }
 
     // --- Left Column: Flow Power ---
     if (hasE('flow_power_price')) {
-      left.push(_flowPower(e));
+      try {
+        left.push(_flowPower(e));
+      } catch (err) {
+        console.error('PowerSync: Failed to build Flow Power card:', err);
+        left.push({ type: 'markdown', content: 'Warning: Flow Power card error: ' + err.message });
+      }
     }
 
     // --- Left Column: Missing dependency warnings ---
@@ -799,7 +921,7 @@ function _priceGauges(e) {
   };
 }
 
-function _batteryControls() {
+function _batteryControls(e) {
   const chipStyle = (bg) => ({
     card: [
       { height: '36px' },
@@ -831,6 +953,9 @@ function _batteryControls() {
   const blueChip = chipStyle('rgba(var(--rgb-blue-color, 33, 150, 243), 0.1)');
   const orangeChip = chipStyle('rgba(var(--rgb-orange-color, 255, 152, 0), 0.1)');
 
+  const chargeDurEntity = e('force_charge_duration', 'select');
+  const dischargeDurEntity = e('force_discharge_duration', 'select');
+
   return {
     type: 'vertical-stack',
     cards: [
@@ -841,11 +966,11 @@ function _batteryControls() {
         cards: [
           {
             type: 'custom:button-card',
-            entity: 'select.power_sync_force_charge_duration',
+            entity: chargeDurEntity,
             show_name: true,
             show_icon: true,
             icon: 'mdi:timer-outline',
-            name: "[[[ return (states['select.power_sync_force_charge_duration'] ? states['select.power_sync_force_charge_duration'].state : '30') + ' min' ]]]",
+            name: `[[[ return (states['${chargeDurEntity}'] ? states['${chargeDurEntity}'].state : '30') + ' min' ]]]`,
             styles: blueChip,
             tap_action: { action: 'more-info' },
           },
@@ -858,20 +983,20 @@ function _batteryControls() {
               action: 'call-service',
               service: 'power_sync.force_charge',
               data: {
-                duration: "[[[ return (states['select.power_sync_force_charge_duration'] ? states['select.power_sync_force_charge_duration'].state : '30'); ]]]",
+                duration: `[[[ return (states['${chargeDurEntity}'] ? states['${chargeDurEntity}'].state : '30'); ]]]`,
               },
               confirmation: {
-                text: "[[[ return 'Force charge for ' + (states['select.power_sync_force_charge_duration'] ? states['select.power_sync_force_charge_duration'].state : '30') + ' minutes?' ]]]",
+                text: `[[[ return 'Force charge for ' + (states['${chargeDurEntity}'] ? states['${chargeDurEntity}'].state : '30') + ' minutes?' ]]]`,
               },
             },
           },
           {
             type: 'custom:button-card',
-            entity: 'select.power_sync_force_discharge_duration',
+            entity: dischargeDurEntity,
             show_name: true,
             show_icon: true,
             icon: 'mdi:timer-outline',
-            name: "[[[ return (states['select.power_sync_force_discharge_duration'] ? states['select.power_sync_force_discharge_duration'].state : '30') + ' min' ]]]",
+            name: `[[[ return (states['${dischargeDurEntity}'] ? states['${dischargeDurEntity}'].state : '30') + ' min' ]]]`,
             styles: orangeChip,
             tap_action: { action: 'more-info' },
           },
@@ -892,10 +1017,10 @@ function _batteryControls() {
               action: 'call-service',
               service: 'power_sync.force_discharge',
               data: {
-                duration: "[[[ return (states['select.power_sync_force_discharge_duration'] ? states['select.power_sync_force_discharge_duration'].state : '30'); ]]]",
+                duration: `[[[ return (states['${dischargeDurEntity}'] ? states['${dischargeDurEntity}'].state : '30'); ]]]`,
               },
               confirmation: {
-                text: "[[[ return 'Force discharge for ' + (states['select.power_sync_force_discharge_duration'] ? states['select.power_sync_force_discharge_duration'].state : '30') + ' minutes?' ]]]",
+                text: `[[[ return 'Force discharge for ' + (states['${dischargeDurEntity}'] ? states['${dischargeDurEntity}'].state : '30') + ' minutes?' ]]]`,
               },
             },
           },
@@ -1737,17 +1862,21 @@ function _acInverterControls(e) {
   };
 }
 
-function _foxessSensors(e) {
-  const entities = [
-    { entity: e('pv1_power'), name: 'PV1 Power' },
-    { entity: e('pv2_power'), name: 'PV2 Power' },
-  ];
-  // Only add CT2 if it exists (not all FoxESS models have it)
-  entities.push({ entity: e('ct2_power'), name: 'CT2 Power' });
-  entities.push({ entity: e('work_mode'), name: 'Work Mode' });
-  entities.push({ entity: e('min_soc'), name: 'Min SOC' });
-  entities.push({ entity: e('daily_battery_charge_foxess'), name: 'Daily Charge' });
-  entities.push({ entity: e('daily_battery_discharge_foxess'), name: 'Daily Discharge' });
+function _foxessSensors(e, has) {
+  const entities = [];
+  const maybeAdd = (key, name) => {
+    const id = e(key);
+    if (has(id)) entities.push({ entity: id, name: name });
+  };
+  maybeAdd('pv1_power', 'PV1 Power');
+  maybeAdd('pv2_power', 'PV2 Power');
+  maybeAdd('ct2_power', 'CT2 Power');
+  maybeAdd('work_mode', 'Work Mode');
+  maybeAdd('min_soc', 'Min SOC');
+  maybeAdd('daily_battery_charge_foxess', 'Daily Charge');
+  maybeAdd('daily_battery_discharge_foxess', 'Daily Discharge');
+
+  if (entities.length === 0) return null;
 
   return {
     type: 'entities',

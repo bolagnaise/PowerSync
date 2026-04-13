@@ -963,14 +963,19 @@ class FoxESSController(InverterController):
                             if attempt < max_attempts:
                                 await asyncio.sleep(2)
                                 continue
-                            # Final attempt failed — log but still return True
-                            # (register write succeeded, inverter may catch up)
+                            # Final attempt failed — report failure so caller
+                            # knows the inverter did not action the command.
                             _LOGGER.warning(
                                 "FoxESS %s power verify still mismatched after %d attempts — "
-                                "inverter may not have actioned the command",
+                                "inverter may not have actioned the command, attempting restore",
                                 label,
                                 max_attempts,
                             )
+                            try:
+                                await self.restore_normal()
+                            except Exception as restore_err:
+                                _LOGGER.error("FoxESS restore after verify failure also failed: %s", restore_err)
+                            return False
                 else:
                     power_readback = await self._read_holding_registers(
                         reg.remote_active_power, 1
