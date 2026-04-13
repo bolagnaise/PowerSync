@@ -1484,6 +1484,19 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 except Exception:
                     pass
 
+            # Fallback: get EV power from BLE/Fleet vehicle sensors when
+            # Wall Connector isn't reporting through Powerwall gateway.
+            # Without this, EV charging power is counted as home load.
+            if ev_power_kw == 0:
+                try:
+                    entry = self.hass.config_entries.async_get_entry(self._entry_id)
+                    if entry:
+                        from . import _get_ev_vehicle_status
+                        ev_status = _get_ev_vehicle_status(self.hass, entry)
+                        ev_power_kw = ev_status.get("ev_power_kw", 0) or 0
+                except Exception:
+                    pass
+
             # Map Teslemetry API response to our data structure
             solar_kw = live_status.get("solar_power", 0) / 1000
             grid_kw = live_status.get("grid_power", 0) / 1000
