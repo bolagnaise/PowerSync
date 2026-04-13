@@ -89,6 +89,24 @@ jobs:
             --notes-file /tmp/release_notes.md
           echo "Created release v$VERSION"
 
+      - name: Clear RELEASE_NOTES.md after use
+        if: steps.check_tag.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Prevent stale hand-written notes from being reused on the
+          # next version bump. Truncate the file and commit it back so
+          # future releases fall through to auto-generated commit notes.
+          if [ -f "RELEASE_NOTES.md" ] && [ -s "RELEASE_NOTES.md" ]; then
+            echo -n "" > RELEASE_NOTES.md
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add RELEASE_NOTES.md
+            git commit -m "docs(release): clear RELEASE_NOTES.md after v${{ steps.version.outputs.version }}"
+            git push origin main
+            echo "Cleared RELEASE_NOTES.md"
+          fi
+
       # NOTE: a separate workflow listening on `release: published` would NOT
       # fire here, because GitHub Actions intentionally suppresses downstream
       # workflows for events triggered by GITHUB_TOKEN. Posting to Discord

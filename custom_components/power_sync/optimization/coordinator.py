@@ -1179,27 +1179,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 effective_action = "self_consumption"
 
-            # Block EXPORT when curtailment is active (export price below threshold).
-            # Without this, force_discharge would override the Tesla "never" export
-            # rule, causing the battery to export at a loss during negative prices.
-            if effective_action in ("discharge", "export") and self._entry:
-                from ..const import (
-                    CONF_AC_INVERTER_CURTAILMENT_ENABLED,
-                    CONF_BATTERY_CURTAILMENT_ENABLED,
-                    CONF_SIGENERGY_DC_CURTAILMENT_ENABLED,
-                )
-                _curtailment_on = (
-                    self._entry.options.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False)
-                    or self._entry.options.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
-                    or self._entry.options.get(CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False)
-                )
+            # Block EXPORT when export price is below threshold.
+            # Without this, force_discharge can cause the battery to export
+            # at a loss during negative/zero prices (e.g. Chip Mode suppression).
+            if effective_action in ("discharge", "export"):
                 _ep = self._last_export_prices
-                if _curtailment_on and _ep:
+                if _ep:
                     _current_export = _ep[0] if _ep else 0
                     if _current_export < 0.01:  # < 1c/kWh
                         _LOGGER.info(
                             "Optimizer: Overriding %s → self_consumption — "
-                            "curtailment active and export price %.1fc/kWh < 1c threshold",
+                            "export price %.1fc/kWh < 1c threshold",
                             effective_action, _current_export * 100,
                         )
                         effective_action = "self_consumption"

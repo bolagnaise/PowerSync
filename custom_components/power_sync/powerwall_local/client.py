@@ -96,6 +96,7 @@ class PowerwallLocalClient:
         self._saved_reserve_percent: int | None = None
         self._curtailment_active = False
 
+
         # Both generations use the same signed transport for symmetry — on
         # PW2 the RSA signing path is unused but the REST helpers live in
         # the same class so we avoid duplicating the session/SSL setup.
@@ -199,28 +200,23 @@ class PowerwallLocalClient:
     async def go_off_grid(self) -> bool:
         """Physically disconnect from the grid (contactor open).
 
-        On PW3: sends islanding commands via the Fleet API ``command``
-        endpoint (same cloud relay used for pairing). Tries three
-        approaches in order:
-          1. ``triggerIslandingBlackStartRequest`` via cloud command
-          2. ``setIslandModeRequest`` (mode=2) via cloud command
-          3. ``device_command`` with captured protobuf (legacy fallback)
+        PW3: signed RoutableMessage via device_command (mode=6).
+        PW2: unsigned energy_device_message via device_command ("MgQqAggC").
 
-        Causes an inverter restart (~30s solar dropout) — use only for
-        manual/deliberate islanding, NOT for automated curtailment.
+        Discovered via mitmproxy: PW2 uses energy_device_message (unsigned,
+        mode=2) while PW3 uses routable_message (RSA-signed, mode=6).
         """
-        if self._version == PowerwallVersion.PW3 and self._din:
-            # Signed device_command with setIslandModeRequest(mode=6)
-            # via routable_message — the only path that physically works
-            # on PW3 for off-grid. Discovered via mitmproxy of Tesla app.
-            if self._transport:
-                _LOGGER.info("go_off_grid: sending signed device_command (mode=6)")
-                return await self._send_signed_device_command(off_grid=True)
+        # PW3: signed routable_message (requires RSA transport)
+        if self._version == PowerwallVersion.PW3 and self._din and self._transport:
+            _LOGGER.info("go_off_grid: PW3 signed device_command (mode=6)")
+            return await self._send_signed_device_command(off_grid=True)
 
-            # Fallback: unsigned device_command (unreliable)
-            _LOGGER.warning("go_off_grid: no transport for signing, trying unsigned")
+        # PW2 (and PW3 fallback): unsigned energy_device_message
+        if self._din:
+            _LOGGER.info("go_off_grid: unsigned device_command (energy_device_message)")
             return await self._send_device_command(off_grid=True)
 
+        # Local REST fallback (requires installer auth on PW2).
         body = {"island_mode": ISLAND_MODE_OFFGRID}
         result = await self._post(ISLAND_MODE_PATH, body)
         if result is not None:
@@ -231,17 +227,15 @@ class PowerwallLocalClient:
         return False
 
     async def reconnect_grid(self) -> bool:
-        """Reconnect to the grid (contactor close).
+        """Reconnect to the grid (contactor close)."""
+        # PW3: signed routable_message
+        if self._version == PowerwallVersion.PW3 and self._din and self._transport:
+            _LOGGER.info("reconnect_grid: PW3 signed device_command (mode=1)")
+            return await self._send_signed_device_command(off_grid=False)
 
-        On PW3: uses cloud ``command`` endpoint, falls back to
-        ``device_command``.
-        """
-        if self._version == PowerwallVersion.PW3 and self._din:
-            if self._transport:
-                _LOGGER.info("reconnect_grid: sending signed device_command (mode=1)")
-                return await self._send_signed_device_command(off_grid=False)
-
-            _LOGGER.warning("reconnect_grid: no transport for signing, trying unsigned")
+        # PW2 (and PW3 fallback): unsigned energy_device_message
+        if self._din:
+            _LOGGER.info("reconnect_grid: unsigned device_command (energy_device_message)")
             return await self._send_device_command(off_grid=False)
 
         body = {"island_mode": ISLAND_MODE_ONGRID}
@@ -850,9 +844,19 @@ class _UnsignedRESTClient:
                         headers["Authorization"] = f"Bearer {self._token}"
                         async with sess.post(url, json=body, headers=headers) as r2:
                             if r2.status not in (200, 201, 204):
+                                text = await r2.text()
+                                _LOGGER.warning(
+                                    "POST %s retry returned %s: %s",
+                                    path, r2.status, text[:300],
+                                )
                                 return None
                             return {} if r2.status == 204 else await r2.json()
                     if resp.status not in (200, 201, 204):
+                        text = await resp.text()
+                        _LOGGER.warning(
+                            "POST %s returned %s: %s",
+                            path, resp.status, text[:300],
+                        )
                         return None
                     return {} if resp.status == 204 else await resp.json()
         except self._aiohttp.ClientError as err:

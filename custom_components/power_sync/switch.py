@@ -19,6 +19,7 @@ from .const import (
     CONF_AUTO_SYNC_ENABLED,
     CONF_ELECTRICITY_PROVIDER,
     CONF_MONITORING_MODE,
+    CONF_POWERWALL_LOCAL_PAIRED,
     SWITCH_TYPE_AUTO_SYNC,
     SWITCH_TYPE_FORCE_DISCHARGE,
     SWITCH_TYPE_FORCE_CHARGE,
@@ -116,6 +117,10 @@ async def async_setup_entry(
                 GridChargingSwitch(hass=hass, entry=entry),
             ]
         )
+
+    # Off-grid switch — available when Powerwall is paired for local control
+    if is_tesla and entry.data.get(CONF_POWERWALL_LOCAL_PAIRED):
+        entities.append(OffGridSwitch(hass=hass, entry=entry))
 
     async_add_entities(entities)
 
@@ -811,3 +816,63 @@ class VppProgramSwitch(_TeslaSiteSwitchBase):
             {"program_id": self._program_id, "enrolled": False},
             blocking=False,
         )
+
+
+class OffGridSwitch(SwitchEntity):
+    """Switch to take the Powerwall off-grid (islanding) or reconnect.
+
+    ON  = off-grid (contactor open, running on battery)
+    OFF = on-grid  (contactor closed, normal operation)
+
+    State is read from the PowerwallLocalCoordinator's snapshot so it
+    reflects the actual gateway state, not just what we last commanded.
+    """
+
+    _attr_has_entity_name = True
+    _attr_icon = "mdi:transmission-tower-off"
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self.hass = hass
+        self._entry = entry
+        self._attr_unique_id = f"{entry.entry_id}_off_grid"
+        self._attr_suggested_object_id = "power_sync_off_grid"
+        self._attr_name = "Off-Grid"
+
+    @property
+    def device_info(self):
+        return {"identifiers": {(DOMAIN, self._entry.entry_id)}}
+
+    @property
+    def is_on(self) -> bool | None:
+        """True when the Powerwall is islanded (off-grid)."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
+        runtime = entry_data.get("powerwall_local") or {}
+        coord = runtime.get("coordinator")
+        if coord is None:
+            return None
+        snap = coord.data
+        if snap is None or snap.grid_status is None:
+            return None
+        return "island" in snap.grid_status.lower()
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Go off-grid."""
+        _LOGGER.info("Off-grid switch: going off-grid")
+        await self.hass.services.async_call(
+            DOMAIN,
+            "powerwall_go_off_grid",
+            {},
+            blocking=True,
+        )
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Reconnect to grid."""
+        _LOGGER.info("Off-grid switch: reconnecting to grid")
+        await self.hass.services.async_call(
+            DOMAIN,
+            "powerwall_reconnect_grid",
+            {},
+            blocking=True,
+        )
+        self.async_write_ha_state()

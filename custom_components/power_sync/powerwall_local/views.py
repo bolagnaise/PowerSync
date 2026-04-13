@@ -349,7 +349,6 @@ class PowerwallPairStartView(HomeAssistantView):
 
         return web.json_response({"success": True, "status": status.to_dict()})
 
-
 class PowerwallPairStatusView(HomeAssistantView):
     """GET: poll the current pairing status."""
 
@@ -540,6 +539,145 @@ class PowerwallOffGridView(HomeAssistantView):
         return web.json_response(
             {"success": ok, "action": action, "snapshot": coordinator.snapshot_as_api()}
         )
+
+
+class PowerwallDebugProbeView(HomeAssistantView):
+    """POST: raw gateway probe for debugging — returns full HTTP response."""
+
+    url = "/api/power_sync/powerwall/debug_probe"
+    name = "api:power_sync:powerwall:debug_probe"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    async def post(self, request: web.Request) -> web.Response:
+        import aiohttp
+        import ssl
+
+        entry = _get_entry(self._hass)
+        if entry is None:
+            return web.json_response({"error": "not configured"}, status=503)
+
+        host = entry.data.get(CONF_POWERWALL_LOCAL_IP)
+        password = entry.data.get(CONF_POWERWALL_LOCAL_CUSTOMER_PASSWORD, "")
+        if not host:
+            return web.json_response({"error": "no gateway IP"}, status=400)
+
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        method = str(payload.get("method", "GET")).upper()
+        path = str(payload.get("path", "/api/system_status/grid_status"))
+        body = payload.get("body")
+        username = str(payload.get("username", "customer"))
+        login_password = str(payload.get("login_password", "")) or password
+
+        # Create insecure SSL context for self-signed gateway cert
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        timeout = aiohttp.ClientTimeout(total=10.0)
+        connector = aiohttp.TCPConnector(ssl=ctx, limit=2)
+
+        results = []
+        async with aiohttp.ClientSession(
+            connector=connector, timeout=timeout
+        ) as sess:
+            # Login
+            login_url = f"https://{host}/api/login/Basic"
+            login_body = {
+                "username": username,
+                "password": login_password,
+                "email": f"{username}@{username}.domain",
+                "clientInfo": {"timezone": "UTC"},
+            }
+            async with sess.post(login_url, json=login_body) as lr:
+                login_text = await lr.text()
+                results.append({"step": "login", "status": lr.status, "body": login_text[:500]})
+                if lr.status != 200:
+                    return web.json_response({"results": results})
+                import json as _json
+                token = _json.loads(login_text).get("token")
+
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            }
+            url = f"https://{host}{path}"
+            if method == "GET":
+                async with sess.get(url, headers=headers) as r:
+                    text = await r.text()
+                    results.append({"step": "request", "method": method, "path": path, "status": r.status, "body": text[:1000]})
+            else:
+                async with sess.post(url, json=body, headers=headers) as r:
+                    text = await r.text()
+                    results.append({"step": "request", "method": method, "path": path, "status": r.status, "body": text[:1000]})
+
+        return web.json_response({"results": results})
+
+
+class PowerwallCloudProbeView(HomeAssistantView):
+    """POST: probe Tesla cloud API endpoints for off-grid debugging."""
+
+    url = "/api/power_sync/powerwall/cloud_probe"
+    name = "api:power_sync:powerwall:cloud_probe"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    async def post(self, request: web.Request) -> web.Response:
+        import aiohttp
+
+        entry = _get_entry(self._hass)
+        if entry is None:
+            return web.json_response({"error": "not configured"}, status=503)
+
+        token, base, site_id = _get_fleet_api_context(self._hass, entry)
+        if not token or not base or not site_id:
+            return web.json_response(
+                {"error": "no Tesla API context", "token": bool(token), "base": base, "site_id": site_id},
+                status=503,
+            )
+
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        # path relative to /api/1/energy_sites/{site_id}/
+        path_suffix = str(payload.get("path", "island_mode"))
+        method = str(payload.get("method", "POST")).upper()
+        body = payload.get("body")
+        # Allow overriding the base URL to hit owner-api directly
+        override_base = payload.get("base_url")
+        effective_base = override_base or base
+
+        url = f"{effective_base}/api/1/energy_sites/{site_id}/{path_suffix}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+
+        session = async_get_clientsession(self._hass)
+        try:
+            if method == "GET":
+                async with session.get(url, headers=headers) as resp:
+                    text = await resp.text()
+                    return web.json_response({
+                        "url": url, "method": method, "status": resp.status,
+                        "body": text[:2000],
+                    })
+            else:
+                async with session.post(url, json=body, headers=headers) as resp:
+                    text = await resp.text()
+                    return web.json_response({
+                        "url": url, "method": method, "status": resp.status,
+                        "request_body": body, "body": text[:2000],
+                    })
+        except aiohttp.ClientError as err:
+            return web.json_response({"error": str(err)}, status=502)
 
 
 class PowerwallLocalStatusView(HomeAssistantView):
@@ -1013,6 +1151,8 @@ def register_views(hass: HomeAssistant) -> None:
     hass.http.register_view(PowerwallDiscoverView(hass))
     hass.http.register_view(PowerwallGatewayInfoView(hass))
     hass.http.register_view(PowerwallDebugConfigView(hass))
+    hass.http.register_view(PowerwallDebugProbeView(hass))
+    hass.http.register_view(PowerwallCloudProbeView(hass))
 
 
 class PowerwallDebugConfigView(HomeAssistantView):
