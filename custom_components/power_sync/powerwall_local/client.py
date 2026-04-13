@@ -316,50 +316,50 @@ class PowerwallLocalClient:
         else:
             mode = 6
 
-        # Local TEDAPI v1r — direct to gateway, no cloud needed
-        if self._din and self._transport:
-            _LOGGER.info("go_off_grid: local TEDAPI set_island_mode (mode=%d)", mode)
+        if not self._din:
+            _LOGGER.warning("go_off_grid: no DIN")
+            return False
+
+        # Cloud signed path first — fast and reliable
+        _LOGGER.info("go_off_grid: cloud signed device_command (mode=%d)", mode)
+        ok = await self._send_signed_device_command(
+            off_grid=True, mode_override=mode,
+        )
+        if ok:
+            return True
+
+        # Local TEDAPI v1r fallback (only useful on same LAN as gateway)
+        if self._transport:
+            _LOGGER.info("go_off_grid: cloud failed, trying local TEDAPI (mode=%d)", mode)
             try:
                 ok = await self._transport.set_island_mode(self._din, off_grid=True)
                 if ok:
                     return True
             except Exception as err:
                 _LOGGER.warning("go_off_grid: local TEDAPI error: %s", err)
-            _LOGGER.warning("go_off_grid: local TEDAPI failed, trying cloud")
 
-            # Cloud fallback: signed routable_message
-            _LOGGER.info("go_off_grid: cloud signed device_command (mode=%d)", mode)
-            return await self._send_signed_device_command(
-                off_grid=True, mode_override=mode,
-            )
-
-        # No transport — cloud only (signed path)
-        if self._din:
-            _LOGGER.info("go_off_grid: cloud signed device_command (mode=%d, no transport)", mode)
-            return await self._send_signed_device_command(
-                off_grid=True, mode_override=mode,
-            )
-
-        _LOGGER.warning("go_off_grid: no transport and no DIN")
         return False
 
     async def reconnect_grid(self) -> bool:
         """Reconnect to the grid (contactor close)."""
-        # Local TEDAPI v1r — direct to gateway
-        if self._din and self._transport:
-            _LOGGER.info("reconnect_grid: local TEDAPI set_island_mode (mode=1)")
+        if not self._din:
+            return False
+
+        # Cloud signed path first — fast and reliable
+        _LOGGER.info("reconnect_grid: cloud signed device_command (mode=1)")
+        ok = await self._send_signed_device_command(off_grid=False)
+        if ok:
+            return True
+
+        # Local TEDAPI v1r fallback
+        if self._transport:
+            _LOGGER.info("reconnect_grid: cloud failed, trying local TEDAPI")
             try:
                 ok = await self._transport.set_island_mode(self._din, off_grid=False)
                 if ok:
                     return True
             except Exception as err:
                 _LOGGER.warning("reconnect_grid: local TEDAPI error: %s", err)
-            _LOGGER.warning("reconnect_grid: local TEDAPI failed, trying cloud")
-
-            return await self._send_signed_device_command(off_grid=False)
-
-        if self._din:
-            return await self._send_signed_device_command(off_grid=False)
 
         return False
 
