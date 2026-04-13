@@ -43,30 +43,23 @@
 
 ---
 
-## Phase 3 — Quick Sensors (Weeks 11-14) `PLANNED`
+## Phase 3 — Quick Sensors (Weeks 11-14) `SKIPPED`
 
-**Goal**: Low-hanging fruit — valuable sensors and automations that are mostly wiring up existing data.
-
-| Area | Problem | Improvement |
-|------|---------|-------------|
-| Weather automations | `weather.py` exists but not surfaced | Configurable automations (storm watch, cloud cover adjustments) |
-| SOC range limits | No user-visible min/max SOC entities | Expose SOC range as number entities users can adjust |
-| Carbon tracking | No environmental impact visibility | CO2 avoided sensor using AEMO NEM emissions data |
-| CT diagnostics | Power flow anomalies from bad CT placement go undetected | Anomaly detection sensor flags impossible readings |
-
-**Effort**: LOW | **Impact**: MEDIUM
+**Status**: Weather automations already implemented upstream. CT diagnostics too niche. Remaining items (SOC limits, carbon tracking) merged into Phase 4.
 
 ---
 
-## Phase 4 — Smarter Forecasting (Weeks 15-22) `PLANNED`
+## Phase 4 — Smarter Forecasting + Sensors (Weeks 11-22) `PLANNED`
 
-**Goal**: Replace the static load estimator with ML that learns from your actual home.
+**Goal**: Replace the static load estimator with ML, add SOC control and environmental tracking.
 
 | Area | Problem | Improvement |
 |------|---------|-------------|
 | Load forecasting | Static estimator doesn't learn usage patterns | scikit-learn model trained on HA history, auto-calibrates against actuals |
 | Demand charge protection | No awareness of demand charge windows | Hard grid import block during demand periods, pre-charge before demand windows |
 | Forecast accuracy | No feedback loop on prediction quality | Track forecast vs actual, auto-tune model weights |
+| SOC range limits | No user-controllable max charge SOC | Max SOC number entity wired into LP optimizer (from Phase 3) |
+| Carbon tracking | No environmental impact visibility | CO2 avoided sensor using AEMO NEM emissions intensity data (from Phase 3) |
 
 **Effort**: MEDIUM | **Impact**: HIGH
 
