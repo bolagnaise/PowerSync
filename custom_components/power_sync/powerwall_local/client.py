@@ -200,23 +200,23 @@ class PowerwallLocalClient:
     async def go_off_grid(self) -> bool:
         """Physically disconnect from the grid (contactor open).
 
-        Both PW2 and PW3 require RSA key pairing (physical toggle) for
-        off-grid control. The command is sent as a signed RoutableMessage
-        via the Fleet API ``device_command`` cloud relay.
-
-        On PW2 firmware, the local REST endpoint ``/api/v2/islanding/mode``
-        requires installer-level auth (customer role gets 403). The Tesla
-        app uses the cloud ``island_mode`` endpoint via owner-api, which
-        requires the same RSA pairing + PowerSync proxy for the command
-        endpoint.
+        PW3: signed RoutableMessage via ``device_command`` (mode=6).
+        PW2: grpc_command via ``command`` endpoint — the PW2 gateway
+        doesn't support signed protobuf device_commands, but does accept
+        the JSON grpc_command relay used for pairing.
         """
-        if self._din and self._transport:
-            _LOGGER.info("go_off_grid: sending signed device_command (mode=6)")
-            return await self._send_signed_device_command(off_grid=True)
-
-        if self._din:
-            _LOGGER.warning("go_off_grid: no transport for signing, trying unsigned")
+        # PW3: signed device_command (mode=6 via routable_message)
+        if self._version == PowerwallVersion.PW3 and self._din:
+            if self._transport:
+                _LOGGER.info("go_off_grid: PW3 signed device_command (mode=6)")
+                return await self._send_signed_device_command(off_grid=True)
+            _LOGGER.warning("go_off_grid: PW3 no transport, trying unsigned")
             return await self._send_device_command(off_grid=True)
+
+        # PW2: grpc_command via /command endpoint (same as pairing relay)
+        if self._din and self._fleet_api_base and self._fleet_api_token:
+            _LOGGER.info("go_off_grid: PW2 via cloud command endpoint")
+            return await self._send_island_command(off_grid=True)
 
         # Local REST fallback (requires installer auth on PW2).
         body = {"island_mode": ISLAND_MODE_OFFGRID}
@@ -229,17 +229,19 @@ class PowerwallLocalClient:
         return False
 
     async def reconnect_grid(self) -> bool:
-        """Reconnect to the grid (contactor close).
-
-        Uses the same signed device_command path as go_off_grid.
-        """
-        if self._din and self._transport:
-            _LOGGER.info("reconnect_grid: sending signed device_command (mode=1)")
-            return await self._send_signed_device_command(off_grid=False)
-
-        if self._din:
-            _LOGGER.warning("reconnect_grid: no transport for signing, trying unsigned")
+        """Reconnect to the grid (contactor close)."""
+        # PW3: signed device_command (mode=1)
+        if self._version == PowerwallVersion.PW3 and self._din:
+            if self._transport:
+                _LOGGER.info("reconnect_grid: PW3 signed device_command (mode=1)")
+                return await self._send_signed_device_command(off_grid=False)
+            _LOGGER.warning("reconnect_grid: PW3 no transport, trying unsigned")
             return await self._send_device_command(off_grid=False)
+
+        # PW2: grpc_command via /command endpoint
+        if self._din and self._fleet_api_base and self._fleet_api_token:
+            _LOGGER.info("reconnect_grid: PW2 via cloud command endpoint")
+            return await self._send_island_command(off_grid=False)
 
         body = {"island_mode": ISLAND_MODE_ONGRID}
         result = await self._post(ISLAND_MODE_PATH, body)
