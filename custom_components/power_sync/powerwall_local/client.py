@@ -309,14 +309,12 @@ class PowerwallLocalClient:
                 "go_off_grid: could not verify pairing state — proceeding anyway"
             )
 
-        # Determine default mode based on version
+        # Determine default mode — mode=6 works for both PW2 and PW3
         if mode_override is not None:
             mode = mode_override
             _LOGGER.info("go_off_grid: using mode_override=%d", mode)
-        elif self._version == PowerwallVersion.PW3:
-            mode = 6
         else:
-            mode = 2
+            mode = 6
 
         # Local TEDAPI v1r — direct to gateway, no cloud needed
         if self._din and self._transport:
