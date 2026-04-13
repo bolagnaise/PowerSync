@@ -280,6 +280,37 @@ class PowerwallCurtailmentFallback:
             _LOGGER.debug("Off-grid release push failed: %s", err)
         return True
 
+    async def check_safety(self) -> bool:
+        """Check SOC floor and daily cap during an active session.
+
+        Call this periodically (e.g. every optimizer tick) while off-grid.
+        Auto-releases and reconnects if SOC drops below floor or daily
+        cap is exceeded. Returns True if still safe, False if released.
+        """
+        if not self._active:
+            return True
+
+        soc_ok, soc_val, floor = self._check_soc_floor()
+        if not soc_ok:
+            _LOGGER.warning(
+                "⚡ Off-grid safety: SOC %s%% dropped below floor %s%% — "
+                "emergency reconnect",
+                soc_val, floor,
+            )
+            await self.release(trigger_reason="soc_below_floor")
+            return False
+
+        if not self._within_daily_cap():
+            _LOGGER.warning(
+                "⚡ Off-grid safety: daily cap %ss exceeded — "
+                "emergency reconnect",
+                self._daily_cap_seconds(),
+            )
+            await self.release(trigger_reason="daily_cap_exceeded")
+            return False
+
+        return True
+
     # ── Internal gates ──────────────────────────────────────────────
 
     def _is_enabled(self) -> bool:
@@ -296,6 +327,21 @@ class PowerwallCurtailmentFallback:
     def _is_paired(self) -> bool:
         return bool(self._entry.data.get(CONF_POWERWALL_LOCAL_PAIRED, False))
 
+    def _get_current_soc(self) -> float | None:
+        """Get current SOC from local coordinator or cloud sensor fallback."""
+        coord = self._get_coordinator()
+        if coord is not None and coord.data is not None and coord.data.soc is not None:
+            return coord.data.soc
+        # Fall back to cloud battery_level sensor (common when PW2
+        # gateway isn't on the same LAN as HA)
+        state = self._hass.states.get("sensor.power_sync_battery_level")
+        if state is not None and state.state not in (None, "unknown", "unavailable"):
+            try:
+                return float(state.state)
+            except (TypeError, ValueError):
+                pass
+        return None
+
     def _check_soc_floor(self) -> tuple[bool, float | None, int]:
         """Return (pass?, current_soc, floor)."""
         floor = int(
@@ -307,11 +353,11 @@ class PowerwallCurtailmentFallback:
                 ),
             )
         )
-        coord = self._get_coordinator()
-        if coord is None or coord.data is None or coord.data.soc is None:
+        soc = self._get_current_soc()
+        if soc is None:
             # No telemetry available — refuse to go off-grid blindly.
             return False, None, floor
-        return coord.data.soc >= floor, coord.data.soc, floor
+        return soc >= floor, soc, floor
 
     def _daily_cap_seconds(self) -> int:
         return int(

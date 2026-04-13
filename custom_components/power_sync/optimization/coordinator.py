@@ -1530,8 +1530,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # before actually going off-grid (avoids contactor cycling
                 # from price noise). Immediate activation if already off-grid.
                 if self._last_executed_action == "off_grid":
-                    # Already off-grid — stay there
-                    _LOGGER.debug("Optimizer: OFF_GRID — already off-grid, holding")
+                    # Already off-grid — check safety gates are still met
+                    try:
+                        from ..powerwall_local.curtailment_fallback import get_fallback
+                        fallback = get_fallback(self.hass, self._entry)
+                        still_safe = await fallback.check_safety()
+                        if not still_safe:
+                            _LOGGER.info(
+                                "Optimizer: OFF_GRID safety check failed — "
+                                "reconnected, switching to self_consumption"
+                            )
+                            effective_action = "self_consumption"
+                            if hasattr(battery, "set_self_consumption_mode"):
+                                await battery.set_self_consumption_mode()
+                        else:
+                            _LOGGER.debug("Optimizer: OFF_GRID — holding, safety OK")
+                    except Exception as err:
+                        _LOGGER.warning("Optimizer: OFF_GRID safety check error: %s", err)
                 else:
                     # Go off-grid — no entry holdoff, the overlay already
                     # requires 3 consecutive eligible slots (15 min) before

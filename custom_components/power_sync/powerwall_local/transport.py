@@ -336,8 +336,9 @@ class TEDAPIv1rTransport:
         Returns base64-ready bytes that can be sent as
         ``routable_message`` in a ``device_command`` call.
 
-        PW3: mode=6 off-grid, mode=1 reconnect (discovered via mitmproxy).
-        PW2: mode=2 off-grid, mode=1 reconnect (confirmed via MITM capture).
+        Both PW2 and PW3: mode=6 off-grid, mode=1 reconnect.
+        force=True is required for off-grid (without it the gateway
+        acknowledges but does not physically open the contactor).
         Use mode_override to specify explicitly.
         """
         from . import tesla_local_pb2 as tp
