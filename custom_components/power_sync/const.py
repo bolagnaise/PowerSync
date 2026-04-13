@@ -127,11 +127,11 @@ BATTERY_SYSTEM_FOXESS = "foxess"
 BATTERY_SYSTEM_GOODWE = "goodwe"
 
 BATTERY_SYSTEMS = {
-    BATTERY_SYSTEM_TESLA: "Tesla Powerwall",
-    BATTERY_SYSTEM_SIGENERGY: "Sigenergy",
-    BATTERY_SYSTEM_SUNGROW: "Sungrow SH-series",
-    BATTERY_SYSTEM_FOXESS: "FoxESS",
-    BATTERY_SYSTEM_GOODWE: "GoodWe",
+    BATTERY_SYSTEM_TESLA: "Tesla Powerwall — Fleet API or Teslemetry",
+    BATTERY_SYSTEM_SIGENERGY: "Sigenergy — Cloud API + optional Modbus",
+    BATTERY_SYSTEM_SUNGROW: "Sungrow SH-series — Modbus TCP",
+    BATTERY_SYSTEM_FOXESS: "FoxESS — Modbus TCP or RS485 serial",
+    BATTERY_SYSTEM_GOODWE: "GoodWe ET/EH/ES/EM — UDP or TCP",
 }
 
 # Sungrow SH-series Battery System Configuration (Modbus TCP)
@@ -401,15 +401,15 @@ AEMO_SENSOR_30MIN_PATTERN = "sensor.aemo_nem_{region}_current_30min_forecast"
 
 # Electricity provider options
 ELECTRICITY_PROVIDERS = {
-    "amber": "Amber Electric",
-    "localvolts": "Localvolts",
-    "flow_power": "Flow Power",
-    "globird": "Globird",
-    "aemo_vpp": "AEMO VPP (AGL, Engie, etc.)",
-    "octopus": "Octopus Energy (UK)",
-    "epex": "EPEX Day-Ahead (EU)",
-    "nz": "New Zealand TOU",
-    "other": "Other / Custom TOU",
+    "amber": "Amber Electric — real-time wholesale pricing (AU)",
+    "localvolts": "Localvolts — 5-minute NEM wholesale pricing (AU)",
+    "flow_power": "Flow Power — wholesale with Happy Hour exports (AU)",
+    "globird": "Globird — static tariff with AEMO spike export (AU)",
+    "aemo_vpp": "AEMO VPP — spike detection for VPP plans (AGL, Engie, etc.)",
+    "octopus": "Octopus Energy — dynamic Agile/Go/Flux pricing (UK)",
+    "epex": "EPEX Day-Ahead — European day-ahead market pricing (EU)",
+    "nz": "New Zealand TOU — Octopus NZ, Electric Kiwi, Contact, etc.",
+    "other": "Other / Custom TOU — enter your own rates manually",
 }
 
 # Localvolts configuration
