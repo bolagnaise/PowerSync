@@ -344,15 +344,8 @@ class TEDAPIv1rTransport:
 
         mode = mode_override if mode_override is not None else (6 if off_grid else 1)
         env = tp.MessageEnvelope()
-        # Use LOCAL_HTTPS delivery channel + LOCAL_PARTICIPANT_CUSTOMER sender
-        # for off-grid (matches the local TEDAPI path that works).
-        # Reconnect uses HERMES_COMMAND + authorizedClient (confirmed working).
-        if off_grid:
-            env.deliveryChannel = 1  # LOCAL_HTTPS
-            env.sender.local = 2  # LOCAL_PARTICIPANT_CUSTOMER
-        else:
-            env.deliveryChannel = 2  # HERMES_COMMAND
-            env.sender.authorizedClient = 1  # CUSTOMER_MOBILE_APP
+        env.deliveryChannel = 1 if off_grid else 2  # LOCAL_HTTPS for off-grid
+        env.sender.authorizedClient = 1  # CUSTOMER_MOBILE_APP
         env.recipient.din = din
         env.teg.setIslandModeRequest.mode = mode
         env.teg.setIslandModeRequest.force = off_grid  # force=True for off-grid
