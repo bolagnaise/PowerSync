@@ -1433,10 +1433,12 @@ def _apply_network_tariff_library(
 
             # Build a datetime for this period (use today's date)
             # The library uses interval_time for TOU period detection
-            now = datetime.now()
-            interval_time = datetime(
-                now.year, now.month, now.day, hour, minute,
-                tzinfo=dt_util.DEFAULT_TIME_ZONE
+            now = dt_util.now()
+            interval_time = now.replace(
+                hour=hour,
+                minute=minute,
+                second=0,
+                microsecond=0,
             )
 
             # Convert wholesale $/kWh to $/MWh for the library
