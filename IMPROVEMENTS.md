@@ -49,17 +49,19 @@
 
 ---
 
-## Phase 4 — Smarter Forecasting + Sensors (Weeks 11-22) `PLANNED`
+## Phase 4 — Smarter Forecasting + SOC Control (Weeks 11-18) `PLANNED`
 
-**Goal**: Replace the static load estimator with ML, add SOC control and environmental tracking.
+**Goal**: Give users SOC control, make the optimizer self-improving with accuracy tracking and auto-calibration.
 
 | Area | Problem | Improvement |
 |------|---------|-------------|
-| Load forecasting | Static estimator doesn't learn usage patterns | scikit-learn model trained on HA history, auto-calibrates against actuals |
-| Demand charge protection | No awareness of demand charge windows | Hard grid import block during demand periods, pre-charge before demand windows |
-| Forecast accuracy | No feedback loop on prediction quality | Track forecast vs actual, auto-tune model weights |
-| SOC range limits | No user-controllable max charge SOC | Max SOC number entity wired into LP optimizer (from Phase 3) |
-| Carbon tracking | No environmental impact visibility | CO2 avoided sensor using AEMO NEM emissions intensity data (from Phase 3) |
+| SOC max limit | LP hardcodes upper bound to 100%, no user control | Max SOC number entity, LP upper bound param, config flow, Sungrow register wiring |
+| Forecast accuracy | Zero tracking of forecast vs actual — no way to know if optimizer is making good predictions | Forecast vs actual comparison sensors, error ring buffer, MAPE/RMSE metrics |
+| Load forecast calibration | Pattern-based estimator uses fixed weights, never learns from mistakes | Adaptive pattern weights tuned by accuracy feedback loop, auto-calibrate against actuals |
+
+**Skipped from original scope:**
+- Demand charge protection — 95% implemented upstream already (config UI, window detection, pre-charge, export blocking)
+- Carbon/CO2 tracking — deferred (requires external API integration research, high effort)
 
 **Effort**: MEDIUM | **Impact**: HIGH
 
