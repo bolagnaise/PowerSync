@@ -977,20 +977,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if battery and hasattr(battery, "force_charge") and self.battery_system not in ("tesla",):
                         extend_mins = self._config.interval_minutes + 5
                         try:
-                            # Pass _extend_hardware flag so the service handler
-                            # only re-issues Modbus writes without setting a new
-                            # expiry timer (we manage the timer here).
+                            # Re-issue the Modbus command to extend the
+                            # hardware timer. Inverter implementations
+                            # only accept duration_minutes and power_w.
                             if force_type == "charge":
                                 await battery.force_charge(
                                     duration_minutes=extend_mins,
                                     power_w=action.power_w,
-                                    _extend_hardware=True,
                                 )
                             else:
                                 await battery.force_discharge(
                                     duration_minutes=extend_mins,
                                     power_w=action.power_w,
-                                    _extend_hardware=True,
                                 )
                             _LOGGER.debug(
                                 "Optimizer: re-issued Modbus %s command for hardware timer extension (%dmin)",

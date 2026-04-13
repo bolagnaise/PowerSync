@@ -26,17 +26,24 @@ class GoodWeBatteryController:
         """Connect to inverter and auto-detect model family."""
         import goodwe
 
-        async with self._lock:
-            self._inverter = await goodwe.connect(
-                host=self.host, port=self.port, comm_addr=self.comm_addr
-            )
-            _LOGGER.info(
-                "Connected to GoodWe %s (SN: %s, rated: %sW)",
-                self._inverter.model_name,
-                self._inverter.serial_number,
-                self._inverter.rated_power,
-            )
-            return True
+        try:
+            async with self._lock:
+                self._inverter = await goodwe.connect(
+                    host=self.host, port=self.port, comm_addr=self.comm_addr
+                )
+                if self._inverter is None:
+                    _LOGGER.error("GoodWe connect returned None for %s", self.host)
+                    return False
+                _LOGGER.info(
+                    "Connected to GoodWe %s (SN: %s, rated: %sW)",
+                    self._inverter.model_name,
+                    self._inverter.serial_number,
+                    self._inverter.rated_power,
+                )
+                return True
+        except Exception as err:
+            _LOGGER.error("GoodWe connect failed for %s: %s", self.host, err)
+            return False
 
     async def get_runtime_data(self) -> dict[str, Any]:
         """Read runtime data from inverter.
@@ -85,33 +92,45 @@ class GoodWeBatteryController:
         """Force charge from grid using ECO_CHARGE mode."""
         import goodwe
 
-        await self._inverter.set_operation_mode(
-            goodwe.OperationMode.ECO_CHARGE,
-            eco_mode_power=power_pct,
-            eco_mode_soc=soc_target,
-        )
-        _LOGGER.info("GoodWe force charge: power=%d%%, target_soc=%d%%", power_pct, soc_target)
-        return True
+        try:
+            await self._inverter.set_operation_mode(
+                goodwe.OperationMode.ECO_CHARGE,
+                eco_mode_power=power_pct,
+                eco_mode_soc=soc_target,
+            )
+            _LOGGER.info("GoodWe force charge: power=%d%%, target_soc=%d%%", power_pct, soc_target)
+            return True
+        except Exception as err:
+            _LOGGER.error("GoodWe force charge failed: %s", err)
+            return False
 
     async def force_discharge(self, power_pct: int = 100, soc_floor: int = 10) -> bool:
         """Force discharge to grid using ECO_DISCHARGE mode."""
         import goodwe
 
-        await self._inverter.set_operation_mode(
-            goodwe.OperationMode.ECO_DISCHARGE,
-            eco_mode_power=power_pct,
-            eco_mode_soc=soc_floor,
-        )
-        _LOGGER.info("GoodWe force discharge: power=%d%%, floor_soc=%d%%", power_pct, soc_floor)
-        return True
+        try:
+            await self._inverter.set_operation_mode(
+                goodwe.OperationMode.ECO_DISCHARGE,
+                eco_mode_power=power_pct,
+                eco_mode_soc=soc_floor,
+            )
+            _LOGGER.info("GoodWe force discharge: power=%d%%, floor_soc=%d%%", power_pct, soc_floor)
+            return True
+        except Exception as err:
+            _LOGGER.error("GoodWe force discharge failed: %s", err)
+            return False
 
     async def restore_normal(self) -> bool:
         """Restore to normal (GENERAL) operation mode."""
         import goodwe
 
-        await self._inverter.set_operation_mode(goodwe.OperationMode.GENERAL)
-        _LOGGER.info("GoodWe restored to GENERAL mode")
-        return True
+        try:
+            await self._inverter.set_operation_mode(goodwe.OperationMode.GENERAL)
+            _LOGGER.info("GoodWe restored to GENERAL mode")
+            return True
+        except Exception as err:
+            _LOGGER.error("GoodWe restore to GENERAL mode failed: %s", err)
+            return False
 
     async def set_backup_reserve(self, percent: int) -> bool:
         """Set backup reserve (minimum SOC).
