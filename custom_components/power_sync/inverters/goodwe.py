@@ -419,12 +419,12 @@ class GoodWeController(InverterController):
             # Calculate total power
             pv1 = attrs.get("pv1_power", 0)
             pv2 = attrs.get("pv2_power", 0)
-            power_output = pv1 + pv2 if pv1 or pv2 else None
+            power_output = pv1 + pv2 if pv1 is not None and pv2 is not None else None
 
             self._last_state = InverterState(
                 status=status,
                 is_curtailed=is_curtailed,
-                power_output_w=float(power_output) if power_output else None,
+                power_output_w=float(power_output) if power_output is not None else None,
                 attributes=attrs,
             )
 
