@@ -811,8 +811,9 @@ def _build_rolling_24h_tariff(
         aus_tz = detected_tz
         _LOGGER.info("Using auto-detected timezone: %s", aus_tz)
     else:
-        aus_tz = ZoneInfo("Australia/Sydney")
-        _LOGGER.warning("Timezone detection failed, falling back to Australia/Sydney")
+        from homeassistant.util import dt as dt_util
+        aus_tz = dt_util.DEFAULT_TIME_ZONE
+        _LOGGER.warning("Timezone detection failed, falling back to HA configured timezone: %s", aus_tz)
 
     now = datetime.now(aus_tz)
     today = now.date()
@@ -1403,6 +1404,7 @@ def _apply_network_tariff_library(
         Modified tariff with retail prices from library
     """
     from datetime import datetime, timezone, timedelta
+    from homeassistant.util import dt as dt_util
 
     # Map distributors to library module names
     # CitiPower and United Energy use the generic Victoria module
@@ -1434,7 +1436,7 @@ def _apply_network_tariff_library(
             now = datetime.now()
             interval_time = datetime(
                 now.year, now.month, now.day, hour, minute,
-                tzinfo=timezone(timedelta(hours=10))  # AEST
+                tzinfo=dt_util.DEFAULT_TIME_ZONE
             )
 
             # Convert wholesale $/kWh to $/MWh for the library
