@@ -197,7 +197,7 @@ class PowerwallLocalClient:
             },
         )
 
-    async def go_off_grid(self) -> bool:
+    async def go_off_grid(self, *, mode_override: int | None = None) -> bool:
         """Physically disconnect from the grid (contactor open).
 
         Primary path (both PW2 and PW3): local TEDAPI v1r with signed
@@ -205,30 +205,39 @@ class PowerwallLocalClient:
         No cloud relay needed — the RSA-signed protobuf goes straight
         to the gateway which verifies the signature locally.
 
-        Cloud fallback (PW3 only): signed routable_message via
-        device_command if local TEDAPI fails.
+        Cloud fallback: signed routable_message via device_command.
+        PW3 default mode=6, PW2 default mode=2. Use mode_override to
+        test alternative mode values.
         """
+        # Determine default mode based on version
+        if mode_override is not None:
+            mode = mode_override
+            _LOGGER.info("go_off_grid: using mode_override=%d", mode)
+        elif self._version == PowerwallVersion.PW3:
+            mode = 6
+        else:
+            mode = 2
+
         # Local TEDAPI v1r — direct to gateway, no cloud needed
         if self._din and self._transport:
-            _LOGGER.info("go_off_grid: local TEDAPI set_island_mode (mode=2)")
+            _LOGGER.info("go_off_grid: local TEDAPI set_island_mode (mode=%d)", mode)
             ok = await self._transport.set_island_mode(self._din, off_grid=True)
             if ok:
                 return True
             _LOGGER.warning("go_off_grid: local TEDAPI failed, trying cloud")
 
-            # Cloud fallback: signed device_command (PW3 mode=6)
-            if self._version == PowerwallVersion.PW3:
-                _LOGGER.info("go_off_grid: PW3 cloud fallback (mode=6)")
-                return await self._send_signed_device_command(off_grid=True)
+            # Cloud fallback: signed routable_message (both PW2 and PW3)
+            _LOGGER.info("go_off_grid: cloud fallback signed device_command (mode=%d)", mode)
+            return await self._send_signed_device_command(
+                off_grid=True, mode_override=mode,
+            )
 
-            # Cloud fallback: unsigned energy_device_message (PW2)
-            _LOGGER.info("go_off_grid: PW2 cloud fallback (unsigned)")
-            return await self._send_device_command(off_grid=True)
-
-        # No transport — cloud only
+        # No transport — cloud only (signed path)
         if self._din:
-            _LOGGER.info("go_off_grid: cloud device_command (no transport)")
-            return await self._send_device_command(off_grid=True)
+            _LOGGER.info("go_off_grid: cloud signed device_command (mode=%d, no transport)", mode)
+            return await self._send_signed_device_command(
+                off_grid=True, mode_override=mode,
+            )
 
         _LOGGER.warning("go_off_grid: no transport and no DIN")
         return False
@@ -243,12 +252,10 @@ class PowerwallLocalClient:
                 return True
             _LOGGER.warning("reconnect_grid: local TEDAPI failed, trying cloud")
 
-            if self._version == PowerwallVersion.PW3:
-                return await self._send_signed_device_command(off_grid=False)
-            return await self._send_device_command(off_grid=False)
+            return await self._send_signed_device_command(off_grid=False)
 
         if self._din:
-            return await self._send_device_command(off_grid=False)
+            return await self._send_signed_device_command(off_grid=False)
 
         return False
 
@@ -468,9 +475,10 @@ class PowerwallLocalClient:
             return False
 
         msg_b64 = base64.b64encode(signed_bytes).decode()
+        actual_mode = mode_override if mode_override is not None else (6 if off_grid else 1)
         _LOGGER.info(
             "signed_device_command: %s — setIslandMode(mode=%d) %d bytes",
-            action, 6 if off_grid else 1, len(signed_bytes),
+            action, actual_mode, len(signed_bytes),
         )
 
         # Use "routable_message" field (NOT "energy_device_message").

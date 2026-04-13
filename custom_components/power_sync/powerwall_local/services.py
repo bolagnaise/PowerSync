@@ -37,6 +37,7 @@ SERVICE_RECONNECT_GRID = "powerwall_reconnect_grid"
 GO_OFF_GRID_SCHEMA = vol.Schema(
     {
         vol.Optional("bypass_soc_check", default=False): bool,
+        vol.Optional("mode"): vol.All(int, vol.Range(min=1, max=10)),
     }
 )
 
@@ -68,7 +69,8 @@ async def _handle_go_off_grid(hass: HomeAssistant, call: ServiceCall) -> None:
                 f"Refusing off-grid: SOC {snap.soc:.0f}% < floor {min_soc}%"
             )
 
-    ok = await coordinator.client.go_off_grid()
+    mode_override = call.data.get("mode")
+    ok = await coordinator.client.go_off_grid(mode_override=mode_override)
     await coordinator.async_request_refresh()
     if not ok:
         raise HomeAssistantError(
