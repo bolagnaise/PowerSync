@@ -309,6 +309,9 @@ class ChargingSessionManager:
         self._sessions_cache: List[ChargingSession] = []
         self._cache_loaded = False
 
+        # Counter for periodic persistence of active sessions
+        self._update_counter: int = 0
+
     @property
     def storage_path(self) -> Path:
         """Get the storage path for session data."""
@@ -333,6 +336,25 @@ class ChargingSessionManager:
                     ChargingSession.from_dict(s) for s in data.get("sessions", [])
                 ]
                 _LOGGER.info(f"Loaded {len(self._sessions_cache)} charging sessions from storage")
+
+                # Restore active sessions that were saved mid-charge so their
+                # accumulated energy survives HA restarts.
+                for raw in data.get("active_sessions", []):
+                    try:
+                        session = ChargingSession.from_dict(raw)
+                        if not session.completed:
+                            self.active_sessions[session.vehicle_id] = session
+                            _LOGGER.info(
+                                "Restored active charging session %s for %s "
+                                "(%.2f kWh accumulated)",
+                                session.id, session.vehicle_id,
+                                session.total_energy_kwh,
+                            )
+                    except Exception as restore_err:
+                        _LOGGER.warning(
+                            "Could not restore active session: %s", restore_err
+                        )
+
             self._cache_loaded = True
         except Exception as e:
             _LOGGER.error(f"Failed to load sessions from storage: {e}")
@@ -340,9 +362,14 @@ class ChargingSessionManager:
             self._cache_loaded = True
 
     async def _save_sessions(self) -> None:
-        """Save sessions to storage."""
+        """Save completed and active sessions to storage.
+
+        Active sessions are persisted so their accumulated energy survives
+        HA restarts.  Without this, a restart mid-charge causes the session
+        to report 0 kWh because all readings were only held in memory.
+        """
         try:
-            # Keep last 365 days of sessions
+            # Keep last 365 days of completed sessions
             cutoff = datetime.now() - timedelta(days=365)
             cutoff_str = cutoff.isoformat()
 
@@ -351,13 +378,22 @@ class ChargingSessionManager:
                 if s.start_time >= cutoff_str
             ]
 
+            # Also persist active sessions so energy isn't lost on restart
+            active_to_save = list(self.active_sessions.values())
+
             def _write_file():
-                data = {"sessions": [s.to_dict() for s in sessions_to_save]}
+                data = {
+                    "sessions": [s.to_dict() for s in sessions_to_save],
+                    "active_sessions": [s.to_dict() for s in active_to_save],
+                }
                 with open(self.storage_path, "w") as f:
                     json.dump(data, f, indent=2)
 
             await self.hass.async_add_executor_job(_write_file)
-            _LOGGER.debug(f"Saved {len(sessions_to_save)} charging sessions to storage")
+            _LOGGER.debug(
+                "Saved %d completed + %d active charging sessions to storage",
+                len(sessions_to_save), len(active_to_save),
+            )
         except Exception as e:
             _LOGGER.error(f"Failed to save sessions to storage: {e}")
 
@@ -448,6 +484,16 @@ class ChargingSessionManager:
             import_price_cents=import_price_cents,
             export_price_cents=export_price_cents,
         )
+
+        # Periodically persist active sessions so accumulated energy
+        # survives HA restarts (every ~10 updates, approx 5 min at 30s interval)
+        self._update_counter += 1
+        if self._update_counter >= 10:
+            self._update_counter = 0
+            try:
+                await self._save_sessions()
+            except Exception as save_err:
+                _LOGGER.debug("Periodic active session save failed: %s", save_err)
 
         return session
 
