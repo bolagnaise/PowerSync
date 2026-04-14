@@ -268,6 +268,9 @@ class AmberWebSocketClient:
         # Stale cache warning debounce (only warn once until data is fresh again)
         self._stale_warning_logged = False
 
+        # Consecutive timeout counter (suppress log spam after 10)
+        self._consecutive_timeouts = 0
+
         # Tesla sync triggering
         self._sync_callback = sync_callback
         self._last_sync_trigger: Optional[datetime] = None
@@ -437,15 +440,21 @@ class AmberWebSocketClient:
                 _LOGGER.debug(f"Subscription sent for site {self.site_id}")
 
                 # Wait for messages (subscription confirmation + price update)
-                # Timeout after 60 seconds - prices can arrive up to 45s after interval start
+                # Timeout after 90 seconds - prices can arrive up to 45s after interval start
                 price_received = False
-                timeout = 60
+                timeout = 90
                 start_time = datetime.now(timezone.utc)
 
                 while not price_received:
                     elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
                     if elapsed > timeout:
-                        _LOGGER.warning(f"Timeout waiting for price update after {timeout}s")
+                        self._consecutive_timeouts += 1
+                        if self._consecutive_timeouts == 10:
+                            _LOGGER.warning("WebSocket: 10 consecutive timeouts — suppressing further warnings")
+                        if self._consecutive_timeouts >= 10:
+                            _LOGGER.debug(f"Timeout waiting for price update after {timeout}s (consecutive: {self._consecutive_timeouts})")
+                        else:
+                            _LOGGER.warning(f"Timeout waiting for price update after {timeout}s")
                         break
 
                     try:
@@ -455,7 +464,13 @@ class AmberWebSocketClient:
                         )
                         price_received = self._handle_message(message)
                     except asyncio.TimeoutError:
-                        _LOGGER.warning("Timeout waiting for WebSocket message")
+                        self._consecutive_timeouts += 1
+                        if self._consecutive_timeouts == 10:
+                            _LOGGER.warning("WebSocket: 10 consecutive timeouts — suppressing further warnings")
+                        if self._consecutive_timeouts >= 10:
+                            _LOGGER.debug("Timeout waiting for WebSocket message (consecutive: %d)", self._consecutive_timeouts)
+                        else:
+                            _LOGGER.warning("Timeout waiting for WebSocket message")
                         break
 
                 # Connection will be closed by context manager
@@ -463,6 +478,7 @@ class AmberWebSocketClient:
             self._connection_status = "disconnected"
 
             if price_received:
+                self._consecutive_timeouts = 0
                 _LOGGER.info(f"Price fetch #{self._fetch_count} successful")
             else:
                 _LOGGER.warning(f"Price fetch #{self._fetch_count} completed without price update")
