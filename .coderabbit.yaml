@@ -18,34 +18,18 @@ reviews:
   sequence_diagrams: true
   changed_files_summary: true
 
-  finishing_touches:
-    docstrings:
-      enabled: true
-
   auto_review:
     enabled: true
     drafts: true
     base_branches:
       - "main"
-      - "develop"
 
   path_filters:
-    - "!**/node_modules/**"
-    - "!**/.next/**"
-    - "!**/dist/**"
-    - "!**/build/**"
-    - "!**/*.lock"
-    - "!**/Pods/**"
-    - "!**/.build/**"
     - "!**/__pycache__/**"
-    - "!**/migrations/**"
-    - "!**/*.min.js"
-    - "!**/coverage/**"
+    - "!**/*.pyc"
+    - "!**/node_modules/**"
+    - "!**/.build/**"
 
-  # ── @claude trigger instructions per severity ─────────────────────────────
-  # CodeRabbit will append a trigger comment to each finding so the
-  # claude-assistant workflow can detect and act on it automatically.
-  # The workflow watches for coderabbitai[bot] comments containing @claude.
   review_comment_instructions: >
     After every finding you post, append a trigger line based on severity:
 
@@ -54,8 +38,7 @@ reviews:
     `@claude fix: critical — [one line summary of the issue]`
 
     For MAJOR findings (logic errors, incorrect API usage, missing error handling,
-    broken stack rules, AEST date bug, force unwrap without justification,
-    bare except:, missing type hints on public functions):
+    bare except:, missing type hints on public functions, battery/pricing logic bugs):
     End your comment with exactly:
     `@claude fix: major — [one line summary of the issue]`
 
@@ -71,62 +54,99 @@ reviews:
     All other severities should attempt an inline fix on the PR branch.
 
   path_instructions:
-    # — Next.js / TypeScript —
-    - path: "**/*.ts"
+    # — Core integration (highest risk) —
+    - path: "custom_components/power_sync/__init__.py"
       instructions: >
-        Check for: strict TypeScript (no `any`), correct Prisma usage, proper
-        Next.js 14 App Router patterns, server vs client component boundaries,
-        missing error boundaries, unhandled promise rejections.
-    - path: "**/*.tsx"
+        Entry point for the integration. Check: correct async_setup_entry flow,
+        proper coordinator initialization, no blocking calls, correct platform
+        forwarding, clean async_unload_entry cleanup.
+
+    - path: "custom_components/power_sync/coordinator.py"
       instructions: >
-        Verify: no client components importing server-only modules, correct use
-        of Suspense and loading.tsx, accessibility (aria labels, semantic HTML),
-        no hardcoded colours outside the design token system.
-    - path: "**/api/**"
+        Main data coordinator. CRITICAL FILE — controls battery charging,
+        discharging, and pricing decisions for every user. Check: correct
+        DataUpdateCoordinator usage, proper error handling in _async_update_data,
+        no stale data on failure, correct update intervals, thread safety.
+
+    - path: "custom_components/power_sync/config_flow.py"
       instructions: >
-        Every route MUST have: input validation, error handling, correct HTTP
-        status codes, no exposed secrets or PII in responses.
-    - path: "**/prisma/**"
+        Config and options flow. Check: correct HA config flow patterns, proper
+        validation, user-friendly error messages, correct use of HA selectors,
+        no secrets logged or exposed in flow steps.
+
+    - path: "custom_components/power_sync/const.py"
       instructions: >
-        Check migrations are additive (no destructive schema changes without
-        explicit comment), indexes on foreign keys, no raw SQL without
-        parameterisation.
-    # — Swift / SwiftUI —
-    - path: "**/*.swift"
+        Constants and configuration keys. Check: no magic strings elsewhere that
+        should be constants here, consistent naming conventions, no stale or
+        unused constants.
+
+    # — Optimization (high risk) —
+    - path: "custom_components/power_sync/optimization/**"
       instructions: >
-        Check for: Swift concurrency correctness (no data races, correct actor
-        isolation), memory leaks (weak self in closures), SwiftUI view
-        efficiency (no unnecessary redraws), proper error handling with
-        Result/throws, no force unwraps without a comment justifying them.
-    - path: "**/Services/**"
+        Battery optimization and LP solver. CRITICAL — incorrect logic here
+        causes financial loss (wrong charge/discharge decisions). Check:
+        correct mathematical constraints, proper handling of edge cases
+        (zero solar, grid outage, negative prices), correct unit conversions
+        ($/kWh vs c/kWh), no silent failures.
+
+    # — Inverter controllers —
+    - path: "custom_components/power_sync/*_api.py"
       instructions: >
-        Verify actor isolation, correct async/await usage, no blocking main
-        thread operations, proper cancellation handling.
-    # — Python / Flask —
+        Inverter and energy provider API clients. Check: correct async HTTP
+        usage, proper timeout handling, correct authentication flows, no
+        secrets in logs, graceful degradation on API failures, correct
+        data parsing and unit handling.
+
+    # — HA platform entities —
+    - path: "custom_components/power_sync/sensor.py"
+      instructions: >
+        Sensor entities. Check: correct state_class and device_class, proper
+        native_unit_of_measurement, no blocking in async methods, correct
+        coordinator data access patterns.
+
+    - path: "custom_components/power_sync/switch.py"
+      instructions: >
+        Switch entities. Check: correct async_turn_on/off implementation,
+        proper optimistic state handling, no race conditions with coordinator.
+
+    - path: "custom_components/power_sync/select.py"
+      instructions: >
+        Select entities. Check: correct option validation, proper async
+        handling, coordinator state consistency.
+
+    - path: "custom_components/power_sync/number.py"
+      instructions: >
+        Number entities. Check: correct min/max/step validation, proper
+        native_value handling, unit consistency.
+
+    - path: "custom_components/power_sync/binary_sensor.py"
+      instructions: >
+        Binary sensor entities. Check: correct is_on logic, proper
+        device_class usage, coordinator data access.
+
+    # — Python general —
     - path: "**/*.py"
       instructions: >
         Check for: type hints on all public functions, no bare `except:`,
-        SQL injection risks, missing input sanitisation, secrets not in code,
-        Flask Blueprint structure respected, APScheduler job error handling.
-    - path: "**/templates/**"
-      instructions: >
-        Verify Jinja2 templates escape user input, no XSS vectors, correct
-        use of url_for().
+        no secrets in code, proper async/await usage (no blocking calls),
+        correct logging levels, no force-formatting changes outside the
+        scope of the PR.
+
     # — GitHub Actions —
     - path: ".github/workflows/**"
       instructions: >
         Check: no hardcoded secrets (use ${{ secrets.X }}), pinned action
-        versions (SHA preferred), no `pull_request_target` misuse, correct
-        permissions blocks, jobs have timeout-minutes set.
+        versions, correct permissions blocks, jobs have timeout-minutes.
+
     # — Documentation —
     - path: "**/*.md"
       instructions: >
         Verify: no broken links, code examples match actual implementation,
-        version numbers are current, no TODO left unfixed.
+        version numbers are current.
+
     - path: "**/CHANGELOG.md"
       instructions: >
-        Entries MUST follow Keep a Changelog format. New version section MUST
-        be present for this PR's changes.
+        Entries MUST follow Keep a Changelog format.
 
 chat:
   auto_reply: true
@@ -139,7 +159,5 @@ knowledge_base:
     enabled: true
     filePatterns:
       - "CLAUDE.md"
-      - "docs/CONTRIBUTING.md"
-      - "docs/ARCHITECTURE.md"
   learnings:
     scope: auto

@@ -23,14 +23,16 @@ jobs:
       (github.event_name == 'issue_comment' &&
        contains(github.event.comment.body, '@claude') &&
        !contains(github.event.comment.body, '@claude review') &&
-       github.event.comment.author_association != 'NONE') ||
+       (github.event.comment.author_association != 'NONE' || github.event.comment.user.login == 'coderabbitai[bot]')) ||
       (github.event_name == 'pull_request_review_comment' &&
-       contains(github.event.comment.body, '@claude') &&
-       !contains(github.event.comment.body, '@claude review') &&
-       github.event.comment.author_association != 'NONE') ||
+       (
+         (contains(github.event.comment.body, '@claude') && !contains(github.event.comment.body, '@claude review')) ||
+         (github.event.comment.user.login == 'coderabbitai[bot]' && (contains(github.event.comment.body, 'Potential issue') || contains(github.event.comment.body, 'Security issue') || contains(github.event.comment.body, 'Suggestion') || contains(github.event.comment.body, 'Nitpick')))
+       ) &&
+       (github.event.comment.author_association != 'NONE' || github.event.comment.user.login == 'coderabbitai[bot]')) ||
       (github.event_name == 'pull_request_review' &&
        contains(github.event.review.body, '@claude') &&
-       github.event.review.author_association != 'NONE') ||
+       (github.event.review.author_association != 'NONE' || github.event.review.user.login == 'coderabbitai[bot]')) ||
       (github.event_name == 'issues' &&
        contains(github.event.issue.body, '@claude') &&
        github.event.issue.author_association != 'NONE')
@@ -55,6 +57,26 @@ jobs:
 
           if [ "$SENDER" = "coderabbitai[bot]" ]; then
             IS_CR_BOT="true"
+
+            # Detect severity from CodeRabbit's native markers
+            if echo "$BODY" | grep -qE "Critical|🔴"; then
+              CR_SEVERITY="critical"
+              ACTION="fix"
+            elif echo "$BODY" | grep -qE "Major|🟠"; then
+              CR_SEVERITY="major"
+              ACTION="fix"
+            elif echo "$BODY" | grep -qE "Minor|🟡"; then
+              CR_SEVERITY="minor"
+              ACTION="fix"
+            elif echo "$BODY" | grep -qE "Suggestion|💡|Nitpick|nitpick"; then
+              CR_SEVERITY="nitpick"
+              ACTION="issue"
+            fi
+
+            # Extract summary from the bold title line
+            CR_SUMMARY=$(echo "$BODY" | grep -oP '\*\*(.+?)\*\*' | head -1 | sed 's/\*\*//g')
+
+            # Also support explicit @claude fix: triggers if CodeRabbit ever uses them
             if echo "$BODY" | grep -q "@claude fix: critical"; then
               CR_SEVERITY="critical"
               ACTION="fix"
@@ -63,10 +85,6 @@ jobs:
               CR_SEVERITY="major"
               ACTION="fix"
               CR_SUMMARY=$(echo "$BODY" | grep -o "@claude fix: major — .*" | sed 's/@claude fix: major — //')
-            elif echo "$BODY" | grep -q "@claude fix: minor"; then
-              CR_SEVERITY="minor"
-              ACTION="fix"
-              CR_SUMMARY=$(echo "$BODY" | grep -o "@claude fix: minor — .*" | sed 's/@claude fix: minor — //')
             elif echo "$BODY" | grep -q "@claude issue: nitpick"; then
               CR_SEVERITY="nitpick"
               ACTION="issue"
@@ -87,87 +105,57 @@ jobs:
             --model claude-sonnet-4-6
             --max-turns 10
           custom_instructions: |
-            You are operating on Ryan's repositories. Follow these rules absolutely.
-
-            IDENTITY: You are a senior engineer working within the established workflow.
+            You are operating on PowerSync, a Home Assistant custom integration for
+            battery optimization and energy management. Python only.
 
             COMMIT FORMAT: {type}({scope}): {description}
             Valid types only: feat, fix, test, refactor, perf, docs, style, chore
-            Never use: sync, wip, update, or any other type.
 
             BRANCH RULES:
             - Never commit directly to main
-            - Always create a feature branch for any code changes
             - Branch naming: {type}/{description}-{issue-number}
 
-            CODE STANDARDS by stack:
-            - Next.js/TypeScript: no any, strict types, App Router patterns, Prisma additive migrations only
-            - Swift/SwiftUI: actor isolation enforced, no force unwraps without JUSTIFIED comment, @MainActor for UI
-            - Python/Flask: type hints on all public functions, no bare except:, Flask Blueprint structure
+            CODE STANDARDS (Python/HA):
+            - Type hints on all public functions
+            - No bare except: — always catch specific exceptions
+            - No secrets in code or logs
+            - Proper async/await — no blocking calls in async methods
+            - Correct HA patterns (DataUpdateCoordinator, config flow, platform entities)
 
-            AEST DATE RULE (JavaScript): NEVER use toISOString().split('T')[0] for local dates.
-            Use: const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,'0'); const day=String(d.getDate()).padStart(2,'0'); return y+'-'+m+'-'+day;
+            CRITICAL FILES (battery charging/discharging/pricing logic):
+            coordinator.py, __init__.py, optimization/coordinator.py, executor.py,
+            schedule_reader.py — extra care required, minimal changes only.
 
-            HOME ASSISTANT RULES:
-            - Never background processes via SSH
-            - Never edit /config/.storage/*.json directly
-            - Verify entity names via /api/states before using
-
-            SECRETS: Never commit .env, tokens, API keys, or credentials. Always blocked.
+            SECRETS: Never commit .env, tokens, API keys, or credentials.
 
             PR RULES:
             - Always open as draft first
-            - Never auto-merge — output PR URL and stop
-            - Always update CHANGELOG.md
+            - Never auto-merge
+            - Small focused changes only — one logical change per PR
 
-            CODERABBIT TRIGGER HANDLING:
+            CODERABBIT AUTO-FIX HANDLING:
 
-            Detect step outputs passed from the workflow:
             IS_CR_BOT: ${{ steps.cr_detect.outputs.is_cr_bot }}
             CR_SEVERITY: ${{ steps.cr_detect.outputs.cr_severity }}
             CR_SUMMARY: ${{ steps.cr_detect.outputs.cr_summary }}
             ACTION: ${{ steps.cr_detect.outputs.action }}
 
-            IF IS_CR_BOT is true AND ACTION is fix (critical, major, or minor):
-            1. Read the full CodeRabbit comment to understand the finding completely
-            2. Locate the exact file and line referenced in the comment
-            3. Understand the issue — do not guess beyond what is stated
-            4. Write the minimal fix that resolves the finding — do not refactor beyond it
-            5. Run the appropriate check for the affected file type:
-               .ts/.tsx: npx tsc --noEmit and npm run lint
-               .swift: swiftlint --strict
-               .py: ruff check . and mypy . --ignore-missing-imports
-            6. If the check passes, commit on the current PR branch:
-               fix({scope}): {cr_summary}
-               Resolves CodeRabbit {cr_severity} finding.
-               Auto-fixed via CodeRabbit @claude trigger.
-            7. Push to the PR branch — never to main
-            8. Reply to the CodeRabbit comment: Fixed in [SHA]. [One sentence describing the change.]
-            9. Stop — do not open new PRs for CR fixes
+            IF IS_CR_BOT is true AND ACTION is fix:
+            1. Read the CodeRabbit comment fully — it contains the finding and proposed fix
+            2. Write the minimal fix — do not refactor beyond the issue
+            3. Run: ruff check . and mypy . --ignore-missing-imports
+            4. Commit: fix({scope}): {cr_summary}
+            5. Push to PR branch — never to main
+            6. Reply: Fixed in [SHA]. [One sentence.]
+            7. Stop
 
             IF IS_CR_BOT is true AND ACTION is issue (nitpick):
-            1. Read the full CodeRabbit comment to understand the nitpick
-            2. Do NOT make any code changes — nitpicks are never fixed inline
-            3. Create a GitHub issue with: title starting with style:, label style and coderabbit-nitpick, assignee @me
-            4. Reply to the CodeRabbit comment: Tracked in issue #[N]. Not fixing inline per project convention.
-            5. Stop
+            1. Do NOT make code changes
+            2. Create GitHub issue (title: style:, labels: style,coderabbit-nitpick)
+            3. Reply: Tracked in issue #[N]. Not fixing inline.
+            4. Stop
 
-            HUMAN TRIGGER HANDLING (IS_CR_BOT is false):
-
-            FOR SMALL TASKS (@claude in issue body or assigned):
-            1. Analyse the issue and related codebase
-            2. Create a branch
-            3. Implement the fix/feature
-            4. Run appropriate lint checks
-            5. Open a draft PR linked to the issue
-            6. Comment on the issue with the PR link
-            7. Stop — do not merge
-
-            FOR CODE REVIEW QUESTIONS (@claude in PR comment):
-            Answer directly with reference to actual code.
-            If suggesting a fix, provide the exact code change.
-            Do not open PRs for review answers unless explicitly asked.
-
-            FOR DEEP REVIEW (@claude review in PR comment):
-            Apply linus-code-reviewer standard.
-            Score 1-10. Critical/Serious/Minor. BLOCK/NEEDS WORK/LGTM verdict.
+            HUMAN TRIGGER (IS_CR_BOT is false):
+            1. Analyse, create branch, implement, run ruff+mypy
+            2. Open draft PR linked to issue
+            3. Stop — do not merge
