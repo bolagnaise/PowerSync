@@ -204,6 +204,36 @@ async def _get_tesla_ev_entity(
                 break
 
     if not tesla_devices:
+        # BLE vehicle discovery fallback — check tesla_ble_entity_prefix from
+        # config for BLE-only vehicles that have no Fleet API device registry
+        # entry. Constructs candidate entity IDs from BLE prefix constants and
+        # returns the first one matching the requested pattern.
+        import re as _re
+        pattern_re = _re.compile(entity_pattern, _re.IGNORECASE)
+        for entry in hass.config_entries.async_entries(DOMAIN):
+            ble_prefix = entry.options.get(
+                CONF_TESLA_BLE_ENTITY_PREFIX,
+                entry.data.get(CONF_TESLA_BLE_ENTITY_PREFIX),
+            )
+            if not ble_prefix:
+                continue
+            for prefix in [p.strip() for p in ble_prefix.split(",") if p.strip()]:
+                # Build candidate entity IDs from known BLE entity templates
+                ble_candidates = [
+                    TESLA_BLE_SWITCH_CHARGER.format(prefix=prefix),
+                    TESLA_BLE_NUMBER_CHARGING_AMPS.format(prefix=prefix),
+                    TESLA_BLE_NUMBER_CHARGING_LIMIT.format(prefix=prefix),
+                    TESLA_BLE_BUTTON_WAKE_UP.format(prefix=prefix),
+                ]
+                for candidate in ble_candidates:
+                    if pattern_re.match(candidate) and hass.states.get(candidate) is not None:
+                        display_name = prefix.replace("_", " ").title()
+                        _LOGGER.info(
+                            "Found Tesla EV entity via BLE prefix: %s (vehicle: %s)",
+                            candidate, display_name,
+                        )
+                        return candidate
+
         _LOGGER.warning(f"No Tesla EV devices found. Looking for domains {TESLA_EV_INTEGRATIONS}, found domains: {sorted(all_domains_found)}")
         if all_tesla_domain_devices:
             _LOGGER.warning(f"Found {len(all_tesla_domain_devices)} Tesla domain devices but none matched VIN format or had EV entities:")
