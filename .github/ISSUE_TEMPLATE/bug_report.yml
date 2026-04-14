@@ -1,0 +1,114 @@
+name: Bug Report
+description: Report a bug in PowerSync — battery control, EV charging, pricing, or dashboard
+title: "fix({scope}): "
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which subsystem is affected?
+      options:
+        - Optimizer (LP solver / coordinator)
+        - Tesla Powerwall (Fleet API / local TEDAPI)
+        - Sungrow inverter (Modbus TCP)
+        - Sigenergy inverter (Cloud + Modbus)
+        - FoxESS inverter
+        - GoodWe inverter
+        - Enphase inverter
+        - Fronius / Huawei / ZeverSolar
+        - Amber Electric (pricing / WebSocket)
+        - Octopus Energy (Agile / Go)
+        - AEMO (wholesale pricing / spikes)
+        - Flow Power / LocalVolts / EPEX
+        - EV charging (planner / sessions)
+        - EV charging (Tesla BLE / Fleet API)
+        - EV charging (OCPP / Zaptec / generic)
+        - Dashboard (strategy card)
+        - Dashboard (energy flow card)
+        - Dashboard (savings card)
+        - Config flow (setup / options)
+        - Automations / triggers
+        - Sensors / entities
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: battery_system
+    attributes:
+      label: Battery System
+      description: Which battery system are you using?
+      options:
+        - Tesla Powerwall
+        - Sigenergy
+        - Sungrow SH-series
+        - FoxESS
+        - GoodWe
+        - Other / N/A
+    validations:
+      required: true
+
+  - type: dropdown
+    id: electricity_provider
+    attributes:
+      label: Electricity Provider
+      description: Which electricity provider is configured?
+      options:
+        - Amber Electric
+        - Octopus Energy (UK)
+        - AEMO wholesale
+        - Flow Power
+        - LocalVolts
+        - EPEX (EU)
+        - GloBird
+        - Fixed rate / custom tariff
+        - Other / N/A
+
+  - type: input
+    id: powersync_version
+    attributes:
+      label: PowerSync version
+      description: From the HA integration page or manifest.json
+      placeholder: "e.g. 2.12.41"
+
+  - type: input
+    id: ha_version
+    attributes:
+      label: Home Assistant version
+      placeholder: "e.g. 2026.4.1"
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the bug clearly with steps to reproduce.
+      placeholder: |
+        1. Open HA → Settings → Integrations → PowerSync
+        2. Click Configure → Smart Optimization
+        3. Set backup reserve to 30%
+        Expected: LP optimizer uses 30% as floor
+        Actual: Optimizer still uses 20% default
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      placeholder: What should have happened instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste from HA logs (Settings → System → Logs, filter by "power_sync"). Redact tokens/keys to `***`.
+      render: text
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Screenshots, entity states, pricing data at the time, recent config changes.

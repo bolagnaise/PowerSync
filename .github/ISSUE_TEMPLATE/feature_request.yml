@@ -1,0 +1,69 @@
+name: Feature Request
+description: Suggest a new feature or improvement for PowerSync
+title: "feat({scope}): "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem are you trying to solve? (Not the solution — the pain.)
+      placeholder: |
+        e.g. "When multiple EVs are plugged in, both charge simultaneously and
+        trip the main breaker. There's no way to prioritize one vehicle over another."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What would you like to happen? How should it look / behave?
+      placeholder: |
+        e.g. "Add a priority slider per vehicle (1-10). When supply is constrained,
+        charge highest priority first. Queue lower priority vehicles."
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds or other approaches you've already thought about.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which subsystem does this touch?
+      options:
+        - Optimizer (LP solver / coordinator)
+        - Battery control (Tesla / Sungrow / Sigenergy / FoxESS / GoodWe)
+        - Pricing (Amber / Octopus / AEMO / Flow Power)
+        - EV charging (planner / sessions / BLE)
+        - Dashboard (cards / strategy)
+        - Config flow (setup / options)
+        - Automations / triggers
+        - Sensors / entities
+        - Cross-cutting / multiple
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: effort
+    attributes:
+      label: Rough effort estimate
+      options:
+        - XS (<1h, trivial tweak)
+        - S (<half day)
+        - M (1-2 days)
+        - L (a week-ish)
+        - XL (multi-week / requires research)
+        - Unknown
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Mockups, screenshots, links to similar features, prior art.
