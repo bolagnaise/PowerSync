@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import pathlib
+import time as _time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -15,6 +16,9 @@ _discrepancy_alert_count: dict[str, int] = {}
 _discrepancy_alert_date: dict[str, str] = {}
 DISCREPANCY_ALERT_COOLDOWN = timedelta(minutes=30)
 DISCREPANCY_ALERT_DAILY_MAX = 4
+
+# Module-level cooldown for tariff_rate 403 responses (keyed by site_id)
+_tariff_rate_403_cooldown: dict[str, float] = {}  # site_id -> monotonic expiry
 
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform, CONF_ACCESS_TOKEN, CONF_TOKEN
@@ -1249,23 +1253,30 @@ class AEMOSpikeManager:
 
             # Step 1: Save current tariff
             _LOGGER.info("Saving current tariff before spike mode...")
-            async with session.get(
-                f"{api_base}/api/1/energy_sites/{self.site_id}/tariff_rate",
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    resp = data.get("response", {})
-                    # Try tariff_content_v2 first, then fall back to tariff_content
-                    self._saved_tariff = resp.get("tariff_content_v2") or resp.get("tariff_content")
-                    if self._saved_tariff:
-                        _LOGGER.info("Saved current tariff for restoration after spike (name: %s)",
-                                    self._saved_tariff.get("name", "unknown"))
+            site_key = str(self.site_id)
+            if site_key in _tariff_rate_403_cooldown and _time.monotonic() < _tariff_rate_403_cooldown[site_key]:
+                _LOGGER.debug("tariff_rate: skipping call (403 cooldown active)")
+            else:
+                async with session.get(
+                    f"{api_base}/api/1/energy_sites/{self.site_id}/tariff_rate",
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        resp = data.get("response", {})
+                        # Try tariff_content_v2 first, then fall back to tariff_content
+                        self._saved_tariff = resp.get("tariff_content_v2") or resp.get("tariff_content")
+                        if self._saved_tariff:
+                            _LOGGER.info("Saved current tariff for restoration after spike (name: %s)",
+                                        self._saved_tariff.get("name", "unknown"))
+                        else:
+                            _LOGGER.warning("Could not extract tariff from tariff_rate response - will try site_info")
+                    elif response.status == 403:
+                        _tariff_rate_403_cooldown[site_key] = _time.monotonic() + 3600  # 1 hour cooldown
+                        _LOGGER.warning("tariff_rate endpoint returned 403 for site %s - cooldown 1h, will try site_info fallback", site_key)
                     else:
-                        _LOGGER.warning("Could not extract tariff from tariff_rate response - will try site_info")
-                else:
-                    _LOGGER.warning("tariff_rate endpoint returned %s - will try site_info fallback", response.status)
+                        _LOGGER.warning("tariff_rate endpoint returned %s - will try site_info fallback", response.status)
 
             # Step 2: Get and save current operation mode (and tariff fallback)
             async with session.get(
@@ -1797,19 +1808,26 @@ class SavingSessionTariffManager:
 
             # Step 1: Save current tariff
             _LOGGER.info("Saving current tariff before session mode...")
-            async with session_http.get(
-                f"{api_base}/api/1/energy_sites/{self.site_id}/tariff_rate",
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    resp = data.get("response", {})
-                    self._saved_tariff = resp.get("tariff_content_v2") or resp.get("tariff_content")
-                    if self._saved_tariff:
-                        _LOGGER.info("Saved current tariff (name: %s)", self._saved_tariff.get("name", "unknown"))
-                    else:
-                        _LOGGER.warning("Could not extract tariff from tariff_rate response")
+            site_key = str(self.site_id)
+            if site_key in _tariff_rate_403_cooldown and _time.monotonic() < _tariff_rate_403_cooldown[site_key]:
+                _LOGGER.debug("tariff_rate: skipping call (403 cooldown active)")
+            else:
+                async with session_http.get(
+                    f"{api_base}/api/1/energy_sites/{self.site_id}/tariff_rate",
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        resp = data.get("response", {})
+                        self._saved_tariff = resp.get("tariff_content_v2") or resp.get("tariff_content")
+                        if self._saved_tariff:
+                            _LOGGER.info("Saved current tariff (name: %s)", self._saved_tariff.get("name", "unknown"))
+                        else:
+                            _LOGGER.warning("Could not extract tariff from tariff_rate response")
+                    elif response.status == 403:
+                        _tariff_rate_403_cooldown[site_key] = _time.monotonic() + 3600  # 1 hour cooldown
+                        _LOGGER.warning("tariff_rate endpoint returned 403 for site %s - cooldown 1h", site_key)
 
             # Step 2: Get and save current operation mode
             async with session_http.get(
