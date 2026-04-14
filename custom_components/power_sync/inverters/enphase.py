@@ -6,7 +6,6 @@ Uses DPEL (Device Power Export Limit) for load following curtailment.
 Reference: https://github.com/pyenphase/pyenphase
            https://github.com/Matthew1471/Enphase-API
 """
-
 import asyncio
 import base64
 import json
@@ -104,15 +103,14 @@ class EnphaseController(InverterController):
         self._firmware_version: Optional[str] = None
         self._envoy_serial: Optional[str] = None
         self._dpel_supported: Optional[bool] = None
-        self._dpel_available: Optional[bool] = (
-            None  # None = unknown, True = works, False = broken (503/404)
-        )
-        self._der_available: Optional[bool] = (
-            None  # None = unknown, True = works, False = broken
-        )
-        self._agf_available: Optional[bool] = (
-            None  # None = unknown, True = works, False = broken
-        )
+        self._dpel_available: Optional[bool] = None  # None = unknown, True = works, False = broken (503/404)
+        # Some Envoy firmware (observed on AU/NZ region) requires installed_capacity
+        # in the DPEL POST payload — without it the gateway returns 400
+        # "missing/incorrect installed_capacity" and the dynamic limit won't engage.
+        # Computed from sum(maxReportWatts) across all microinverters.
+        self._installed_capacity_w: Optional[float] = None
+        self._der_available: Optional[bool] = None   # None = unknown, True = works, False = broken
+        self._agf_available: Optional[bool] = None   # None = unknown, True = works, False = broken
         self._profile_switching_supported: Optional[bool] = None
         self._current_profile: Optional[str] = None
         self._token_obtained_at: Optional[datetime] = None
@@ -142,11 +140,7 @@ class EnphaseController(InverterController):
                 "user[password]": self._password,
             }
 
-            _LOGGER.debug(
-                "Enlighten login: POST %s (email=%s)",
-                self.ENLIGHTEN_LOGIN_URL,
-                self._username,
-            )
+            _LOGGER.debug("Enlighten login: POST %s (email=%s)", self.ENLIGHTEN_LOGIN_URL, self._username)
             async with self._cloud_session.post(
                 self.ENLIGHTEN_LOGIN_URL,
                 data=login_data,
@@ -155,26 +149,19 @@ class EnphaseController(InverterController):
                     result = await response.json()
                     session_id = result.get("session_id")
                     # Log all response fields (except sensitive ones) for debugging installer vs owner
-                    safe_keys = {
-                        k: v for k, v in result.items() if k not in ("session_id",)
-                    }
+                    safe_keys = {k: v for k, v in result.items() if k not in ("session_id",)}
                     _LOGGER.info(
                         "Enlighten login response: session_id=%s, fields=%s",
-                        "present" if session_id else "MISSING",
-                        safe_keys,
+                        "present" if session_id else "MISSING", safe_keys,
                     )
                     if session_id:
                         self._enlighten_session_id = session_id
                         return session_id
                     else:
-                        _LOGGER.error(
-                            f"Enlighten login response missing session_id: {result}"
-                        )
+                        _LOGGER.error(f"Enlighten login response missing session_id: {result}")
                 else:
                     text = await response.text()
-                    _LOGGER.error(
-                        f"Enlighten login failed with status {response.status}: {text[:200]}"
-                    )
+                    _LOGGER.error(f"Enlighten login failed with status {response.status}: {text[:200]}")
 
         except Exception as e:
             _LOGGER.error(f"Error authenticating with Enlighten: {e}")
@@ -195,7 +182,6 @@ class EnphaseController(InverterController):
 
         try:
             import re as _re
-
             # Use a separate session to isolate the Entrez cookies
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=30.0),
@@ -207,16 +193,12 @@ class EnphaseController(InverterController):
                     "https://entrez.enphaseenergy.com/login_main_page",
                 ) as page_resp:
                     page_html = await page_resp.text()
-                    csrf_match = _re.search(
-                        r'name="_csrf"\s+value="([^"]+)"', page_html
-                    )
+                    csrf_match = _re.search(r'name="_csrf"\s+value="([^"]+)"', page_html)
                     if not csrf_match:
                         _LOGGER.warning("Entrez login page: no CSRF token found")
                         return None
                     csrf_token = csrf_match.group(1)
-                    _LOGGER.debug(
-                        "Entrez CSRF token obtained (len=%d)", len(csrf_token)
-                    )
+                    _LOGGER.debug("Entrez CSRF token obtained (len=%d)", len(csrf_token))
 
                 # Step 1b: POST login with CSRF token + credentials
                 login_data = {
@@ -233,47 +215,31 @@ class EnphaseController(InverterController):
                     allow_redirects=True,
                 ) as login_resp:
                     login_text = await login_resp.text()
-                    session_cookies = {
-                        c.key: c.value for c in entrez_session.cookie_jar
-                    }
+                    session_cookies = {c.key: c.value for c in entrez_session.cookie_jar}
                     has_session = "SESSION" in session_cookies
                     # Check for login failure (page contains login form again)
-                    login_failed = (
-                        'action="/login"' in login_text and 'name="_csrf"' in login_text
-                    )
+                    login_failed = 'action="/login"' in login_text and 'name="_csrf"' in login_text
                     _LOGGER.info(
                         "Entrez web login response: status=%s, has_session_cookie=%s, login_ok=%s",
-                        login_resp.status,
-                        has_session,
-                        not login_failed,
+                        login_resp.status, has_session, not login_failed,
                     )
                     if not has_session or login_failed:
-                        _LOGGER.warning(
-                            "Entrez web login failed (credentials rejected or no session)"
-                        )
+                        _LOGGER.warning("Entrez web login failed (credentials rejected or no session)")
                         return None
 
                 # Step 2: GET /entrez_tokens to load the form and extract its CSRF token
-                _LOGGER.info(
-                    "Fetching installer token from %s (serial=%s)",
-                    self.ENTREZ_TOKENS_URL,
-                    serial,
-                )
+                _LOGGER.info("Fetching installer token from %s (serial=%s)", self.ENTREZ_TOKENS_URL, serial)
 
                 async with entrez_session.get(self.ENTREZ_TOKENS_URL) as form_resp:
                     form_html = await form_resp.text()
                     if form_resp.status != 200:
-                        _LOGGER.warning(
-                            "Entrez /entrez_tokens GET returned %s", form_resp.status
-                        )
+                        _LOGGER.warning("Entrez /entrez_tokens GET returned %s", form_resp.status)
                         return None
 
                 # Extract CSRF token from the token generation form
                 csrf_match2 = _re.search(r'name="_csrf"\s+value="([^"]+)"', form_html)
                 if not csrf_match2:
-                    _LOGGER.warning(
-                        "Entrez /entrez_tokens page: no CSRF token found in form"
-                    )
+                    _LOGGER.warning("Entrez /entrez_tokens page: no CSRF token found in form")
                     return None
                 form_csrf = csrf_match2.group(1)
 
@@ -294,9 +260,7 @@ class EnphaseController(InverterController):
                     content_type = token_resp.content_type or ""
                     _LOGGER.debug(
                         "Entrez /entrez_tokens form POST response: status=%s, len=%d, type=%s",
-                        token_resp.status,
-                        len(text),
-                        content_type,
+                        token_resp.status, len(text), content_type,
                     )
 
                     # Extract JWT from response (JSON or HTML)
@@ -304,31 +268,20 @@ class EnphaseController(InverterController):
                     if "application/json" in content_type:
                         try:
                             data = json.loads(text)
-                            token = (
-                                data.get("token")
-                                or data.get("jwt")
-                                or data.get("access_token")
-                            )
+                            token = data.get("token") or data.get("jwt") or data.get("access_token")
                         except (json.JSONDecodeError, ValueError):
                             pass
 
                     if not token:
                         # HTML response — extract JWT (eyJ... pattern)
                         import re
-
-                        match = re.search(
-                            r"eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
-                            text,
-                        )
+                        match = re.search(r'eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+', text)
                         token = match.group(0) if match else None
 
                     if not token:
                         # Look for token in textarea, input value, or data attribute
                         import re
-
-                        value_match = re.search(
-                            r'(?:value|data-token)=["\']([^"\']+)["\']', text
-                        )
+                        value_match = re.search(r'(?:value|data-token)=["\']([^"\']+)["\']', text)
                         if value_match and len(value_match.group(1)) > 100:
                             token = value_match.group(1)
 
@@ -339,9 +292,7 @@ class EnphaseController(InverterController):
                         jwt_info = self._decode_jwt_info()
                         _LOGGER.info(
                             "Entrez web token received: token_type=%s, jwt_fields=%s, token_len=%d",
-                            token_type,
-                            jwt_info,
-                            len(token),
+                            token_type, jwt_info, len(token),
                         )
                         self._update_session_cookie()
                         await self._validate_token_locally()
@@ -349,24 +300,15 @@ class EnphaseController(InverterController):
                     else:
                         # Log form fields and links to understand the page structure
                         import re as _re2
-
                         forms = _re2.findall(r'<form[^>]*action="([^"]*)"[^>]*>', text)
                         inputs = _re2.findall(r'<input[^>]*name="([^"]*)"[^>]*>', text)
-                        selects = _re2.findall(
-                            r'<select[^>]*name="([^"]*)"[^>]*>', text
-                        )
-                        textareas = _re2.findall(r"<textarea[^>]*", text)
-                        buttons = _re2.findall(r"<button[^>]*>([^<]*)</button>", text)
+                        selects = _re2.findall(r'<select[^>]*name="([^"]*)"[^>]*>', text)
+                        textareas = _re2.findall(r'<textarea[^>]*', text)
+                        buttons = _re2.findall(r'<button[^>]*>([^<]*)</button>', text)
                         _LOGGER.warning(
                             "Entrez /entrez_tokens: no JWT found (len=%d, type=%s). "
                             "Page forms: actions=%s, inputs=%s, selects=%s, textareas=%d, buttons=%s",
-                            len(text),
-                            content_type,
-                            forms,
-                            inputs,
-                            selects,
-                            len(textareas),
-                            buttons,
+                            len(text), content_type, forms, inputs, selects, len(textareas), buttons,
                         )
                         return None
 
@@ -389,9 +331,7 @@ class EnphaseController(InverterController):
         """
         # Installer accounts: try Entrez web flow first (returns installer tokens)
         if self._is_installer:
-            _LOGGER.info(
-                "Installer account — trying Entrez web flow for installer token"
-            )
+            _LOGGER.info("Installer account — trying Entrez web flow for installer token")
             token = await self._get_token_via_entrez(serial)
             if token:
                 token_type = self._get_token_type()
@@ -430,10 +370,7 @@ class EnphaseController(InverterController):
 
             _LOGGER.info(
                 "Entrez token request: POST %s (serial=%s, username=%s, is_installer=%s, content_type=json)",
-                self.ENLIGHTEN_TOKEN_URL,
-                serial,
-                self._username,
-                self._is_installer,
+                self.ENLIGHTEN_TOKEN_URL, serial, self._username, self._is_installer,
             )
             async with self._cloud_session.post(
                 self.ENLIGHTEN_TOKEN_URL,
@@ -451,12 +388,9 @@ class EnphaseController(InverterController):
                         _LOGGER.info(
                             "Entrez token received: token_type=%s, is_installer_config=%s, "
                             "jwt_fields=%s, token_len=%d",
-                            token_type,
-                            self._is_installer,
-                            jwt_info,
-                            len(token),
+                            token_type, self._is_installer, jwt_info, len(token),
                         )
-                        if token_type == "owner" and self._is_installer:
+                        if token_type == 'owner' and self._is_installer:
                             _LOGGER.warning(
                                 "Token is 'owner' type but installer was requested — "
                                 "/installer/ endpoints (AGF profile switching) will NOT work. "
@@ -468,15 +402,12 @@ class EnphaseController(InverterController):
                         await self._validate_token_locally()
                         return token
                     else:
-                        _LOGGER.error(
-                            f"Invalid token response from Enlighten (len={len(token)}): {token[:100]}"
-                        )
+                        _LOGGER.error(f"Invalid token response from Enlighten (len={len(token)}): {token[:100]}")
                 else:
                     text = await response.text()
                     _LOGGER.error(
                         "Entrez token request failed: status=%s, response=%s",
-                        response.status,
-                        text[:300],
+                        response.status, text[:300],
                     )
 
         except Exception as e:
@@ -499,7 +430,6 @@ class EnphaseController(InverterController):
         # Fast path (no lock needed): check if current token is valid
         if self._token and not force_refresh:
             import time as _time
-
             jwt_info = self._decode_jwt_info()
             exp = jwt_info.get("exp")
             if exp:
@@ -515,10 +445,7 @@ class EnphaseController(InverterController):
                 # External token with no timestamp — check exp, if expired and
                 # we have credentials, refresh immediately instead of using it
                 if exp and exp < _time.time() and self._username and self._password:
-                    _LOGGER.info(
-                        "External config token has expired (exp=%d), will fetch fresh token",
-                        exp,
-                    )
+                    _LOGGER.info("External config token has expired (exp=%d), will fetch fresh token", exp)
                     # Fall through to refresh
                 elif not self._username or not self._password:
                     _LOGGER.debug("External token provided, no credentials for refresh")
@@ -527,9 +454,7 @@ class EnphaseController(InverterController):
                 else:
                     self._token_obtained_at = datetime.now()
                     token_type = self._get_token_type()
-                    _LOGGER.info(
-                        f"External token provided (type={token_type}), marked timestamp for age tracking"
-                    )
+                    _LOGGER.info(f"External token provided (type={token_type}), marked timestamp for age tracking")
                     self._update_session_cookie()
                     return True
 
@@ -539,9 +464,7 @@ class EnphaseController(InverterController):
             if self._token and not force_refresh and self._token_obtained_at:
                 age = datetime.now() - self._token_obtained_at
                 if age < timedelta(seconds=30):
-                    _LOGGER.debug(
-                        "Token was just refreshed by another caller, skipping"
-                    )
+                    _LOGGER.debug("Token was just refreshed by another caller, skipping")
                     return True
 
             # Need to get token from cloud
@@ -555,9 +478,7 @@ class EnphaseController(InverterController):
                 _LOGGER.warning("Cannot fetch token: Envoy serial number not known")
                 return False
 
-            _LOGGER.info(
-                f"Fetching new JWT token from Enlighten cloud for Envoy {serial}"
-            )
+            _LOGGER.info(f"Fetching new JWT token from Enlighten cloud for Envoy {serial}")
             token = await self._get_token_from_cloud(serial)
             return token is not None
 
@@ -575,9 +496,7 @@ class EnphaseController(InverterController):
         """Get SSL context, creating it via executor if needed to avoid blocking."""
         if self._ssl_context is None:
             loop = asyncio.get_event_loop()
-            self._ssl_context = await loop.run_in_executor(
-                None, self._create_ssl_context
-            )
+            self._ssl_context = await loop.run_in_executor(None, self._create_ssl_context)
         return self._ssl_context
 
     def _get_ssl_context(self) -> ssl.SSLContext:
@@ -599,18 +518,18 @@ class EnphaseController(InverterController):
         try:
             # JWT format: header.payload.signature
             # We only need to decode the payload (second part)
-            parts = self._token.split(".")
+            parts = self._token.split('.')
             if len(parts) != 3:
                 return None
             # Add padding if needed for base64 decode
             payload_b64 = parts[1]
             padding = 4 - len(payload_b64) % 4
             if padding != 4:
-                payload_b64 += "=" * padding
+                payload_b64 += '=' * padding
             payload_json = base64.urlsafe_b64decode(payload_b64)
             payload = json.loads(payload_json)
             # The 'enphaseUser' field contains 'owner' or 'installer'
-            return payload.get("enphaseUser")
+            return payload.get('enphaseUser')
         except Exception as e:
             _LOGGER.debug(f"Failed to decode JWT token type: {e}")
             return None
@@ -620,28 +539,20 @@ class EnphaseController(InverterController):
         if not self._token:
             return {}
         try:
-            parts = self._token.split(".")
+            parts = self._token.split('.')
             if len(parts) != 3:
                 return {"error": "not a JWT"}
             payload_b64 = parts[1]
             padding = 4 - len(payload_b64) % 4
             if padding != 4:
-                payload_b64 += "=" * padding
+                payload_b64 += '=' * padding
             payload_json = base64.urlsafe_b64decode(payload_b64)
             payload = json.loads(payload_json)
             # Return useful fields, redact sensitive ones
             safe_fields = {}
-            for key in (
-                "enphaseUser",
-                "aud",
-                "iss",
-                "jti",
-                "username",
-                "enphase_system_id",
-                "enphase_site_id",
-                "is_consumer",
-                "is_installer",
-            ):
+            for key in ("enphaseUser", "aud", "iss", "jti", "username",
+                        "enphase_system_id", "enphase_site_id",
+                        "is_consumer", "is_installer"):
                 if key in payload:
                     safe_fields[key] = payload[key]
             if "exp" in payload:
@@ -670,7 +581,8 @@ class EnphaseController(InverterController):
 
             # Update the session's cookie jar
             self._session.cookie_jar.update_cookies(
-                cookie, URL(f"https://{self.host}:{self.port}/")
+                cookie,
+                URL(f"https://{self.host}:{self.port}/")
             )
             _LOGGER.debug(f"Updated session cookie with JWT token for {self.host}")
 
@@ -696,9 +608,7 @@ class EnphaseController(InverterController):
                     _LOGGER.info(f"JWT token validated locally (POST): {body[:200]}")
                     return True
                 else:
-                    _LOGGER.debug(
-                        f"JWT local validation POST returned {response.status}: {body[:100]}"
-                    )
+                    _LOGGER.debug(f"JWT local validation POST returned {response.status}: {body[:100]}")
 
             # Fall back to GET
             async with self._session.get(url, headers=self._get_headers()) as response:
@@ -707,9 +617,7 @@ class EnphaseController(InverterController):
                     _LOGGER.info(f"JWT token validated locally (GET): {body[:200]}")
                     return True
                 else:
-                    _LOGGER.debug(
-                        f"JWT local validation GET returned {response.status}: {body[:100]}"
-                    )
+                    _LOGGER.debug(f"JWT local validation GET returned {response.status}: {body[:100]}")
                     return False
         except Exception as e:
             _LOGGER.debug(f"JWT local validation error: {e}")
@@ -729,9 +637,7 @@ class EnphaseController(InverterController):
                 connector = aiohttp.TCPConnector(ssl=ssl_context)
                 timeout = aiohttp.ClientTimeout(total=self.TIMEOUT_SECONDS)
                 # Use cookie jar to store session cookies (needed for /installer/ endpoints)
-                cookie_jar = aiohttp.CookieJar(
-                    unsafe=True
-                )  # unsafe=True for IP addresses
+                cookie_jar = aiohttp.CookieJar(unsafe=True)  # unsafe=True for IP addresses
                 self._session = aiohttp.ClientSession(
                     connector=connector,
                     timeout=timeout,
@@ -753,16 +659,12 @@ class EnphaseController(InverterController):
                     if self._username and self._password and not self._token:
                         serial = self._serial or self._envoy_serial
                         if serial:
-                            _LOGGER.info(
-                                f"Fetching JWT token from Enlighten cloud for Envoy {serial}"
-                            )
+                            _LOGGER.info(f"Fetching JWT token from Enlighten cloud for Envoy {serial}")
                             await self._get_token_from_cloud(serial)
 
                     return True
                 else:
-                    _LOGGER.error(
-                        f"Failed to connect to Enphase IQ Gateway at {self.host}"
-                    )
+                    _LOGGER.error(f"Failed to connect to Enphase IQ Gateway at {self.host}")
                     return False
 
             except Exception as e:
@@ -827,9 +729,7 @@ class EnphaseController(InverterController):
             _LOGGER.debug(f"Error getting {endpoint}: {e}")
             return None
 
-    async def _put(
-        self, endpoint: str, data: dict, retry_auth: bool = True
-    ) -> tuple[bool, Optional[int]]:
+    async def _put(self, endpoint: str, data: dict, retry_auth: bool = True) -> tuple[bool, Optional[int]]:
         """Make a PUT request to the IQ Gateway.
 
         Returns:
@@ -862,13 +762,9 @@ class EnphaseController(InverterController):
                     # Log response body for debugging 400 errors
                     try:
                         body = await response.text()
-                        _LOGGER.debug(
-                            f"PUT {endpoint} returned status {response.status}: {body[:200]}"
-                        )
+                        _LOGGER.debug(f"PUT {endpoint} returned status {response.status}: {body[:200]}")
                     except:
-                        _LOGGER.debug(
-                            f"PUT {endpoint} returned status {response.status}"
-                        )
+                        _LOGGER.debug(f"PUT {endpoint} returned status {response.status}")
                     return False, response.status
 
         except aiohttp.ClientError as e:
@@ -878,9 +774,7 @@ class EnphaseController(InverterController):
             _LOGGER.error(f"Error putting {endpoint}: {e}")
             return False, None
 
-    async def _post(
-        self, endpoint: str, data: dict, retry_auth: bool = True
-    ) -> tuple[bool, Optional[int]]:
+    async def _post(self, endpoint: str, data: dict, retry_auth: bool = True) -> tuple[bool, Optional[int]]:
         """Make a POST request to the IQ Gateway.
 
         Returns:
@@ -913,13 +807,9 @@ class EnphaseController(InverterController):
                     # Log response body for debugging 400 errors
                     try:
                         body = await response.text()
-                        _LOGGER.debug(
-                            f"POST {endpoint} returned status {response.status}: {body[:200]}"
-                        )
+                        _LOGGER.debug(f"POST {endpoint} returned status {response.status}: {body[:200]}")
                     except:
-                        _LOGGER.debug(
-                            f"POST {endpoint} returned status {response.status}"
-                        )
+                        _LOGGER.debug(f"POST {endpoint} returned status {response.status}")
                     return False, response.status
 
         except aiohttp.ClientError as e:
@@ -949,9 +839,7 @@ class EnphaseController(InverterController):
                         info = {}
                         for elem in root.iter():
                             # Remove namespace prefix if present
-                            tag = (
-                                elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
-                            )
+                            tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
                             if elem.text and elem.text.strip():
                                 info[tag] = elem.text.strip()
 
@@ -960,27 +848,18 @@ class EnphaseController(InverterController):
                         if info:
                             # Map common fields from Enphase XML
                             return {
-                                "serial": info.get("sn")
-                                or info.get("serial")
-                                or info.get("device_sn"),
-                                "software": info.get("software")
-                                or info.get("version")
-                                or info.get("imeter_fw_version"),
-                                "model": info.get("pn")
-                                or info.get("model")
-                                or info.get("part_num"),
+                                "serial": info.get("sn") or info.get("serial") or info.get("device_sn"),
+                                "software": info.get("software") or info.get("version") or info.get("imeter_fw_version"),
+                                "model": info.get("pn") or info.get("model") or info.get("part_num"),
                             }
                     except ET.ParseError as e:
                         _LOGGER.debug(f"XML parse error: {e}")
                         # Not XML, try JSON
                         try:
                             import json
-
                             return json.loads(text)
                         except json.JSONDecodeError:
-                            _LOGGER.debug(
-                                f"Could not parse /info response as XML or JSON"
-                            )
+                            _LOGGER.debug(f"Could not parse /info response as XML or JSON")
         except Exception as e:
             _LOGGER.debug(f"Error getting /info: {e}")
 
@@ -1012,9 +891,107 @@ class EnphaseController(InverterController):
         """Get DPEL (Device Power Export Limit) settings."""
         return await self._get(self.ENDPOINT_DPEL)
 
-    async def _set_dpel(
-        self, enabled: bool, limit_watts: int = 0, use_production_limit: bool = False
-    ) -> tuple[bool, bool]:
+    # Cache of the gateway's full DPEL settings dict — read once on first
+    # curtail attempt and reused. Some Envoy firmware requires every field
+    # it returns to be echoed back (we've seen demands for both
+    # installed_capacity AND relay_config). Easiest way to satisfy that is
+    # to read what the gateway has, merge in the values we want to change,
+    # and POST the full thing.
+    _dpel_base_settings: Optional[dict] = None
+
+    async def _get_dpel_base_settings(self) -> Optional[dict]:
+        """Resolve the gateway's current DPEL settings dict, cached.
+
+        The dict structure is `{"dynamic_pel_settings": {...}}` — we
+        return the inner settings sub-object, or None if the GET failed.
+        """
+        if self._dpel_base_settings:
+            return self._dpel_base_settings
+        try:
+            raw = await self._get_dpel_settings()
+            if isinstance(raw, dict):
+                inner = raw.get("dynamic_pel_settings", raw)
+                if isinstance(inner, dict) and inner:
+                    self._dpel_base_settings = dict(inner)
+                    _LOGGER.info(
+                        "Cached DPEL base settings from gateway: keys=%s",
+                        sorted(self._dpel_base_settings.keys()),
+                    )
+                    return self._dpel_base_settings
+        except Exception as err:
+            _LOGGER.debug("DPEL base settings read failed: %s", err)
+        return None
+
+    async def _get_installed_capacity_w(self) -> Optional[float]:
+        """Resolve the system's total installed PV capacity in watts.
+
+        Required by some Envoy firmware (AU/NZ region) for the DPEL POST
+        to actually engage dynamic limiting — without it the gateway
+        returns 400 "missing/incorrect installed_capacity" and we silently
+        fall through to a payload format that succeeds (200) but has
+        enable_dynamic_limiting=False, so the inverter keeps producing
+        and the user thinks curtailment is broken.
+
+        Three resolution paths in order of preference:
+          1. Cached value from a previous resolve.
+          2. GET /ivp/ss/dpel — existing settings sometimes include the
+             value the gateway expects to see echoed back.
+          3. Sum maxReportWatts across all microinverters from
+             /api/v1/production/inverters.
+        """
+        if self._installed_capacity_w is not None and self._installed_capacity_w > 0:
+            return self._installed_capacity_w
+
+        # Path 2: read what the gateway already has stored
+        try:
+            existing = await self._get_dpel_settings()
+            if isinstance(existing, dict):
+                settings = existing.get("dynamic_pel_settings", existing)
+                for key in ("installed_capacity", "installed_capacity_W", "installedCapacity"):
+                    val = settings.get(key) if isinstance(settings, dict) else None
+                    if val is not None:
+                        try:
+                            cap = float(val)
+                            if cap > 0:
+                                self._installed_capacity_w = cap
+                                _LOGGER.info(
+                                    "Discovered installed_capacity from /ivp/ss/dpel: %sW", cap
+                                )
+                                return cap
+                        except (TypeError, ValueError):
+                            pass
+        except Exception as err:
+            _LOGGER.debug("DPEL settings read for capacity failed: %s", err)
+
+        # Path 3: sum microinverter ratings
+        try:
+            inverters = await self._get(self.ENDPOINT_INVERTERS)
+            if isinstance(inverters, list) and inverters:
+                total = 0.0
+                for inv in inverters:
+                    val = inv.get("maxReportWatts")
+                    if val is not None:
+                        try:
+                            total += float(val)
+                        except (TypeError, ValueError):
+                            pass
+                if total > 0:
+                    self._installed_capacity_w = total
+                    _LOGGER.info(
+                        "Computed installed_capacity from %d microinverters: %sW",
+                        len(inverters), total,
+                    )
+                    return total
+        except Exception as err:
+            _LOGGER.debug("Microinverter capacity computation failed: %s", err)
+
+        _LOGGER.warning(
+            "Could not determine installed_capacity for DPEL — falling back to "
+            "payloads without it (some Envoy firmware will reject these)"
+        )
+        return None
+
+    async def _set_dpel(self, enabled: bool, limit_watts: int = 0, use_production_limit: bool = False) -> tuple[bool, bool]:
         """Set DPEL (Device Power Export Limit) settings.
 
         Args:
@@ -1050,62 +1027,108 @@ class EnphaseController(InverterController):
         limit_type = "production" if use_production_limit else "export"
         _LOGGER.debug(f"Setting DPEL with {limit_type} limiting: {limit_watts}W")
 
-        payloads = [
-            # EU gateway format - ALL fields required based on API error responses
-            # enable_dynamic_limiting + slew_rate are mandatory
-            {
-                "dynamic_pel_settings": {
-                    "enable": enabled,
-                    "export_limit": export_limit_flag,
-                    "limit_value_W": float(limit_watts),
-                    "slew_rate": slew_rate,
-                    "enable_dynamic_limiting": True,
-                }
-            },
-            # Try with enable_dynamic_limiting False
-            {
-                "dynamic_pel_settings": {
-                    "enable": enabled,
-                    "export_limit": export_limit_flag,
-                    "limit_value_W": float(limit_watts),
-                    "slew_rate": slew_rate,
-                    "enable_dynamic_limiting": False,
-                }
-            },
+        # Resolve installed_capacity — required by some firmware (AU/NZ) for
+        # dynamic_limiting=True to actually engage. Without it the payload
+        # without installed_capacity gets a 400, then we silently fall through
+        # to the dynamic_limiting=False format which the gateway accepts but
+        # doesn't enforce — so the user thinks they're curtailed but isn't.
+        installed_capacity_w = await self._get_installed_capacity_w()
+
+        # Strategy: read the gateway's current DPEL settings, merge in the
+        # values we want to change, and POST the full thing. This handles
+        # firmware that requires extra fields (relay_config, installed_capacity,
+        # etc.) without us having to know the exhaustive list — we just echo
+        # back whatever the gateway already had.
+        merged_settings: Optional[dict] = None
+        base_settings = await self._get_dpel_base_settings()
+        if base_settings:
+            merged_settings = dict(base_settings)
+            merged_settings.update({
+                "enable": enabled,
+                "export_limit": export_limit_flag,
+                "limit_value_W": float(limit_watts),
+                "slew_rate": slew_rate,
+                "enable_dynamic_limiting": True,
+            })
+            # Make sure installed_capacity is present and correct even if the
+            # gateway returned a missing/zero value.
+            if installed_capacity_w is not None and installed_capacity_w > 0:
+                merged_settings["installed_capacity"] = float(installed_capacity_w)
+            # Some Envoy firmware (specifically gateways that have ANY
+            # relay control configured in Enlighten Manager — even with the
+            # relays sitting inert) demand a `relay_config` field on every
+            # DPEL POST, but the matching GET /ivp/ss/dpel does NOT return
+            # it, so we can't echo it back from the base settings. Send a
+            # disabled-relay sentinel by default — gateways without relay
+            # configuration ignore it, gateways with it should accept it
+            # since "no relay" is the safest neutral value. If the gateway
+            # rejects this, the user can disable the relay controls in
+            # Enlighten Manager as a workaround.
+            if "relay_config" not in merged_settings:
+                merged_settings["relay_config"] = False
+            _LOGGER.debug(
+                "Built DPEL payload by merging into gateway base: %s",
+                sorted(merged_settings.keys()),
+            )
+
+        # Build the canned primary payload (used as a fallback if the GET
+        # didn't return anything we could merge into).
+        primary_settings = {
+            "enable": enabled,
+            "export_limit": export_limit_flag,
+            "limit_value_W": float(limit_watts),
+            "slew_rate": slew_rate,
+            "enable_dynamic_limiting": True,
+        }
+        if installed_capacity_w is not None and installed_capacity_w > 0:
+            primary_settings["installed_capacity"] = float(installed_capacity_w)
+        # Same relay_config default as merged_settings — see comment above.
+        primary_settings["relay_config"] = False
+
+        payloads = []
+        # Preferred: merged payload (echoes back all gateway-required fields)
+        if merged_settings:
+            payloads.append({"dynamic_pel_settings": merged_settings})
+        payloads += [
+            # Synthesised payload with installed_capacity (AU/NZ firmware)
+            {"dynamic_pel_settings": primary_settings},
+            # Bare format — EU firmware doesn't need installed_capacity
+            {"dynamic_pel_settings": {
+                "enable": enabled,
+                "export_limit": export_limit_flag,
+                "limit_value_W": float(limit_watts),
+                "slew_rate": slew_rate,
+                "enable_dynamic_limiting": True
+            }},
+            # Try with enable_dynamic_limiting False — LAST RESORT only.
+            # Gateway accepts this without installed_capacity but doesn't
+            # enforce the limit. We keep it so we get a 200 success rather
+            # than failing entirely on unknown firmware, but the curtailment
+            # won't actually engage. Surface a warning when this hits.
+            {"dynamic_pel_settings": {
+                "enable": enabled,
+                "export_limit": export_limit_flag,
+                "limit_value_W": float(limit_watts),
+                "slew_rate": slew_rate,
+                "enable_dynamic_limiting": False
+            }},
             # Try opposite export_limit flag as fallback
-            {
-                "dynamic_pel_settings": {
-                    "enable": enabled,
-                    "export_limit": not export_limit_flag,
-                    "limit_value_W": float(limit_watts),
-                    "slew_rate": slew_rate,
-                    "enable_dynamic_limiting": True,
-                }
-            },
+            {"dynamic_pel_settings": {
+                "enable": enabled,
+                "export_limit": not export_limit_flag,
+                "limit_value_W": float(limit_watts),
+                "slew_rate": slew_rate,
+                "enable_dynamic_limiting": True
+            }},
             # Legacy formats for other firmware versions
             # D8.2.x format - 'enable' boolean + 'export_limit' as value
             {"dynamic_pel_settings": {"enable": enabled, "export_limit": limit_watts}},
             # D8.x - wrapped with 'enable' integer + 'export_limit'
-            {
-                "dynamic_pel_settings": {
-                    "enable": 1 if enabled else 0,
-                    "export_limit": limit_watts,
-                }
-            },
+            {"dynamic_pel_settings": {"enable": 1 if enabled else 0, "export_limit": limit_watts}},
             # Float export_limit (might expect decimal)
-            {
-                "dynamic_pel_settings": {
-                    "enable": enabled,
-                    "export_limit": float(limit_watts),
-                }
-            },
+            {"dynamic_pel_settings": {"enable": enabled, "export_limit": float(limit_watts)}},
             # Older D8.x - wrapped with 'enable' integer + 'limit'
-            {
-                "dynamic_pel_settings": {
-                    "enable": 1 if enabled else 0,
-                    "limit": limit_watts,
-                }
-            },
+            {"dynamic_pel_settings": {"enable": 1 if enabled else 0, "limit": limit_watts}},
             # Wrapped with 'enable' boolean + 'limit'
             {"dynamic_pel_settings": {"enable": enabled, "limit": limit_watts}},
         ]
@@ -1117,6 +1140,23 @@ class EnphaseController(InverterController):
             if success:
                 self._dpel_available = True
                 _LOGGER.debug(f"DPEL succeeded with payload: {payload}")
+                # Critical: if we succeeded with enable_dynamic_limiting=False
+                # the gateway accepted the request but isn't enforcing the
+                # limit. This used to silently fail because we logged success.
+                # Now warn loudly so the user knows curtailment isn't real.
+                settings = payload.get("dynamic_pel_settings", {}) if isinstance(payload, dict) else {}
+                if (
+                    isinstance(settings, dict)
+                    and settings.get("enable_dynamic_limiting") is False
+                ):
+                    _LOGGER.warning(
+                        "DPEL accepted with enable_dynamic_limiting=False — the "
+                        "Envoy will NOT actually limit production. This usually "
+                        "means installed_capacity could not be resolved (check "
+                        "/api/v1/production/inverters access) or the gateway "
+                        "firmware doesn't support dynamic limiting."
+                    )
+                    return False, True
                 return True, True
 
             # 404 = endpoint doesn't exist on this firmware, permanently skip
@@ -1127,9 +1167,7 @@ class EnphaseController(InverterController):
 
             # 503 = temporarily unavailable (e.g. gateway overloaded), don't mark permanent
             if status == 503:
-                _LOGGER.warning(
-                    "DPEL endpoint returned 503 (temporary) - will retry next call"
-                )
+                _LOGGER.warning("DPEL endpoint returned 503 (temporary) - will retry next call")
                 return False, True
 
             # 400 errors might be payload format issues, continue trying other formats
@@ -1153,9 +1191,7 @@ class EnphaseController(InverterController):
                 return False, True
 
         # All attempts failed but endpoint exists - might be config issue
-        _LOGGER.warning(
-            "All DPEL payload formats failed - endpoint exists but rejected all requests"
-        )
+        _LOGGER.warning("All DPEL payload formats failed - endpoint exists but rejected all requests")
         return False, True
 
     async def _get_der_settings(self) -> Optional[dict]:
@@ -1187,9 +1223,7 @@ class EnphaseController(InverterController):
         if isinstance(current, dict) and "error" in str(current).lower():
             error_str = str(current)
             if "not valid for" in error_str and "region" in error_str:
-                _LOGGER.info(
-                    f"DER endpoint returned region error - marking as unavailable: {error_str[:100]}"
-                )
+                _LOGGER.info(f"DER endpoint returned region error - marking as unavailable: {error_str[:100]}")
                 self._der_available = False
                 return False, False
 
@@ -1242,9 +1276,7 @@ class EnphaseController(InverterController):
         _LOGGER.debug(f"AGF index response: {data}")
 
         if not data:
-            _LOGGER.warning(
-                "AGF index returned no data - endpoint may require different authentication"
-            )
+            _LOGGER.warning("AGF index returned no data - endpoint may require different authentication")
             return None
 
         # Handle dict response with 'profiles' key (newer firmware)
@@ -1257,14 +1289,10 @@ class EnphaseController(InverterController):
             # Extract profiles list
             profiles_list = data.get("profiles")
             if profiles_list and isinstance(profiles_list, list):
-                _LOGGER.info(
-                    f"Available grid profiles ({len(profiles_list)}): {[p.get('profile_name', p) for p in profiles_list if isinstance(p, dict)]}"
-                )
+                _LOGGER.info(f"Available grid profiles ({len(profiles_list)}): {[p.get('profile_name', p) for p in profiles_list if isinstance(p, dict)]}")
                 return profiles_list
 
-            _LOGGER.warning(
-                f"AGF index dict missing 'profiles' key or wrong format: {list(data.keys())}"
-            )
+            _LOGGER.warning(f"AGF index dict missing 'profiles' key or wrong format: {list(data.keys())}")
             return None
 
         # Handle direct list response (older firmware)
@@ -1272,9 +1300,7 @@ class EnphaseController(InverterController):
             _LOGGER.info(f"Available grid profiles ({len(data)}): {data}")
             return data
 
-        _LOGGER.warning(
-            f"AGF index returned unexpected format: {type(data)} - {str(data)[:200]}"
-        )
+        _LOGGER.warning(f"AGF index returned unexpected format: {type(data)} - {str(data)[:200]}")
         return None
 
     async def _get_current_profile(self) -> Optional[str]:
@@ -1285,11 +1311,7 @@ class EnphaseController(InverterController):
         """
         data = await self._get(self.ENDPOINT_AGF_DETAILS)
         if data:
-            profile_name = (
-                data.get("selected_profile")
-                or data.get("profile_name")
-                or data.get("name")
-            )
+            profile_name = data.get("selected_profile") or data.get("profile_name") or data.get("name")
             if profile_name:
                 self._current_profile = profile_name
                 _LOGGER.debug(f"Current grid profile: {profile_name}")
@@ -1332,40 +1354,21 @@ class EnphaseController(InverterController):
             profile_lower = profile_name.lower()
 
             # Detect zero export profiles (case-insensitive patterns)
-            if any(
-                pattern in profile_lower
-                for pattern in [
-                    "0 kw export",
-                    "zero kw export",
-                    "zero export",
-                    "no export",
-                    "0kw export",
-                ]
-            ):
+            if any(pattern in profile_lower for pattern in ["0 kw export", "zero kw export", "zero export", "no export", "0kw export"]):
                 zero_export_profile = profile_id
-                _LOGGER.info(
-                    f"Auto-detected zero export profile: {profile_name} (id: {profile_id})"
-                )
+                _LOGGER.info(f"Auto-detected zero export profile: {profile_name} (id: {profile_id})")
 
             # Detect normal export profiles (non-zero export limits)
-            elif any(
-                pattern in profile_lower
-                for pattern in ["5 kw export", "10 kw export", "export limit"]
-            ):
+            elif any(pattern in profile_lower for pattern in ["5 kw export", "10 kw export", "export limit"]):
                 # Make sure it's not zero export
                 if "0 kw" not in profile_lower and "zero" not in profile_lower:
                     normal_profile = profile_id
-                    _LOGGER.info(
-                        f"Auto-detected normal export profile: {profile_name} (id: {profile_id})"
-                    )
+                    _LOGGER.info(f"Auto-detected normal export profile: {profile_name} (id: {profile_id})")
 
         # If we didn't find a normal profile but have a current profile that's not zero-export, use it
         if not normal_profile and current:
             current_lower = current.lower()
-            if not any(
-                pattern in current_lower
-                for pattern in ["0 kw export", "zero export", "no export"]
-            ):
+            if not any(pattern in current_lower for pattern in ["0 kw export", "zero export", "no export"]):
                 normal_profile = current
                 _LOGGER.info(f"Using current profile as normal profile: {current}")
 
@@ -1406,9 +1409,7 @@ class EnphaseController(InverterController):
                 missing.append("zero_export_profile")
             if not self._normal_profile:
                 missing.append("normal_profile")
-            _LOGGER.warning(
-                f"Could not auto-detect profiles: {', '.join(missing)} not found"
-            )
+            _LOGGER.warning(f"Could not auto-detect profiles: {', '.join(missing)} not found")
             return False
 
     def _normalize_profile_name(self, profile_name: str) -> str:
@@ -1418,16 +1419,13 @@ class EnphaseController(InverterController):
         E.g., "Profile Name (1.3.10)" -> "Profile Name:1.3.10"
         """
         import re
-
         # Match pattern like " (1.3.10)" at the end and convert to ":1.3.10"
-        match = re.search(r"\s+\((\d+\.\d+\.\d+)\)$", profile_name)
+        match = re.search(r'\s+\((\d+\.\d+\.\d+)\)$', profile_name)
         if match:
             version = match.group(1)
-            base_name = profile_name[: match.start()]
+            base_name = profile_name[:match.start()]
             normalized = f"{base_name}:{version}"
-            _LOGGER.debug(
-                f"Normalized profile name: '{profile_name}' -> '{normalized}'"
-            )
+            _LOGGER.debug(f"Normalized profile name: '{profile_name}' -> '{normalized}'")
             return normalized
         return profile_name
 
@@ -1562,67 +1560,62 @@ class EnphaseController(InverterController):
             # Method 1: Try DPEL endpoint first (fastest, most dynamic) - for backward compatibility
             # For systems with zero export profile as base, disabling DPEL falls back to zero export
             if self._dpel_available is not False:
-                _LOGGER.debug(
-                    f"Trying DPEL endpoint for curtailment (limit={export_limit_w}W)"
-                )
+                _LOGGER.debug(f"Trying DPEL endpoint for curtailment (limit={export_limit_w}W)")
                 # For load-following, use PRODUCTION limiting (export_limit=False) to cap total output
                 # For zero-export, use EXPORT limiting (export_limit=True) to block grid exports
                 use_production_limit = export_limit_w > 0
                 # First try: enable DPEL with calculated limit (0 for zero export, home_load for load following)
-                success, available = await self._set_dpel(
-                    enabled=True,
-                    limit_watts=export_limit_w,
-                    use_production_limit=use_production_limit,
-                )
+                success, available = await self._set_dpel(enabled=True, limit_watts=export_limit_w, use_production_limit=use_production_limit)
                 if success:
                     if export_limit_w > 0:
-                        _LOGGER.info(
-                            f"Successfully curtailed Enphase system at {self.host} via DPEL (load following: {export_limit_w}W)"
-                        )
+                        _LOGGER.info(f"Successfully curtailed Enphase system at {self.host} via DPEL (load following: {export_limit_w}W)")
                     else:
+                        _LOGGER.info(f"Successfully curtailed Enphase system at {self.host} via DPEL (zero export)")
+                    self._dpel_supported = True
+                    await asyncio.sleep(1)
+                    return True
+                # Second try: disable DPEL — only safe if the gateway's BASE
+                # grid profile is itself zero-export. On most Australian
+                # installs the base profile allows full export, so disabling
+                # DPEL just turns curtailment OFF entirely. Skip this branch
+                # for load-following (where we wanted to actively limit, not
+                # fall back to a profile) and only attempt it for zero-export
+                # mode where the user explicitly opted into a zero-export
+                # base profile.
+                if export_limit_w == 0:
+                    success, available = await self._set_dpel(enabled=False, limit_watts=0)
+                    if success:
                         _LOGGER.info(
-                            f"Successfully curtailed Enphase system at {self.host} via DPEL (zero export)"
+                            f"Successfully curtailed Enphase system at {self.host} via DPEL "
+                            f"(disabled, falling back to base grid profile)"
                         )
-                    self._dpel_supported = True
-                    await asyncio.sleep(1)
-                    return True
-                # Second try: disable DPEL (for systems with zero export profile as base)
-                success, available = await self._set_dpel(enabled=False, limit_watts=0)
-                if success:
-                    _LOGGER.info(
-                        f"Successfully curtailed Enphase system at {self.host} via DPEL (disabled, using profile)"
+                        self._dpel_supported = True
+                        await asyncio.sleep(1)
+                        return True
+                else:
+                    _LOGGER.warning(
+                        "DPEL load-following payload was rejected by the gateway. "
+                        "Skipping the disable-DPEL fallback because it would let "
+                        "the inverter export freely on most installs."
                     )
-                    self._dpel_supported = True
-                    await asyncio.sleep(1)
-                    return True
                 if not available:
-                    _LOGGER.info(
-                        "DPEL endpoint not available on this gateway (503/404), will use fallback methods"
-                    )
+                    _LOGGER.info("DPEL endpoint not available on this gateway (503/404), will use fallback methods")
             else:
                 _LOGGER.debug("DPEL known to be unavailable, skipping")
 
             # Method 2: Try DER settings as second option
             if self._der_available is not False:
-                _LOGGER.debug(
-                    f"Trying DER settings for curtailment (limit={export_limit_w}W)"
-                )
+                _LOGGER.debug(f"Trying DER settings for curtailment (limit={export_limit_w}W)")
                 success, available = await self._set_der_export_limit(export_limit_w)
                 if success:
                     if export_limit_w > 0:
-                        _LOGGER.info(
-                            f"Successfully curtailed Enphase system at {self.host} via DER (load following: {export_limit_w}W)"
-                        )
+                        _LOGGER.info(f"Successfully curtailed Enphase system at {self.host} via DER (load following: {export_limit_w}W)")
                     else:
-                        _LOGGER.info(
-                            f"Successfully curtailed Enphase system at {self.host} via DER (zero export)"
-                        )
+                        _LOGGER.info(f"Successfully curtailed Enphase system at {self.host} via DER (zero export)")
                     await asyncio.sleep(1)
                     return True
                 if not available:
-                    _LOGGER.info(
-                        "DER endpoint not available (503/404 or region error), will use AGF profile switching"
-                    )
+                    _LOGGER.info("DER endpoint not available (503/404 or region error), will use AGF profile switching")
             else:
                 _LOGGER.debug("DER known to be unavailable, skipping")
 
@@ -1630,30 +1623,22 @@ class EnphaseController(InverterController):
             # This is the modern replacement for DPEL and works on most recent firmware
             # NOTE: AGF profile switching only supports zero export, not load following
             if export_limit_w > 0:
-                _LOGGER.warning(
-                    f"Load following ({export_limit_w}W) requested but DPEL/DER unavailable. "
-                    f"AGF profile switching only supports zero export mode."
-                )
+                _LOGGER.warning(f"Load following ({export_limit_w}W) requested but DPEL/DER unavailable. "
+                               f"AGF profile switching only supports zero export mode.")
             # First, fetch and log available profiles for debugging
             available_profiles = await self._get_available_profiles()
             if available_profiles:
-                _LOGGER.info(
-                    f"Available AGF grid profiles on gateway: {available_profiles}"
-                )
+                _LOGGER.info(f"Available AGF grid profiles on gateway: {available_profiles}")
             else:
                 _LOGGER.warning("Could not fetch available AGF profiles from gateway")
 
             # Auto-detect profiles if not manually configured
             if not self._zero_export_profile:
-                _LOGGER.debug(
-                    "No zero export profile configured, attempting auto-detection"
-                )
+                _LOGGER.debug("No zero export profile configured, attempting auto-detection")
                 await self._ensure_profiles_configured()
 
             if self._zero_export_profile:
-                _LOGGER.debug(
-                    f"Trying AGF profile switching to zero export profile: {self._zero_export_profile}"
-                )
+                _LOGGER.debug(f"Trying AGF profile switching to zero export profile: {self._zero_export_profile}")
                 success, available = await self._switch_to_zero_export_profile()
                 if success:
                     _LOGGER.info(
@@ -1663,13 +1648,9 @@ class EnphaseController(InverterController):
                     await asyncio.sleep(5)
                     return True
                 if not available:
-                    _LOGGER.warning(
-                        "AGF endpoint also not available - no curtailment methods work on this gateway"
-                    )
+                    _LOGGER.warning("AGF endpoint also not available - no curtailment methods work on this gateway")
             else:
-                _LOGGER.debug(
-                    "No zero export profile available (manual or auto-detected) for AGF fallback"
-                )
+                _LOGGER.debug("No zero export profile available (manual or auto-detected) for AGF fallback")
 
             # All methods failed
             methods_tried = []
@@ -1725,13 +1706,9 @@ class EnphaseController(InverterController):
                 # 99999W first (effectively unlimited), then fall back to smaller values
                 for limit_value in [50000]:
                     _LOGGER.debug(f"Trying DPEL restore with limit={limit_value}")
-                    success, available = await self._set_dpel(
-                        enabled=True, limit_watts=limit_value
-                    )
+                    success, available = await self._set_dpel(enabled=True, limit_watts=limit_value)
                     if success:
-                        _LOGGER.info(
-                            f"Successfully restored Enphase system at {self.host} via DPEL (limit={limit_value})"
-                        )
+                        _LOGGER.info(f"Successfully restored Enphase system at {self.host} via DPEL (limit={limit_value})")
                         await asyncio.sleep(1)
                         return True
                     if not available:
@@ -1739,34 +1716,24 @@ class EnphaseController(InverterController):
                 # If enabling with high limit fails, try disabling (for normal profile base)
                 success, available = await self._set_dpel(enabled=False, limit_watts=0)
                 if success:
-                    _LOGGER.info(
-                        f"Successfully restored Enphase system at {self.host} via DPEL (disabled)"
-                    )
+                    _LOGGER.info(f"Successfully restored Enphase system at {self.host} via DPEL (disabled)")
                     await asyncio.sleep(1)
                     return True
                 if not available:
-                    _LOGGER.info(
-                        "DPEL endpoint not available on this gateway, will use fallback methods"
-                    )
+                    _LOGGER.info("DPEL endpoint not available on this gateway, will use fallback methods")
             else:
                 _LOGGER.debug("DPEL known to be unavailable, skipping")
 
             # Method 2: Try DER settings (set high limit to effectively disable)
             if self._der_available is not False:
                 _LOGGER.debug("Trying DER settings for restore")
-                success, available = await self._set_der_export_limit(
-                    100000
-                )  # 100kW effectively unlimited
+                success, available = await self._set_der_export_limit(100000)  # 100kW effectively unlimited
                 if success:
-                    _LOGGER.info(
-                        f"Successfully restored Enphase system at {self.host} via DER"
-                    )
+                    _LOGGER.info(f"Successfully restored Enphase system at {self.host} via DER")
                     await asyncio.sleep(1)
                     return True
                 if not available:
-                    _LOGGER.info(
-                        "DER endpoint not available, will use AGF profile switching"
-                    )
+                    _LOGGER.info("DER endpoint not available, will use AGF profile switching")
             else:
                 _LOGGER.debug("DER known to be unavailable, skipping")
 
@@ -1777,9 +1744,7 @@ class EnphaseController(InverterController):
                 await self._ensure_profiles_configured()
 
             if self._normal_profile:
-                _LOGGER.debug(
-                    f"Trying AGF profile switching to normal profile: {self._normal_profile}"
-                )
+                _LOGGER.debug(f"Trying AGF profile switching to normal profile: {self._normal_profile}")
                 success, available = await self._switch_to_normal_profile()
                 if success:
                     _LOGGER.info(
@@ -1789,13 +1754,9 @@ class EnphaseController(InverterController):
                     await asyncio.sleep(5)
                     return True
                 if not available:
-                    _LOGGER.warning(
-                        "AGF endpoint also not available - no restore methods work on this gateway"
-                    )
+                    _LOGGER.warning("AGF endpoint also not available - no restore methods work on this gateway")
             else:
-                _LOGGER.debug(
-                    "No normal profile available (manual or auto-detected) for AGF fallback"
-                )
+                _LOGGER.debug("No normal profile available (manual or auto-detected) for AGF fallback")
 
             # All methods failed
             _LOGGER.warning(
@@ -1844,9 +1805,7 @@ class EnphaseController(InverterController):
                 elif "wattsNow" in production:
                     attrs["production_w"] = production.get("wattsNow", 0)
                     attrs["daily_production_wh"] = production.get("wattHoursToday", 0)
-                    attrs["lifetime_production_wh"] = production.get(
-                        "wattHoursLifetime", 0
-                    )
+                    attrs["lifetime_production_wh"] = production.get("wattHoursLifetime", 0)
 
             # Get inverter count
             inverters = await self._get(self.ENDPOINT_INVERTERS)

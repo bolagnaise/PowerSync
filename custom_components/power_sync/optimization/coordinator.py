@@ -993,11 +993,38 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
                     return
 
-                # Optimizer-triggered: check if LP still wants the same action
-                lp_matches_force = (
-                    (force_type == "discharge" and action.action in ("discharge", "export"))
-                    or (force_type == "charge" and action.action == "charge")
-                )
+                # Optimizer-triggered: check if LP still wants the same action.
+                # LP degeneracy in flat-price windows (e.g. 14-18c midday) means
+                # the LP is indifferent about WHICH specific 5-min slot to charge
+                # in, so it may shuffle action[t=0] between charge and
+                # self_consumption while still planning to charge within the
+                # same cheap window. Canceling the already-uploaded tariff in
+                # that case is pure waste — check a short lookahead (~20 min,
+                # 4 intervals at 5-min) before canceling. A 20-min window
+                # captures slot-shuffles that bounce back within 3-4 LP cycles
+                # while still permitting cancellation when LP genuinely
+                # commits to a sustained non-force action.
+                def _action_matches_force(a) -> bool:
+                    return (
+                        (force_type == "discharge" and a.action in ("discharge", "export"))
+                        or (force_type == "charge" and a.action == "charge")
+                    )
+
+                lp_matches_force = _action_matches_force(action)
+
+                if not lp_matches_force and self._current_schedule and self._current_schedule.actions:
+                    for _i, _a in enumerate(self._current_schedule.actions):
+                        if _a.timestamp == action.timestamp:
+                            _lookahead = self._current_schedule.actions[_i + 1:_i + 5]
+                            if any(_action_matches_force(_la) for _la in _lookahead):
+                                lp_matches_force = True
+                                _LOGGER.info(
+                                    "Optimizer: LP shuffled action[t=0] to %s but still "
+                                    "plans %s within next ~20 min — keeping force %s "
+                                    "active (slot-shuffle protection)",
+                                    action.action, force_type, force_type,
+                                )
+                            break
                 if lp_matches_force:
                     # Extend the expiry timer so the force mode doesn't expire
                     # between optimizer cycles (avoids restore→re-issue gap).

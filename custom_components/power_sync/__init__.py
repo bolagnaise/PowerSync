@@ -7637,8 +7637,48 @@ class WeatherSolcastSettingsView(HomeAssistantView):
             if "solcast_resource_id" in data:
                 new_options[CONF_SOLCAST_RESOURCE_ID] = data["solcast_resource_id"]
 
+            # Determine whether any solcast-related setting changed OR whether the
+            # coordinator is missing despite valid config. Either case requires a
+            # reload to (re)initialize SolcastForecastCoordinator, which is only
+            # created inside async_setup_entry.
+            solcast_keys = (CONF_SOLCAST_ENABLED, CONF_SOLCAST_API_KEY, CONF_SOLCAST_RESOURCE_ID)
+            solcast_changed = any(
+                entry.options.get(k) != new_options.get(k) for k in solcast_keys
+            )
+
+            entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            coordinator_missing = (
+                bool(new_options.get(CONF_SOLCAST_ENABLED))
+                and bool(new_options.get(CONF_SOLCAST_API_KEY))
+                and bool(new_options.get(CONF_SOLCAST_RESOURCE_ID))
+                and entry_data.get("solcast_coordinator") is None
+                and "solcast_solar" not in self._hass.config.components
+            )
+
             self._hass.config_entries.async_update_entry(entry, options=new_options)
-            _LOGGER.info("Weather/Solcast settings updated from mobile app")
+            _LOGGER.info(
+                "Weather/Solcast settings updated from mobile app "
+                "(solcast_changed=%s, coordinator_missing=%s, api_key=%s, resource_id=%s, enabled=%s)",
+                solcast_changed,
+                coordinator_missing,
+                "set" if new_options.get(CONF_SOLCAST_API_KEY) else "empty",
+                "set" if new_options.get(CONF_SOLCAST_RESOURCE_ID) else "empty",
+                bool(new_options.get(CONF_SOLCAST_ENABLED)),
+            )
+
+            # Force reload if solcast config changed or coordinator wasn't created
+            # at startup. async_update_entry only fires the update listener when
+            # HA detects a diff, so re-submitting identical values wouldn't reload
+            # even when the coordinator is missing.
+            if solcast_changed or coordinator_missing:
+                _LOGGER.info(
+                    "Reloading PowerSync to (re)initialize Solcast coordinator "
+                    "(changed=%s, missing=%s)",
+                    solcast_changed, coordinator_missing,
+                )
+                self._hass.async_create_task(
+                    self._hass.config_entries.async_reload(entry.entry_id)
+                )
 
             return web.json_response({"success": True})
         except Exception as e:
