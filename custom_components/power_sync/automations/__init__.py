@@ -535,9 +535,20 @@ class AutomationEngine:
         entry_id = self._config_entry.entry_id
         if DOMAIN in self._hass.data and entry_id in self._hass.data[DOMAIN]:
             data = self._hass.data[DOMAIN][entry_id]
-            # Use tesla_coordinator for Tesla users, sigenergy_coordinator for Sigenergy users
-            coordinator = data.get("tesla_coordinator") or data.get(
-                "sigenergy_coordinator"
+            # Pick whichever battery-brand coordinator is populated for this site.
+            # Automations must work for every supported battery brand, not just
+            # Tesla + Sigenergy — FoxESS/Sungrow/GoodWe sites were silently
+            # failing every battery_level condition with "Battery level
+            # unavailable" because their coordinators were never consulted.
+            # All coordinators publish the same data keys (battery_level,
+            # solar_power, battery_power, grid_power, load_power, etc.) so
+            # picking the first one that has data works uniformly.
+            coordinator = (
+                data.get("tesla_coordinator")
+                or data.get("sigenergy_coordinator")
+                or data.get("sungrow_coordinator")
+                or data.get("foxess_coordinator")
+                or data.get("goodwe_coordinator")
             )
 
             if coordinator and coordinator.data:

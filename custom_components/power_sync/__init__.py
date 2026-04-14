@@ -7596,10 +7596,20 @@ class WeatherSolcastSettingsView(HomeAssistantView):
         elif external_solcast:
             solcast_source = "integration"
 
+        # Pick up any init error the coordinator cached at setup so the app
+        # can display the real failure reason (e.g. "API key does not match
+        # an active account") instead of silently reporting success while
+        # Solcast isn't actually working.
+        domain_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        solcast_init_error = domain_data.get("solcast_init_error") if isinstance(domain_data, dict) else None
+        solcast_coord = domain_data.get("solcast_coordinator") if isinstance(domain_data, dict) else None
+        solcast_active = bool(solcast_coord is not None or external_solcast)
+
         _LOGGER.info(
-            "Weather/Solcast GET: source=%s, builtin_enabled=%s, external_detected=%s, api_key=%s",
+            "Weather/Solcast GET: source=%s, builtin_enabled=%s, external_detected=%s, api_key=%s, active=%s, init_error=%s",
             solcast_source, builtin_enabled, external_solcast,
             "set" if opts.get(CONF_SOLCAST_API_KEY) else "empty",
+            solcast_active, bool(solcast_init_error),
         )
         return web.json_response({
             "success": True,
@@ -7609,6 +7619,8 @@ class WeatherSolcastSettingsView(HomeAssistantView):
             "solcast_source": solcast_source,
             "solcast_api_key": opts.get(CONF_SOLCAST_API_KEY, ""),
             "solcast_resource_id": opts.get(CONF_SOLCAST_RESOURCE_ID, ""),
+            "solcast_active": solcast_active,
+            "solcast_error": solcast_init_error,
         })
 
     async def post(self, request: web.Request) -> web.Response:
@@ -7633,9 +7645,9 @@ class WeatherSolcastSettingsView(HomeAssistantView):
             if "solcast_enabled" in data:
                 new_options[CONF_SOLCAST_ENABLED] = bool(data["solcast_enabled"])
             if "solcast_api_key" in data:
-                new_options[CONF_SOLCAST_API_KEY] = data["solcast_api_key"]
+                new_options[CONF_SOLCAST_API_KEY] = (data["solcast_api_key"] or "").strip()
             if "solcast_resource_id" in data:
-                new_options[CONF_SOLCAST_RESOURCE_ID] = data["solcast_resource_id"]
+                new_options[CONF_SOLCAST_RESOURCE_ID] = (data["solcast_resource_id"] or "").strip()
 
             # Determine whether any solcast-related setting changed OR whether the
             # coordinator is missing despite valid config. Either case requires a
@@ -13100,15 +13112,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_SOLCAST_ENABLED,
         entry.data.get(CONF_SOLCAST_ENABLED, False)
     )
-    solcast_api_key = entry.options.get(
+    # Strip whitespace defensively — users often paste the API key from the
+    # Solcast Toolkit dashboard with a trailing space or newline that silently
+    # breaks every auth request with an unhelpful "authentication failed - check
+    # API key" error. Resource IDs are already split+stripped inside the
+    # coordinator, but the raw api_key wasn't.
+    solcast_api_key = (entry.options.get(
         CONF_SOLCAST_API_KEY,
         entry.data.get(CONF_SOLCAST_API_KEY, "")
-    )
-    solcast_resource_id = entry.options.get(
+    ) or "").strip()
+    solcast_resource_id = (entry.options.get(
         CONF_SOLCAST_RESOURCE_ID,
         entry.data.get(CONF_SOLCAST_RESOURCE_ID, "")
-    )
+    ) or "").strip()
 
+    solcast_init_error: str | None = None
     if solcast_integration_installed:
         _LOGGER.info(
             "Solcast Solar integration detected - using its data instead of PowerSync's own coordinator "
@@ -13130,6 +13148,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
         except Exception as e:
             _LOGGER.error("Failed to initialize Solcast coordinator: %s", e)
+            # Cache the failure reason so the mobile app's
+            # /api/power_sync/weather/settings GET can show it to the user
+            # instead of silently returning success while the optimizer logs
+            # "Solcast forecast not available" forever.
+            solcast_init_error = str(e)
             solcast_coordinator = None
 
     # Initialize Octopus Energy UK Price Coordinator if configured
@@ -13277,6 +13300,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "generic_aemo_spike_manager": generic_aemo_spike_manager,  # For non-Tesla AEMO spike detection
         "aemo_sensor_coordinator": aemo_sensor_coordinator,  # For Flow Power AEMO-only mode
         "solcast_coordinator": solcast_coordinator,  # For Solcast solar forecasting
+        "solcast_init_error": solcast_init_error,  # Last init failure reason, surfaced to mobile app
         "octopus_coordinator": octopus_coordinator,  # For Octopus Energy UK pricing
         "localvolts_coordinator": localvolts_coordinator,  # For Localvolts pricing
         "epex_coordinator": epex_coordinator,  # For EPEX Day-Ahead EU pricing

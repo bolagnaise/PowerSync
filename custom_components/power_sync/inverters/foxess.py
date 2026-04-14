@@ -796,6 +796,18 @@ class FoxESSController(InverterController):
                 max_discharge_a = None
             attrs["max_discharge_current_a"] = max_discharge_a
 
+            # Battery pack voltage — needed so force_charge/force_discharge can
+            # convert the inverter's configured max current to an accurate
+            # power_w. Without this we had to assume a conservative 300 V, which
+            # underestimated HV packs (FoxESS CQ6 ≈ 500 V nominal) and capped
+            # H3-Pro 25 kW systems at ~15 kW = 50 A × 300 V.
+            battery_voltage_v = None
+            if reg.battery_voltage:
+                bv_raw = await self._read_data_register(reg.battery_voltage, 1)
+                if bv_raw:
+                    battery_voltage_v = bv_raw[0] / GAIN_VOLTAGE
+            attrs["battery_voltage_v"] = battery_voltage_v
+
             is_curtailed = False  # Determined by export limit state if tracked
 
             return InverterState(

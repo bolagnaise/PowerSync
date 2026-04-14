@@ -3693,6 +3693,7 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
                 "min_soc": attrs.get("min_soc"),
                 "max_charge_current_a": attrs.get("max_charge_current_a"),
                 "max_discharge_current_a": attrs.get("max_discharge_current_a"),
+                "battery_voltage_v": attrs.get("battery_voltage_v"),
                 "model_family": attrs.get("model_family"),
                 "energy_summary": acc,
             }
@@ -3725,8 +3726,16 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
                 # Use inverter's configured max charge current (set via FoxESS app)
                 max_charge_a = self.data.get("max_charge_current_a")
                 if max_charge_a and max_charge_a > 0:
-                    power_w = max_charge_a * 300  # Conservative voltage estimate
-                    _LOGGER.info("FoxESS force_charge using inverter max: %.0fA → %.0fW", max_charge_a, power_w)
+                    # Prefer the live battery pack voltage over a fixed 300 V
+                    # estimate. H3-Pro with a FoxESS CQ6 HV pack runs ~500 V,
+                    # so 300 V caps a 50 A × 500 V = 25 kW system at 15 kW.
+                    v = self.data.get("battery_voltage_v")
+                    voltage = v if isinstance(v, (int, float)) and v > 100 else 300
+                    power_w = max_charge_a * voltage
+                    _LOGGER.info(
+                        "FoxESS force_charge using inverter max: %.0fA × %.0fV → %.0fW",
+                        max_charge_a, voltage, power_w,
+                    )
             if power_w <= 0:
                 power_w = 5000  # Fallback default
             return await self._controller.force_charge(duration_minutes, power_w=power_w)
@@ -3744,8 +3753,13 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
                 # Use inverter's configured max discharge current (set via FoxESS app)
                 max_discharge_a = self.data.get("max_discharge_current_a")
                 if max_discharge_a and max_discharge_a > 0:
-                    power_w = max_discharge_a * 300  # Conservative voltage estimate
-                    _LOGGER.info("FoxESS force_discharge using inverter max: %.0fA → %.0fW", max_discharge_a, power_w)
+                    v = self.data.get("battery_voltage_v")
+                    voltage = v if isinstance(v, (int, float)) and v > 100 else 300
+                    power_w = max_discharge_a * voltage
+                    _LOGGER.info(
+                        "FoxESS force_discharge using inverter max: %.0fA × %.0fV → %.0fW",
+                        max_discharge_a, voltage, power_w,
+                    )
             if power_w <= 0:
                 power_w = 5000  # Fallback default
             return await self._controller.force_discharge(duration_minutes, power_w=power_w)
@@ -4175,7 +4189,20 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
 
         async with self._session.get(url, headers=headers, params=params) as response:
             if response.status == 401:
-                raise UpdateFailed("Solcast API authentication failed - check API key")
+                # Most common cause: user pasted a stale/rotated API key, or
+                # the resource_id belongs to a different Solcast account than
+                # the API key does. Surface key prefix + resource so the user
+                # can at least tell that the right values reached the API.
+                key_preview = (
+                    f"{self._api_key[:4]}…{self._api_key[-4:]}"
+                    if len(self._api_key) > 8 else "<short>"
+                )
+                raise UpdateFailed(
+                    "Solcast API 401 Unauthorized — API key does not match an "
+                    "active account, or resource_id belongs to a different "
+                    "account. Verify both at toolkit.solcast.com.au → API "
+                    f"Management. (key={key_preview}, resource={resource_id})"
+                )
             if response.status == 429:
                 self._rate_limited = True
                 self._last_rate_limit_time = dt_util.now()
