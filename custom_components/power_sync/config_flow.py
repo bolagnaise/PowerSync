@@ -268,10 +268,8 @@ from .const import (
     CONF_OPTIMIZATION_ENABLED,
     CONF_OPTIMIZATION_COST_FUNCTION,
     CONF_OPTIMIZATION_BACKUP_RESERVE,
-    CONF_OPTIMIZATION_MAX_SOC,
     COST_FUNCTION_COST,
     DEFAULT_OPTIMIZATION_BACKUP_RESERVE,
-    DEFAULT_OPTIMIZATION_MAX_SOC,
     # Optimization provider selection
     CONF_OPTIMIZATION_PROVIDER,
     OPT_PROVIDER_NATIVE,
@@ -541,7 +539,7 @@ def _build_tesla_ev_provider_choices(hass: HomeAssistant) -> dict[str, str]:
         teslemetry_label += " — will ask for API token"
 
     return {
-        TESLA_EV_API_PROVIDER_NONE: "None — Powerwall only, no vehicle commands",
+        TESLA_EV_API_PROVIDER_NONE: "None — BLE/OCPP, Powerwall only",
         TESLA_EV_API_PROVIDER_FLEET_API: fleet_label,
         TESLA_EV_API_PROVIDER_TESLEMETRY: teslemetry_label,
     }
@@ -749,8 +747,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         await self.async_set_unique_id(DOMAIN)
         self._abort_if_unique_id_configured()
 
-        # Battery system selection is the first step
-        return await self.async_step_battery_system()
+        # Electricity provider selection is the first step
+        return await self.async_step_provider_selection()
 
     async def async_step_reauth(self, entry_data: dict[str, Any]) -> FlowResult:
         """Handle reauthentication when the stored token is no longer valid.
@@ -968,22 +966,44 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._amber_data = {}
             self._aemo_only_mode = False
 
-            # Route directly to battery setup (skip tariff/portal steps)
-            return await self._route_to_battery_setup()
+            # Route to battery system selection
+            return await self.async_step_battery_system()
 
         return self.async_show_form(
             step_id="flow_power_setup",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_FLOW_POWER_STATE, default="QLD1"): vol.In(
-                        FLOW_POWER_STATES
+                    vol.Required(CONF_FLOW_POWER_STATE, default="QLD1"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=k, label=v)
+                                for k, v in FLOW_POWER_STATES.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
                     ),
                     vol.Required(
                         CONF_NETWORK_TARIFF_COMBINED, default="energex:6900"
-                    ): vol.In(ALL_NETWORK_TARIFFS),
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=k, label=v)
+                                for k, v in ALL_NETWORK_TARIFFS.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
                     vol.Required(
                         CONF_FLOW_POWER_BASE_RATE, default=FLOW_POWER_DEFAULT_BASE_RATE
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0.0,
+                            max=100.0,
+                            step=0.01,
+                            unit_of_measurement="c/kWh",
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
                 }
             ),
             errors=errors,
@@ -1149,17 +1169,29 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     region,
                 )
 
-                # Route directly to battery setup (skip saving sessions)
-                return await self._route_to_battery_setup()
+                # Route to battery system selection
+                return await self.async_step_battery_system()
 
         # Build form schema
         data_schema = vol.Schema(
             {
-                vol.Required(CONF_OCTOPUS_PRODUCT, default="agile"): vol.In(
-                    OCTOPUS_PRODUCTS
+                vol.Required(CONF_OCTOPUS_PRODUCT, default="agile"): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in OCTOPUS_PRODUCTS.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
                 ),
-                vol.Required(CONF_OCTOPUS_REGION, default="C"): vol.In(
-                    OCTOPUS_GSP_REGIONS
+                vol.Required(CONF_OCTOPUS_REGION, default="C"): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in OCTOPUS_GSP_REGIONS.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
                 ),
             }
         )
@@ -1206,8 +1238,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_AMBER_FORECAST_TYPE: "predicted",
                     }
                     _LOGGER.info(f"Auto-selected Amber site: {amber_site_id}")
-                # Route directly to battery setup (skip amber_settings)
-                return await self._route_to_battery_setup()
+                # Route to battery system selection
+                return await self.async_step_battery_system()
             else:
                 errors["base"] = validation_result.get("error", "unknown")
 
@@ -1270,8 +1302,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     export_rate,
                 )
 
-                # Route directly to battery setup (skip amber_settings)
-                return await self._route_to_battery_setup()
+                # Route to battery system selection
+                return await self.async_step_battery_system()
 
         data_schema = vol.Schema(
             {
@@ -1323,8 +1355,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
             if validation["success"]:
                 self._localvolts_data = user_input
-                # Route directly to battery setup (skip amber_settings)
-                return await self._route_to_battery_setup()
+                # Route to battery system selection
+                return await self.async_step_battery_system()
             else:
                 errors["base"] = validation.get("error", "cannot_connect")
 
@@ -1388,8 +1420,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if provider == OPT_PROVIDER_POWERSYNC:
                 return await self.async_step_ml_options()
             else:
-                # User wants native battery optimization - proceed to electricity provider
-                return await self.async_step_provider_selection()
+                # User wants native battery optimization - proceed to battery connection
+                return await self._route_to_battery_setup()
 
         # Get the native optimization name based on battery system
         native_name = OPTIMIZATION_PROVIDER_NATIVE_NAMES.get(
@@ -1428,8 +1460,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_ml_options(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Configure Smart Optimization options - backup reserve and max SOC."""
-        errors: dict[str, str] = {}
+        """Configure Smart Optimization options - backup reserve."""
         if user_input is not None:
             self._ml_options = {
                 CONF_OPTIMIZATION_COST_FUNCTION: COST_FUNCTION_COST,
@@ -1438,20 +1469,9 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
                 )
                 / 100.0,
-                CONF_OPTIMIZATION_MAX_SOC: user_input.get(
-                    CONF_OPTIMIZATION_MAX_SOC,
-                    int(DEFAULT_OPTIMIZATION_MAX_SOC * 100),
-                )
-                / 100.0,
             }
-            # Cross-validate: backup_reserve must be less than max_soc
-            backup_reserve = self._ml_options[CONF_OPTIMIZATION_BACKUP_RESERVE]
-            max_soc = self._ml_options[CONF_OPTIMIZATION_MAX_SOC]
-            if backup_reserve >= max_soc:
-                errors["base"] = "max_soc_below_reserve"
-            else:
-                # Proceed to electricity provider selection
-                return await self.async_step_provider_selection()
+            # Proceed to battery connection setup
+            return await self._route_to_battery_setup()
 
         return self.async_show_form(
             step_id="ml_options",
@@ -1469,21 +1489,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             mode=NumberSelectorMode.SLIDER,
                         )
                     ),
-                    vol.Required(
-                        CONF_OPTIMIZATION_MAX_SOC,
-                        default=int(DEFAULT_OPTIMIZATION_MAX_SOC * 100),
-                    ): NumberSelector(
-                        NumberSelectorConfig(
-                            min=50,
-                            max=100,
-                            step=5,
-                            unit_of_measurement="%",
-                            mode=NumberSelectorMode.SLIDER,
-                        )
-                    ),
                 }
             ),
-            errors=errors,
             description_placeholders={},
         )
 
@@ -1550,11 +1557,15 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="sigenergy_credentials",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_SIGENERGY_USERNAME): str,
+                    vol.Required(CONF_SIGENERGY_USERNAME): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.TEXT)
+                    ),
                     vol.Required(CONF_SIGENERGY_PASSWORD): TextSelector(
                         TextSelectorConfig(type=TextSelectorType.PASSWORD)
                     ),
-                    vol.Optional(CONF_SIGENERGY_DEVICE_ID, default=""): str,
+                    vol.Optional(CONF_SIGENERGY_DEVICE_ID, default=""): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.TEXT)
+                    ),
                     vol.Optional(CONF_SIGENERGY_PASS_ENC): TextSelector(
                         TextSelectorConfig(type=TextSelectorType.PASSWORD)
                     ),
@@ -1600,7 +1611,9 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 step_id="sigenergy_station",
                 data_schema=vol.Schema(
                     {
-                        vol.Required(CONF_SIGENERGY_STATION_ID): str,
+                        vol.Required(CONF_SIGENERGY_STATION_ID): TextSelector(
+                            TextSelectorConfig(type=TextSelectorType.TEXT)
+                        ),
                     }
                 ),
                 errors=errors,
@@ -1614,7 +1627,15 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="sigenergy_station",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_SIGENERGY_STATION_ID): vol.In(station_options),
+                    vol.Required(CONF_SIGENERGY_STATION_ID): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=k, label=v)
+                                for k, v in station_options.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
                 }
             ),
             errors=errors,
@@ -1645,15 +1666,21 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="sigenergy_modbus",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_SIGENERGY_MODBUS_HOST): str,
+                    vol.Required(CONF_SIGENERGY_MODBUS_HOST): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.TEXT)
+                    ),
                     vol.Optional(
                         CONF_SIGENERGY_MODBUS_PORT,
                         default=DEFAULT_SIGENERGY_MODBUS_PORT,
-                    ): vol.All(int, vol.Range(min=1, max=65535)),
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=1, max=65535, step=1, mode=NumberSelectorMode.BOX)
+                    ),
                     vol.Optional(
                         CONF_SIGENERGY_MODBUS_SLAVE_ID,
                         default=DEFAULT_SIGENERGY_MODBUS_SLAVE_ID,
-                    ): vol.All(int, vol.Range(min=0, max=247)),
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=0, max=247, step=1, mode=NumberSelectorMode.BOX)
+                    ),
                 }
             ),
             errors=errors,
@@ -1700,13 +1727,17 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="sungrow",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_SUNGROW_HOST): str,
-                    vol.Optional(CONF_SUNGROW_PORT, default=DEFAULT_SUNGROW_PORT): vol.All(
-                        int, vol.Range(min=1, max=65535)
+                    vol.Required(CONF_SUNGROW_HOST): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.TEXT)
+                    ),
+                    vol.Optional(CONF_SUNGROW_PORT, default=DEFAULT_SUNGROW_PORT): NumberSelector(
+                        NumberSelectorConfig(min=1, max=65535, step=1, mode=NumberSelectorMode.BOX)
                     ),
                     vol.Optional(
                         CONF_SUNGROW_SLAVE_ID, default=DEFAULT_SUNGROW_SLAVE_ID
-                    ): vol.All(int, vol.Range(min=1, max=247)),
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=1, max=247, step=1, mode=NumberSelectorMode.BOX)
+                    ),
                 }
             ),
             errors=errors,
@@ -1733,11 +1764,14 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required(
                         CONF_FOXESS_CONNECTION_TYPE, default=FOXESS_CONNECTION_TCP
-                    ): vol.In(
-                        {
-                            FOXESS_CONNECTION_TCP: "Modbus TCP (LAN/Wi-Fi)",
-                            FOXESS_CONNECTION_SERIAL: "RS485 Serial",
-                        }
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=FOXESS_CONNECTION_TCP, label="Modbus TCP (LAN/Wi-Fi)"),
+                                SelectOptionDict(value=FOXESS_CONNECTION_SERIAL, label="RS485 Serial"),
+                            ],
+                            mode=SelectSelectorMode.LIST,
+                        )
                     ),
                 }
             ),
@@ -1792,13 +1826,17 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="foxess_tcp",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_FOXESS_HOST): str,
-                    vol.Optional(CONF_FOXESS_PORT, default=DEFAULT_FOXESS_PORT): vol.All(
-                        int, vol.Range(min=1, max=65535)
+                    vol.Required(CONF_FOXESS_HOST): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.TEXT)
+                    ),
+                    vol.Optional(CONF_FOXESS_PORT, default=DEFAULT_FOXESS_PORT): NumberSelector(
+                        NumberSelectorConfig(min=1, max=65535, step=1, mode=NumberSelectorMode.BOX)
                     ),
                     vol.Optional(
                         CONF_FOXESS_SLAVE_ID, default=DEFAULT_FOXESS_SLAVE_ID
-                    ): vol.All(int, vol.Range(min=1, max=247)),
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=1, max=247, step=1, mode=NumberSelectorMode.BOX)
+                    ),
                 }
             ),
             errors=errors,
@@ -1857,14 +1895,20 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="foxess_serial",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_FOXESS_SERIAL_PORT, default="/dev/ttyUSB0"): str,
+                    vol.Required(CONF_FOXESS_SERIAL_PORT, default="/dev/ttyUSB0"): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.TEXT)
+                    ),
                     vol.Optional(
                         CONF_FOXESS_SERIAL_BAUDRATE,
                         default=DEFAULT_FOXESS_SERIAL_BAUDRATE,
-                    ): int,
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=1200, max=115200, step=1, mode=NumberSelectorMode.BOX)
+                    ),
                     vol.Optional(
                         CONF_FOXESS_SLAVE_ID, default=DEFAULT_FOXESS_SLAVE_ID
-                    ): vol.All(int, vol.Range(min=1, max=247)),
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=1, max=247, step=1, mode=NumberSelectorMode.BOX)
+                    ),
                 }
             ),
             errors=errors,
@@ -1890,8 +1934,14 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="foxess_model",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_FOXESS_MODEL_FAMILY, default=detected): vol.In(
-                        FOXESS_MODEL_FAMILIES
+                    vol.Required(CONF_FOXESS_MODEL_FAMILY, default=detected): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=k, label=v)
+                                for k, v in FOXESS_MODEL_FAMILIES.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
                     ),
                 }
             ),
@@ -1941,7 +1991,9 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Optional(CONF_FOXESS_CLOUD_API_KEY, default=""): TextSelector(
                         TextSelectorConfig(type=TextSelectorType.PASSWORD)
                     ),
-                    vol.Optional(CONF_FOXESS_CLOUD_DEVICE_SN, default=""): str,
+                    vol.Optional(CONF_FOXESS_CLOUD_DEVICE_SN, default=""): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.TEXT)
+                    ),
                 }
             ),
             errors=errors,
@@ -1992,16 +2044,23 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="goodwe_connection",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_GOODWE_HOST): str,
-                    vol.Required(CONF_GOODWE_PROTOCOL, default="udp"): vol.In(
-                        {
-                            "udp": "UDP (WiFi dongle, port 8899)",
-                            "tcp": "TCP (LAN dongle, port 502)",
-                        }
+                    vol.Required(CONF_GOODWE_HOST): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.TEXT)
+                    ),
+                    vol.Required(CONF_GOODWE_PROTOCOL, default="udp"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value="udp", label="UDP (WiFi dongle, port 8899)"),
+                                SelectOptionDict(value="tcp", label="TCP (LAN dongle, port 502)"),
+                            ],
+                            mode=SelectSelectorMode.LIST,
+                        )
                     ),
                     vol.Required(
                         CONF_GOODWE_PORT, default=DEFAULT_GOODWE_PORT_UDP
-                    ): int,
+                    ): NumberSelector(
+                        NumberSelectorConfig(min=1, max=65535, step=1, mode=NumberSelectorMode.BOX)
+                    ),
                 }
             ),
             errors=errors,
@@ -2341,14 +2400,14 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         ),
                     }
 
-                    # Route directly to battery setup (skip custom_tariff)
-                    return await self._route_to_battery_setup()
+                    # Route to battery system selection
+                    return await self.async_step_battery_system()
             else:
                 # AEMO disabled
                 self._aemo_data = {CONF_AEMO_SPIKE_ENABLED: False}
 
-                # Route directly to battery setup
-                return await self._route_to_battery_setup()
+                # Route to battery system selection
+                return await self.async_step_battery_system()
 
         # Build region choices
         region_options = [
@@ -2556,18 +2615,30 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_NZ_DISTRIBUTION_ZONE: zone,
             }
 
-            # Route directly to battery setup (skip nz_rates — rates configured via options flow)
-            return await self._route_to_battery_setup()
+            # Route to battery system selection
+            return await self.async_step_battery_system()
 
         return self.async_show_form(
             step_id="nz_retailer",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_NZ_RETAILER, default="octopus_nz"): vol.In(
-                        NZ_RETAILERS
+                    vol.Required(CONF_NZ_RETAILER, default="octopus_nz"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=k, label=v)
+                                for k, v in NZ_RETAILERS.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
                     ),
-                    vol.Required(CONF_NZ_DISTRIBUTION_ZONE, default="vector"): vol.In(
-                        NZ_DISTRIBUTION_ZONES
+                    vol.Required(CONF_NZ_DISTRIBUTION_ZONE, default="vector"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=k, label=v)
+                                for k, v in NZ_DISTRIBUTION_ZONES.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
                     ),
                 }
             ),
@@ -2853,25 +2924,746 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             key, self.config_entry.data.get(key, default)
         )
 
+    def _save_and_finish(self, section_data: dict[str, Any]) -> FlowResult:
+        """Save a single section's data merged with existing options and finish."""
+        final = dict(self.config_entry.options)
+        final.update(section_data)
+        return self.async_create_entry(title="", data=final)
+
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step 1: Select electricity provider and battery-specific settings."""
-        # Detect battery system type
+        """Show options menu -- user picks which section to reconfigure."""
         battery_system = self.config_entry.data.get(
             CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA
         )
 
-        if battery_system == BATTERY_SYSTEM_SIGENERGY:
-            return await self.async_step_init_sigenergy(user_input)
+        # Build menu options based on current config
+        menu_options = ["pricing"]
+
+        # Battery connection settings
+        if battery_system == BATTERY_SYSTEM_TESLA:
+            menu_options.append("tesla_connection")
+        elif battery_system == BATTERY_SYSTEM_SIGENERGY:
+            menu_options.append("sigenergy_connection")
         elif battery_system == BATTERY_SYSTEM_SUNGROW:
-            return await self.async_step_init_sungrow(user_input)
+            menu_options.append("sungrow_connection")
         elif battery_system == BATTERY_SYSTEM_FOXESS:
-            return await self.async_step_init_foxess(user_input)
+            menu_options.append("foxess_connection_options")
         elif battery_system == BATTERY_SYSTEM_GOODWE:
-            return await self.async_step_init_goodwe(user_input)
-        else:
-            return await self.async_step_init_tesla(user_input)
+            menu_options.append("goodwe_connection_options")
+
+        menu_options.extend([
+            "optimization",
+            "inverter",
+            "curtailment",
+            "demand_charges",
+            "ev_charging",
+            "weather",
+        ])
+
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=menu_options,
+        )
+
+    async def async_step_pricing(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: choose or change electricity provider, then configure it."""
+        self._from_menu = True
+
+        if user_input is not None:
+            provider = user_input.get(CONF_ELECTRICITY_PROVIDER, "amber")
+            self._provider = provider
+            # Save the provider choice immediately so downstream steps see it
+            current_options = dict(self.config_entry.options)
+            current_options[CONF_ELECTRICITY_PROVIDER] = provider
+            self.hass.config_entries.async_update_entry(
+                self.config_entry, options=current_options
+            )
+
+            if provider == "amber":
+                return await self.async_step_amber_options()
+            if provider == "flow_power":
+                return await self.async_step_flow_power_options()
+            if provider in ("globird", "aemo_vpp"):
+                return await self.async_step_globird_options()
+            if provider == "localvolts":
+                return await self.async_step_localvolts_options()
+            if provider == "octopus":
+                return await self.async_step_octopus_options()
+            if provider == "epex":
+                return await self.async_step_epex_options()
+            if provider == "nz":
+                return await self.async_step_nz_options()
+            return await self.async_step_amber_options()
+
+        current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
+
+        return self.async_show_form(
+            step_id="pricing",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_ELECTRICITY_PROVIDER, default=current_provider
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=k, label=v)
+                                for k, v in ELECTRICITY_PROVIDERS.items()
+                            ],
+                            mode=SelectSelectorMode.LIST,
+                        )
+                    ),
+                }
+            ),
+        )
+
+    async def async_step_tesla_connection(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: Tesla Energy/EV API provider settings."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            tesla_provider = user_input.get(
+                CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_TESLEMETRY
+            )
+            ev_choice = user_input.get(
+                CONF_TESLA_EV_API_PROVIDER, TESLA_EV_API_PROVIDER_NONE
+            )
+
+            # Validate EV provider
+            detected = _detect_tesla_ev_integrations(self.hass)
+            if (
+                ev_choice == TESLA_EV_API_PROVIDER_FLEET_API
+                and not detected["tesla_fleet"]
+            ):
+                errors[CONF_TESLA_EV_API_PROVIDER] = "tesla_fleet_not_installed"
+            elif (
+                ev_choice == TESLA_EV_API_PROVIDER_TESLEMETRY
+                and not detected["teslemetry"]
+                and not self.config_entry.data.get(CONF_TESLA_EV_TELEMETRY_TOKEN)
+            ):
+                self._pending_init_tesla_input = dict(user_input)
+                self._tesla_connection_return = True
+                return await self.async_step_options_tesla_ev_token()
+
+            if not errors:
+                new_data = dict(self.config_entry.data)
+                new_data[CONF_TESLA_API_PROVIDER] = tesla_provider
+                new_data[CONF_TESLA_EV_API_PROVIDER] = ev_choice
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data=new_data
+                )
+
+                # If user picked PowerSync or Teslemetry, route to token step
+                self._tesla_provider = tesla_provider
+                if tesla_provider == TESLA_PROVIDER_POWERSYNC:
+                    self._tesla_connection_return = True
+                    return await self.async_step_powersync_token()
+                if tesla_provider == TESLA_PROVIDER_TESLEMETRY:
+                    self._tesla_connection_return = True
+                    return await self.async_step_teslemetry_token()
+
+                # Fleet API -- save directly
+                return self.async_create_entry(
+                    title="", data=dict(self.config_entry.options)
+                )
+
+        current_tesla_provider = self.config_entry.data.get(
+            CONF_TESLA_API_PROVIDER, TESLA_PROVIDER_TESLEMETRY
+        )
+        current_ev_provider = self.config_entry.data.get(
+            CONF_TESLA_EV_API_PROVIDER, TESLA_EV_API_PROVIDER_NONE
+        )
+
+        tesla_providers = {
+            TESLA_PROVIDER_POWERSYNC: "PowerSync (Free - sign in with Tesla, recommended)",
+            TESLA_PROVIDER_FLEET_API: "Tesla Fleet API (Free - requires Tesla Fleet integration)",
+            TESLA_PROVIDER_TESLEMETRY: "Teslemetry (~$4/month)",
+        }
+        tesla_ev_providers = _build_tesla_ev_provider_choices(self.hass)
+
+        return self.async_show_form(
+            step_id="tesla_connection",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_TESLA_API_PROVIDER,
+                        default=current_tesla_provider,
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in tesla_providers.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
+                    vol.Required(
+                        CONF_TESLA_EV_API_PROVIDER,
+                        default=current_ev_provider,
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in tesla_ev_providers.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_sigenergy_connection(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: Sigenergy Modbus connection and Cloud credentials."""
+        from .sigenergy_api import encode_sigenergy_password
+
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            modbus_host = user_input.get(CONF_SIGENERGY_MODBUS_HOST, "").strip()
+            if not modbus_host:
+                errors["base"] = "modbus_host_required"
+            else:
+                new_data = dict(self.config_entry.data)
+                new_data[CONF_SIGENERGY_MODBUS_HOST] = modbus_host
+                new_data[CONF_SIGENERGY_MODBUS_PORT] = user_input.get(
+                    CONF_SIGENERGY_MODBUS_PORT, DEFAULT_SIGENERGY_MODBUS_PORT
+                )
+                new_data[CONF_SIGENERGY_MODBUS_SLAVE_ID] = user_input.get(
+                    CONF_SIGENERGY_MODBUS_SLAVE_ID, DEFAULT_SIGENERGY_MODBUS_SLAVE_ID
+                )
+                new_data[CONF_SIGENERGY_DC_CURTAILMENT_ENABLED] = user_input.get(
+                    CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False
+                )
+                export_limit = user_input.get(CONF_SIGENERGY_EXPORT_LIMIT_KW)
+                if export_limit is not None:
+                    new_data[CONF_SIGENERGY_EXPORT_LIMIT_KW] = export_limit
+                elif CONF_SIGENERGY_EXPORT_LIMIT_KW in new_data:
+                    del new_data[CONF_SIGENERGY_EXPORT_LIMIT_KW]
+
+                # Cloud credentials
+                sigen_username = user_input.get(CONF_SIGENERGY_USERNAME, "").strip()
+                sigen_password = user_input.get(CONF_SIGENERGY_PASSWORD, "").strip()
+                sigen_pass_enc = user_input.get(CONF_SIGENERGY_PASS_ENC, "").strip()
+                sigen_device_id = user_input.get(CONF_SIGENERGY_DEVICE_ID, "").strip()
+                sigen_station_id = user_input.get(CONF_SIGENERGY_STATION_ID, "").strip()
+
+                if sigen_pass_enc:
+                    final_pass_enc = sigen_pass_enc
+                elif sigen_password:
+                    final_pass_enc = encode_sigenergy_password(sigen_password)
+                else:
+                    final_pass_enc = ""
+
+                if sigen_username:
+                    new_data[CONF_SIGENERGY_USERNAME] = sigen_username
+                if final_pass_enc:
+                    new_data[CONF_SIGENERGY_PASS_ENC] = final_pass_enc
+                if sigen_device_id:
+                    new_data[CONF_SIGENERGY_DEVICE_ID] = sigen_device_id
+                if sigen_station_id:
+                    new_data[CONF_SIGENERGY_STATION_ID] = sigen_station_id
+
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data=new_data
+                )
+                return self.async_create_entry(
+                    title="", data=dict(self.config_entry.options)
+                )
+
+        current_modbus_host = self._get_option(CONF_SIGENERGY_MODBUS_HOST, "")
+        current_modbus_port = self._get_option(
+            CONF_SIGENERGY_MODBUS_PORT, DEFAULT_SIGENERGY_MODBUS_PORT
+        )
+        current_modbus_slave_id = self._get_option(
+            CONF_SIGENERGY_MODBUS_SLAVE_ID, DEFAULT_SIGENERGY_MODBUS_SLAVE_ID
+        )
+        current_dc_curtailment = self._get_option(
+            CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False
+        )
+        current_export_limit = self.config_entry.data.get(
+            CONF_SIGENERGY_EXPORT_LIMIT_KW
+        )
+        current_sigen_username = self.config_entry.data.get(CONF_SIGENERGY_USERNAME, "")
+        current_sigen_device_id = self.config_entry.data.get(
+            CONF_SIGENERGY_DEVICE_ID, ""
+        )
+        current_sigen_station_id = self.config_entry.data.get(
+            CONF_SIGENERGY_STATION_ID, ""
+        )
+
+        return self.async_show_form(
+            step_id="sigenergy_connection",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_SIGENERGY_MODBUS_HOST,
+                        default=current_modbus_host,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                    vol.Optional(
+                        CONF_SIGENERGY_MODBUS_PORT,
+                        default=current_modbus_port,
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=1, max=65535, step=1, mode=NumberSelectorMode.BOX,
+                    )),
+                    vol.Optional(
+                        CONF_SIGENERGY_MODBUS_SLAVE_ID,
+                        default=current_modbus_slave_id,
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0, max=247, step=1, mode=NumberSelectorMode.BOX,
+                    )),
+                    vol.Optional(
+                        CONF_SIGENERGY_DC_CURTAILMENT_ENABLED,
+                        default=current_dc_curtailment,
+                    ): BooleanSelector(),
+                    vol.Optional(
+                        CONF_SIGENERGY_EXPORT_LIMIT_KW,
+                        description={"suggested_value": current_export_limit},
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0, max=100, step=0.1, unit_of_measurement="kW",
+                        mode=NumberSelectorMode.BOX,
+                    )),
+                    vol.Optional(
+                        CONF_SIGENERGY_USERNAME,
+                        default=current_sigen_username,
+                        description={"suggested_value": current_sigen_username},
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                    vol.Optional(
+                        CONF_SIGENERGY_PASSWORD,
+                        description={"suggested_value": ""},
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
+                    vol.Optional(
+                        CONF_SIGENERGY_PASS_ENC,
+                        description={"suggested_value": ""},
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
+                    vol.Optional(
+                        CONF_SIGENERGY_DEVICE_ID,
+                        default=current_sigen_device_id,
+                        description={"suggested_value": current_sigen_device_id},
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                    vol.Optional(
+                        CONF_SIGENERGY_STATION_ID,
+                        default=current_sigen_station_id,
+                        description={"suggested_value": current_sigen_station_id},
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_sungrow_connection(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: Sungrow Modbus connection settings."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            modbus_host = user_input.get(CONF_SUNGROW_HOST, "").strip()
+            if not modbus_host:
+                errors["base"] = "sungrow_host_required"
+            else:
+                new_data = dict(self.config_entry.data)
+                new_data[CONF_SUNGROW_HOST] = modbus_host
+                new_data[CONF_SUNGROW_PORT] = user_input.get(
+                    CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT
+                )
+                new_data[CONF_SUNGROW_SLAVE_ID] = user_input.get(
+                    CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID
+                )
+
+                host2 = user_input.get(CONF_SUNGROW_HOST_2, "").strip()
+                if host2:
+                    new_data[CONF_SUNGROW_HOST_2] = host2
+                    new_data[CONF_SUNGROW_PORT_2] = user_input.get(
+                        CONF_SUNGROW_PORT_2, DEFAULT_SUNGROW_PORT
+                    )
+                    new_data[CONF_SUNGROW_SLAVE_ID_2] = user_input.get(
+                        CONF_SUNGROW_SLAVE_ID_2, DEFAULT_SUNGROW_SLAVE_ID
+                    )
+                else:
+                    new_data.pop(CONF_SUNGROW_HOST_2, None)
+                    new_data.pop(CONF_SUNGROW_PORT_2, None)
+                    new_data.pop(CONF_SUNGROW_SLAVE_ID_2, None)
+
+                new_data[CONF_SUNGROW_GRID_INVERTER_SOC_CAP] = user_input.get(
+                    CONF_SUNGROW_GRID_INVERTER_SOC_CAP,
+                    DEFAULT_SUNGROW_GRID_INVERTER_SOC_CAP,
+                )
+                new_data[CONF_SUNGROW_BATTERY_CAPACITY_1] = user_input.get(
+                    CONF_SUNGROW_BATTERY_CAPACITY_1, DEFAULT_SUNGROW_BATTERY_CAPACITY
+                )
+                new_data[CONF_SUNGROW_BATTERY_CAPACITY_2] = user_input.get(
+                    CONF_SUNGROW_BATTERY_CAPACITY_2, DEFAULT_SUNGROW_BATTERY_CAPACITY
+                )
+
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data=new_data
+                )
+                return self.async_create_entry(
+                    title="", data=dict(self.config_entry.options)
+                )
+
+        current_host = self._get_option(CONF_SUNGROW_HOST, "")
+        current_port = self._get_option(CONF_SUNGROW_PORT, DEFAULT_SUNGROW_PORT)
+        current_slave_id = self._get_option(
+            CONF_SUNGROW_SLAVE_ID, DEFAULT_SUNGROW_SLAVE_ID
+        )
+        current_host_2 = self._get_option(CONF_SUNGROW_HOST_2, "")
+        current_port_2 = self._get_option(CONF_SUNGROW_PORT_2, DEFAULT_SUNGROW_PORT)
+        current_slave_id_2 = self._get_option(
+            CONF_SUNGROW_SLAVE_ID_2, DEFAULT_SUNGROW_SLAVE_ID
+        )
+        current_soc_cap = self._get_option(
+            CONF_SUNGROW_GRID_INVERTER_SOC_CAP, DEFAULT_SUNGROW_GRID_INVERTER_SOC_CAP
+        )
+        current_cap1 = self._get_option(
+            CONF_SUNGROW_BATTERY_CAPACITY_1, DEFAULT_SUNGROW_BATTERY_CAPACITY
+        )
+        current_cap2 = self._get_option(
+            CONF_SUNGROW_BATTERY_CAPACITY_2, DEFAULT_SUNGROW_BATTERY_CAPACITY
+        )
+
+        return self.async_show_form(
+            step_id="sungrow_connection",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_SUNGROW_HOST,
+                        default=current_host,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                    vol.Optional(
+                        CONF_SUNGROW_PORT,
+                        default=current_port,
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=1, max=65535, step=1, mode=NumberSelectorMode.BOX,
+                    )),
+                    vol.Optional(
+                        CONF_SUNGROW_SLAVE_ID,
+                        default=current_slave_id,
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=1, max=247, step=1, mode=NumberSelectorMode.BOX,
+                    )),
+                    vol.Optional(
+                        CONF_SUNGROW_HOST_2,
+                        default=current_host_2,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                    vol.Optional(
+                        CONF_SUNGROW_PORT_2,
+                        default=current_port_2,
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=1, max=65535, step=1, mode=NumberSelectorMode.BOX,
+                    )),
+                    vol.Optional(
+                        CONF_SUNGROW_SLAVE_ID_2,
+                        default=current_slave_id_2,
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=1, max=247, step=1, mode=NumberSelectorMode.BOX,
+                    )),
+                    vol.Optional(
+                        CONF_SUNGROW_GRID_INVERTER_SOC_CAP,
+                        default=current_soc_cap,
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=50, max=100, step=1, unit_of_measurement="%",
+                        mode=NumberSelectorMode.SLIDER,
+                    )),
+                    vol.Optional(
+                        CONF_SUNGROW_BATTERY_CAPACITY_1,
+                        default=current_cap1,
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=1.0, max=500.0, step=0.1, unit_of_measurement="kWh",
+                        mode=NumberSelectorMode.BOX,
+                    )),
+                    vol.Optional(
+                        CONF_SUNGROW_BATTERY_CAPACITY_2,
+                        default=current_cap2,
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=1.0, max=500.0, step=0.1, unit_of_measurement="kWh",
+                        mode=NumberSelectorMode.BOX,
+                    )),
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_foxess_connection_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: FoxESS Modbus connection settings."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            conn_type = user_input.get(
+                CONF_FOXESS_CONNECTION_TYPE, FOXESS_CONNECTION_TCP
+            )
+            modbus_host = user_input.get(CONF_FOXESS_HOST, "").strip()
+            serial_port = user_input.get(CONF_FOXESS_SERIAL_PORT, "").strip()
+
+            if conn_type == FOXESS_CONNECTION_TCP and not modbus_host:
+                errors["base"] = "foxess_host_required"
+            elif conn_type == FOXESS_CONNECTION_SERIAL and not serial_port:
+                errors["base"] = "foxess_serial_required"
+            else:
+                new_data = dict(self.config_entry.data)
+                new_data[CONF_FOXESS_CONNECTION_TYPE] = conn_type
+                if conn_type == FOXESS_CONNECTION_TCP:
+                    new_data[CONF_FOXESS_HOST] = modbus_host
+                    new_data[CONF_FOXESS_PORT] = user_input.get(
+                        CONF_FOXESS_PORT, DEFAULT_FOXESS_PORT
+                    )
+                else:
+                    new_data[CONF_FOXESS_SERIAL_PORT] = serial_port
+                    new_data[CONF_FOXESS_SERIAL_BAUDRATE] = user_input.get(
+                        CONF_FOXESS_SERIAL_BAUDRATE, DEFAULT_FOXESS_SERIAL_BAUDRATE
+                    )
+                new_data[CONF_FOXESS_SLAVE_ID] = user_input.get(
+                    CONF_FOXESS_SLAVE_ID, DEFAULT_FOXESS_SLAVE_ID
+                )
+
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data=new_data
+                )
+                return self.async_create_entry(
+                    title="", data=dict(self.config_entry.options)
+                )
+
+        current_conn_type = self._get_option(
+            CONF_FOXESS_CONNECTION_TYPE, FOXESS_CONNECTION_TCP
+        )
+        current_host = self._get_option(CONF_FOXESS_HOST, "")
+        current_port = self._get_option(CONF_FOXESS_PORT, DEFAULT_FOXESS_PORT)
+        current_slave_id = self._get_option(
+            CONF_FOXESS_SLAVE_ID, DEFAULT_FOXESS_SLAVE_ID
+        )
+        current_serial_port = self._get_option(CONF_FOXESS_SERIAL_PORT, "")
+        current_baudrate = self._get_option(
+            CONF_FOXESS_SERIAL_BAUDRATE, DEFAULT_FOXESS_SERIAL_BAUDRATE
+        )
+
+        foxess_conn_types = {
+            FOXESS_CONNECTION_TCP: "Modbus TCP",
+            FOXESS_CONNECTION_SERIAL: "RS485 Serial",
+        }
+
+        return self.async_show_form(
+            step_id="foxess_connection_options",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_FOXESS_CONNECTION_TYPE,
+                        default=current_conn_type,
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in foxess_conn_types.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
+                    vol.Optional(
+                        CONF_FOXESS_HOST,
+                        default=current_host,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                    vol.Optional(
+                        CONF_FOXESS_PORT,
+                        default=current_port,
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=1, max=65535, step=1, mode=NumberSelectorMode.BOX,
+                    )),
+                    vol.Optional(
+                        CONF_FOXESS_SLAVE_ID,
+                        default=current_slave_id,
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=1, max=247, step=1, mode=NumberSelectorMode.BOX,
+                    )),
+                    vol.Optional(
+                        CONF_FOXESS_SERIAL_PORT,
+                        default=current_serial_port,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                    vol.Optional(
+                        CONF_FOXESS_SERIAL_BAUDRATE,
+                        default=current_baudrate,
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=300, max=115200, step=1, mode=NumberSelectorMode.BOX,
+                    )),
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_goodwe_connection_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: GoodWe connection settings."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            goodwe_host = user_input.get(CONF_GOODWE_HOST, "").strip()
+            if not goodwe_host:
+                errors["base"] = "goodwe_connect_failed"
+            else:
+                new_data = dict(self.config_entry.data)
+                new_data[CONF_GOODWE_HOST] = goodwe_host
+                new_data[CONF_GOODWE_PORT] = user_input.get(
+                    CONF_GOODWE_PORT, DEFAULT_GOODWE_PORT_UDP
+                )
+                new_data[CONF_GOODWE_PROTOCOL] = user_input.get(
+                    CONF_GOODWE_PROTOCOL, "udp"
+                )
+
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data=new_data
+                )
+                return self.async_create_entry(
+                    title="", data=dict(self.config_entry.options)
+                )
+
+        current_host = self._get_option(CONF_GOODWE_HOST, "")
+        current_port = self._get_option(CONF_GOODWE_PORT, DEFAULT_GOODWE_PORT_UDP)
+        current_protocol = self._get_option(CONF_GOODWE_PROTOCOL, "udp")
+
+        goodwe_protocols = {
+            "udp": "UDP (WiFi dongle, port 8899)",
+            "tcp": "TCP (LAN dongle, port 502)",
+        }
+
+        return self.async_show_form(
+            step_id="goodwe_connection_options",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_GOODWE_HOST,
+                        default=current_host,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                    vol.Required(
+                        CONF_GOODWE_PROTOCOL,
+                        default=current_protocol,
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in goodwe_protocols.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
+                    vol.Optional(
+                        CONF_GOODWE_PORT,
+                        default=current_port,
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=1, max=65535, step=1, mode=NumberSelectorMode.BOX,
+                    )),
+                }
+            ),
+            errors=errors,
+        )
+
+    async def async_step_optimization(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: optimization provider and backup reserve settings."""
+        if user_input is not None:
+            optimization_provider = user_input.get(
+                CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE
+            )
+            new_data = dict(self.config_entry.data)
+            new_data[CONF_OPTIMIZATION_PROVIDER] = optimization_provider
+            if optimization_provider == OPT_PROVIDER_POWERSYNC:
+                new_data[CONF_OPTIMIZATION_COST_FUNCTION] = COST_FUNCTION_COST
+                new_data[CONF_OPTIMIZATION_BACKUP_RESERVE] = (
+                    user_input.get(
+                        CONF_OPTIMIZATION_BACKUP_RESERVE,
+                        int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
+                    )
+                    / 100.0
+                )
+
+            self.hass.config_entries.async_update_entry(
+                self.config_entry, data=new_data
+            )
+            return self.async_create_entry(
+                title="", data=dict(self.config_entry.options)
+            )
+
+        battery_system = self.config_entry.data.get(
+            CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA
+        )
+        current_opt_provider = self.config_entry.data.get(
+            CONF_OPTIMIZATION_PROVIDER, OPT_PROVIDER_NATIVE
+        )
+        current_backup_reserve = self.config_entry.data.get(
+            CONF_OPTIMIZATION_BACKUP_RESERVE, DEFAULT_OPTIMIZATION_BACKUP_RESERVE
+        )
+
+        # Build native label based on battery system
+        native_labels = {
+            BATTERY_SYSTEM_TESLA: "Tesla Powerwall built-in optimization",
+            BATTERY_SYSTEM_SIGENERGY: "Sigenergy built-in optimization",
+            BATTERY_SYSTEM_SUNGROW: "Sungrow built-in optimization",
+            BATTERY_SYSTEM_FOXESS: "FoxESS built-in optimization",
+            BATTERY_SYSTEM_GOODWE: "GoodWe built-in optimization",
+        }
+        native_label = native_labels.get(battery_system, "Built-in optimization")
+
+        opt_providers = {
+            OPT_PROVIDER_NATIVE: native_label,
+            OPT_PROVIDER_POWERSYNC: "Smart Optimization (Built-in LP)",
+        }
+
+        return self.async_show_form(
+            step_id="optimization",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_OPTIMIZATION_PROVIDER,
+                        default=current_opt_provider,
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in opt_providers.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
+                    vol.Required(
+                        CONF_OPTIMIZATION_BACKUP_RESERVE,
+                        default=int(current_backup_reserve * 100)
+                        if current_backup_reserve < 1
+                        else int(current_backup_reserve),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0, max=100, step=1, unit_of_measurement="%",
+                        mode=NumberSelectorMode.SLIDER,
+                    )),
+                }
+            ),
+        )
+
+    async def async_step_inverter(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: configure AC-coupled inverter for curtailment."""
+        self._from_menu = True
+        return await self.async_step_inverter_brand(user_input)
+
+    async def async_step_curtailment(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: curtailment settings only."""
+        self._from_menu = True
+        return await self.async_step_curtailment_options(user_input)
+
+    async def async_step_demand_charges(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: demand charge settings only."""
+        self._from_menu = True
+        return await self.async_step_demand_charge_options(user_input)
+
+    async def async_step_weather(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: weather settings only."""
+        self._from_menu = True
+        return await self.async_step_weather_options(user_input)
 
     async def async_step_init_tesla(
         self, user_input: dict[str, Any] | None = None
@@ -3005,31 +3797,58 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         }
 
         return self.async_show_form(
-            step_id="init",
+            step_id="init_tesla",
             data_schema=vol.Schema(
                 {
                     vol.Required(
                         CONF_ELECTRICITY_PROVIDER,
                         default=current_provider,
-                    ): vol.In(ELECTRICITY_PROVIDERS),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in ELECTRICITY_PROVIDERS.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Required(
                         CONF_TESLA_API_PROVIDER,
                         default=current_tesla_provider,
-                    ): vol.In(tesla_providers),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in tesla_providers.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Required(
                         CONF_TESLA_EV_API_PROVIDER,
                         default=current_ev_provider,
-                    ): vol.In(tesla_ev_providers),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in tesla_ev_providers.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Required(
                         CONF_OPTIMIZATION_PROVIDER,
                         default=current_opt_provider,
-                    ): vol.In(opt_providers),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in opt_providers.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Required(
                         CONF_OPTIMIZATION_BACKUP_RESERVE,
                         default=int(current_backup_reserve * 100)
                         if current_backup_reserve < 1
                         else int(current_backup_reserve),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=0, max=100)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0, max=100, step=1, unit_of_measurement="%",
+                        mode=NumberSelectorMode.SLIDER,
+                    )),
                 }
             ),
             errors=errors,
@@ -3217,43 +4036,65 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Required(
                         CONF_ELECTRICITY_PROVIDER,
                         default=current_provider,
-                    ): vol.In(ELECTRICITY_PROVIDERS),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in ELECTRICITY_PROVIDERS.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Required(
                         CONF_OPTIMIZATION_PROVIDER,
                         default=current_opt_provider,
-                    ): vol.In(opt_providers),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in opt_providers.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Required(
                         CONF_OPTIMIZATION_BACKUP_RESERVE,
                         default=int(current_backup_reserve * 100)
                         if current_backup_reserve < 1
                         else int(current_backup_reserve),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=0, max=100)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0, max=100, step=1, unit_of_measurement="%",
+                        mode=NumberSelectorMode.SLIDER,
+                    )),
                     vol.Required(
                         CONF_SIGENERGY_MODBUS_HOST,
                         default=current_modbus_host,
-                    ): str,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                     vol.Optional(
                         CONF_SIGENERGY_MODBUS_PORT,
                         default=current_modbus_port,
-                    ): vol.All(int, vol.Range(min=1, max=65535)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=1, max=65535, step=1, mode=NumberSelectorMode.BOX,
+                    )),
                     vol.Optional(
                         CONF_SIGENERGY_MODBUS_SLAVE_ID,
                         default=current_modbus_slave_id,
-                    ): vol.All(int, vol.Range(min=0, max=247)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0, max=247, step=1, mode=NumberSelectorMode.BOX,
+                    )),
                     vol.Optional(
                         CONF_SIGENERGY_DC_CURTAILMENT_ENABLED,
                         default=current_dc_curtailment,
-                    ): bool,
+                    ): BooleanSelector(),
                     vol.Optional(
                         CONF_SIGENERGY_EXPORT_LIMIT_KW,
                         description={"suggested_value": current_export_limit},
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0, max=100)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0, max=100, step=0.1, unit_of_measurement="kW",
+                        mode=NumberSelectorMode.BOX,
+                    )),
                     # Sigenergy Cloud API credentials for tariff sync
                     vol.Optional(
                         CONF_SIGENERGY_USERNAME,
                         default=current_sigen_username,
                         description={"suggested_value": current_sigen_username},
-                    ): str,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                     vol.Optional(
                         CONF_SIGENERGY_PASSWORD,  # Plain password (recommended)
                         description={"suggested_value": ""},
@@ -3266,12 +4107,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_SIGENERGY_DEVICE_ID,
                         default=current_sigen_device_id,
                         description={"suggested_value": current_sigen_device_id},
-                    ): str,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                     vol.Optional(
                         CONF_SIGENERGY_STATION_ID,
                         default=current_sigen_station_id,
                         description={"suggested_value": current_sigen_station_id},
-                    ): str,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                 }
             ),
             errors=errors,
@@ -3405,53 +4246,85 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Required(
                         CONF_ELECTRICITY_PROVIDER,
                         default=current_provider,
-                    ): vol.In(ELECTRICITY_PROVIDERS),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in ELECTRICITY_PROVIDERS.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Required(
                         CONF_OPTIMIZATION_PROVIDER,
                         default=current_opt_provider,
-                    ): vol.In(opt_providers),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in opt_providers.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Required(
                         CONF_OPTIMIZATION_BACKUP_RESERVE,
                         default=int(current_backup_reserve * 100)
                         if current_backup_reserve < 1
                         else int(current_backup_reserve),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=0, max=100)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0, max=100, step=1, unit_of_measurement="%",
+                        mode=NumberSelectorMode.SLIDER,
+                    )),
                     vol.Required(
                         CONF_SUNGROW_HOST,
                         default=current_host,
-                    ): str,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                     vol.Optional(
                         CONF_SUNGROW_PORT,
                         default=current_port,
-                    ): vol.All(int, vol.Range(min=1, max=65535)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=1, max=65535, step=1, mode=NumberSelectorMode.BOX,
+                    )),
                     vol.Optional(
                         CONF_SUNGROW_SLAVE_ID,
                         default=current_slave_id,
-                    ): vol.All(int, vol.Range(min=1, max=247)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=1, max=247, step=1, mode=NumberSelectorMode.BOX,
+                    )),
                     vol.Optional(
                         CONF_SUNGROW_HOST_2,
                         default=current_host_2,
-                    ): str,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                     vol.Optional(
                         CONF_SUNGROW_PORT_2,
                         default=current_port_2,
-                    ): vol.All(int, vol.Range(min=1, max=65535)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=1, max=65535, step=1, mode=NumberSelectorMode.BOX,
+                    )),
                     vol.Optional(
                         CONF_SUNGROW_SLAVE_ID_2,
                         default=current_slave_id_2,
-                    ): vol.All(int, vol.Range(min=1, max=247)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=1, max=247, step=1, mode=NumberSelectorMode.BOX,
+                    )),
                     vol.Optional(
                         CONF_SUNGROW_GRID_INVERTER_SOC_CAP,
                         default=current_soc_cap,
-                    ): vol.All(vol.Coerce(int), vol.Range(min=50, max=100)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=50, max=100, step=1, unit_of_measurement="%",
+                        mode=NumberSelectorMode.SLIDER,
+                    )),
                     vol.Optional(
                         CONF_SUNGROW_BATTERY_CAPACITY_1,
                         default=current_cap1,
-                    ): vol.All(vol.Coerce(float), vol.Range(min=1.0, max=500.0)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=1.0, max=500.0, step=0.1, unit_of_measurement="kWh",
+                        mode=NumberSelectorMode.BOX,
+                    )),
                     vol.Optional(
                         CONF_SUNGROW_BATTERY_CAPACITY_2,
                         default=current_cap2,
-                    ): vol.All(vol.Coerce(float), vol.Range(min=1.0, max=500.0)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=1.0, max=500.0, step=0.1, unit_of_measurement="kWh",
+                        mode=NumberSelectorMode.BOX,
+                    )),
                 }
             ),
             errors=errors,
@@ -3553,6 +4426,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             OPT_PROVIDER_POWERSYNC: "Smart Optimization (Built-in LP)",
         }
 
+        foxess_conn_types_legacy = {
+            FOXESS_CONNECTION_TCP: "Modbus TCP",
+            FOXESS_CONNECTION_SERIAL: "RS485 Serial",
+        }
+
         return self.async_show_form(
             step_id="init_foxess",
             data_schema=vol.Schema(
@@ -3560,46 +4438,68 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Required(
                         CONF_ELECTRICITY_PROVIDER,
                         default=current_provider,
-                    ): vol.In(ELECTRICITY_PROVIDERS),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in ELECTRICITY_PROVIDERS.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Required(
                         CONF_OPTIMIZATION_PROVIDER,
                         default=current_opt_provider,
-                    ): vol.In(opt_providers),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in opt_providers.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Required(
                         CONF_OPTIMIZATION_BACKUP_RESERVE,
                         default=int(current_backup_reserve * 100)
                         if current_backup_reserve < 1
                         else int(current_backup_reserve),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=0, max=100)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0, max=100, step=1, unit_of_measurement="%",
+                        mode=NumberSelectorMode.SLIDER,
+                    )),
                     vol.Required(
                         CONF_FOXESS_CONNECTION_TYPE,
                         default=current_conn_type,
-                    ): vol.In(
-                        {
-                            FOXESS_CONNECTION_TCP: "Modbus TCP",
-                            FOXESS_CONNECTION_SERIAL: "RS485 Serial",
-                        }
-                    ),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in foxess_conn_types_legacy.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Optional(
                         CONF_FOXESS_HOST,
                         default=current_host,
-                    ): str,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                     vol.Optional(
                         CONF_FOXESS_PORT,
                         default=current_port,
-                    ): vol.All(int, vol.Range(min=1, max=65535)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=1, max=65535, step=1, mode=NumberSelectorMode.BOX,
+                    )),
                     vol.Optional(
                         CONF_FOXESS_SLAVE_ID,
                         default=current_slave_id,
-                    ): vol.All(int, vol.Range(min=1, max=247)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=1, max=247, step=1, mode=NumberSelectorMode.BOX,
+                    )),
                     vol.Optional(
                         CONF_FOXESS_SERIAL_PORT,
                         default=current_serial_port,
-                    ): str,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                     vol.Optional(
                         CONF_FOXESS_SERIAL_BAUDRATE,
                         default=current_baudrate,
-                    ): int,
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=300, max=115200, step=1, mode=NumberSelectorMode.BOX,
+                    )),
                 }
             ),
             errors=errors,
@@ -3678,6 +4578,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             OPT_PROVIDER_POWERSYNC: "Smart Optimization (Built-in LP)",
         }
 
+        goodwe_protocols_legacy = {
+            "udp": "UDP (WiFi dongle, port 8899)",
+            "tcp": "TCP (LAN dongle, port 502)",
+        }
+
         return self.async_show_form(
             step_id="init_goodwe",
             data_schema=vol.Schema(
@@ -3685,34 +4590,52 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Required(
                         CONF_ELECTRICITY_PROVIDER,
                         default=current_provider,
-                    ): vol.In(ELECTRICITY_PROVIDERS),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in ELECTRICITY_PROVIDERS.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Required(
                         CONF_OPTIMIZATION_PROVIDER,
                         default=current_opt_provider,
-                    ): vol.In(opt_providers),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in opt_providers.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Required(
                         CONF_OPTIMIZATION_BACKUP_RESERVE,
                         default=int(current_backup_reserve * 100)
                         if current_backup_reserve < 1
                         else int(current_backup_reserve),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=0, max=100)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0, max=100, step=1, unit_of_measurement="%",
+                        mode=NumberSelectorMode.SLIDER,
+                    )),
                     vol.Required(
                         CONF_GOODWE_HOST,
                         default=current_host,
-                    ): str,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                     vol.Required(
                         CONF_GOODWE_PROTOCOL,
                         default=current_protocol,
-                    ): vol.In(
-                        {
-                            "udp": "UDP (WiFi dongle, port 8899)",
-                            "tcp": "TCP (LAN dongle, port 502)",
-                        }
-                    ),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in goodwe_protocols_legacy.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Optional(
                         CONF_GOODWE_PORT,
                         default=current_port,
-                    ): int,
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=1, max=65535, step=1, mode=NumberSelectorMode.BOX,
+                    )),
                 }
             ),
             errors=errors,
@@ -3907,48 +4830,61 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             if not is_tesla:
                 self._amber_options[CONF_FORCE_TARIFF_MODE_TOGGLE] = False
 
+            # If entered from menu, save this section only and finish
+            if getattr(self, "_from_menu", False):
+                return self._save_and_finish(self._amber_options)
+
             # Route to demand charge options page
             return await self.async_step_demand_charge_options()
 
         # Build schema dict - conditionally include force mode toggle for Tesla only
+        amber_forecast_types = {
+            "predicted": "Predicted (Default)",
+            "low": "Low (Lower prices expected)",
+            "high": "High (Higher prices expected)",
+        }
+
         schema_dict = {
             vol.Optional(
                 "update_amber_token",
                 default="",
-            ): str,
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
             vol.Optional(
                 CONF_AUTO_SYNC_ENABLED,
                 default=self._get_option(CONF_AUTO_SYNC_ENABLED, True),
-            ): bool,
+            ): BooleanSelector(),
             vol.Optional(
                 CONF_AMBER_FORECAST_TYPE,
                 default=self._get_option(CONF_AMBER_FORECAST_TYPE, "predicted"),
-            ): vol.In(
-                {
-                    "predicted": "Predicted (Default)",
-                    "low": "Low (Lower prices expected)",
-                    "high": "High (Higher prices expected)",
-                }
-            ),
+            ): SelectSelector(SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(value=k, label=v)
+                    for k, v in amber_forecast_types.items()
+                ],
+                mode=SelectSelectorMode.DROPDOWN,
+            )),
             vol.Optional(
                 CONF_SPIKE_PROTECTION_ENABLED,
                 default=self._get_option(CONF_SPIKE_PROTECTION_ENABLED, False),
-            ): bool,
+            ): BooleanSelector(),
             vol.Optional(
                 CONF_SETTLED_PRICES_ONLY,
                 default=self._get_option(CONF_SETTLED_PRICES_ONLY, False),
-            ): bool,
+            ): BooleanSelector(),
             vol.Optional(
                 CONF_FORECAST_DISCREPANCY_ALERT,
                 default=self._get_option(CONF_FORECAST_DISCREPANCY_ALERT, False),
-            ): bool,
+            ): BooleanSelector(),
             vol.Optional(
                 CONF_FORECAST_DISCREPANCY_THRESHOLD,
                 default=self._get_option(
                     CONF_FORECAST_DISCREPANCY_THRESHOLD,
                     DEFAULT_FORECAST_DISCREPANCY_THRESHOLD,
                 ),
-            ): vol.Coerce(float),
+            ): NumberSelector(NumberSelectorConfig(
+                min=0.0, max=100.0, step=0.1, unit_of_measurement="c/kWh",
+                mode=NumberSelectorMode.BOX,
+            )),
         }
 
         # Only show force mode toggle for Tesla (it's a Tesla-specific feature)
@@ -3958,61 +4894,73 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_FORCE_TARIFF_MODE_TOGGLE,
                     default=self._get_option(CONF_FORCE_TARIFF_MODE_TOGGLE, False),
                 )
-            ] = bool
+            ] = BooleanSelector()
 
         schema_dict.update(
             {
                 vol.Optional(
                     CONF_EXPORT_BOOST_ENABLED,
                     default=self._get_option(CONF_EXPORT_BOOST_ENABLED, False),
-                ): bool,
+                ): BooleanSelector(),
                 vol.Optional(
                     CONF_EXPORT_PRICE_OFFSET,
                     default=self._get_option(CONF_EXPORT_PRICE_OFFSET, 0.0),
-                ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0)),
+                ): NumberSelector(NumberSelectorConfig(
+                    min=0.0, max=50.0, step=0.1, unit_of_measurement="c/kWh",
+                    mode=NumberSelectorMode.BOX,
+                )),
                 vol.Optional(
                     CONF_EXPORT_MIN_PRICE,
                     default=self._get_option(CONF_EXPORT_MIN_PRICE, 0.0),
-                ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
+                ): NumberSelector(NumberSelectorConfig(
+                    min=0.0, max=100.0, step=0.1, unit_of_measurement="c/kWh",
+                    mode=NumberSelectorMode.BOX,
+                )),
                 vol.Optional(
                     CONF_EXPORT_BOOST_START,
                     default=self._get_option(
                         CONF_EXPORT_BOOST_START, DEFAULT_EXPORT_BOOST_START
                     ),
-                ): str,
+                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                 vol.Optional(
                     CONF_EXPORT_BOOST_END,
                     default=self._get_option(
                         CONF_EXPORT_BOOST_END, DEFAULT_EXPORT_BOOST_END
                     ),
-                ): str,
+                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                 vol.Optional(
                     CONF_EXPORT_BOOST_THRESHOLD,
                     default=self._get_option(
                         CONF_EXPORT_BOOST_THRESHOLD, DEFAULT_EXPORT_BOOST_THRESHOLD
                     ),
-                ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0)),
+                ): NumberSelector(NumberSelectorConfig(
+                    min=0.0, max=50.0, step=0.1, unit_of_measurement="c/kWh",
+                    mode=NumberSelectorMode.BOX,
+                )),
                 # Chip Mode (inverse of export boost)
                 vol.Optional(
                     CONF_CHIP_MODE_ENABLED,
                     default=self._get_option(CONF_CHIP_MODE_ENABLED, False),
-                ): bool,
+                ): BooleanSelector(),
                 vol.Optional(
                     CONF_CHIP_MODE_START,
                     default=self._get_option(
                         CONF_CHIP_MODE_START, DEFAULT_CHIP_MODE_START
                     ),
-                ): str,
+                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                 vol.Optional(
                     CONF_CHIP_MODE_END,
                     default=self._get_option(CONF_CHIP_MODE_END, DEFAULT_CHIP_MODE_END),
-                ): str,
+                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                 vol.Optional(
                     CONF_CHIP_MODE_THRESHOLD,
                     default=self._get_option(
                         CONF_CHIP_MODE_THRESHOLD, DEFAULT_CHIP_MODE_THRESHOLD
                     ),
-                ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=200.0)),
+                ): NumberSelector(NumberSelectorConfig(
+                    min=0.0, max=200.0, step=0.1, unit_of_measurement="c/kWh",
+                    mode=NumberSelectorMode.BOX,
+                )),
             }
         )
 
@@ -4025,9 +4973,24 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Dedicated step for Network Demand Charge configuration."""
+        # If a pricing step chains here but we came from the menu,
+        # save the pricing data and finish — don't show demand charge form.
+        if (
+            user_input is None
+            and getattr(self, "_from_menu", False)
+            and hasattr(self, "_amber_options")
+            and self._amber_options
+        ):
+            return self._save_and_finish(self._amber_options)
+
         if user_input is not None:
             # Store demand charge options
             self._demand_options = user_input
+
+            # If entered from menu, save this section only and finish
+            if getattr(self, "_from_menu", False):
+                return self._save_and_finish(self._demand_options)
+
             # Route to curtailment options
             return await self.async_step_curtailment_options()
 
@@ -4035,35 +4998,57 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA
         )
 
+        demand_days_options = [
+            SelectOptionDict(value="All Days", label="All Days"),
+            SelectOptionDict(value="Weekdays Only", label="Weekdays Only"),
+            SelectOptionDict(value="Weekends Only", label="Weekends Only"),
+        ]
+        demand_apply_options = [
+            SelectOptionDict(value="Buy Only", label="Buy Only"),
+            SelectOptionDict(value="Sell Only", label="Sell Only"),
+            SelectOptionDict(value="Both", label="Both"),
+        ]
+
         schema_dict = {
             vol.Optional(
                 CONF_DEMAND_CHARGE_ENABLED,
                 default=self._get_option(CONF_DEMAND_CHARGE_ENABLED, False),
-            ): bool,
+            ): BooleanSelector(),
             vol.Optional(
                 CONF_DEMAND_CHARGE_RATE,
                 default=self._get_option(CONF_DEMAND_CHARGE_RATE, 10.0),
-            ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
+            ): NumberSelector(NumberSelectorConfig(
+                min=0.0, max=100.0, step=0.1, unit_of_measurement="$/kW",
+                mode=NumberSelectorMode.BOX,
+            )),
             vol.Optional(
                 CONF_DEMAND_CHARGE_START_TIME,
                 default=self._get_option(CONF_DEMAND_CHARGE_START_TIME, "14:00"),
-            ): str,
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Optional(
                 CONF_DEMAND_CHARGE_END_TIME,
                 default=self._get_option(CONF_DEMAND_CHARGE_END_TIME, "20:00"),
-            ): str,
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Optional(
                 CONF_DEMAND_CHARGE_DAYS,
                 default=self._get_option(CONF_DEMAND_CHARGE_DAYS, "All Days"),
-            ): vol.In(["All Days", "Weekdays Only", "Weekends Only"]),
+            ): SelectSelector(SelectSelectorConfig(
+                options=demand_days_options,
+                mode=SelectSelectorMode.DROPDOWN,
+            )),
             vol.Optional(
                 CONF_DEMAND_CHARGE_BILLING_DAY,
                 default=self._get_option(CONF_DEMAND_CHARGE_BILLING_DAY, 1),
-            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=31)),
+            ): NumberSelector(NumberSelectorConfig(
+                min=1, max=31, step=1, mode=NumberSelectorMode.BOX,
+            )),
             vol.Optional(
                 CONF_DEMAND_CHARGE_APPLY_TO,
                 default=self._get_option(CONF_DEMAND_CHARGE_APPLY_TO, "Buy Only"),
-            ): vol.In(["Buy Only", "Sell Only", "Both"]),
+            ): SelectSelector(SelectSelectorConfig(
+                options=demand_apply_options,
+                mode=SelectSelectorMode.DROPDOWN,
+            )),
         }
 
         # Only show artificial price increase for Tesla (Tesla-specific TOU feature)
@@ -4073,22 +5058,28 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_DEMAND_ARTIFICIAL_PRICE,
                     default=self._get_option(CONF_DEMAND_ARTIFICIAL_PRICE, False),
                 )
-            ] = bool
+            ] = BooleanSelector()
 
         schema_dict.update(
             {
                 vol.Optional(
                     CONF_DEMAND_ALLOW_GRID_CHARGING,
                     default=self._get_option(CONF_DEMAND_ALLOW_GRID_CHARGING, False),
-                ): bool,
+                ): BooleanSelector(),
                 vol.Optional(
                     CONF_DAILY_SUPPLY_CHARGE,
                     default=self._get_option(CONF_DAILY_SUPPLY_CHARGE, 0.0),
-                ): vol.Coerce(float),
+                ): NumberSelector(NumberSelectorConfig(
+                    min=0.0, max=500.0, step=0.01, unit_of_measurement="$/day",
+                    mode=NumberSelectorMode.BOX,
+                )),
                 vol.Optional(
                     CONF_MONTHLY_SUPPLY_CHARGE,
                     default=self._get_option(CONF_MONTHLY_SUPPLY_CHARGE, 0.0),
-                ): vol.Coerce(float),
+                ): NumberSelector(NumberSelectorConfig(
+                    min=0.0, max=500.0, step=0.01, unit_of_measurement="$/month",
+                    mode=NumberSelectorMode.BOX,
+                )),
             }
         )
 
@@ -4123,6 +5114,23 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             self._curtailment_options = {
                 CONF_BATTERY_CURTAILMENT_ENABLED: new_curtailment_enabled,
             }
+
+            # If entered from menu, save curtailment settings and finish
+            if getattr(self, "_from_menu", False):
+                if is_sigenergy:
+                    dc_enabled = user_input.get(
+                        CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False
+                    )
+                    new_data = dict(self.config_entry.data)
+                    new_data[CONF_SIGENERGY_DC_CURTAILMENT_ENABLED] = dc_enabled
+                    self.hass.config_entries.async_update_entry(
+                        self.config_entry, data=new_data
+                    )
+                ac_enabled = user_input.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False)
+                self._curtailment_options[CONF_AC_INVERTER_CURTAILMENT_ENABLED] = ac_enabled
+                if ac_enabled:
+                    return await self.async_step_inverter_brand()
+                return self._save_and_finish(self._curtailment_options)
 
             if is_sigenergy:
                 # Sigenergy DC curtailment - save DC settings to config entry data
@@ -4164,7 +5172,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             vol.Optional(
                 CONF_BATTERY_CURTAILMENT_ENABLED,
                 default=self._get_option(CONF_BATTERY_CURTAILMENT_ENABLED, False),
-            ): bool,
+            ): BooleanSelector(),
         }
 
         if is_sigenergy:
@@ -4176,7 +5184,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_SIGENERGY_DC_CURTAILMENT_ENABLED, False
                     ),
                 )
-            ] = bool
+            ] = BooleanSelector()
             # AC-coupled inverter curtailment (e.g. Enphase microinverters)
             schema_dict[
                 vol.Optional(
@@ -4185,7 +5193,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_AC_INVERTER_CURTAILMENT_ENABLED, False
                     ),
                 )
-            ] = bool
+            ] = BooleanSelector()
         elif is_sungrow:
             # Sungrow doesn't need additional curtailment options - battery controls built-in
             pass
@@ -4198,7 +5206,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_AC_INVERTER_CURTAILMENT_ENABLED, False
                     ),
                 )
-            ] = bool
+            ] = BooleanSelector()
 
         return self.async_show_form(
             step_id="curtailment_options",
@@ -4220,6 +5228,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_SOLCAST_API_KEY: user_input.get(CONF_SOLCAST_API_KEY, ""),
                 CONF_SOLCAST_RESOURCE_ID: user_input.get(CONF_SOLCAST_RESOURCE_ID, ""),
             }
+
+            # If entered from menu, save weather settings only and finish
+            if getattr(self, "_from_menu", False):
+                return self._save_and_finish(weather_options)
 
             # Combine with previous options - check if came from inverter_config or curtailment_options
             if hasattr(self, "_inverter_options") and self._inverter_options:
@@ -4248,15 +5260,15 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_WEATHER_LOCATION,
                         default=self._get_option(CONF_WEATHER_LOCATION, ""),
-                    ): str,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                     vol.Optional(
                         CONF_OPENWEATHERMAP_API_KEY,
                         default=self._get_option(CONF_OPENWEATHERMAP_API_KEY, ""),
-                    ): str,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
                     vol.Optional(
                         CONF_SOLCAST_ENABLED,
                         default=self._get_option(CONF_SOLCAST_ENABLED, False),
-                    ): bool,
+                    ): BooleanSelector(),
                     vol.Optional(
                         CONF_SOLCAST_API_KEY,
                         default=self._get_option(CONF_SOLCAST_API_KEY, ""),
@@ -4264,7 +5276,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_SOLCAST_RESOURCE_ID,
                         default=self._get_option(CONF_SOLCAST_RESOURCE_ID, ""),
-                    ): str,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                 }
             ),
         )
@@ -4288,7 +5300,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Required(
                         CONF_INVERTER_BRAND,
                         default=current_brand,
-                    ): vol.In(INVERTER_BRANDS),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in INVERTER_BRANDS.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                 }
             ),
         )
@@ -4386,8 +5404,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_INVERTER_RESTORE_SOC, DEFAULT_INVERTER_RESTORE_SOC
                 )
 
-                # Store inverter config and route to weather options
+                # Store inverter config
                 self._inverter_options = final_data
+
+                # If entered from menu, save inverter settings only and finish
+                if getattr(self, "_from_menu", False):
+                    return self._save_and_finish(final_data)
+
                 return await self.async_step_weather_options()
 
         # Get brand-specific models and defaults
@@ -4419,15 +5442,23 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             vol.Required(
                 CONF_INVERTER_MODEL,
                 default=current_model,
-            ): vol.In(models),
+            ): SelectSelector(SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(value=k, label=v)
+                    for k, v in models.items()
+                ],
+                mode=SelectSelectorMode.DROPDOWN,
+            )),
             vol.Required(
                 CONF_INVERTER_HOST,
                 default=current_host,
-            ): str,
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Required(
                 CONF_INVERTER_PORT,
                 default=current_port,
-            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
+            ): NumberSelector(NumberSelectorConfig(
+                min=1, max=65535, step=1, mode=NumberSelectorMode.BOX,
+            )),
         }
 
         # Only show Slave ID for Modbus brands (not Enphase/Zeversolar which use HTTP)
@@ -4437,7 +5468,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_INVERTER_SLAVE_ID,
                     default=current_slave_id,
                 )
-            ] = vol.All(vol.Coerce(int), vol.Range(min=1, max=247))
+            ] = NumberSelector(NumberSelectorConfig(
+                min=1, max=247, step=1, mode=NumberSelectorMode.BOX,
+            ))
 
         # Show JWT token and Enlighten credentials for Enphase (firmware 7.x+)
         if brand == "enphase":
@@ -4447,7 +5480,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_INVERTER_TOKEN,
                     default=current_token,
                 )
-            ] = str
+            ] = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
 
             # Enlighten credentials for automatic JWT token refresh (recommended)
             current_enphase_username = self._get_option(CONF_ENPHASE_USERNAME, "")
@@ -4456,7 +5489,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_ENPHASE_USERNAME,
                     default=current_enphase_username,
                 )
-            ] = str
+            ] = TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT))
 
             current_enphase_password = self._get_option(CONF_ENPHASE_PASSWORD, "")
             schema_dict[
@@ -4472,7 +5505,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_ENPHASE_SERIAL,
                     default=current_enphase_serial,
                 )
-            ] = str
+            ] = TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT))
 
             # Grid profile names for profile switching fallback (when DPEL/DER unavailable)
             current_normal_profile = self._get_option(CONF_ENPHASE_NORMAL_PROFILE, "")
@@ -4481,7 +5514,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_ENPHASE_NORMAL_PROFILE,
                     default=current_normal_profile,
                 )
-            ] = str
+            ] = TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT))
 
             current_zero_export_profile = self._get_option(
                 CONF_ENPHASE_ZERO_EXPORT_PROFILE, ""
@@ -4491,7 +5524,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_ENPHASE_ZERO_EXPORT_PROFILE,
                     default=current_zero_export_profile,
                 )
-            ] = str
+            ] = TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT))
 
             # Installer mode for grid profile access
             current_is_installer = self._get_option(CONF_ENPHASE_IS_INSTALLER, False)
@@ -4500,7 +5533,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_ENPHASE_IS_INSTALLER,
                     default=current_is_installer,
                 )
-            ] = bool
+            ] = BooleanSelector()
 
         # Fronius-specific: load following mode (for users without 0W export profile)
         if brand == "fronius":
@@ -4513,7 +5546,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     default=current_load_following,
                     description={"suggested_value": current_load_following},
                 )
-            ] = bool
+            ] = BooleanSelector()
 
         # Restore SOC threshold - restore inverter when battery drops below this %
         current_restore_soc = self._get_option(
@@ -4524,7 +5557,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_INVERTER_RESTORE_SOC,
                 default=current_restore_soc,
             )
-        ] = vol.All(vol.Coerce(int), vol.Range(min=50, max=100))
+        ] = NumberSelector(NumberSelectorConfig(
+            min=50, max=100, step=1, unit_of_measurement="%",
+            mode=NumberSelectorMode.SLIDER,
+        ))
 
         return self.async_show_form(
             step_id="inverter_config",
@@ -4562,61 +5598,69 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             vol.Optional(
                 CONF_EV_CHARGING_ENABLED,
                 default=current_ev_enabled,
-            ): bool,
+            ): BooleanSelector(),
             vol.Optional(
                 CONF_EV_PROVIDER,
                 default=current_ev_provider,
-            ): vol.In(EV_PROVIDERS),
+            ): SelectSelector(SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(value=k, label=v)
+                    for k, v in EV_PROVIDERS.items()
+                ],
+                mode=SelectSelectorMode.DROPDOWN,
+            )),
             vol.Optional(
                 CONF_TESLA_BLE_ENTITY_PREFIX,
                 default=self._get_option(
                     CONF_TESLA_BLE_ENTITY_PREFIX, DEFAULT_TESLA_BLE_ENTITY_PREFIX
                 ),
-            ): str,
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             # OCPP settings
             vol.Optional(
                 CONF_OCPP_ENABLED,
                 default=self._get_option(CONF_OCPP_ENABLED, False),
-            ): bool,
+            ): BooleanSelector(),
             vol.Optional(
                 CONF_OCPP_PORT,
                 default=self._get_option(CONF_OCPP_PORT, DEFAULT_OCPP_PORT),
-            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=65535)),
+            ): NumberSelector(NumberSelectorConfig(
+                min=1, max=65535, step=1, mode=NumberSelectorMode.BOX,
+            )),
             # Zaptec settings
             vol.Optional(
                 CONF_ZAPTEC_CHARGER_ENTITY,
                 default=self._get_option(CONF_ZAPTEC_CHARGER_ENTITY, ""),
-            ): str,
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Optional(
                 CONF_ZAPTEC_INSTALLATION_ID,
                 default=self._get_option(CONF_ZAPTEC_INSTALLATION_ID, ""),
-            ): str,
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             # Zaptec standalone (direct API)
             vol.Optional(
                 CONF_ZAPTEC_STANDALONE_ENABLED,
                 default=self._get_option(CONF_ZAPTEC_STANDALONE_ENABLED, False),
-            ): bool,
+            ): BooleanSelector(),
             # Generic charger
             vol.Optional(
                 CONF_GENERIC_CHARGER_ENABLED,
                 default=self._get_option(CONF_GENERIC_CHARGER_ENABLED, False),
-            ): bool,
+            ): BooleanSelector(),
             vol.Optional(
                 CONF_GENERIC_CHARGER_SWITCH_ENTITY,
                 default=self._get_option(CONF_GENERIC_CHARGER_SWITCH_ENTITY, ""),
-            ): str,
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Optional(
                 CONF_GENERIC_CHARGER_AMPS_ENTITY,
                 default=self._get_option(CONF_GENERIC_CHARGER_AMPS_ENTITY, ""),
-            ): str,
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Optional(
                 CONF_GENERIC_CHARGER_STATUS_ENTITY,
                 default=self._get_option(CONF_GENERIC_CHARGER_STATUS_ENTITY, ""),
-            ): str,
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Optional(
                 CONF_GENERIC_CHARGER_SOC_ENTITY,
                 default=self._get_option(CONF_GENERIC_CHARGER_SOC_ENTITY, ""),
-            ): str,
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
         }
 
         return self.async_show_form(
@@ -4738,7 +5782,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Required(
                         CONF_ZAPTEC_USERNAME,
                         default=self._get_option(CONF_ZAPTEC_USERNAME, ""),
-                    ): str,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                     vol.Required(CONF_ZAPTEC_PASSWORD): TextSelector(
                         TextSelectorConfig(type=TextSelectorType.PASSWORD)
                     ),
@@ -4815,50 +5859,91 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         # Default Amber markup for region
         default_markup = DEFAULT_FP_AMBER_MARKUP.get(current_region, 4.0)
 
+        fp_network_combined = {"": "None (legacy formula)", **network_options}
+
         schema = {
             vol.Required(
                 CONF_FLOW_POWER_STATE,
                 default=self._get_option(CONF_FLOW_POWER_STATE, "NSW1"),
-            ): vol.In(FLOW_POWER_STATES),
+            ): SelectSelector(SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(value=k, label=v)
+                    for k, v in FLOW_POWER_STATES.items()
+                ],
+                mode=SelectSelectorMode.DROPDOWN,
+            )),
             vol.Required(
                 CONF_FLOW_POWER_PRICE_SOURCE,
                 default=self._get_option(CONF_FLOW_POWER_PRICE_SOURCE, "aemo"),
-            ): vol.In(FLOW_POWER_PRICE_SOURCES),
+            ): SelectSelector(SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(value=k, label=v)
+                    for k, v in FLOW_POWER_PRICE_SOURCES.items()
+                ],
+                mode=SelectSelectorMode.DROPDOWN,
+            )),
             vol.Required(
                 CONF_NETWORK_TARIFF_COMBINED,
                 default=current_combined,
-            ): vol.In(ALL_NETWORK_TARIFFS),
+            ): SelectSelector(SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(value=k, label=v)
+                    for k, v in ALL_NETWORK_TARIFFS.items()
+                ],
+                mode=SelectSelectorMode.DROPDOWN,
+            )),
             vol.Required(
                 CONF_FLOW_POWER_BASE_RATE,
                 default=self._get_option(
                     CONF_FLOW_POWER_BASE_RATE, FLOW_POWER_DEFAULT_BASE_RATE
                 ),
-            ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=100.0)),
+            ): NumberSelector(NumberSelectorConfig(
+                min=0.0, max=100.0, step=0.01, unit_of_measurement="c/kWh",
+                mode=NumberSelectorMode.BOX,
+            )),
             vol.Optional(
                 CONF_PEA_ENABLED,
                 default=self._get_option(CONF_PEA_ENABLED, True),
-            ): bool,
+            ): BooleanSelector(),
             vol.Optional(
                 CONF_AUTO_SYNC_ENABLED,
                 default=self._get_option(CONF_AUTO_SYNC_ENABLED, True),
-            ): bool,
+            ): BooleanSelector(),
             vol.Optional(
                 CONF_FP_NETWORK,
                 default=self._get_option(CONF_FP_NETWORK, ""),
-            ): vol.In({"": "None (legacy formula)", **network_options}),
+            ): SelectSelector(SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(value=k, label=v)
+                    for k, v in fp_network_combined.items()
+                ],
+                mode=SelectSelectorMode.DROPDOWN,
+            )),
             vol.Optional(
                 CONF_FP_TARIFF_CODE,
                 default=self._get_option(CONF_FP_TARIFF_CODE, ""),
-            ): vol.In(tariff_code_options),
+            ): SelectSelector(SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(value=k, label=v)
+                    for k, v in tariff_code_options.items()
+                ],
+                mode=SelectSelectorMode.DROPDOWN,
+            )),
             vol.Optional(
                 CONF_FP_TWAP_OVERRIDE,
                 default=self._get_option(CONF_FP_TWAP_OVERRIDE, None),
-            ): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0))),
+            ): vol.Any(None, NumberSelector(NumberSelectorConfig(
+                min=0.0, max=50.0, step=0.01, unit_of_measurement="c/kWh",
+                mode=NumberSelectorMode.BOX,
+            ))),
             vol.Optional(
                 CONF_FP_AMBER_MARKUP,
                 default=self._get_option(CONF_FP_AMBER_MARKUP, None),
-            ): vol.Any(None, vol.All(vol.Coerce(float), vol.Range(min=0.0, max=20.0))),
-            vol.Optional("connect_portal", default=False): bool,
+            ): vol.Any(None, NumberSelector(NumberSelectorConfig(
+                min=0.0, max=20.0, step=0.01, unit_of_measurement="c/kWh",
+                mode=NumberSelectorMode.BOX,
+            ))),
+            vol.Optional("connect_portal", default=False): BooleanSelector(),
         }
 
         return self.async_show_form(
@@ -4926,11 +6011,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Required(
                         CONF_FLOWPOWER_EMAIL,
                         default=current.get(CONF_FLOWPOWER_EMAIL, ""),
-                    ): str,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.EMAIL)),
                     vol.Required(
                         CONF_FLOWPOWER_PASSWORD,
                         default=current.get(CONF_FLOWPOWER_PASSWORD, ""),
-                    ): str,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
                 }
             ),
             errors=errors,
@@ -4968,7 +6053,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             step_id="flow_power_portal_mfa_options",
             data_schema=vol.Schema(
                 {
-                    vol.Required("mfa_code"): str,
+                    vol.Required("mfa_code"): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                 }
             ),
             errors=errors,
@@ -5025,6 +6110,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             self._amber_options = merged
             return await self.async_step_demand_charge_options()
 
+        hour_options = [
+            SelectOptionDict(value=f"{h:02d}:00", label=f"{h:02d}:00")
+            for h in range(24)
+        ]
+
         return self.async_show_form(
             step_id="flow_power_network_options",
             data_schema=vol.Schema(
@@ -5033,56 +6123,92 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_PEA_CUSTOM_VALUE,
                         default=self._get_option(CONF_PEA_CUSTOM_VALUE, None),
                     ): vol.Any(
-                        None, vol.All(vol.Coerce(float), vol.Range(min=-50.0, max=50.0))
+                        None, NumberSelector(NumberSelectorConfig(
+                            min=-50.0, max=50.0, step=0.01, unit_of_measurement="c/kWh",
+                            mode=NumberSelectorMode.BOX,
+                        ))
                     ),
                     vol.Optional(
                         CONF_NETWORK_USE_MANUAL_RATES,
                         default=self._get_option(CONF_NETWORK_USE_MANUAL_RATES, False),
-                    ): bool,
+                    ): BooleanSelector(),
                     vol.Optional(
                         CONF_NETWORK_TARIFF_TYPE,
                         default=self._get_option(CONF_NETWORK_TARIFF_TYPE, "flat"),
-                    ): vol.In(NETWORK_TARIFF_TYPES),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in NETWORK_TARIFF_TYPES.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Optional(
                         CONF_NETWORK_FLAT_RATE,
                         default=self._get_option(CONF_NETWORK_FLAT_RATE, 8.0),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0.0, max=50.0, step=0.01, unit_of_measurement="c/kWh",
+                        mode=NumberSelectorMode.BOX,
+                    )),
                     vol.Optional(
                         CONF_NETWORK_PEAK_RATE,
                         default=self._get_option(CONF_NETWORK_PEAK_RATE, 15.0),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0.0, max=50.0, step=0.01, unit_of_measurement="c/kWh",
+                        mode=NumberSelectorMode.BOX,
+                    )),
                     vol.Optional(
                         CONF_NETWORK_SHOULDER_RATE,
                         default=self._get_option(CONF_NETWORK_SHOULDER_RATE, 5.0),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0.0, max=50.0, step=0.01, unit_of_measurement="c/kWh",
+                        mode=NumberSelectorMode.BOX,
+                    )),
                     vol.Optional(
                         CONF_NETWORK_OFFPEAK_RATE,
                         default=self._get_option(CONF_NETWORK_OFFPEAK_RATE, 2.0),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=50.0)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0.0, max=50.0, step=0.01, unit_of_measurement="c/kWh",
+                        mode=NumberSelectorMode.BOX,
+                    )),
                     vol.Optional(
                         CONF_NETWORK_PEAK_START,
                         default=self._get_option(CONF_NETWORK_PEAK_START, "16:00"),
-                    ): vol.In({f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=hour_options,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Optional(
                         CONF_NETWORK_PEAK_END,
                         default=self._get_option(CONF_NETWORK_PEAK_END, "21:00"),
-                    ): vol.In({f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=hour_options,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Optional(
                         CONF_NETWORK_OFFPEAK_START,
                         default=self._get_option(CONF_NETWORK_OFFPEAK_START, "10:00"),
-                    ): vol.In({f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=hour_options,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Optional(
                         CONF_NETWORK_OFFPEAK_END,
                         default=self._get_option(CONF_NETWORK_OFFPEAK_END, "15:00"),
-                    ): vol.In({f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=hour_options,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Optional(
                         CONF_NETWORK_OTHER_FEES,
                         default=self._get_option(CONF_NETWORK_OTHER_FEES, 1.5),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=20.0)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0.0, max=20.0, step=0.01, unit_of_measurement="c/kWh",
+                        mode=NumberSelectorMode.BOX,
+                    )),
                     vol.Optional(
                         CONF_NETWORK_INCLUDE_GST,
                         default=self._get_option(CONF_NETWORK_INCLUDE_GST, True),
-                    ): bool,
+                    ): BooleanSelector(),
                 }
             ),
         )
@@ -5124,20 +6250,29 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             vol.Optional(
                 CONF_AEMO_SPIKE_ENABLED,
                 default=self._get_option(CONF_AEMO_SPIKE_ENABLED, False),
-            ): bool,
+            ): BooleanSelector(),
             vol.Optional(
                 CONF_AEMO_REGION,
                 default=self._get_option(CONF_AEMO_REGION, ""),
-            ): vol.In(region_choices),
+            ): SelectSelector(SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(value=k, label=v)
+                    for k, v in region_choices.items()
+                ],
+                mode=SelectSelectorMode.DROPDOWN,
+            )),
             vol.Optional(
                 CONF_AEMO_SPIKE_THRESHOLD,
                 default=self._get_option(CONF_AEMO_SPIKE_THRESHOLD, 3000.0),
-            ): vol.All(vol.Coerce(float), vol.Range(min=0.0, max=20000.0)),
+            ): NumberSelector(NumberSelectorConfig(
+                min=0.0, max=20000.0, step=1.0, unit_of_measurement="$/MWh",
+                mode=NumberSelectorMode.BOX,
+            )),
         }
 
         # Tesla users get tariff from the Tesla API — no need for manual configuration
         if not is_tesla:
-            schema_fields[vol.Optional("configure_custom_tariff", default=False)] = bool
+            schema_fields[vol.Optional("configure_custom_tariff", default=False)] = BooleanSelector()
             tariff_hint = "**Custom Tariff (recommended):** Enable 'Configure Custom Tariff' to set your TOU rates. These are needed for accurate price sensors, battery optimisation, and EV charging."
         else:
             tariff_hint = (
@@ -5207,10 +6342,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     ): TextSelector(),
                     vol.Optional(
                         CONF_AUTO_SYNC_ENABLED, default=current_auto_sync
-                    ): bool,
+                    ): BooleanSelector(),
                     vol.Optional(
                         CONF_BATTERY_CURTAILMENT_ENABLED, default=current_curtailment
-                    ): bool,
+                    ): BooleanSelector(),
                 }
             ),
             errors=errors,
@@ -5266,28 +6401,43 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             step_id="epex_options",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_EPEX_REGION, default=current_region): vol.In(
-                        EPEX_REGIONS
+                    vol.Required(CONF_EPEX_REGION, default=current_region): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=k, label=v)
+                                for k, v in EPEX_REGIONS.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
                     ),
                     vol.Optional(
                         CONF_EPEX_SURCHARGE, default=current_surcharge
-                    ): vol.Coerce(float),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0.0, max=100.0, step=0.01, unit_of_measurement="ct/kWh",
+                        mode=NumberSelectorMode.BOX,
+                    )),
                     vol.Optional(
                         CONF_EPEX_TAX_PERCENT, default=current_tax
-                    ): vol.Coerce(float),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0.0, max=100.0, step=0.1, unit_of_measurement="%",
+                        mode=NumberSelectorMode.BOX,
+                    )),
                     vol.Optional(
                         CONF_EPEX_EXPORT_RATE, default=current_export
-                    ): vol.Coerce(float),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0.0, max=100.0, step=0.01, unit_of_measurement="ct/kWh",
+                        mode=NumberSelectorMode.BOX,
+                    )),
                     vol.Optional(
                         CONF_AUTO_SYNC_ENABLED,
                         default=self._get_option(CONF_AUTO_SYNC_ENABLED, True),
-                    ): bool,
+                    ): BooleanSelector(),
                     vol.Optional(
                         CONF_BATTERY_CURTAILMENT_ENABLED,
                         default=self._get_option(
                             CONF_BATTERY_CURTAILMENT_ENABLED, False
                         ),
-                    ): bool,
+                    ): BooleanSelector(),
                 }
             ),
             errors=errors,
@@ -5385,22 +6535,34 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             step_id="octopus_options",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_OCTOPUS_PRODUCT, default=current_product): vol.In(
-                        OCTOPUS_PRODUCTS
+                    vol.Required(CONF_OCTOPUS_PRODUCT, default=current_product): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=k, label=v)
+                                for k, v in OCTOPUS_PRODUCTS.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
                     ),
-                    vol.Required(CONF_OCTOPUS_REGION, default=current_region): vol.In(
-                        OCTOPUS_GSP_REGIONS
+                    vol.Required(CONF_OCTOPUS_REGION, default=current_region): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=k, label=v)
+                                for k, v in OCTOPUS_GSP_REGIONS.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
                     ),
                     vol.Optional(
                         CONF_AUTO_SYNC_ENABLED,
                         default=self._get_option(CONF_AUTO_SYNC_ENABLED, True),
-                    ): bool,
+                    ): BooleanSelector(),
                     vol.Optional(
                         CONF_BATTERY_CURTAILMENT_ENABLED,
                         default=self._get_option(
                             CONF_BATTERY_CURTAILMENT_ENABLED, False
                         ),
-                    ): bool,
+                    ): BooleanSelector(),
                 }
             ),
             errors=errors,
@@ -5472,27 +6634,37 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             CONF_OCTOPUS_SAVING_SESSIONS_AUTO_JOIN, True
         )
 
+        saving_session_sources = {
+            "direct": "Direct (Octopus API key)",
+            "entity": "Bottlecap Dave integration",
+        }
+
         data_schema = vol.Schema(
             {
                 vol.Optional(
                     CONF_OCTOPUS_SAVING_SESSIONS_ENABLED, default=current_enabled
-                ): bool,
+                ): BooleanSelector(),
                 vol.Optional(
                     CONF_OCTOPUS_SAVING_SESSIONS_SOURCE, default=current_source
-                ): vol.In(
-                    {
-                        "direct": "Direct (Octopus API key)",
-                        "entity": "Bottlecap Dave integration",
-                    }
+                ): SelectSelector(SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(value=k, label=v)
+                        for k, v in saving_session_sources.items()
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )),
+                vol.Optional(CONF_OCTOPUS_API_KEY, default=current_api_key): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.PASSWORD)
                 ),
-                vol.Optional(CONF_OCTOPUS_API_KEY, default=current_api_key): str,
-                vol.Optional(CONF_OCTOPUS_ACCOUNT_NUMBER, default=current_account): str,
+                vol.Optional(CONF_OCTOPUS_ACCOUNT_NUMBER, default=current_account): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.TEXT)
+                ),
                 vol.Optional(
                     CONF_OCTOPUS_SAVING_SESSIONS_ENTITY, default=current_entity
-                ): str,
+                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                 vol.Optional(
                     CONF_OCTOPUS_SAVING_SESSIONS_AUTO_JOIN, default=current_auto_join
-                ): bool,
+                ): BooleanSelector(),
             }
         )
 
@@ -5612,35 +6784,65 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Required(
                         CONF_NZ_RETAILER,
                         default=self._get_option(CONF_NZ_RETAILER, "octopus_nz"),
-                    ): vol.In(NZ_RETAILERS),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in NZ_RETAILERS.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Required(
                         CONF_NZ_DISTRIBUTION_ZONE,
                         default=self._get_option(CONF_NZ_DISTRIBUTION_ZONE, "vector"),
-                    ): vol.In(NZ_DISTRIBUTION_ZONES),
+                    ): SelectSelector(SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in NZ_DISTRIBUTION_ZONES.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )),
                     vol.Required(
                         CONF_NZ_PEAK_RATE,
                         default=self._get_option(CONF_NZ_PEAK_RATE, 40.0),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0, max=200)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0, max=200, step=0.1, unit_of_measurement="c/kWh",
+                        mode=NumberSelectorMode.BOX,
+                    )),
                     vol.Required(
                         CONF_NZ_SHOULDER_RATE,
                         default=self._get_option(CONF_NZ_SHOULDER_RATE, 25.0),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0, max=200)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0, max=200, step=0.1, unit_of_measurement="c/kWh",
+                        mode=NumberSelectorMode.BOX,
+                    )),
                     vol.Required(
                         CONF_NZ_OFFPEAK_RATE,
                         default=self._get_option(CONF_NZ_OFFPEAK_RATE, 15.0),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0, max=200)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0, max=200, step=0.1, unit_of_measurement="c/kWh",
+                        mode=NumberSelectorMode.BOX,
+                    )),
                     vol.Required(
                         CONF_NZ_PEAK_EXPORT,
                         default=self._get_option(CONF_NZ_PEAK_EXPORT, 8.0),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0, max=100)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0, max=100, step=0.1, unit_of_measurement="c/kWh",
+                        mode=NumberSelectorMode.BOX,
+                    )),
                     vol.Required(
                         CONF_NZ_OFFPEAK_EXPORT,
                         default=self._get_option(CONF_NZ_OFFPEAK_EXPORT, 8.0),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0, max=100)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0, max=100, step=0.1, unit_of_measurement="c/kWh",
+                        mode=NumberSelectorMode.BOX,
+                    )),
                     vol.Required(
                         CONF_NZ_DAILY_SUPPLY,
                         default=self._get_option(CONF_NZ_DAILY_SUPPLY, 200.0),
-                    ): vol.All(vol.Coerce(float), vol.Range(min=0, max=1000)),
+                    ): NumberSelector(NumberSelectorConfig(
+                        min=0, max=1000, step=0.1, unit_of_measurement="c/day",
+                        mode=NumberSelectorMode.BOX,
+                    )),
                 }
             ),
         )
@@ -5712,25 +6914,44 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         default_fit = int(v * 100)
                         break
 
+        tariff_type_options = {
+            "flat": "Flat Rate (single rate all day)",
+            "tou": "Time of Use (multiple periods)",
+        }
+
         return self.async_show_form(
             step_id="custom_tariff_options",
             data_schema=vol.Schema(
                 {
-                    vol.Optional("plan_name", default=""): str,
-                    vol.Required("tariff_type", default="tou"): vol.In(
-                        {
-                            "flat": "Flat Rate (single rate all day)",
-                            "tou": "Time of Use (multiple periods)",
-                        }
+                    vol.Optional("plan_name", default=""): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.TEXT)
                     ),
-                    vol.Optional("flat_rate", default=30): vol.All(
-                        vol.Coerce(float), vol.Range(min=0, max=200)
+                    vol.Required("tariff_type", default="tou"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=k, label=v)
+                                for k, v in tariff_type_options.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
                     ),
-                    vol.Required("offpeak_rate", default=default_offpeak): vol.All(
-                        vol.Coerce(float), vol.Range(min=0, max=200)
+                    vol.Optional("flat_rate", default=30): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0, max=200, step=0.1, unit_of_measurement="c/kWh",
+                            mode=NumberSelectorMode.BOX,
+                        )
                     ),
-                    vol.Required("fit_rate", default=default_fit): vol.All(
-                        vol.Coerce(float), vol.Range(min=0, max=100)
+                    vol.Required("offpeak_rate", default=default_offpeak): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0, max=200, step=0.1, unit_of_measurement="c/kWh",
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Required("fit_rate", default=default_fit): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0, max=100, step=0.1, unit_of_measurement="c/kWh",
+                            mode=NumberSelectorMode.BOX,
+                        )
                     ),
                 }
             ),
@@ -5776,7 +6997,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             await self._save_custom_tariff(custom_tariff)
             return await self.async_step_demand_charge_options()
 
-        hour_options = {f"{h:02d}:00": f"{h:02d}:00" for h in range(24)}
+        tariff_hour_options = [
+            SelectOptionDict(value=f"{h:02d}:00", label=f"{h:02d}:00")
+            for h in range(24)
+        ]
         day_options = {
             "weekdays": "Weekdays only (Mon-Fri)",
             "all_days": "All days (Mon-Sun)",
@@ -5809,19 +7033,49 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             step_id="tariff_period_options",
             data_schema=vol.Schema(
                 {
-                    vol.Required("period_type", default="PEAK"): vol.In(period_types),
-                    vol.Required("period_start", default="15:00"): vol.In(hour_options),
-                    vol.Required("period_end", default="21:00"): vol.In(hour_options),
-                    vol.Optional("period_days", default="all_days"): vol.In(
-                        day_options
+                    vol.Required("period_type", default="PEAK"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=k, label=v)
+                                for k, v in period_types.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
                     ),
-                    vol.Required("import_rate", default=45): vol.All(
-                        vol.Coerce(float), vol.Range(min=0, max=200)
+                    vol.Required("period_start", default="15:00"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=tariff_hour_options,
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
                     ),
-                    vol.Required("export_rate", default=5): vol.All(
-                        vol.Coerce(float), vol.Range(min=0, max=200)
+                    vol.Required("period_end", default="21:00"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=tariff_hour_options,
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
                     ),
-                    vol.Optional("add_another", default=False): bool,
+                    vol.Optional("period_days", default="all_days"): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=k, label=v)
+                                for k, v in day_options.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Required("import_rate", default=45): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0, max=200, step=0.1, unit_of_measurement="c/kWh",
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Required("export_rate", default=5): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0, max=200, step=0.1, unit_of_measurement="c/kWh",
+                            mode=NumberSelectorMode.BOX,
+                        )
+                    ),
+                    vol.Optional("add_another", default=False): BooleanSelector(),
                 }
             ),
             errors=errors,

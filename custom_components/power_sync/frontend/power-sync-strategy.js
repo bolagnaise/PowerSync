@@ -2049,31 +2049,12 @@ function _powerwallLocalControl(e) {
           { entity: e('powerwall_local_paired'), state: 'on' },
         ],
         card: {
-          type: 'horizontal-stack',
-          cards: [
+          type: 'entities',
+          entities: [
             {
-              type: 'button',
-              name: 'Go Off-Grid',
+              entity: findEntity('switch', 'off_grid') || e('off_grid'),
+              name: 'Off-Grid Mode',
               icon: 'mdi:transmission-tower-off',
-              tap_action: {
-                action: 'call-service',
-                service: 'power_sync.powerwall_go_off_grid',
-                confirmation: {
-                  text: 'Disconnect the Powerwall from the grid?',
-                },
-              },
-            },
-            {
-              type: 'button',
-              name: 'Reconnect',
-              icon: 'mdi:transmission-tower',
-              tap_action: {
-                action: 'call-service',
-                service: 'power_sync.powerwall_reconnect_grid',
-                confirmation: {
-                  text: 'Reconnect the Powerwall to the grid?',
-                },
-              },
             },
           ],
         },

@@ -2,1203 +2,1524 @@
   "config": {
     "step": {
       "user": {
-        "title": "PowerSync Setup",
-        "description": "Configure PowerSync to automatically sync electricity pricing to your battery system."
+        "title": "PowerSync setup",
+        "description": "Configure PowerSync to sync electricity pricing to your battery system automatically.",
+        "submit": "Next"
       },
       "provider_selection": {
-        "title": "Select Electricity Provider",
-        "description": "Choose your electricity provider:\n\n**Amber Electric**: Full real-time price sync using Amber API.\n\n**Localvolts**: Real-time wholesale pricing with 5-minute NEM interval data.\n\n**Flow Power**: Wholesale electricity with Happy Hour exports. Choose AEMO or Amber pricing.\n\n**Globird**: Static tariff plans with optional AEMO spike export.\n\n**AEMO VPP**: AEMO spike detection for VPP exports (AGL, Engie, etc.).\n\n**New Zealand TOU**: NZ electricity retailers with TOU tariffs (Octopus NZ, Electric Kiwi, Contact Energy).",
+        "title": "Electricity provider",
+        "description": "Select your electricity retailer. PowerSync will fetch pricing and sync it to your battery on a 5-minute cycle.",
         "data": {
-          "electricity_provider": "Electricity Provider"
-        }
+          "electricity_provider": "Electricity provider"
+        },
+        "data_description": {
+          "electricity_provider": "If your retailer is not listed, choose Other / Custom TOU to enter rates manually."
+        },
+        "submit": "Next"
       },
       "flow_power_setup": {
-        "title": "Flow Power",
-        "description": "Enter your Flow Power details. You can find your base rate and network tariff on your Flow Power bill.",
+        "title": "Flow Power pricing",
+        "description": "Enter your base rate and network tariff from your Flow Power bill.",
         "data": {
-          "flow_power_state": "NEM Region",
-          "network_tariff_combined": "Network Tariff",
-          "flow_power_base_rate": "Base Rate (c/kWh)"
-        }
+          "flow_power_state": "NEM region",
+          "network_tariff_combined": "Network tariff",
+          "flow_power_base_rate": "Base rate (c/kWh)"
+        },
+        "data_description": {
+          "flow_power_state": "Your NEM region determines which wholesale price feed is used. Check your bill if unsure.",
+          "network_tariff_combined": "Select the network tariff that matches your electricity bill.",
+          "flow_power_base_rate": "The base energy rate from your Flow Power contract, before wholesale adjustments."
+        },
+        "submit": "Next"
       },
       "flow_power_tariff": {
-        "title": "Flow Power Tariff (v2)",
-        "description": "Optional: Configure your DNSP network tariff for the corrected PEA formula.\n\nThe v2 formula includes GST, network charges, and daily tariff averaging for accurate pricing.\n\nSelect your network distributor and tariff code from your electricity bill, or tick **Skip** to use the legacy formula.",
+        "title": "Network tariff (v2 formula)",
+        "description": "Configure your DNSP network tariff for the corrected PEA formula with GST, network charges, and daily averaging. Select Skip to use the legacy formula.",
         "data": {
           "skip_tariff": "Skip (use legacy formula)",
-          "fp_network": "Network Distributor (DNSP)",
-          "fp_tariff_code": "Tariff Code"
+          "fp_network": "Network distributor (DNSP)",
+          "fp_tariff_code": "Tariff code"
         },
         "data_description": {
+          "skip_tariff": "Check this to skip the v2 tariff setup and use the simpler legacy PEA formula instead.",
           "fp_network": "Your local network distributor (DNSP). Filtered by your NEM region.",
           "fp_tariff_code": "The tariff code from your electricity bill (e.g. RESELE, 6900)."
-        }
+        },
+        "submit": "Next"
       },
       "flow_power_portal": {
-        "title": "Flow Power Portal (Optional)",
-        "description": "Connect your Flow Power portal account to get actual billing data (PEA, LWAP, TWAP, DLF) instead of estimates.\n\nThis requires your Flow Power portal login and SMS verification.",
+        "title": "Flow Power portal",
+        "description": "Connect your portal account to get actual billing data (PEA, LWAP, TWAP, DLF) instead of estimates. Requires SMS verification.",
         "data": {
           "connect_portal": "Connect Flow Power portal account"
-        }
+        },
+        "data_description": {
+          "connect_portal": "When enabled, PowerSync fetches real billing components from your Flow Power account. Disable to use estimated pricing only."
+        },
+        "submit": "Next"
       },
       "flow_power_portal_login": {
-        "title": "Flow Power Portal Login",
-        "description": "Enter your Flow Power portal credentials. An SMS verification code will be sent to your registered phone.",
+        "title": "Portal login",
+        "description": "Enter your Flow Power portal credentials. An SMS code will be sent to your registered phone.",
         "data": {
-          "flowpower_email": "Email Address",
+          "flowpower_email": "Email address",
           "flowpower_password": "Password"
-        }
+        },
+        "data_description": {
+          "flowpower_email": "The email address you use to log in to the Flow Power portal.",
+          "flowpower_password": "Your Flow Power portal password. Stored securely in Home Assistant."
+        },
+        "submit": "Connect"
       },
       "flow_power_portal_mfa": {
-        "title": "Flow Power SMS Verification",
-        "description": "Enter the SMS verification code sent to your phone.",
+        "title": "SMS verification",
+        "description": "Enter the SMS code sent to your registered phone number.",
         "data": {
-          "mfa_code": "SMS Code"
-        }
+          "mfa_code": "SMS code"
+        },
+        "data_description": {
+          "mfa_code": "6-digit code from the SMS sent to your Flow Power registered phone. Codes expire after 5 minutes."
+        },
+        "submit": "Connect"
       },
       "amber": {
-        "title": "Amber Electric Configuration",
-        "description": "Enter your Amber Electric API token. You can get this from {amber_url}",
+        "title": "Amber Electric API key",
+        "description": "Connect your Amber account so PowerSync can read live pricing. Prices update every 5 minutes.",
         "data": {
-          "amber_api_token": "Amber API Token"
-        }
+          "amber_api_token": "API token"
+        },
+        "data_description": {
+          "amber_api_token": "Found in the Amber app under Profile > Developer > API key. Or visit [{amber_url}]({amber_url})."
+        },
+        "submit": "Connect"
       },
       "localvolts": {
-        "title": "Localvolts Configuration",
-        "description": "Enter your Localvolts API credentials. Contact Localvolts to obtain your API key and Partner ID.",
+        "title": "Localvolts API credentials",
+        "description": "Connect your Localvolts account for real-time 5-minute NEM wholesale pricing.",
         "data": {
-          "localvolts_api_key": "API Key",
+          "localvolts_api_key": "API key",
           "localvolts_partner_id": "Partner ID",
-          "localvolts_nmi": "NMI (National Meter Identifier)"
+          "localvolts_nmi": "NMI"
         },
         "data_description": {
-          "localvolts_api_key": "Your Localvolts API key (keep this secret)",
-          "localvolts_partner_id": "Your Localvolts Partner ID",
-          "localvolts_nmi": "Your 10-digit National Meter Identifier. Use * for all authorized NMIs."
-        }
+          "localvolts_api_key": "Contact Localvolts support to request your API key. Keep it secret -- treat it like a password.",
+          "localvolts_partner_id": "Your Localvolts Partner ID, provided alongside the API key.",
+          "localvolts_nmi": "Your 10-digit National Meter Identifier (on your electricity bill). Enter * to authorize all NMIs on the account."
+        },
+        "submit": "Connect"
       },
       "amber_settings": {
-        "title": "Amber Settings",
-        "description": "Configure spike protection and export boost settings.\n\nSpike protection prevents grid charging during high prices.\nExport boost triggers battery exports at lower price points.",
+        "title": "Amber pricing options",
+        "description": "Configure spike protection, export boost, and chip mode for Amber pricing.",
         "data": {
-          "spike_protection_enabled": "Enable Spike Protection",
-          "settled_prices_only": "Settled Prices Only (skip forecast sync)",
-          "forecast_discrepancy_alert": "Forecast Discrepancy Alert",
-          "forecast_discrepancy_threshold": "Discrepancy Threshold (c/kWh)",
-          "force_tariff_mode_toggle": "Force Mode Toggle (faster PW response)",
-          "export_boost_enabled": "Enable Export Price Boost",
-          "export_price_offset": "Offset to Add (c/kWh)",
-          "export_min_price": "Minimum Floor (c/kWh)",
-          "export_boost_start": "Boost Start Time (HH:MM)",
-          "export_boost_end": "Boost End Time (HH:MM)",
-          "export_boost_threshold": "Only Boost Above (c/kWh)",
-          "chip_mode_enabled": "Enable Chip Mode",
-          "chip_mode_start": "Chip Mode Start Time (HH:MM)",
-          "chip_mode_end": "Chip Mode End Time (HH:MM)",
-          "chip_mode_threshold": "Price Threshold (c/kWh)"
+          "spike_protection_enabled": "Enable spike protection",
+          "settled_prices_only": "Use settled prices only",
+          "forecast_discrepancy_alert": "Enable forecast discrepancy alert",
+          "forecast_discrepancy_threshold": "Discrepancy threshold (c/kWh)",
+          "force_tariff_mode_toggle": "Force mode toggle after sync",
+          "export_boost_enabled": "Enable export price boost",
+          "export_price_offset": "Offset to add (c/kWh)",
+          "export_min_price": "Minimum floor (c/kWh)",
+          "export_boost_start": "Boost start time (HH:MM)",
+          "export_boost_end": "Boost end time (HH:MM)",
+          "export_boost_threshold": "Only boost above (c/kWh)",
+          "chip_mode_enabled": "Enable chip mode",
+          "chip_mode_start": "Chip mode start (HH:MM)",
+          "chip_mode_end": "Chip mode end (HH:MM)",
+          "chip_mode_threshold": "Price threshold (c/kWh)"
         },
         "data_description": {
-          "spike_protection_enabled": "When Amber detects a price spike, artificially inflate buy prices to prevent your battery from charging from grid",
-          "settled_prices_only": "Skip forecast sync at :00 and only sync when actual prices arrive at :35/:60",
-          "forecast_discrepancy_alert": "Send mobile notification when predicted forecast differs significantly from conservative forecast (indicates forecast may be unreliable)",
-          "forecast_discrepancy_threshold": "Average price difference threshold to trigger alert. Default 10c/kWh means alert when predicted vs conservative differ by more than 10c on average",
-          "force_tariff_mode_toggle": "After uploading a new tariff, briefly toggle operation mode to force immediate recalculation (Tesla only)",
-          "export_boost_enabled": "Artificially increase sell prices during configured hours to encourage battery export during high-value periods",
-          "export_price_offset": "Amount to ADD to the actual Amber export price. Example: Amber=18c + Offset=5c → battery sees 23c",
-          "export_min_price": "Floor price AFTER offset is applied. Example: Amber=12c + Offset=5c = 17c → bumped up to Floor=20c",
-          "export_boost_threshold": "Only apply boost when ACTUAL Amber price (before boost) is at or above this value. Prices below this are sent unchanged. Use 0 to always boost.",
-          "chip_mode_enabled": "Suppress exports during configured hours unless price exceeds threshold (inverse of Export Boost)",
-          "chip_mode_threshold": "Allow exports only when price is at or above this value"
-        }
+          "spike_protection_enabled": "When Amber detects a price spike, artificially inflate buy prices to prevent your battery from charging from grid.",
+          "settled_prices_only": "Skip forecast sync at :00 and only sync when actual prices arrive at :35/:60. Use when forecasts differ significantly from settled prices.",
+          "forecast_discrepancy_alert": "Send a mobile notification when predicted and conservative forecasts diverge significantly. Indicates the forecast may be unreliable.",
+          "forecast_discrepancy_threshold": "Average price difference that triggers the alert. Default 10 c/kWh.",
+          "force_tariff_mode_toggle": "After uploading a new tariff, briefly toggle operation mode to force immediate recalculation. Tesla only, causes a ~5 second interruption.",
+          "export_boost_enabled": "Artificially increase sell prices during configured hours to encourage battery export during high-value periods.",
+          "export_price_offset": "Amount added to the actual Amber export price. Example: Amber 18c + Offset 5c = battery sees 23c.",
+          "export_min_price": "Floor price after offset. Example: Amber 12c + Offset 5c = 17c, bumped to Floor 20c.",
+          "export_boost_start": "Start time for the export boost window (24-hour format).",
+          "export_boost_end": "End time for the export boost window (24-hour format).",
+          "export_boost_threshold": "Only apply boost when the actual Amber price (before boost) is at or above this value. Use 0 to always boost.",
+          "chip_mode_enabled": "Suppress exports during configured hours unless price exceeds threshold. The inverse of export boost.",
+          "chip_mode_start": "Start time for the chip mode window (24-hour format).",
+          "chip_mode_end": "End time for the chip mode window (24-hour format).",
+          "chip_mode_threshold": "Allow exports only when the price is at or above this value during chip mode hours."
+        },
+        "submit": "Next"
       },
       "aemo_config": {
-        "title": "AEMO Spike Detection",
-        "description": "Configure AEMO wholesale price spike detection. When prices spike above your threshold, your battery will be configured to export energy to the grid.\n\n{threshold_hint}",
-        "data_description": {
-          "aemo_spike_threshold": "Default: $3,000/MWh. GloBird spike exports use $3,000/MWh threshold."
-        },
+        "title": "AEMO spike detection",
+        "description": "When AEMO wholesale prices spike above your threshold, PowerSync will switch your battery to export mode to earn spike credits.",
         "data": {
-          "aemo_spike_enabled": "Enable AEMO Spike Detection",
-          "aemo_region": "NEM Region",
-          "aemo_spike_threshold": "Spike Threshold ($/MWh)"
-        }
+          "aemo_spike_enabled": "Enable spike detection",
+          "aemo_region": "NEM region",
+          "aemo_spike_threshold": "Spike threshold"
+        },
+        "data_description": {
+          "aemo_spike_enabled": "Required for Globird and AEMO VPP plans that include spike export payments. Disable if your plan does not pay for spike exports.",
+          "aemo_region": "Your NEM region determines which AEMO price feed is monitored. Check your electricity bill if unsure.",
+          "aemo_spike_threshold": "Battery exports when the AEMO wholesale price exceeds this value. Default $3,000/MWh matches most Globird and VPP plans. Only change if your plan specifies a different threshold."
+        },
+        "submit": "Next"
       },
       "epex": {
-        "title": "EPEX Day-Ahead (EU) Configuration",
-        "description": "Configure EPEX day-ahead electricity pricing for European markets.\n\nPrices are sourced from ENTSO-E via the EPEX Predictor API (free, no account needed).\n\n**Surcharge**: Add fixed network fees, levies, and other charges (ct/kWh).\n**Tax**: VAT percentage applied on top (e.g. 21% for Belgium, 19% for Germany).\n**Export Rate**: Fixed feed-in tariff in ct/kWh. Leave at 0 to use the wholesale price for export valuation.",
+        "title": "EPEX day-ahead pricing",
+        "description": "Configure European day-ahead pricing. Prices are sourced from ENTSO-E via the EPEX Predictor API (free, no account needed).",
         "data": {
-          "epex_region": "Bidding Zone",
-          "epex_surcharge": "Surcharge (ct/kWh)",
-          "epex_tax_percent": "Tax (%)",
-          "epex_export_rate": "Fixed Export Rate (ct/kWh)"
+          "epex_region": "Bidding zone",
+          "epex_surcharge": "Surcharge",
+          "epex_tax_percent": "Tax",
+          "epex_export_rate": "Fixed export rate"
         },
         "data_description": {
-          "epex_region": "Your EPEX electricity market bidding zone",
-          "epex_surcharge": "Fixed additional charges per kWh (network fees, levies, etc.)",
-          "epex_tax_percent": "Tax percentage applied to the total price (e.g. 21 for 21% VAT)",
-          "epex_export_rate": "Fixed feed-in rate in ct/kWh. Set to 0 to use wholesale price for exports."
-        }
+          "epex_region": "Your EPEX electricity market bidding zone. Most users need just their country code (DE, AT, BE, NL, FR, etc.).",
+          "epex_surcharge": "Fixed network fees, levies, and other charges in ct/kWh. Added to the wholesale price before tax.",
+          "epex_tax_percent": "VAT percentage applied on top of the total price. Example: 21 for Belgium, 19 for Germany.",
+          "epex_export_rate": "Fixed feed-in tariff in ct/kWh. Set to 0 to use the wholesale price for export valuation."
+        },
+        "submit": "Connect"
       },
       "octopus": {
-        "title": "Octopus Energy UK Configuration",
-        "description": "Configure your Octopus Energy tariff. Select your product and GSP region.\n\n**Agile Octopus**: Dynamic half-hourly pricing based on wholesale rates.\n**Octopus Go**: EV tariff with cheap overnight rates (00:30-05:30).\n**Intelligent Octopus Go**: Smart EV/battery tariff with optimised overnight rates.\n**Octopus Flux**: Solar/battery optimised import/export tariff.\n**Intelligent Octopus Flux**: Smart battery optimised import/export tariff.\n**Tracker**: Daily price tracking based on wholesale rates.\n\nFind your GSP region on your Octopus bill or at {octopus_url}",
+        "title": "Octopus Energy tariff",
+        "description": "Select your Octopus product and GSP region. Find your GSP region on your Octopus bill or at {octopus_url}.",
         "data": {
-          "octopus_product": "Octopus Product",
-          "octopus_region": "GSP Region"
+          "octopus_product": "Octopus product",
+          "octopus_region": "GSP region"
         },
         "data_description": {
-          "octopus_product": "Select your Octopus tariff product",
-          "octopus_region": "Your Grid Supply Point region - check your Octopus bill for your GSP code (single letter A-P)"
-        }
+          "octopus_product": "Agile = half-hourly dynamic. Go/Intelligent Go = cheap overnight EV rates. Flux/Intelligent Flux = solar+battery optimised. Tracker = daily wholesale.",
+          "octopus_region": "Your Grid Supply Point region (single letter A-P). Check your Octopus bill or account dashboard."
+        },
+        "submit": "Next"
       },
       "octopus_saving_sessions": {
-        "title": "Octopus Saving Sessions",
-        "description": "Octopus Saving Sessions pay you to reduce grid usage during peak demand (typically 1-2 hours, 4-7pm in winter). PowerSync will automatically export your battery during active sessions.\n\nYou can connect directly via Octopus API or use the Bottlecap Dave integration.",
+        "title": "Saving sessions",
+        "description": "PowerSync automatically exports your battery during Octopus Saving Sessions to earn Octopoints. Connect via Octopus API or the Bottlecap Dave integration.",
         "data": {
-          "octopus_saving_sessions_enabled": "Enable Saving Sessions support",
-          "octopus_saving_sessions_source": "Data Source",
-          "octopus_api_key": "Octopus API Key",
-          "octopus_account_number": "Account Number",
-          "octopus_saving_sessions_entity": "Bottlecap Dave Entity ID",
+          "octopus_saving_sessions_enabled": "Enable saving sessions",
+          "octopus_saving_sessions_source": "Data source",
+          "octopus_api_key": "Octopus API key",
+          "octopus_account_number": "Account number",
+          "octopus_saving_sessions_entity": "Bottlecap Dave entity ID",
           "octopus_saving_sessions_auto_join": "Auto-join available sessions"
         },
         "data_description": {
-          "octopus_saving_sessions_enabled": "Enable automatic battery export during Octopus Saving Sessions",
+          "octopus_saving_sessions_enabled": "Enable automatic battery export during Octopus Saving Sessions.",
           "octopus_saving_sessions_source": "Direct uses the Octopus GraphQL API (requires API key). Entity reads from Bottlecap Dave's Octopus integration.",
-          "octopus_api_key": "Your Octopus API key from the developer dashboard (not the same as your public tariff API key)",
-          "octopus_account_number": "Your Octopus account number (e.g. A-12345678)",
-          "octopus_saving_sessions_entity": "Entity ID of the Bottlecap Dave saving sessions event entity (e.g. event.octopus_energy_saving_sessions)",
-          "octopus_saving_sessions_auto_join": "Automatically join available saving sessions (direct mode only)"
-        }
+          "octopus_api_key": "Your Octopus API key from the developer dashboard (not the same as your public tariff API key).",
+          "octopus_account_number": "Your Octopus account number (e.g. A-12345678).",
+          "octopus_saving_sessions_entity": "Entity ID of the Bottlecap Dave saving sessions event entity (e.g. event.octopus_energy_saving_sessions).",
+          "octopus_saving_sessions_auto_join": "Automatically join available saving sessions. Only works in direct mode."
+        },
+        "submit": "Next"
       },
       "custom_tariff": {
-        "title": "Custom Tariff Setup",
+        "title": "Custom tariff setup",
         "description": "{info}\n\n{skip_hint}",
         "data": {
           "skip_tariff": "Skip tariff configuration",
-          "plan_name": "Plan Name (optional)",
-          "tariff_type": "Tariff Type",
-          "flat_rate": "Flat Rate (c/kWh)",
-          "offpeak_rate": "Off-Peak Rate (c/kWh)",
-          "fit_rate": "Default Feed-in Tariff (c/kWh)"
+          "plan_name": "Plan name (optional)",
+          "tariff_type": "Tariff type",
+          "flat_rate": "Flat rate (c/kWh)",
+          "offpeak_rate": "Off-peak rate (c/kWh)",
+          "fit_rate": "Default feed-in tariff (c/kWh)"
         },
         "data_description": {
-          "skip_tariff": "Check to use default estimation instead of configuring custom rates",
+          "skip_tariff": "Check to use default estimation instead of configuring custom rates.",
+          "plan_name": "Optional label for this tariff plan. Shown in the integration card.",
           "tariff_type": "Flat rate uses a single price all day. Time of Use lets you add multiple periods with different rates.",
-          "flat_rate": "Only used for Flat Rate tariff type",
-          "offpeak_rate": "Rate for hours not covered by any period you define",
-          "fit_rate": "Default export rate for off-peak hours"
-        }
+          "flat_rate": "Only used for flat rate tariff type.",
+          "offpeak_rate": "Rate for hours not covered by any period you define.",
+          "fit_rate": "Default export rate for off-peak hours."
+        },
+        "submit": "Next"
       },
       "tariff_period": {
-        "title": "Add Tariff Period",
+        "title": "Add tariff period",
         "description": "{period_info}",
         "data": {
-          "period_type": "Period Type",
-          "period_start": "Start Time",
-          "period_end": "End Time",
-          "period_days": "Applies To",
-          "import_rate": "Import Rate (c/kWh)",
-          "export_rate": "Export/Feed-in Rate (c/kWh)",
+          "period_type": "Period type",
+          "period_start": "Start time",
+          "period_end": "End time",
+          "period_days": "Applies to",
+          "import_rate": "Import rate (c/kWh)",
+          "export_rate": "Export/feed-in rate (c/kWh)",
           "add_another": "Add another period"
         },
         "data_description": {
-          "period_type": "e.g. Peak, Shoulder, Off-Peak, Super Off-Peak",
-          "export_rate": "What you earn for exporting during this period",
+          "period_type": "e.g. Peak, Shoulder, Off-Peak, Super Off-Peak.",
+          "period_start": "Start time in 24-hour format (e.g. 07:00).",
+          "period_end": "End time in 24-hour format (e.g. 22:00).",
+          "period_days": "Which days this period applies to (weekdays, weekends, or all).",
+          "import_rate": "What you pay per kWh to import during this period.",
+          "export_rate": "What you earn per kWh for exporting during this period.",
           "add_another": "Uncheck when done. Remaining hours become off-peak."
-        }
+        },
+        "submit": "Next"
       },
       "nz_retailer": {
-        "title": "NZ Electricity Retailer",
-        "description": "Select your NZ electricity retailer and distribution zone. Rates will be pre-filled from the selected plan — you can adjust them in the next step.",
+        "title": "NZ electricity retailer",
+        "description": "Select your retailer and distribution zone. Rates will be pre-filled and can be adjusted in the next step.",
         "data": {
           "nz_retailer": "Retailer",
-          "nz_distribution_zone": "Distribution Zone"
-        }
+          "nz_distribution_zone": "Distribution zone"
+        },
+        "data_description": {
+          "nz_retailer": "Your NZ electricity retailer. Rates are pre-filled from the selected plan.",
+          "nz_distribution_zone": "Your local network distribution zone. Check your electricity bill if unsure."
+        },
+        "submit": "Next"
       },
       "nz_rates": {
-        "title": "NZ Electricity Rates",
-        "description": "Enter your rates in NZD cents per kWh. These are pre-filled from your selected retailer — adjust to match your actual plan.",
+        "title": "NZ electricity rates",
+        "description": "Adjust rates to match your actual plan. All values are in NZD cents per kWh.",
         "data": {
-          "nz_peak_rate": "Peak Rate (c/kWh)",
-          "nz_shoulder_rate": "Shoulder Rate (c/kWh)",
-          "nz_offpeak_rate": "Off-Peak Rate (c/kWh)",
-          "nz_peak_export": "Peak Export Rate (c/kWh)",
-          "nz_offpeak_export": "Off-Peak Export Rate (c/kWh)",
-          "nz_daily_supply": "Daily Supply Charge (c/day)"
+          "nz_peak_rate": "Peak rate (c/kWh)",
+          "nz_shoulder_rate": "Shoulder rate (c/kWh)",
+          "nz_offpeak_rate": "Off-peak rate (c/kWh)",
+          "nz_peak_export": "Peak export rate (c/kWh)",
+          "nz_offpeak_export": "Off-peak export rate (c/kWh)",
+          "nz_daily_supply": "Daily supply charge (c/day)"
         },
         "data_description": {
-          "nz_peak_rate": "Weekday peak rate (typically 7-9am and 5-9pm)",
-          "nz_shoulder_rate": "Weekday daytime and weekend daytime rate",
-          "nz_offpeak_rate": "Overnight rate (typically 9pm-7am)",
-          "nz_peak_export": "Export rate during peak periods",
-          "nz_offpeak_export": "Export rate during off-peak periods",
-          "nz_daily_supply": "Fixed daily supply charge from your retailer"
-        }
+          "nz_peak_rate": "Weekday peak rate (typically 7-9am and 5-9pm).",
+          "nz_shoulder_rate": "Weekday daytime and weekend daytime rate.",
+          "nz_offpeak_rate": "Overnight rate (typically 9pm-7am).",
+          "nz_peak_export": "Export rate during peak periods.",
+          "nz_offpeak_export": "Export rate during off-peak periods.",
+          "nz_daily_supply": "Fixed daily supply charge from your retailer."
+        },
+        "submit": "Next"
       },
       "battery_system": {
-        "title": "Select Battery System",
-        "description": "Choose your battery storage system:\n\n**Tesla Powerwall**: Connect via Fleet API or Teslemetry.\n\n**Sigenergy**: Connect via Sigenergy Cloud API.\n\n**Sungrow SH-series**: Connect via Modbus TCP.\n\n**FoxESS**: Connect via Modbus TCP or RS485 serial.\n\n**GoodWe**: Connect via UDP/TCP (ET/EH/ES/EM series hybrid inverters).",
+        "title": "Battery system",
+        "description": "Select the battery or hybrid inverter installed at your site. This determines which connection protocol PowerSync uses.",
         "data": {
-          "battery_system": "Battery System"
-        }
+          "battery_system": "Battery system"
+        },
+        "data_description": {
+          "battery_system": "If you have multiple battery brands, choose the primary system that PowerSync should control."
+        },
+        "submit": "Next"
       },
       "optimization_provider": {
-        "title": "Choose Optimization Provider",
-        "description": "Your {battery_name} has built-in battery scheduling. Choose how PowerSync should manage your battery:\n\n**{battery_name} built-in**: Use your battery's native Time-of-Use scheduling.\n\n**Smart Optimization (Built-in LP)**: Uses Linear Programming to find the optimal battery schedule — minimizing costs. No external dependencies required.",
+        "title": "Optimization mode",
+        "description": "Choose how PowerSync schedules your battery. The built-in option uses your {battery_name}'s native TOU scheduler; Smart Optimization runs a cost-minimising LP solver inside PowerSync.",
         "data": {
-          "optimization_provider": "Optimization Provider"
-        }
+          "optimization_provider": "Optimization mode"
+        },
+        "data_description": {
+          "optimization_provider": "Smart Optimization generally delivers lower bills but requires scipy. The native mode is simpler and uses your battery's own scheduling logic."
+        },
+        "submit": "Next"
       },
       "ml_options": {
-        "title": "Smart Optimization Settings",
-        "description": "Configure the minimum discharge level for the built-in LP optimizer.\n\nThe optimizer uses electricity price forecasts, solar generation, and load patterns to find the cost-minimizing charge/discharge schedule.\n\nNote: This is the optimizer's discharge floor, not your battery's hardware backup reserve for grid outages.",
+        "title": "Smart Optimization settings",
+        "description": "Set the minimum discharge level for the LP optimizer. This is the optimizer's floor, not your battery's hardware backup reserve for grid outages.",
         "data": {
-          "optimization_backup_reserve": "Minimum Discharge Level (%)"
+          "optimization_backup_reserve": "Minimum discharge level"
         },
         "data_description": {
-          "optimization_backup_reserve": "Optimizer will not discharge below this level. This is separate from your battery's hardware backup reserve (set in the mobile app)."
-        }
+          "optimization_backup_reserve": "The optimizer will never discharge below this percentage. Default 20% is a good starting point. Your battery's hardware backup reserve (set in the Tesla/Sigenergy app) is separate."
+        },
+        "submit": "Next"
       },
       "sungrow": {
-        "title": "Sungrow Modbus Connection",
-        "description": "Configure the Modbus TCP connection to your Sungrow SH-series hybrid inverter.\n\nEnter the local IP address of your Sungrow inverter or WiNet-S dongle.",
+        "title": "Sungrow Modbus connection",
+        "description": "Connect to your Sungrow SH-series hybrid inverter via Modbus TCP.",
         "data": {
-          "sungrow_host": "Sungrow IP Address",
-          "sungrow_port": "Modbus Port",
-          "sungrow_slave_id": "Modbus Slave ID"
+          "sungrow_host": "Inverter IP address",
+          "sungrow_port": "Modbus port",
+          "sungrow_slave_id": "Modbus slave ID"
         },
         "data_description": {
-          "sungrow_host": "Local IP address of your Sungrow inverter (e.g., 192.168.1.100)",
-          "sungrow_port": "Modbus TCP port (default: 502)",
-          "sungrow_slave_id": "Modbus slave ID (default: 1)"
-        }
+          "sungrow_host": "Local IP of your Sungrow inverter or WiNet-S dongle (e.g. 192.168.1.100).",
+          "sungrow_port": "Default Modbus TCP port is 502. Only change if customised on the inverter.",
+          "sungrow_slave_id": "Default is 1. Only change if you have multiple devices on the same bus."
+        },
+        "submit": "Connect"
       },
       "sungrow_secondary": {
-        "title": "Secondary Sungrow Inverter (Optional)",
-        "description": "If you have a second Sungrow SH inverter (e.g., connected to the primary's backup port), enter its connection details below.\n\nLeave the IP address blank to skip.",
+        "title": "Secondary Sungrow inverter",
+        "description": "If you have a second Sungrow SH inverter, enter its connection details. Leave the IP blank to skip.",
         "data": {
-          "sungrow_host_2": "Secondary Sungrow IP Address",
-          "sungrow_port_2": "Modbus Port",
-          "sungrow_slave_id_2": "Modbus Slave ID"
+          "sungrow_host_2": "Secondary inverter IP",
+          "sungrow_port_2": "Modbus port",
+          "sungrow_slave_id_2": "Modbus slave ID"
         },
         "data_description": {
-          "sungrow_host_2": "Local IP address of your second Sungrow inverter or WiNet-S dongle (leave blank to skip)",
-          "sungrow_port_2": "Modbus TCP port (default: 502)",
-          "sungrow_slave_id_2": "Modbus slave ID (default: 1)"
-        }
+          "sungrow_host_2": "Local IP of your second Sungrow inverter or WiNet-S dongle. Leave blank to skip.",
+          "sungrow_port_2": "Default Modbus TCP port is 502.",
+          "sungrow_slave_id_2": "Default is 1. Only change if customised."
+        },
+        "submit": "Next"
       },
       "foxess_connection": {
-        "title": "FoxESS Connection Type",
-        "description": "Choose how to connect to your FoxESS inverter.\n\n**Modbus TCP**: Connect over your local network (LAN/Wi-Fi).\n\n**RS485 Serial**: Direct serial connection for full register access.",
+        "title": "FoxESS connection type",
+        "description": "Choose how to connect to your FoxESS inverter.",
         "data": {
-          "foxess_connection_type": "Connection Type"
-        }
+          "foxess_connection_type": "Connection type"
+        },
+        "data_description": {
+          "foxess_connection_type": "Modbus TCP connects over LAN/WiFi. RS485 Serial provides full register access via a direct serial adapter."
+        },
+        "submit": "Next"
       },
       "foxess_tcp": {
-        "title": "FoxESS Modbus TCP Connection",
-        "description": "Configure the Modbus TCP connection to your FoxESS inverter.\n\n**H3 Smart**: Has built-in WiFi Modbus — use the inverter's IP address directly (may appear as 'espressif' on your network). Ensure inverter firmware is up to date.\n\nThe model family will be auto-detected.",
+        "title": "FoxESS Modbus TCP",
+        "description": "Connect to your FoxESS inverter over the local network. The model family will be auto-detected.",
         "data": {
-          "foxess_host": "FoxESS IP Address",
-          "foxess_port": "Modbus Port",
-          "foxess_slave_id": "Modbus Slave ID"
+          "foxess_host": "Inverter IP address",
+          "foxess_port": "Modbus port",
+          "foxess_slave_id": "Modbus slave ID"
         },
         "data_description": {
-          "foxess_host": "Local IP address of your FoxESS inverter (e.g., 192.168.1.100)",
-          "foxess_port": "Modbus TCP port (default: 502)",
-          "foxess_slave_id": "Modbus slave ID (default: 247)"
-        }
+          "foxess_host": "Local IP of your FoxESS inverter. H3 Smart may appear as 'espressif' on your network.",
+          "foxess_port": "Default Modbus TCP port is 502.",
+          "foxess_slave_id": "Default is 247 for FoxESS."
+        },
+        "submit": "Connect"
       },
       "foxess_serial": {
-        "title": "FoxESS RS485 Serial Connection",
-        "description": "Configure the RS485 serial connection to your FoxESS inverter.\n\nRS485 provides full register access including BMS data and charge periods.",
+        "title": "FoxESS RS485 serial",
+        "description": "Connect to your FoxESS inverter via RS485 serial for full register access including BMS data.",
         "data": {
-          "foxess_serial_port": "Serial Port",
-          "foxess_serial_baudrate": "Baud Rate",
-          "foxess_slave_id": "Modbus Slave ID"
+          "foxess_serial_port": "Serial port path",
+          "foxess_serial_baudrate": "Baud rate",
+          "foxess_slave_id": "Modbus slave ID"
         },
         "data_description": {
-          "foxess_serial_port": "Serial device path (e.g., /dev/ttyUSB0)",
-          "foxess_serial_baudrate": "Serial baud rate (default: 9600)",
-          "foxess_slave_id": "Modbus slave ID (default: 247)"
-        }
+          "foxess_serial_port": "e.g. /dev/ttyUSB0 for a USB-to-RS485 adapter.",
+          "foxess_serial_baudrate": "Default 9600. Only change if the inverter is configured differently.",
+          "foxess_slave_id": "Default is 247 for FoxESS."
+        },
+        "submit": "Connect"
       },
       "foxess_model": {
-        "title": "Confirm FoxESS Model",
-        "description": "Connection successful! Please confirm your inverter model.\n\nBoth H3-Pro and H3 Smart use the same register set. The H3 Smart has built-in WiFi Modbus and does not require an external adapter.",
+        "title": "Confirm FoxESS model",
+        "description": "Connection successful. Please confirm your inverter model.",
         "data": {
-          "foxess_model_family": "Inverter Model"
-        }
+          "foxess_model_family": "Inverter model"
+        },
+        "data_description": {
+          "foxess_model_family": "H3-Pro and H3 Smart use the same register set. The H3 Smart has built-in WiFi Modbus."
+        },
+        "submit": "Next"
       },
       "foxess_cloud": {
-        "title": "FoxESS Cloud (Optional)",
-        "description": "Optionally provide your FoxESS Cloud API key to sync Amber/Octopus prices as time-based schedules on your inverter.\n\nGet your API key from **foxesscloud.com/user/center > API Management**.\n\nThis is **not required** for battery control — all control is done locally via Modbus.\n\nLeave blank to skip.",
+        "title": "FoxESS Cloud (optional)",
+        "description": "Optionally connect FoxESS Cloud to sync prices as time-based schedules. Not required for battery control. Leave blank to skip.",
         "data": {
-          "foxess_cloud_api_key": "FoxESS Cloud API Key",
-          "foxess_cloud_device_sn": "Device Serial Number"
+          "foxess_cloud_api_key": "FoxESS Cloud API key",
+          "foxess_cloud_device_sn": "Device serial number"
         },
         "data_description": {
-          "foxess_cloud_api_key": "API key from foxesscloud.com (optional)",
-          "foxess_cloud_device_sn": "Inverter serial number from FoxESS Cloud (optional)"
-        }
+          "foxess_cloud_api_key": "Get your API key from foxesscloud.com > User Centre > API Management. Leave blank to skip.",
+          "foxess_cloud_device_sn": "Inverter serial number from FoxESS Cloud. Leave blank to auto-detect."
+        },
+        "submit": "Next"
       },
       "goodwe_connection": {
-        "title": "GoodWe Connection",
-        "description": "Connect to your GoodWe hybrid inverter. The inverter model will be auto-detected.\n\n**UDP (default):** Port 8899 via WiFi dongle — works with most GoodWe inverters.\n**TCP:** Port 502 via LAN dongle.",
+        "title": "GoodWe inverter connection",
+        "description": "Connect to your GoodWe hybrid inverter. The model will be auto-detected.",
         "data": {
-          "goodwe_host": "Inverter IP Address",
+          "goodwe_host": "Inverter IP address",
           "goodwe_port": "Port",
           "goodwe_protocol": "Protocol"
-        }
+        },
+        "data_description": {
+          "goodwe_host": "Local IP address of your GoodWe inverter.",
+          "goodwe_protocol": "UDP for WiFi dongles (port 8899), TCP for LAN dongles (port 502).",
+          "goodwe_port": "Default: 8899 for UDP, 502 for TCP."
+        },
+        "submit": "Connect"
       },
       "sigenergy_credentials": {
-        "title": "Sigenergy Credentials",
-        "description": "Enter your Sigenergy Cloud API credentials.\n\n**Password:** Enter your Sigenergy account password.\n\n**Device ID (optional):** Usually not needed. Only required if authentication fails without it. To find it, open browser dev tools (F12), go to Network tab, login to web-aus.sigencloud.com, find the 'token' request payload → userDeviceId.",
+        "title": "Sigenergy Cloud login",
+        "description": "Enter your Sigenergy Cloud API credentials to connect your system.",
         "data": {
-          "sigenergy_username": "Sigenergy Email",
+          "sigenergy_username": "Email address",
           "sigenergy_password": "Password",
           "sigenergy_device_id": "Device ID (optional)",
-          "sigenergy_pass_enc": "Encrypted Password (Advanced)"
+          "sigenergy_pass_enc": "Pre-encoded password (advanced)"
         },
         "data_description": {
-          "sigenergy_password": "Your Sigenergy account password",
-          "sigenergy_pass_enc": "Leave blank unless you have a pre-encoded password"
-        }
+          "sigenergy_username": "Your Sigenergy Cloud account email address.",
+          "sigenergy_password": "Plain-text password (recommended). Encoded automatically.",
+          "sigenergy_device_id": "13-digit device ID. Only needed if authentication fails without it. Find it in browser dev tools > Network tab > 'token' request > userDeviceId.",
+          "sigenergy_pass_enc": "Pre-encoded password from the Sigenergy API. Leave blank unless you know what this is."
+        },
+        "submit": "Connect"
       },
       "sigenergy_station": {
-        "title": "Sigenergy Station",
-        "description": "Select or enter your Sigenergy Station ID.\n\nIf the station list is unavailable, enter your Station ID manually. To find it, ask SigenAI 'Tell me my StationID' in the Sigenergy app.",
+        "title": "Sigenergy station",
+        "description": "Select your Sigenergy station. If the list is unavailable, enter the ID manually.",
         "data": {
           "sigenergy_station_id": "Station ID"
-        }
+        },
+        "data_description": {
+          "sigenergy_station_id": "To find your Station ID, ask SigenAI 'Tell me my StationID' in the Sigenergy app."
+        },
+        "submit": "Next"
       },
       "sigenergy_modbus": {
-        "title": "Sigenergy Modbus Connection",
-        "description": "Configure the Modbus TCP connection to your Sigenergy system.\n\n**Required for energy data:** PowerSync reads real-time solar, battery, and grid power data from your Sigenergy system via Modbus.\n\nEnter the local IP address of your Sigenergy inverter.",
+        "title": "Sigenergy Modbus connection",
+        "description": "Configure Modbus TCP to read real-time solar, battery, and grid power data from your Sigenergy system.",
         "data": {
-          "sigenergy_modbus_host": "Sigenergy IP Address",
-          "sigenergy_modbus_port": "Modbus Port",
-          "sigenergy_modbus_slave_id": "Modbus Slave ID"
+          "sigenergy_modbus_host": "Inverter IP address",
+          "sigenergy_modbus_port": "Modbus port",
+          "sigenergy_modbus_slave_id": "Modbus slave ID"
         },
         "data_description": {
-          "sigenergy_modbus_host": "Local IP address of your Sigenergy inverter (e.g., 192.168.1.100)",
-          "sigenergy_modbus_slave_id": "Leave at 247 (default). PowerSync auto-detects the correct registers and slave ID."
-        }
+          "sigenergy_modbus_host": "Local IP address of your Sigenergy inverter or gateway (e.g. 192.168.1.100).",
+          "sigenergy_modbus_port": "Default Modbus TCP port is 502. Only change if customised.",
+          "sigenergy_modbus_slave_id": "Default is 247. PowerSync auto-detects the correct registers."
+        },
+        "submit": "Connect"
       },
       "sigenergy_dc_curtailment": {
-        "title": "Sigenergy DC Solar Curtailment",
-        "description": "Configure DC solar curtailment for your Sigenergy system.\n\nWhen enabled, PowerSync can limit DC solar production during negative prices by setting the PV power limit via Modbus.\n\n**Note:** This is for DC solar connected directly to your Sigenergy system. AC-coupled inverters from other brands can be configured separately.",
+        "title": "DC solar curtailment",
+        "description": "When enabled, PowerSync limits DC solar production during negative prices via Modbus. For AC-coupled inverters, configure curtailment separately.",
         "data": {
-          "sigenergy_dc_curtailment_enabled": "Enable DC Solar Curtailment",
-          "sigenergy_export_limit_kw": "Grid Export Limit (kW)"
+          "sigenergy_dc_curtailment_enabled": "Enable DC solar curtailment",
+          "sigenergy_export_limit_kw": "Grid export limit (kW)"
         },
         "data_description": {
-          "sigenergy_dc_curtailment_enabled": "Allow PowerSync to control DC solar production during negative prices",
-          "sigenergy_export_limit_kw": "Your DNSP grid export limit in kW. Leave blank to auto-detect from inverter registers. This prevents PowerSync from ever setting an export limit higher than your grid connection allows."
-        }
+          "sigenergy_dc_curtailment_enabled": "Reduce DC solar output when export prices go negative. Requires Modbus write access to the Sigenergy system.",
+          "sigenergy_export_limit_kw": "Your DNSP grid export limit in kW. Leave blank to auto-detect from inverter registers. Prevents PowerSync from ever exceeding your grid connection allowance."
+        },
+        "submit": "Next"
       },
       "tesla_provider": {
-        "title": "Choose Tesla API Providers",
-        "description": "{fleet_detected}\n\n**Tesla Energy API Provider** — used for Powerwall control:\n\n• **PowerSync** (recommended) — Free. Sign in with your Tesla account on powersync.cc and we handle the OAuth flow for you.\n\n• **Tesla Fleet API** — Free. Uses an existing Tesla Fleet integration that you've already set up in Home Assistant.\n\n• **Teslemetry** — ~$4/month. A third-party paid proxy.\n\n**Tesla EV API Provider** — used for vehicle commands. PowerSync.cc does not include vehicle endpoints, so pick Tesla Fleet or Teslemetry here if you want to control your Tesla vehicles. Choose **None** if you don't have a Tesla vehicle (or only use BLE control).",
+        "title": "Tesla API connection",
+        "description": "{fleet_detected}\n\nChoose how PowerSync connects to your Tesla account for Powerwall control, and optionally for vehicle commands.",
         "data": {
-          "tesla_api_provider": "Tesla Energy API Provider",
-          "tesla_ev_api_provider": "Tesla EV API Provider"
-        }
+          "tesla_api_provider": "Powerwall API provider",
+          "tesla_ev_api_provider": "Vehicle API provider"
+        },
+        "data_description": {
+          "tesla_api_provider": "Controls how PowerSync reads and writes your Powerwall TOU schedule. PowerSync.cc is free and handles OAuth for you.",
+          "tesla_ev_api_provider": "Only needed if you want PowerSync to send commands to a Tesla vehicle (e.g. start/stop charging). Choose None if you only have a Powerwall or use BLE."
+        },
+        "submit": "Next"
       },
       "tesla_ev_teslemetry_token": {
-        "title": "Teslemetry token for vehicle commands",
-        "description": "Teslemetry isn't installed in Home Assistant, so PowerSync needs an API token to talk to vehicles directly.\n\nGet a token from [{teslemetry_url}]({teslemetry_url}) and paste it below.",
+        "title": "Teslemetry vehicle token",
+        "description": "The Teslemetry HA integration is not installed, so PowerSync needs a token to send vehicle commands directly.",
         "data": {
-          "tesla_ev_teslemetry_token": "Teslemetry API Token"
-        }
+          "tesla_ev_teslemetry_token": "Teslemetry API token"
+        },
+        "data_description": {
+          "tesla_ev_teslemetry_token": "Get a token from [{teslemetry_url}]({teslemetry_url}). This is only used for vehicle commands -- your Powerwall uses a separate connection."
+        },
+        "submit": "Connect"
       },
       "teslemetry": {
-        "title": "Teslemetry Configuration",
-        "description": "Enter your Teslemetry API token. You can get this from teslemetry.com",
+        "title": "Teslemetry API key",
+        "description": "Enter your Teslemetry API token to connect PowerSync to your Tesla account via the Teslemetry proxy (~$4/month).",
         "data": {
-          "teslemetry_api_token": "Teslemetry API Token"
-        }
+          "teslemetry_api_token": "API token"
+        },
+        "data_description": {
+          "teslemetry_api_token": "Get a token from [teslemetry.com](https://teslemetry.com). Paste the full token string."
+        },
+        "submit": "Connect"
       },
       "powersync": {
-        "title": "Connect with PowerSync",
-        "description": "1. Open this URL in a browser and sign in with your Tesla account:\n\n**{auth_url}**\n\n2. After signing in, you'll get a token starting with `psync_`.\n\n3. Paste it below to connect.\n\nYour Tesla credentials are never seen by PowerSync — Tesla handles authentication and we only receive a token to call the Fleet API on your behalf.",
+        "title": "Sign in with PowerSync",
+        "description": "Sign in with your Tesla account at the link below. You will receive a token starting with `psync_` -- paste it here.",
         "data": {
-          "teslemetry_api_token": "PowerSync Token"
-        }
+          "teslemetry_api_token": "PowerSync token"
+        },
+        "data_description": {
+          "teslemetry_api_token": "Open [{auth_url}]({auth_url}) in a browser, sign in with Tesla, and copy the `psync_` token. Your Tesla credentials are never shared with PowerSync."
+        },
+        "submit": "Connect"
       },
       "powersync_reauth": {
         "title": "Re-authenticate with PowerSync",
-        "description": "Your PowerSync token is no longer valid. This usually means it was revoked or your Tesla session expired.\n\n1. Sign in again at:\n\n**{auth_url}**\n\n2. Paste the new `psync_` token below.",
+        "description": "Your PowerSync token is no longer valid. Sign in again at **{auth_url}** and paste the new `psync_` token below.",
         "data": {
-          "teslemetry_api_token": "PowerSync Token"
-        }
+          "teslemetry_api_token": "PowerSync token"
+        },
+        "submit": "Connect"
       },
       "teslemetry_reauth": {
-        "title": "Re-authenticate with Teslemetry",
+        "title": "Re-authenticate Teslemetry",
         "description": "Your Teslemetry token is no longer valid. Get a new one from teslemetry.com and paste it below.",
         "data": {
-          "teslemetry_api_token": "Teslemetry API Token"
-        }
+          "teslemetry_api_token": "Teslemetry API token"
+        },
+        "submit": "Connect"
       },
       "site_selection": {
-        "title": "Site Selection",
-        "description": "Select your Tesla energy site and Amber site (if you have multiple), and configure sync options.",
+        "title": "Select your sites",
+        "description": "Match your Tesla energy site with your electricity account. If you only have one of each, they are pre-selected.",
         "data": {
-          "tesla_energy_site_id": "Tesla Energy Site",
-          "amber_site_id": "Amber Site (if you have multiple)",
-          "auto_sync_enabled": "Enable automatic TOU schedule syncing",
-          "amber_forecast_type": "Amber Forecast Type",
-          "battery_curtailment_enabled": "Enable DC Solar Curtailment (stop export at negative prices)"
+          "tesla_energy_site_id": "Tesla energy site",
+          "amber_site_id": "Amber site",
+          "auto_sync_enabled": "Sync TOU schedule automatically",
+          "amber_forecast_type": "Amber price forecast",
+          "battery_curtailment_enabled": "Stop export at negative feed-in prices"
         },
         "data_description": {
-          "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices",
-          "amber_forecast_type": "Which Amber price forecast to use: Predicted (balanced), Low/Aggressive (assumes cheaper prices), High/Conservative (assumes higher prices)",
-          "battery_curtailment_enabled": "Automatically stop battery exports and DC solar production when feed-in prices go negative to avoid paying to export"
-        }
+          "tesla_energy_site_id": "The Powerwall or Solar site that PowerSync will control. If you have multiple Tesla sites, choose the one at this address.",
+          "amber_site_id": "If you have multiple Amber NMIs, select the one associated with this Powerwall.",
+          "auto_sync_enabled": "When enabled, PowerSync uploads a new TOU tariff schedule to your battery every 5 minutes based on current Amber prices.",
+          "amber_forecast_type": "Predicted is balanced. Low assumes cheaper prices (more aggressive charging). High assumes expensive prices (more conservative).",
+          "battery_curtailment_enabled": "Prevents your battery from exporting when feed-in prices go negative, so you never pay to export. Can be fine-tuned in options later."
+        },
+        "submit": "Finish"
       },
       "weather_setup": {
-        "title": "Weather & Solar Forecast (Optional)",
-        "description": "Configure weather-based automations and solar production forecasting.\n\n**Already using Solcast HA integration?** PowerSync will automatically detect and use your existing Solcast sensors - no API key needed! Just enable Solcast below and leave the API fields blank.\n\n**New to Solcast?** Get a free API key from toolkit.solcast.com.au (10 API calls/day on hobbyist tier).",
+        "title": "Weather & solar forecast",
+        "description": "Configure weather automations and solar forecasting. If Solcast HA integration is already installed, PowerSync detects it automatically.",
         "data": {
-          "weather_location": "Weather Location",
-          "openweathermap_api_key": "OpenWeatherMap API Key",
-          "solcast_enabled": "Enable Solcast Solar Forecast",
-          "solcast_api_key": "Solcast API Key (leave blank if using Solcast HA integration)",
-          "solcast_resource_id": "Solcast Resource ID(s) (leave blank if using Solcast HA integration)"
+          "weather_location": "Weather location",
+          "openweathermap_api_key": "OpenWeatherMap API key",
+          "solcast_enabled": "Enable Solcast solar forecast",
+          "solcast_api_key": "Solcast API key",
+          "solcast_resource_id": "Solcast resource ID(s)"
         },
         "data_description": {
-          "weather_location": "Your suburb or city name (e.g., 'Berowra' or 'Melbourne'). For duplicate names, use full state (e.g., 'Berowra, New South Wales'). You can also use a postcode (e.g., '2081') or lat,lon coordinates (e.g., '-33.62,151.15'). Leave blank to auto-detect from timezone.",
-          "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny/cloudy triggers). Leave blank to disable weather triggers.",
-          "solcast_enabled": "Enable solar production forecasting. If the Solcast HA integration is installed, PowerSync will automatically read from its sensors (no API calls). Otherwise, enter your API key below.",
-          "solcast_api_key": "Only needed if you do NOT have the Solcast HA integration installed. If you have the Solcast integration in HA, leave this blank — PowerSync reads from its sensors automatically.",
-          "solcast_resource_id": "Only needed if you do NOT have the Solcast HA integration installed. For split arrays, enter comma-separated IDs (e.g., abc123,def456). If you have the Solcast integration in HA, leave this blank."
-        }
+          "weather_location": "Suburb, city, postcode, or lat,lon coordinates (e.g. 'Melbourne', '3000', '-37.81,144.96'). Leave blank to auto-detect from timezone.",
+          "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny/cloudy triggers). Leave blank to disable.",
+          "solcast_enabled": "Enable solar production forecasting. If the Solcast HA integration is installed, PowerSync reads from its sensors automatically (no API calls needed).",
+          "solcast_api_key": "Only needed if you do NOT have the Solcast HA integration. Get a free key from toolkit.solcast.com.au (10 calls/day on hobbyist tier).",
+          "solcast_resource_id": "Only needed without the Solcast HA integration. For split arrays, enter comma-separated IDs (e.g. abc123,def456)."
+        },
+        "submit": "Next"
       },
       "demand_charges": {
-        "title": "Demand Charge Configuration (Optional)",
-        "description": "Configure demand charge tracking for electricity plans with capacity-based fees. Demand charges are applied during peak periods based on your maximum power draw. Leave 'Enable Demand Charge Tracking' unchecked to skip this step.",
+        "title": "Demand charge tracking",
+        "description": "Track peak demand during capacity-based billing periods. Leave unchecked to skip if your plan has no demand charges.",
         "data": {
-          "demand_charge_enabled": "Enable Demand Charge Tracking",
-          "demand_charge_rate": "Demand Charge Rate ($/kW)",
-          "demand_charge_start_time": "Peak Period Start Time (HH:MM)",
-          "demand_charge_end_time": "Peak Period End Time (HH:MM)",
-          "demand_allow_grid_charging": "Allow Grid Charging During Demand Windows"
+          "demand_charge_enabled": "Enable demand charge tracking",
+          "demand_charge_rate": "Demand charge rate ($/kW)",
+          "demand_charge_start_time": "Peak start time (HH:MM)",
+          "demand_charge_end_time": "Peak end time (HH:MM)",
+          "demand_allow_grid_charging": "Allow grid charging during demand windows"
         },
         "data_description": {
-          "demand_charge_enabled": "Track your peak grid draw during demand charge periods and calculate monthly capacity fees based on your highest 30-minute average",
-          "demand_allow_grid_charging": "Allow the battery to charge from grid during demand peak periods. When disabled, grid charging is blocked during peak to protect against demand charges."
-        }
+          "demand_charge_enabled": "Track your peak grid draw during demand charge periods and calculate monthly capacity fees.",
+          "demand_charge_rate": "Your network demand charge rate in dollars per kW of peak demand. Check your bill for this value.",
+          "demand_charge_start_time": "Start time of the demand charge measurement period (24-hour format).",
+          "demand_charge_end_time": "End time of the demand charge measurement period (24-hour format).",
+          "demand_allow_grid_charging": "Allow battery grid charging during demand peak periods. Disable to protect against demand charge spikes."
+        },
+        "submit": "Next"
       },
       "curtailment_setup": {
-        "title": "Negative FIT Curtailment Settings",
-        "description": "Configure automatic curtailment during negative feed-in tariff (FIT) prices.\n\nWhen feed-in prices go negative, you PAY to export power. These settings prevent that by stopping battery export and optionally shutting down solar production.",
+        "title": "Negative FIT curtailment",
+        "description": "When feed-in prices go negative, you pay to export. These settings stop battery export and optionally shut down solar.",
         "data": {
-          "battery_curtailment_enabled": "Enable Battery Export Curtailment",
-          "ac_inverter_curtailment_enabled": "Enable AC-Coupled Inverter Shutdown"
+          "battery_curtailment_enabled": "Enable battery export curtailment",
+          "ac_inverter_curtailment_enabled": "Enable AC-coupled inverter shutdown"
         },
         "data_description": {
-          "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. This is the MAIN toggle - must be enabled for curtailment to work.",
-          "ac_inverter_curtailment_enabled": "Shutdown AC-coupled solar inverter (Fronius, Sungrow, GoodWe, Enphase, etc.) when feed-in price is negative. Use this if your solar bypasses the battery and exports directly to grid. Requires inverter IP configuration in next step."
-        }
+          "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. This is the main toggle -- must be enabled for any curtailment to work.",
+          "ac_inverter_curtailment_enabled": "Shut down AC-coupled solar inverter (Fronius, Sungrow, GoodWe, Enphase) when feed-in price is negative. Use if solar bypasses your battery and exports directly."
+        },
+        "submit": "Next"
       },
       "inverter_brand_setup": {
-        "title": "AC-Coupled Inverter Setup",
-        "description": "Select your solar inverter brand for direct curtailment control.\n\nThis allows PowerSync to shut down your AC-coupled solar inverter when feed-in prices are negative.",
+        "title": "AC-coupled inverter brand",
+        "description": "Select your solar inverter brand for direct curtailment control during negative feed-in prices.",
         "data": {
-          "inverter_brand": "Inverter Brand"
-        }
+          "inverter_brand": "Inverter brand"
+        },
+        "data_description": {
+          "inverter_brand": "The brand of your AC-coupled solar inverter. PowerSync uses brand-specific protocols for shutdown commands."
+        },
+        "submit": "Next"
       },
       "inverter_config_setup": {
-        "title": "{brand} Inverter Configuration",
-        "description": "Configure your {brand} inverter connection settings.",
+        "title": "{brand} inverter configuration",
+        "description": "Configure the connection to your {brand} inverter for curtailment control.",
         "data": {
-          "inverter_model": "Inverter Model",
-          "inverter_host": "IP Address / Hostname",
+          "inverter_model": "Inverter model",
+          "inverter_host": "IP address / hostname",
           "inverter_port": "Port",
-          "inverter_slave_id": "Modbus Slave ID",
-          "inverter_token": "JWT Token (Manual)",
-          "enphase_username": "Enlighten Email",
-          "enphase_password": "Enlighten Password",
-          "enphase_serial": "Envoy Serial (Optional)",
-          "enphase_normal_profile": "Normal Grid Profile Name",
-          "enphase_zero_export_profile": "Zero Export Grid Profile Name",
-          "enphase_is_installer": "Installer Account",
-          "inverter_restore_soc": "Restore SOC Threshold (%)",
-          "fronius_load_following": "Enable Load Following Mode"
+          "inverter_slave_id": "Modbus slave ID",
+          "inverter_token": "JWT token (manual)",
+          "enphase_username": "Enlighten email",
+          "enphase_password": "Enlighten password",
+          "enphase_serial": "Envoy serial (optional)",
+          "enphase_normal_profile": "Normal grid profile name",
+          "enphase_zero_export_profile": "Zero export grid profile name",
+          "enphase_is_installer": "Use installer account",
+          "inverter_restore_soc": "Restore SOC threshold (%)",
+          "fronius_load_following": "Enable load following mode"
         },
         "data_description": {
-          "inverter_host": "Local IP address of your inverter or gateway",
-          "inverter_port": "502 for Modbus (Sungrow, Fronius, GoodWe, Huawei), 443 for Enphase",
+          "inverter_host": "Local IP address of your inverter or gateway.",
+          "inverter_port": "502 for Modbus (Sungrow, Fronius, GoodWe, Huawei), 443 for Enphase.",
           "inverter_slave_id": "Usually 1. GoodWe uses 247 by default.",
           "inverter_token": "Optional if using Enlighten credentials. Manual tokens expire in 12 hours for installer accounts.",
-          "enphase_username": "Your Enlighten account email for automatic JWT token refresh (recommended)",
-          "enphase_password": "Your Enlighten account password",
-          "enphase_serial": "Leave blank to auto-detect from IQ Gateway",
-          "enphase_normal_profile": "Full name of your normal grid profile (for fallback when DPEL/DER unavailable). Example: 'AS/NZS 4777.2:2020 Australia A'",
-          "enphase_zero_export_profile": "Full name of a zero-export grid profile if available (for fallback curtailment)",
-          "enphase_is_installer": "Enable if using an installer Enlighten account. Required for grid profile switching access.",
-          "inverter_restore_soc": "Restore inverter when battery drops below this %. Ensures battery stays topped up before evening peak. Default: 98%",
-          "fronius_load_following": "Enable if you DON'T have a 0W export limit configured by your installer. Uses calculated power limits based on home load and auto-detected inverter capacity. Leave OFF if you have the 0W export profile (most users)."
-        }
+          "enphase_username": "Your Enlighten account email for automatic JWT token refresh (recommended).",
+          "enphase_password": "Your Enlighten account password.",
+          "enphase_serial": "Leave blank to auto-detect from IQ Gateway.",
+          "enphase_normal_profile": "Full name of your normal grid profile. Example: 'AS/NZS 4777.2:2020 Australia A'.",
+          "enphase_zero_export_profile": "Full name of a zero-export grid profile if available (for fallback curtailment).",
+          "enphase_is_installer": "Enable if using an installer Enlighten account. Required for grid profile switching.",
+          "inverter_restore_soc": "Restore inverter when battery drops below this %. Ensures battery stays topped up before evening peak. Default: 98%.",
+          "fronius_load_following": "Enable if you do NOT have a 0W export limit. Uses calculated power limits based on home load. Leave off if you have a 0W export profile (most users)."
+        },
+        "submit": "Next"
       },
       "battery_management_mode": {
-        "title": "Battery Management Mode",
-        "description": "Choose how PowerSync should manage your battery:\n\n**Manual**: Use PowerSync automations to control charge/discharge.\n\n**TOU Sync**: Sync prices to battery, let battery's built-in scheduler decide.\n\n**Smart Optimization**: Built-in LP scheduling to minimize costs. No external dependencies required.",
+        "title": "Battery management mode",
+        "description": "Choose how PowerSync manages your battery.",
         "data": {
-          "battery_management_mode": "Battery Management Mode",
-          "optimization_backup_reserve": "Minimum Discharge Level (%)"
+          "battery_management_mode": "Management mode",
+          "optimization_backup_reserve": "Minimum discharge level (%)"
         },
         "data_description": {
-          "battery_management_mode": "Select how PowerSync should manage your battery system",
-          "optimization_backup_reserve": "Optimizer will not discharge below this level. This is separate from your battery's hardware backup reserve (set in the mobile app)."
-        }
+          "battery_management_mode": "Manual = PowerSync automations control charge/discharge. TOU Sync = prices synced to battery's built-in scheduler. Smart Optimization = LP solver minimises costs.",
+          "optimization_backup_reserve": "The optimizer will not discharge below this level. Separate from your battery's hardware backup reserve (set in the mobile app)."
+        },
+        "submit": "Next"
       }
     },
     "error": {
-      "invalid_auth": "Invalid API token. Please check your token and try again.",
-      "cannot_connect": "Unable to connect to API. Please check your internet connection.",
-      "no_sites": "No Amber Electric sites found for this account.",
-      "no_energy_sites": "No Tesla energy sites found in your account.",
-      "no_token_provided": "Please provide a Teslemetry API token.",
-      "tesla_fleet_not_installed": "The Tesla Fleet HA integration is not installed. Add it from the Home Assistant integrations page first, then return here.",
-      "aemo_region_required": "Please select an AEMO NEM region when spike detection is enabled.",
-      "aemo_required_in_aemo_mode": "AEMO spike detection is recommended for Globird/VPP plans that include spike export payments. Disable if your plan does not include this feature.",
-      "missing_credentials": "Please provide your Sigenergy email and password.",
-      "invalid_device_id": "Device ID must be exactly 13 digits (leave blank if not required).",
-      "no_stations": "No Sigenergy stations found for this account.",
-      "no_station_selected": "Please select a Sigenergy station.",
-      "modbus_host_required": "Sigenergy IP address is required for energy data.",
-      "sungrow_host_required": "Sungrow IP address is required for Modbus connection.",
-      "modbus_conflict": "Connected to inverter but received invalid data (SOC > 100%). This usually means another integration (e.g. modbus_manager, sungrow) is also using Modbus on the same port. Disable other Modbus integrations for this inverter and try again.",
-      "sungrow_modbus_conflict": "The AC inverter and Sungrow battery have the same IP, port, and slave ID. Use a different slave ID for the AC inverter.",
-      "foxess_host_required": "FoxESS IP address is required for Modbus TCP connection.",
-      "foxess_tcp_failed": "Cannot connect to FoxESS inverter via Modbus TCP. Check: (1) IP address is correct — H3 Smart shows as 'espressif' on your network, (2) inverter firmware is up to date, (3) port 502 is accessible.",
-      "foxess_serial_required": "Serial port path is required for RS485 connection.",
-      "foxess_cloud_auth_failed": "FoxESS Cloud API key validation failed. Check your API key is correct and your account has API access enabled.",
-      "foxess_cloud_connection_error": "Unable to connect to FoxESS Cloud. Check your internet connection and try again.",
-      "goodwe_connect_failed": "Cannot connect to GoodWe inverter. Check IP address and ensure the inverter is online.",
-      "goodwe_no_battery": "This GoodWe inverter does not have battery support (DT/MS/XS series are grid-only).",
-      "invalid_credentials": "Invalid email or password. Please check your Flow Power portal credentials.",
-      "invalid_mfa_code": "Invalid SMS verification code. Please try again.",
-      "zaptec_auth_failed": "Zaptec Cloud authentication failed. Check your email and password are correct.",
-      "zaptec_missing_credentials": "Please provide both your Zaptec email and password.",
-      "no_prices": "No Octopus prices found for this tariff and region. Check your product and GSP region are correct.",
-      "optimizer_not_installed": "Smart Optimization requires scipy. Check Home Assistant logs for installation details.",
-      "invalid_tariff": "Could not validate this tariff code for the selected network. Check that the tariff code matches your electricity bill.",
-      "invalid_token_format": "Token is not in the expected format. PowerSync tokens start with 'psync_'.",
-      "max_soc_below_reserve": "Max charge SOC must be greater than backup reserve.",
-      "unknown": "An unexpected error occurred. Please try again."
+      "invalid_auth": "Token rejected by the API -- check you copied the full token string with no extra spaces.",
+      "cannot_connect": "Cannot reach the API server. Check your internet connection and that Home Assistant has outbound HTTPS access.",
+      "no_sites": "No Amber sites found for this token. Verify the token belongs to an account with an active Amber site.",
+      "no_energy_sites": "No Tesla energy sites found. Ensure your Powerwall or Solar system is set up in the Tesla app before continuing.",
+      "no_token_provided": "Paste a token in the field above. See the hint text for where to find it.",
+      "tesla_fleet_not_installed": "Tesla Fleet integration is not installed in Home Assistant. Add it from Settings > Devices & Services > Add Integration > Tesla Fleet, then return here.",
+      "aemo_region_required": "Select your NEM region when spike detection is enabled. Check your electricity bill for your NEM zone.",
+      "aemo_required_in_aemo_mode": "Spike detection is recommended for Globird and VPP plans with spike export payments. Disable only if your plan does not include this feature.",
+      "missing_credentials": "Email and password are both required. Enter your Sigenergy account credentials.",
+      "invalid_device_id": "Device ID must be exactly 13 digits. Leave blank if your account does not require one.",
+      "no_stations": "No Sigenergy stations found. Check that your Sigenergy account has at least one commissioned station.",
+      "no_station_selected": "Select a Sigenergy station from the list to continue.",
+      "modbus_host_required": "IP address is required -- enter the local IP of your Sigenergy inverter or gateway.",
+      "sungrow_host_required": "IP address is required -- enter the local IP of your Sungrow inverter or WiNet-S dongle.",
+      "modbus_conflict": "Connected but received invalid data (SOC > 100%). Another integration is likely using Modbus on the same port. Disable other Modbus integrations for this inverter and retry.",
+      "sungrow_modbus_conflict": "The AC inverter and Sungrow battery share the same IP, port, and slave ID. Change the AC inverter's slave ID to a different value.",
+      "foxess_host_required": "IP address is required -- enter the local IP of your FoxESS inverter.",
+      "foxess_tcp_failed": "Cannot connect via Modbus TCP. Check: (1) IP is correct (H3 Smart shows as 'espressif'), (2) firmware is current, (3) port 502 is reachable from Home Assistant.",
+      "foxess_serial_required": "Serial port path is required -- e.g. /dev/ttyUSB0 for a USB-to-RS485 adapter.",
+      "foxess_cloud_auth_failed": "FoxESS Cloud rejected the API key. Verify the key is correct and that API access is enabled on your FoxESS account.",
+      "foxess_cloud_connection_error": "Cannot reach FoxESS Cloud. Check your internet connection and retry.",
+      "goodwe_connect_failed": "Cannot connect to GoodWe inverter. Verify the IP address is correct and the inverter is powered on and reachable from Home Assistant.",
+      "goodwe_no_battery": "This GoodWe model (DT/MS/XS series) does not support battery control. Only ET/EH/ES/EM series hybrid inverters are supported.",
+      "invalid_credentials": "Email or password is incorrect. Check your Flow Power portal login credentials.",
+      "invalid_mfa_code": "Verification code is incorrect or expired. Request a new SMS code and try again.",
+      "zaptec_auth_failed": "Zaptec Cloud login failed. Check that your email and password are correct.",
+      "zaptec_missing_credentials": "Both email and password are required for Zaptec Cloud authentication.",
+      "no_prices": "No prices found for this tariff and region combination. Verify your Octopus product and GSP region match your account.",
+      "optimizer_not_installed": "Smart Optimization requires scipy, which is not installed. Check Home Assistant logs for installation errors.",
+      "invalid_tariff": "This tariff code is not recognised for the selected network distributor. Check the code on your electricity bill.",
+      "invalid_token_format": "Token format is not recognised. PowerSync tokens start with 'psync_' -- make sure you copied the full string.",
+      "unknown": "An unexpected error occurred. Check the Home Assistant logs for details and try again."
     },
     "abort": {
-      "already_configured": "PowerSync is already configured.",
-      "no_energy_sites": "No Tesla energy sites found in your Teslemetry account. Please ensure you have a Powerwall or Solar system configured.",
-      "no_stations": "No Sigenergy stations found for this account. Please check your credentials.",
-      "reauth_successful": "Token updated successfully — PowerSync is reconnected.",
-      "reauth_failed": "Reauthentication could not be completed. Please remove and re-add the integration.",
-      "reauth_fleet_api_use_tesla_fleet": "PowerSync uses tokens from your existing Tesla Fleet integration. Re-authenticate the Tesla Fleet integration in Home Assistant settings, then PowerSync will pick up the new tokens automatically."
+      "already_configured": "PowerSync is already configured. To change settings, use the Configure button on the integration card.",
+      "no_energy_sites": "No Tesla energy sites found. Ensure you have a Powerwall or Solar system set up in the Tesla app before adding PowerSync.",
+      "no_stations": "No Sigenergy stations found. Check that your credentials are correct and your station is commissioned.",
+      "reauth_successful": "Token updated -- PowerSync is reconnected.",
+      "reauth_failed": "Re-authentication failed. Remove the integration and set it up again.",
+      "reauth_fleet_api_use_tesla_fleet": "PowerSync reads tokens from your Tesla Fleet integration. Go to Settings > Devices & Services > Tesla Fleet and re-authenticate there. PowerSync will pick up the new tokens automatically."
     }
   },
   "options": {
     "step": {
       "init": {
-        "title": "PowerSync Settings",
-        "description": "Configure your electricity provider, Tesla API connection, and optimization settings.",
+        "title": "PowerSync settings",
+        "description": "Choose a section to configure. Changes take effect immediately.",
+        "menu_options": {
+          "pricing": "Electricity pricing & provider",
+          "tesla_connection": "Tesla API connection",
+          "sigenergy_connection": "Sigenergy connection",
+          "sungrow_connection": "Sungrow Modbus connection",
+          "foxess_connection_options": "FoxESS connection",
+          "goodwe_connection_options": "GoodWe connection",
+          "optimization": "Optimization mode",
+          "inverter": "AC inverter curtailment",
+          "curtailment": "Curtailment settings",
+          "demand_charges": "Demand charge tracking",
+          "ev_charging": "EV charging",
+          "weather": "Weather & solar forecast"
+        }
+      },
+      "pricing": {
+        "title": "Electricity pricing",
+        "description": "Change your electricity provider or update pricing settings. Changes apply after the next sync cycle.",
         "data": {
-          "electricity_provider": "Electricity Provider",
-          "tesla_api_provider": "Tesla Energy API Provider",
-          "tesla_ev_api_provider": "Tesla EV API Provider",
-          "optimization_provider": "Optimization Provider",
-          "optimization_backup_reserve": "Minimum Discharge Level (%)",
-          "update_teslemetry_token": "Update Teslemetry API Token"
+          "electricity_provider": "Electricity provider"
         },
         "data_description": {
-          "tesla_api_provider": "Used for Powerwall control. PowerSync.cc is the recommended free option.",
-          "tesla_ev_api_provider": "Used for vehicle commands. PowerSync.cc has no vehicle endpoints, so pick Tesla Fleet or Teslemetry here if you want to control Tesla vehicles. Choose None if you don't have a Tesla vehicle.",
-          "optimization_provider": "Choose between Tesla's built-in optimization or Smart Optimization (Built-in LP)",
-          "optimization_backup_reserve": "Optimizer will not discharge below this level. This is separate from your battery's hardware backup reserve (set in the mobile app).",
-          "update_teslemetry_token": "Paste a new token from teslemetry.com to update it. Leave blank to keep current token."
-        }
+          "electricity_provider": "Changing provider will clear your current pricing configuration and start fresh."
+        },
+        "submit": "Next"
+      },
+      "tesla_connection": {
+        "title": "Tesla API connection",
+        "description": "Update your Powerwall and vehicle API providers. Changes take effect immediately.",
+        "data": {
+          "tesla_api_provider": "Powerwall API provider",
+          "tesla_ev_api_provider": "Vehicle API provider",
+          "update_teslemetry_token": "New API token (leave blank to keep current)"
+        },
+        "data_description": {
+          "tesla_api_provider": "Controls how PowerSync reads and writes your Powerwall TOU schedule.",
+          "tesla_ev_api_provider": "Only needed for vehicle commands. Choose None if you only have a Powerwall.",
+          "update_teslemetry_token": "Paste a new token to rotate it. Leave blank to keep your existing token."
+        },
+        "submit": "Save"
+      },
+      "sigenergy_connection": {
+        "title": "Sigenergy connection",
+        "description": "Update your Sigenergy Modbus and Cloud API settings. Changes take effect immediately.",
+        "data": {
+          "sigenergy_modbus_host": "Inverter IP address",
+          "sigenergy_modbus_port": "Modbus port",
+          "sigenergy_modbus_slave_id": "Modbus slave ID",
+          "sigenergy_dc_curtailment_enabled": "Enable DC curtailment",
+          "sigenergy_export_limit_kw": "Export limit",
+          "sigenergy_username": "Cloud API email",
+          "sigenergy_password": "Cloud API password",
+          "sigenergy_pass_enc": "Pre-encoded password (advanced)",
+          "sigenergy_device_id": "Device ID",
+          "sigenergy_station_id": "Station ID"
+        },
+        "data_description": {
+          "sigenergy_modbus_host": "Local IP address of your Sigenergy inverter or gateway.",
+          "sigenergy_modbus_port": "Default Modbus TCP port is 502. Only change if customised on the inverter.",
+          "sigenergy_modbus_slave_id": "Default is 247. Only change if you have multiple devices on the same bus.",
+          "sigenergy_dc_curtailment_enabled": "Reduce DC solar output when export prices go negative. Requires Modbus write access.",
+          "sigenergy_export_limit_kw": "Maximum export power in kW. Leave blank for no limit.",
+          "sigenergy_username": "Your Sigenergy Cloud account email.",
+          "sigenergy_password": "Plain-text password (recommended). Encoded automatically.",
+          "sigenergy_pass_enc": "Pre-encoded password from the Sigenergy API. Use only if you know what this is.",
+          "sigenergy_device_id": "13-digit device ID. Leave blank if your account does not require one.",
+          "sigenergy_station_id": "Your Sigenergy station ID."
+        },
+        "submit": "Save"
+      },
+      "sungrow_connection": {
+        "title": "Sungrow Modbus connection",
+        "description": "Update your Sungrow inverter Modbus settings. Changes take effect immediately.",
+        "data": {
+          "sungrow_host": "Primary inverter IP",
+          "sungrow_port": "Modbus port",
+          "sungrow_slave_id": "Modbus slave ID",
+          "sungrow_host_2": "Secondary inverter IP",
+          "sungrow_port_2": "Secondary Modbus port",
+          "sungrow_slave_id_2": "Secondary slave ID",
+          "sungrow_grid_inverter_soc_cap": "Grid inverter SOC cap",
+          "sungrow_battery_capacity_1": "Primary battery capacity",
+          "sungrow_battery_capacity_2": "Secondary battery capacity"
+        },
+        "data_description": {
+          "sungrow_host": "Local IP of your Sungrow inverter or WiNet-S dongle (e.g. 192.168.1.100).",
+          "sungrow_port": "Default Modbus TCP port is 502.",
+          "sungrow_slave_id": "Default is 1. Only change if customised on the inverter.",
+          "sungrow_host_2": "Leave blank if you only have one inverter.",
+          "sungrow_grid_inverter_soc_cap": "Maximum SOC percentage for grid-connected inverter in dual setups. Default 100 (disabled).",
+          "sungrow_battery_capacity_1": "Battery capacity in kWh for the primary inverter. Used for weighted SOC calculation in dual setups.",
+          "sungrow_battery_capacity_2": "Battery capacity in kWh for the secondary inverter."
+        },
+        "submit": "Save"
+      },
+      "foxess_connection_options": {
+        "title": "FoxESS connection",
+        "description": "Update your FoxESS inverter Modbus settings. Changes take effect immediately.",
+        "data": {
+          "foxess_host": "Inverter IP address",
+          "foxess_port": "Modbus port",
+          "foxess_slave_id": "Modbus slave ID",
+          "foxess_serial_port": "Serial port path",
+          "foxess_serial_baudrate": "Serial baud rate"
+        },
+        "data_description": {
+          "foxess_host": "Local IP of your FoxESS inverter. H3 Smart shows as 'espressif' on your network.",
+          "foxess_port": "Default Modbus TCP port is 502.",
+          "foxess_slave_id": "Default is 247 for FoxESS.",
+          "foxess_serial_port": "e.g. /dev/ttyUSB0 for a USB-to-RS485 adapter. Only used for serial connections.",
+          "foxess_serial_baudrate": "Default 9600. Only change if the inverter is configured differently."
+        },
+        "submit": "Save"
+      },
+      "goodwe_connection_options": {
+        "title": "GoodWe connection",
+        "description": "Update your GoodWe inverter connection settings. Changes take effect immediately.",
+        "data": {
+          "goodwe_host": "Inverter IP address",
+          "goodwe_protocol": "Connection protocol",
+          "goodwe_port": "Port"
+        },
+        "data_description": {
+          "goodwe_host": "Local IP address of your GoodWe inverter.",
+          "goodwe_protocol": "UDP for WiFi dongles (port 8899), TCP for LAN dongles (port 502).",
+          "goodwe_port": "Default: 8899 for UDP, 502 for TCP."
+        },
+        "submit": "Save"
+      },
+      "optimization": {
+        "title": "Optimization mode",
+        "description": "Change how PowerSync schedules your battery. Changes apply after the next optimization cycle.",
+        "data": {
+          "optimization_provider": "Optimization mode",
+          "optimization_backup_reserve": "Minimum discharge level"
+        },
+        "data_description": {
+          "optimization_provider": "Smart Optimization uses an LP solver to minimise costs. Native mode uses your battery's built-in TOU scheduler.",
+          "optimization_backup_reserve": "The optimizer will not discharge below this percentage. Separate from your battery's hardware backup reserve."
+        },
+        "submit": "Save"
       },
       "options_tesla_ev_token": {
-        "title": "Teslemetry token for vehicle commands",
-        "description": "Teslemetry isn't installed in Home Assistant, so PowerSync needs an API token to talk to vehicles directly.\n\nGet a token from [{teslemetry_url}]({teslemetry_url}) and paste it below.",
+        "title": "Vehicle API token",
+        "description": "Teslemetry is not installed in Home Assistant, so PowerSync needs an API token for vehicle commands. Get a token from [{teslemetry_url}]({teslemetry_url}).",
         "data": {
-          "tesla_ev_teslemetry_token": "Teslemetry API Token"
-        }
+          "tesla_ev_teslemetry_token": "Teslemetry API token"
+        },
+        "data_description": {
+          "tesla_ev_teslemetry_token": "This token is only used for vehicle commands. Your Powerwall uses a separate connection."
+        },
+        "submit": "Save"
       },
       "init_sigenergy": {
-        "title": "PowerSync Settings",
-        "description": "Configure your electricity provider, optimization settings, Sigenergy Modbus connection, and Cloud API credentials.\n\n**Modbus connection is required** to read real-time energy data.\n**Cloud API credentials are required** to sync Amber prices to your Sigenergy system.",
+        "title": "Sigenergy settings",
+        "description": "Configure pricing, optimization, Modbus connection, and Cloud API credentials. Modbus is required for energy data; Cloud API is required for price sync.",
         "data": {
-          "electricity_provider": "Electricity Provider",
-          "optimization_provider": "Optimization Provider",
-          "optimization_backup_reserve": "Minimum Discharge Level (%)",
-          "sigenergy_modbus_host": "Sigenergy IP Address",
-          "sigenergy_modbus_port": "Modbus Port",
-          "sigenergy_modbus_slave_id": "Modbus Slave ID",
-          "sigenergy_dc_curtailment_enabled": "Enable DC Solar Curtailment",
-          "sigenergy_export_limit_kw": "Grid Export Limit (kW)",
-          "sigenergy_username": "Sigenergy Cloud Email",
+          "electricity_provider": "Electricity provider",
+          "optimization_provider": "Optimization mode",
+          "optimization_backup_reserve": "Minimum discharge level (%)",
+          "sigenergy_modbus_host": "Inverter IP address",
+          "sigenergy_modbus_port": "Modbus port",
+          "sigenergy_modbus_slave_id": "Modbus slave ID",
+          "sigenergy_dc_curtailment_enabled": "Enable DC solar curtailment",
+          "sigenergy_export_limit_kw": "Grid export limit (kW)",
+          "sigenergy_username": "Cloud API email",
           "sigenergy_password": "Password",
-          "sigenergy_pass_enc": "Encrypted Password (Advanced)",
+          "sigenergy_pass_enc": "Pre-encoded password (advanced)",
           "sigenergy_device_id": "Device ID (optional)",
           "sigenergy_station_id": "Station ID"
         },
         "data_description": {
-          "sigenergy_modbus_host": "Local IP address of your Sigenergy inverter (e.g., 192.168.1.100)",
-          "sigenergy_dc_curtailment_enabled": "Allow PowerSync to limit DC solar production during negative prices",
+          "sigenergy_modbus_host": "Local IP address of your Sigenergy inverter (e.g. 192.168.1.100).",
+          "sigenergy_modbus_port": "Default Modbus TCP port is 502.",
+          "sigenergy_modbus_slave_id": "Default is 247. PowerSync auto-detects the correct registers.",
+          "sigenergy_dc_curtailment_enabled": "Reduce DC solar output when export prices go negative. Requires Modbus write access.",
           "sigenergy_export_limit_kw": "Your DNSP grid export limit in kW. Leave blank to auto-detect from inverter registers.",
-          "sigenergy_username": "Your Sigenergy Cloud account email address",
-          "sigenergy_password": "Your Sigenergy account password (leave blank to keep existing)",
-          "sigenergy_pass_enc": "Pre-encoded password - leave blank unless you know what this is",
-          "sigenergy_device_id": "Optional — leave blank unless authentication fails without it",
-          "sigenergy_station_id": "Your Sigenergy station ID (numeric)"
-        }
+          "sigenergy_username": "Your Sigenergy Cloud account email address.",
+          "sigenergy_password": "Your Sigenergy account password (leave blank to keep existing).",
+          "sigenergy_pass_enc": "Pre-encoded password -- leave blank unless you know what this is.",
+          "sigenergy_device_id": "Optional -- leave blank unless authentication fails without it.",
+          "sigenergy_station_id": "Your Sigenergy station ID (numeric)."
+        },
+        "submit": "Save"
       },
       "init_sungrow": {
-        "title": "PowerSync Settings",
-        "description": "Configure your electricity provider, optimization settings, and Sungrow Modbus connection.\n\n**Modbus connection is required** to read real-time energy data and control battery settings.",
+        "title": "Sungrow settings",
+        "description": "Configure pricing, optimization, and Sungrow Modbus connection. Modbus is required for energy data and battery control.",
         "data": {
-          "electricity_provider": "Electricity Provider",
-          "optimization_provider": "Optimization Provider",
-          "optimization_backup_reserve": "Minimum Discharge Level (%)",
-          "sungrow_host": "Sungrow IP Address",
-          "sungrow_port": "Modbus Port",
-          "sungrow_slave_id": "Modbus Slave ID",
-          "sungrow_host_2": "Secondary Sungrow IP Address (Optional)",
-          "sungrow_port_2": "Secondary Modbus Port",
-          "sungrow_slave_id_2": "Secondary Modbus Slave ID",
-          "sungrow_grid_inverter_soc_cap": "Primary Inverter Max SOC (%)",
-          "sungrow_battery_capacity_1": "Primary Battery Capacity (kWh)",
-          "sungrow_battery_capacity_2": "Secondary Battery Capacity (kWh)"
+          "electricity_provider": "Electricity provider",
+          "optimization_provider": "Optimization mode",
+          "optimization_backup_reserve": "Minimum discharge level (%)",
+          "sungrow_host": "Primary inverter IP",
+          "sungrow_port": "Modbus port",
+          "sungrow_slave_id": "Modbus slave ID",
+          "sungrow_host_2": "Secondary inverter IP (optional)",
+          "sungrow_port_2": "Secondary Modbus port",
+          "sungrow_slave_id_2": "Secondary slave ID",
+          "sungrow_grid_inverter_soc_cap": "Grid inverter max SOC (%)",
+          "sungrow_battery_capacity_1": "Primary battery capacity (kWh)",
+          "sungrow_battery_capacity_2": "Secondary battery capacity (kWh)"
         },
         "data_description": {
-          "optimization_provider": "Choose between Sungrow's built-in scheduling or Smart Optimization (Built-in LP)",
-          "optimization_backup_reserve": "Optimizer will not discharge below this level. This is separate from your battery's hardware backup reserve (set in the mobile app).",
-          "sungrow_host": "Local IP address of your Sungrow inverter or WiNet-S dongle (e.g., 192.168.1.100)",
-          "sungrow_port": "Modbus TCP port (default: 502)",
-          "sungrow_slave_id": "Modbus slave ID (default: 1)",
-          "sungrow_host_2": "IP address of a second Sungrow inverter (leave blank if not applicable)",
-          "sungrow_port_2": "Modbus TCP port for secondary inverter (default: 502)",
-          "sungrow_slave_id_2": "Modbus slave ID for secondary inverter (default: 1)",
-          "sungrow_grid_inverter_soc_cap": "Maximum charge level for the grid-forming inverter. Set below 100% to reserve headroom for off-grid buffering (only applies to dual inverter setups).",
-          "sungrow_battery_capacity_1": "Total battery capacity connected to the primary inverter in kWh (e.g. 25.6 for one SBR256, 51.2 for two). Used for weighted SOC averaging and power splitting.",
+          "optimization_provider": "Choose between Sungrow's built-in scheduling or Smart Optimization (LP solver).",
+          "optimization_backup_reserve": "The optimizer will not discharge below this level. Separate from your battery's hardware backup reserve.",
+          "sungrow_host": "Local IP of your Sungrow inverter or WiNet-S dongle (e.g. 192.168.1.100).",
+          "sungrow_port": "Default Modbus TCP port is 502.",
+          "sungrow_slave_id": "Default is 1. Only change if customised.",
+          "sungrow_host_2": "IP of a second Sungrow inverter. Leave blank if not applicable.",
+          "sungrow_port_2": "Default Modbus TCP port is 502.",
+          "sungrow_slave_id_2": "Default is 1. Only change if customised.",
+          "sungrow_grid_inverter_soc_cap": "Maximum charge level for the grid-forming inverter. Set below 100% to reserve headroom for off-grid buffering (dual inverter setups only).",
+          "sungrow_battery_capacity_1": "Total battery capacity connected to the primary inverter in kWh. Used for weighted SOC averaging and power splitting.",
           "sungrow_battery_capacity_2": "Total battery capacity connected to the secondary inverter in kWh."
-        }
+        },
+        "submit": "Save"
       },
       "init_foxess": {
-        "title": "PowerSync Settings",
-        "description": "Configure your electricity provider, optimization settings, and FoxESS Modbus connection.\n\n**Modbus connection is required** to read real-time energy data and control battery settings.",
+        "title": "FoxESS settings",
+        "description": "Configure pricing, optimization, and FoxESS Modbus connection. Modbus is required for energy data and battery control.",
         "data": {
-          "electricity_provider": "Electricity Provider",
-          "optimization_provider": "Optimization Provider",
-          "optimization_backup_reserve": "Minimum Discharge Level (%)",
-          "foxess_connection_type": "Connection Type",
-          "foxess_host": "FoxESS IP Address",
-          "foxess_port": "Modbus Port",
-          "foxess_slave_id": "Modbus Slave ID",
-          "foxess_serial_port": "Serial Port",
-          "foxess_serial_baudrate": "Baud Rate"
+          "electricity_provider": "Electricity provider",
+          "optimization_provider": "Optimization mode",
+          "optimization_backup_reserve": "Minimum discharge level (%)",
+          "foxess_connection_type": "Connection type",
+          "foxess_host": "Inverter IP address",
+          "foxess_port": "Modbus port",
+          "foxess_slave_id": "Modbus slave ID",
+          "foxess_serial_port": "Serial port path",
+          "foxess_serial_baudrate": "Baud rate"
         },
         "data_description": {
-          "optimization_provider": "Choose between FoxESS built-in scheduling or Smart Optimization (Built-in LP)",
-          "optimization_backup_reserve": "Optimizer will not discharge below this level. This is separate from your battery's hardware backup reserve (set in the mobile app).",
-          "foxess_connection_type": "Modbus TCP (LAN) or RS485 Serial",
-          "foxess_host": "Local IP address of your FoxESS inverter (e.g., 192.168.1.100)",
-          "foxess_port": "Modbus TCP port (default: 502)",
-          "foxess_slave_id": "Modbus slave ID (default: 247)",
-          "foxess_serial_port": "Serial device path (e.g., /dev/ttyUSB0) — only for RS485",
-          "foxess_serial_baudrate": "Serial baud rate (default: 9600) — only for RS485"
-        }
+          "optimization_provider": "Choose between FoxESS built-in scheduling or Smart Optimization (LP solver).",
+          "optimization_backup_reserve": "The optimizer will not discharge below this level. Separate from your battery's hardware backup reserve.",
+          "foxess_connection_type": "Modbus TCP (LAN) or RS485 Serial.",
+          "foxess_host": "Local IP of your FoxESS inverter. H3 Smart may appear as 'espressif' on your network.",
+          "foxess_port": "Default Modbus TCP port is 502.",
+          "foxess_slave_id": "Default is 247 for FoxESS.",
+          "foxess_serial_port": "e.g. /dev/ttyUSB0 -- only for RS485 serial connections.",
+          "foxess_serial_baudrate": "Default 9600 -- only for RS485 serial connections."
+        },
+        "submit": "Save"
       },
       "init_goodwe": {
-        "title": "PowerSync Settings",
-        "description": "Configure your electricity provider, optimization settings, and GoodWe connection.\n\n**Connection is required** to read real-time energy data and control battery settings.",
+        "title": "GoodWe settings",
+        "description": "Configure pricing, optimization, and GoodWe connection. Required for energy data and battery control.",
         "data": {
-          "electricity_provider": "Electricity Provider",
-          "optimization_provider": "Optimization Provider",
-          "optimization_backup_reserve": "Minimum Discharge Level (%)",
-          "goodwe_host": "GoodWe IP Address",
+          "electricity_provider": "Electricity provider",
+          "optimization_provider": "Optimization mode",
+          "optimization_backup_reserve": "Minimum discharge level (%)",
+          "goodwe_host": "Inverter IP address",
           "goodwe_protocol": "Protocol",
           "goodwe_port": "Port"
         },
         "data_description": {
-          "optimization_provider": "Choose between GoodWe built-in scheduling or Smart Optimization (Built-in LP)",
-          "optimization_backup_reserve": "Optimizer will not discharge below this level. This is separate from your battery's hardware backup reserve (set in the mobile app).",
-          "goodwe_host": "Local IP address of your GoodWe inverter (e.g., 192.168.1.100)",
-          "goodwe_protocol": "UDP (WiFi dongle, port 8899) or TCP (LAN dongle, port 502)",
-          "goodwe_port": "Connection port (default: 8899 for UDP, 502 for TCP)"
-        }
+          "optimization_provider": "Choose between GoodWe built-in scheduling or Smart Optimization (LP solver).",
+          "optimization_backup_reserve": "The optimizer will not discharge below this level. Separate from your battery's hardware backup reserve.",
+          "goodwe_host": "Local IP address of your GoodWe inverter.",
+          "goodwe_protocol": "UDP for WiFi dongles (port 8899), TCP for LAN dongles (port 502).",
+          "goodwe_port": "Default: 8899 for UDP, 502 for TCP."
+        },
+        "submit": "Save"
       },
       "teslemetry_token": {
-        "title": "Teslemetry Configuration",
-        "description": "Enter your Teslemetry API token. You can get this from teslemetry.com.",
+        "title": "Teslemetry API token",
+        "description": "Enter your Teslemetry API token from teslemetry.com. Changes take effect immediately.",
         "data": {
-          "teslemetry_api_token": "Teslemetry API Token"
-        }
+          "teslemetry_api_token": "Teslemetry API token"
+        },
+        "data_description": {
+          "teslemetry_api_token": "Paste the full token string from your Teslemetry dashboard."
+        },
+        "submit": "Save"
       },
       "powersync_token": {
-        "title": "Connect with PowerSync",
-        "description": "1. Open this URL in a browser and sign in with your Tesla account:\n\n**{auth_url}**\n\n2. After signing in, you'll get a token starting with `psync_`.\n\n3. Paste it below to connect.\n\nYour Tesla credentials are never seen by PowerSync — Tesla handles authentication and we only receive a token to call the Fleet API on your behalf.",
+        "title": "PowerSync token",
+        "description": "Sign in at **{auth_url}** with your Tesla account and paste the `psync_` token below. Your Tesla credentials are never shared with PowerSync.",
         "data": {
-          "teslemetry_api_token": "PowerSync Token"
-        }
+          "teslemetry_api_token": "PowerSync token"
+        },
+        "data_description": {
+          "teslemetry_api_token": "Token starting with psync_ from the PowerSync sign-in page."
+        },
+        "submit": "Save"
       },
       "amber_options": {
-        "title": "Amber Electric Options",
-        "description": "Configure Amber Electric TOU sync, export boost, and pricing options.",
+        "title": "Amber Electric options",
+        "description": "Configure TOU sync, export boost, spike protection, and curtailment. Changes apply after the next sync cycle.",
         "data": {
-          "update_amber_token": "Update Amber API Token",
-          "auto_sync_enabled": "Enable automatic TOU schedule syncing",
-          "amber_forecast_type": "Amber Forecast Type",
-          "battery_curtailment_enabled": "Enable DC Solar Curtailment (stop export at negative prices)",
-          "spike_protection_enabled": "Enable Spike Protection (prevent grid charging during spikes)",
-          "settled_prices_only": "Settled Prices Only (skip forecast sync)",
-          "forecast_discrepancy_alert": "Forecast Discrepancy Alert",
-          "forecast_discrepancy_threshold": "Discrepancy Threshold (c/kWh)",
-          "force_tariff_mode_toggle": "Force Mode Toggle (ALPHA) - faster PW response",
-          "export_boost_enabled": "Enable Export Price Boost",
-          "export_price_offset": "Offset to Add (c/kWh)",
-          "export_min_price": "Minimum Floor (c/kWh)",
-          "export_boost_start": "Boost Start Time (HH:MM)",
-          "export_boost_end": "Boost End Time (HH:MM)",
-          "export_boost_threshold": "Only Boost Above (c/kWh)",
-          "chip_mode_enabled": "Enable Chip Mode",
-          "chip_mode_start": "Chip Mode Start Time (HH:MM)",
-          "chip_mode_end": "Chip Mode End Time (HH:MM)",
-          "chip_mode_threshold": "Price Threshold (c/kWh)",
-          "ac_inverter_curtailment_enabled": "Enable AC-Coupled Inverter Curtailment",
-          "inverter_brand": "Inverter Brand",
-          "inverter_model": "Inverter Model",
-          "inverter_host": "Inverter IP Address",
-          "inverter_port": "Modbus Port",
-          "inverter_slave_id": "Modbus Slave ID"
+          "update_amber_token": "Update Amber API token",
+          "auto_sync_enabled": "Enable automatic TOU sync",
+          "amber_forecast_type": "Amber forecast type",
+          "battery_curtailment_enabled": "Stop export at negative prices",
+          "spike_protection_enabled": "Enable spike protection",
+          "settled_prices_only": "Use settled prices only",
+          "forecast_discrepancy_alert": "Enable forecast discrepancy alert",
+          "forecast_discrepancy_threshold": "Discrepancy threshold (c/kWh)",
+          "force_tariff_mode_toggle": "Force mode toggle after sync",
+          "export_boost_enabled": "Enable export price boost",
+          "export_price_offset": "Offset to add (c/kWh)",
+          "export_min_price": "Minimum floor (c/kWh)",
+          "export_boost_start": "Boost start time (HH:MM)",
+          "export_boost_end": "Boost end time (HH:MM)",
+          "export_boost_threshold": "Only boost above (c/kWh)",
+          "chip_mode_enabled": "Enable chip mode",
+          "chip_mode_start": "Chip mode start (HH:MM)",
+          "chip_mode_end": "Chip mode end (HH:MM)",
+          "chip_mode_threshold": "Price threshold (c/kWh)",
+          "ac_inverter_curtailment_enabled": "Enable AC inverter curtailment",
+          "inverter_brand": "Inverter brand",
+          "inverter_model": "Inverter model",
+          "inverter_host": "Inverter IP address",
+          "inverter_port": "Modbus port",
+          "inverter_slave_id": "Modbus slave ID"
         },
         "data_description": {
-          "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices",
-          "amber_forecast_type": "Which Amber price forecast to use: Predicted (balanced), Low/Aggressive (assumes cheaper prices), High/Conservative (assumes higher prices)",
-          "battery_curtailment_enabled": "Automatically stop battery exports and DC solar production when feed-in prices go negative to avoid paying to export",
-          "spike_protection_enabled": "When Amber detects a price spike, artificially inflate buy prices to prevent your battery from charging from grid (stops arbitrage behavior)",
-          "ac_inverter_curtailment_enabled": "Shutdown AC-coupled solar inverter when feed-in price is negative (stops solar export that bypasses your battery)",
-          "settled_prices_only": "Skip the initial forecast sync at :00 and only sync when actual/settled prices arrive at :35/:60 seconds. Use this if forecast prices differ significantly from settled prices.",
-          "forecast_discrepancy_alert": "Send mobile notification when predicted forecast differs significantly from conservative forecast. Useful when using 'predicted' forecast type to detect unreliable forecasts.",
-          "forecast_discrepancy_threshold": "Average price difference threshold to trigger alert. Default 10c/kWh means alert when predicted vs conservative differ by more than 10c on average across forecast periods.",
-          "force_tariff_mode_toggle": "After uploading a new tariff, briefly toggle operation mode to force immediate recalculation of battery behavior (Tesla only, ~5 second interruption)",
-          "export_boost_enabled": "Artificially increase sell prices during configured hours to encourage battery export during high-value periods",
-          "export_price_offset": "Amount to ADD to the actual Amber export price. Example: Amber=18c + Offset=5c → battery sees 23c",
-          "export_min_price": "Floor price AFTER offset is applied. Example: Amber=12c + Offset=5c = 17c → bumped up to Floor=20c",
-          "export_boost_threshold": "Only apply boost when ACTUAL Amber price (before boost) is at or above this value. Prices below this are sent unchanged. Use 0 to always boost.",
-          "chip_mode_enabled": "Suppress exports during configured hours unless price exceeds threshold (inverse of Export Boost)",
-          "chip_mode_threshold": "Allow exports only when price is at or above this value"
-        }
+          "update_amber_token": "Paste a new Amber API token to rotate it. Leave blank to keep your current token.",
+          "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery based on current Amber prices.",
+          "amber_forecast_type": "Predicted = balanced. Low = assumes cheaper prices (aggressive charging). High = assumes expensive prices (conservative).",
+          "battery_curtailment_enabled": "Stop battery exports and DC solar when feed-in prices go negative.",
+          "spike_protection_enabled": "Artificially inflate buy prices during Amber price spikes to prevent grid charging.",
+          "ac_inverter_curtailment_enabled": "Shut down AC-coupled solar inverter when feed-in price is negative. Use if solar bypasses your battery.",
+          "settled_prices_only": "Skip forecast sync at :00 and only sync when actual prices arrive at :35/:60. Use when forecasts diverge from settled prices.",
+          "forecast_discrepancy_alert": "Send a notification when predicted and conservative forecasts diverge significantly.",
+          "forecast_discrepancy_threshold": "Average price difference that triggers the alert. Default 10 c/kWh.",
+          "force_tariff_mode_toggle": "After uploading a new tariff, briefly toggle operation mode to force recalculation. Tesla only, ~5 second interruption.",
+          "export_boost_enabled": "Artificially increase sell prices during configured hours to encourage battery export.",
+          "export_price_offset": "Amount added to the actual Amber export price. Example: Amber 18c + Offset 5c = 23c.",
+          "export_min_price": "Floor price after offset. Example: Amber 12c + Offset 5c = 17c, bumped to Floor 20c.",
+          "export_boost_threshold": "Only boost when actual Amber price is at or above this value. Use 0 to always boost.",
+          "chip_mode_enabled": "Suppress exports during configured hours unless price exceeds threshold.",
+          "chip_mode_threshold": "Allow exports only when price is at or above this value."
+        },
+        "submit": "Save"
       },
       "flow_power_options": {
-        "title": "Flow Power Settings",
-        "description": "Core Flow Power configuration.",
+        "title": "Flow Power settings",
+        "description": "Update your Flow Power pricing and portal settings. Changes apply after the next sync cycle.",
         "data": {
-          "flow_power_state": "NEM Region",
-          "flow_power_price_source": "Price Source",
-          "network_tariff_combined": "Network Tariff",
-          "flow_power_base_rate": "Base Rate (c/kWh)",
-          "pea_enabled": "Enable PEA Pricing (Recommended)",
-          "auto_sync_enabled": "Enable automatic TOU schedule syncing",
-          "fp_network": "V2 Tariff: Network Distributor",
-          "fp_tariff_code": "V2 Tariff: Tariff Code",
-          "fp_twap_override": "TWAP Override (c/kWh)",
-          "fp_amber_markup": "Amber Comparison Markup (c/kWh)",
-          "connect_portal": "Connect/re-authenticate Flow Power portal"
+          "flow_power_state": "NEM region",
+          "flow_power_price_source": "Price source",
+          "network_tariff_combined": "Network tariff",
+          "flow_power_base_rate": "Base rate (c/kWh)",
+          "pea_enabled": "Enable PEA pricing (recommended)",
+          "auto_sync_enabled": "Enable automatic TOU sync",
+          "fp_network": "V2 tariff: network distributor",
+          "fp_tariff_code": "V2 tariff: tariff code",
+          "fp_twap_override": "TWAP override (c/kWh)",
+          "fp_amber_markup": "Amber comparison markup (c/kWh)",
+          "connect_portal": "Re-authenticate Flow Power portal"
         },
         "data_description": {
-          "flow_power_price_source": "AEMO Direct fetches wholesale prices from NEMWeb (no API key needed). Amber API uses your Amber Electric account for pricing.",
-          "pea_enabled": "PEA reflects how Flow Power actually bills you: your final rate moves with wholesale prices. Final Rate = Base Rate + (Wholesale - 9.7c). Disable only if you want flat network tariff rates instead.",
-          "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices",
-          "fp_network": "Select your DNSP for the v2 PEA formula (includes GST and network charges). Leave as None to use the legacy formula.",
-          "fp_tariff_code": "Your tariff code from your electricity bill. Must match the selected network distributor.",
-          "fp_twap_override": "Override the dynamic 30-day TWAP with a fixed value. Leave empty to use the rolling average. Useful when the 30-day average is skewed by price spikes.",
-          "fp_amber_markup": "Retailer margin used for the Amber comparison sensor. Leave empty for the regional default (~4 c/kWh)."
-        }
+          "flow_power_price_source": "AEMO Direct fetches wholesale prices from NEMWeb (no API key). Amber API uses your Amber Electric account.",
+          "pea_enabled": "PEA reflects how Flow Power actually bills you: final rate moves with wholesale prices. Disable for flat network tariff rates.",
+          "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery based on current prices.",
+          "fp_network": "Select your DNSP for the v2 PEA formula (includes GST and network charges). Leave as None for the legacy formula.",
+          "fp_tariff_code": "Tariff code from your electricity bill. Must match the selected network distributor.",
+          "fp_twap_override": "Override the dynamic 30-day TWAP with a fixed value. Leave empty for the rolling average.",
+          "fp_amber_markup": "Retailer margin for the Amber comparison sensor. Leave empty for the regional default (~4 c/kWh)."
+        },
+        "submit": "Save"
       },
       "flow_power_portal_reauth": {
-        "title": "Flow Power Portal Login",
-        "description": "Enter your Flow Power portal credentials to re-authenticate.",
+        "title": "Portal re-authentication",
+        "description": "Enter your Flow Power portal credentials to reconnect.",
         "data": {
-          "flowpower_email": "Email Address",
+          "flowpower_email": "Email address",
           "flowpower_password": "Password"
-        }
+        },
+        "data_description": {
+          "flowpower_email": "The email address you use to log in to the Flow Power portal.",
+          "flowpower_password": "Your Flow Power portal password."
+        },
+        "submit": "Connect"
       },
       "flow_power_portal_mfa_options": {
-        "title": "Flow Power SMS Verification",
-        "description": "Enter the SMS verification code sent to your phone.",
+        "title": "SMS verification",
+        "description": "Enter the SMS code sent to your registered phone number.",
         "data": {
-          "mfa_code": "SMS Code"
-        }
+          "mfa_code": "SMS code"
+        },
+        "data_description": {
+          "mfa_code": "6-digit code from the SMS sent to your Flow Power registered phone."
+        },
+        "submit": "Connect"
       },
       "flow_power_amber_token": {
-        "title": "Amber API Token",
-        "description": "Enter your Amber Electric API token. You can get this from {amber_url}",
+        "title": "Amber API token",
+        "description": "Enter your Amber Electric API token. Get one from {amber_url}.",
         "data": {
-          "amber_api_token": "Amber API Token"
-        }
+          "amber_api_token": "Amber API token"
+        },
+        "data_description": {
+          "amber_api_token": "Found in the Amber app under Profile > Developer > API key."
+        },
+        "submit": "Connect"
       },
       "flow_power_network_options": {
-        "title": "Flow Power Options",
-        "description": "These options are for advanced users and aren't typically required.",
+        "title": "Flow Power advanced options",
+        "description": "Advanced network tariff overrides. Most users do not need to change these settings.",
         "data": {
-          "pea_custom_value": "Custom PEA Override (c/kWh, leave empty for auto)",
+          "pea_custom_value": "Custom PEA override (c/kWh)",
           "network_use_manual_rates": "Use manual network rates",
-          "network_tariff_type": "Network Tariff Type",
-          "network_flat_rate": "Flat Rate (c/kWh)",
-          "network_peak_rate": "Peak Rate (c/kWh)",
-          "network_shoulder_rate": "Shoulder Rate (c/kWh)",
-          "network_offpeak_rate": "Off-Peak Rate (c/kWh)",
-          "network_peak_start": "Peak Start Time",
-          "network_peak_end": "Peak End Time",
-          "network_offpeak_start": "Off-Peak Start Time",
-          "network_offpeak_end": "Off-Peak End Time",
-          "network_other_fees": "Other Fees (c/kWh)",
+          "network_tariff_type": "Network tariff type",
+          "network_flat_rate": "Flat rate (c/kWh)",
+          "network_peak_rate": "Peak rate (c/kWh)",
+          "network_shoulder_rate": "Shoulder rate (c/kWh)",
+          "network_offpeak_rate": "Off-peak rate (c/kWh)",
+          "network_peak_start": "Peak start time",
+          "network_peak_end": "Peak end time",
+          "network_offpeak_start": "Off-peak start time",
+          "network_offpeak_end": "Off-peak end time",
+          "network_other_fees": "Other fees (c/kWh)",
           "network_include_gst": "Include GST (10%)"
         },
         "data_description": {
-          "pea_custom_value": "Override the calculated PEA value with a fixed amount. Leave empty to use the automatic calculation.",
-          "network_use_manual_rates": "Enter network tariff rates manually instead of using the automatic lookup from your selected tariff.",
-          "network_other_fees": "Additional per-kWh fees not covered by the network tariff (e.g. metering, environmental charges).",
+          "pea_custom_value": "Override the calculated PEA with a fixed amount. Leave empty for automatic calculation.",
+          "network_use_manual_rates": "Enter network tariff rates manually instead of using the automatic lookup.",
+          "network_other_fees": "Additional per-kWh fees not covered by the network tariff (metering, environmental charges, etc.).",
           "network_include_gst": "Add 10% GST on top of the network tariff rates."
-        }
+        },
+        "submit": "Save"
       },
       "globird_options": {
-        "title": "Globird Settings",
-        "description": "Configure your Globird plan settings.\n\n**AEMO Spike Export** (optional): If your plan includes spike export payments, enable this to automatically export when AEMO wholesale prices exceed your threshold. GloBird uses a $3,000/MWh spike threshold by default.\n\n{tariff_hint}",
+        "title": "Globird settings",
+        "description": "Configure your Globird plan and optional AEMO spike export. Changes apply after the next sync cycle.\n\n{tariff_hint}",
         "data": {
-          "aemo_spike_enabled": "Enable AEMO Spike Export",
-          "aemo_region": "AEMO NEM Region",
-          "aemo_spike_threshold": "Spike Threshold ($/MWh)",
-          "configure_custom_tariff": "Configure Custom Tariff"
+          "aemo_spike_enabled": "Enable AEMO spike export",
+          "aemo_region": "AEMO NEM region",
+          "aemo_spike_threshold": "Spike threshold ($/MWh)",
+          "configure_custom_tariff": "Configure custom tariff"
         },
         "data_description": {
-          "aemo_spike_enabled": "Enable if your Globird plan includes payments for exporting during AEMO price spikes. Not all plans include this feature.",
-          "configure_custom_tariff": "Recommended: your TOU rates are needed for accurate price sensors, battery optimisation, and EV charging"
-        }
+          "aemo_spike_enabled": "Enable if your Globird plan includes payments for exporting during AEMO price spikes.",
+          "aemo_region": "Your NEM region. Check your electricity bill if unsure.",
+          "aemo_spike_threshold": "Battery exports when the AEMO wholesale price exceeds this value. Default $3,000/MWh.",
+          "configure_custom_tariff": "Recommended: TOU rates are needed for accurate price sensors, optimization, and EV charging."
+        },
+        "submit": "Save"
       },
       "localvolts_options": {
-        "title": "Localvolts Options",
-        "description": "Update your Localvolts API credentials and settings.",
+        "title": "Localvolts settings",
+        "description": "Update your Localvolts credentials and sync settings. Changes take effect immediately.",
         "data": {
-          "localvolts_api_key": "API Key",
+          "localvolts_api_key": "API key",
           "localvolts_partner_id": "Partner ID",
-          "localvolts_nmi": "NMI (National Meter Identifier)",
-          "auto_sync_enabled": "Enable automatic TOU schedule syncing",
-          "battery_curtailment_enabled": "Enable Battery Export Curtailment (stop export at negative prices)"
+          "localvolts_nmi": "NMI",
+          "auto_sync_enabled": "Enable automatic TOU sync",
+          "battery_curtailment_enabled": "Stop export at negative prices"
         },
         "data_description": {
-          "localvolts_api_key": "Your Localvolts API key (keep this secret)",
-          "localvolts_partner_id": "Your Localvolts Partner ID",
+          "localvolts_api_key": "Your Localvolts API key. Keep it secret -- treat it like a password.",
+          "localvolts_partner_id": "Your Localvolts Partner ID.",
           "localvolts_nmi": "Your 10-digit National Meter Identifier. Use * for all authorized NMIs.",
-          "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices",
-          "battery_curtailment_enabled": "Stop battery from exporting when prices are negative to avoid paying to export"
-        }
+          "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery based on current prices.",
+          "battery_curtailment_enabled": "Stop battery from exporting when prices are negative to avoid paying to export."
+        },
+        "submit": "Save"
       },
       "epex_options": {
-        "title": "EPEX Day-Ahead (EU) Options",
-        "description": "Configure your EPEX day-ahead pricing settings.\n\n**Surcharge**: Fixed network fees, levies, and other charges (ct/kWh).\n**Tax**: VAT percentage (e.g. 21% for Belgium).\n**Export Rate**: Fixed feed-in tariff in ct/kWh. 0 = use wholesale price.",
+        "title": "EPEX day-ahead settings",
+        "description": "Update your EPEX pricing settings. Changes apply after the next sync cycle.",
         "data": {
-          "epex_region": "Bidding Zone",
+          "epex_region": "Bidding zone",
           "epex_surcharge": "Surcharge (ct/kWh)",
           "epex_tax_percent": "Tax (%)",
-          "epex_export_rate": "Fixed Export Rate (ct/kWh)",
-          "auto_sync_enabled": "Auto Sync Enabled",
-          "battery_curtailment_enabled": "Battery Curtailment"
-        }
-      },
-      "octopus_options": {
-        "title": "Octopus Energy UK Options",
-        "description": "Configure your Octopus Energy tariff settings.\n\n**Product**: Select your Octopus tariff product (Agile, Go, Intelligent Go, Flux, Intelligent Flux, or Tracker).\n**GSP Region**: Your Grid Supply Point region (A-P).\n\nFind your GSP region on your Octopus bill or at {octopus_url}",
-        "data": {
-          "octopus_product": "Octopus Product",
-          "octopus_region": "GSP Region",
-          "auto_sync_enabled": "Enable automatic TOU schedule syncing",
-          "battery_curtailment_enabled": "Enable Battery Export Curtailment (stop export at negative prices)"
+          "epex_export_rate": "Fixed export rate (ct/kWh)",
+          "auto_sync_enabled": "Enable automatic TOU sync",
+          "battery_curtailment_enabled": "Stop export at negative prices"
         },
         "data_description": {
-          "octopus_product": "Select your Octopus tariff product",
-          "octopus_region": "Your Grid Supply Point region - check your Octopus bill for your GSP code (single letter A-P)",
-          "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery system based on current electricity prices",
-          "battery_curtailment_enabled": "Stop battery from exporting when prices are negative to avoid paying to export"
-        }
+          "epex_region": "Your EPEX bidding zone. Most users need just their country code.",
+          "epex_surcharge": "Fixed network fees and levies added to wholesale price before tax.",
+          "epex_tax_percent": "VAT percentage. Example: 21 for Belgium, 19 for Germany.",
+          "epex_export_rate": "Fixed feed-in tariff in ct/kWh. Set to 0 to use wholesale price.",
+          "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery.",
+          "battery_curtailment_enabled": "Stop battery from exporting when prices go negative."
+        },
+        "submit": "Save"
+      },
+      "octopus_options": {
+        "title": "Octopus Energy settings",
+        "description": "Update your Octopus tariff and sync settings. Changes apply after the next sync cycle.",
+        "data": {
+          "octopus_product": "Octopus product",
+          "octopus_region": "GSP region",
+          "auto_sync_enabled": "Enable automatic TOU sync",
+          "battery_curtailment_enabled": "Stop export at negative prices"
+        },
+        "data_description": {
+          "octopus_product": "Agile = half-hourly dynamic. Go/Intelligent Go = cheap overnight. Flux/Intelligent Flux = solar+battery optimised. Tracker = daily wholesale.",
+          "octopus_region": "Your Grid Supply Point region (single letter A-P). Check your Octopus bill.",
+          "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery based on current prices.",
+          "battery_curtailment_enabled": "Stop battery from exporting when prices go negative."
+        },
+        "submit": "Save"
       },
       "octopus_saving_sessions_options": {
-        "title": "Octopus Saving Sessions",
-        "description": "Configure Saving Sessions support. PowerSync will automatically export your battery during active sessions to earn Octopoints.\n\nDirect mode requires your Octopus API key and account number. Entity mode reads from Bottlecap Dave's Octopus integration.",
+        "title": "Saving sessions settings",
+        "description": "Configure automatic battery export during Octopus Saving Sessions. Changes take effect immediately.",
         "data": {
-          "octopus_saving_sessions_enabled": "Enable Saving Sessions support",
-          "octopus_saving_sessions_source": "Data Source",
-          "octopus_api_key": "Octopus API Key",
-          "octopus_account_number": "Account Number",
-          "octopus_saving_sessions_entity": "Bottlecap Dave Entity ID",
+          "octopus_saving_sessions_enabled": "Enable saving sessions",
+          "octopus_saving_sessions_source": "Data source",
+          "octopus_api_key": "Octopus API key",
+          "octopus_account_number": "Account number",
+          "octopus_saving_sessions_entity": "Bottlecap Dave entity ID",
           "octopus_saving_sessions_auto_join": "Auto-join available sessions"
         },
         "data_description": {
-          "octopus_saving_sessions_enabled": "Enable automatic battery export during Octopus Saving Sessions",
-          "octopus_saving_sessions_source": "Direct uses the Octopus GraphQL API (requires API key). Entity reads from Bottlecap Dave's Octopus integration.",
-          "octopus_api_key": "Your Octopus API key from the developer dashboard",
-          "octopus_account_number": "Your Octopus account number (e.g. A-12345678)",
-          "octopus_saving_sessions_entity": "Entity ID of the Bottlecap Dave saving sessions event entity",
-          "octopus_saving_sessions_auto_join": "Automatically join available saving sessions (direct mode only)"
-        }
+          "octopus_saving_sessions_enabled": "Enable automatic battery export during Octopus Saving Sessions.",
+          "octopus_saving_sessions_source": "Direct uses Octopus GraphQL API (requires API key). Entity reads from Bottlecap Dave's integration.",
+          "octopus_api_key": "Your Octopus API key from the developer dashboard.",
+          "octopus_account_number": "Your Octopus account number (e.g. A-12345678).",
+          "octopus_saving_sessions_entity": "Entity ID of the Bottlecap Dave saving sessions event entity.",
+          "octopus_saving_sessions_auto_join": "Automatically join available sessions. Only works in direct mode."
+        },
+        "submit": "Save"
       },
       "nz_options": {
-        "title": "NZ Electricity Settings",
-        "description": "Configure your NZ electricity plan. Select your retailer and adjust rates to match your plan.\n\nAll rates are in NZD cents per kWh.",
+        "title": "NZ electricity settings",
+        "description": "Update your NZ electricity plan and rates. All values in NZD cents per kWh. Changes apply after the next sync cycle.",
         "data": {
           "nz_retailer": "Retailer",
-          "nz_distribution_zone": "Distribution Zone",
-          "nz_peak_rate": "Peak Rate (c/kWh)",
-          "nz_shoulder_rate": "Shoulder Rate (c/kWh)",
-          "nz_offpeak_rate": "Off-Peak Rate (c/kWh)",
-          "nz_peak_export": "Peak Export Rate (c/kWh)",
-          "nz_offpeak_export": "Off-Peak Export Rate (c/kWh)",
-          "nz_daily_supply": "Daily Supply Charge (c/day)"
+          "nz_distribution_zone": "Distribution zone",
+          "nz_peak_rate": "Peak rate (c/kWh)",
+          "nz_shoulder_rate": "Shoulder rate (c/kWh)",
+          "nz_offpeak_rate": "Off-peak rate (c/kWh)",
+          "nz_peak_export": "Peak export rate (c/kWh)",
+          "nz_offpeak_export": "Off-peak export rate (c/kWh)",
+          "nz_daily_supply": "Daily supply charge (c/day)"
         },
         "data_description": {
-          "nz_retailer": "Select your NZ electricity retailer. Rates will update to match the selected plan.",
-          "nz_distribution_zone": "Your local distribution network zone",
-          "nz_peak_rate": "Weekday peak rate (typically 7-9am and 5-9pm)",
-          "nz_shoulder_rate": "Weekday daytime and weekend daytime rate",
-          "nz_offpeak_rate": "Overnight rate (typically 9pm-7am)",
-          "nz_peak_export": "Export rate during peak periods",
-          "nz_offpeak_export": "Export rate during off-peak periods",
-          "nz_daily_supply": "Fixed daily supply charge from your retailer"
-        }
+          "nz_retailer": "Select your NZ retailer. Rates will update to match the selected plan.",
+          "nz_distribution_zone": "Your local distribution network zone.",
+          "nz_peak_rate": "Weekday peak rate (typically 7-9am and 5-9pm).",
+          "nz_shoulder_rate": "Weekday daytime and weekend daytime rate.",
+          "nz_offpeak_rate": "Overnight rate (typically 9pm-7am).",
+          "nz_peak_export": "Export rate during peak periods.",
+          "nz_offpeak_export": "Export rate during off-peak periods.",
+          "nz_daily_supply": "Fixed daily supply charge from your retailer."
+        },
+        "submit": "Save"
       },
       "custom_tariff_options": {
-        "title": "Custom Tariff Setup",
+        "title": "Custom tariff setup",
         "description": "{info}",
         "data": {
-          "plan_name": "Plan Name (optional)",
-          "tariff_type": "Tariff Type",
-          "flat_rate": "Flat Rate (c/kWh)",
-          "offpeak_rate": "Off-Peak Rate (c/kWh)",
-          "fit_rate": "Default Feed-in Tariff (c/kWh)"
+          "plan_name": "Plan name (optional)",
+          "tariff_type": "Tariff type",
+          "flat_rate": "Flat rate (c/kWh)",
+          "offpeak_rate": "Off-peak rate (c/kWh)",
+          "fit_rate": "Default feed-in tariff (c/kWh)"
         },
         "data_description": {
-          "tariff_type": "Flat rate uses a single price all day. Time of Use lets you add multiple periods with different rates.",
-          "flat_rate": "Only used for Flat Rate tariff type",
-          "offpeak_rate": "Rate for hours not covered by any period you define",
-          "fit_rate": "Default export rate for off-peak hours"
-        }
+          "plan_name": "Optional label for this tariff plan.",
+          "tariff_type": "Flat rate uses a single price all day. Time of Use lets you add multiple periods.",
+          "flat_rate": "Only used for flat rate tariff type.",
+          "offpeak_rate": "Rate for hours not covered by any defined period.",
+          "fit_rate": "Default export rate for off-peak hours."
+        },
+        "submit": "Save"
       },
       "tariff_period_options": {
-        "title": "Add Tariff Period",
+        "title": "Add tariff period",
         "description": "{period_info}",
         "data": {
-          "period_type": "Period Type",
-          "period_start": "Start Time",
-          "period_end": "End Time",
-          "period_days": "Applies To",
-          "import_rate": "Import Rate (c/kWh)",
-          "export_rate": "Export/Feed-in Rate (c/kWh)",
+          "period_type": "Period type",
+          "period_start": "Start time",
+          "period_end": "End time",
+          "period_days": "Applies to",
+          "import_rate": "Import rate (c/kWh)",
+          "export_rate": "Export/feed-in rate (c/kWh)",
           "add_another": "Add another period"
         },
         "data_description": {
-          "period_type": "e.g. Peak, Shoulder, Off-Peak, Super Off-Peak",
-          "export_rate": "What you earn for exporting during this period",
+          "period_type": "e.g. Peak, Shoulder, Off-Peak, Super Off-Peak.",
+          "period_start": "Start time in 24-hour format (e.g. 07:00).",
+          "period_end": "End time in 24-hour format (e.g. 22:00).",
+          "import_rate": "What you pay per kWh to import during this period.",
+          "export_rate": "What you earn per kWh for exporting during this period.",
           "add_another": "Uncheck when done. Remaining hours become off-peak."
-        }
-      },
-      "inverter_brand": {
-        "title": "AC-Coupled Inverter Setup",
-        "description": "Select your solar inverter brand for direct curtailment control.\n\nThis allows PowerSync to shut down your AC-coupled solar inverter when feed-in prices are negative.",
-        "data": {
-          "inverter_brand": "Inverter Brand"
-        }
-      },
-      "inverter_config": {
-        "title": "{brand} Inverter Configuration",
-        "description": "Configure your {brand} inverter connection settings.",
-        "data": {
-          "inverter_model": "Inverter Model",
-          "inverter_host": "IP Address / Hostname",
-          "inverter_port": "Port",
-          "inverter_slave_id": "Modbus Slave ID",
-          "inverter_token": "JWT Token (Manual)",
-          "enphase_username": "Enlighten Email",
-          "enphase_password": "Enlighten Password",
-          "enphase_serial": "Envoy Serial (Optional)",
-          "enphase_normal_profile": "Normal Grid Profile Name",
-          "enphase_zero_export_profile": "Zero Export Grid Profile Name",
-          "enphase_is_installer": "Installer Account",
-          "inverter_restore_soc": "Restore SOC Threshold (%)",
-          "fronius_load_following": "Enable Load Following Mode"
         },
-        "data_description": {
-          "inverter_host": "Local IP address of your inverter or gateway",
-          "inverter_port": "502 for Modbus (Sungrow, Fronius, GoodWe, Huawei), 443 for Enphase",
-          "inverter_slave_id": "Usually 1. GoodWe uses 247 by default.",
-          "inverter_token": "Optional if using Enlighten credentials. Manual tokens expire in 12 hours for installer accounts.",
-          "enphase_username": "Your Enlighten account email for automatic JWT token refresh (recommended)",
-          "enphase_password": "Your Enlighten account password",
-          "enphase_serial": "Leave blank to auto-detect from IQ Gateway",
-          "enphase_normal_profile": "Full name of your normal grid profile (for fallback when DPEL/DER unavailable). Example: 'AS/NZS 4777.2:2020 Australia A'",
-          "enphase_zero_export_profile": "Full name of a zero-export grid profile if available (for fallback curtailment)",
-          "enphase_is_installer": "Enable if using an installer Enlighten account. Required for grid profile switching access.",
-          "inverter_restore_soc": "Restore inverter when battery drops below this %. Ensures battery stays topped up before evening peak. Default: 98%",
-          "fronius_load_following": "Enable if you DON'T have a 0W export limit configured by your installer. Uses calculated power limits based on home load and auto-detected inverter capacity. Leave OFF if you have the 0W export profile (most users)."
-        }
+        "submit": "Save"
       },
       "curtailment_options": {
-        "title": "Curtailment & Weather Settings",
-        "description": "Configure automatic curtailment during negative feed-in tariff (FIT) prices.\n\nWhen feed-in prices go negative, you PAY to export power. These settings prevent that by stopping battery export and optionally shutting down solar production.\n\n**Weather automations** are independent of curtailment and can be configured on the Weather & Solar Forecast page.",
+        "title": "Curtailment settings",
+        "description": "Configure automatic curtailment during negative feed-in prices. Changes take effect immediately.",
         "data": {
-          "battery_curtailment_enabled": "Enable Battery Export Curtailment",
-          "ac_inverter_curtailment_enabled": "Enable AC-Coupled Inverter Shutdown",
-          "sigenergy_dc_curtailment_enabled": "Enable DC Solar Curtailment (Sigenergy)",
-          "openweathermap_api_key": "OpenWeatherMap API Key (Optional)"
+          "battery_curtailment_enabled": "Enable battery export curtailment",
+          "ac_inverter_curtailment_enabled": "Enable AC inverter shutdown",
+          "sigenergy_dc_curtailment_enabled": "Enable DC curtailment (Sigenergy)",
+          "openweathermap_api_key": "OpenWeatherMap API key (optional)"
         },
         "data_description": {
-          "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. This is the MAIN toggle - must be enabled for curtailment to work.",
-          "ac_inverter_curtailment_enabled": "Shutdown AC-coupled solar inverter (Fronius, Sungrow, GoodWe, Enphase, etc.) when feed-in price is negative. Use this if your solar bypasses the battery and exports directly to grid. Requires inverter IP configuration in next step.",
-          "sigenergy_dc_curtailment_enabled": "Limit DC solar production via Sigenergy Modbus when feed-in price is negative. Only applies to Sigenergy systems with DC-coupled solar.",
-          "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny/cloudy triggers). Leave blank to disable weather triggers."
-        }
+          "battery_curtailment_enabled": "Stop battery from exporting when feed-in price is negative. This is the main toggle -- must be enabled for any curtailment to work.",
+          "ac_inverter_curtailment_enabled": "Shut down AC-coupled solar inverter when feed-in price is negative. Use if solar bypasses your battery. Requires inverter configuration.",
+          "sigenergy_dc_curtailment_enabled": "Limit DC solar production via Sigenergy Modbus when feed-in price is negative. Only for Sigenergy systems with DC-coupled solar.",
+          "openweathermap_api_key": "Free key from openweathermap.org for weather-based automations. Leave blank to disable."
+        },
+        "submit": "Save"
       },
       "demand_charge_options": {
-        "title": "Network Demand Charges (Optional)",
-        "description": "Configure demand charge tracking for electricity plans with capacity-based network fees.\n\nDemand charges are based on your peak power draw during specified periods. Your network provider charges a monthly fee based on your highest 30-minute average demand.\n\nLeave 'Enable Demand Charge Tracking' unchecked if your plan does not have demand charges.",
+        "title": "Demand charge tracking",
+        "description": "Track peak demand during capacity-based billing periods. Changes take effect immediately.",
         "data": {
-          "demand_charge_enabled": "Enable Demand Charge Tracking",
-          "demand_charge_rate": "Demand Charge Rate ($/kW)",
-          "demand_charge_start_time": "Peak Period Start Time (HH:MM)",
-          "demand_charge_end_time": "Peak Period End Time (HH:MM)",
-          "demand_charge_days": "Demand Charge Days",
-          "demand_charge_billing_day": "Billing Cycle Reset Day",
-          "demand_charge_apply_to": "Apply Demand Charge To",
-          "demand_artificial_price_enabled": "Apply Artificial Price During Demand Peak",
-          "demand_allow_grid_charging": "Allow Grid Charging During Demand Windows",
-          "daily_supply_charge": "Daily Supply Charge ($)",
-          "monthly_supply_charge": "Monthly Supply Charge ($)"
+          "demand_charge_enabled": "Enable demand charge tracking",
+          "demand_charge_rate": "Demand charge rate ($/kW)",
+          "demand_charge_start_time": "Peak start time (HH:MM)",
+          "demand_charge_end_time": "Peak end time (HH:MM)",
+          "demand_charge_days": "Demand charge days",
+          "demand_charge_billing_day": "Billing cycle reset day",
+          "demand_charge_apply_to": "Apply demand charge to",
+          "demand_artificial_price_enabled": "Apply artificial price during peak",
+          "demand_allow_grid_charging": "Allow grid charging during demand windows",
+          "daily_supply_charge": "Daily supply charge ($)",
+          "monthly_supply_charge": "Monthly supply charge ($)"
         },
         "data_description": {
-          "demand_charge_enabled": "Track your peak grid draw during demand charge periods and calculate monthly capacity fees based on your highest 30-minute average",
-          "demand_charge_rate": "Your network demand charge rate in dollars per kW of peak demand",
-          "demand_charge_start_time": "Start time of the demand charge peak measurement period",
-          "demand_charge_end_time": "End time of the demand charge peak measurement period",
-          "demand_charge_days": "Which days demand charges apply",
-          "demand_charge_billing_day": "Day of month when the billing cycle resets (1-28)",
-          "demand_charge_apply_to": "Whether demand charges apply to grid imports, exports, or both",
-          "demand_artificial_price_enabled": "Add an artificial price component during demand peak periods to discourage grid draw",
-          "demand_allow_grid_charging": "Allow the battery to charge from grid during demand peak periods. When disabled, grid charging is blocked during peak to protect against demand charges.",
-          "daily_supply_charge": "Your daily electricity supply charge for cost tracking",
-          "monthly_supply_charge": "Your monthly electricity supply charge for cost tracking"
-        }
+          "demand_charge_enabled": "Track your peak grid draw during demand periods and calculate monthly capacity fees.",
+          "demand_charge_rate": "Your network demand charge rate in $/kW of peak demand. Check your bill.",
+          "demand_charge_start_time": "Start of the demand charge measurement period (24-hour format).",
+          "demand_charge_end_time": "End of the demand charge measurement period (24-hour format).",
+          "demand_charge_days": "Which days demand charges apply (weekdays, all days, etc.).",
+          "demand_charge_billing_day": "Day of month when the billing cycle resets (1-28).",
+          "demand_charge_apply_to": "Whether demand charges apply to grid imports, exports, or both.",
+          "demand_artificial_price_enabled": "Add an artificial price component during demand peak periods to discourage grid draw.",
+          "demand_allow_grid_charging": "Allow battery grid charging during demand peak periods. Disable to protect against demand charge spikes.",
+          "daily_supply_charge": "Your daily electricity supply charge for cost tracking.",
+          "monthly_supply_charge": "Your monthly electricity supply charge for cost tracking."
+        },
+        "submit": "Save"
       },
       "ev_charging_setup": {
-        "title": "EV Charging & OCPP",
-        "description": "Configure EV charger control. Each section below is independent — only enable the one(s) that match your setup.\n\n**Tesla EV** — Control Tesla vehicle charging via API or Bluetooth.\n**OCPP** — Connect any OCPP 1.6-compliant charger (e.g. Wallbox, ABB, Easee).\n**Zaptec** — Connect Zaptec chargers via HA integration or direct Cloud API.",
+        "title": "EV charging setup",
+        "description": "Configure EV charger control. Each section is independent -- only enable the charger(s) that match your setup.",
         "data": {
-          "ev_charging_enabled": "[Tesla] Enable EV Charging Control",
-          "ev_provider": "[Tesla] Control Method",
-          "tesla_ble_entity_prefix": "[Tesla] BLE Entity Prefix",
-          "ocpp_enabled": "[OCPP] Enable OCPP Central System",
-          "ocpp_port": "[OCPP] WebSocket Port",
-          "zaptec_charger_entity": "[Zaptec] Charger Entity (HA Integration)",
-          "zaptec_installation_id": "[Zaptec] Installation ID",
-          "zaptec_standalone_enabled": "[Zaptec] Enable Standalone Cloud API",
-          "generic_charger_enabled": "[Generic] Enable Generic Charger",
-          "generic_charger_switch_entity": "[Generic] Charger Switch Entity",
-          "generic_charger_amps_entity": "[Generic] Charger Amps Entity",
-          "generic_charger_status_entity": "[Generic] Connector Status Sensor",
-          "generic_charger_soc_entity": "[Generic] EV Battery SoC Sensor"
+          "ev_charging_enabled": "Enable Tesla EV charging",
+          "ev_provider": "Tesla control method",
+          "tesla_ble_entity_prefix": "Tesla BLE entity prefix",
+          "ocpp_enabled": "Enable OCPP central system",
+          "ocpp_port": "OCPP WebSocket port",
+          "zaptec_charger_entity": "Zaptec charger entity (HA)",
+          "zaptec_installation_id": "Zaptec installation ID",
+          "zaptec_standalone_enabled": "Enable Zaptec Cloud API",
+          "generic_charger_enabled": "Enable generic charger",
+          "generic_charger_switch_entity": "Charger switch entity",
+          "generic_charger_amps_entity": "Charger amps entity",
+          "generic_charger_status_entity": "Connector status sensor",
+          "generic_charger_soc_entity": "EV battery SoC sensor"
         },
         "data_description": {
-          "ev_charging_enabled": "Enable smart charging control for Tesla vehicles. Not required for OCPP or Zaptec chargers.",
-          "ev_provider": "Fleet API/Teslemetry uses cloud API. Tesla BLE uses local Bluetooth via ESPHome. Teslemetry Bluetooth uses native HA integration. Both uses local BLE with Fleet API fallback.",
-          "tesla_ble_entity_prefix": "Must match your ESPHome device name(s). For multiple vehicles, separate with commas: my_tesla, wifes_tesla. Default: tesla_ble.",
-          "ocpp_enabled": "Run an OCPP 1.6J WebSocket server. Independent of Tesla — enable this for OCPP-compatible chargers. Chargers connect to ws://your-ha-ip:port/charger_id",
-          "ocpp_port": "Port for OCPP WebSocket server. Default: 9000.",
-          "zaptec_charger_entity": "Entity ID from the Zaptec HA integration (e.g. switch.zaptec_charger). Leave blank if not using Zaptec or if using standalone mode.",
+          "ev_charging_enabled": "Enable smart charging for Tesla vehicles. Not required for OCPP or Zaptec chargers.",
+          "ev_provider": "Fleet API/Teslemetry = cloud API. Tesla BLE = local Bluetooth via ESPHome. Both = BLE with Fleet API fallback.",
+          "tesla_ble_entity_prefix": "Must match your ESPHome device name(s). For multiple vehicles: my_tesla, wifes_tesla. Default: tesla_ble.",
+          "ocpp_enabled": "Run an OCPP 1.6J WebSocket server for OCPP-compatible chargers. Chargers connect to ws://your-ha-ip:port/charger_id.",
+          "ocpp_port": "Port for the OCPP WebSocket server. Default: 9000.",
+          "zaptec_charger_entity": "Entity ID from the Zaptec HA integration (e.g. switch.zaptec_charger). Leave blank if using standalone mode.",
           "zaptec_installation_id": "Installation device ID for current limiting. Found in the Zaptec HA integration device list. Leave blank to auto-detect.",
-          "zaptec_standalone_enabled": "Connect directly to Zaptec Cloud API without the Zaptec HA integration. You'll be prompted for your Zaptec account credentials on the next page.",
-          "generic_charger_enabled": "Control any EV charger that has a switch and optional amps entity in Home Assistant (e.g. Evnex, Wallbox, or any charger with an HA integration).",
+          "zaptec_standalone_enabled": "Connect directly to Zaptec Cloud API without the HA integration. Credentials are entered on the next page.",
+          "generic_charger_enabled": "Control any charger with a switch entity in Home Assistant (e.g. Evnex, Wallbox).",
           "generic_charger_switch_entity": "Entity ID of the switch that starts/stops charging (e.g. switch.evnex_charge_now). Required.",
-          "generic_charger_amps_entity": "Entity ID of the number that controls charge current in amps (e.g. number.evnex_connector_1_maximum_current). Leave blank if your charger doesn't support amp control.",
-          "generic_charger_status_entity": "Entity ID of a sensor that reports charger connector status (e.g. sensor.home_charger_connector_status). Used to detect if an EV is plugged in. Recognised states: charging, preparing, suspended_evse, suspended_ev, finishing. Leave blank to skip plug detection.",
-          "generic_charger_soc_entity": "Entity ID of a sensor that reports EV battery state of charge as a percentage (e.g. sensor.byd_atto_3_battery_level). Used for target SoC charging. Leave blank if not available."
-        }
+          "generic_charger_amps_entity": "Entity ID for charge current control in amps. Leave blank if not supported.",
+          "generic_charger_status_entity": "Entity ID reporting connector status. Recognised: charging, preparing, suspended_evse, suspended_ev, finishing. Leave blank to skip.",
+          "generic_charger_soc_entity": "Entity ID reporting EV battery SoC as a percentage. Used for target SoC charging. Leave blank if unavailable."
+        },
+        "submit": "Save"
       },
       "zaptec_cloud": {
-        "title": "Zaptec Cloud Credentials",
-        "description": "Enter your Zaptec account credentials to connect directly to the Zaptec Cloud API.\n\nPowerSync will auto-discover your chargers and installations.",
+        "title": "Zaptec Cloud login",
+        "description": "Enter your Zaptec account credentials. PowerSync will auto-discover your chargers and installations.",
         "data": {
-          "zaptec_username": "Zaptec Email",
-          "zaptec_password": "Zaptec Password"
+          "zaptec_username": "Zaptec email",
+          "zaptec_password": "Zaptec password"
         },
         "data_description": {
-          "zaptec_username": "Your Zaptec account email address (same as Zaptec Portal login).",
+          "zaptec_username": "Your Zaptec account email (same as Zaptec Portal login).",
           "zaptec_password": "Your Zaptec account password."
-        }
-      },
-      "ev_charging": {
-        "title": "EV Charging & OCPP",
-        "description": "Configure EV charger control. Each section below is independent — only enable the one(s) that match your setup.\n\n**Tesla EV** — Control Tesla vehicle charging via API or Bluetooth.\n**OCPP** — Connect any OCPP 1.6-compliant charger (e.g. Wallbox, ABB, Easee).\n**Zaptec** — Connect Zaptec chargers via HA integration or direct Cloud API.",
-        "data": {
-          "ev_charging_enabled": "[Tesla] Enable EV Charging Control",
-          "ev_provider": "[Tesla] Control Method",
-          "tesla_ble_entity_prefix": "[Tesla] BLE Entity Prefix",
-          "ocpp_enabled": "[OCPP] Enable OCPP Central System",
-          "ocpp_port": "[OCPP] WebSocket Port",
-          "zaptec_charger_entity": "[Zaptec] Charger Entity (HA Integration)",
-          "zaptec_installation_id": "[Zaptec] Installation ID",
-          "zaptec_standalone_enabled": "[Zaptec] Enable Standalone Cloud API",
-          "generic_charger_enabled": "[Generic] Enable Generic Charger",
-          "generic_charger_switch_entity": "[Generic] Charger Switch Entity",
-          "generic_charger_amps_entity": "[Generic] Charger Amps Entity",
-          "generic_charger_status_entity": "[Generic] Connector Status Sensor",
-          "generic_charger_soc_entity": "[Generic] EV Battery SoC Sensor"
         },
-        "data_description": {
-          "ev_charging_enabled": "Enable smart charging control for Tesla vehicles. Not required for OCPP or Zaptec chargers.",
-          "ev_provider": "Fleet API/Teslemetry uses cloud API. Tesla BLE uses local Bluetooth via ESPHome. Teslemetry Bluetooth uses native HA integration. Both uses local BLE with Fleet API fallback.",
-          "tesla_ble_entity_prefix": "Must match your ESPHome device name(s). For multiple vehicles, separate with commas: my_tesla, wifes_tesla. Default: tesla_ble.",
-          "ocpp_enabled": "Run an OCPP 1.6J WebSocket server. Independent of Tesla — enable this for OCPP-compatible chargers. Chargers connect to ws://your-ha-ip:port/charger_id",
-          "ocpp_port": "Port for OCPP WebSocket server. Default: 9000.",
-          "zaptec_charger_entity": "Entity ID from the Zaptec HA integration (e.g. switch.zaptec_charger). Leave blank if not using Zaptec or if using standalone mode.",
-          "zaptec_installation_id": "Installation device ID for current limiting. Found in the Zaptec HA integration device list. Leave blank to auto-detect.",
-          "zaptec_standalone_enabled": "Connect directly to Zaptec Cloud API without the Zaptec HA integration. You'll be prompted for your Zaptec account credentials on the next page.",
-          "generic_charger_enabled": "Control any EV charger that has a switch and optional amps entity in Home Assistant (e.g. Evnex, Wallbox, or any charger with an HA integration).",
-          "generic_charger_switch_entity": "Entity ID of the switch that starts/stops charging (e.g. switch.evnex_charge_now). Required.",
-          "generic_charger_amps_entity": "Entity ID of the number that controls charge current in amps (e.g. number.evnex_connector_1_maximum_current). Leave blank if your charger doesn't support amp control.",
-          "generic_charger_status_entity": "Entity ID of a sensor that reports charger connector status (e.g. sensor.home_charger_connector_status). Used to detect if an EV is plugged in. Recognised states: charging, preparing, suspended_evse, suspended_ev, finishing. Leave blank to skip plug detection.",
-          "generic_charger_soc_entity": "Entity ID of a sensor that reports EV battery state of charge as a percentage (e.g. sensor.byd_atto_3_battery_level). Used for target SoC charging. Leave blank if not available."
-        }
+        "submit": "Connect"
       },
       "zaptec_cloud_options": {
-        "title": "Zaptec Cloud Credentials",
-        "description": "Enter your Zaptec account credentials to connect directly to the Zaptec Cloud API.\n\nPowerSync will auto-discover your chargers and installations.",
+        "title": "Zaptec Cloud credentials",
+        "description": "Update your Zaptec account credentials. Changes take effect immediately.",
         "data": {
-          "zaptec_username": "Zaptec Email",
-          "zaptec_password": "Zaptec Password"
+          "zaptec_username": "Zaptec email",
+          "zaptec_password": "Zaptec password"
         },
         "data_description": {
-          "zaptec_username": "Your Zaptec account email address (same as Zaptec Portal login).",
+          "zaptec_username": "Your Zaptec account email (same as Zaptec Portal login).",
           "zaptec_password": "Your Zaptec account password."
-        }
+        },
+        "submit": "Save"
+      },
+      "ev_charging": {
+        "title": "EV charging settings",
+        "description": "Update your EV charger configuration. Changes take effect immediately.",
+        "data": {
+          "ev_charging_enabled": "Enable Tesla EV charging",
+          "ev_provider": "Tesla control method",
+          "tesla_ble_entity_prefix": "Tesla BLE entity prefix",
+          "ocpp_enabled": "Enable OCPP central system",
+          "ocpp_port": "OCPP WebSocket port",
+          "zaptec_charger_entity": "Zaptec charger entity (HA)",
+          "zaptec_installation_id": "Zaptec installation ID",
+          "zaptec_standalone_enabled": "Enable Zaptec Cloud API",
+          "generic_charger_enabled": "Enable generic charger",
+          "generic_charger_switch_entity": "Charger switch entity",
+          "generic_charger_amps_entity": "Charger amps entity",
+          "generic_charger_status_entity": "Connector status sensor",
+          "generic_charger_soc_entity": "EV battery SoC sensor"
+        },
+        "data_description": {
+          "ev_charging_enabled": "Enable smart charging for Tesla vehicles. Not required for OCPP or Zaptec chargers.",
+          "ev_provider": "Fleet API/Teslemetry = cloud API. Tesla BLE = local Bluetooth via ESPHome. Both = BLE with Fleet API fallback.",
+          "tesla_ble_entity_prefix": "Must match your ESPHome device name(s). For multiple vehicles: my_tesla, wifes_tesla. Default: tesla_ble.",
+          "ocpp_enabled": "Run an OCPP 1.6J WebSocket server for OCPP-compatible chargers. Chargers connect to ws://your-ha-ip:port/charger_id.",
+          "ocpp_port": "Port for the OCPP WebSocket server. Default: 9000.",
+          "zaptec_charger_entity": "Entity ID from the Zaptec HA integration (e.g. switch.zaptec_charger). Leave blank if using standalone mode.",
+          "zaptec_installation_id": "Installation device ID for current limiting. Leave blank to auto-detect.",
+          "zaptec_standalone_enabled": "Connect directly to Zaptec Cloud API without the HA integration.",
+          "generic_charger_enabled": "Control any charger with a switch entity in Home Assistant.",
+          "generic_charger_switch_entity": "Entity ID of the switch that starts/stops charging. Required.",
+          "generic_charger_amps_entity": "Entity ID for charge current control in amps. Leave blank if not supported.",
+          "generic_charger_status_entity": "Entity ID reporting connector status. Leave blank to skip plug detection.",
+          "generic_charger_soc_entity": "Entity ID reporting EV battery SoC as a percentage. Leave blank if unavailable."
+        },
+        "submit": "Save"
+      },
+      "inverter_brand": {
+        "title": "AC-coupled inverter brand",
+        "description": "Select your solar inverter brand for curtailment control during negative feed-in prices.",
+        "data": {
+          "inverter_brand": "Inverter brand"
+        },
+        "data_description": {
+          "inverter_brand": "The brand of your AC-coupled solar inverter. PowerSync uses brand-specific protocols for shutdown commands."
+        },
+        "submit": "Save"
+      },
+      "inverter_config": {
+        "title": "{brand} inverter configuration",
+        "description": "Update your {brand} inverter connection settings. Changes take effect immediately.",
+        "data": {
+          "inverter_model": "Inverter model",
+          "inverter_host": "IP address / hostname",
+          "inverter_port": "Port",
+          "inverter_slave_id": "Modbus slave ID",
+          "inverter_token": "JWT token (manual)",
+          "enphase_username": "Enlighten email",
+          "enphase_password": "Enlighten password",
+          "enphase_serial": "Envoy serial (optional)",
+          "enphase_normal_profile": "Normal grid profile name",
+          "enphase_zero_export_profile": "Zero export grid profile name",
+          "enphase_is_installer": "Use installer account",
+          "inverter_restore_soc": "Restore SOC threshold (%)",
+          "fronius_load_following": "Enable load following mode"
+        },
+        "data_description": {
+          "inverter_host": "Local IP address of your inverter or gateway.",
+          "inverter_port": "502 for Modbus (Sungrow, Fronius, GoodWe, Huawei), 443 for Enphase.",
+          "inverter_slave_id": "Usually 1. GoodWe uses 247 by default.",
+          "inverter_token": "Optional if using Enlighten credentials. Manual tokens expire in 12 hours for installer accounts.",
+          "enphase_username": "Your Enlighten account email for automatic JWT token refresh (recommended).",
+          "enphase_password": "Your Enlighten account password.",
+          "enphase_serial": "Leave blank to auto-detect from IQ Gateway.",
+          "enphase_normal_profile": "Full name of your normal grid profile. Example: 'AS/NZS 4777.2:2020 Australia A'.",
+          "enphase_zero_export_profile": "Full name of a zero-export grid profile if available.",
+          "enphase_is_installer": "Enable if using an installer Enlighten account. Required for grid profile switching.",
+          "inverter_restore_soc": "Restore inverter when battery drops below this %. Default: 98%.",
+          "fronius_load_following": "Enable if you do NOT have a 0W export limit. Uses calculated power limits. Leave off if you have a 0W export profile (most users)."
+        },
+        "submit": "Save"
       },
       "weather_options": {
-        "title": "Weather & Solar Forecast",
-        "description": "Configure weather-based automations and solar production forecasting.\n\n**Already using Solcast HA integration?** PowerSync will automatically detect and use your existing Solcast sensors - no API key needed! Just enable Solcast below and leave the API fields blank.",
+        "title": "Weather & solar forecast",
+        "description": "Update weather automations and solar forecasting settings. Changes take effect immediately.",
         "data": {
-          "weather_location": "Weather Location",
-          "openweathermap_api_key": "OpenWeatherMap API Key",
-          "solcast_enabled": "Enable Solcast Solar Forecast",
-          "solcast_api_key": "Solcast API Key (leave blank if using Solcast HA integration)",
-          "solcast_resource_id": "Solcast Resource ID(s) (leave blank if using Solcast HA integration)"
+          "weather_location": "Weather location",
+          "openweathermap_api_key": "OpenWeatherMap API key",
+          "solcast_enabled": "Enable Solcast solar forecast",
+          "solcast_api_key": "Solcast API key",
+          "solcast_resource_id": "Solcast resource ID(s)"
         },
         "data_description": {
-          "weather_location": "Your suburb or city name (e.g., 'Berowra' or 'Melbourne'). For duplicate names, use full state (e.g., 'Berowra, New South Wales'). You can also use a postcode (e.g., '2081') or lat,lon coordinates (e.g., '-33.62,151.15'). Leave blank to auto-detect from timezone.",
-          "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny/cloudy triggers). Leave blank to disable weather triggers.",
-          "solcast_enabled": "Enable solar production forecasting. If the Solcast HA integration is installed, PowerSync will automatically read from its sensors (no API calls).",
-          "solcast_api_key": "Only needed if you do NOT have the Solcast HA integration installed. If you have the Solcast integration in HA, leave this blank — PowerSync reads from its sensors automatically.",
-          "solcast_resource_id": "Only needed if you do NOT have the Solcast HA integration installed. For split arrays, enter comma-separated IDs (e.g., abc123,def456). If you have the Solcast integration in HA, leave this blank."
-        }
+          "weather_location": "Suburb, city, postcode, or lat,lon coordinates (e.g. 'Melbourne', '3000', '-37.81,144.96'). Leave blank to auto-detect.",
+          "openweathermap_api_key": "Free key from openweathermap.org for weather-based automations. Leave blank to disable.",
+          "solcast_enabled": "Enable solar forecasting. If the Solcast HA integration is installed, PowerSync reads from its sensors automatically.",
+          "solcast_api_key": "Only needed without the Solcast HA integration. Get a free key from toolkit.solcast.com.au.",
+          "solcast_resource_id": "Only needed without the Solcast HA integration. For split arrays, enter comma-separated IDs."
+        },
+        "submit": "Save"
       }
     }
   },

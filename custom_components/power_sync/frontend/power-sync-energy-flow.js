@@ -1944,7 +1944,8 @@
       if (gridStatusEl) {
         const gridStatusEntity = cfg.entities.grid_status;
         const gridStatusState = gridStatusEntity ? this._entityState(gridStatusEntity) : null;
-        const isOffGrid = gridStatusState && gridStatusState.state === 'Islanded';
+        const gs = gridStatusState ? gridStatusState.state.toLowerCase() : '';
+        const isOffGrid = gs.includes('island') || gs === 'inactive';
         if (isOffGrid) {
           this._setText('#flow-grid-status', this._t('card.status.off_grid', 'OFF GRID'));
           gridStatusEl.style.fill = '#ff5d73';

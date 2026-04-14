@@ -33,10 +33,12 @@ _LOGGER = logging.getLogger(__name__)
 
 SERVICE_GO_OFF_GRID = "powerwall_go_off_grid"
 SERVICE_RECONNECT_GRID = "powerwall_reconnect_grid"
+SERVICE_VERIFY_PAIRING = "powerwall_verify_pairing"
 
 GO_OFF_GRID_SCHEMA = vol.Schema(
     {
         vol.Optional("bypass_soc_check", default=False): bool,
+        vol.Optional("mode"): vol.All(int, vol.Range(min=1, max=10)),
     }
 )
 
@@ -68,7 +70,8 @@ async def _handle_go_off_grid(hass: HomeAssistant, call: ServiceCall) -> None:
                 f"Refusing off-grid: SOC {snap.soc:.0f}% < floor {min_soc}%"
             )
 
-    ok = await coordinator.client.go_off_grid()
+    mode_override = call.data.get("mode")
+    ok = await coordinator.client.go_off_grid(mode_override=mode_override)
     await coordinator.async_request_refresh()
     if not ok:
         raise HomeAssistantError(
@@ -91,15 +94,39 @@ async def _handle_reconnect_grid(hass: HomeAssistant, call: ServiceCall) -> None
         raise HomeAssistantError("Gateway rejected reconnect command")
 
 
+async def _handle_verify_pairing(hass: HomeAssistant, call: ServiceCall) -> None:
+    entry = _get_entry(hass)
+    if entry is None:
+        raise HomeAssistantError("PowerSync not configured")
+
+    coordinator = await ensure_coordinator(hass, entry)
+    if coordinator is None or coordinator.client is None:
+        raise HomeAssistantError("Powerwall local client unavailable")
+
+    state = await coordinator.client.verify_pairing()
+    state_names = {1: "pending", 2: "pending_verification", 3: "verified"}
+    if state is None:
+        raise HomeAssistantError("Could not determine pairing state")
+    if state != 3:
+        raise HomeAssistantError(
+            f"Pairing key state={state} ({state_names.get(state, 'unknown')}). "
+            "Toggle the DC isolator to complete verification."
+        )
+    _LOGGER.info("verify_pairing: key is verified (state=3)")
+
+
 @callback
 def register_services(hass: HomeAssistant) -> None:
-    """Register the off-grid / reconnect services (idempotent)."""
+    """Register the off-grid / reconnect / verify services (idempotent)."""
 
     async def go_off_grid(call: ServiceCall) -> None:
         await _handle_go_off_grid(hass, call)
 
     async def reconnect_grid(call: ServiceCall) -> None:
         await _handle_reconnect_grid(hass, call)
+
+    async def verify_pairing(call: ServiceCall) -> None:
+        await _handle_verify_pairing(hass, call)
 
     if not hass.services.has_service(DOMAIN, SERVICE_GO_OFF_GRID):
         hass.services.async_register(
@@ -111,4 +138,11 @@ def register_services(hass: HomeAssistant) -> None:
             SERVICE_RECONNECT_GRID,
             reconnect_grid,
             schema=RECONNECT_SCHEMA,
+        )
+    if not hass.services.has_service(DOMAIN, SERVICE_VERIFY_PAIRING):
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_VERIFY_PAIRING,
+            verify_pairing,
+            schema=vol.Schema({}),
         )

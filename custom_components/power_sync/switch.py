@@ -844,16 +844,27 @@ class OffGridSwitch(SwitchEntity):
 
     @property
     def is_on(self) -> bool | None:
-        """True when the Powerwall is islanded (off-grid)."""
+        """True when the Powerwall is islanded (off-grid).
+
+        Checks the local coordinator snapshot first, falls back to the
+        cloud grid_status sensor if the local coordinator has no data
+        (common when the PW2 gateway isn't on the same LAN).
+        """
+        # Try local coordinator snapshot first
         entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
         runtime = entry_data.get("powerwall_local") or {}
         coord = runtime.get("coordinator")
-        if coord is None:
-            return None
-        snap = coord.data
-        if snap is None or snap.grid_status is None:
-            return None
-        return "island" in snap.grid_status.lower()
+        if coord is not None:
+            snap = coord.data
+            if snap is not None and snap.grid_status is not None:
+                return "island" in snap.grid_status.lower()
+
+        # Fall back to cloud grid_status sensor
+        state = self.hass.states.get("sensor.power_sync_grid_status")
+        if state is not None and state.state not in (None, "unknown", "unavailable"):
+            return state.state.lower() != "active"
+
+        return None
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Go off-grid."""

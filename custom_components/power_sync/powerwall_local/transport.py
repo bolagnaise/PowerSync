@@ -328,24 +328,28 @@ class TEDAPIv1rTransport:
 
         return self.build_signed_bytes(env.SerializeToString(), din)
 
-    def build_signed_island_mode(self, din: str, *, off_grid: bool) -> bytes:
+    def build_signed_island_mode(
+        self, din: str, *, off_grid: bool, mode_override: int | None = None,
+    ) -> bytes:
         """Build a signed island-mode ``RoutableMessage`` for cloud relay.
 
         Returns base64-ready bytes that can be sent as
-        ``energy_device_message`` in a ``device_command`` call.
+        ``routable_message`` in a ``device_command`` call.
+
+        Both PW2 and PW3: mode=6 off-grid, mode=1 reconnect.
+        force=True is required for off-grid (without it the gateway
+        acknowledges but does not physically open the contactor).
+        Use mode_override to specify explicitly.
         """
         from . import tesla_local_pb2 as tp
 
-        # Mode 6 = off-grid, Mode 1 = on-grid (reconnect).
-        # Discovered via mitmproxy of Tesla app — mode=2 gets accepted
-        # but doesn't physically island; mode=6 is what the app sends.
-        mode = 6 if off_grid else 1
+        mode = mode_override if mode_override is not None else (6 if off_grid else 1)
         env = tp.MessageEnvelope()
         env.deliveryChannel = 2  # HERMES_COMMAND for cloud relay
         env.sender.authorizedClient = 1  # CUSTOMER_MOBILE_APP
         env.recipient.din = din
         env.teg.setIslandModeRequest.mode = mode
-        env.teg.setIslandModeRequest.force = False
+        env.teg.setIslandModeRequest.force = off_grid  # force=True for off-grid
 
         return self.build_signed_bytes(env.SerializeToString(), din)
 
