@@ -1486,14 +1486,17 @@ LP_FORECAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_LP_LOAD_FORECAST,
         name="Load Forecast",
-        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
-        device_class=SensorDeviceClass.ENERGY,
+        native_unit_of_measurement=UnitOfPower.KILO_WATT,
+        device_class=SensorDeviceClass.POWER,
         suggested_display_precision=1,
         icon="mdi:home-lightning-bolt",
         value_fn=lambda data: data.get("load_forecast_kwh") if data and data.get("available") else None,
         attr_fn=lambda data: {
             "peak_kw": data.get("load_peak_kw"),
-            "forecast_values_kw": data.get("load_forecast"),
+            "forecast_hours": len(data.get("load_forecast", [])) // 2,
+            "forecast_min_kw": round(min(data.get("load_forecast", [0])), 2) if data.get("load_forecast") else None,
+            "forecast_max_kw": round(max(data.get("load_forecast", [0])), 2) if data.get("load_forecast") else None,
+            "forecast_avg_kw": round(sum(data.get("load_forecast", [0])) / max(1, len(data.get("load_forecast", [1]))), 2) if data.get("load_forecast") else None,
         } if data and data.get("available") else {},
     ),
     PowerSyncSensorEntityDescription(
