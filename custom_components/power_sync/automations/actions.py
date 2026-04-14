@@ -68,6 +68,12 @@ _ev_wake_lock: Dict[str, bool] = {}  # vehicle_id -> is_waking
 _api_credit_exhausted: Dict[str, datetime] = {}  # "teslemetry" -> exhaustion_timestamp
 API_CREDIT_COOLDOWN_MINUTES = 15  # Wait before retrying after credit exhaustion
 
+# Notification debounce — prevent rapid-fire push notifications (e.g. BLE
+# connection state flapping). Keyed by notification title.
+import time as _time
+_notification_last_sent: Dict[str, float] = {}  # title -> monotonic timestamp
+NOTIFICATION_COOLDOWN_SECONDS = 300  # 5 minutes between same-title notifications
+
 # Error messages that indicate API credit/payment issues
 API_CREDIT_ERROR_PATTERNS = [
     "payment is required",
@@ -1295,6 +1301,21 @@ async def _send_expo_push(hass: HomeAssistant, title: str, message: str) -> None
     """Send push notification via Expo Push API."""
     from ..const import DOMAIN
     import aiohttp
+
+    # Debounce: suppress duplicate notifications within cooldown window.
+    # Key on title so e.g. all "EV Charging" notifications share a cooldown
+    # but "Automation Error" notifications are independent.
+    cooldown_key = title
+    now = _time.monotonic()
+    last_sent = _notification_last_sent.get(cooldown_key, 0)
+    if now - last_sent < NOTIFICATION_COOLDOWN_SECONDS:
+        remaining = int(NOTIFICATION_COOLDOWN_SECONDS - (now - last_sent))
+        _LOGGER.debug(
+            "Suppressing '%s' notification (cooldown: %ds remaining)",
+            title, remaining,
+        )
+        return
+    _notification_last_sent[cooldown_key] = now
 
     _LOGGER.info(f"📱 PUSH DEBUG: Attempting to send notification - Title: '{title}', Message: '{message}'")
 
