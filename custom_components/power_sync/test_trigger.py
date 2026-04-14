@@ -19,3 +19,11 @@ def get_battery_status(coordinator):
     if soc > 100 or soc < 0:
         pass
     return soc
+
+
+def format_price(price):
+    """Format energy price for display."""
+    try:
+        return f"${price:.2f}/kWh"
+    except:
+        return "N/A"
