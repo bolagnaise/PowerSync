@@ -46,50 +46,35 @@ jobs:
 
       - name: Detect CodeRabbit trigger and severity
         id: cr_detect
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_SENDER: ${{ github.event.comment.user.login }}
         run: |
-          BODY="${{ github.event.comment.body }}"
-          SENDER="${{ github.event.comment.user.login }}"
-
           IS_CR_BOT="false"
           CR_SEVERITY=""
           CR_SUMMARY=""
           ACTION="human"
 
-          if [ "$SENDER" = "coderabbitai[bot]" ]; then
+          if [ "$COMMENT_SENDER" = "coderabbitai[bot]" ]; then
             IS_CR_BOT="true"
 
-            # Detect severity from CodeRabbit's native markers
-            if echo "$BODY" | grep -qE "Critical|🔴"; then
+            # Detect severity from CodeRabbit's native markers (safely via env var)
+            if echo "$COMMENT_BODY" | grep -qE "Critical|🔴"; then
               CR_SEVERITY="critical"
               ACTION="fix"
-            elif echo "$BODY" | grep -qE "Major|🟠"; then
+            elif echo "$COMMENT_BODY" | grep -qE "Major|🟠"; then
               CR_SEVERITY="major"
               ACTION="fix"
-            elif echo "$BODY" | grep -qE "Minor|🟡"; then
+            elif echo "$COMMENT_BODY" | grep -qE "Minor|🟡"; then
               CR_SEVERITY="minor"
               ACTION="fix"
-            elif echo "$BODY" | grep -qE "Suggestion|💡|Nitpick|nitpick"; then
+            elif echo "$COMMENT_BODY" | grep -qE "Suggestion|💡|Nitpick|nitpick"; then
               CR_SEVERITY="nitpick"
               ACTION="issue"
             fi
 
             # Extract summary from the bold title line
-            CR_SUMMARY=$(echo "$BODY" | grep -oP '\*\*(.+?)\*\*' | head -1 | sed 's/\*\*//g')
-
-            # Also support explicit @claude fix: triggers if CodeRabbit ever uses them
-            if echo "$BODY" | grep -q "@claude fix: critical"; then
-              CR_SEVERITY="critical"
-              ACTION="fix"
-              CR_SUMMARY=$(echo "$BODY" | grep -o "@claude fix: critical — .*" | sed 's/@claude fix: critical — //')
-            elif echo "$BODY" | grep -q "@claude fix: major"; then
-              CR_SEVERITY="major"
-              ACTION="fix"
-              CR_SUMMARY=$(echo "$BODY" | grep -o "@claude fix: major — .*" | sed 's/@claude fix: major — //')
-            elif echo "$BODY" | grep -q "@claude issue: nitpick"; then
-              CR_SEVERITY="nitpick"
-              ACTION="issue"
-              CR_SUMMARY=$(echo "$BODY" | grep -o "@claude issue: nitpick — .*" | sed 's/@claude issue: nitpick — //')
-            fi
+            CR_SUMMARY=$(echo "$COMMENT_BODY" | grep -oP '\*\*(.+?)\*\*' | head -1 | sed 's/\*\*//g')
           fi
 
           echo "is_cr_bot=$IS_CR_BOT" >> $GITHUB_OUTPUT
