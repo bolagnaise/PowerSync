@@ -1271,11 +1271,18 @@
 
       const vehicles = evSlots
         .map((slot) => {
-          const configured = !!(slot.powerEntity || slot.batteryEntity || slot.chargeSwitchEntity || slot.presenceEntity);
+          const hasConfiguredEntity = !!(slot.powerEntity || slot.batteryEntity || slot.chargeSwitchEntity || slot.presenceEntity);
           const powerState = this._entityState(slot.powerEntity);
           const batteryState = this._entityState(slot.batteryEntity);
           const switchState = this._entityState(slot.chargeSwitchEntity);
           const presenceState = this._entityState(slot.presenceEntity);
+          // Only consider configured if at least one entity exists in HA and
+          // is not unavailable/unknown — prevents phantom EV icons when the
+          // card config references entities that don't exist.
+          const anyEntityAvailable = [powerState, batteryState, switchState, presenceState].some(
+            (s) => s != null && s.state !== 'unavailable' && s.state !== 'unknown'
+          );
+          const configured = hasConfiguredEntity && anyEntityAvailable;
           const batteryPct = [
             toPct(batteryState, Number.NaN),
             toPct(powerState, Number.NaN),
