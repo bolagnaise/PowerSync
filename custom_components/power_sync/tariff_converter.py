@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+import zoneinfo
 import logging
 from typing import Any
 
@@ -1558,7 +1559,7 @@ def _apply_network_tariff_library(
                 now.day,
                 hour,
                 minute,
-                tzinfo=timezone(timedelta(hours=10)),  # AEST
+                tzinfo=zoneinfo.ZoneInfo("Australia/Sydney"),  # Handles AEST/AEDT
             )
 
             # Convert wholesale $/kWh to $/MWh for the library

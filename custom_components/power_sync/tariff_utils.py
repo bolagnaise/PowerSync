@@ -12,7 +12,8 @@ import io
 import logging
 import sys
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+import zoneinfo
+from datetime import datetime, timedelta
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ def compute_avg_daily_tariff(
     try:
         from aemo_to_tariff import spot_to_tariff
 
-        now = datetime.now(tz=timezone(timedelta(hours=10)))  # AEST
+        now = datetime.now(tz=zoneinfo.ZoneInfo("Australia/Sydney"))  # Handles AEST/AEDT
         base_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
         total = 0.0
