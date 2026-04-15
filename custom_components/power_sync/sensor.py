@@ -113,6 +113,8 @@ from .const import (
     BATTERY_MODE_STATE_NORMAL,
     BATTERY_MODE_STATE_FORCE_CHARGE,
     BATTERY_MODE_STATE_FORCE_DISCHARGE,
+    BATTERY_MODE_STATE_HOLD_SOC,
+    BATTERY_MODE_STATE_SELF_CONSUMPTION,
     CONF_AC_INVERTER_CURTAILMENT_ENABLED,
     CONF_INVERTER_BRAND,
     CONF_INVERTER_MODEL,
@@ -3308,6 +3310,16 @@ class BatteryModeSensor(SensorEntity):
         if force_discharge_state.get("active", False):
             return BATTERY_MODE_STATE_FORCE_DISCHARGE
 
+        # Check Hold SoC state (locks battery at current SoC for a duration)
+        hold_soc_state = entry_data.get("hold_soc_state", {})
+        if hold_soc_state.get("active", False):
+            return BATTERY_MODE_STATE_HOLD_SOC
+
+        # Check Self-Consumption override (persistent toggle, no timer)
+        self_consumption_state = entry_data.get("self_consumption_state", {})
+        if self_consumption_state.get("active", False):
+            return BATTERY_MODE_STATE_SELF_CONSUMPTION
+
         # Default to normal
         return BATTERY_MODE_STATE_NORMAL
 
@@ -3324,6 +3336,10 @@ class BatteryModeSensor(SensorEntity):
             return "mdi:battery-charging"
         elif mode == BATTERY_MODE_STATE_FORCE_DISCHARGE:
             return "mdi:battery-arrow-down"
+        elif mode == BATTERY_MODE_STATE_HOLD_SOC:
+            return "mdi:battery-lock"
+        elif mode == BATTERY_MODE_STATE_SELF_CONSUMPTION:
+            return "mdi:home-lightning-bolt"
         return "mdi:battery-sync"
 
     @property
@@ -3332,6 +3348,8 @@ class BatteryModeSensor(SensorEntity):
         entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
         force_charge_state = entry_data.get("force_charge_state", {})
         force_discharge_state = entry_data.get("force_discharge_state", {})
+        hold_soc_state = entry_data.get("hold_soc_state", {})
+        self_consumption_state = entry_data.get("self_consumption_state", {})
 
         mode = self._get_current_mode()
 
@@ -3339,29 +3357,43 @@ class BatteryModeSensor(SensorEntity):
             "mode": mode,
         }
 
+        def _populate_timer_attrs(target: dict, src: dict) -> None:
+            """Fill in expires_at + remaining_minutes from a state dict."""
+            target["force_duration_minutes"] = src.get("duration", 0)
+            if src.get("expires_at"):
+                expires_at = src["expires_at"]
+                target["expires_at"] = (
+                    expires_at.isoformat()
+                    if hasattr(expires_at, "isoformat")
+                    else str(expires_at)
+                )
+                target["force_expires_at"] = target["expires_at"]
+                from homeassistant.util import dt as dt_util
+                remaining = (expires_at - dt_util.utcnow()).total_seconds() / 60
+                target["remaining_minutes"] = max(0, int(remaining))
+                target["force_remaining_minutes"] = target["remaining_minutes"]
+
         # Add mode-specific attributes
         if mode == BATTERY_MODE_STATE_FORCE_CHARGE:
             attributes["description"] = "Battery is being force charged"
-            attributes["force_duration_minutes"] = force_charge_state.get("duration", 0)
-            if force_charge_state.get("expires_at"):
-                expires_at = force_charge_state["expires_at"]
-                attributes["expires_at"] = expires_at.isoformat() if hasattr(expires_at, 'isoformat') else str(expires_at)
-                attributes["force_expires_at"] = attributes["expires_at"]
-                from homeassistant.util import dt as dt_util
-                remaining = (expires_at - dt_util.utcnow()).total_seconds() / 60
-                attributes["remaining_minutes"] = max(0, int(remaining))
-                attributes["force_remaining_minutes"] = attributes["remaining_minutes"]
+            _populate_timer_attrs(attributes, force_charge_state)
         elif mode == BATTERY_MODE_STATE_FORCE_DISCHARGE:
             attributes["description"] = "Battery is being force discharged"
-            attributes["force_duration_minutes"] = force_discharge_state.get("duration", 0)
-            if force_discharge_state.get("expires_at"):
-                expires_at = force_discharge_state["expires_at"]
-                attributes["expires_at"] = expires_at.isoformat() if hasattr(expires_at, 'isoformat') else str(expires_at)
-                attributes["force_expires_at"] = attributes["expires_at"]
-                from homeassistant.util import dt as dt_util
-                remaining = (expires_at - dt_util.utcnow()).total_seconds() / 60
-                attributes["remaining_minutes"] = max(0, int(remaining))
-                attributes["force_remaining_minutes"] = attributes["remaining_minutes"]
+            _populate_timer_attrs(attributes, force_discharge_state)
+        elif mode == BATTERY_MODE_STATE_HOLD_SOC:
+            attributes["description"] = "Battery locked at current state of charge"
+            _populate_timer_attrs(attributes, hold_soc_state)
+            if hold_soc_state.get("locked_soc") is not None:
+                attributes["locked_soc"] = hold_soc_state["locked_soc"]
+        elif mode == BATTERY_MODE_STATE_SELF_CONSUMPTION:
+            attributes["description"] = "Pure self-consumption (TOU optimisation off)"
+            engaged_at = self_consumption_state.get("engaged_at")
+            if engaged_at:
+                attributes["engaged_at"] = (
+                    engaged_at.isoformat()
+                    if hasattr(engaged_at, "isoformat")
+                    else str(engaged_at)
+                )
         else:
             attributes["description"] = "Battery operating in normal self-consumption mode"
 
