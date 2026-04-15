@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+
+from homeassistant.util import dt as dt_util
 import logging
 from typing import Any
 
@@ -1420,6 +1422,7 @@ def _apply_network_tariff_library(
         rates = tariff["energy_charges"][season].get("rates", {})
         modified_count = 0
 
+        anchor_now = dt_util.now()  # Anchor once to avoid midnight crossing inconsistency
         for period, price in list(rates.items()):
             # Extract hour and minute from PERIOD_HH_MM
             try:
@@ -1431,10 +1434,8 @@ def _apply_network_tariff_library(
 
             # Build a datetime for this period (use today's date)
             # The library uses interval_time for TOU period detection
-            now = datetime.now()
-            interval_time = datetime(
-                now.year, now.month, now.day, hour, minute,
-                tzinfo=timezone(timedelta(hours=10))  # AEST
+            interval_time = anchor_now.replace(
+                hour=hour, minute=minute, second=0, microsecond=0,
             )
 
             # Convert wholesale $/kWh to $/MWh for the library
