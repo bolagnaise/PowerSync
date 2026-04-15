@@ -334,6 +334,7 @@ class ChargingSessionManager:
         # Load existing sessions on init
         self._sessions_cache: List[ChargingSession] = []
         self._cache_loaded = False
+        self._last_cleanup_time: float = 0
 
     @property
     def storage_path(self) -> Path:
@@ -547,7 +548,17 @@ class ChargingSessionManager:
         return session
 
     async def cleanup_stale_sessions(self, timeout_minutes: int = 30) -> list[str]:
-        """End sessions that haven't received an update in timeout_minutes."""
+        """End sessions that haven't received an update in timeout_minutes.
+
+        Throttled to run at most once every 5 minutes to avoid overhead.
+        """
+        import time as _time
+
+        now_mono = _time.monotonic()
+        if now_mono - self._last_cleanup_time < 300:  # 5 min throttle
+            return []
+        self._last_cleanup_time = now_mono
+
         now = datetime.now()
         stale: list[str] = []
         for vehicle_id, session in list(self.active_sessions.items()):
@@ -555,7 +566,10 @@ class ChargingSessionManager:
             if last_time_str:
                 try:
                     last = datetime.fromisoformat(last_time_str)
-                    if (now - last).total_seconds() > timeout_minutes * 60:
+                    # Normalize both to naive for comparison (replace doesn't convert)
+                    last_naive = last.replace(tzinfo=None)
+                    now_naive = now.replace(tzinfo=None)
+                    if (now_naive - last_naive).total_seconds() >= timeout_minutes * 60:
                         stale.append(vehicle_id)
                 except (ValueError, TypeError):
                     pass

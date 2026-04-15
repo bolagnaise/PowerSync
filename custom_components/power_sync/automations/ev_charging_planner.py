@@ -4182,6 +4182,16 @@ class AutoScheduleExecutor:
         # Periodically save cached SoC values to storage
         await self._save_cached_soc_if_needed()
 
+        # Clean up stale sessions (0 kWh for 30+ min = ghost session)
+        try:
+            from .ev_charging_session import get_session_manager
+
+            sm = get_session_manager()
+            if sm:
+                await sm.cleanup_stale_sessions(timeout_minutes=30)
+        except Exception as cleanup_err:
+            _LOGGER.warning("Stale EV session cleanup failed: %s", cleanup_err)
+
     def _sync_charger_params_from_vehicle_configs(
         self,
         vehicle_id: str,
