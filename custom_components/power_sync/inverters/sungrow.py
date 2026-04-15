@@ -458,7 +458,7 @@ class SungrowController(InverterController):
                 _LOGGER.debug(f"Sungrow power: {attrs['dc_power']}W")
             else:
                 # This can happen during concurrent reads or if inverter is offline
-                _LOGGER.debug(f"Failed to read power register for model {self._model}")
+                _LOGGER.debug(f"Failed to read power register for model {self.model}")
 
             # Read daily yield
             daily_result = await self._read_register_from_map("daily_yield")
