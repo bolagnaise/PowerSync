@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-import zoneinfo
+
+from homeassistant.util import dt as dt_util
 import logging
 from typing import Any
 
@@ -1552,14 +1553,12 @@ def _apply_network_tariff_library(
 
             # Build a datetime for this period (use today's date)
             # The library uses interval_time for TOU period detection
-            now = datetime.now()
-            interval_time = datetime(
-                now.year,
-                now.month,
-                now.day,
-                hour,
-                minute,
-                tzinfo=zoneinfo.ZoneInfo("Australia/Sydney"),  # Handles AEST/AEDT
+            now = dt_util.now()  # Uses HA configured timezone
+            interval_time = now.replace(
+                hour=hour,
+                minute=minute,
+                second=0,
+                microsecond=0,
             )
 
             # Convert wholesale $/kWh to $/MWh for the library
