@@ -932,6 +932,9 @@ SENSOR_TYPE_GRID_STATUS = "grid_status"
 SENSOR_TYPE_BATTERY_POWER = "battery_power"
 SENSOR_TYPE_HOME_LOAD = "home_load"
 SENSOR_TYPE_BATTERY_LEVEL = "battery_level"
+# Battery BMS-reported power limits (kW) — used by force-mode defaults and mobile sliders
+SENSOR_TYPE_BATTERY_MAX_CHARGE_POWER = "battery_max_charge_power"
+SENSOR_TYPE_BATTERY_MAX_DISCHARGE_POWER = "battery_max_discharge_power"
 
 # Dual Sungrow per-inverter sensor types
 SENSOR_TYPE_BATTERY_LEVEL_1 = "battery_level_1"

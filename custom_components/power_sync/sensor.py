@@ -39,6 +39,8 @@ from .const import (
     SENSOR_TYPE_BATTERY_POWER,
     SENSOR_TYPE_HOME_LOAD,
     SENSOR_TYPE_BATTERY_LEVEL,
+    SENSOR_TYPE_BATTERY_MAX_CHARGE_POWER,
+    SENSOR_TYPE_BATTERY_MAX_DISCHARGE_POWER,
     SENSOR_TYPE_DAILY_SOLAR_ENERGY,
     SENSOR_TYPE_DAILY_GRID_IMPORT,
     SENSOR_TYPE_DAILY_GRID_EXPORT,
@@ -526,6 +528,32 @@ SIGENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     ),
 )
 
+# AlphaESS-specific sensors exposing the BMS-reported power ceilings (registers
+# 0x012C / 0x012D). Shared sensors for brands that also report these limits can
+# reuse this list by keying on the same coordinator data fields.
+ALPHAESS_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_BATTERY_MAX_CHARGE_POWER,
+        name="Battery Max Charge Power",
+        native_unit_of_measurement=UnitOfPower.KILO_WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        icon="mdi:battery-plus",
+        value_fn=lambda data: data.get("battery_max_charge_power") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_BATTERY_MAX_DISCHARGE_POWER,
+        name="Battery Max Discharge Power",
+        native_unit_of_measurement=UnitOfPower.KILO_WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        icon="mdi:battery-minus",
+        value_fn=lambda data: data.get("battery_max_discharge_power") if data else None,
+    ),
+)
+
 OPTIMIZER_ACTION_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_OPTIMIZATION_STATUS,
@@ -884,6 +912,18 @@ async def async_setup_entry(
                 )
             )
         _LOGGER.info("Sigenergy PV sensors added (DC and AC-coupled)")
+
+    # Add AlphaESS-specific sensors (BMS-reported charge/discharge power limits)
+    if is_alphaess and energy_coordinator:
+        for description in ALPHAESS_SENSORS:
+            entities.append(
+                TeslaEnergySensor(
+                    coordinator=energy_coordinator,
+                    description=description,
+                    entry=entry,
+                )
+            )
+        _LOGGER.info("AlphaESS BMS-limit sensors added")
 
     # Add EV sensors if EV charging is configured (Tesla, OCPP, or Zaptec)
     ev_enabled = entry.options.get(

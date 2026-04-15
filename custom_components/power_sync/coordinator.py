@@ -3119,6 +3119,12 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
         buy, sell = _get_current_prices(self.hass, self._entry_id)
         self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
 
+        # BMS-reported power limits (W) — used to default force-mode power and
+        # to cap the mobile app slider so users can't request more than the
+        # battery can deliver.
+        max_charge_w = attrs.get("battery_max_charge_power_w")
+        max_discharge_w = attrs.get("battery_max_discharge_power_w")
+
         energy_data = {
             "solar_power": solar_kw,
             "grid_power": grid_kw,
@@ -3127,6 +3133,11 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
             "battery_level": attrs.get("battery_soc", 0),
             "battery_soh": attrs.get("battery_soh"),
             "battery_capacity_kwh": attrs.get("battery_capacity_kwh"),
+            # Expose BMS limits in both W (raw) and kW (display-friendly)
+            "battery_max_charge_power_w": max_charge_w,
+            "battery_max_discharge_power_w": max_discharge_w,
+            "battery_max_charge_power": (max_charge_w / 1000.0) if max_charge_w else None,
+            "battery_max_discharge_power": (max_discharge_w / 1000.0) if max_discharge_w else None,
             "export_limit_percent": attrs.get("export_limit_percent"),
             "is_curtailed": is_curtailed,
             "work_mode_raw": attrs.get("work_mode_raw"),
@@ -3158,24 +3169,56 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
         async with self._controller:
             return await self._controller.restore_from_standby()
 
-    # Default force-mode power when caller passes 0/None. 5 kW matches the
-    # SMILE5 / SMILE-Hi5 rated power and is safely within every supported
-    # model's BMS limit — the controller further clamps against 0x012C/0x012D
-    # before writing.
+    # Safety floor when no BMS reading is available (e.g. first poll hasn't
+    # completed). SMILE5 rated power, well inside every supported model's
+    # BMS limit. The controller further clamps against 0x012C/0x012D.
     _DEFAULT_FORCE_POWER_W = 5000.0
 
-    async def force_charge(self, duration_min: int = 30, power_w: float = 5000.0) -> bool:
+    def _resolve_force_power_w(self, requested_w: float, direction: str) -> float:
+        """Pick the force-mode power to actually write.
+
+        - If the caller passed a positive value, use it (controller clamps to BMS max).
+        - Otherwise, read the last BMS-reported max from self.data
+          (battery_max_charge_power_w / battery_max_discharge_power_w).
+        - If the BMS value isn't available yet, fall back to _DEFAULT_FORCE_POWER_W.
+
+        Args:
+            requested_w: Power from the caller (mobile app / service call).
+            direction: "charge" or "discharge" — selects which BMS field to read.
+        """
+        if requested_w and requested_w > 0:
+            return float(requested_w)
+
+        field = (
+            "battery_max_charge_power_w"
+            if direction == "charge"
+            else "battery_max_discharge_power_w"
+        )
+        bms_w = (self.data or {}).get(field)
+        if bms_w and bms_w > 0:
+            _LOGGER.info(
+                "AlphaESS: caller passed power_w<=0, auto-defaulting to BMS %s max = %.0f W",
+                direction, bms_w,
+            )
+            return float(bms_w)
+
+        _LOGGER.warning(
+            "AlphaESS: no BMS %s power reading available yet — using safety default %.0f W",
+            direction, self._DEFAULT_FORCE_POWER_W,
+        )
+        return self._DEFAULT_FORCE_POWER_W
+
+    async def force_charge(self, duration_min: int = 30, power_w: float = 0.0) -> bool:
         """Force-charge the battery via the dispatch register block.
 
         Args:
             duration_min: Declared duration in minutes (used for logging only —
                 AlphaESS has no auto-timeout; the caller must issue release).
-            power_w: Charge power in watts (positive). <=0 falls back to the
-                5 kW default — protects against mobile-app calls that omit an
-                explicit power and would otherwise write idle dispatch.
+            power_w: Charge power in watts (positive). 0 or negative falls back
+                to the BMS-reported max charge power (register 0x012C), then to
+                a 5 kW safety default if the BMS reading isn't available yet.
         """
-        if not power_w or power_w <= 0:
-            power_w = self._DEFAULT_FORCE_POWER_W
+        power_w = self._resolve_force_power_w(power_w, "charge")
         _LOGGER.info(
             "AlphaESS coordinator: force_charge(power_w=%.0f, duration=%dm)",
             power_w, duration_min,
@@ -3183,13 +3226,12 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
         async with self._controller:
             return await self._controller.force_charge(power_kw=power_w / 1000.0)
 
-    async def force_discharge(self, duration_min: int = 30, power_w: float = 5000.0) -> bool:
+    async def force_discharge(self, duration_min: int = 30, power_w: float = 0.0) -> bool:
         """Force-discharge the battery via the dispatch register block.
 
-        Same <=0 fallback as force_charge — see its docstring.
+        Same fallback chain as force_charge — see its docstring.
         """
-        if not power_w or power_w <= 0:
-            power_w = self._DEFAULT_FORCE_POWER_W
+        power_w = self._resolve_force_power_w(power_w, "discharge")
         _LOGGER.info(
             "AlphaESS coordinator: force_discharge(power_w=%.0f, duration=%dm)",
             power_w, duration_min,
