@@ -7451,8 +7451,30 @@ class CurrentWeatherView(HomeAssistantView):
         """Initialize the view."""
         self._hass = hass
 
+    def _is_night_from_sun(self) -> bool:
+        """Read HA's built-in sun.sun entity to derive day/night state.
+
+        Works on every HA instance out of the box — HA auto-configures
+        sun.sun from the instance latitude/longitude set at onboarding.
+        Falls back to False (day) if the sun entity is somehow missing
+        rather than reporting a stuck-in-day house scene, which is
+        what we already ship today.
+        """
+        sun = self._hass.states.get("sun.sun")
+        if sun is None:
+            _LOGGER.debug("sun.sun entity missing — defaulting is_night to False")
+            return False
+        return sun.state == "below_horizon"
+
     async def get(self, request: web.Request) -> web.Response:
-        """Handle GET request - fetch current weather."""
+        """Handle GET request - fetch current weather.
+
+        When OpenWeatherMap is configured, returns full weather + is_night
+        from the OWM icon. Without OWM (e.g. Solcast-only setups), returns
+        a minimal success payload with is_night derived from HA's sun.sun
+        entity so the mobile app house scene still switches to night mode
+        after sunset.
+        """
         from .automations.weather import async_get_current_weather
         from .const import CONF_OPENWEATHERMAP_API_KEY, CONF_WEATHER_LOCATION
 
@@ -7473,11 +7495,20 @@ class CurrentWeatherView(HomeAssistantView):
                 entry.data.get(CONF_OPENWEATHERMAP_API_KEY)
             )
 
+            # OWM not configured — return a minimal success payload so the
+            # mobile app still gets is_night for the house-scene switch.
+            # Previously this returned HTTP 400, leaving Solcast-only users
+            # stuck in the daytime scene after dark.
             if not api_key:
                 return web.json_response({
-                    "success": False,
-                    "error": "OpenWeatherMap API key not configured"
-                }, status=400)
+                    "success": True,
+                    "condition": "clear",
+                    "description": "",
+                    "temperature_c": None,
+                    "humidity": None,
+                    "cloud_cover": None,
+                    "is_night": self._is_night_from_sun(),
+                })
 
             # Get weather location from config
             weather_location = entry.options.get(
@@ -7497,10 +7528,23 @@ class CurrentWeatherView(HomeAssistantView):
             )
 
             if not weather_data:
+                # OWM reachable but returned nothing — still give the mobile
+                # app is_night from sun.sun so the scene doesn't get stuck.
                 return web.json_response({
-                    "success": False,
-                    "error": "Failed to fetch weather data"
-                }, status=500)
+                    "success": True,
+                    "condition": "clear",
+                    "description": "",
+                    "temperature_c": None,
+                    "humidity": None,
+                    "cloud_cover": None,
+                    "is_night": self._is_night_from_sun(),
+                })
+
+            # Prefer OWM's is_night (based on the icon) but fall back to
+            # sun.sun if OWM didn't report it for any reason.
+            is_night = weather_data.get("is_night")
+            if is_night is None:
+                is_night = self._is_night_from_sun()
 
             return web.json_response({
                 "success": True,
@@ -7509,7 +7553,7 @@ class CurrentWeatherView(HomeAssistantView):
                 "temperature_c": weather_data.get("temperature_c"),
                 "humidity": weather_data.get("humidity"),
                 "cloud_cover": weather_data.get("cloud_cover"),
-                "is_night": weather_data.get("is_night", False),
+                "is_night": is_night,
             })
 
         except Exception as e:
