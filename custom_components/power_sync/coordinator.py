@@ -3158,14 +3158,24 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
         async with self._controller:
             return await self._controller.restore_from_standby()
 
+    # Default force-mode power when caller passes 0/None. 5 kW matches the
+    # SMILE5 / SMILE-Hi5 rated power and is safely within every supported
+    # model's BMS limit — the controller further clamps against 0x012C/0x012D
+    # before writing.
+    _DEFAULT_FORCE_POWER_W = 5000.0
+
     async def force_charge(self, duration_min: int = 30, power_w: float = 5000.0) -> bool:
         """Force-charge the battery via the dispatch register block.
 
         Args:
             duration_min: Declared duration in minutes (used for logging only —
                 AlphaESS has no auto-timeout; the caller must issue release).
-            power_w: Charge power in watts (positive).
+            power_w: Charge power in watts (positive). <=0 falls back to the
+                5 kW default — protects against mobile-app calls that omit an
+                explicit power and would otherwise write idle dispatch.
         """
+        if not power_w or power_w <= 0:
+            power_w = self._DEFAULT_FORCE_POWER_W
         _LOGGER.info(
             "AlphaESS coordinator: force_charge(power_w=%.0f, duration=%dm)",
             power_w, duration_min,
@@ -3174,7 +3184,12 @@ class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
             return await self._controller.force_charge(power_kw=power_w / 1000.0)
 
     async def force_discharge(self, duration_min: int = 30, power_w: float = 5000.0) -> bool:
-        """Force-discharge the battery via the dispatch register block."""
+        """Force-discharge the battery via the dispatch register block.
+
+        Same <=0 fallback as force_charge — see its docstring.
+        """
+        if not power_w or power_w <= 0:
+            power_w = self._DEFAULT_FORCE_POWER_W
         _LOGGER.info(
             "AlphaESS coordinator: force_discharge(power_w=%.0f, duration=%dm)",
             power_w, duration_min,

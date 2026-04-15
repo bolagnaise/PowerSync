@@ -743,12 +743,14 @@ async def async_setup_entry(
     sungrow_coordinator = domain_data.get("sungrow_coordinator")
     foxess_coordinator = domain_data.get("foxess_coordinator")
     goodwe_coordinator = domain_data.get("goodwe_coordinator")
+    alphaess_coordinator = domain_data.get("alphaess_coordinator")
     demand_charge_coordinator: DemandChargeCoordinator | None = domain_data.get("demand_charge_coordinator")
     aemo_spike_manager = domain_data.get("aemo_spike_manager")
     is_sigenergy = domain_data.get("is_sigenergy", False)
     is_sungrow = domain_data.get("is_sungrow", False)
     is_foxess = domain_data.get("is_foxess", False)
     is_goodwe = domain_data.get("is_goodwe", False)
+    is_alphaess = domain_data.get("is_alphaess", False)
 
     entities: list[SensorEntity] = []
 
@@ -820,6 +822,8 @@ async def async_setup_entry(
         energy_coordinator = sungrow_coordinator
     elif is_sigenergy:
         energy_coordinator = sigenergy_coordinator
+    elif is_alphaess:
+        energy_coordinator = alphaess_coordinator
     else:
         energy_coordinator = tesla_coordinator
     if energy_coordinator:
@@ -1144,6 +1148,8 @@ async def async_setup_entry(
         battery_system = "sungrow"
     elif is_sigenergy:
         battery_system = "sigenergy"
+    elif is_alphaess:
+        battery_system = "alphaess"
     entities.append(BatteryHealthSensor(
         entry=entry,
         coordinator=energy_coordinator,
