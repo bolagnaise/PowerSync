@@ -1101,6 +1101,20 @@
     if (!entityState) return false;
     const state = String(entityState.state || '').trim().toLowerCase();
     if (!state || ['unknown', 'unavailable', 'none', 'null'].includes(state)) return false;
+
+    // Stale check for BLE/sensor entities: if entity hasn't updated in 15 min,
+    // treat as absent. BLE entities keep their last state when vehicle leaves range.
+    // Skip staleness for person/device_tracker/input_boolean which update infrequently.
+    const entityId = entityState.entity_id || '';
+    const isBleOrSensor = entityId.startsWith('binary_sensor.') || entityId.startsWith('sensor.');
+    if (isBleOrSensor) {
+      const lastUpdated = entityState.last_updated || entityState.last_changed;
+      if (lastUpdated) {
+        const ageMs = Date.now() - new Date(lastUpdated).getTime();
+        if (ageMs > 15 * 60 * 1000) return false;  // 15 min stale threshold
+      }
+    }
+
     if (['on', 'home', 'present', 'true', 'occupied', 'detected'].includes(state)) return true;
     // EV charging states that indicate vehicle is present (plugged in)
     if (['charging', 'complete', 'connected', 'stopped', 'ready', 'waiting', 'paused', 'full'].includes(state)) return true;
