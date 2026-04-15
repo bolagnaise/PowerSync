@@ -521,7 +521,7 @@
           "teslemetry_api_token": "API token"
         },
         "data_description": {
-          "teslemetry_api_token": "Get a token from [teslemetry.com](https://teslemetry.com). Paste the full token string."
+          "teslemetry_api_token": "Get a token from teslemetry.com. Paste the full token string."
         },
         "submit": "Connect"
       },
@@ -532,7 +532,7 @@
           "teslemetry_api_token": "PowerSync token"
         },
         "data_description": {
-          "teslemetry_api_token": "Open [{auth_url}]({auth_url}) in a browser, sign in with Tesla, and copy the `psync_` token. Your Tesla credentials are never shared with PowerSync."
+          "teslemetry_api_token": "Open {auth_url} in a browser, sign in with Tesla, and copy the psync_ token. Your Tesla credentials are never shared with PowerSync."
         },
         "submit": "Connect"
       },

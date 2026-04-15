@@ -3200,6 +3200,29 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 return
 
+            # AlphaESS auto-detection: the coordinator exposes BMS-reported
+            # max charge/discharge power (watts) and rated capacity (kWh) directly
+            # — no voltage assumption needed.
+            ae_max_charge_w = data.get("battery_max_charge_power_w")
+            ae_max_discharge_w = data.get("battery_max_discharge_power_w")
+            ae_capacity_kwh = data.get("battery_capacity_kwh")
+
+            if ae_max_charge_w and ae_max_charge_w > 0:
+                self._config.max_charge_w = int(ae_max_charge_w)
+                self._config.max_discharge_w = int(ae_max_discharge_w or ae_max_charge_w)
+                if ae_capacity_kwh and ae_capacity_kwh > 0:
+                    self._config.battery_capacity_wh = int(ae_capacity_kwh * 1000)
+                self._battery_specs_source = "auto"
+
+                _LOGGER.info(
+                    "Auto-detected AlphaESS battery specs from Modbus: "
+                    "capacity %.1f kWh, charge %.1f kW, discharge %.1f kW",
+                    (ae_capacity_kwh or self._config.battery_capacity_wh / 1000),
+                    self._config.max_charge_w / 1000,
+                    self._config.max_discharge_w / 1000,
+                )
+                return
+
         site_info = getattr(self.energy_coordinator, "_site_info_cache", None)
         if not site_info:
             # Try fetching it

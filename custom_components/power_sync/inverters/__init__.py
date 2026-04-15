@@ -22,6 +22,7 @@ INVERTER_BRANDS = {
     "sigenergy": "Sigenergy",
     "foxess": "FoxESS",
     "solax": "Solax",
+    "alphaess": "AlphaESS",
 }
 
 # Fronius models (SunSpec Modbus)
@@ -136,6 +137,19 @@ FOXESS_INVERTER_MODELS = {
     "h3-pro": "H3-Pro (Three Phase)",
     "h3-smart": "H3 Smart (Three Phase, WiFi)",
     "kh": "KH (Single Phase Hybrid)",
+}
+
+# AlphaESS hybrid inverter-battery models (SMILE / Storion series)
+# Reference: official AlphaESS Modbus parameter address table
+# Default Modbus slave ID is 0x55 (85), port 502.
+ALPHAESS_MODELS = {
+    "smile5": "SMILE5 (Single Phase Hybrid)",
+    "smile-hi5": "SMILE-Hi5 (Single Phase Hybrid)",
+    "smile-hi10": "SMILE-Hi10 (Three Phase Hybrid)",
+    "smile-b3": "SMILE-B3 (Single Phase)",
+    "smile-t10": "SMILE-T10 (Three Phase)",
+    "smile-g3": "SMILE-G3 (Generation 3)",
+    "storion-t30": "Storion-T30 (Three Phase)",
 }
 
 # Sungrow SG series (string inverters) - single phase residential
@@ -373,6 +387,19 @@ def get_inverter_controller(
             slave_id=slave_id,
             model=model,
             hass=hass,
+        )
+
+    if brand_lower == "alphaess":
+        from .alphaess import AlphaESSController
+        # AlphaESS default slave ID is 0x55 (85) — not the generic 1
+        if slave_id == 1:
+            slave_id = 85
+        return AlphaESSController(
+            host=host,
+            port=port,
+            slave_id=slave_id,
+            model=model,
+            max_export_limit_kw=max_export_limit_kw,
         )
 
     _LOGGER.error(f"Unsupported inverter brand: {brand}")

@@ -6,7 +6,7 @@ Automations are stored using HA's Store helper for persistence.
 """
 
 import logging
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timezone
 from typing import Optional, List, Dict, Any
 import json
 
@@ -506,7 +506,7 @@ class AutomationEngine:
             user_tz = ZoneInfo(user_timezone)
             current_time_local = datetime.now(user_tz)
         except Exception:
-            current_time_local = datetime.now()
+            current_time_local = datetime.now(timezone.utc)
             user_timezone = "UTC"
 
         state: Dict[str, Any] = {

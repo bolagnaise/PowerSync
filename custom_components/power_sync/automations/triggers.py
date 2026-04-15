@@ -19,6 +19,8 @@ from datetime import datetime, time as dt_time, timedelta
 from typing import Dict, Any, Optional, List, TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
+from homeassistant.util import dt as dt_util
+
 if TYPE_CHECKING:
     from . import AutomationStore
 
@@ -153,7 +155,7 @@ def _is_within_time_window(
     except ValueError:
         return True
 
-    current_datetime = current_state.get("current_time", datetime.now())
+    current_datetime = current_state.get("current_time", dt_util.now())
     current_time = current_datetime.time()
     user_timezone = current_state.get("user_timezone", "UTC")
 
@@ -191,7 +193,7 @@ def _evaluate_time_trigger(
     except ValueError:
         return TriggerResult(triggered=False, reason="Invalid time format")
 
-    now = current_state.get("current_time", datetime.now())
+    now = current_state.get("current_time", dt_util.now())
     user_timezone = current_state.get("user_timezone", "UTC")
     current_time = now.time()
 
@@ -782,7 +784,7 @@ def _evaluate_solar_forecast_trigger(
         return TriggerResult(triggered=False, reason=f"No {period} forecast available")
 
     # Check if we already triggered today
-    now = current_state.get("current_time", datetime.now())
+    now = current_state.get("current_time", dt_util.now())
     current_date_encoded = int(now.strftime("%Y%m%d"))
 
     # We encode the date into last_value to prevent re-triggering same day
@@ -1480,7 +1482,7 @@ def _evaluate_time_condition(
     condition: Dict[str, Any], current_state: Dict[str, Any]
 ) -> TriggerResult:
     """Evaluate time condition (before/after/between, weekday filter)."""
-    current_datetime = current_state.get("current_time", datetime.now())
+    current_datetime = current_state.get("current_time", dt_util.now())
     current_time = current_datetime.time()
 
     # Weekday check (Sun=0..Sat=6)

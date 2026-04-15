@@ -5,7 +5,6 @@ Control includes force charge/discharge, work mode switching, backup reserve, an
 
 Reference: https://github.com/nathanmarlor/foxess_modbus
 """
-
 import asyncio
 import logging
 from dataclasses import dataclass
@@ -19,13 +18,11 @@ from .base import InverterController, InverterState, InverterStatus
 
 _LOGGER = logging.getLogger(__name__)
 
-
 # pymodbus 3.10+ renamed 'slave' to 'device_id'
 def _detect_slave_kwarg() -> str:
     """Detect the correct keyword argument for the Modbus slave/device ID."""
     try:
         import inspect
-
         sig = inspect.signature(AsyncModbusTcpClient.read_input_registers)
         if "slave" in sig.parameters:
             return "slave"
@@ -33,29 +30,27 @@ def _detect_slave_kwarg() -> str:
         pass
     return "device_id"
 
-
 _SLAVE_KWARG: str = _detect_slave_kwarg()
 
 # Modbus scaling factors
-GAIN_POWER = 1000  # kW × 0.001 → W (standard models)
+GAIN_POWER = 1000       # kW × 0.001 → W (standard models)
 GAIN_POWER_H3PRO = 10000  # kW × 0.0001 → W (H3-Pro models)
-GAIN_SOC = 1  # % (no scaling)
-GAIN_CURRENT = 10  # A × 0.1
-GAIN_VOLTAGE = 10  # V × 0.1
-GAIN_TEMPERATURE = 10  # °C × 0.1
-GAIN_ENERGY = 10  # kWh × 0.1 (energy totals)
+GAIN_SOC = 1            # % (no scaling)
+GAIN_CURRENT = 10       # A × 0.1
+GAIN_VOLTAGE = 10       # V × 0.1
+GAIN_TEMPERATURE = 10   # °C × 0.1
+GAIN_ENERGY = 10        # kWh × 0.1 (energy totals)
 
 # Remote control re-send interval (seconds) — for future periodic resend if needed
 REMOTE_CONTROL_RESEND_INTERVAL = 480  # 8 minutes
 
 # Remote control enable bitfield values (register 46001 / 44000)
-REMOTE_CONTROL_AC = 0x0001  # Target inverter AC output
-REMOTE_CONTROL_GRID = 0x0009  # Target grid meter (CT) — auto-adjusts for load + PV
+REMOTE_CONTROL_AC = 0x0001        # Target inverter AC output
+REMOTE_CONTROL_GRID = 0x0009      # Target grid meter (CT) — auto-adjusts for load + PV
 
 
 class FoxESSModelFamily(Enum):
     """FoxESS inverter model families."""
-
     H1 = "H1"
     H3 = "H3"
     H3_PRO = "H3-Pro"
@@ -67,36 +62,35 @@ class FoxESSModelFamily(Enum):
 @dataclass
 class FoxESSRegisterMap:
     """Model-specific Modbus register addresses for FoxESS inverters."""
-
     # Battery registers
     battery_soc: int
-    battery_power: int  # Scaled by battery_pv_gain, signed (neg=charge, pos=discharge)
+    battery_power: int          # Scaled by battery_pv_gain, signed (neg=charge, pos=discharge)
     battery_power_is_32bit: bool = False  # H3-Pro uses 32-bit battery power
     battery_voltage: int = 0
     battery_current: int = 0
     battery_temperature: int = 0
 
     # PV registers
-    pv1_power: int = 0  # Scaled by battery_pv_gain
-    pv2_power: int = 0  # Scaled by battery_pv_gain
+    pv1_power: int = 0         # Scaled by battery_pv_gain
+    pv2_power: int = 0         # Scaled by battery_pv_gain
     pv_power_is_32bit: bool = False  # H3-Pro/H3-Smart use 32-bit PV power
 
     # Grid registers
-    grid_power: int = 0  # Scaled by power_gain, signed (neg=export, pos=import)
+    grid_power: int = 0        # Scaled by power_gain, signed (neg=export, pos=import)
     grid_power_is_32bit: bool = False  # H3-Pro uses 32-bit grid power
 
     # CT2 meter registers (AC-coupled inverter measurement)
-    ct2_power: int = 0  # Total CT2 power, signed
+    ct2_power: int = 0             # Total CT2 power, signed
     ct2_power_is_32bit: bool = False
 
     # Load registers
-    load_power: int = 0  # kW × 0.001
+    load_power: int = 0        # kW × 0.001
 
     # Control registers (holding — write)
-    min_soc: int = 0  # % backup reserve
-    max_charge_current: int = 0  # A × 0.1
+    min_soc: int = 0           # % backup reserve
+    max_charge_current: int = 0   # A × 0.1
     max_discharge_current: int = 0  # A × 0.1
-    work_mode: int = 0  # Work mode register address
+    work_mode: int = 0         # Work mode register address
 
     # Work mode enum values (differ between register 41000 and 49203)
     # Register 41000 (H1/H3/KH): 0-based (0=Self Use, 1=Feed-in, 2=Backup)
@@ -106,25 +100,23 @@ class FoxESSRegisterMap:
     work_mode_backup: int = 2
 
     # Remote control registers
-    remote_enable: int = 0  # 0/1
-    remote_timeout: int = 0  # seconds
+    remote_enable: int = 0     # 0/1
+    remote_timeout: int = 0    # seconds
     remote_active_power: int = 0  # W, signed
     remote_active_power_is_32bit: bool = False
 
     # Energy totals (daily)
     charge_energy_today: int = 0
     discharge_energy_today: int = 0
-    energy_is_32bit: bool = False  # H3-Pro/Smart: 32-bit energy registers
-    energy_gain: int = (
-        10  # H1/H3/KH: 0.1 kWh (gain=10); H3-Pro/Smart: 0.01 kWh (gain=100)
-    )
+    energy_is_32bit: bool = False     # H3-Pro/Smart: 32-bit energy registers
+    energy_gain: int = 10             # H1/H3/KH: 0.1 kWh (gain=10); H3-Pro/Smart: 0.01 kWh (gain=100)
 
     # Scaling factors for power registers (varies by model)
     # H1/H3/KH: all registers use gain=1000 (scale 0.001)
     # H3-Pro/H3-Smart: grid_ct uses gain=10000 (scale 0.0001),
     #   battery/PV/load use gain=1000 (scale 0.001)
-    power_gain: int = 1000  # Grid power scaling (default 0.001)
-    battery_pv_gain: int = 0  # Battery/PV scaling (0 = use power_gain)
+    power_gain: int = 1000        # Grid power scaling (default 0.001)
+    battery_pv_gain: int = 0      # Battery/PV scaling (0 = use power_gain)
 
     # Feature flags
     supports_bms: bool = True
@@ -172,9 +164,9 @@ REGISTER_MAPS: dict[FoxESSModelFamily, FoxESSRegisterMap] = {
         remote_active_power=44002,
         charge_energy_today=31088,
         discharge_energy_today=31089,
-        supports_bms=False,  # H1 LAN = no BMS; RS485 = BMS
+        supports_bms=False,          # H1 LAN = no BMS; RS485 = BMS
         supports_energy_totals=False,  # H1 LAN = no; RS485 = yes
-        supports_work_mode_rw=False,  # H1 LAN = no; RS485 = yes
+        supports_work_mode_rw=False,   # H1 LAN = no; RS485 = yes
         supports_charge_periods=False,
     ),
     FoxESSModelFamily.KH: FoxESSRegisterMap(
@@ -227,36 +219,36 @@ REGISTER_MAPS: dict[FoxESSModelFamily, FoxESSRegisterMap] = {
     ),
     FoxESSModelFamily.H3_PRO: FoxESSRegisterMap(
         battery_soc=37612,
-        battery_power=39238,  # 32-bit: 39237 (high) + 39238 (low), scale 0.001
+        battery_power=39238,      # 32-bit: 39237 (high) + 39238 (low), scale 0.001
         battery_power_is_32bit=True,
         battery_voltage=37610,
         battery_current=37611,
         battery_temperature=37613,
-        pv1_power=39280,  # 32-bit: 39279 (high) + 39280 (low), scale 0.001
-        pv2_power=39282,  # 32-bit: 39281 (high) + 39282 (low), scale 0.001
+        pv1_power=39280,          # 32-bit: 39279 (high) + 39280 (low), scale 0.001
+        pv2_power=39282,          # 32-bit: 39281 (high) + 39282 (low), scale 0.001
         pv_power_is_32bit=True,
-        grid_power=38815,  # 32-bit: 38814 (high) + 38815 (low), scale 0.0001
+        grid_power=38815,         # 32-bit: 38814 (high) + 38815 (low), scale 0.0001
         grid_power_is_32bit=True,
-        ct2_power=38915,  # 32-bit: 38914 (high) + 38915 (low), scale 0.0001
+        ct2_power=38915,          # 32-bit: 38914 (high) + 38915 (low), scale 0.0001
         ct2_power_is_32bit=True,
-        load_power=0,  # H3-Pro: calculated from pv + ct2 + grid + battery
-        power_gain=10000,  # Grid CT uses 0.0001 kW scaling
-        battery_pv_gain=1000,  # Battery/PV use 0.001 kW scaling
+        load_power=0,             # H3-Pro: calculated from pv + ct2 + grid + battery
+        power_gain=10000,         # Grid CT uses 0.0001 kW scaling
+        battery_pv_gain=1000,     # Battery/PV use 0.001 kW scaling
         min_soc=46609,
         max_charge_current=46607,
         max_discharge_current=46608,
         work_mode=49203,
-        work_mode_self_use=1,  # Register 49203 uses 1-based indexing
+        work_mode_self_use=1,     # Register 49203 uses 1-based indexing
         work_mode_feed_in=2,
         work_mode_backup=3,
         remote_enable=46001,
         remote_timeout=46002,
         remote_active_power=46003,  # 32-bit: 46003 + 46004
         remote_active_power_is_32bit=True,
-        charge_energy_today=39608,  # 32-bit: [39608, 39607], scale 0.01
-        discharge_energy_today=39612,  # 32-bit: [39612, 39611], scale 0.01
+        charge_energy_today=39608,    # 32-bit: [39608, 39607], scale 0.01
+        discharge_energy_today=39612, # 32-bit: [39612, 39611], scale 0.01
         energy_is_32bit=True,
-        energy_gain=100,  # 0.01 kWh resolution
+        energy_gain=100,              # 0.01 kWh resolution
         supports_bms=True,
         supports_energy_totals=True,
         supports_work_mode_rw=True,
@@ -269,36 +261,36 @@ REGISTER_MAPS: dict[FoxESSModelFamily, FoxESSRegisterMap] = {
     # Ref: https://github.com/nathanmarlor/foxess_modbus (H3_SMART profile)
     FoxESSModelFamily.H3_SMART: FoxESSRegisterMap(
         battery_soc=37612,
-        battery_power=39238,  # 32-bit: scale 0.001
+        battery_power=39238,      # 32-bit: scale 0.001
         battery_power_is_32bit=True,
         battery_voltage=37610,
         battery_current=37611,
         battery_temperature=37613,
-        pv1_power=39280,  # 32-bit: 39279 (high) + 39280 (low), scale 0.001
-        pv2_power=39282,  # 32-bit: 39281 (high) + 39282 (low), scale 0.001
+        pv1_power=39280,          # 32-bit: 39279 (high) + 39280 (low), scale 0.001
+        pv2_power=39282,          # 32-bit: 39281 (high) + 39282 (low), scale 0.001
         pv_power_is_32bit=True,
-        grid_power=38815,  # 32-bit: scale 0.0001
+        grid_power=38815,         # 32-bit: scale 0.0001
         grid_power_is_32bit=True,
-        ct2_power=38915,  # 32-bit: 38914 (high) + 38915 (low), scale 0.0001
+        ct2_power=38915,          # 32-bit: 38914 (high) + 38915 (low), scale 0.0001
         ct2_power_is_32bit=True,
-        load_power=0,  # Calculated from pv + ct2 + grid + battery
-        power_gain=10000,  # Grid CT uses 0.0001 kW scaling
-        battery_pv_gain=1000,  # Battery/PV use 0.001 kW scaling
+        load_power=0,             # Calculated from pv + ct2 + grid + battery
+        power_gain=10000,         # Grid CT uses 0.0001 kW scaling
+        battery_pv_gain=1000,     # Battery/PV use 0.001 kW scaling
         min_soc=46609,
         max_charge_current=46607,
         max_discharge_current=46608,
         work_mode=49203,
-        work_mode_self_use=1,  # Register 49203 uses 1-based indexing
+        work_mode_self_use=1,     # Register 49203 uses 1-based indexing
         work_mode_feed_in=2,
         work_mode_backup=3,
         remote_enable=46001,
         remote_timeout=46002,
         remote_active_power=46003,
         remote_active_power_is_32bit=True,
-        charge_energy_today=39608,  # 32-bit: [39608, 39607], scale 0.01
-        discharge_energy_today=39612,  # 32-bit: [39612, 39611], scale 0.01
+        charge_energy_today=39608,    # 32-bit: [39608, 39607], scale 0.01
+        discharge_energy_today=39612, # 32-bit: [39612, 39611], scale 0.01
         energy_is_32bit=True,
-        energy_gain=100,  # 0.01 kWh resolution
+        energy_gain=100,              # 0.01 kWh resolution
         supports_bms=True,
         supports_energy_totals=True,
         supports_work_mode_rw=True,
@@ -360,9 +352,7 @@ class FoxESSController(InverterController):
         else:
             self._model_family = FoxESSModelFamily.UNKNOWN
 
-        self._register_map: Optional[FoxESSRegisterMap] = REGISTER_MAPS.get(
-            self._model_family
-        )
+        self._register_map: Optional[FoxESSRegisterMap] = REGISTER_MAPS.get(self._model_family)
 
     async def connect(self) -> bool:
         """Establish Modbus connection."""
@@ -379,7 +369,6 @@ class FoxESSController(InverterController):
 
                 if self._connection_type == "serial" and self._serial_port:
                     from pymodbus.client import AsyncModbusSerialClient
-
                     self._client = AsyncModbusSerialClient(
                         port=self._serial_port,
                         baudrate=self._baudrate,
@@ -400,9 +389,7 @@ class FoxESSController(InverterController):
                     self._connected = True
                     _LOGGER.info(
                         "FoxESS Modbus connected: %s (%s)",
-                        self.host
-                        if self._connection_type == "tcp"
-                        else self._serial_port,
+                        self.host if self._connection_type == "tcp" else self._serial_port,
                         self._connection_type,
                     )
                 else:
@@ -424,9 +411,7 @@ class FoxESSController(InverterController):
 
     # ---- Low-level Modbus operations ----
 
-    async def _read_input_registers(
-        self, address: int, count: int = 1
-    ) -> Optional[list[int]]:
+    async def _read_input_registers(self, address: int, count: int = 1) -> Optional[list[int]]:
         """Read input registers."""
         if not self._client or not self._connected:
             return None
@@ -435,18 +420,14 @@ class FoxESSController(InverterController):
                 address=address, count=count, **{_SLAVE_KWARG: self.slave_id}
             )
             if result.isError():
-                _LOGGER.debug(
-                    "FoxESS read input register %d error: %s", address, result
-                )
+                _LOGGER.debug("FoxESS read input register %d error: %s", address, result)
                 return None
             return list(result.registers)
         except (ModbusException, Exception) as e:
             _LOGGER.debug("FoxESS read input register %d exception: %s", address, e)
             return None
 
-    async def _read_holding_registers(
-        self, address: int, count: int = 1
-    ) -> Optional[list[int]]:
+    async def _read_holding_registers(self, address: int, count: int = 1) -> Optional[list[int]]:
         """Read holding registers."""
         if not self._client or not self._connected:
             return None
@@ -455,18 +436,14 @@ class FoxESSController(InverterController):
                 address=address, count=count, **{_SLAVE_KWARG: self.slave_id}
             )
             if result.isError():
-                _LOGGER.debug(
-                    "FoxESS read holding register %d error: %s", address, result
-                )
+                _LOGGER.debug("FoxESS read holding register %d error: %s", address, result)
                 return None
             return list(result.registers)
         except (ModbusException, Exception) as e:
             _LOGGER.debug("FoxESS read holding register %d exception: %s", address, e)
             return None
 
-    async def _read_data_register(
-        self, address: int, count: int = 1
-    ) -> Optional[list[int]]:
+    async def _read_data_register(self, address: int, count: int = 1) -> Optional[list[int]]:
         """Read a data register using the correct type for the detected model.
 
         H3-Pro and H3-Smart use holding registers for all data.
@@ -562,9 +539,7 @@ class FoxESSController(InverterController):
             h3pro_check = await self._read_holding_registers(41001, 1)
             if h3pro_check is not None:
                 self._model_family = FoxESSModelFamily.H3_PRO
-                _LOGGER.info(
-                    "FoxESS model detected: H3-Pro (registers 37612 + 41001 responded)"
-                )
+                _LOGGER.info("FoxESS model detected: H3-Pro (registers 37612 + 41001 responded)")
             else:
                 self._model_family = FoxESSModelFamily.H3_SMART
                 _LOGGER.info(
@@ -587,14 +562,10 @@ class FoxESSController(InverterController):
             bms_check = await self._read_holding_registers(41009, 1)
             if bms_check is not None:
                 self._model_family = FoxESSModelFamily.KH
-                _LOGGER.info(
-                    "FoxESS model detected: KH (holding register 41009 accessible)"
-                )
+                _LOGGER.info("FoxESS model detected: KH (holding register 41009 accessible)")
             else:
                 self._model_family = FoxESSModelFamily.H1
-                _LOGGER.info(
-                    "FoxESS model detected: H1 (holding register 41009 not accessible)"
-                )
+                _LOGGER.info("FoxESS model detected: H1 (holding register 41009 not accessible)")
             self._register_map = REGISTER_MAPS[self._model_family]
             return self._model_family
 
@@ -641,15 +612,11 @@ class FoxESSController(InverterController):
                     battery_power_kw = None
             elif reg.battery_power:
                 bp_raw = await self._read_data_register(reg.battery_power, 1)
-                battery_power_kw = (
-                    self._to_signed16(bp_raw[0]) / bp_gain if bp_raw else None
-                )
+                battery_power_kw = self._to_signed16(bp_raw[0]) / bp_gain if bp_raw else None
             else:
                 battery_power_kw = None
             attrs["battery_power_kw"] = battery_power_kw
-            attrs["battery_power_w"] = (
-                battery_power_kw * 1000 if battery_power_kw is not None else None
-            )
+            attrs["battery_power_w"] = battery_power_kw * 1000 if battery_power_kw is not None else None
 
             # PV power
             pv1_kw = None
@@ -678,14 +645,9 @@ class FoxESSController(InverterController):
 
             _LOGGER.debug(
                 "FoxESS PV raw: pv1_reg=%s pv1_raw=%s pv1=%.3f kW, pv2_reg=%s pv2_raw=%s pv2=%.3f kW, gain=%d, 32bit=%s",
-                reg.pv1_power,
-                list(pv1_raw) if pv1_raw else None,
-                pv1_kw or 0,
-                reg.pv2_power,
-                list(pv2_raw) if pv2_raw else None,
-                pv2_kw or 0,
-                bp_gain,
-                reg.pv_power_is_32bit,
+                reg.pv1_power, list(pv1_raw) if pv1_raw else None, pv1_kw or 0,
+                reg.pv2_power, list(pv2_raw) if pv2_raw else None, pv2_kw or 0,
+                bp_gain, reg.pv_power_is_32bit,
             )
 
             # Grid power
@@ -697,9 +659,7 @@ class FoxESSController(InverterController):
                     grid_power_kw = None
             elif reg.grid_power:
                 gp_raw = await self._read_data_register(reg.grid_power, 1)
-                grid_power_kw = (
-                    self._to_signed16(gp_raw[0]) / grid_gain if gp_raw else None
-                )
+                grid_power_kw = self._to_signed16(gp_raw[0]) / grid_gain if gp_raw else None
             else:
                 grid_power_kw = None
             # H3-Pro/H3-Smart grid CT has inverted sign (pos=export, neg=import).
@@ -715,27 +675,16 @@ class FoxESSController(InverterController):
                 if reg.ct2_power_is_32bit:
                     ct2_raw = await self._read_holding_registers(reg.ct2_power - 1, 2)
                     if ct2_raw and len(ct2_raw) == 2:
-                        ct2_power_kw = (
-                            self._to_signed32(ct2_raw[0], ct2_raw[1]) / grid_gain
-                        )
+                        ct2_power_kw = self._to_signed32(ct2_raw[0], ct2_raw[1]) / grid_gain
                     else:
-                        _LOGGER.debug(
-                            "FoxESS CT2 read failed: reg=%d, raw=%s",
-                            reg.ct2_power,
-                            ct2_raw,
-                        )
+                        _LOGGER.debug("FoxESS CT2 read failed: reg=%d, raw=%s", reg.ct2_power, ct2_raw)
                 else:
                     ct2_raw = await self._read_data_register(reg.ct2_power, 1)
                     if ct2_raw:
                         ct2_power_kw = self._to_signed16(ct2_raw[0]) / grid_gain
-                _LOGGER.debug(
-                    "FoxESS CT2 raw: reg=%d raw=%s ct2=%.3f kW, gain=%d, 32bit=%s",
-                    reg.ct2_power,
-                    list(ct2_raw) if ct2_raw else None,
-                    ct2_power_kw,
-                    grid_gain,
-                    reg.ct2_power_is_32bit,
-                )
+                _LOGGER.debug("FoxESS CT2 raw: reg=%d raw=%s ct2=%.3f kW, gain=%d, 32bit=%s",
+                              reg.ct2_power, list(ct2_raw) if ct2_raw else None, ct2_power_kw,
+                              grid_gain, reg.ct2_power_is_32bit)
                 # CT2 measures AC-coupled inverter generation — positive = generating.
                 # Do NOT apply grid_sign_inverted: grid CT sign is about import/export
                 # direction, but CT2 is unidirectional generation measurement.
@@ -750,9 +699,7 @@ class FoxESSController(InverterController):
                 # Sign convention: battery positive=discharge, grid positive=import
                 # Load = PV_DC + CT2_AC + battery_discharge + grid_import
                 if grid_power_kw is not None and battery_power_kw is not None:
-                    load_power_kw = (
-                        total_pv_kw + ct2_power_kw + grid_power_kw + battery_power_kw
-                    )
+                    load_power_kw = total_pv_kw + ct2_power_kw + grid_power_kw + battery_power_kw
                 else:
                     load_power_kw = None
             attrs["load_power_kw"] = load_power_kw
@@ -765,11 +712,7 @@ class FoxESSController(InverterController):
                 work_mode = None
             attrs["work_mode"] = work_mode
             wm_names = reg.get_work_mode_names()
-            attrs["work_mode_name"] = (
-                wm_names.get(work_mode, f"Unknown ({work_mode})")
-                if work_mode is not None
-                else None
-            )
+            attrs["work_mode_name"] = wm_names.get(work_mode, f"Unknown ({work_mode})") if work_mode is not None else None
 
             # Min SOC / backup reserve
             if reg.min_soc and reg.supports_work_mode_rw:
@@ -788,9 +731,7 @@ class FoxESSController(InverterController):
             attrs["max_charge_current_a"] = max_charge_a
 
             if reg.max_discharge_current and reg.supports_work_mode_rw:
-                md_raw = await self._read_holding_registers(
-                    reg.max_discharge_current, 1
-                )
+                md_raw = await self._read_holding_registers(reg.max_discharge_current, 1)
                 max_discharge_a = md_raw[0] / GAIN_CURRENT if md_raw else None
             else:
                 max_discharge_a = None
@@ -839,18 +780,11 @@ class FoxESSController(InverterController):
                         from force_charge/force_discharge (they write it next).
         """
         if not self._register_map or not self._register_map.work_mode:
-            _LOGGER.error(
-                "Work mode register not available for model %s",
-                self._model_family.value,
-            )
+            _LOGGER.error("Work mode register not available for model %s", self._model_family.value)
             return False
 
         wm_names = self._register_map.get_work_mode_names()
-        _LOGGER.info(
-            "FoxESS setting work mode to %d (%s)",
-            mode,
-            wm_names.get(mode, f"Unknown ({mode})"),
-        )
+        _LOGGER.info("FoxESS setting work mode to %d (%s)", mode, wm_names.get(mode, f"Unknown ({mode})"))
 
         # Clear any active remote control so the mode change takes immediate
         # effect. Without this, force charge/discharge continues until the
@@ -860,14 +794,9 @@ class FoxESSController(InverterController):
 
         return await self._write_holding_register(self._register_map.work_mode, mode)
 
-    async def _write_remote_control(
-        self,
-        reg: "FoxESSRegisterMap",
-        power_val: int,
-        duration_minutes: int,
-        timeout_seconds: int,
-        label: str,
-    ) -> bool:
+    async def _write_remote_control(self, reg: 'FoxESSRegisterMap', power_val: int,
+                                    duration_minutes: int, timeout_seconds: int,
+                                    label: str) -> bool:
         """Write remote control registers and verify they took effect.
 
         Writes remote_enable, remote_timeout, and remote_active_power, then
@@ -876,23 +805,17 @@ class FoxESSController(InverterController):
         """
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
-            # Enable remote control
-            # H3-Pro/H3-Smart: use grid/CT target (0x0009) so the power setpoint
-            # targets the grid meter — the inverter auto-adjusts for PV and load.
-            # H1/H3/KH: use AC output target (0x0001) — untested with grid target.
+            # Enable remote control — AC output target (0x0001) on all families.
+            # Grid target (0x0009) on H3-Pro/Smart made the setpoint control grid
+            # meter draw, so the inverter apportioned battery_charge = setpoint −
+            # load + PV. When an EV was drawing 11 kW, a 15 kW force_charge only
+            # delivered ~4 kW to the battery. AC target commands battery power
+            # directly and is independent of concurrent house load.
             if reg.remote_enable:
-                if self._model_family in (
-                    FoxESSModelFamily.H3_PRO,
-                    FoxESSModelFamily.H3_SMART,
-                ):
-                    enable_val = REMOTE_CONTROL_GRID
-                else:
-                    enable_val = REMOTE_CONTROL_AC
+                enable_val = REMOTE_CONTROL_AC
                 await self._write_holding_register(reg.remote_enable, enable_val)
                 if reg.remote_timeout:
-                    await self._write_holding_register(
-                        reg.remote_timeout, timeout_seconds
-                    )
+                    await self._write_holding_register(reg.remote_timeout, timeout_seconds)
                 # H3-Smart silently clears reg 46003/4 if the power setpoint
                 # arrives before the inverter finishes processing remote_enable.
                 # A brief sleep prevents this race condition.
@@ -905,22 +828,13 @@ class FoxESSController(InverterController):
                     write_val = write_val + 0x100000000
                 high = (write_val >> 16) & 0xFFFF
                 low = write_val & 0xFFFF
-                success = await self._write_holding_registers(
-                    reg.remote_active_power, [high, low]
-                )
+                success = await self._write_holding_registers(reg.remote_active_power, [high, low])
             else:
                 raw = write_val & 0xFFFF
-                success = await self._write_holding_register(
-                    reg.remote_active_power, raw
-                )
+                success = await self._write_holding_register(reg.remote_active_power, raw)
 
             if not success:
-                _LOGGER.warning(
-                    "FoxESS %s write failed on attempt %d/%d",
-                    label,
-                    attempt,
-                    max_attempts,
-                )
+                _LOGGER.warning("FoxESS %s write failed on attempt %d/%d", label, attempt, max_attempts)
                 if attempt < max_attempts:
                     await asyncio.sleep(1)
                     continue
@@ -933,11 +847,7 @@ class FoxESSController(InverterController):
                 if not verify or verify[0] != enable_val:
                     _LOGGER.warning(
                         "FoxESS %s register verify failed: remote_enable=%s expected=%s (attempt %d/%d)",
-                        label,
-                        verify,
-                        enable_val,
-                        attempt,
-                        max_attempts,
+                        label, verify, enable_val, attempt, max_attempts,
                     )
                     if attempt < max_attempts:
                         await asyncio.sleep(1)
@@ -950,82 +860,52 @@ class FoxESSController(InverterController):
                 # mode if the firmware is in a transitional state.
                 await asyncio.sleep(2)
                 if reg.remote_active_power_is_32bit:
-                    power_readback = await self._read_holding_registers(
-                        reg.remote_active_power, 2
-                    )
+                    power_readback = await self._read_holding_registers(reg.remote_active_power, 2)
                     if power_readback and len(power_readback) == 2:
                         rb_val = (power_readback[0] << 16) | power_readback[1]
                         if rb_val > 0x7FFFFFFF:
                             rb_val -= 0x100000000
                         _LOGGER.debug(
                             "FoxESS %s power readback: wrote=%d read=%d",
-                            label,
-                            power_val,
-                            rb_val,
+                            label, power_val, rb_val,
                         )
                         if rb_val != power_val:
                             _LOGGER.warning(
                                 "FoxESS %s power verify mismatch: wrote %d, read %d (attempt %d/%d) — retrying",
-                                label,
-                                power_val,
-                                rb_val,
-                                attempt,
-                                max_attempts,
+                                label, power_val, rb_val, attempt, max_attempts,
                             )
                             if attempt < max_attempts:
                                 await asyncio.sleep(2)
                                 continue
-                            # Final attempt failed — report failure so caller
-                            # knows the inverter did not action the command.
+                            # Final attempt failed — log but still return True
+                            # (register write succeeded, inverter may catch up)
                             _LOGGER.warning(
                                 "FoxESS %s power verify still mismatched after %d attempts — "
-                                "inverter may not have actioned the command, attempting restore",
-                                label,
-                                max_attempts,
+                                "inverter may not have actioned the command",
+                                label, max_attempts,
                             )
-                            try:
-                                await self.restore_normal()
-                            except Exception as restore_err:
-                                _LOGGER.error("FoxESS restore after verify failure also failed: %s", restore_err)
-                            return False
                 else:
-                    power_readback = await self._read_holding_registers(
-                        reg.remote_active_power, 1
-                    )
+                    power_readback = await self._read_holding_registers(reg.remote_active_power, 1)
                     if power_readback:
                         rb_val = power_readback[0]
                         if rb_val > 0x7FFF:
                             rb_val -= 0x10000
-                        _LOGGER.debug(
-                            "FoxESS %s power readback: wrote=%d read=%d",
-                            label,
-                            power_val,
-                            rb_val,
-                        )
+                        _LOGGER.debug("FoxESS %s power readback: wrote=%d read=%d", label, power_val, rb_val)
 
                 _LOGGER.info(
                     "FoxESS %s activated for %d minutes (timeout %ds)%s",
-                    label,
-                    duration_minutes,
-                    timeout_seconds,
+                    label, duration_minutes, timeout_seconds,
                     "" if attempt == 1 else f" (attempt {attempt})",
                 )
                 return True
             else:
                 # No remote_enable register to verify — trust the write
-                _LOGGER.info(
-                    "FoxESS %s activated for %d minutes (timeout %ds)",
-                    label,
-                    duration_minutes,
-                    timeout_seconds,
-                )
+                _LOGGER.info("FoxESS %s activated for %d minutes (timeout %ds)", label, duration_minutes, timeout_seconds)
                 return True
 
         return False
 
-    async def force_charge(
-        self, duration_minutes: int = 60, power_w: float = 5000
-    ) -> bool:
+    async def force_charge(self, duration_minutes: int = 60, power_w: float = 5000) -> bool:
         """Force battery to charge from grid via remote control registers."""
         if not self._register_map:
             return False
@@ -1047,22 +927,15 @@ class FoxESSController(InverterController):
         # H3-Pro/Smart: remote control works without mode change.
         # Changing mode causes post-timeout corruption (mode stays as
         # Backup instead of reverting). H1/H3/KH need the mode change.
-        is_pro_smart = self._model_family in (
-            FoxESSModelFamily.H3_PRO,
-            FoxESSModelFamily.H3_SMART,
-        )
+        is_pro_smart = self._model_family in (FoxESSModelFamily.H3_PRO, FoxESSModelFamily.H3_SMART)
         if not is_pro_smart and reg.work_mode and reg.supports_work_mode_rw:
             await self.set_work_mode(reg.work_mode_backup, _from_force=True)
 
         timeout_seconds = max(duration_minutes * 60, 600)
         power_val = -int(abs(power_w))
-        return await self._write_remote_control(
-            reg, power_val, duration_minutes, timeout_seconds, "force charge"
-        )
+        return await self._write_remote_control(reg, power_val, duration_minutes, timeout_seconds, "force charge")
 
-    async def force_discharge(
-        self, duration_minutes: int = 60, power_w: float = 5000
-    ) -> bool:
+    async def force_discharge(self, duration_minutes: int = 60, power_w: float = 5000) -> bool:
         """Force battery to discharge/export via remote control registers."""
         if not self._register_map:
             return False
@@ -1084,18 +957,13 @@ class FoxESSController(InverterController):
         # H3-Pro/Smart: remote control works without mode change.
         # Changing mode causes post-timeout corruption (mode stays as
         # Feed-in instead of reverting). H1/H3/KH need the mode change.
-        is_pro_smart = self._model_family in (
-            FoxESSModelFamily.H3_PRO,
-            FoxESSModelFamily.H3_SMART,
-        )
+        is_pro_smart = self._model_family in (FoxESSModelFamily.H3_PRO, FoxESSModelFamily.H3_SMART)
         if not is_pro_smart and reg.work_mode and reg.supports_work_mode_rw:
             await self.set_work_mode(reg.work_mode_feed_in, _from_force=True)
 
         timeout_seconds = max(duration_minutes * 60, 600)
         power_val = int(abs(power_w))
-        return await self._write_remote_control(
-            reg, power_val, duration_minutes, timeout_seconds, "force discharge"
-        )
+        return await self._write_remote_control(reg, power_val, duration_minutes, timeout_seconds, "force discharge")
 
     async def restore_normal(self) -> bool:
         """Restore normal operation (Self Use mode)."""
@@ -1105,18 +973,12 @@ class FoxESSController(InverterController):
         reg = self._register_map
 
         # Restore to saved mode or default Self Use (model-specific value)
-        target_mode = (
-            self._original_work_mode
-            if self._original_work_mode is not None
-            else reg.work_mode_self_use
-        )
+        target_mode = self._original_work_mode if self._original_work_mode is not None else reg.work_mode_self_use
         success = await self.set_work_mode(target_mode)
 
         # Restore original min_soc if saved
         if self._original_min_soc is not None and self._register_map.min_soc:
-            await self._write_holding_register(
-                self._register_map.min_soc, self._original_min_soc
-            )
+            await self._write_holding_register(self._register_map.min_soc, self._original_min_soc)
             self._original_min_soc = None
 
         # Disable remote control override
@@ -1154,11 +1016,7 @@ class FoxESSController(InverterController):
             await self._write_holding_register(reg.remote_enable, 0)
 
         # Save current work mode for restore (only on first call, not re-entry)
-        if (
-            self._original_work_mode is None
-            and reg.work_mode
-            and reg.supports_work_mode_rw
-        ):
+        if self._original_work_mode is None and reg.work_mode and reg.supports_work_mode_rw:
             wm_raw = await self._read_holding_registers(reg.work_mode, 1)
             if wm_raw:
                 self._original_work_mode = wm_raw[0]
@@ -1171,9 +1029,7 @@ class FoxESSController(InverterController):
 
         success = await self.set_work_mode(reg.work_mode_backup)
         if success:
-            _LOGGER.info(
-                "FoxESS set to Backup mode (IDLE hold, remote control disabled)"
-            )
+            _LOGGER.info("FoxESS set to Backup mode (IDLE hold, remote control disabled)")
         return success
 
     async def restore_work_mode_from_idle(self) -> bool:
@@ -1208,9 +1064,7 @@ class FoxESSController(InverterController):
             percent: Minimum SOC percentage (0-100)
         """
         if not self._register_map or not self._register_map.min_soc:
-            _LOGGER.error(
-                "Min SOC register not available for model %s", self._model_family.value
-            )
+            _LOGGER.error("Min SOC register not available for model %s", self._model_family.value)
             return False
 
         percent = max(0, min(100, percent))
@@ -1235,12 +1089,8 @@ class FoxESSController(InverterController):
             return False
 
         raw_value = int(amps * GAIN_CURRENT)
-        _LOGGER.info(
-            "FoxESS setting max charge current to %.1f A (raw=%d)", amps, raw_value
-        )
-        return await self._write_holding_register(
-            self._register_map.max_charge_current, raw_value
-        )
+        _LOGGER.info("FoxESS setting max charge current to %.1f A (raw=%d)", amps, raw_value)
+        return await self._write_holding_register(self._register_map.max_charge_current, raw_value)
 
     async def set_discharge_rate_limit(self, amps: float) -> bool:
         """Set maximum discharge current.
@@ -1252,12 +1102,8 @@ class FoxESSController(InverterController):
             return False
 
         raw_value = int(amps * GAIN_CURRENT)
-        _LOGGER.info(
-            "FoxESS setting max discharge current to %.1f A (raw=%d)", amps, raw_value
-        )
-        return await self._write_holding_register(
-            self._register_map.max_discharge_current, raw_value
-        )
+        _LOGGER.info("FoxESS setting max discharge current to %.1f A (raw=%d)", amps, raw_value)
+        return await self._write_holding_register(self._register_map.max_discharge_current, raw_value)
 
     # ---- Solar curtailment ----
 
@@ -1289,9 +1135,7 @@ class FoxESSController(InverterController):
             if reg.remote_active_power_is_32bit:
                 high = (power_w >> 16) & 0xFFFF
                 low = power_w & 0xFFFF
-                await self._write_holding_registers(
-                    reg.remote_active_power, [high, low]
-                )
+                await self._write_holding_registers(reg.remote_active_power, [high, low])
             else:
                 await self._write_holding_register(reg.remote_active_power, power_w)
 
@@ -1338,9 +1182,7 @@ class FoxESSController(InverterController):
 
         if reg.discharge_energy_today:
             if reg.energy_is_32bit:
-                raw = await self._read_holding_registers(
-                    reg.discharge_energy_today - 1, 2
-                )
+                raw = await self._read_holding_registers(reg.discharge_energy_today - 1, 2)
                 if raw and len(raw) == 2:
                     val = (raw[0] << 16) | raw[1]  # unsigned 32-bit
                     result["discharge_today_kwh"] = val / gain
@@ -1349,12 +1191,7 @@ class FoxESSController(InverterController):
                 if raw:
                     result["discharge_today_kwh"] = raw[0] / gain
 
-        _LOGGER.debug(
-            "FoxESS energy summary: %s (gain=%d, 32bit=%s)",
-            result,
-            gain,
-            reg.energy_is_32bit,
-        )
+        _LOGGER.debug("FoxESS energy summary: %s (gain=%d, 32bit=%s)", result, gain, reg.energy_is_32bit)
         return result if result else None
 
     # ---- Battery data for connection test ----

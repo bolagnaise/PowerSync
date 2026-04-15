@@ -1,5 +1,4 @@
 """Sensor platform for PowerSync integration."""
-
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -40,6 +39,8 @@ from .const import (
     SENSOR_TYPE_BATTERY_POWER,
     SENSOR_TYPE_HOME_LOAD,
     SENSOR_TYPE_BATTERY_LEVEL,
+    SENSOR_TYPE_BATTERY_MAX_CHARGE_POWER,
+    SENSOR_TYPE_BATTERY_MAX_DISCHARGE_POWER,
     SENSOR_TYPE_DAILY_SOLAR_ENERGY,
     SENSOR_TYPE_DAILY_GRID_IMPORT,
     SENSOR_TYPE_DAILY_GRID_EXPORT,
@@ -95,22 +96,10 @@ from .const import (
     SENSOR_TYPE_BATTERY_LEVEL_2,
     SENSOR_TYPE_OPTIMIZATION_STATUS,
     SENSOR_TYPE_OPTIMIZATION_NEXT_ACTION,
-    SENSOR_TYPE_SAVINGS_TODAY,
-    SENSOR_TYPE_SAVINGS_THIS_WEEK,
-    SENSOR_TYPE_SAVINGS_THIS_MONTH,
-    SENSOR_TYPE_SAVINGS_LIFETIME,
-    SENSOR_TYPE_DAILY_COST_TOTAL,
-    SENSOR_TYPE_DAILY_BASELINE,
-    SENSOR_TYPE_ROI_PERCENTAGE,
-    SENSOR_TYPE_LAST_DECISION,
-    CONF_SYSTEM_COST,
     SENSOR_TYPE_LP_SOLAR_FORECAST,
     SENSOR_TYPE_LP_LOAD_FORECAST,
     SENSOR_TYPE_LP_IMPORT_PRICE_FORECAST,
     SENSOR_TYPE_LP_EXPORT_PRICE_FORECAST,
-    SENSOR_TYPE_FORECAST_MAE,
-    SENSOR_TYPE_FORECAST_BIAS,
-    SENSOR_TYPE_FORECAST_MAPE,
     SENSOR_TYPE_AMBER_USAGE_YESTERDAY_COST,
     SENSOR_TYPE_AMBER_USAGE_YESTERDAY_SAVINGS,
     SENSOR_TYPE_AMBER_USAGE_MONTH_COST,
@@ -163,13 +152,7 @@ from .const import (
     ATTR_AEMO_THRESHOLD,
     ATTR_SPIKE_START_TIME,
 )
-from .coordinator import (
-    AmberPriceCoordinator,
-    LocalvoltsPriceCoordinator,
-    TeslaEnergyCoordinator,
-    DemandChargeCoordinator,
-    SolcastForecastCoordinator,
-)
+from .coordinator import AmberPriceCoordinator, LocalvoltsPriceCoordinator, TeslaEnergyCoordinator, DemandChargeCoordinator, SolcastForecastCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -188,24 +171,15 @@ def _get_import_price(data):
         _LOGGER.debug("_get_import_price: No data available")
         return None
     if not data.get("current"):
-        _LOGGER.debug(
-            "_get_import_price: No 'current' key in data. Keys: %s",
-            list(data.keys()) if isinstance(data, dict) else "not a dict",
-        )
+        _LOGGER.debug("_get_import_price: No 'current' key in data. Keys: %s", list(data.keys()) if isinstance(data, dict) else "not a dict")
         return None
     current_prices = data.get("current", [])
-    _LOGGER.debug(
-        "_get_import_price: Found %d current price entries", len(current_prices)
-    )
+    _LOGGER.debug("_get_import_price: Found %d current price entries", len(current_prices))
     for price in current_prices:
         if price.get("channelType") == "general":
             raw_price = price.get("perKwh", 0)
             converted_price = raw_price / 100
-            _LOGGER.debug(
-                "_get_import_price: Found general price: %s c/kWh -> %s $/kWh",
-                raw_price,
-                converted_price,
-            )
+            _LOGGER.debug("_get_import_price: Found general price: %s c/kWh -> %s $/kWh", raw_price, converted_price)
             return converted_price
     _LOGGER.debug("_get_import_price: No 'general' channel found in current prices")
     return None
@@ -229,11 +203,7 @@ def _get_export_price(data):
         return None
     current_prices = data.get("current", [])
     channel_types = [p.get("channelType") for p in current_prices]
-    _LOGGER.debug(
-        "_get_export_price: Found %d entries with channels: %s",
-        len(current_prices),
-        channel_types,
-    )
+    _LOGGER.debug("_get_export_price: Found %d entries with channels: %s", len(current_prices), channel_types)
     for price in current_prices:
         if price.get("channelType") == "feedIn":
             raw_price = price.get("perKwh", 0)
@@ -241,11 +211,7 @@ def _get_export_price(data):
             # Amber feedIn +10 (paying) → sensor -0.10 (negative earnings)
             # Amber feedIn -10 (earning) → sensor +0.10 (positive earnings)
             converted_price = -raw_price / 100
-            _LOGGER.debug(
-                "_get_export_price: Found feedIn price: %s c/kWh -> %s $/kWh",
-                raw_price,
-                converted_price,
-            )
+            _LOGGER.debug("_get_export_price: Found feedIn price: %s c/kWh -> %s $/kWh", raw_price, converted_price)
             return converted_price
     _LOGGER.debug("_get_export_price: No 'feedIn' channel found in current prices")
     return None
@@ -263,14 +229,10 @@ PRICE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
             ATTR_PRICE_SPIKE: data.get("current", [{}])[0].get("spikeStatus")
             if data and data.get("current")
             else None,
-            ATTR_WHOLESALE_PRICE: data.get("current", [{}])[0].get(
-                "wholesaleKWHPrice", 0
-            )
-            / 100
+            ATTR_WHOLESALE_PRICE: data.get("current", [{}])[0].get("wholesaleKWHPrice", 0) / 100
             if data and data.get("current")
             else 0,
-            ATTR_NETWORK_PRICE: data.get("current", [{}])[0].get("networkKWHPrice", 0)
-            / 100
+            ATTR_NETWORK_PRICE: data.get("current", [{}])[0].get("networkKWHPrice", 0) / 100
             if data and data.get("current")
             else 0,
         },
@@ -349,9 +311,7 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL_INCREASING,
         suggested_display_precision=2,
         icon="mdi:solar-power",
-        value_fn=lambda data: (
-            data.get("energy_summary", {}).get("pv_today_kwh") if data else None
-        ),
+        value_fn=lambda data: data.get("energy_summary", {}).get("pv_today_kwh") if data else None,
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DAILY_GRID_IMPORT,
@@ -361,11 +321,7 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL_INCREASING,
         suggested_display_precision=2,
         icon="mdi:transmission-tower-import",
-        value_fn=lambda data: (
-            data.get("energy_summary", {}).get("grid_import_today_kwh")
-            if data
-            else None
-        ),
+        value_fn=lambda data: data.get("energy_summary", {}).get("grid_import_today_kwh") if data else None,
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DAILY_GRID_EXPORT,
@@ -375,11 +331,7 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL_INCREASING,
         suggested_display_precision=2,
         icon="mdi:transmission-tower-export",
-        value_fn=lambda data: (
-            data.get("energy_summary", {}).get("grid_export_today_kwh")
-            if data
-            else None
-        ),
+        value_fn=lambda data: data.get("energy_summary", {}).get("grid_export_today_kwh") if data else None,
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DAILY_BATTERY_CHARGE,
@@ -389,9 +341,7 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL_INCREASING,
         suggested_display_precision=2,
         icon="mdi:battery-charging",
-        value_fn=lambda data: (
-            data.get("energy_summary", {}).get("charge_today_kwh") if data else None
-        ),
+        value_fn=lambda data: data.get("energy_summary", {}).get("charge_today_kwh") if data else None,
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DAILY_BATTERY_DISCHARGE,
@@ -401,9 +351,7 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL_INCREASING,
         suggested_display_precision=2,
         icon="mdi:battery-arrow-down",
-        value_fn=lambda data: (
-            data.get("energy_summary", {}).get("discharge_today_kwh") if data else None
-        ),
+        value_fn=lambda data: data.get("energy_summary", {}).get("discharge_today_kwh") if data else None,
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DAILY_LOAD,
@@ -413,9 +361,7 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL_INCREASING,
         suggested_display_precision=2,
         icon="mdi:home-lightning-bolt",
-        value_fn=lambda data: (
-            data.get("energy_summary", {}).get("load_today_kwh") if data else None
-        ),
+        value_fn=lambda data: data.get("energy_summary", {}).get("load_today_kwh") if data else None,
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DAILY_IMPORT_COST,
@@ -425,9 +371,7 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL,
         suggested_display_precision=2,
         icon="mdi:cash-minus",
-        value_fn=lambda data: (
-            data.get("energy_summary", {}).get("import_cost_today") if data else None
-        ),
+        value_fn=lambda data: data.get("energy_summary", {}).get("import_cost_today") if data else None,
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DAILY_EXPORT_EARNINGS,
@@ -437,11 +381,7 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL,
         suggested_display_precision=2,
         icon="mdi:cash-plus",
-        value_fn=lambda data: (
-            data.get("energy_summary", {}).get("export_earnings_today")
-            if data
-            else None
-        ),
+        value_fn=lambda data: data.get("energy_summary", {}).get("export_earnings_today") if data else None,
     ),
 )
 
@@ -498,9 +438,7 @@ FOXESS_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL_INCREASING,
         suggested_display_precision=2,
         icon="mdi:battery-charging",
-        value_fn=lambda data: (
-            data.get("energy_summary", {}).get("charge_today_kwh") if data else None
-        ),
+        value_fn=lambda data: data.get("energy_summary", {}).get("charge_today_kwh") if data else None,
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DAILY_BATTERY_DISCHARGE_FOXESS,
@@ -510,9 +448,7 @@ FOXESS_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.TOTAL_INCREASING,
         suggested_display_precision=2,
         icon="mdi:battery-arrow-down",
-        value_fn=lambda data: (
-            data.get("energy_summary", {}).get("discharge_today_kwh") if data else None
-        ),
+        value_fn=lambda data: data.get("energy_summary", {}).get("discharge_today_kwh") if data else None,
     ),
 )
 
@@ -578,11 +514,7 @@ SIGENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=3,
         icon="mdi:solar-panel",
-        value_fn=lambda data: (
-            (data.get("solar_power", 0) - data.get("third_party_pv_power_kw", 0))
-            if data
-            else None
-        ),
+        value_fn=lambda data: (data.get("solar_power", 0) - data.get("third_party_pv_power_kw", 0)) if data else None,
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_PV_AC_POWER,
@@ -596,186 +528,52 @@ SIGENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     ),
 )
 
+# AlphaESS-specific sensors exposing the BMS-reported power ceilings (registers
+# 0x012C / 0x012D). Shared sensors for brands that also report these limits can
+# reuse this list by keying on the same coordinator data fields.
+ALPHAESS_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_BATTERY_MAX_CHARGE_POWER,
+        name="Battery Max Charge Power",
+        native_unit_of_measurement=UnitOfPower.KILO_WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        icon="mdi:battery-plus",
+        value_fn=lambda data: data.get("battery_max_charge_power") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_BATTERY_MAX_DISCHARGE_POWER,
+        name="Battery Max Discharge Power",
+        native_unit_of_measurement=UnitOfPower.KILO_WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        icon="mdi:battery-minus",
+        value_fn=lambda data: data.get("battery_max_discharge_power") if data else None,
+    ),
+)
+
 OPTIMIZER_ACTION_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_OPTIMIZATION_STATUS,
         name="Optimizer Current Action",
         icon="mdi:battery-sync",
         value_fn=lambda data: data.get("current_action") if data else None,
-        attr_fn=lambda data: (
-            {
-                "power_w": data.get("current_power_w"),
-                "status": data.get("status"),
-            }
-            if data
-            else {}
-        ),
+        attr_fn=lambda data: {
+            "power_w": data.get("current_power_w"),
+            "status": data.get("status"),
+        } if data else {},
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_OPTIMIZATION_NEXT_ACTION,
         name="Optimizer Next Action",
         icon="mdi:clock-fast",
         value_fn=lambda data: data.get("next_action") if data else None,
-        attr_fn=lambda data: (
-            {
-                "time": data.get("next_action_time"),
-                "power_w": data.get("next_action_power_w"),
-            }
-            if data
-            else {}
-        ),
-    ),
-)
-
-SAVINGS_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
-    PowerSyncSensorEntityDescription(
-        key=SENSOR_TYPE_SAVINGS_TODAY,
-        name="Savings Today",
-        native_unit_of_measurement=CURRENCY_DOLLAR,
-        device_class=SensorDeviceClass.MONETARY,
-        state_class=SensorStateClass.TOTAL,
-        suggested_display_precision=2,
-        icon="mdi:piggy-bank-outline",
-        value_fn=lambda data: data.get("predicted_savings") if data else None,
-        attr_fn=lambda data: (
-            {
-                **data.get("daily_cost_detail", {}),
-                "predicted_cost": data.get("predicted_cost"),
-                "predicted_savings": data.get("predicted_savings"),
-                "actual_savings": data.get("daily_cost_breakdown", {}).get(
-                    "actual_savings"
-                ),
-            }
-            if data
-            else {}
-        ),
-    ),
-    PowerSyncSensorEntityDescription(
-        key=SENSOR_TYPE_SAVINGS_THIS_WEEK,
-        name="Savings This Week",
-        native_unit_of_measurement=CURRENCY_DOLLAR,
-        device_class=SensorDeviceClass.MONETARY,
-        state_class=SensorStateClass.TOTAL,
-        suggested_display_precision=2,
-        icon="mdi:calendar-week",
-        value_fn=lambda data: (
-            data.get("savings_periods", {}).get("week", {}).get("total_savings")
-            if data
-            else None
-        ),
-        attr_fn=lambda data: (
-            data.get("savings_periods", {}).get("week", {}) if data else {}
-        ),
-    ),
-    PowerSyncSensorEntityDescription(
-        key=SENSOR_TYPE_SAVINGS_THIS_MONTH,
-        name="Savings This Month",
-        native_unit_of_measurement=CURRENCY_DOLLAR,
-        device_class=SensorDeviceClass.MONETARY,
-        state_class=SensorStateClass.TOTAL,
-        suggested_display_precision=2,
-        icon="mdi:calendar-month",
-        value_fn=lambda data: (
-            data.get("savings_periods", {}).get("month", {}).get("total_savings")
-            if data
-            else None
-        ),
-        attr_fn=lambda data: (
-            data.get("savings_periods", {}).get("month", {}) if data else {}
-        ),
-    ),
-    PowerSyncSensorEntityDescription(
-        key=SENSOR_TYPE_SAVINGS_LIFETIME,
-        name="Savings Lifetime",
-        native_unit_of_measurement=CURRENCY_DOLLAR,
-        device_class=SensorDeviceClass.MONETARY,
-        state_class=SensorStateClass.TOTAL,
-        suggested_display_precision=2,
-        icon="mdi:chart-line",
-        value_fn=lambda data: (
-            data.get("savings_periods", {}).get("all_time", {}).get("total_savings")
-            if data
-            else None
-        ),
-        attr_fn=lambda data: (
-            data.get("savings_periods", {}).get("all_time", {}) if data else {}
-        ),
-    ),
-    PowerSyncSensorEntityDescription(
-        key=SENSOR_TYPE_DAILY_COST_TOTAL,
-        name="Daily Cost",
-        native_unit_of_measurement=CURRENCY_DOLLAR,
-        device_class=SensorDeviceClass.MONETARY,
-        state_class=SensorStateClass.TOTAL,
-        suggested_display_precision=2,
-        icon="mdi:cash",
-        value_fn=lambda data: data.get("predicted_cost") if data else None,
-    ),
-    PowerSyncSensorEntityDescription(
-        key=SENSOR_TYPE_DAILY_BASELINE,
-        name="Daily Baseline Cost",
-        native_unit_of_measurement=CURRENCY_DOLLAR,
-        device_class=SensorDeviceClass.MONETARY,
-        state_class=SensorStateClass.TOTAL,
-        suggested_display_precision=2,
-        icon="mdi:cash-remove",
-        value_fn=lambda data: (
-            data.get("daily_cost_breakdown", {}).get("actual_baseline", 0)
-            + data.get("daily_cost_breakdown", {}).get(
-                "predicted_baseline_remaining", 0
-            )
-            if data
-            else None
-        ),
-    ),
-    PowerSyncSensorEntityDescription(
-        key=SENSOR_TYPE_ROI_PERCENTAGE,
-        name="Battery ROI",
-        native_unit_of_measurement=PERCENTAGE,
-        state_class=SensorStateClass.TOTAL,
-        suggested_display_precision=1,
-        icon="mdi:percent-circle-outline",
-        # ROI calculated from lifetime savings / system cost — requires system_cost config
-        value_fn=lambda data: None,  # Overridden in ROISensor class
-    ),
-    PowerSyncSensorEntityDescription(
-        key=SENSOR_TYPE_LAST_DECISION,
-        name="Last Optimizer Decision",
-        icon="mdi:head-lightbulb-outline",
-        value_fn=lambda data: None,  # Overridden in LastDecisionSensor class
-    ),
-)
-
-FORECAST_ACCURACY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
-    PowerSyncSensorEntityDescription(
-        key=SENSOR_TYPE_FORECAST_MAE,
-        name="Load Forecast MAE",
-        native_unit_of_measurement=UnitOfPower.KILO_WATT,
-        device_class=SensorDeviceClass.POWER,
-        state_class=SensorStateClass.MEASUREMENT,
-        suggested_display_precision=3,
-        icon="mdi:chart-bell-curve",
-        value_fn=lambda data: data.get("forecast_accuracy", {}).get("mae_kw") if data else None,
-        attr_fn=lambda data: data.get("forecast_accuracy", {}) if data else {},
-    ),
-    PowerSyncSensorEntityDescription(
-        key=SENSOR_TYPE_FORECAST_BIAS,
-        name="Load Forecast Bias",
-        native_unit_of_measurement=UnitOfPower.KILO_WATT,
-        device_class=SensorDeviceClass.POWER,
-        state_class=SensorStateClass.MEASUREMENT,
-        suggested_display_precision=3,
-        icon="mdi:arrow-up-down",
-        value_fn=lambda data: data.get("forecast_accuracy", {}).get("bias_kw") if data else None,
-    ),
-    PowerSyncSensorEntityDescription(
-        key=SENSOR_TYPE_FORECAST_MAPE,
-        name="Load Forecast MAPE",
-        native_unit_of_measurement=PERCENTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-        suggested_display_precision=1,
-        icon="mdi:percent-outline",
-        value_fn=lambda data: data.get("forecast_accuracy", {}).get("mape_percent") if data else None,
+        attr_fn=lambda data: {
+            "time": data.get("next_action_time"),
+            "power_w": data.get("next_action_power_w"),
+        } if data else {},
     ),
 )
 
@@ -809,9 +607,7 @@ DEMAND_CHARGE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.MONETARY,
         state_class=SensorStateClass.TOTAL,  # MONETARY only supports 'total', not 'total_increasing'
         suggested_display_precision=2,
-        value_fn=lambda data: (
-            data.get("daily_supply_charge_cost", 0.0) if data else 0.0
-        ),
+        value_fn=lambda data: data.get("daily_supply_charge_cost", 0.0) if data else 0.0,
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_MONTHLY_SUPPLY_CHARGE,
@@ -852,9 +648,7 @@ AEMO_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         key=SENSOR_TYPE_AEMO_SPIKE_STATUS,
         name="AEMO Spike Status",
         icon="mdi:alert-decagram",
-        value_fn=lambda data: (
-            "Spike Active" if data and data.get("in_spike_mode") else "Normal"
-        ),
+        value_fn=lambda data: "Spike Active" if data and data.get("in_spike_mode") else "Normal",
         attr_fn=lambda data: {
             ATTR_AEMO_REGION: data.get("region") if data else None,
             ATTR_AEMO_THRESHOLD: data.get("threshold") if data else None,
@@ -871,60 +665,28 @@ SAVING_SESSION_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         key=SENSOR_TYPE_SAVING_SESSION_ACTIVE,
         name="Saving Session Active",
         icon="mdi:lightning-bolt",
-        value_fn=lambda data: (
-            "Active" if data and data.get("active_session") else "Inactive"
-        ),
-        attr_fn=lambda data: (
-            {
-                "session_code": data["active_session"].code
-                if data and data.get("active_session")
-                else None,
-                "session_start": data["active_session"].start.isoformat()
-                if data and data.get("active_session")
-                else None,
-                "session_end": data["active_session"].end.isoformat()
-                if data and data.get("active_session")
-                else None,
-                "session_type": data["active_session"].session_type
-                if data and data.get("active_session")
-                else None,
-                "octopoints_per_kwh": data["active_session"].octopoints_per_kwh
-                if data and data.get("active_session")
-                else None,
-            }
-            if data
-            else {}
-        ),
+        value_fn=lambda data: "Active" if data and data.get("active_session") else "Inactive",
+        attr_fn=lambda data: {
+            "session_code": data["active_session"].code if data and data.get("active_session") else None,
+            "session_start": data["active_session"].start.isoformat() if data and data.get("active_session") else None,
+            "session_end": data["active_session"].end.isoformat() if data and data.get("active_session") else None,
+            "session_type": data["active_session"].session_type if data and data.get("active_session") else None,
+            "octopoints_per_kwh": data["active_session"].octopoints_per_kwh if data and data.get("active_session") else None,
+        } if data else {},
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_NEXT_SAVING_SESSION,
         name="Next Saving Session",
         icon="mdi:calendar-clock",
         device_class=SensorDeviceClass.TIMESTAMP,
-        value_fn=lambda data: (
-            data["next_session"].start if data and data.get("next_session") else None
-        ),
-        attr_fn=lambda data: (
-            {
-                "session_code": data["next_session"].code
-                if data and data.get("next_session")
-                else None,
-                "session_end": data["next_session"].end.isoformat()
-                if data and data.get("next_session")
-                else None,
-                "session_type": data["next_session"].session_type
-                if data and data.get("next_session")
-                else None,
-                "octopoints_per_kwh": data["next_session"].octopoints_per_kwh
-                if data and data.get("next_session")
-                else None,
-                "rate_pence_per_kwh": data["next_session"].rate_pence_per_kwh
-                if data and data.get("next_session")
-                else None,
-            }
-            if data
-            else {}
-        ),
+        value_fn=lambda data: data["next_session"].start if data and data.get("next_session") else None,
+        attr_fn=lambda data: {
+            "session_code": data["next_session"].code if data and data.get("next_session") else None,
+            "session_end": data["next_session"].end.isoformat() if data and data.get("next_session") else None,
+            "session_type": data["next_session"].session_type if data and data.get("next_session") else None,
+            "octopoints_per_kwh": data["next_session"].octopoints_per_kwh if data and data.get("next_session") else None,
+            "rate_pence_per_kwh": data["next_session"].rate_pence_per_kwh if data and data.get("next_session") else None,
+        } if data else {},
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_SAVING_SESSION_RATE,
@@ -941,16 +703,10 @@ SAVING_SESSION_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
                 else None
             )
         ),
-        attr_fn=lambda data: (
-            {
-                "source": "active"
-                if data and data.get("active_session")
-                else ("next" if data and data.get("next_session") else None),
-                "total_sessions": len(data.get("sessions", [])) if data else 0,
-            }
-            if data
-            else {}
-        ),
+        attr_fn=lambda data: {
+            "source": "active" if data and data.get("active_session") else ("next" if data and data.get("next_session") else None),
+            "total_sessions": len(data.get("sessions", [])) if data else 0,
+        } if data else {},
     ),
 )
 
@@ -964,26 +720,14 @@ SOLCAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.ENERGY,
         icon="mdi:solar-power",
         suggested_display_precision=1,
-        value_fn=lambda data: (
-            data.get("today_forecast_kwh") if data and data.get("available") else None
-        ),
-        attr_fn=lambda data: (
-            {
-                "peak_kw": data.get("today_peak_kw") if data else None,
-                "remaining_kwh": data.get("today_remaining_kwh") if data else None,
-                "hourly_forecast": data.get("hourly_forecast")
-                if data
-                else None,  # For chart overlay
-                "last_update": data.get("last_update").isoformat()
-                if data and data.get("last_update")
-                else None,
-                "source": data.get("source", "api")
-                if data
-                else None,  # "solcast_integration" or "api"
-            }
-            if data
-            else {}
-        ),
+        value_fn=lambda data: data.get("today_forecast_kwh") if data and data.get("available") else None,
+        attr_fn=lambda data: {
+            "peak_kw": data.get("today_peak_kw") if data else None,
+            "remaining_kwh": data.get("today_remaining_kwh") if data else None,
+            "hourly_forecast": data.get("hourly_forecast") if data else None,  # For chart overlay
+            "last_update": data.get("last_update").isoformat() if data and data.get("last_update") else None,
+            "source": data.get("source", "api") if data else None,  # "solcast_integration" or "api"
+        } if data else {},
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_SOLCAST_TOMORROW,
@@ -992,16 +736,10 @@ SOLCAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.ENERGY,
         icon="mdi:solar-power-variant",
         suggested_display_precision=1,
-        value_fn=lambda data: (
-            data.get("tomorrow_total_kwh") if data and data.get("available") else None
-        ),
-        attr_fn=lambda data: (
-            {
-                "peak_kw": data.get("tomorrow_peak_kw") if data else None,
-            }
-            if data
-            else {}
-        ),
+        value_fn=lambda data: data.get("tomorrow_total_kwh") if data and data.get("available") else None,
+        attr_fn=lambda data: {
+            "peak_kw": data.get("tomorrow_peak_kw") if data else None,
+        } if data else {},
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_SOLCAST_CURRENT,
@@ -1011,16 +749,10 @@ SOLCAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:white-balance-sunny",
         suggested_display_precision=2,
-        value_fn=lambda data: (
-            data.get("current_estimate_kw") if data and data.get("available") else None
-        ),
-        attr_fn=lambda data: (
-            {
-                "forecast_periods": data.get("forecast_periods") if data else None,
-            }
-            if data
-            else {}
-        ),
+        value_fn=lambda data: data.get("current_estimate_kw") if data and data.get("available") else None,
+        attr_fn=lambda data: {
+            "forecast_periods": data.get("forecast_periods") if data else None,
+        } if data else {},
     ),
 )
 
@@ -1032,27 +764,21 @@ async def async_setup_entry(
 ) -> None:
     """Set up PowerSync sensor entities."""
     domain_data = hass.data[DOMAIN][entry.entry_id]
-    amber_coordinator: AmberPriceCoordinator | None = domain_data.get(
-        "amber_coordinator"
-    )
-    localvolts_coordinator: LocalvoltsPriceCoordinator | None = domain_data.get(
-        "localvolts_coordinator"
-    )
-    tesla_coordinator: TeslaEnergyCoordinator | None = domain_data.get(
-        "tesla_coordinator"
-    )
+    amber_coordinator: AmberPriceCoordinator | None = domain_data.get("amber_coordinator")
+    localvolts_coordinator: LocalvoltsPriceCoordinator | None = domain_data.get("localvolts_coordinator")
+    tesla_coordinator: TeslaEnergyCoordinator | None = domain_data.get("tesla_coordinator")
     sigenergy_coordinator = domain_data.get("sigenergy_coordinator")
     sungrow_coordinator = domain_data.get("sungrow_coordinator")
     foxess_coordinator = domain_data.get("foxess_coordinator")
     goodwe_coordinator = domain_data.get("goodwe_coordinator")
-    demand_charge_coordinator: DemandChargeCoordinator | None = domain_data.get(
-        "demand_charge_coordinator"
-    )
+    alphaess_coordinator = domain_data.get("alphaess_coordinator")
+    demand_charge_coordinator: DemandChargeCoordinator | None = domain_data.get("demand_charge_coordinator")
     aemo_spike_manager = domain_data.get("aemo_spike_manager")
     is_sigenergy = domain_data.get("is_sigenergy", False)
     is_sungrow = domain_data.get("is_sungrow", False)
     is_foxess = domain_data.get("is_foxess", False)
     is_goodwe = domain_data.get("is_goodwe", False)
+    is_alphaess = domain_data.get("is_alphaess", False)
 
     entities: list[SensorEntity] = []
 
@@ -1088,14 +814,7 @@ async def async_setup_entry(
             CONF_ELECTRICITY_PROVIDER,
             entry.data.get(CONF_ELECTRICITY_PROVIDER, ""),
         )
-        tou_providers = (
-            "globird",
-            "aemo_vpp",
-            "other",
-            "tou_only",
-            "octopus",
-            "flow_power",
-        )
+        tou_providers = ("globird", "aemo_vpp", "other", "tou_only", "octopus", "flow_power")
         tariff_schedule = domain_data.get("tariff_schedule")
         if tariff_schedule or electricity_provider in tou_providers:
             _LOGGER.info(
@@ -1119,9 +838,7 @@ async def async_setup_entry(
                 )
             )
         else:
-            _LOGGER.debug(
-                "No price coordinator or known provider - skipping price sensors"
-            )
+            _LOGGER.debug("No price coordinator or known provider - skipping price sensors")
 
     # Add energy sensors - select the correct coordinator for battery system type
     # All coordinators return data with same field names (solar_power, grid_power, etc.)
@@ -1133,6 +850,8 @@ async def async_setup_entry(
         energy_coordinator = sungrow_coordinator
     elif is_sigenergy:
         energy_coordinator = sigenergy_coordinator
+    elif is_alphaess:
+        energy_coordinator = alphaess_coordinator
     else:
         energy_coordinator = tesla_coordinator
     if energy_coordinator:
@@ -1145,9 +864,7 @@ async def async_setup_entry(
                 )
             )
     else:
-        _LOGGER.warning(
-            "No energy coordinator available - energy sensors will not be created"
-        )
+        _LOGGER.warning("No energy coordinator available - energy sensors will not be created")
 
     # Add Tesla-specific sensors (gateway firmware, etc.)
     if tesla_coordinator:
@@ -1170,12 +887,10 @@ async def async_setup_entry(
                     entry=entry,
                 )
             )
-        _LOGGER.info(
-            "FoxESS-specific sensors added (PV1, PV2, CT2, work mode, min SOC, daily energy)"
-        )
+        _LOGGER.info("FoxESS-specific sensors added (PV1, PV2, CT2, work mode, min SOC, daily energy)")
 
     # Add dual Sungrow per-inverter SOC sensors
-    if is_sungrow and energy_coordinator and hasattr(energy_coordinator, "_coord2"):
+    if is_sungrow and energy_coordinator and hasattr(energy_coordinator, '_coord2'):
         for description in DUAL_SUNGROW_SENSORS:
             entities.append(
                 TeslaEnergySensor(
@@ -1198,14 +913,24 @@ async def async_setup_entry(
             )
         _LOGGER.info("Sigenergy PV sensors added (DC and AC-coupled)")
 
+    # Add AlphaESS-specific sensors (BMS-reported charge/discharge power limits)
+    if is_alphaess and energy_coordinator:
+        for description in ALPHAESS_SENSORS:
+            entities.append(
+                TeslaEnergySensor(
+                    coordinator=energy_coordinator,
+                    description=description,
+                    entry=entry,
+                )
+            )
+        _LOGGER.info("AlphaESS BMS-limit sensors added")
+
     # Add EV sensors if EV charging is configured (Tesla, OCPP, or Zaptec)
     ev_enabled = entry.options.get(
         CONF_EV_CHARGING_ENABLED,
         entry.data.get(CONF_EV_CHARGING_ENABLED, False),
     )
-    ocpp_enabled = entry.options.get(
-        "ocpp_enabled", entry.data.get("ocpp_enabled", False)
-    )
+    ocpp_enabled = entry.options.get("ocpp_enabled", entry.data.get("ocpp_enabled", False))
     zaptec_entity = entry.options.get(
         "zaptec_charger_entity", entry.data.get("zaptec_charger_entity", "")
     )
@@ -1262,9 +987,7 @@ async def async_setup_entry(
             )
 
     # Add Solcast solar forecast sensors if enabled and coordinator exists
-    solcast_coordinator: SolcastForecastCoordinator | None = domain_data.get(
-        "solcast_coordinator"
-    )
+    solcast_coordinator: SolcastForecastCoordinator | None = domain_data.get("solcast_coordinator")
     if solcast_coordinator:
         _LOGGER.info("Solcast solar forecasting enabled - adding sensors")
         for description in SOLCAST_SENSORS:
@@ -1285,7 +1008,8 @@ async def async_setup_entry(
         _LOGGER.info("LP optimizer active - adding forecast sensors")
         # Skip price forecast sensors for fixed-price providers (prices never change)
         electricity_provider = entry.options.get(
-            CONF_ELECTRICITY_PROVIDER, entry.data.get(CONF_ELECTRICITY_PROVIDER, "")
+            CONF_ELECTRICITY_PROVIDER,
+            entry.data.get(CONF_ELECTRICITY_PROVIDER, "")
         )
         fixed_price_providers = ("globird", "nz_retailer", "nz_custom")
         has_dynamic_prices = electricity_provider not in fixed_price_providers
@@ -1312,50 +1036,6 @@ async def async_setup_entry(
                 )
             )
         _LOGGER.info("Optimizer action sensors added (current action, next action)")
-
-        # Add savings sensors (Trust & Transparency Phase 1)
-        for description in SAVINGS_SENSORS:
-            if description.key == SENSOR_TYPE_ROI_PERCENTAGE:
-                system_cost = entry.options.get(
-                    CONF_SYSTEM_COST, entry.data.get(CONF_SYSTEM_COST, 0)
-                )
-                if system_cost and float(system_cost) > 0:
-                    entities.append(
-                        ROISensor(
-                            coordinator=optimization_coordinator,
-                            description=description,
-                            entry=entry,
-                            system_cost=float(system_cost),
-                        )
-                    )
-            elif description.key == SENSOR_TYPE_LAST_DECISION:
-                entities.append(
-                    LastDecisionSensor(
-                        coordinator=optimization_coordinator,
-                        description=description,
-                        entry=entry,
-                    )
-                )
-            else:
-                entities.append(
-                    SavingsSensor(
-                        coordinator=optimization_coordinator,
-                        description=description,
-                        entry=entry,
-                    )
-                )
-        _LOGGER.info("Savings sensors added (today, week, month, lifetime, cost, baseline)")
-
-        # Add forecast accuracy sensors (Phase 4)
-        for description in FORECAST_ACCURACY_SENSORS:
-            entities.append(
-                SavingsSensor(
-                    coordinator=optimization_coordinator,
-                    description=description,
-                    entry=entry,
-                )
-            )
-        _LOGGER.info("Forecast accuracy sensors added (MAE, bias, MAPE)")
     else:
         # Store callback for deferred LP forecast + optimizer action sensor creation
         domain_data["sensor_async_add_entities"] = async_add_entities
@@ -1393,7 +1073,7 @@ async def async_setup_entry(
     # Add solar curtailment sensor if curtailment is enabled
     curtailment_enabled = entry.options.get(
         CONF_BATTERY_CURTAILMENT_ENABLED,
-        entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False),
+        entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
     )
     if curtailment_enabled:
         entities.append(
@@ -1407,7 +1087,7 @@ async def async_setup_entry(
     # Add inverter status sensor if inverter curtailment is enabled
     inverter_enabled = entry.options.get(
         CONF_AC_INVERTER_CURTAILMENT_ENABLED,
-        entry.data.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False),
+        entry.data.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False)
     )
     if inverter_enabled:
         entities.append(
@@ -1420,13 +1100,12 @@ async def async_setup_entry(
 
     # Add Flow Power price sensors if Flow Power provider is selected
     electricity_provider = entry.options.get(
-        CONF_ELECTRICITY_PROVIDER, entry.data.get(CONF_ELECTRICITY_PROVIDER)
+        CONF_ELECTRICITY_PROVIDER,
+        entry.data.get(CONF_ELECTRICITY_PROVIDER)
     )
     if electricity_provider == "flow_power":
         # Get the price coordinator (Amber or AEMO)
-        price_coordinator = amber_coordinator or domain_data.get(
-            "aemo_sensor_coordinator"
-        )
+        price_coordinator = amber_coordinator or domain_data.get("aemo_sensor_coordinator")
         if price_coordinator:
             # Add import price sensor
             entities.append(
@@ -1473,27 +1152,17 @@ async def async_setup_entry(
                         coordinator=price_coordinator,
                     )
                 )
-                _LOGGER.info(
-                    "Flow Power tariff sensors added (network tariff + Amber comparison)"
-                )
+                _LOGGER.info("Flow Power tariff sensors added (network tariff + Amber comparison)")
 
             _LOGGER.info("Flow Power price sensors added (import, export, and TWAP)")
 
             # Add portal sensors if portal is connected
             from .const import CONF_FLOWPOWER_EMAIL, FLOW_POWER_PORTAL_SENSORS
-
             fp_email = entry.options.get(
                 CONF_FLOWPOWER_EMAIL, entry.data.get(CONF_FLOWPOWER_EMAIL)
             )
             if fp_email:
-                for (
-                    sensor_type,
-                    name,
-                    data_key,
-                    unit,
-                    icon,
-                    source,
-                ) in FLOW_POWER_PORTAL_SENSORS:
+                for sensor_type, name, data_key, unit, icon, source in FLOW_POWER_PORTAL_SENSORS:
                     entities.append(
                         FlowPowerPortalSensor(
                             hass=hass,
@@ -1506,10 +1175,7 @@ async def async_setup_entry(
                             source_label=source,
                         )
                     )
-                _LOGGER.info(
-                    "Flow Power portal sensors added (%d sensors)",
-                    len(FLOW_POWER_PORTAL_SENSORS),
-                )
+                _LOGGER.info("Flow Power portal sensors added (%d sensors)", len(FLOW_POWER_PORTAL_SENSORS))
 
     # Always add battery health sensor
     # For non-Tesla systems, pass coordinator so it can read battery_soh
@@ -1522,13 +1188,13 @@ async def async_setup_entry(
         battery_system = "sungrow"
     elif is_sigenergy:
         battery_system = "sigenergy"
-    entities.append(
-        BatteryHealthSensor(
-            entry=entry,
-            coordinator=energy_coordinator,
-            battery_system=battery_system,
-        )
-    )
+    elif is_alphaess:
+        battery_system = "alphaess"
+    entities.append(BatteryHealthSensor(
+        entry=entry,
+        coordinator=energy_coordinator,
+        battery_system=battery_system,
+    ))
     _LOGGER.info("Battery health sensor added")
 
     # Always add battery mode sensor (for automation triggers)
@@ -1557,11 +1223,7 @@ class AmberPriceSensor(CoordinatorEntity, SensorEntity):
         # HA 2026.2.0+ requires lowercase suggested_object_id
         self._attr_suggested_object_id = f"power_sync_{description.key}"
         self._entry = entry
-        _LOGGER.debug(
-            "AmberPriceSensor initialized: %s (unique_id=%s)",
-            description.key,
-            self._attr_unique_id,
-        )
+        _LOGGER.debug("AmberPriceSensor initialized: %s (unique_id=%s)", description.key, self._attr_unique_id)
 
     @property
     def device_info(self):
@@ -1575,11 +1237,7 @@ class AmberPriceSensor(CoordinatorEntity, SensorEntity):
         """Return the state of the sensor."""
         if self.entity_description.value_fn:
             value = self.entity_description.value_fn(self.coordinator.data)
-            _LOGGER.debug(
-                "AmberPriceSensor %s native_value: %s",
-                self.entity_description.key,
-                value,
-            )
+            _LOGGER.debug("AmberPriceSensor %s native_value: %s", self.entity_description.key, value)
             return value
         return None
 
@@ -1664,159 +1322,6 @@ class OptimizerActionSensor(CoordinatorEntity, SensorEntity):
         """Return additional attributes."""
         if self.entity_description.attr_fn:
             return self.entity_description.attr_fn(self.coordinator.data)
-        return {}
-
-
-class SavingsSensor(CoordinatorEntity, SensorEntity):
-    """Sensor for savings data (reads from OptimizationCoordinator.data)."""
-
-    entity_description: PowerSyncSensorEntityDescription
-
-    def __init__(
-        self,
-        coordinator,
-        description: PowerSyncSensorEntityDescription,
-        entry: ConfigEntry,
-    ) -> None:
-        """Initialize the sensor."""
-        super().__init__(coordinator)
-        self.entity_description = description
-        self._entry = entry
-        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
-        self._attr_has_entity_name = True
-        self._attr_suggested_object_id = f"power_sync_{description.key}"
-
-    @property
-    def device_info(self):
-        """Return device info to link to the PowerSync device."""
-        return {
-            "identifiers": {(DOMAIN, self._entry.entry_id)},
-        }
-
-    @property
-    def native_value(self) -> Any:
-        """Return the state of the sensor."""
-        if self.entity_description.value_fn:
-            return self.entity_description.value_fn(self.coordinator.data)
-        return None
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Return additional attributes."""
-        if self.entity_description.attr_fn:
-            return self.entity_description.attr_fn(self.coordinator.data)
-        return {}
-
-
-class ROISensor(CoordinatorEntity, SensorEntity):
-    """ROI percentage sensor — requires system_cost in config options."""
-
-    entity_description: PowerSyncSensorEntityDescription
-
-    def __init__(
-        self,
-        coordinator,
-        description: PowerSyncSensorEntityDescription,
-        entry: ConfigEntry,
-        system_cost: float,
-    ) -> None:
-        """Initialize the sensor."""
-        super().__init__(coordinator)
-        self.entity_description = description
-        self._entry = entry
-        self._system_cost = system_cost
-        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
-        self._attr_has_entity_name = True
-        self._attr_suggested_object_id = f"power_sync_{description.key}"
-
-    @property
-    def device_info(self):
-        """Return device info to link to the PowerSync device."""
-        return {
-            "identifiers": {(DOMAIN, self._entry.entry_id)},
-        }
-
-    @property
-    def native_value(self) -> Any:
-        """Return ROI as percentage of system cost recovered."""
-        if not self.coordinator.data or self._system_cost <= 0:
-            return None
-        lifetime = (
-            self.coordinator.data.get("savings_periods", {})
-            .get("all_time", {})
-            .get("total_savings", 0)
-        )
-        return round(lifetime / self._system_cost * 100, 1)
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Return additional attributes."""
-        if not self.coordinator.data:
-            return {}
-        lifetime = (
-            self.coordinator.data.get("savings_periods", {})
-            .get("all_time", {})
-            .get("total_savings", 0)
-        )
-        return {
-            "system_cost": self._system_cost,
-            "lifetime_savings": lifetime,
-            "days_tracked": (
-                self.coordinator.data.get("savings_periods", {})
-                .get("all_time", {})
-                .get("days_tracked", 0)
-            ),
-        }
-
-
-class LastDecisionSensor(CoordinatorEntity, SensorEntity):
-    """Sensor showing the last optimizer decision with human-readable reason."""
-
-    entity_description: PowerSyncSensorEntityDescription
-
-    def __init__(
-        self,
-        coordinator,
-        description: PowerSyncSensorEntityDescription,
-        entry: ConfigEntry,
-    ) -> None:
-        """Initialize the sensor."""
-        super().__init__(coordinator)
-        self.entity_description = description
-        self._entry = entry
-        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
-        self._attr_has_entity_name = True
-        self._attr_suggested_object_id = f"power_sync_{description.key}"
-
-    @property
-    def device_info(self):
-        """Return device info to link to the PowerSync device."""
-        return {
-            "identifiers": {(DOMAIN, self._entry.entry_id)},
-        }
-
-    @property
-    def native_value(self) -> Any:
-        """Return the human-readable decision reason."""
-        if not self.coordinator.data:
-            return None
-        decision = self.coordinator.data.get("last_decision")
-        if decision:
-            return decision.get("reason", "No decision yet")
-        return "No decision yet"
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Return the full decision entry as attributes."""
-        if not self.coordinator.data:
-            return {}
-        decision = self.coordinator.data.get("last_decision")
-        if decision:
-            return {
-                k: v
-                for k, v in decision.items()
-                if k != "reason"  # reason is the state value
-            }
         return {}
 
 
@@ -2018,17 +1523,11 @@ LP_FORECAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.ENERGY,
         suggested_display_precision=1,
         icon="mdi:solar-power-variant",
-        value_fn=lambda data: (
-            data.get("solar_forecast_kwh") if data and data.get("available") else None
-        ),
-        attr_fn=lambda data: (
-            {
-                "peak_kw": data.get("solar_peak_kw"),
-                "forecast_values_kw": data.get("solar_forecast"),
-            }
-            if data and data.get("available")
-            else {}
-        ),
+        value_fn=lambda data: data.get("solar_forecast_kwh") if data and data.get("available") else None,
+        attr_fn=lambda data: {
+            "peak_kw": data.get("solar_peak_kw"),
+            "forecast_values_kw": data.get("solar_forecast"),
+        } if data and data.get("available") else {},
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_LP_LOAD_FORECAST,
@@ -2037,17 +1536,11 @@ LP_FORECAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.ENERGY,
         suggested_display_precision=1,
         icon="mdi:home-lightning-bolt",
-        value_fn=lambda data: (
-            data.get("load_forecast_kwh") if data and data.get("available") else None
-        ),
-        attr_fn=lambda data: (
-            {
-                "peak_kw": data.get("load_peak_kw"),
-                "forecast_values_kw": data.get("load_forecast"),
-            }
-            if data and data.get("available")
-            else {}
-        ),
+        value_fn=lambda data: data.get("load_forecast_kwh") if data and data.get("available") else None,
+        attr_fn=lambda data: {
+            "peak_kw": data.get("load_peak_kw"),
+            "forecast_values_kw": data.get("load_forecast"),
+        } if data and data.get("available") else {},
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_LP_IMPORT_PRICE_FORECAST,
@@ -2056,18 +1549,12 @@ LP_FORECAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.MONETARY,
         suggested_display_precision=4,
         icon="mdi:cash-clock",
-        value_fn=lambda data: (
-            data.get("import_price_avg") if data and data.get("available") else None
-        ),
-        attr_fn=lambda data: (
-            {
-                "min_price": data.get("import_price_min"),
-                "max_price": data.get("import_price_max"),
-                "price_values": data.get("import_prices"),
-            }
-            if data and data.get("available")
-            else {}
-        ),
+        value_fn=lambda data: data.get("import_price_avg") if data and data.get("available") else None,
+        attr_fn=lambda data: {
+            "min_price": data.get("import_price_min"),
+            "max_price": data.get("import_price_max"),
+            "price_values": data.get("import_prices"),
+        } if data and data.get("available") else {},
     ),
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_LP_EXPORT_PRICE_FORECAST,
@@ -2076,18 +1563,12 @@ LP_FORECAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.MONETARY,
         suggested_display_precision=4,
         icon="mdi:cash-clock",
-        value_fn=lambda data: (
-            data.get("export_price_avg") if data and data.get("available") else None
-        ),
-        attr_fn=lambda data: (
-            {
-                "min_price": data.get("export_price_min"),
-                "max_price": data.get("export_price_max"),
-                "price_values": data.get("export_prices"),
-            }
-            if data and data.get("available")
-            else {}
-        ),
+        value_fn=lambda data: data.get("export_price_avg") if data and data.get("available") else None,
+        attr_fn=lambda data: {
+            "min_price": data.get("export_price_min"),
+            "max_price": data.get("export_price_max"),
+            "price_values": data.get("export_prices"),
+        } if data and data.get("available") else {},
     ),
 )
 
@@ -2189,7 +1670,8 @@ class TariffScheduleSensor(SensorEntity):
 
         # Log entity_id to help users configure dashboards
         _LOGGER.info(
-            "Tariff schedule sensor registered with entity_id: %s", self.entity_id
+            "Tariff schedule sensor registered with entity_id: %s",
+            self.entity_id
         )
 
         @callback
@@ -2227,17 +1709,10 @@ class TariffScheduleSensor(SensorEntity):
     @property
     def native_value(self) -> Any:
         """Return the state - current tariff period and price (recalculated in real-time)."""
-        tariff_data = (
-            self.hass.data.get(DOMAIN, {})
-            .get(self._entry.entry_id, {})
-            .get("tariff_schedule")
-        )
+        tariff_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("tariff_schedule")
         if tariff_data:
             from . import get_current_price_from_tariff_schedule
-
-            buy_price_cents, _, current_period = get_current_price_from_tariff_schedule(
-                tariff_data
-            )
+            buy_price_cents, _, current_period = get_current_price_from_tariff_schedule(tariff_data)
             if current_period and current_period != "UNKNOWN":
                 return f"{current_period} ({buy_price_cents:.1f}c/kWh)"
             # Fallback to last sync time
@@ -2247,11 +1722,7 @@ class TariffScheduleSensor(SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return the tariff schedule as attributes for visualization."""
-        tariff_data = (
-            self.hass.data.get(DOMAIN, {})
-            .get(self._entry.entry_id, {})
-            .get("tariff_schedule")
-        )
+        tariff_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("tariff_schedule")
         if not tariff_data:
             return {}
 
@@ -2265,11 +1736,8 @@ class TariffScheduleSensor(SensorEntity):
 
         # Calculate real-time current price and period
         from . import get_current_price_from_tariff_schedule
-
         now = datetime.now()
-        buy_price_cents, sell_price_cents, current_period = (
-            get_current_price_from_tariff_schedule(tariff_data)
-        )
+        buy_price_cents, sell_price_cents, current_period = get_current_price_from_tariff_schedule(tariff_data)
 
         attributes = {
             "last_sync": tariff_data.get("last_sync"),
@@ -2295,13 +1763,11 @@ class TariffScheduleSensor(SensorEntity):
                 # Convert PERIOD_HH_MM to HH:MM
                 parts = period_key.replace("PERIOD_", "").split("_")
                 time_str = f"{parts[0]}:{parts[1]}"
-                schedule_list.append(
-                    {
-                        "time": time_str,
-                        "buy": buy_prices.get(period_key, 0),
-                        "sell": sell_prices.get(period_key, 0),
-                    }
-                )
+                schedule_list.append({
+                    "time": time_str,
+                    "buy": buy_prices.get(period_key, 0),
+                    "sell": sell_prices.get(period_key, 0),
+                })
             attributes["schedule"] = schedule_list
             attributes["buy_prices"] = buy_prices
             attributes["sell_prices"] = sell_prices
@@ -2333,31 +1799,23 @@ class TariffScheduleSensor(SensorEntity):
                     to_hour = window.get("toHour", 24)
                     from_dow = window.get("fromDayOfWeek", 0)
                     to_dow = window.get("toDayOfWeek", 6)
-                    time_windows.append(
-                        {
-                            "from_hour": from_hour,
-                            "to_hour": to_hour,
-                            "from_day": from_dow,
-                            "to_day": to_dow,
-                        }
-                    )
+                    time_windows.append({
+                        "from_hour": from_hour,
+                        "to_hour": to_hour,
+                        "from_day": from_dow,
+                        "to_day": to_dow,
+                    })
 
-                tou_schedule.append(
-                    {
-                        "period": period_name,
-                        "buy": round(buy_cents, 2),
-                        "sell": round(sell_cents, 2),
-                        "windows": time_windows,
-                    }
-                )
+                tou_schedule.append({
+                    "period": period_name,
+                    "buy": round(buy_cents, 2),
+                    "sell": round(sell_cents, 2),
+                    "windows": time_windows,
+                })
 
             attributes["tou_schedule"] = tou_schedule
-            attributes["buy_rates"] = {
-                k: round(v * 100 if v < 1 else v, 2) for k, v in buy_rates.items()
-            }
-            attributes["sell_rates"] = {
-                k: round(v * 100 if v < 1 else v, 2) for k, v in sell_rates.items()
-            }
+            attributes["buy_rates"] = {k: round(v * 100 if v < 1 else v, 2) for k, v in buy_rates.items()}
+            attributes["sell_rates"] = {k: round(v * 100 if v < 1 else v, 2) for k, v in sell_rates.items()}
 
             # Also generate 48-slot schedule list for price chart compatibility.
             # Maps each half-hour of the day to its TOU period's buy/sell rate.
@@ -2365,15 +1823,10 @@ class TariffScheduleSensor(SensorEntity):
             sorted_tou = sorted(
                 tou_schedule,
                 key=lambda e: (
-                    0
-                    if e["period"].startswith("SUPER_OFF_PEAK")
-                    else 1
-                    if e["period"].startswith("PEAK_")
-                    else 2
-                    if e["period"] == "PEAK"
-                    else 3
-                    if e["period"].startswith("SHOULDER")
-                    else 4
+                    0 if e["period"].startswith("SUPER_OFF_PEAK") else
+                    1 if e["period"].startswith("PEAK_") else
+                    2 if e["period"] == "PEAK" else
+                    3 if e["period"].startswith("SHOULDER") else 4
                 ),
             )
             schedule_list = []
@@ -2393,18 +1846,14 @@ class TariffScheduleSensor(SensorEntity):
                         fh = w.get("from_hour", 0)
                         th = w.get("to_hour", 24)
                         if fd <= tesla_dow <= td:
-                            if (fh <= th and fh <= hour < th) or (
-                                fh > th and (hour >= fh or hour < th)
-                            ):
+                            if (fh <= th and fh <= hour < th) or (fh > th and (hour >= fh or hour < th)):
                                 slot_buy = entry["buy"] / 100  # cents → $/kWh
                                 slot_sell = entry["sell"] / 100
                                 matched = True
                                 break
                     if matched:
                         break
-                schedule_list.append(
-                    {"time": time_str, "buy": slot_buy, "sell": slot_sell}
-                )
+                schedule_list.append({"time": time_str, "buy": slot_buy, "sell": slot_sell})
             attributes["schedule"] = schedule_list
 
         return attributes
@@ -2434,16 +1883,10 @@ class TariffPriceSensor(SensorEntity):
         # Use same entity naming as AmberPriceSensor for mobile app compatibility
         # Creates: sensor.power_sync_current_import_price, sensor.power_sync_current_export_price
         self._attr_suggested_object_id = f"power_sync_{sensor_type}"
-        self._attr_native_unit_of_measurement = (
-            f"{CURRENCY_DOLLAR}/{UnitOfEnergy.KILO_WATT_HOUR}"
-        )
+        self._attr_native_unit_of_measurement = f"{CURRENCY_DOLLAR}/{UnitOfEnergy.KILO_WATT_HOUR}"
         self._attr_device_class = SensorDeviceClass.MONETARY
         self._attr_suggested_display_precision = 4
-        self._attr_icon = (
-            "mdi:currency-usd"
-            if "import" in sensor_type
-            else "mdi:transmission-tower-export"
-        )
+        self._attr_icon = "mdi:currency-usd" if "import" in sensor_type else "mdi:transmission-tower-export"
         self._unsub_dispatcher = None
         self._unsub_time_interval = None
         self._current_period = None
@@ -2462,15 +1905,13 @@ class TariffPriceSensor(SensorEntity):
         _LOGGER.info(
             "Tariff price sensor registered: %s (entity_id=%s)",
             self._sensor_type,
-            self.entity_id,
+            self.entity_id
         )
 
         @callback
         def _handle_tariff_update():
             """Handle tariff update signal."""
-            _LOGGER.debug(
-                "Tariff price sensor received update signal: %s", self._sensor_type
-            )
+            _LOGGER.debug("Tariff price sensor received update signal: %s", self._sensor_type)
             self.async_write_ha_state()
 
         # Subscribe to tariff update signal
@@ -2502,20 +1943,14 @@ class TariffPriceSensor(SensorEntity):
     @property
     def native_value(self) -> float | None:
         """Return the current price from tariff schedule."""
-        tariff_data = (
-            self.hass.data.get(DOMAIN, {})
-            .get(self._entry.entry_id, {})
-            .get("tariff_schedule")
-        )
+        tariff_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("tariff_schedule")
         if not tariff_data:
             return None
 
         # Import the function from __init__.py
         from . import get_current_price_from_tariff_schedule
 
-        buy_price_cents, sell_price_cents, current_period = (
-            get_current_price_from_tariff_schedule(tariff_data)
-        )
+        buy_price_cents, sell_price_cents, current_period = get_current_price_from_tariff_schedule(tariff_data)
 
         # Update current period for attributes
         self._current_period = current_period
@@ -2529,11 +1964,7 @@ class TariffPriceSensor(SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return additional attributes."""
-        tariff_data = (
-            self.hass.data.get(DOMAIN, {})
-            .get(self._entry.entry_id, {})
-            .get("tariff_schedule")
-        )
+        tariff_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("tariff_schedule")
         if not tariff_data:
             return {}
 
@@ -2545,9 +1976,7 @@ class TariffPriceSensor(SensorEntity):
         }
 
         if self._sensor_type == SENSOR_TYPE_CURRENT_IMPORT_PRICE:
-            attributes["price_spike"] = (
-                None  # No spike detection for tariff-based pricing
-            )
+            attributes["price_spike"] = None  # No spike detection for tariff-based pricing
         else:
             attributes["channel_type"] = "feedIn"
 
@@ -2613,7 +2042,7 @@ class SolarCurtailmentSensor(SensorEntity):
         """Run when entity is removed from hass."""
         if self._unsub_dispatcher:
             self._unsub_dispatcher()
-        if hasattr(self, "_unsub_amber") and self._unsub_amber:
+        if hasattr(self, '_unsub_amber') and self._unsub_amber:
             self._unsub_amber()
 
     def _get_feedin_price(self) -> float | None:
@@ -2641,11 +2070,7 @@ class SolarCurtailmentSensor(SensorEntity):
             return export_earnings < 1.0
 
         # No price data, fall back to cached rule
-        cached_rule = (
-            self.hass.data.get(DOMAIN, {})
-            .get(self._entry.entry_id, {})
-            .get("cached_export_rule")
-        )
+        cached_rule = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("cached_export_rule")
         return cached_rule == "never"
 
     @property
@@ -2669,7 +2094,7 @@ class SolarCurtailmentSensor(SensorEntity):
         cached_rule = entry_data.get("cached_export_rule")
         curtailment_enabled = self._entry.options.get(
             CONF_BATTERY_CURTAILMENT_ENABLED,
-            self._entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False),
+            self._entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
         )
         feedin_price = self._get_feedin_price()
         export_earnings = -feedin_price if feedin_price is not None else None
@@ -2679,9 +2104,7 @@ class SolarCurtailmentSensor(SensorEntity):
             "curtailment_enabled": curtailment_enabled,
             "feedin_price": feedin_price,
             "export_earnings": export_earnings,
-            "description": "Export blocked due to negative feed-in price"
-            if self._is_curtailed()
-            else "Normal solar export allowed",
+            "description": "Export blocked due to negative feed-in price" if self._is_curtailed() else "Normal solar export allowed",
         }
 
 
@@ -2710,9 +2133,7 @@ class InverterStatusSensor(SensorEntity):
         self._unsub_interval = None
         self._cached_state = None
         self._cached_attrs = {}
-        self._controller = (
-            None  # Cached controller to preserve state (e.g., JWT token timestamp)
-        )
+        self._controller = None  # Cached controller to preserve state (e.g., JWT token timestamp)
 
     @property
     def device_info(self):
@@ -2730,9 +2151,7 @@ class InverterStatusSensor(SensorEntity):
         def _handle_curtailment_update():
             """Handle curtailment update signal (inverter state may change too)."""
             # Schedule a poll to get updated state
-            _LOGGER.debug(
-                "Curtailment update signal received - scheduling inverter poll"
-            )
+            _LOGGER.debug("Curtailment update signal received - scheduling inverter poll")
             self.hass.async_create_task(self._async_poll_inverter())
 
         # Subscribe to curtailment update signal
@@ -2758,9 +2177,7 @@ class InverterStatusSensor(SensorEntity):
                 # Only poll every 5 minutes when offline (every 10th call at 30s interval)
                 if self._offline_count % 10 != 0:
                     self._offline_count += 1
-                    _LOGGER.debug(
-                        f"Inverter offline - skipping poll (backoff, count={self._offline_count})"
-                    )
+                    _LOGGER.debug(f"Inverter offline - skipping poll (backoff, count={self._offline_count})")
                     return
 
             _LOGGER.debug("Periodic inverter poll triggered")
@@ -2771,9 +2188,7 @@ class InverterStatusSensor(SensorEntity):
             _periodic_poll,
             timedelta(seconds=30),
         )
-        _LOGGER.info(
-            "Inverter polling scheduled every 30 seconds (with offline backoff)"
-        )
+        _LOGGER.info("Inverter polling scheduled every 30 seconds (with offline backoff)")
 
     async def async_will_remove_from_hass(self) -> None:
         """Run when entity is removed from hass."""
@@ -2793,9 +2208,7 @@ class InverterStatusSensor(SensorEntity):
         """Poll the inverter to get current status."""
         from .inverters import get_inverter_controller
 
-        inverter_enabled = self._get_config_value(
-            CONF_AC_INVERTER_CURTAILMENT_ENABLED, False
-        )
+        inverter_enabled = self._get_config_value(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False)
         if not inverter_enabled:
             _LOGGER.debug("Inverter curtailment not enabled - skipping poll")
             self._cached_state = "disabled"
@@ -2808,9 +2221,7 @@ class InverterStatusSensor(SensorEntity):
         inverter_slave_id = self._get_config_value(CONF_INVERTER_SLAVE_ID, 1)
         inverter_model = self._get_config_value(CONF_INVERTER_MODEL)
         inverter_token = self._get_config_value(CONF_INVERTER_TOKEN)  # For Enphase JWT
-        fronius_load_following = self._get_config_value(
-            CONF_FRONIUS_LOAD_FOLLOWING, False
-        )
+        fronius_load_following = self._get_config_value(CONF_FRONIUS_LOAD_FOLLOWING, False)
 
         # Enphase Enlighten credentials for automatic JWT token refresh
         enphase_username = self._get_config_value(CONF_ENPHASE_USERNAME)
@@ -2818,9 +2229,7 @@ class InverterStatusSensor(SensorEntity):
         enphase_serial = self._get_config_value(CONF_ENPHASE_SERIAL)
         enphase_is_installer = self._get_config_value(CONF_ENPHASE_IS_INSTALLER, False)
         enphase_normal_profile = self._get_config_value(CONF_ENPHASE_NORMAL_PROFILE)
-        enphase_zero_export_profile = self._get_config_value(
-            CONF_ENPHASE_ZERO_EXPORT_PROFILE
-        )
+        enphase_zero_export_profile = self._get_config_value(CONF_ENPHASE_ZERO_EXPORT_PROFILE)
 
         if not inverter_host:
             _LOGGER.debug("Inverter host not configured - skipping poll")
@@ -2828,17 +2237,12 @@ class InverterStatusSensor(SensorEntity):
             self.async_write_ha_state()
             return
 
-        _LOGGER.debug(
-            f"Polling inverter: {inverter_brand} at {inverter_host}:{inverter_port}"
-        )
+        _LOGGER.debug(f"Polling inverter: {inverter_brand} at {inverter_host}:{inverter_port}")
 
         try:
             # Reuse cached controller if config matches (preserves JWT token state for Enphase)
             controller_key = f"{inverter_brand}:{inverter_host}:{inverter_port}"
-            if (
-                self._controller
-                and getattr(self._controller, "_cache_key", None) == controller_key
-            ):
+            if self._controller and getattr(self._controller, '_cache_key', None) == controller_key:
                 controller = self._controller
                 _LOGGER.debug("Reusing cached inverter controller")
             else:
@@ -2892,9 +2296,7 @@ class InverterStatusSensor(SensorEntity):
                 # Check if curtailment logic has set state to "curtailed" (e.g., Fronius simple mode)
                 # In simple mode, inverter uses soft export limit but doesn't report power_limit_enabled
                 # So we trust the cached state from curtailment logic if it says "curtailed"
-                entry_data = self.hass.data.get(DOMAIN, {}).get(
-                    self._entry.entry_id, {}
-                )
+                entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
                 cached_curtail_state = entry_data.get("inverter_last_state")
                 if cached_curtail_state == "curtailed" and not fronius_load_following:
                     # Fronius simple mode: trust curtailment logic, not register values
@@ -2920,9 +2322,7 @@ class InverterStatusSensor(SensorEntity):
                 entry_data["inverter_last_state"] = self._cached_state
                 entry_data["inverter_attributes"] = self._cached_attrs
 
-            _LOGGER.info(
-                f"Inverter poll: state={self._cached_state}, power={state.power_limit_percent}%"
-            )
+            _LOGGER.info(f"Inverter poll: state={self._cached_state}, power={state.power_limit_percent}%")
 
         except Exception as e:
             _LOGGER.warning(f"Error polling inverter {inverter_host}: {e}")
@@ -2968,9 +2368,7 @@ class InverterStatusSensor(SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return additional attributes including register data."""
-        inverter_enabled = self._get_config_value(
-            CONF_AC_INVERTER_CURTAILMENT_ENABLED, False
-        )
+        inverter_enabled = self._get_config_value(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False)
         inverter_brand = self._get_config_value(CONF_INVERTER_BRAND, "sungrow")
         inverter_host = self._get_config_value(CONF_INVERTER_HOST, "")
         inverter_model = self._get_config_value(CONF_INVERTER_MODEL, "")
@@ -3045,9 +2443,7 @@ class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):
             self._attr_name = "Flow Power Export Price"
             self._attr_icon = "mdi:solar-power"
 
-        self._attr_native_unit_of_measurement = (
-            f"{CURRENCY_DOLLAR}/{UnitOfEnergy.KILO_WATT_HOUR}"
-        )
+        self._attr_native_unit_of_measurement = f"{CURRENCY_DOLLAR}/{UnitOfEnergy.KILO_WATT_HOUR}"
         self._attr_device_class = SensorDeviceClass.MONETARY
         self._attr_suggested_display_precision = 4
 
@@ -3134,9 +2530,7 @@ class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):
 
         # Get config values
         pea_enabled = self._get_config_value(CONF_PEA_ENABLED, True)
-        base_rate = self._get_config_value(
-            CONF_FLOW_POWER_BASE_RATE, FLOW_POWER_DEFAULT_BASE_RATE
-        )
+        base_rate = self._get_config_value(CONF_FLOW_POWER_BASE_RATE, FLOW_POWER_DEFAULT_BASE_RATE)
         custom_pea = self._get_config_value(CONF_PEA_CUSTOM_VALUE)
 
         if pea_enabled:
@@ -3199,9 +2593,7 @@ class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):
         """Return additional attributes."""
         wholesale_cents = self._get_wholesale_price_cents()
         pea_enabled = self._get_config_value(CONF_PEA_ENABLED, True)
-        base_rate = self._get_config_value(
-            CONF_FLOW_POWER_BASE_RATE, FLOW_POWER_DEFAULT_BASE_RATE
-        )
+        base_rate = self._get_config_value(CONF_FLOW_POWER_BASE_RATE, FLOW_POWER_DEFAULT_BASE_RATE)
         custom_pea = self._get_config_value(CONF_PEA_CUSTOM_VALUE)
         state = self._get_config_value(CONF_FLOW_POWER_STATE, "QLD1")
 
@@ -3216,9 +2608,7 @@ class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):
             tracker = self._get_twap_tracker()
             twap = self._get_effective_twap()
             attributes["twap_used"] = round(twap, 2)
-            attributes["twap_source"] = (
-                "dynamic" if (tracker and not tracker.using_fallback) else "fallback"
-            )
+            attributes["twap_source"] = "dynamic" if (tracker and not tracker.using_fallback) else "fallback"
 
             # TWAP override info
             override = self._get_config_value(CONF_FP_TWAP_OVERRIDE)
@@ -3315,26 +2705,20 @@ class FlowPowerTWAPSensor(SensorEntity):
             attrs["twap_override"] = override
 
         if tracker:
-            twap_value = (
-                tracker.twap if tracker.twap is not None else FLOW_POWER_MARKET_AVG
-            )
-            attrs.update(
-                {
-                    "days_of_data": tracker.twap_days,
-                    "sample_count": tracker.sample_count,
-                    "using_fallback": tracker.using_fallback,
-                    "twap_dollars": round(twap_value / 100, 4),
-                }
-            )
+            twap_value = tracker.twap if tracker.twap is not None else FLOW_POWER_MARKET_AVG
+            attrs.update({
+                "days_of_data": tracker.twap_days,
+                "sample_count": tracker.sample_count,
+                "using_fallback": tracker.using_fallback,
+                "twap_dollars": round(twap_value / 100, 4),
+            })
         else:
-            attrs.update(
-                {
-                    "days_of_data": 0,
-                    "sample_count": 0,
-                    "using_fallback": True,
-                    "twap_dollars": round(FLOW_POWER_MARKET_AVG / 100, 4),
-                }
-            )
+            attrs.update({
+                "days_of_data": 0,
+                "sample_count": 0,
+                "using_fallback": True,
+                "twap_dollars": round(FLOW_POWER_MARKET_AVG / 100, 4),
+            })
         return attrs
 
 
@@ -3413,9 +2797,7 @@ class FlowPowerAmberComparisonSensor(SensorEntity):
         self._attr_suggested_object_id = f"power_sync_{SENSOR_TYPE_AMBER_COMPARISON}"
         self._attr_name = "Flow Power Amber Comparison"
         self._attr_icon = "mdi:compare-horizontal"
-        self._attr_native_unit_of_measurement = (
-            f"{CURRENCY_DOLLAR}/{UnitOfEnergy.KILO_WATT_HOUR}"
-        )
+        self._attr_native_unit_of_measurement = f"{CURRENCY_DOLLAR}/{UnitOfEnergy.KILO_WATT_HOUR}"
         self._attr_device_class = SensorDeviceClass.MONETARY
         self._attr_suggested_display_precision = 4
 
@@ -3622,9 +3004,7 @@ class BatteryHealthSensor(SensorEntity):
             self._battery_count = stored_health.get("battery_count")
             self._scanned_at = stored_health.get("scanned_at")
             self._individual_batteries = stored_health.get("individual_batteries")
-            _LOGGER.info(
-                f"Restored battery health from storage: {self._calculate_health_percent()}% health"
-            )
+            _LOGGER.info(f"Restored battery health from storage: {self._calculate_health_percent()}% health")
 
         # For non-Tesla systems: listen to coordinator updates for battery_soh
         if self._coordinator is not None and self._battery_system != "tesla":
@@ -3664,14 +3044,8 @@ class BatteryHealthSensor(SensorEntity):
 
     def _calculate_health_percent(self) -> float | None:
         """Calculate health as percentage of original capacity."""
-        if (
-            self._current_capacity_wh is not None
-            and self._original_capacity_wh is not None
-            and self._original_capacity_wh > 0
-        ):
-            return round(
-                (self._current_capacity_wh / self._original_capacity_wh) * 100, 1
-            )
+        if self._current_capacity_wh is not None and self._original_capacity_wh is not None and self._original_capacity_wh > 0:
+            return round((self._current_capacity_wh / self._original_capacity_wh) * 100, 1)
         return None
 
     @property
@@ -3695,15 +3069,11 @@ class BatteryHealthSensor(SensorEntity):
 
         if self._original_capacity_wh is not None:
             attributes["original_capacity_wh"] = self._original_capacity_wh
-            attributes["original_capacity_kwh"] = round(
-                self._original_capacity_wh / 1000, 2
-            )
+            attributes["original_capacity_kwh"] = round(self._original_capacity_wh / 1000, 2)
 
         if self._current_capacity_wh is not None:
             attributes["current_capacity_wh"] = self._current_capacity_wh
-            attributes["current_capacity_kwh"] = round(
-                self._current_capacity_wh / 1000, 2
-            )
+            attributes["current_capacity_kwh"] = round(self._current_capacity_wh / 1000, 2)
 
         if self._degradation_percent is not None:
             attributes["degradation_percent"] = self._degradation_percent
@@ -3740,9 +3110,7 @@ class BatteryHealthSensor(SensorEntity):
                         health = round((orig_wh / RATED_CAPACITY_WH) * 100, 1)
                         attributes[f"{prefix}_health_percent"] = health
                     if battery.get("isExpansion") is not None:
-                        attributes[f"{prefix}_is_expansion"] = battery.get(
-                            "isExpansion"
-                        )
+                        attributes[f"{prefix}_is_expansion"] = battery.get("isExpansion")
 
         # Source attribution
         if self._original_capacity_wh is not None:
@@ -3809,7 +3177,7 @@ class EVStatusSensor(SensorEntity):
         """Stop polling when removed."""
         if self._unsub_timer:
             self._unsub_timer()
-        if hasattr(self, "_unsub_coordinator") and self._unsub_coordinator:
+        if hasattr(self, '_unsub_coordinator') and self._unsub_coordinator:
             self._unsub_coordinator()
 
     @callback
@@ -3830,7 +3198,6 @@ class EVStatusSensor(SensorEntity):
     async def _async_update_ev(self, _now=None) -> None:
         """Poll EV status from vehicle sensors."""
         from . import _get_ev_vehicle_status
-
         try:
             self._ev_data = _get_ev_vehicle_status(self.hass, self._entry)
             # Supplement with Tesla coordinator Wall Connector data
@@ -3898,7 +3265,8 @@ class BatteryModeSensor(SensorEntity):
         await super().async_added_to_hass()
 
         _LOGGER.info(
-            "Battery mode sensor registered with entity_id: %s", self.entity_id
+            "Battery mode sensor registered with entity_id: %s",
+            self.entity_id
         )
 
         @callback
@@ -3977,39 +3345,25 @@ class BatteryModeSensor(SensorEntity):
             attributes["force_duration_minutes"] = force_charge_state.get("duration", 0)
             if force_charge_state.get("expires_at"):
                 expires_at = force_charge_state["expires_at"]
-                attributes["expires_at"] = (
-                    expires_at.isoformat()
-                    if hasattr(expires_at, "isoformat")
-                    else str(expires_at)
-                )
+                attributes["expires_at"] = expires_at.isoformat() if hasattr(expires_at, 'isoformat') else str(expires_at)
                 attributes["force_expires_at"] = attributes["expires_at"]
                 from homeassistant.util import dt as dt_util
-
                 remaining = (expires_at - dt_util.utcnow()).total_seconds() / 60
                 attributes["remaining_minutes"] = max(0, int(remaining))
                 attributes["force_remaining_minutes"] = attributes["remaining_minutes"]
         elif mode == BATTERY_MODE_STATE_FORCE_DISCHARGE:
             attributes["description"] = "Battery is being force discharged"
-            attributes["force_duration_minutes"] = force_discharge_state.get(
-                "duration", 0
-            )
+            attributes["force_duration_minutes"] = force_discharge_state.get("duration", 0)
             if force_discharge_state.get("expires_at"):
                 expires_at = force_discharge_state["expires_at"]
-                attributes["expires_at"] = (
-                    expires_at.isoformat()
-                    if hasattr(expires_at, "isoformat")
-                    else str(expires_at)
-                )
+                attributes["expires_at"] = expires_at.isoformat() if hasattr(expires_at, 'isoformat') else str(expires_at)
                 attributes["force_expires_at"] = attributes["expires_at"]
                 from homeassistant.util import dt as dt_util
-
                 remaining = (expires_at - dt_util.utcnow()).total_seconds() / 60
                 attributes["remaining_minutes"] = max(0, int(remaining))
                 attributes["force_remaining_minutes"] = attributes["remaining_minutes"]
         else:
-            attributes["description"] = (
-                "Battery operating in normal self-consumption mode"
-            )
+            attributes["description"] = "Battery operating in normal self-consumption mode"
 
         return attributes
 
@@ -4053,7 +3407,6 @@ class AmberUsageSensor(SensorEntity):
 
     async def async_added_to_hass(self) -> None:
         """Start periodic updates when added to HA."""
-
         @callback
         def _periodic_update(_now=None) -> None:
             self.async_write_ha_state()

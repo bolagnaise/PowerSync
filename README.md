@@ -18,7 +18,7 @@
 
 </div>
 
-> **Disclaimer:** This is an unofficial integration and is not affiliated with or endorsed by Tesla, Sigenergy, Sungrow, FoxESS, GoodWe, Amber Electric, Localvolts, Octopus Energy, or EPEX/ENTSO-E. Use at your own risk.
+> **Disclaimer:** This is an unofficial integration and is not affiliated with or endorsed by Tesla, Sigenergy, Sungrow, FoxESS, GoodWe, AlphaESS, Amber Electric, Localvolts, Octopus Energy, or EPEX/ENTSO-E. Use at your own risk.
 
 ---
 
@@ -34,6 +34,7 @@
 | **Solax** | Modbus TCP or HA entity | Export control, curtailment (GEN2-GEN6) |
 | **GoodWe** (ET, EH, BT, BH, ES, EM, BP) | UDP or TCP (local) | Force charge/discharge, backup reserve, export limit |
 | **Sungrow SH-series** | Modbus TCP | Force charge/discharge, rate limiting, export control, dual inverter |
+| **AlphaESS** (SMILE5, SMILE-Hi5/Hi10, SMILE-B3, SMILE-T10, SMILE-G3, Storion-T30) | Modbus TCP + optional Cloud API | Force charge/discharge, dispatch SOC targeting, DC solar curtailment |
 
 ### AC-Coupled Inverter Curtailment
 
@@ -51,6 +52,7 @@ Solar inverters that bypass the battery can be curtailed during negative feed-in
 | **Zeversolar** | HTTP API | Power limit percentage |
 | **Solax** | Modbus TCP or HA entity | Export control user limit (reg 0x42) |
 | **Sigenergy** | Modbus TCP | Grid export limit / DC curtailment |
+| **AlphaESS** | Modbus TCP | MAX feed-into-grid percent (register 0x0800) |
 
 ### Electricity Providers
 
@@ -104,7 +106,7 @@ Or manually:
 
 | Feature | Description | Wiki |
 |---------|-------------|------|
-| **Battery System Setup** | Tesla, FoxESS, Sigenergy, GoodWe, Sungrow connection guides | [Setup Guide](https://github.com/bolagnaise/PowerSync/wiki/Battery-System-Setup) |
+| **Battery System Setup** | Tesla, FoxESS, Sigenergy, GoodWe, Sungrow, AlphaESS connection guides | [Setup Guide](https://github.com/bolagnaise/PowerSync/wiki/Battery-System-Setup) |
 | **Smart Optimization** | Built-in LP optimizer calculates optimal charge/discharge schedule using prices, solar, and load. **Solar forecasting (Solcast) must be configured for accurate scheduling.** | [Details](https://github.com/bolagnaise/PowerSync/wiki/Smart-Optimization) |
 | **EV Smart Charging** | Coordinate EV charging with battery optimization — Solar, Cheapest, Deadline modes | [Details](https://github.com/bolagnaise/PowerSync/wiki/EV-Smart-Charging) |
 | **Advanced Features** | AEMO spike detection, solar curtailment, spike protection, export boost, **off-grid control** | [Details](https://github.com/bolagnaise/PowerSync/wiki/Advanced-Features) |
