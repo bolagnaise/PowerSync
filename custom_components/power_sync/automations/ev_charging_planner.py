@@ -23,6 +23,11 @@ from ..const import TESLA_INTEGRATIONS
 
 _LOGGER = logging.getLogger(__name__)
 
+# Minimum power (kW) required to start/continue EV charging.
+# Default 1.4 kW ≈ 6A @ 230V single-phase. Override per-vehicle
+# via charger settings if your charger has a different minimum.
+MIN_CHARGING_POWER_KW = 1.4
+
 
 def _iter_tesla_vehicle_devices(device_registry) -> Iterator[Tuple[Any, str]]:
     """Yield ``(device, vin)`` tuples for every Tesla vehicle in the HA device registry.
@@ -1677,8 +1682,8 @@ class ChargingPlanner:
         # Clamp to charger limits and minimum charging threshold
         available = min(charger_max_kw, max(0, total_available))
 
-        # Minimum 1.4kW (6A) to actually charge
-        if available < 1.4:
+        # Minimum power to actually charge
+        if available < MIN_CHARGING_POWER_KW:
             return 0
 
         return available
@@ -1819,7 +1824,7 @@ class ChargingPlanner:
                     solar_surplus_kw=forecast.surplus_kw,
                 )
 
-                if available_power < 1.4:  # Minimum 6A to charge
+                if available_power < MIN_CHARGING_POWER_KW:
                     continue
 
                 energy_this_hour = available_power  # kWh (1 hour)
@@ -1900,7 +1905,7 @@ class ChargingPlanner:
                     solar_surplus_kw=forecast.surplus_kw,
                 )
 
-                if available_power < 1.4:
+                if available_power < MIN_CHARGING_POWER_KW:
                     continue
 
                 energy_this_hour = min(available_power, energy_needed_kwh - solar_energy - grid_energy)
@@ -1949,7 +1954,7 @@ class ChargingPlanner:
                     solar_surplus_kw=0,  # No solar during grid-only hours
                 )
 
-                if available_power < 1.4:
+                if available_power < MIN_CHARGING_POWER_KW:
                     continue  # Not enough capacity, try next hour
 
                 energy_this_hour = min(available_power, remaining_energy - grid_energy)
