@@ -126,13 +126,23 @@ jobs:
             ACTION: ${{ steps.cr_detect.outputs.action }}
 
             IF IS_CR_BOT is true AND ACTION is fix:
-            1. Read the CodeRabbit comment fully — it contains the finding and proposed fix
-            2. Write the minimal fix — do not refactor beyond the issue
-            3. Run: ruff check . and mypy . --ignore-missing-imports
-            4. Commit: fix({scope}): {cr_summary}
-            5. Push to PR branch — never to main
-            6. Reply: Fixed in [SHA]. [One sentence.]
-            7. Stop
+            1. Read the CodeRabbit comment fully — understand the finding AND proposed fix
+            2. ALWAYS attempt to fix the issue, even if:
+               - The comment is marked "outside diff range" — fix the file anyway
+               - The current PR partially addresses it — improve the fix
+               - The finding spans multiple files — fix all affected files
+            3. Locate the exact file and line. Read surrounding context to understand the code.
+            4. Write the fix. Keep it minimal but complete — address the root cause.
+            5. Run: ruff check . and mypy . --ignore-missing-imports
+            6. Commit: fix({scope}): {cr_summary}
+            7. Push to PR branch — never to main
+            8. Reply to the CodeRabbit comment: Fixed in [SHA]. [One sentence describing change.]
+            9. Stop — do not open new PRs
+
+            IF you cannot fix it (e.g., requires architectural change or user decision):
+            1. Reply explaining WHY you can't fix it and what the user should do
+            2. Create a GitHub issue tracking the work needed
+            3. Stop
 
             IF IS_CR_BOT is true AND ACTION is issue (nitpick):
             1. Do NOT make code changes
