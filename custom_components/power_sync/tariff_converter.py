@@ -1542,6 +1542,7 @@ def _apply_network_tariff_library(
         rates = tariff["energy_charges"][season].get("rates", {})
         modified_count = 0
 
+        anchor_now = dt_util.now()  # Anchor once to avoid midnight crossing inconsistency
         for period, price in list(rates.items()):
             # Extract hour and minute from PERIOD_HH_MM
             try:
@@ -1553,8 +1554,7 @@ def _apply_network_tariff_library(
 
             # Build a datetime for this period (use today's date)
             # The library uses interval_time for TOU period detection
-            now = dt_util.now()  # Uses HA configured timezone
-            interval_time = now.replace(
+            interval_time = anchor_now.replace(
                 hour=hour,
                 minute=minute,
                 second=0,
