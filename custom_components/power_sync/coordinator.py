@@ -3005,6 +3005,239 @@ class SigenergyEnergyCoordinator(DataUpdateCoordinator):
         await self._controller.disconnect()
 
 
+class AlphaESSEnergyCoordinator(DataUpdateCoordinator):
+    """Coordinator to fetch AlphaESS energy data via Modbus (primary) with
+    optional AlphaESS Cloud API fallback.
+
+    AlphaESS hybrid inverter-battery systems (SMILE / Storion) expose a rich
+    Modbus TCP register map (slave ID 0x55 by default). Cloud is used only
+    when Modbus is unreachable.
+
+    Sign conventions (unlike Sigenergy):
+      - Battery power (reg 0126H): NEGATIVE = charging, POSITIVE = discharging
+        → already matches PowerSync convention, no flip needed.
+      - Grid power (reg 0021H): POSITIVE = importing, NEGATIVE = exporting
+        (standard grid-meter convention).
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        host: str,
+        port: int = 502,
+        slave_id: int = 85,
+        entry_id: str = "",
+        max_export_limit_kw: Optional[float] = None,
+        cloud_client: Optional[Any] = None,
+    ) -> None:
+        """Initialize the coordinator.
+
+        Args:
+            hass: HomeAssistant instance.
+            host: IP address of AlphaESS inverter.
+            port: Modbus TCP port (default 502).
+            slave_id: Modbus slave ID (default 85 = 0x55).
+            entry_id: Config entry ID for price lookups.
+            max_export_limit_kw: User-configured DNSP export safety cap.
+            cloud_client: Optional AlphaESSCloudClient for telemetry fallback.
+        """
+        from .inverters.alphaess import AlphaESSController
+
+        self.host = host
+        self.port = port
+        self.slave_id = slave_id
+        self._entry_id = entry_id
+        self._controller = AlphaESSController(
+            host, port, slave_id, max_export_limit_kw=max_export_limit_kw
+        )
+        self._energy_acc = EnergyAccumulator(hass, "alphaess")
+        self._cloud = cloud_client
+        self._modbus_failures = 0  # Consecutive failures → cloud fallback
+
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_alphaess_energy",
+            update_interval=UPDATE_INTERVAL_ENERGY,
+        )
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Fetch AlphaESS data, preferring Modbus and falling back to cloud."""
+        if not self._energy_acc._last_update:
+            await self._energy_acc.async_restore()
+
+        attrs: dict[str, Any] = {}
+        is_curtailed = False
+        source = "modbus"
+
+        try:
+            status = await self._controller.get_status()
+            attrs = status.attributes or {}
+            is_curtailed = status.is_curtailed
+
+            if "battery_soc" not in attrs:
+                raise UpdateFailed("AlphaESS Modbus returned no battery data")
+
+            self._modbus_failures = 0
+
+        except Exception as modbus_err:
+            self._modbus_failures += 1
+            _LOGGER.warning(
+                "AlphaESS Modbus read failed (%d consecutive): %s",
+                self._modbus_failures,
+                modbus_err,
+            )
+
+            # Try cloud fallback if configured
+            if self._cloud is not None:
+                try:
+                    cloud_data = await self._cloud.get_last_power_data()
+                    attrs = _normalize_alphaess_cloud_data(cloud_data)
+                    source = "cloud"
+                    _LOGGER.info("AlphaESS fell back to cloud telemetry")
+                except Exception as cloud_err:
+                    _LOGGER.error("AlphaESS cloud fallback also failed: %s", cloud_err)
+                    if self.data:
+                        return self.data
+                    raise UpdateFailed(
+                        f"AlphaESS Modbus and cloud both failed: "
+                        f"modbus={modbus_err}; cloud={cloud_err}"
+                    ) from modbus_err
+            else:
+                if self.data:
+                    return self.data
+                raise UpdateFailed(f"AlphaESS Modbus failed: {modbus_err}") from modbus_err
+
+        solar_kw = attrs.get("pv_power_kw", 0) or 0
+        grid_kw = attrs.get("grid_power_kw", 0) or 0  # + import, − export
+        # AlphaESS battery sign already matches PowerSync: + = discharge, − = charge
+        battery_kw = attrs.get("battery_power_kw", 0) or 0
+
+        # Load from balance: solar + grid + battery (with sign conventions above)
+        load_kw = solar_kw + grid_kw + battery_kw
+
+        buy, sell = _get_current_prices(self.hass, self._entry_id)
+        self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+
+        energy_data = {
+            "solar_power": solar_kw,
+            "grid_power": grid_kw,
+            "battery_power": battery_kw,
+            "load_power": load_kw,
+            "battery_level": attrs.get("battery_soc", 0),
+            "battery_soh": attrs.get("battery_soh"),
+            "battery_capacity_kwh": attrs.get("battery_capacity_kwh"),
+            "export_limit_percent": attrs.get("export_limit_percent"),
+            "is_curtailed": is_curtailed,
+            "work_mode_raw": attrs.get("work_mode_raw"),
+            "data_source": source,
+            "last_update": dt_util.utcnow(),
+            "energy_summary": self._energy_acc.as_dict(),
+        }
+
+        _LOGGER.debug(
+            "AlphaESS (%s): solar=%.2f kW, grid=%.2f kW, battery=%.2f kW (%.1f%%), "
+            "load=%.2f kW, curtailed=%s",
+            source,
+            energy_data["solar_power"],
+            energy_data["grid_power"],
+            energy_data["battery_power"],
+            energy_data["battery_level"],
+            energy_data["load_power"],
+            energy_data["is_curtailed"],
+        )
+        return energy_data
+
+    async def set_backup_mode(self) -> bool:
+        """IDLE hold — release dispatch but write zero-power dispatch if needed."""
+        async with self._controller:
+            return await self._controller.set_standby_mode()
+
+    async def restore_work_mode_from_idle(self) -> bool:
+        """Restore self-consumption after IDLE hold."""
+        async with self._controller:
+            return await self._controller.restore_from_standby()
+
+    async def force_charge(self, duration_min: int = 30, power_w: float = 5000.0) -> bool:
+        """Force-charge the battery via the dispatch register block.
+
+        Args:
+            duration_min: Declared duration in minutes (used for logging only —
+                AlphaESS has no auto-timeout; the caller must issue release).
+            power_w: Charge power in watts (positive).
+        """
+        _LOGGER.info(
+            "AlphaESS coordinator: force_charge(power_w=%.0f, duration=%dm)",
+            power_w, duration_min,
+        )
+        async with self._controller:
+            return await self._controller.force_charge(power_kw=power_w / 1000.0)
+
+    async def force_discharge(self, duration_min: int = 30, power_w: float = 5000.0) -> bool:
+        """Force-discharge the battery via the dispatch register block."""
+        _LOGGER.info(
+            "AlphaESS coordinator: force_discharge(power_w=%.0f, duration=%dm)",
+            power_w, duration_min,
+        )
+        async with self._controller:
+            return await self._controller.force_discharge(power_kw=power_w / 1000.0)
+
+    async def restore_normal(self) -> bool:
+        """Release dispatch and restore export limit to normal."""
+        _LOGGER.info("AlphaESS coordinator: restore_normal")
+        async with self._controller:
+            return await self._controller.restore_normal()
+
+    async def async_shutdown(self) -> None:
+        """Release dispatch and disconnect on shutdown.
+
+        AlphaESS has no auto-revert: if we leave 0722H=1, the battery stays
+        locked in forced mode. disconnect() handles the release.
+        """
+        await self._controller.disconnect()
+        if self._cloud is not None:
+            try:
+                await self._cloud.close()
+            except Exception:
+                pass
+
+
+def _normalize_alphaess_cloud_data(cloud_data: dict) -> dict:
+    """Translate AlphaESS cloud getLastPowerData response to Modbus-shaped attrs.
+
+    Cloud fields (per AlphaESS Open API):
+      - ppv:   PV power (W, positive)
+      - pgrid: grid power (W, + import)
+      - pbat:  battery power (W) — cloud convention has been observed as
+               + discharge / − charge (same as Modbus 0126H); kept without flip.
+      - soc:   battery state of charge (%)
+    """
+    attrs: dict[str, Any] = {}
+    if not isinstance(cloud_data, dict):
+        return attrs
+
+    ppv = cloud_data.get("ppv")
+    if isinstance(ppv, (int, float)):
+        attrs["pv_power_w"] = ppv
+        attrs["pv_power_kw"] = round(ppv / 1000.0, 3)
+
+    pgrid = cloud_data.get("pgrid")
+    if isinstance(pgrid, (int, float)):
+        attrs["grid_power_w"] = pgrid
+        attrs["grid_power_kw"] = round(pgrid / 1000.0, 3)
+
+    pbat = cloud_data.get("pbat")
+    if isinstance(pbat, (int, float)):
+        attrs["battery_power_w"] = pbat
+        attrs["battery_power_kw"] = round(pbat / 1000.0, 3)
+
+    soc = cloud_data.get("soc")
+    if isinstance(soc, (int, float)):
+        attrs["battery_soc"] = round(float(soc), 1)
+
+    return attrs
+
+
 class SungrowEnergyCoordinator(DataUpdateCoordinator):
     """Coordinator to fetch Sungrow SH-series battery system data via Modbus.
 

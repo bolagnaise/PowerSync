@@ -69,7 +69,21 @@ from .const import (
     BATTERY_SYSTEM_SIGENERGY,
     BATTERY_SYSTEM_SUNGROW,
     BATTERY_SYSTEM_FOXESS,
+    BATTERY_SYSTEM_ALPHAESS,
     BATTERY_SYSTEMS,
+    # AlphaESS battery system configuration
+    CONF_ALPHAESS_MODBUS_HOST,
+    CONF_ALPHAESS_MODBUS_PORT,
+    CONF_ALPHAESS_MODBUS_SLAVE_ID,
+    CONF_ALPHAESS_EXPORT_LIMIT_KW,
+    CONF_ALPHAESS_DC_CURTAILMENT_ENABLED,
+    CONF_ALPHAESS_MODEL,
+    DEFAULT_ALPHAESS_MODBUS_PORT,
+    DEFAULT_ALPHAESS_MODBUS_SLAVE_ID,
+    CONF_ALPHAESS_CLOUD_ENABLED,
+    CONF_ALPHAESS_CLOUD_APP_ID,
+    CONF_ALPHAESS_CLOUD_APP_SECRET,
+    CONF_ALPHAESS_CLOUD_SERIAL,
     # Sungrow battery system configuration
     CONF_SUNGROW_HOST,
     CONF_SUNGROW_PORT,
@@ -1019,6 +1033,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return await self.async_step_foxess_connection()
         elif self._selected_battery_system == BATTERY_SYSTEM_GOODWE:
             return await self.async_step_goodwe_connection()
+        elif self._selected_battery_system == BATTERY_SYSTEM_ALPHAESS:
+            return await self.async_step_alphaess_modbus()
         else:
             return await self.async_step_tesla_provider()
 
@@ -1042,6 +1058,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             **getattr(self, "_sungrow_data", {}),
             **getattr(self, "_foxess_data", {}),
             **getattr(self, "_goodwe_data", {}),
+            **getattr(self, "_alphaess_data", {}),
             CONF_ELECTRICITY_PROVIDER: self._selected_electricity_provider,
         }
 
@@ -1078,6 +1095,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             BATTERY_SYSTEM_SUNGROW: "Sungrow",
             BATTERY_SYSTEM_FOXESS: "FoxESS",
             BATTERY_SYSTEM_GOODWE: "GoodWe",
+            BATTERY_SYSTEM_ALPHAESS: "AlphaESS",
         }.get(self._selected_battery_system, "")
 
         if battery_label:
@@ -1684,6 +1702,175 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 }
             ),
             errors=errors,
+        )
+
+    async def async_step_alphaess_modbus(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure AlphaESS Modbus TCP connection (primary control path).
+
+        Default slave ID is 85 (0x55) — the AlphaESS factory default. We
+        sanity-probe the connection by reading the battery SOC register (0102H)
+        before accepting. Cloud credentials are optional and collected next.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            host = user_input.get(CONF_ALPHAESS_MODBUS_HOST, "").strip()
+            port = user_input.get(CONF_ALPHAESS_MODBUS_PORT, DEFAULT_ALPHAESS_MODBUS_PORT)
+            slave_id = user_input.get(
+                CONF_ALPHAESS_MODBUS_SLAVE_ID, DEFAULT_ALPHAESS_MODBUS_SLAVE_ID
+            )
+            export_limit_kw = user_input.get(CONF_ALPHAESS_EXPORT_LIMIT_KW)
+
+            if not host:
+                errors["base"] = "alphaess_host_required"
+            else:
+                # Sanity-probe: try to read battery SOC (register 0x0102)
+                from .inverters.alphaess import AlphaESSController
+                controller = AlphaESSController(
+                    host=host,
+                    port=int(port),
+                    slave_id=int(slave_id),
+                    max_export_limit_kw=export_limit_kw,
+                )
+                try:
+                    connected = await controller.connect()
+                    if not connected:
+                        errors["base"] = "alphaess_connection_failed"
+                    else:
+                        state = await controller.get_status()
+                        if state.attributes is None or "battery_soc" not in state.attributes:
+                            errors["base"] = "alphaess_no_data"
+                finally:
+                    try:
+                        await controller.disconnect()
+                    except Exception:
+                        pass
+
+                if not errors:
+                    self._alphaess_data = {
+                        CONF_ALPHAESS_MODBUS_HOST: host,
+                        CONF_ALPHAESS_MODBUS_PORT: int(port),
+                        CONF_ALPHAESS_MODBUS_SLAVE_ID: int(slave_id),
+                    }
+                    if export_limit_kw is not None:
+                        self._alphaess_data[CONF_ALPHAESS_EXPORT_LIMIT_KW] = float(
+                            export_limit_kw
+                        )
+                    return await self.async_step_alphaess_cloud()
+
+        return self.async_show_form(
+            step_id="alphaess_modbus",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_ALPHAESS_MODBUS_HOST): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.TEXT)
+                    ),
+                    vol.Optional(
+                        CONF_ALPHAESS_MODBUS_PORT,
+                        default=DEFAULT_ALPHAESS_MODBUS_PORT,
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=1, max=65535, step=1, mode=NumberSelectorMode.BOX
+                        )
+                    ),
+                    vol.Optional(
+                        CONF_ALPHAESS_MODBUS_SLAVE_ID,
+                        default=DEFAULT_ALPHAESS_MODBUS_SLAVE_ID,
+                    ): NumberSelector(
+                        NumberSelectorConfig(
+                            min=1, max=255, step=1, mode=NumberSelectorMode.BOX
+                        )
+                    ),
+                    vol.Optional(CONF_ALPHAESS_EXPORT_LIMIT_KW): NumberSelector(
+                        NumberSelectorConfig(
+                            min=0.0, max=100.0, step=0.1, mode=NumberSelectorMode.BOX,
+                            unit_of_measurement="kW",
+                        )
+                    ),
+                }
+            ),
+            errors=errors,
+            description_placeholders={
+                "alphaess_help": (
+                    "Connect to your AlphaESS inverter. Default slave ID is 85 "
+                    "(0x55) — the AlphaESS factory default. Export limit is "
+                    "optional; leave blank for unlimited."
+                ),
+            },
+        )
+
+    async def async_step_alphaess_cloud(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure optional AlphaESS Cloud API (fallback when Modbus is down).
+
+        Credentials are issued at https://open.alphaess.com. Leave blank to
+        skip — Modbus alone is sufficient for full control.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            app_id = (user_input.get(CONF_ALPHAESS_CLOUD_APP_ID) or "").strip()
+            app_secret = (user_input.get(CONF_ALPHAESS_CLOUD_APP_SECRET) or "").strip()
+            serial = (user_input.get(CONF_ALPHAESS_CLOUD_SERIAL) or "").strip()
+
+            # Both empty = skip cloud entirely
+            if not app_id and not app_secret:
+                self._alphaess_data[CONF_ALPHAESS_CLOUD_ENABLED] = False
+                return self._create_final_entry()
+
+            if not app_id or not app_secret:
+                errors["base"] = "alphaess_cloud_partial"
+            else:
+                from .alphaess_api import AlphaESSCloudClient
+                client = AlphaESSCloudClient(
+                    app_id=app_id, app_secret=app_secret, serial=serial
+                )
+                try:
+                    ok, msg = await client.test_connection()
+                    if not ok:
+                        errors["base"] = "alphaess_cloud_invalid"
+                        _LOGGER.warning("AlphaESS cloud validation failed: %s", msg)
+                finally:
+                    try:
+                        await client.close()
+                    except Exception:
+                        pass
+
+                if not errors:
+                    self._alphaess_data.update({
+                        CONF_ALPHAESS_CLOUD_ENABLED: True,
+                        CONF_ALPHAESS_CLOUD_APP_ID: app_id,
+                        CONF_ALPHAESS_CLOUD_APP_SECRET: app_secret,
+                        CONF_ALPHAESS_CLOUD_SERIAL: serial,
+                    })
+                    return self._create_final_entry()
+
+        return self.async_show_form(
+            step_id="alphaess_cloud",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(CONF_ALPHAESS_CLOUD_APP_ID): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.TEXT)
+                    ),
+                    vol.Optional(CONF_ALPHAESS_CLOUD_APP_SECRET): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                    ),
+                    vol.Optional(CONF_ALPHAESS_CLOUD_SERIAL): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.TEXT)
+                    ),
+                }
+            ),
+            errors=errors,
+            description_placeholders={
+                "alphaess_cloud_help": (
+                    "Optional. Get App ID + App Secret from https://open.alphaess.com. "
+                    "Cloud is a fallback only — Modbus is the primary control path. "
+                    "Leave blank to skip."
+                ),
+            },
         )
 
     async def async_step_sungrow(

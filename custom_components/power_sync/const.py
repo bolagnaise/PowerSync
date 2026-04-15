@@ -125,6 +125,7 @@ BATTERY_SYSTEM_SUNGROW = "sungrow"
 
 BATTERY_SYSTEM_FOXESS = "foxess"
 BATTERY_SYSTEM_GOODWE = "goodwe"
+BATTERY_SYSTEM_ALPHAESS = "alphaess"
 
 BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_TESLA: "Tesla Powerwall — Fleet API or Teslemetry",
@@ -132,6 +133,7 @@ BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_SUNGROW: "Sungrow SH-series — Modbus TCP",
     BATTERY_SYSTEM_FOXESS: "FoxESS — Modbus TCP or RS485 serial",
     BATTERY_SYSTEM_GOODWE: "GoodWe ET/EH/ES/EM — UDP or TCP",
+    BATTERY_SYSTEM_ALPHAESS: "AlphaESS SMILE/Storion — Modbus TCP + optional Cloud API",
 }
 
 # Sungrow SH-series Battery System Configuration (Modbus TCP)
@@ -349,6 +351,26 @@ CONF_SIGENERGY_MODBUS_SLAVE_ID = "sigenergy_modbus_slave_id"
 CONF_SIGENERGY_EXPORT_LIMIT_KW = "sigenergy_export_limit_kw"
 DEFAULT_SIGENERGY_MODBUS_PORT = 502
 DEFAULT_SIGENERGY_MODBUS_SLAVE_ID = 247  # Sigenergy uses unit ID 247 (or 0)
+
+# AlphaESS Modbus TCP (SMILE / Storion hybrid inverter-battery)
+# Reference: official AlphaESS-HouseholdModbusRegisterParameterList.pdf
+CONF_ALPHAESS_MODBUS_HOST = "alphaess_modbus_host"
+CONF_ALPHAESS_MODBUS_PORT = "alphaess_modbus_port"
+CONF_ALPHAESS_MODBUS_SLAVE_ID = "alphaess_modbus_slave_id"
+CONF_ALPHAESS_EXPORT_LIMIT_KW = "alphaess_export_limit_kw"
+CONF_ALPHAESS_DC_CURTAILMENT_ENABLED = "alphaess_dc_curtailment_enabled"
+CONF_ALPHAESS_MODEL = "alphaess_model"
+DEFAULT_ALPHAESS_MODBUS_PORT = 502
+DEFAULT_ALPHAESS_MODBUS_SLAVE_ID = 85  # 0x55 — AlphaESS factory default (register 080FH)
+
+# AlphaESS Cloud API (openapi.alphaess.com)
+# App ID / App Secret issued from https://open.alphaess.com
+# Signature = SHA-512(AppID + AppSecret + Timestamp)
+CONF_ALPHAESS_CLOUD_ENABLED = "alphaess_cloud_enabled"
+CONF_ALPHAESS_CLOUD_APP_ID = "alphaess_cloud_app_id"
+CONF_ALPHAESS_CLOUD_APP_SECRET = "alphaess_cloud_app_secret"
+CONF_ALPHAESS_CLOUD_SERIAL = "alphaess_cloud_serial"
+ALPHAESS_CLOUD_BASE_URL = "https://openapi.alphaess.com/api"
 
 # Demand charge configuration
 CONF_DEMAND_CHARGE_ENABLED = "demand_charge_enabled"
@@ -1118,6 +1140,7 @@ INVERTER_BRANDS = {
     "zeversolar": "Zeversolar",
     "sigenergy": "Sigenergy",
     "solax": "Solax",
+    "alphaess": "AlphaESS",
 }
 
 # Fronius models (SunSpec Modbus)
@@ -1385,6 +1408,7 @@ OPTIMIZATION_PROVIDER_NATIVE_NAMES = {
     BATTERY_SYSTEM_SUNGROW: "Sungrow",
     BATTERY_SYSTEM_FOXESS: "FoxESS",
     BATTERY_SYSTEM_GOODWE: "GoodWe",
+    BATTERY_SYSTEM_ALPHAESS: "AlphaESS",
 }
 
 OPTIMIZATION_PROVIDERS = {
@@ -1423,6 +1447,7 @@ BATTERY_CAPACITY_DEFAULTS = {
     BATTERY_SYSTEM_SUNGROW: 10000,    # Varies, default 10 kWh
     BATTERY_SYSTEM_FOXESS: 10000,     # Varies, default 10 kWh
     BATTERY_SYSTEM_GOODWE: 10000,     # Varies, default 10 kWh
+    BATTERY_SYSTEM_ALPHAESS: 10000,   # Varies (SMILE5 ~ 5.7 kWh, Storion ~ 30 kWh), default 10 kWh
 }
 
 # Max charge/discharge power defaults by system (W)
@@ -1432,6 +1457,7 @@ BATTERY_POWER_DEFAULTS = {
     BATTERY_SYSTEM_SUNGROW: 5000,     # Varies
     BATTERY_SYSTEM_FOXESS: 5000,      # Varies by model
     BATTERY_SYSTEM_GOODWE: 5000,      # Varies by model
+    BATTERY_SYSTEM_ALPHAESS: 5000,    # Varies by model (SMILE5 = 5 kW, Storion-T30 larger)
 }
 
 # Optimization service

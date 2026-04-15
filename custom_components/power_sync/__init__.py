@@ -185,6 +185,18 @@ from .const import (
     CONF_SIGENERGY_ACCESS_TOKEN,
     CONF_SIGENERGY_REFRESH_TOKEN,
     CONF_SIGENERGY_TOKEN_EXPIRES_AT,
+    # AlphaESS battery system configuration
+    CONF_ALPHAESS_MODBUS_HOST,
+    CONF_ALPHAESS_MODBUS_PORT,
+    CONF_ALPHAESS_MODBUS_SLAVE_ID,
+    CONF_ALPHAESS_EXPORT_LIMIT_KW,
+    CONF_ALPHAESS_CLOUD_ENABLED,
+    CONF_ALPHAESS_CLOUD_APP_ID,
+    CONF_ALPHAESS_CLOUD_APP_SECRET,
+    CONF_ALPHAESS_CLOUD_SERIAL,
+    DEFAULT_ALPHAESS_MODBUS_PORT,
+    DEFAULT_ALPHAESS_MODBUS_SLAVE_ID,
+    BATTERY_SYSTEM_ALPHAESS,
     # Battery system selection
     CONF_BATTERY_SYSTEM,
     BATTERY_SYSTEM_SUNGROW,
@@ -314,6 +326,7 @@ from .coordinator import (
     DualSungrowCoordinator,
     FoxESSEnergyCoordinator,
     GoodWeEnergyCoordinator,
+    AlphaESSEnergyCoordinator,
     DemandChargeCoordinator,
     AEMOSensorCoordinator,
     OctopusPriceCoordinator,
@@ -3619,7 +3632,7 @@ class BatteryHealthView(HomeAssistantView):
     def _get_coordinator_soh(self, entry) -> float | None:
         """Get battery_soh from the energy coordinator for non-Tesla systems."""
         entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-        for key in ("sungrow_coordinator", "sigenergy_coordinator", "goodwe_coordinator"):
+        for key in ("sungrow_coordinator", "sigenergy_coordinator", "goodwe_coordinator", "alphaess_coordinator"):
             coord = entry_data.get(key)
             if coord and coord.data:
                 soh = coord.data.get("battery_soh")
@@ -5334,7 +5347,7 @@ class ConfigView(HomeAssistantView):
                 }
             else:
                 # Fall back to coordinator battery_soh (Sungrow, Sigenergy, GoodWe)
-                for key in ("sungrow_coordinator", "sigenergy_coordinator", "goodwe_coordinator"):
+                for key in ("sungrow_coordinator", "sigenergy_coordinator", "goodwe_coordinator", "alphaess_coordinator"):
                     coord = entry_data.get(key)
                     if coord and coord.data:
                         soh = coord.data.get("battery_soh")
@@ -12463,17 +12476,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("Failed to start Amber usage coordinator: %s", e)
             amber_usage_coordinator = None
 
-    # Check if this is a Sigenergy, Sungrow, FoxESS, or GoodWe setup (no Tesla needed)
+    # Check if this is a Sigenergy, Sungrow, FoxESS, GoodWe, or AlphaESS setup (no Tesla needed)
     is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
     is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
     is_foxess = bool(entry.data.get(CONF_FOXESS_HOST) or entry.data.get(CONF_FOXESS_SERIAL_PORT))
     is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
+    is_alphaess = bool(entry.data.get(CONF_ALPHAESS_MODBUS_HOST))
     tesla_coordinator = None
     sigenergy_coordinator = None
     sungrow_coordinator = None
     sungrow_coordinator_2 = None
     foxess_coordinator = None
     goodwe_coordinator = None
+    alphaess_coordinator = None
     token_getter = None  # Will be set for Tesla users
 
     if is_sigenergy:
@@ -12603,6 +12618,50 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             port=goodwe_port,
             entry_id=entry.entry_id,
         )
+    elif is_alphaess:
+        _LOGGER.info("Running in AlphaESS mode - Tesla credentials not required")
+
+        alphaess_host = entry.options.get(
+            CONF_ALPHAESS_MODBUS_HOST, entry.data.get(CONF_ALPHAESS_MODBUS_HOST)
+        )
+        alphaess_port = entry.options.get(
+            CONF_ALPHAESS_MODBUS_PORT,
+            entry.data.get(CONF_ALPHAESS_MODBUS_PORT, DEFAULT_ALPHAESS_MODBUS_PORT),
+        )
+        alphaess_slave_id = entry.options.get(
+            CONF_ALPHAESS_MODBUS_SLAVE_ID,
+            entry.data.get(CONF_ALPHAESS_MODBUS_SLAVE_ID, DEFAULT_ALPHAESS_MODBUS_SLAVE_ID),
+        )
+        alphaess_export_limit_kw = entry.data.get(CONF_ALPHAESS_EXPORT_LIMIT_KW)
+
+        # Optional cloud client for fallback telemetry when Modbus is unreachable
+        alphaess_cloud_client = None
+        if entry.data.get(CONF_ALPHAESS_CLOUD_ENABLED):
+            try:
+                from .alphaess_api import AlphaESSCloudClient
+                alphaess_cloud_client = AlphaESSCloudClient(
+                    app_id=entry.data.get(CONF_ALPHAESS_CLOUD_APP_ID, ""),
+                    app_secret=entry.data.get(CONF_ALPHAESS_CLOUD_APP_SECRET, ""),
+                    serial=entry.data.get(CONF_ALPHAESS_CLOUD_SERIAL, ""),
+                )
+                _LOGGER.info("AlphaESS cloud fallback enabled")
+            except Exception as e:
+                _LOGGER.warning("Failed to init AlphaESS cloud client: %s", e)
+                alphaess_cloud_client = None
+
+        _LOGGER.info(
+            "Initializing AlphaESS Modbus coordinator: %s:%s (slave %s)",
+            alphaess_host, alphaess_port, alphaess_slave_id,
+        )
+        alphaess_coordinator = AlphaESSEnergyCoordinator(
+            hass,
+            alphaess_host,
+            port=int(alphaess_port),
+            slave_id=int(alphaess_slave_id),
+            entry_id=entry.entry_id,
+            max_export_limit_kw=alphaess_export_limit_kw,
+            cloud_client=alphaess_cloud_client,
+        )
     else:
         # Get initial Tesla API token and provider
         # Use get_tesla_api_token() which fetches fresh from tesla_fleet if available
@@ -12697,6 +12756,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.warning("GoodWe coordinator failed to initialize: %s", e)
             goodwe_coordinator = None
+    if alphaess_coordinator:
+        try:
+            await alphaess_coordinator.async_config_entry_first_refresh()
+            _LOGGER.info("AlphaESS coordinator initialized successfully")
+        except Exception as e:
+            _LOGGER.warning("AlphaESS coordinator failed to initialize: %s", e)
+            alphaess_coordinator = None
 
     # Initialize demand charge coordinator if enabled (any battery system with grid power data)
     demand_charge_coordinator = None
@@ -12704,7 +12770,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_DEMAND_CHARGE_ENABLED,
         entry.data.get(CONF_DEMAND_CHARGE_ENABLED, False)
     )
-    energy_coord_for_demand = tesla_coordinator or foxess_coordinator or goodwe_coordinator or sigenergy_coordinator or sungrow_coordinator
+    energy_coord_for_demand = (
+        tesla_coordinator or foxess_coordinator or goodwe_coordinator
+        or sigenergy_coordinator or sungrow_coordinator or alphaess_coordinator
+    )
     if demand_charge_enabled and energy_coord_for_demand:
         demand_charge_rate = entry.options.get(
             CONF_DEMAND_CHARGE_RATE,
@@ -13233,6 +13302,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "sungrow_coordinator": sungrow_coordinator,  # For Sungrow Modbus energy/battery data
         "foxess_coordinator": foxess_coordinator,  # For FoxESS Modbus energy/battery data
         "goodwe_coordinator": goodwe_coordinator,  # For GoodWe energy/battery data
+        "alphaess_coordinator": alphaess_coordinator,  # For AlphaESS Modbus + cloud fallback
         "demand_charge_coordinator": demand_charge_coordinator,
         "aemo_spike_manager": aemo_spike_manager,
         "generic_aemo_spike_manager": generic_aemo_spike_manager,  # For non-Tesla AEMO spike detection
@@ -13262,8 +13332,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "is_sungrow": is_sungrow,  # Track if Sungrow battery system
         "is_foxess": is_foxess,  # Track if FoxESS battery system
         "is_goodwe": is_goodwe,  # Track if GoodWe battery system
+        "is_alphaess": is_alphaess,  # Track if AlphaESS battery system
         "foxess_curtailment_state": "normal",  # Track FoxESS DC curtailment state
         "sigenergy_curtailment_state": "normal",  # Track Sigenergy DC curtailment state
+        "alphaess_curtailment_state": "normal",  # Track AlphaESS DC curtailment state
         "amber_usage_coordinator": amber_usage_coordinator,  # For actual metered cost data
         "flow_power_twap_tracker": flow_power_twap_tracker,  # For dynamic PEA pricing
         "flow_power_portal_client": flow_power_portal_client,  # Authenticated portal client
@@ -13985,7 +14057,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 # Use load-following curtailment for supported brands
                 # Limit = home load + battery charge rate (so we don't export but still charge battery)
                 home_load_w = None
-                if inverter_brand in ("zeversolar", "sigenergy", "sungrow", "enphase", "foxess", "huawei", "goodwe", "solax"):
+                if inverter_brand in ("zeversolar", "sigenergy", "sungrow", "enphase", "foxess", "huawei", "goodwe", "solax", "alphaess"):
                     live_status = await get_live_status()
                     if live_status and live_status.get("load_power"):
                         home_load_w = int(live_status.get("load_power", 0))
@@ -15898,6 +15970,84 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.error("Sigenergy curtailment error: %s", e, exc_info=True)
 
+    async def handle_alphaess_curtailment(feedin_price=None, import_price=None) -> None:
+        """Handle AlphaESS DC curtailment via Modbus with zero-export.
+
+        Uses the AlphaESS controller's curtail()/restore() methods which set
+        register 0x0800 (MAX feed-into-grid percent). 0% = block all export
+        while the inverter keeps powering the house and charging the battery.
+        """
+        dc_curtailment_enabled = entry.options.get(
+            CONF_ALPHAESS_DC_CURTAILMENT_ENABLED,
+            entry.data.get(CONF_ALPHAESS_DC_CURTAILMENT_ENABLED, False),
+        )
+        if not dc_curtailment_enabled:
+            _LOGGER.debug("AlphaESS DC curtailment is disabled, skipping")
+            return
+
+        entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        current_state = entry_data.get("alphaess_curtailment_state", "normal")
+
+        if feedin_price is None:
+            _price_coord = (
+                amber_coordinator or localvolts_coordinator
+                or aemo_sensor_coordinator or octopus_coordinator
+            )
+            if _price_coord and _price_coord.data:
+                current_prices = _price_coord.data.get("current", [])
+                for price_data in current_prices:
+                    if price_data.get("channelType") == "feedIn":
+                        feedin_price = price_data.get("perKwh", 0)
+                    elif price_data.get("channelType") == "general":
+                        import_price = price_data.get("perKwh", 0)
+
+        if feedin_price is None:
+            _LOGGER.warning("AlphaESS curtailment: no feed-in price available")
+            return
+
+        export_earnings = -feedin_price
+        _LOGGER.info(
+            "AlphaESS curtailment check: export_earnings=%.2fc/kWh, import=%.2fc/kWh, state=%s",
+            export_earnings, import_price or 0, current_state,
+        )
+
+        ae_coord = entry_data.get("alphaess_coordinator")
+        if not ae_coord or not hasattr(ae_coord, "_controller") or not ae_coord._controller:
+            _LOGGER.debug("AlphaESS curtailment: no controller available")
+            return
+
+        controller = ae_coord._controller
+
+        try:
+            if export_earnings < 1:
+                if current_state == "normal":
+                    _LOGGER.info(
+                        "AlphaESS curtailment TRIGGERED: export_earnings=%.2fc (<1c) → zero export",
+                        export_earnings,
+                    )
+                    success = await controller.curtail()
+                    if success:
+                        hass.data[DOMAIN][entry.entry_id]["alphaess_curtailment_state"] = "curtailed"
+                    else:
+                        _LOGGER.error("AlphaESS curtail() failed")
+                else:
+                    _LOGGER.debug("AlphaESS already curtailed (zero export), no action needed")
+            else:
+                if current_state != "normal":
+                    _LOGGER.info(
+                        "AlphaESS curtailment RESTORED: export_earnings=%.2fc (>=1c) → normal export",
+                        export_earnings,
+                    )
+                    success = await controller.restore()
+                    if success:
+                        hass.data[DOMAIN][entry.entry_id]["alphaess_curtailment_state"] = "normal"
+                    else:
+                        _LOGGER.error("AlphaESS restore() failed")
+                else:
+                    _LOGGER.debug("AlphaESS already in normal mode, no action needed")
+        except Exception as e:
+            _LOGGER.error("AlphaESS curtailment error: %s", e, exc_info=True)
+
     async def handle_solar_curtailment_check(call: ServiceCall = None) -> None:
         """
         Check export prices and curtail solar export when price is below 1c/kWh.
@@ -15938,6 +16088,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Sigenergy uses Modbus-based curtailment, not Tesla API
         if is_sigenergy:
             await handle_sigenergy_curtailment()
+            return
+
+        # AlphaESS uses Modbus-based curtailment, not Tesla API
+        if is_alphaess:
+            await handle_alphaess_curtailment()
             return
 
         # Find an available price coordinator (Amber, AEMO, or Octopus)
@@ -16270,6 +16425,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             feedin_price = websocket_data.get('feedIn', {}).get('perKwh') if websocket_data else None
             import_price = websocket_data.get('general', {}).get('perKwh') if websocket_data else None
             await handle_sigenergy_curtailment(feedin_price=feedin_price, import_price=import_price)
+            return
+
+        # AlphaESS uses Modbus-based curtailment, not Tesla API
+        if is_alphaess:
+            feedin_price = websocket_data.get('feedIn', {}).get('perKwh') if websocket_data else None
+            import_price = websocket_data.get('general', {}).get('perKwh') if websocket_data else None
+            await handle_alphaess_curtailment(feedin_price=feedin_price, import_price=import_price)
             return
 
         _LOGGER.info("=== Starting solar curtailment check (WebSocket event-driven) ===")
@@ -17105,6 +17267,59 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "GoodWe communication error"))
                 return
 
+        # Check if this is an AlphaESS system
+        is_alphaess = bool(entry.data.get(CONF_ALPHAESS_MODBUS_HOST))
+        if is_alphaess:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                alphaess_coord = entry_data.get("alphaess_coordinator")
+                if not alphaess_coord:
+                    force_discharge_state["active"] = False
+                    _LOGGER.error("Force discharge: AlphaESS coordinator not available")
+                    return
+
+                power_w = call.data.get("power_w", 0)
+                discharge_result = await alphaess_coord.force_discharge(duration, power_w=power_w)
+
+                if discharge_result:
+                    force_discharge_state["active"] = True
+                    force_discharge_state["source"] = source
+                    force_discharge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
+                    _LOGGER.info(f"AlphaESS FORCE DISCHARGE ACTIVE for {duration} minutes (power_w={power_w})")
+
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                        "active": True,
+                        "expires_at": force_discharge_state["expires_at"].isoformat(),
+                        "duration": duration,
+                    })
+
+                    if force_discharge_state.get("cancel_expiry_timer"):
+                        force_discharge_state["cancel_expiry_timer"]()
+
+                    async def auto_restore_discharge_alphaess(_now):
+                        if _command_generation[0] != _restore_gen:
+                            _LOGGER.debug("AlphaESS force discharge timer superseded — skipping restore")
+                            return
+                        if force_discharge_state["active"]:
+                            _LOGGER.info("AlphaESS force discharge expired, auto-restoring")
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+
+                    force_discharge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass,
+                        auto_restore_discharge_alphaess,
+                        force_discharge_state["expires_at"],
+                    )
+                    await persist_force_mode_state()
+                else:
+                    force_discharge_state["active"] = False
+                    _LOGGER.error("AlphaESS force discharge failed")
+                return
+            except Exception as e:
+                force_discharge_state["active"] = False
+                _LOGGER.error(f"Error in AlphaESS force discharge: {e}", exc_info=True)
+                hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "AlphaESS Modbus communication error"))
+                return
+
         # Check if this is a Sungrow system
         is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
         if is_sungrow:
@@ -17909,6 +18124,59 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "GoodWe communication error"))
                 return
 
+        # Check if this is an AlphaESS system
+        is_alphaess = bool(entry.data.get(CONF_ALPHAESS_MODBUS_HOST))
+        if is_alphaess:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                alphaess_coord = entry_data.get("alphaess_coordinator")
+                if not alphaess_coord:
+                    force_charge_state["active"] = False
+                    _LOGGER.error("Force charge: AlphaESS coordinator not available")
+                    return
+
+                power_w = call.data.get("power_w", 0)
+                charge_result = await alphaess_coord.force_charge(duration, power_w=power_w)
+
+                if charge_result:
+                    force_charge_state["active"] = True
+                    force_charge_state["source"] = source
+                    force_charge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
+                    _LOGGER.info(f"AlphaESS FORCE CHARGE ACTIVE for {duration} minutes (power_w={power_w})")
+
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
+                        "active": True,
+                        "expires_at": force_charge_state["expires_at"].isoformat(),
+                        "duration": duration,
+                    })
+
+                    if force_charge_state.get("cancel_expiry_timer"):
+                        force_charge_state["cancel_expiry_timer"]()
+
+                    async def auto_restore_charge_alphaess(_now):
+                        if _command_generation[0] != _restore_gen:
+                            _LOGGER.debug("AlphaESS force charge timer superseded — skipping restore")
+                            return
+                        if force_charge_state["active"]:
+                            _LOGGER.info("AlphaESS force charge expired, auto-restoring")
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+
+                    force_charge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass,
+                        auto_restore_charge_alphaess,
+                        force_charge_state["expires_at"],
+                    )
+                    await persist_force_mode_state()
+                else:
+                    force_charge_state["active"] = False
+                    _LOGGER.error("AlphaESS force charge failed")
+                return
+            except Exception as e:
+                force_charge_state["active"] = False
+                _LOGGER.error(f"Error in AlphaESS force charge: {e}", exc_info=True)
+                hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "AlphaESS Modbus communication error"))
+                return
+
         # Check if this is a Sungrow system
         is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
         if is_sungrow:
@@ -18557,6 +18825,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
             except Exception as e:
                 _LOGGER.error(f"Error in GoodWe restore normal: {e}", exc_info=True)
+                return
+
+        # Check if this is an AlphaESS system
+        is_alphaess = bool(entry.data.get(CONF_ALPHAESS_MODBUS_HOST))
+        if is_alphaess:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                alphaess_coord = entry_data.get("alphaess_coordinator")
+                if alphaess_coord:
+                    await alphaess_coord.restore_normal()
+
+                force_charge_state["active"] = False
+                force_discharge_state["active"] = False
+                force_charge_state["expires_at"] = None
+                force_discharge_state["expires_at"] = None
+
+                _LOGGER.info("AlphaESS NORMAL OPERATION RESTORED")
+
+                if not suppress_notification:
+                    try:
+                        from .automations.actions import _send_expo_push
+                        await _send_expo_push(hass, "Battery", "Normal operation restored")
+                    except Exception as notify_err:
+                        _LOGGER.debug(f"Could not send success notification: {notify_err}")
+
+                async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                    "active": False, "expires_at": None, "duration": 0,
+                })
+                async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
+                    "active": False, "expires_at": None, "duration": 0,
+                })
+
+                await persist_force_mode_state()
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error in AlphaESS restore normal: {e}", exc_info=True)
                 return
 
         # Check if this is a Sungrow system
@@ -19670,7 +19974,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     home_load_w = 0
             else:
                 # Load-following mode - get home load for dynamic limiting
-                if inverter_brand in ("zeversolar", "sigenergy", "sungrow", "enphase", "foxess", "huawei", "goodwe", "solax"):
+                if inverter_brand in ("zeversolar", "sigenergy", "sungrow", "enphase", "foxess", "huawei", "goodwe", "solax", "alphaess"):
                     live_status = await get_live_status()
                     if live_status and live_status.get("load_power"):
                         home_load_w = int(live_status.get("load_power", 0))
@@ -20599,7 +20903,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             inverter_host = entry.options.get(CONF_INVERTER_HOST, entry.data.get(CONF_INVERTER_HOST))
 
             # Only brands with load-following curtail() support
-            if inverter_brand not in ("zeversolar", "sigenergy", "sungrow", "enphase", "foxess", "huawei", "goodwe", "solax"):
+            if inverter_brand not in ("zeversolar", "sigenergy", "sungrow", "enphase", "foxess", "huawei", "goodwe", "solax", "alphaess"):
                 return
 
             if not inverter_host:
