@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "powersync"
+version = "2.12.58"
+description = "PowerSync Home Assistant custom integration"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+include = ["custom_components*"]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "pytest-homeassistant-custom-component>=0.13",
+    "hypothesis>=6.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+pythonpath = ["."]
+
+[tool.coverage.run]
+source = ["custom_components/power_sync"]
+omit = ["*/test*"]
+
+[tool.coverage.report]
+fail_under = 0
