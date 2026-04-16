@@ -1125,7 +1125,21 @@
   }
 
   function friendlyEntityName(entityState) {
-    const name = String(entityState?.attributes?.friendly_name || '').trim();
+    let name = String(entityState?.attributes?.friendly_name || '').trim();
+    if (!name) return '';
+    // Clean up raw BLE prefixes for display:
+    //   "Tesla BLE (ble_slater)" → "Slater"
+    //   "Tesla BLE Slater Charge Level" → "Slater"
+    //   "ble_phoenix Power" → "Phoenix"
+    name = name
+      .replace(/^Tesla\s+BLE\s*/i, '')
+      .replace(/^\(?(ble_)/i, '')
+      .replace(/\)$/, '')
+      .replace(/\s*(charge\s*(level|flap|state)|power|battery|charger)\s*$/i, '')
+      .trim();
+    if (name.length > 0) {
+      name = name.charAt(0).toUpperCase() + name.slice(1);
+    }
     return name || '';
   }
 
