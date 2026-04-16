@@ -749,17 +749,18 @@ class AmberPriceCoordinator(DataUpdateCoordinator):
 # Localvolts Price Coordinator
 # ============================================================
 
-def _parse_localvolts_price(value) -> float:
+def _parse_localvolts_price(value) -> float | None:
     """Parse a Localvolts price value, handling 'N/A' and non-numeric values.
 
-    Returns price in c/kWh (same unit as Amber perKwh).
+    Returns price in c/kWh (same unit as Amber perKwh), or None if invalid.
+    $0/kWh is a valid price signal — never use 0.0 as a fallback for missing data.
     """
-    if value is None or value == "N/A" or value == "n/a":
-        return 0.0
+    if value is None or value == "N/A" or value == "n/a" or value == "":
+        return None
     try:
         return float(value)
     except (ValueError, TypeError):
-        return 0.0
+        return None
 
 
 def _localvolts_interval_start(interval_end: str, duration_minutes: int = 5) -> str:
@@ -829,7 +830,8 @@ class LocalvoltsPriceCoordinator(DataUpdateCoordinator):
                 # Export price: earningsFlexUp (c/kWh)
                 # Negate to match Amber convention: Amber feedIn.perKwh is negative
                 # when earning; Localvolts earningsFlexUp is positive when earning
-                export_ckwh = -_parse_localvolts_price(interval.get("earningsFlexUp"))
+                raw_export = _parse_localvolts_price(interval.get("earningsFlexUp"))
+                export_ckwh = -raw_export if raw_export is not None else None
 
                 start_time = _localvolts_interval_start(nem_time, 5)
 

@@ -154,6 +154,7 @@ class SungrowSHController(InverterController):
         self._client: Optional[AsyncModbusTcpClient] = None
         self._lock = asyncio.Lock()
         self._battery_voltage: float = self.BATTERY_VOLTAGE_FALLBACK
+        self._last_valid_soc: Optional[float] = None
         self._original_ems_mode: Optional[int] = None
         self._in_forced_stop: bool = False
         self._ems_registers_supported: bool = (
@@ -1175,7 +1176,17 @@ class SungrowSHController(InverterController):
                     self._to_signed16(battery_regs[1]) * 0.1, 1
                 )
                 data["battery_power"] = self._to_signed16(battery_regs[2])
-                data["battery_soc"] = round(battery_regs[3] * 0.1, 1)
+                raw_soc = battery_regs[3]
+                # 0xFFFF indicates invalid/missing reading from Modbus
+                if raw_soc == 0xFFFF:
+                    data["battery_soc"] = self._last_valid_soc
+                else:
+                    soc = round(raw_soc * 0.1, 1)
+                    if 0 <= soc <= 100:
+                        self._last_valid_soc = soc
+                        data["battery_soc"] = soc
+                    else:
+                        data["battery_soc"] = self._last_valid_soc
                 data["battery_soh"] = round(battery_regs[4] * 0.1, 1)
                 data["battery_temp"] = round(
                     self._to_signed16(battery_regs[5]) * 0.1, 1

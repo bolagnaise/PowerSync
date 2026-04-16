@@ -18,6 +18,7 @@ kicks off ``PowerwallPairingManager``.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -544,6 +545,10 @@ class PowerwallDebugProbeView(HomeAssistantView):
     url = "/api/power_sync/powerwall/debug_probe"
     name = "api:power_sync:powerwall:debug_probe"
     requires_auth = True
+    require_admin = True
+
+    # Allowed path pattern: /api/ followed by alphanumeric segments
+    _PATH_PATTERN = re.compile(r"^/api/[a-z0-9/_-]+$", re.IGNORECASE)
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
@@ -569,7 +574,13 @@ class PowerwallDebugProbeView(HomeAssistantView):
         path = str(payload.get("path", "/api/system_status/grid_status"))
         body = payload.get("body")
         username = str(payload.get("username", "customer"))
-        login_password = str(payload.get("login_password", "")) or password
+
+        # Validate path — must start with /api/ and contain no traversal
+        if ".." in path or not self._PATH_PATTERN.match(path):
+            return web.json_response(
+                {"error": "invalid path — must match /api/<segments>"},
+                status=400,
+            )
 
         # Create insecure SSL context for self-signed gateway cert
         ctx = ssl.create_default_context()
@@ -586,7 +597,7 @@ class PowerwallDebugProbeView(HomeAssistantView):
             login_url = f"https://{host}/api/login/Basic"
             login_body = {
                 "username": username,
-                "password": login_password,
+                "password": password,
                 "email": f"{username}@{username}.domain",
                 "clientInfo": {"timezone": "UTC"},
             }
@@ -621,12 +632,22 @@ class PowerwallCloudProbeView(HomeAssistantView):
     url = "/api/power_sync/powerwall/cloud_probe"
     name = "api:power_sync:powerwall:cloud_probe"
     requires_auth = True
+    require_admin = True
+
+    # Allowlisted Tesla API hostnames — prevents SSRF credential exfiltration
+    _ALLOWED_HOSTS = frozenset({
+        "owner-api.teslamotors.com",
+        "fleet-api.prd.na.vn.cloud.tesla.com",
+        "fleet-api.prd.eu.vn.cloud.tesla.com",
+        "fleet-api.prd.cn.vn.cloud.tesla.com",
+    })
 
     def __init__(self, hass: HomeAssistant) -> None:
         self._hass = hass
 
     async def post(self, request: web.Request) -> web.Response:
         import aiohttp
+        from urllib.parse import urlparse
 
         entry = _get_entry(self._hass)
         if entry is None:
@@ -639,6 +660,14 @@ class PowerwallCloudProbeView(HomeAssistantView):
                 status=503,
             )
 
+        # Validate the configured base URL against allowlist
+        parsed_base = urlparse(base)
+        if parsed_base.hostname not in self._ALLOWED_HOSTS:
+            return web.json_response(
+                {"error": "configured base URL not in Tesla allowlist"},
+                status=403,
+            )
+
         try:
             payload = await request.json()
         except Exception:
@@ -647,11 +676,8 @@ class PowerwallCloudProbeView(HomeAssistantView):
         path_suffix = str(payload.get("path", "island_mode"))
         method = str(payload.get("method", "POST")).upper()
         body = payload.get("body")
-        # Allow overriding the base URL to hit owner-api directly
-        override_base = payload.get("base_url")
-        effective_base = override_base or base
 
-        url = f"{effective_base}/api/1/energy_sites/{site_id}/{path_suffix}"
+        url = f"{base}/api/1/energy_sites/{site_id}/{path_suffix}"
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",

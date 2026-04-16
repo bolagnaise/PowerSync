@@ -364,7 +364,7 @@ async def validate_amber_token(hass: HomeAssistant, api_token: str) -> dict[str,
     except aiohttp.ClientError:
         return {"success": False, "error": "cannot_connect"}
     except Exception as err:
-        _LOGGER.exception("Unexpected error validating Amber token: %s", err)
+        _LOGGER.error("Unexpected error validating Amber token: %s", type(err).__name__)
         return {"success": False, "error": "unknown"}
 
 
@@ -421,10 +421,10 @@ async def validate_teslemetry_token(
                 )
                 return {"success": False, "error": "cannot_connect"}
     except aiohttp.ClientError as err:
-        _LOGGER.exception("Error connecting to Teslemetry API: %s", err)
+        _LOGGER.error("Error connecting to Teslemetry API: %s", type(err).__name__)
         return {"success": False, "error": "cannot_connect"}
     except Exception as err:
-        _LOGGER.exception("Unexpected error validating Teslemetry token: %s", err)
+        _LOGGER.error("Unexpected error validating Teslemetry token: %s", type(err).__name__)
         return {"success": False, "error": "unknown"}
 
 
@@ -467,10 +467,10 @@ async def validate_fleet_api_token(
                 )
                 return {"success": False, "error": "cannot_connect"}
     except aiohttp.ClientError as err:
-        _LOGGER.exception("Error connecting to Fleet API: %s", err)
+        _LOGGER.error("Error connecting to Fleet API: %s", type(err).__name__)
         return {"success": False, "error": "cannot_connect"}
     except Exception as err:
-        _LOGGER.exception("Unexpected error validating Fleet API token: %s", err)
+        _LOGGER.error("Unexpected error validating Fleet API token: %s", type(err).__name__)
         return {"success": False, "error": "unknown"}
 
 
@@ -515,10 +515,10 @@ async def validate_powersync_token(
             )
             return {"success": False, "error": "cannot_connect"}
     except aiohttp.ClientError as err:
-        _LOGGER.exception("Error connecting to PowerSync proxy: %s", err)
+        _LOGGER.error("Error connecting to PowerSync proxy: %s", type(err).__name__)
         return {"success": False, "error": "cannot_connect"}
     except Exception as err:
-        _LOGGER.exception("Unexpected error validating PowerSync token: %s", err)
+        _LOGGER.error("Unexpected error validating PowerSync token: %s", type(err).__name__)
         return {"success": False, "error": "unknown"}
 
 
@@ -607,7 +607,7 @@ async def validate_sigenergy_credentials(
         return result
 
     except Exception as err:
-        _LOGGER.exception("Unexpected error validating Sigenergy credentials: %s", err)
+        _LOGGER.error("Unexpected error validating Sigenergy credentials: %s", type(err).__name__)
         return {"success": False, "error": "unknown"}
 
 

@@ -402,16 +402,15 @@ class EnphaseController(InverterController):
                         await self._validate_token_locally()
                         return token
                     else:
-                        _LOGGER.error(f"Invalid token response from Enlighten (len={len(token)}): {token[:100]}")
+                        _LOGGER.error("Invalid token response from Enlighten (length=%d)", len(token))
                 else:
-                    text = await response.text()
                     _LOGGER.error(
-                        "Entrez token request failed: status=%s, response=%s",
-                        response.status, text[:300],
+                        "Entrez token request failed: status=%s",
+                        response.status,
                     )
 
         except Exception as e:
-            _LOGGER.error(f"Error getting token from Enlighten: {e}")
+            _LOGGER.error("Error getting token from Enlighten: %s", type(e).__name__)
 
         return None
 
