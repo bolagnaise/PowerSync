@@ -1414,8 +1414,13 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             update_interval=UPDATE_INTERVAL_ENERGY,
         )
 
-    def _get_current_token(self) -> str:
-        """Get the current API token, fetching fresh if token_getter is available."""
+    def _get_current_token(self) -> str | None:
+        """Get the current API token, fetching fresh if token_getter is available.
+
+        Returns None if token_getter is set but returned no token — callers must
+        treat this as a transient failure and raise UpdateFailed rather than
+        falling back to the potentially stale startup token.
+        """
         if self._token_getter:
             try:
                 token, provider = self._token_getter()
@@ -1429,10 +1434,14 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                             self.api_base_url = FLEET_API_BASE_URL
                         else:
                             self.api_base_url = TESLEMETRY_API_BASE_URL
-                        _LOGGER.debug(f"Token provider changed to {provider}")
+                        _LOGGER.debug("Token provider changed to %s", provider)
                     return token
+                # token_getter returned None — fleet integration may be mid-refresh
+                _LOGGER.warning("Token getter returned no token (fleet integration may be refreshing) — skipping poll")
+                return None
             except Exception as e:
-                _LOGGER.warning(f"Token getter failed, using fallback token: {e}")
+                _LOGGER.warning("Token getter failed — skipping poll: %s", e)
+                return None
         return self._api_token
 
     async def _async_update_data(self) -> dict[str, Any]:
@@ -1441,6 +1450,8 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             await self._energy_acc.async_restore()
 
         current_token = self._get_current_token()
+        if not current_token:
+            raise UpdateFailed("Tesla token temporarily unavailable — will retry next poll")
         headers = {
             "Authorization": f"Bearer {current_token}",
             "Content-Type": "application/json",

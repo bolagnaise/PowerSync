@@ -1179,11 +1179,12 @@ class AEMOSpikeManager:
             threshold,
         )
 
-    def _get_current_token(self) -> tuple[str, str]:
+    def _get_current_token(self) -> tuple[str | None, str]:
         """Get the current API token, fetching fresh if token_getter is available.
 
-        Returns:
-            tuple: (token, provider)
+        Returns None as the token if token_getter is set but returned no token —
+        callers should treat this as a transient failure rather than using the
+        potentially stale startup token.
         """
         if self._token_getter:
             try:
@@ -1191,8 +1192,11 @@ class AEMOSpikeManager:
                 if token:
                     self.api_provider = provider
                     return token, provider
+                _LOGGER.warning("Token getter returned no token (fleet integration may be refreshing)")
+                return None, self.api_provider
             except Exception as e:
-                _LOGGER.warning(f"Token getter failed, using fallback token: {e}")
+                _LOGGER.warning("Token getter failed: %s", e)
+                return None, self.api_provider
         return self._api_token, self.api_provider
 
     @property
@@ -1257,6 +1261,9 @@ class AEMOSpikeManager:
         try:
             # Get fresh token in case it was refreshed by tesla_fleet integration
             current_token, current_provider = self._get_current_token()
+            if not current_token:
+                _LOGGER.warning("Cannot enter spike mode — token temporarily unavailable")
+                return
             session = async_get_clientsession(self.hass)
             headers = {
                 "Authorization": f"Bearer {current_token}",
@@ -1354,6 +1361,9 @@ class AEMOSpikeManager:
         try:
             # Get fresh token in case it was refreshed by tesla_fleet integration
             current_token, current_provider = self._get_current_token()
+            if not current_token:
+                _LOGGER.warning("Cannot exit spike mode — token temporarily unavailable")
+                return
             session = async_get_clientsession(self.hass)
             headers = {
                 "Authorization": f"Bearer {current_token}",
@@ -1761,7 +1771,7 @@ class SavingSessionTariffManager:
 
         _LOGGER.info("Saving Session Tariff Manager initialized for Tesla site %s", site_id)
 
-    def _get_current_token(self) -> tuple[str, str]:
+    def _get_current_token(self) -> tuple[str | None, str]:
         """Get the current API token."""
         if self._token_getter:
             try:
@@ -1769,8 +1779,11 @@ class SavingSessionTariffManager:
                 if token:
                     self.api_provider = provider
                     return token, provider
+                _LOGGER.warning("Token getter returned no token (fleet integration may be refreshing)")
+                return None, self.api_provider
             except Exception as e:
-                _LOGGER.warning("Token getter failed, using fallback: %s", e)
+                _LOGGER.warning("Token getter failed: %s", e)
+                return None, self.api_provider
         return self._api_token, self.api_provider
 
     @property
@@ -1805,6 +1818,9 @@ class SavingSessionTariffManager:
 
         try:
             current_token, current_provider = self._get_current_token()
+            if not current_token:
+                _LOGGER.warning("Cannot enter session mode — token temporarily unavailable")
+                return
             session_http = async_get_clientsession(self.hass)
             headers = {
                 "Authorization": f"Bearer {current_token}",
@@ -1944,6 +1960,9 @@ class SavingSessionTariffManager:
 
         try:
             current_token, current_provider = self._get_current_token()
+            if not current_token:
+                _LOGGER.warning("Cannot exit session mode — token temporarily unavailable")
+                return
             session_http = async_get_clientsession(self.hass)
             headers = {
                 "Authorization": f"Bearer {current_token}",
