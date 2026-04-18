@@ -553,30 +553,25 @@ class PowerwallLocalClient:
                     if resp.status != 200:
                         return None
 
-                    # Fleet API returns JSON with a base64 "response" field containing
-                    # the gateway's RoutableMessage response bytes.
+                    # Fleet API response: {"response": {"message_envelope_as_bytes": "<b64>"}}
+                    # The value is a MessageEnvelope serialised directly (not wrapped in RoutableMessage).
                     try:
                         resp_json = _json.loads(body)
-                        response_b64 = (
-                            resp_json.get("response")
-                            or resp_json.get("result")
-                            or resp_json.get("data", {}).get("response")
+                        envelope_b64 = (
+                            resp_json.get("response", {}).get("message_envelope_as_bytes")
                         )
-                        if response_b64:
-                            resp_bytes = base64.b64decode(response_b64)
-                            routable = combined_pb2.RoutableMessage()
-                            routable.ParseFromString(resp_bytes)
-                            inner = routable.protobuf_message_as_bytes
-                            if inner:
-                                env_resp = combined_pb2.MessageEnvelope()
-                                env_resp.ParseFromString(inner)
-                                if env_resp.HasField("filestore"):
-                                    blob = env_resp.filestore.readFileResponse.file.blob
-                                    result = _json.loads(blob.decode("utf-8"))
-                                    _LOGGER.warning("SPIKE: decoded config blob keys: %s", list(result.keys()))
-                                    return result
-                                _LOGGER.warning("SPIKE: response had no filestore field — inner envelope fields: %s", env_resp.ListFields())
-                        _LOGGER.warning("SPIKE: could not find response bytes in: %s", list(resp_json.keys()))
+                        if envelope_b64:
+                            env_bytes = base64.b64decode(envelope_b64)
+                            env_resp = combined_pb2.MessageEnvelope()
+                            env_resp.ParseFromString(env_bytes)
+                            if env_resp.HasField("filestore"):
+                                blob = env_resp.filestore.readFileResponse.file.blob
+                                result = _json.loads(blob.decode("utf-8"))
+                                _LOGGER.warning("SPIKE: SUCCESS — decoded config blob keys: %s", list(result.keys()))
+                                return result
+                            _LOGGER.warning("SPIKE: envelope had no filestore — fields: %s", [f[0].name for f in env_resp.ListFields()])
+                        else:
+                            _LOGGER.warning("SPIKE: no message_envelope_as_bytes in response keys: %s", list(resp_json.get("response", {}).keys()))
                     except Exception as decode_err:
                         _LOGGER.error("SPIKE: decode failed: %s", decode_err)
         except Exception as err:
