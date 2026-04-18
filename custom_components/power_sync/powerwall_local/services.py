@@ -34,6 +34,7 @@ _LOGGER = logging.getLogger(__name__)
 SERVICE_GO_OFF_GRID = "powerwall_go_off_grid"
 SERVICE_RECONNECT_GRID = "powerwall_reconnect_grid"
 SERVICE_VERIFY_PAIRING = "powerwall_verify_pairing"
+SERVICE_TEST_SIGNED_READ = "powerwall_test_signed_read"  # SPIKE — remove after go/no-go
 
 GO_OFF_GRID_SCHEMA = vol.Schema(
     {
@@ -94,6 +95,22 @@ async def _handle_reconnect_grid(hass: HomeAssistant, call: ServiceCall) -> None
         raise HomeAssistantError("Gateway rejected reconnect command")
 
 
+async def _handle_test_signed_read(hass: HomeAssistant, call: ServiceCall) -> None:
+    """SPIKE: send a signed filestore.readFileRequest via Fleet API and log the result."""
+    entry = _get_entry(hass)
+    if entry is None:
+        raise HomeAssistantError("PowerSync not configured")
+    coordinator = await ensure_coordinator(hass, entry)
+    if coordinator is None or coordinator.client is None:
+        raise HomeAssistantError("Powerwall local client unavailable")
+    result = await coordinator.client.test_signed_read_via_fleet()
+    if result is None:
+        raise HomeAssistantError(
+            "Signed read returned no data — check Home Assistant logs (filter: SPIKE) for details"
+        )
+    _LOGGER.info("SPIKE result: %s", result)
+
+
 async def _handle_verify_pairing(hass: HomeAssistant, call: ServiceCall) -> None:
     entry = _get_entry(hass)
     if entry is None:
@@ -144,5 +161,16 @@ def register_services(hass: HomeAssistant) -> None:
             DOMAIN,
             SERVICE_VERIFY_PAIRING,
             verify_pairing,
+            schema=vol.Schema({}),
+        )
+
+    async def test_signed_read(call: ServiceCall) -> None:
+        await _handle_test_signed_read(hass, call)
+
+    if not hass.services.has_service(DOMAIN, SERVICE_TEST_SIGNED_READ):
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_TEST_SIGNED_READ,
+            test_signed_read,
             schema=vol.Schema({}),
         )

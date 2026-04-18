@@ -482,6 +482,107 @@ class PowerwallLocalClient:
             _LOGGER.error("signed_device_command %s error: %s", action, err)
             return False
 
+    async def test_signed_read_via_fleet(self) -> dict | None:
+        """SPIKE: send a signed filestore.readFileRequest via Fleet API device_command.
+
+        Same signing path as island-mode cloud relay, but the inner MessageEnvelope
+        carries filestore.readFileRequest instead of teg.setIslandModeRequest.
+        Goal: prove Fleet API relays non-TEG envelopes and returns gateway config.
+        Remove this method after go/no-go decision.
+        """
+        import base64
+        import json as _json
+
+        import aiohttp
+
+        from . import tedapi_combined_pb2 as combined_pb2
+
+        if not self._fleet_api_base or not self._fleet_api_token or not self._energy_site_id:
+            _LOGGER.warning("SPIKE: fleet_api not configured, cannot test")
+            return None
+        if not self._transport or not self._din:
+            _LOGGER.warning("SPIKE: transport/din not ready, cannot test")
+            return None
+
+        # Build the same envelope that read_config() uses on LAN
+        msg = combined_pb2.Message()
+        envelope = msg.message
+        envelope.deliveryChannel = combined_pb2.DELIVERY_CHANNEL_HERMES_COMMAND
+        envelope.sender.authorizedClient = 1
+        envelope.recipient.din = self._din
+        req = envelope.filestore.readFileRequest
+        req.domain = combined_pb2.FILE_STORE_API_DOMAIN_CONFIG_JSON
+        req.name = "config.json"
+
+        # Sign identically to island-mode cloud path
+        try:
+            signed_bytes = self._transport.build_signed_bytes(
+                envelope.SerializeToString(), self._din
+            )
+        except Exception as err:
+            _LOGGER.error("SPIKE: signing failed: %s", err)
+            return None
+
+        msg_b64 = base64.b64encode(signed_bytes).decode()
+        url = (
+            f"{self._fleet_api_base}/api/1/energy_sites/"
+            f"{self._energy_site_id}/device_command"
+        )
+        payload = {
+            "data": {
+                "target_id": self._din,
+                "routable_message": msg_b64,
+                "command_timeout_s": 10,
+                "identifier_type": 1,
+            }
+        }
+        headers = {
+            "Authorization": f"Bearer {self._fleet_api_token}",
+            "Content-Type": "application/json",
+        }
+
+        _LOGGER.info("SPIKE: posting signed readFileRequest to Fleet API %s", url)
+        try:
+            async with aiohttp.ClientSession() as sess:
+                async with sess.post(
+                    url, json=payload, headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=35),
+                ) as resp:
+                    body = await resp.text()
+                    _LOGGER.info("SPIKE: HTTP %d — %s", resp.status, body[:2000])
+                    if resp.status != 200:
+                        return None
+
+                    # Fleet API returns JSON with a base64 "response" field containing
+                    # the gateway's RoutableMessage response bytes.
+                    try:
+                        resp_json = _json.loads(body)
+                        response_b64 = (
+                            resp_json.get("response")
+                            or resp_json.get("result")
+                            or resp_json.get("data", {}).get("response")
+                        )
+                        if response_b64:
+                            resp_bytes = base64.b64decode(response_b64)
+                            routable = combined_pb2.RoutableMessage()
+                            routable.ParseFromString(resp_bytes)
+                            inner = routable.protobuf_message_as_bytes
+                            if inner:
+                                env_resp = combined_pb2.MessageEnvelope()
+                                env_resp.ParseFromString(inner)
+                                if env_resp.HasField("filestore"):
+                                    blob = env_resp.filestore.readFileResponse.file.blob
+                                    result = _json.loads(blob.decode("utf-8"))
+                                    _LOGGER.info("SPIKE: decoded config blob keys: %s", list(result.keys()))
+                                    return result
+                                _LOGGER.info("SPIKE: response had no filestore field — inner envelope fields: %s", env_resp.ListFields())
+                        _LOGGER.info("SPIKE: could not find response bytes in: %s", list(resp_json.keys()))
+                    except Exception as decode_err:
+                        _LOGGER.error("SPIKE: decode failed: %s", decode_err)
+        except Exception as err:
+            _LOGGER.error("SPIKE: request error: %s", err)
+        return None
+
     async def verify_paired(self) -> bool:
         """Best-effort check that the RSA key is still accepted.
 
