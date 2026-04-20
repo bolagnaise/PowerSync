@@ -15449,7 +15449,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Signal the tariff schedule sensor to update
         async_dispatcher_send(hass, f"power_sync_tariff_updated_{entry.entry_id}")
 
-        # Send tariff to Tesla via Teslemetry or Fleet API
+        # Send tariff to Tesla via Teslemetry or Fleet API (non-Tesla systems exit here)
+        if token_getter is None:
+            return
+
         # Blocked in monitoring mode — tariff_schedule already stored above for display
         if _is_monitoring_mode():
             _LOGGER.info("[MONITORING] Tariff schedule updated for display; Tesla sync blocked by monitoring mode")
@@ -19981,7 +19984,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         try:
             site_configs = _get_tesla_site_configs(hass, entry)
             if not site_configs:
-                _LOGGER.error("Missing Tesla site ID or token for set_grid_export")
+                _LOGGER.debug("set_grid_export: no Tesla site config (non-Tesla system)")
                 return
 
             session = async_get_clientsession(hass)

@@ -1020,7 +1020,10 @@ async def _action_preserve_charge(
         finally:
             await controller.disconnect()
 
-    from ..const import DOMAIN, SERVICE_SET_GRID_EXPORT
+    from ..const import CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA, DOMAIN, SERVICE_SET_GRID_EXPORT
+    if config_entry.data.get(CONF_BATTERY_SYSTEM) != BATTERY_SYSTEM_TESLA:
+        _LOGGER.debug("preserve_charge via grid export not supported for non-Tesla systems")
+        return False
 
     try:
         await hass.services.async_call(
@@ -1395,11 +1398,10 @@ async def _action_set_grid_export(
     params: Dict[str, Any]
 ) -> bool:
     """Set grid export rule (Tesla only)."""
-    if _is_sigenergy(config_entry):
-        _LOGGER.warning("set_grid_export not supported for Sigenergy")
+    from ..const import CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA, DOMAIN, SERVICE_SET_GRID_EXPORT
+    if config_entry.data.get(CONF_BATTERY_SYSTEM) != BATTERY_SYSTEM_TESLA:
+        _LOGGER.debug("set_grid_export not supported for non-Tesla systems")
         return False
-
-    from ..const import DOMAIN, SERVICE_SET_GRID_EXPORT
 
     # Accept both "rule" and "grid_export_rule" for flexibility
     rule = params.get("rule") or params.get("grid_export_rule")
