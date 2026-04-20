@@ -49,6 +49,8 @@ from .const import (
     SENSOR_TYPE_DAILY_LOAD,
     SENSOR_TYPE_DAILY_IMPORT_COST,
     SENSOR_TYPE_DAILY_EXPORT_EARNINGS,
+    SENSOR_TYPE_DAILY_AVG_COST_PER_KWH,
+    SENSOR_TYPE_MTD_AVG_COST_PER_KWH,
     SENSOR_TYPE_GRID_IMPORT_POWER,
     SENSOR_TYPE_IN_DEMAND_CHARGE_PERIOD,
     SENSOR_TYPE_PEAK_DEMAND_THIS_CYCLE,
@@ -384,6 +386,24 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
         suggested_display_precision=2,
         icon="mdi:cash-plus",
         value_fn=lambda data: data.get("energy_summary", {}).get("export_earnings_today") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_DAILY_AVG_COST_PER_KWH,
+        name="Average Cost per kWh Today",
+        native_unit_of_measurement=f"{CURRENCY_DOLLAR}/kWh",
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=3,
+        icon="mdi:cash-clock",
+        value_fn=lambda data: data.get("energy_summary", {}).get("avg_cost_per_kwh_today") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_MTD_AVG_COST_PER_KWH,
+        name="Average Cost per kWh Month to Date",
+        native_unit_of_measurement=f"{CURRENCY_DOLLAR}/kWh",
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=3,
+        icon="mdi:calendar-month",
+        value_fn=lambda data: data.get("energy_summary", {}).get("avg_cost_per_kwh_mtd") if data else None,
     ),
 )
 

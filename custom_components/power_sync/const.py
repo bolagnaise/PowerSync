@@ -957,6 +957,8 @@ SENSOR_TYPE_DAILY_BATTERY_DISCHARGE = "daily_battery_discharge"
 SENSOR_TYPE_DAILY_LOAD = "daily_load"
 SENSOR_TYPE_DAILY_IMPORT_COST = "daily_import_cost"
 SENSOR_TYPE_DAILY_EXPORT_EARNINGS = "daily_export_earnings"
+SENSOR_TYPE_DAILY_AVG_COST_PER_KWH = "daily_avg_cost_per_kwh"
+SENSOR_TYPE_MTD_AVG_COST_PER_KWH = "mtd_avg_cost_per_kwh"
 
 # Demand charge sensors
 SENSOR_TYPE_GRID_IMPORT_POWER = "grid_import_power"

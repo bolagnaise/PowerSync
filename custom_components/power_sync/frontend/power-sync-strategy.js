@@ -676,6 +676,12 @@ class PowerSyncStrategy {
       if (hasE('daily_export_earnings')) {
         costEntities.push({ entity: e('daily_export_earnings'), name: 'Export Earnings Today', icon: 'mdi:cash-plus' });
       }
+      if (hasE('daily_avg_cost_per_kwh')) {
+        costEntities.push({ entity: e('daily_avg_cost_per_kwh'), name: 'Avg Cost per kWh (Today)', icon: 'mdi:cash-clock' });
+      }
+      if (hasE('mtd_avg_cost_per_kwh')) {
+        costEntities.push({ entity: e('mtd_avg_cost_per_kwh'), name: 'Avg Cost per kWh (Month)', icon: 'mdi:calendar-month' });
+      }
       center.push({
         type: 'entities',
         title: 'Daily Cost Tracking',

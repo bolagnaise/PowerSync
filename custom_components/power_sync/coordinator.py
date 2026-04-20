@@ -59,6 +59,15 @@ class EnergyAccumulator:
         self.load_kwh: float = 0.0
         self.import_cost_today: float = 0.0
         self.export_earnings_today: float = 0.0
+        self.mtd_solar_kwh: float = 0.0
+        self.mtd_grid_import_kwh: float = 0.0
+        self.mtd_grid_export_kwh: float = 0.0
+        self.mtd_battery_charge_kwh: float = 0.0
+        self.mtd_battery_discharge_kwh: float = 0.0
+        self.mtd_load_kwh: float = 0.0
+        self.mtd_import_cost: float = 0.0
+        self.mtd_export_earnings: float = 0.0
+        self._last_month: Any = None
         self._store: Store | None = None
         if hass and store_key:
             self._store = Store(
@@ -102,6 +111,17 @@ class EnergyAccumulator:
                 "Energy accumulator data from %s (today=%s), starting fresh",
                 stored_date, today,
             )
+        stored_month = data.get("month")
+        current_month = dt_util.now().strftime("%Y-%m")
+        if stored_month == current_month:
+            self.mtd_solar_kwh = float(data.get("mtd_solar_kwh", 0.0))
+            self.mtd_grid_import_kwh = float(data.get("mtd_grid_import_kwh", 0.0))
+            self.mtd_grid_export_kwh = float(data.get("mtd_grid_export_kwh", 0.0))
+            self.mtd_battery_charge_kwh = float(data.get("mtd_battery_charge_kwh", 0.0))
+            self.mtd_battery_discharge_kwh = float(data.get("mtd_battery_discharge_kwh", 0.0))
+            self.mtd_load_kwh = float(data.get("mtd_load_kwh", 0.0))
+            self.mtd_import_cost = float(data.get("mtd_import_cost", 0.0))
+            self.mtd_export_earnings = float(data.get("mtd_export_earnings", 0.0))
 
     async def async_flush(self) -> None:
         """Immediately write current energy data to persistent storage.
@@ -134,6 +154,15 @@ class EnergyAccumulator:
             "load_kwh": round(self.load_kwh, 4),
             "import_cost_today": round(self.import_cost_today, 4),
             "export_earnings_today": round(self.export_earnings_today, 4),
+            "month": dt_util.now().strftime("%Y-%m"),
+            "mtd_solar_kwh": round(self.mtd_solar_kwh, 4),
+            "mtd_grid_import_kwh": round(self.mtd_grid_import_kwh, 4),
+            "mtd_grid_export_kwh": round(self.mtd_grid_export_kwh, 4),
+            "mtd_battery_charge_kwh": round(self.mtd_battery_charge_kwh, 4),
+            "mtd_battery_discharge_kwh": round(self.mtd_battery_discharge_kwh, 4),
+            "mtd_load_kwh": round(self.mtd_load_kwh, 4),
+            "mtd_import_cost": round(self.mtd_import_cost, 4),
+            "mtd_export_earnings": round(self.mtd_export_earnings, 4),
         }
 
     def update(
@@ -158,6 +187,17 @@ class EnergyAccumulator:
             sell_price_per_kwh: current export/feed-in price in $/kWh (None = skip cost tracking)
         """
         now = dt_util.now()  # Local time for midnight reset
+
+        # Reset MTD at month rollover
+        if self._last_month is not None and now.month != self._last_month:
+            self.mtd_solar_kwh = 0.0
+            self.mtd_grid_import_kwh = 0.0
+            self.mtd_grid_export_kwh = 0.0
+            self.mtd_battery_charge_kwh = 0.0
+            self.mtd_battery_discharge_kwh = 0.0
+            self.mtd_load_kwh = 0.0
+            self.mtd_import_cost = 0.0
+            self.mtd_export_earnings = 0.0
 
         # Reset at local midnight
         if self._last_date is not None and now.date() != self._last_date:
@@ -192,13 +232,33 @@ class EnergyAccumulator:
                     self.import_cost_today += max(0, grid_kw) * buy_price_per_kwh * delta_h
                 if sell_price_per_kwh is not None:
                     self.export_earnings_today += max(0, -grid_kw) * sell_price_per_kwh * delta_h
+                # MTD accumulation
+                self.mtd_solar_kwh += max(0, solar_kw) * delta_h
+                self.mtd_grid_import_kwh += max(0, grid_kw) * delta_h
+                self.mtd_grid_export_kwh += max(0, -grid_kw) * delta_h
+                self.mtd_battery_charge_kwh += max(0, -battery_kw) * delta_h
+                self.mtd_battery_discharge_kwh += max(0, battery_kw) * delta_h
+                self.mtd_load_kwh += max(0, load_kw) * delta_h
+                if buy_price_per_kwh is not None:
+                    self.mtd_import_cost += max(0, grid_kw) * buy_price_per_kwh * delta_h
+                if sell_price_per_kwh is not None:
+                    self.mtd_export_earnings += max(0, -grid_kw) * sell_price_per_kwh * delta_h
                 self._schedule_save()
 
         self._last_update = now
         self._last_date = now.date()
+        self._last_month = now.month
 
-    def as_dict(self) -> dict[str, float]:
+    def as_dict(self) -> dict:
         """Return accumulated totals as a dict for energy_summary."""
+        avg_today = (
+            round((self.import_cost_today - self.export_earnings_today) / self.load_kwh, 4)
+            if self.load_kwh > 0 else None
+        )
+        avg_mtd = (
+            round((self.mtd_import_cost - self.mtd_export_earnings) / self.mtd_load_kwh, 4)
+            if self.mtd_load_kwh > 0 else None
+        )
         return {
             "pv_today_kwh": round(self.solar_kwh, 3),
             "grid_import_today_kwh": round(self.grid_import_kwh, 3),
@@ -208,6 +268,11 @@ class EnergyAccumulator:
             "load_today_kwh": round(self.load_kwh, 3),
             "import_cost_today": round(self.import_cost_today, 4),
             "export_earnings_today": round(self.export_earnings_today, 4),
+            "avg_cost_per_kwh_today": avg_today,
+            "mtd_import_cost": round(self.mtd_import_cost, 4),
+            "mtd_export_earnings": round(self.mtd_export_earnings, 4),
+            "mtd_load_kwh": round(self.mtd_load_kwh, 3),
+            "avg_cost_per_kwh_mtd": avg_mtd,
         }
 
 
@@ -3514,6 +3579,15 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 daily_pv + final_import + (daily_discharge or 0) - final_export - (daily_charge or 0)
             ), 2)
 
+        # Recompute daily avg using possibly-overridden load from hardware registers
+        load_kwh = summary.get("load_today_kwh", 0.0) or 0.0
+        if load_kwh > 0:
+            import_cost = summary.get("import_cost_today", 0.0) or 0.0
+            export_earn = summary.get("export_earnings_today", 0.0) or 0.0
+            summary["avg_cost_per_kwh_today"] = round((import_cost - export_earn) / load_kwh, 4)
+        else:
+            summary["avg_cost_per_kwh_today"] = None
+
         return summary
 
     async def _async_update_data(self) -> dict[str, Any]:
@@ -3861,10 +3935,21 @@ class DualSungrowCoordinator(DataUpdateCoordinator):
             "pv_today_kwh", "grid_import_today_kwh", "grid_export_today_kwh",
             "charge_today_kwh", "discharge_today_kwh", "load_today_kwh",
             "import_cost_today", "export_earnings_today",
+            "mtd_import_cost", "mtd_export_earnings", "mtd_load_kwh",
         ):
             combined_energy[key] = round(
                 (es1.get(key, 0) or 0) + (es2.get(key, 0) or 0), 4
             )
+        load_today = combined_energy.get("load_today_kwh", 0) or 0
+        combined_energy["avg_cost_per_kwh_today"] = (
+            round((combined_energy["import_cost_today"] - combined_energy["export_earnings_today"]) / load_today, 4)
+            if load_today > 0 else None
+        )
+        mtd_load = combined_energy.get("mtd_load_kwh", 0) or 0
+        combined_energy["avg_cost_per_kwh_mtd"] = (
+            round((combined_energy["mtd_import_cost"] - combined_energy["mtd_export_earnings"]) / mtd_load, 4)
+            if mtd_load > 0 else None
+        )
 
         return {
             "solar_power": max(0, solar),

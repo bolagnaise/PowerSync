@@ -3023,6 +3023,11 @@ class CalendarHistoryView(HomeAssistantView):
             if not cost_summary and tariff_schedule:
                 cost_summary = _calculate_cost_from_tariff(tariff_schedule, time_series)
             if cost_summary:
+                load_kwh = sum(e.get("home_consumption", 0) for e in time_series) / 1000
+                if load_kwh > 0:
+                    cost_summary["avg_cost_per_kwh"] = round(
+                        ((cost_summary.get("import_cost") or 0) - (cost_summary.get("export_earnings") or 0)) / load_kwh, 4
+                    )
                 result["cost_summary"] = cost_summary
             return web.json_response(result)
 
@@ -3055,6 +3060,11 @@ class CalendarHistoryView(HomeAssistantView):
             if not cost_summary and tariff_schedule:
                 cost_summary = _calculate_cost_from_tariff(tariff_schedule, time_series)
             if cost_summary:
+                load_kwh = sum(e.get("home_consumption", 0) for e in time_series) / 1000
+                if load_kwh > 0:
+                    cost_summary["avg_cost_per_kwh"] = round(
+                        ((cost_summary.get("import_cost") or 0) - (cost_summary.get("export_earnings") or 0)) / load_kwh, 4
+                    )
                 result["cost_summary"] = cost_summary
             return web.json_response(result)
 
@@ -3083,6 +3093,11 @@ class CalendarHistoryView(HomeAssistantView):
             if not cost_summary and tariff_schedule:
                 cost_summary = _calculate_cost_from_tariff(tariff_schedule, time_series)
             if cost_summary:
+                load_kwh = sum(e.get("home_consumption", 0) for e in time_series) / 1000
+                if load_kwh > 0:
+                    cost_summary["avg_cost_per_kwh"] = round(
+                        ((cost_summary.get("import_cost") or 0) - (cost_summary.get("export_earnings") or 0)) / load_kwh, 4
+                    )
                 result["cost_summary"] = cost_summary
             return web.json_response(result)
 
@@ -3163,6 +3178,11 @@ class CalendarHistoryView(HomeAssistantView):
         if not cost_summary and tariff_schedule:
             cost_summary = _calculate_cost_from_tariff(tariff_schedule, time_series)
         if cost_summary:
+            load_kwh = sum(e.get("home_consumption", 0) for e in time_series) / 1000
+            if load_kwh > 0:
+                cost_summary["avg_cost_per_kwh"] = round(
+                    ((cost_summary.get("import_cost") or 0) - (cost_summary.get("export_earnings") or 0)) / load_kwh, 4
+                )
             result["cost_summary"] = cost_summary
 
         _LOGGER.info(f"✅ Calendar history HTTP response: {len(time_series)} records for period '{period}'")
