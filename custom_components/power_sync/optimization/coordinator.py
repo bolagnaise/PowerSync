@@ -280,8 +280,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             (now - forecast_start).total_seconds() / 60 / interval_minutes
         )
 
-        today_remaining_w = []
-        tomorrow_w = []
+        today_remaining_kw = []
+        tomorrow_kw = []
         slot_time = forecast_start + elapsed_intervals * timedelta(minutes=interval_minutes)
         local_midnight_today = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
         local_midnight_tomorrow = local_midnight_today + timedelta(days=1)
@@ -293,13 +293,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         def _flush_hour(vals: list[float], ts: datetime | None, target: list) -> None:
             if vals and ts is not None:
-                avg_kw = (sum(vals) / len(vals)) / 1000
+                # vals are in kW; average kW * 1h = kWh for a 1-hour bucket
+                avg_kw = sum(vals) / len(vals)
                 target.append({"period_start": ts.isoformat(), "load_kwh": round(avg_kw * 1, 3)})
 
-        for i, load_w in enumerate(self._last_load_forecast[elapsed_intervals:], start=elapsed_intervals):
+        for i, load_kw in enumerate(self._last_load_forecast[elapsed_intervals:], start=elapsed_intervals):
             if i >= len(self._last_load_forecast):
                 break
-            load_w = self._last_load_forecast[i]
+            load_kw = self._last_load_forecast[i]
             local_slot = dt_util.as_local(slot_time)
 
             slot_hour_ts = local_slot.replace(minute=0, second=0, microsecond=0)
@@ -313,24 +314,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 current_hour_vals = []
                 current_hour_ts = slot_hour_ts
 
-            current_hour_vals.append(load_w)
+            current_hour_vals.append(load_kw)
             if slot_time <= local_midnight_today:
-                today_remaining_w.append(load_w)
+                today_remaining_kw.append(load_kw)
             elif slot_time <= local_midnight_tomorrow:
-                tomorrow_w.append(load_w)
+                tomorrow_kw.append(load_kw)
             else:
                 break
 
             slot_time += timedelta(minutes=interval_minutes)
 
-        today_remaining_kwh = sum(today_remaining_w) * dt_h / 1000 if today_remaining_w else 0
-        tomorrow_kwh = sum(tomorrow_w) * dt_h / 1000 if tomorrow_w else 0
-        all_forecast_kw = [w / 1000 for w in self._last_load_forecast]
+        # _last_load_forecast is in kW; multiply by interval hours to get kWh
+        today_remaining_kwh = sum(today_remaining_kw) * dt_h if today_remaining_kw else 0
+        tomorrow_kwh = sum(tomorrow_kw) * dt_h if tomorrow_kw else 0
 
         return {
             "today_remaining_kwh": round(today_remaining_kwh, 2),
             "tomorrow_kwh": round(tomorrow_kwh, 2),
-            "peak_kw": round(max(all_forecast_kw) if all_forecast_kw else 0, 2),
+            "peak_kw": round(max(self._last_load_forecast) if self._last_load_forecast else 0, 2),
             "hourly_today_remaining": hourly_remaining,
             "hourly_tomorrow": hourly_tomorrow,
             "temperature_adjusted": (
