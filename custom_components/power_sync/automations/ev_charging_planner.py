@@ -461,10 +461,15 @@ async def is_ev_plugged_in(
                 state = hass.states.get(status_entity)
                 if state:
                     status = state.state.lower()
-                    plugged = status in (
-                        "charging", "preparing", "suspended_evse",
-                        "suspended_ev", "finishing",
-                    )
+                    if status_entity.startswith("binary_sensor."):
+                        # Binary sensors: "on" = vehicle connected
+                        plugged = status == "on"
+                    else:
+                        # OCPP/charger status sensors
+                        plugged = status in (
+                            "charging", "preparing", "suspended_evse",
+                            "suspended_ev", "finishing",
+                        )
                     _LOGGER.debug(
                         "Generic charger plugged_in check: %s state=%s → %s",
                         status_entity, state.state, plugged,
