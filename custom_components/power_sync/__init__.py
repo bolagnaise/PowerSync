@@ -12540,20 +12540,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # after coordinators are initialized
         websocket_sync_callback = None
 
-        # Fetch the active Amber site ID from API (don't rely on stored/stale ID)
-        stored_site_id = entry.data.get("amber_site_id")
-        amber_site_id = await fetch_active_amber_site_id(hass, entry.data[CONF_AMBER_API_TOKEN])
-
-        if amber_site_id:
-            if stored_site_id and stored_site_id != amber_site_id:
-                _LOGGER.warning(
-                    f"⚠️ Stored Amber site ID ({stored_site_id}) differs from active site ({amber_site_id}). "
-                    f"Using active site ID."
-                )
-        else:
-            # Fall back to stored ID if API fetch fails
+        # Use the configured site ID if one is stored; only call the API to
+        # discover a site when the user hasn't explicitly chosen one yet.
+        stored_site_id = entry.data.get(CONF_AMBER_SITE_ID)
+        if stored_site_id:
             amber_site_id = stored_site_id
-            _LOGGER.warning(f"Could not fetch active Amber site, using stored ID: {amber_site_id}")
+            _LOGGER.debug(f"Using configured Amber site ID: {amber_site_id}")
+        else:
+            amber_site_id = await fetch_active_amber_site_id(hass, entry.data[CONF_AMBER_API_TOKEN])
+            if not amber_site_id:
+                _LOGGER.warning("Could not fetch Amber site ID from API and none is configured")
 
         try:
             from .websocket_client import AmberWebSocketClient
