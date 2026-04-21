@@ -46,6 +46,18 @@ force_discharge:
               value: "210"
             - label: "4 hours"
               value: "240"
+    power_w:
+      name: Power (W)
+      description: Target power in watts. 0 or omitted means use the inverter's rated/BMS max.
+      required: false
+      default: 0
+      example: 5000
+      selector:
+        number:
+          min: 0
+          max: 50000
+          step: 500
+          unit_of_measurement: W
 
 force_charge:
   name: Force Charge
@@ -84,6 +96,18 @@ force_charge:
               value: "210"
             - label: "4 hours"
               value: "240"
+    power_w:
+      name: Power (W)
+      description: Target power in watts. 0 or omitted means use the inverter's rated/BMS max.
+      required: false
+      default: 0
+      example: 5000
+      selector:
+        number:
+          min: 0
+          max: 50000
+          step: 500
+          unit_of_measurement: W
 
 restore_normal:
   name: Restore Normal
