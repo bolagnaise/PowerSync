@@ -71,7 +71,8 @@ class SungrowSHController(InverterController):
     # Battery
     REG_BATTERY_VOLTAGE = 13019        # 13020 - Battery voltage (V * 0.1)
     REG_BATTERY_CURRENT = 13020        # 13021 - Battery current (A * 0.1, signed)
-    REG_BATTERY_POWER = 13021          # 13022 - Battery power (W, signed)
+    REG_BATTERY_POWER = 13021          # 13022 - Battery power (W, S16) — may read unsigned on some firmware
+    REG_BATTERY_POWER_S32 = 5213       # 5214-5215 - Battery power (W, S32 word-swapped) — preferred, always signed
     REG_BATTERY_LEVEL = 13022          # 13023 - Battery level (% * 0.1)
     REG_BATTERY_SOH = 13023            # 13024 - Battery state of health (% * 0.1)
     REG_BATTERY_TEMP = 13024           # 13025 - Battery temperature (°C * 0.1, signed)
@@ -377,11 +378,20 @@ class SungrowSHController(InverterController):
                 if voltage > 0:
                     self._battery_voltage = voltage
                 attrs["battery_current"] = round(self._to_signed16(battery_regs[1]) * 0.1, 1)
+                # Prefer the S32 register (5214-5215) which is always signed; fall back to S16 (13022)
                 attrs["battery_power"] = self._to_signed16(battery_regs[2])
                 attrs["battery_level"] = round(battery_regs[3] * 0.1, 1)
                 attrs["battery_soh"] = round(battery_regs[4] * 0.1, 1)
                 attrs["battery_temperature"] = round(self._to_signed16(battery_regs[5]) * 0.1, 1)
                 attrs["daily_battery_discharge"] = round(battery_regs[6] * 0.1, 2)
+
+            # Override battery_power with the S32 signed register (5214-5215).
+            # Register 13022 can report unsigned on some SH-series firmware, making
+            # charge/discharge indistinguishable. Register 5214 is S32 word-swapped
+            # and is the authoritative signed value used by the reference Sungrow integration.
+            batt_power_s32 = await self._read_input_register(self.REG_BATTERY_POWER_S32, 2)
+            if batt_power_s32 and len(batt_power_s32) >= 2:
+                attrs["battery_power"] = self._to_signed32(batt_power_s32[0], batt_power_s32[1])
 
             # Read daily PV generation
             daily_pv = await self._read_input_register(self.REG_DAILY_PV, 1)
