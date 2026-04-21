@@ -2039,7 +2039,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         PowerSync bridges through the wills106/homeassistant-solax-modbus entities.
         Install the solax_modbus integration from HACS first, then return here.
         """
+        from .inverters.solax_battery import SolaxBatteryController
+
         errors: dict[str, str] = {}
+        description_placeholders: dict[str, str] = {}
 
         if user_input is not None:
             prefix = user_input.get(CONF_SOLAX_ENTITY_PREFIX, DEFAULT_SOLAX_ENTITY_PREFIX).strip()
@@ -2049,7 +2052,6 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             max_discharge_a = user_input.get(CONF_SOLAX_MAX_DISCHARGE_CURRENT_A, DEFAULT_SOLAX_MAX_DISCHARGE_CURRENT_A)
 
             try:
-                from .inverters.solax_battery import SolaxBatteryController
                 ctrl = SolaxBatteryController(
                     self.hass,
                     entity_prefix=prefix,
@@ -2069,18 +2071,30 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except ValueError as exc:
                 msg = str(exc)
                 if "solax_missing_entities:" in msg:
-                    missing = msg.split(":", 1)[1]
-                    _LOGGER.warning("Solax setup: missing entities: %s", missing)
+                    missing_list = msg.split(":", 1)[1]
+                    _LOGGER.warning("Solax setup: missing entities: %s", missing_list)
                     errors["base"] = "solax_missing_entities"
+                    first_missing = missing_list.split(",")[0].strip()
+                    description_placeholders["first_missing"] = first_missing
                 else:
                     errors["base"] = "solax_connect_failed"
             except Exception as exc:
                 _LOGGER.error("Solax setup error: %s", exc)
                 errors["base"] = "solax_connect_failed"
 
-        current_prefix = getattr(self, "_solax_data", {}).get(
-            CONF_SOLAX_ENTITY_PREFIX, DEFAULT_SOLAX_ENTITY_PREFIX
-        )
+        # Auto-detect prefix from discovered wills106 charger_use_mode entities.
+        # If exactly one candidate exists use it; otherwise fall back to saved/default.
+        saved_prefix = getattr(self, "_solax_data", {}).get(CONF_SOLAX_ENTITY_PREFIX)
+        if saved_prefix:
+            current_prefix = saved_prefix
+        elif user_input is not None:
+            current_prefix = user_input.get(CONF_SOLAX_ENTITY_PREFIX, DEFAULT_SOLAX_ENTITY_PREFIX)
+        else:
+            candidates = SolaxBatteryController.discover_prefixes(self.hass)
+            current_prefix = candidates[0] if len(candidates) == 1 else DEFAULT_SOLAX_ENTITY_PREFIX
+            if candidates:
+                description_placeholders["discovered"] = ", ".join(candidates)
+
         return self.async_show_form(
             step_id="solax_battery",
             data_schema=vol.Schema({
@@ -2101,6 +2115,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ),
             }),
             errors=errors,
+            description_placeholders=description_placeholders or None,
         )
 
     async def async_step_sungrow(
@@ -4042,12 +4057,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         """Menu handler: Solax connection settings."""
+        from .inverters.solax_battery import SolaxBatteryController
+
         errors: dict[str, str] = {}
+        description_placeholders: dict[str, str] = {}
 
         if user_input is not None:
             prefix = user_input.get(CONF_SOLAX_ENTITY_PREFIX, DEFAULT_SOLAX_ENTITY_PREFIX).strip()
             try:
-                from .inverters.solax_battery import SolaxBatteryController
                 ctrl = SolaxBatteryController(
                     self.hass,
                     entity_prefix=prefix,
@@ -4065,8 +4082,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
                 return self.async_create_entry(title="", data=dict(self.config_entry.options))
             except ValueError as exc:
-                if "solax_missing_entities:" in str(exc):
+                msg = str(exc)
+                if "solax_missing_entities:" in msg:
+                    missing_list = msg.split(":", 1)[1]
+                    _LOGGER.warning("Solax options: missing entities: %s", missing_list)
                     errors["base"] = "solax_missing_entities"
+                    first_missing = missing_list.split(",")[0].strip()
+                    description_placeholders["first_missing"] = first_missing
                 else:
                     errors["base"] = "solax_connect_failed"
             except Exception as exc:
@@ -4099,6 +4121,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 ),
             }),
             errors=errors,
+            description_placeholders=description_placeholders or None,
         )
 
     async def async_step_optimization(

@@ -3233,19 +3233,52 @@ class PowerwallSettingsView(HomeAssistantView):
                 status=503
             )
 
-        # Check if this is a Sigenergy, Sungrow, FoxESS, or GoodWe setup - Powerwall settings not applicable
+        # Check if this is a Sigenergy, Sungrow, FoxESS, GoodWe, or AlphaESS setup - Powerwall settings not applicable
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
         is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
         is_foxess = bool(entry.data.get(CONF_FOXESS_HOST) or entry.data.get(CONF_FOXESS_SERIAL_PORT))
-        is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
-        if is_goodwe:
+        is_alphaess_pw = bool(entry.data.get(CONF_ALPHAESS_MODBUS_HOST))
+        if is_alphaess_pw:
+            entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            curtailment_state = entry_data.get("alphaess_curtailment_state", "normal")
+            grid_export_rule = "never" if curtailment_state == "curtailed" else "battery_ok"
+            solar_curtailment_enabled = entry.options.get(
+                CONF_BATTERY_CURTAILMENT_ENABLED,
+                entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False),
+            )
             return web.json_response(
                 {
-                    "success": False,
-                    "error": "Powerwall settings are not available for GoodWe battery systems",
-                    "reason": "goodwe_not_supported"
-                },
-                status=200
+                    "success": True,
+                    "backup_reserve": 0,
+                    "operation_mode": "self_consumption",
+                    "grid_export_rule": grid_export_rule,
+                    "grid_charging_enabled": True,
+                    "solar_curtailment_enabled": solar_curtailment_enabled,
+                    "manual_export_override": entry_data.get("manual_export_override", False),
+                    "capabilities": {},
+                }
+            )
+        is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
+        if is_goodwe:
+            # Return current export rule derived from curtailment state
+            entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            curtailment_state = entry_data.get("goodwe_curtailment_state", "normal")
+            grid_export_rule = "never" if curtailment_state == "curtailed" else "battery_ok"
+            solar_curtailment_enabled = entry.options.get(
+                CONF_BATTERY_CURTAILMENT_ENABLED,
+                entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False),
+            )
+            return web.json_response(
+                {
+                    "success": True,
+                    "backup_reserve": 0,
+                    "operation_mode": "self_consumption",
+                    "grid_export_rule": grid_export_rule,
+                    "grid_charging_enabled": True,
+                    "solar_curtailment_enabled": solar_curtailment_enabled,
+                    "manual_export_override": entry_data.get("manual_export_override", False),
+                    "capabilities": {},
+                }
             )
         if is_foxess:
             _LOGGER.info("Powerwall settings not available for FoxESS battery systems")
@@ -20495,6 +20528,51 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.info(f"📤 Setting grid export rule to {rule}")
 
         try:
+            entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+
+            # AlphaESS: map rule to export limit register (REG_MAX_FEED_INTO_GRID_PERCENT)
+            alphaess_coord = entry_data.get("alphaess_coordinator")
+            if alphaess_coord and hasattr(alphaess_coord, "_controller") and alphaess_coord._controller:
+                controller = alphaess_coord._controller
+                if rule == "never":
+                    success = await controller.curtail()
+                    if success:
+                        entry_data["alphaess_curtailment_state"] = "curtailed"
+                        _LOGGER.info("AlphaESS: grid export set to never (0%% feed-in limit)")
+                    else:
+                        _LOGGER.error("AlphaESS: failed to set zero export")
+                else:
+                    # battery_ok and pv_only both restore unlimited export
+                    success = await controller.restore()
+                    if success:
+                        entry_data["alphaess_curtailment_state"] = "normal"
+                        _LOGGER.info("AlphaESS: grid export set to %s (export limit restored)", rule)
+                    else:
+                        _LOGGER.error("AlphaESS: failed to restore export limit")
+                return
+
+            # GoodWe: map rule to export limit register
+            gw_coord = entry_data.get("goodwe_coordinator")
+            if gw_coord and hasattr(gw_coord, "_controller") and gw_coord._controller:
+                controller = gw_coord._controller
+                if rule == "never":
+                    success = await controller.curtail()
+                    if success:
+                        entry_data["goodwe_curtailment_state"] = "curtailed"
+                        _LOGGER.info("GoodWe: grid export set to never (export limit = 0W)")
+                    else:
+                        _LOGGER.error("GoodWe: failed to set zero export")
+                else:
+                    # battery_ok and pv_only both map to unrestricted export —
+                    # GoodWe has no hardware-level PV-only export restriction
+                    success = await controller.restore()
+                    if success:
+                        entry_data["goodwe_curtailment_state"] = "normal"
+                        _LOGGER.info("GoodWe: grid export set to %s (export limit removed)", rule)
+                    else:
+                        _LOGGER.error("GoodWe: failed to restore export limit")
+                return
+
             site_configs = _get_tesla_site_configs(hass, entry)
             if not site_configs:
                 _LOGGER.debug("set_grid_export: no Tesla site config (non-Tesla system)")

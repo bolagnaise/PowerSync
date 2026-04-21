@@ -93,6 +93,26 @@ class SolaxBatteryController:
     def _select(self, suffix: str) -> str:
         return f"select.{self._prefix}_{suffix}"
 
+    # ── Prefix discovery ────────────────────────────────────────────────────
+
+    @staticmethod
+    def discover_prefixes(hass: Any) -> list[str]:
+        """Scan HA states for wills106 charger_use_mode select entities.
+
+        Returns a list of candidate entity prefixes sorted alphabetically.
+        Useful for surfacing a better default in the config flow when the user
+        has multiple Solax-related integrations installed.
+        """
+        suffix = f"_{_WRITE_ENTITIES['charger_use_mode']}"  # "_charger_use_mode"
+        prefixes = []
+        for state in hass.states.async_all("select"):
+            eid = state.entity_id  # e.g. "select.solax_modbus_charger_use_mode"
+            if eid.endswith(suffix):
+                prefix = eid[len("select."):-len(suffix)]
+                if prefix:
+                    prefixes.append(prefix)
+        return sorted(prefixes)
+
     # ── Connect / validate ──────────────────────────────────────────────────
 
     async def connect(self) -> bool:

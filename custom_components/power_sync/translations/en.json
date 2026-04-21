@@ -740,7 +740,7 @@
       "invalid_tariff": "This tariff code is not recognised for the selected network distributor. Check the code on your electricity bill.",
       "invalid_token_format": "Token format is not recognised. PowerSync tokens start with 'psync_' -- make sure you copied the full string.",
       "unknown": "An unexpected error occurred. Check the Home Assistant logs for details and try again.",
-      "solax_missing_entities": "Some required solax_modbus entities were not found. Ensure the homeassistant-solax-modbus integration is installed and running, and that the entity prefix matches (check Developer Tools > States for 'sensor.<prefix>_battery_capacity').",
+      "solax_missing_entities": "Could not find the required solax_modbus entities. The first missing entity was: {first_missing}. Open Developer Tools > States and search for 'charger_use_mode' — the part before '_charger_use_mode' is your prefix. If you have multiple Solax integrations installed, the wills106 prefix may differ from 'solax'.",
       "solax_connect_failed": "Failed to validate Solax entities. Check the entity prefix and try again."
     },
     "abort": {
