@@ -72,7 +72,9 @@ Solar inverters that bypass the battery can be curtailed during negative feed-in
 4. **Connect your battery system** and enter connection details
 5. **Done!** Sensors appear automatically and a **PowerSync dashboard** is auto-created in your sidebar. Enable [Smart Optimization](https://github.com/bolagnaise/PowerSync/wiki/Smart-Optimization) for automated scheduling, or install the [Mobile App](#mobile-app) for remote control.
 
-> **Tesla Powerwall users**: PowerSync now offers a **free** built-in OAuth flow via [powersync.cc](https://powersync.cc) — no developer registration, no monthly fees, no Tesla Fleet integration required. Just click "Sign in with Tesla" during setup.
+> **Tesla Powerwall users — two options:**
+> - **Home Assistant integration (this repo):** Free. Connects via the built-in OAuth flow at [powersync.cc](https://powersync.cc) — no developer registration, no monthly fees. Just click "Sign in with Tesla" during setup.
+> - **[PowerSync Cloud](https://powersync.cc/#cloud) ($4.99/month):** No Home Assistant required. Fully hosted service — sign in with Tesla, choose your retailer (Amber, GloBird, Energy Locals), and PowerSync handles negative-price protection, AEMO spike export, and real-time monitoring entirely in the cloud. Includes iOS/Android apps.
 
 ---
 
