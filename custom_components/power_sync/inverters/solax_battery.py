@@ -97,20 +97,29 @@ class SolaxBatteryController:
 
     @staticmethod
     def discover_prefixes(hass: Any) -> list[str]:
-        """Scan HA states for wills106 charger_use_mode select entities.
+        """Scan HA states for wills106 hybrid inverter entity prefixes.
 
-        Returns a list of candidate entity prefixes sorted alphabetically.
-        Useful for surfacing a better default in the config flow when the user
-        has multiple Solax-related integrations installed.
+        Requires BOTH select.*_charger_use_mode AND sensor.*_battery_capacity
+        to exist for the same prefix — this filters out Solax EV chargers and
+        other Solax integrations that have charger_use_mode but no battery sensor.
+
+        Returns candidate prefixes sorted alphabetically.
         """
-        suffix = f"_{_WRITE_ENTITIES['charger_use_mode']}"  # "_charger_use_mode"
-        prefixes = []
+        mode_suffix = f"_{_WRITE_ENTITIES['charger_use_mode']}"    # "_charger_use_mode"
+        batt_suffix = f"_{_READ_ENTITIES['battery_level']}"         # "_battery_capacity"
+
+        mode_prefixes = set()
         for state in hass.states.async_all("select"):
-            eid = state.entity_id  # e.g. "select.solax_modbus_charger_use_mode"
-            if eid.endswith(suffix):
-                prefix = eid[len("select."):-len(suffix)]
+            eid = state.entity_id
+            if eid.endswith(mode_suffix):
+                prefix = eid[len("select."):-len(mode_suffix)]
                 if prefix:
-                    prefixes.append(prefix)
+                    mode_prefixes.add(prefix)
+
+        prefixes = []
+        for prefix in mode_prefixes:
+            if hass.states.get(f"sensor.{prefix}{batt_suffix}") is not None:
+                prefixes.append(prefix)
         return sorted(prefixes)
 
     # ── Connect / validate ──────────────────────────────────────────────────
