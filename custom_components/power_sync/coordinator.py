@@ -4513,6 +4513,256 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
         self._connected = False
 
 
+class ESYSunhomeEnergyCoordinator(DataUpdateCoordinator):
+    """Bridge coordinator for ESY Sunhome via the upstream esy_sunhome integration.
+
+    Reads entity states published by the esy_sunhome integration (which handles the
+    ESY cloud MQTT connection) and assembles the standard PowerSync data dict.
+    Control commands are sent via HA's select.select_option service on the ESY
+    mode-select entity (Regular Mode / Emergency Mode / Electricity Sell Mode).
+
+    W-level charge/discharge setpoints are not supported by ESY Sunhome hardware;
+    force_charge/force_discharge map to coarse mode switches only.
+    """
+
+    ESY_DOMAIN = "esy_sunhome"
+
+    # Maps ESY sensor translation_key → internal slot name
+    _SENSOR_KEYS = {
+        "batterySoc": "battery_soc",
+        "pvPower": "pv_w",
+        "gridPower": "grid_w",
+        "loadPower": "load_w",
+        "batteryImport": "battery_import_w",
+        "batteryExport": "battery_export_w",
+        "batteryPower": "battery_abs_w",
+        "ratedPower": "rated_w",
+        "inverterTemp": "inv_temp",
+        "dailyPowerGeneration": "daily_gen_kwh",
+        "dailyPowerConsumption": "daily_load_kwh",
+        "dailyBattCharge": "daily_charge_kwh",
+        "dailyBattDischarge": "daily_discharge_kwh",
+        "batteryStatusText": "battery_status_text",
+        "batterySoh": "battery_soh",
+    }
+    _MODE_SELECT_KEY = "code"
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        esy_entry_id: str,
+        entry_id: str = "",
+    ) -> None:
+        self._esy_entry_id = esy_entry_id
+        self._entry_id = entry_id
+        self._entity_map: dict[str, str] = {}   # esy_key → ha entity_id
+        self._mode_select_entity_id: str | None = None
+        self._energy_acc = EnergyAccumulator(hass, "esy_sunhome")
+
+        super().__init__(
+            hass,
+            _LOGGER,
+            name="ESY Sunhome Energy",
+            update_interval=timedelta(seconds=30),
+        )
+
+    def _discover_entities(self) -> None:
+        """Discover esy_sunhome entities from the HA entity registry once."""
+        from homeassistant.helpers import entity_registry as er
+
+        esy_entry = self.hass.config_entries.async_get_entry(self._esy_entry_id)
+        if not esy_entry:
+            _LOGGER.warning("ESY Sunhome config entry %s not found", self._esy_entry_id)
+            return
+
+        # device_id in ESY config entry is the numeric cloud device ID, used as
+        # the unique_id prefix: "{device_id}_{translation_key}"
+        device_id = esy_entry.data.get("device_id", "")
+        if not device_id:
+            _LOGGER.warning("ESY Sunhome config entry missing device_id")
+            return
+
+        registry = er.async_get(self.hass)
+        uid_to_eid: dict[str, str] = {
+            reg_entry.unique_id: reg_entry.entity_id
+            for reg_entry in er.async_entries_for_config_entry(registry, self._esy_entry_id)
+            if reg_entry.unique_id
+        }
+
+        for esy_key in self._SENSOR_KEYS:
+            uid = f"{device_id}_{esy_key}"
+            if uid in uid_to_eid:
+                self._entity_map[esy_key] = uid_to_eid[uid]
+
+        mode_uid = f"{device_id}_{self._MODE_SELECT_KEY}"
+        self._mode_select_entity_id = uid_to_eid.get(mode_uid)
+
+        _LOGGER.info(
+            "ESY Sunhome entity discovery: %d/%d sensors found, mode_select=%s",
+            len(self._entity_map), len(self._SENSOR_KEYS), self._mode_select_entity_id,
+        )
+
+    def _state_float(self, esy_key: str, default: float | None = None) -> float | None:
+        entity_id = self._entity_map.get(esy_key)
+        if not entity_id:
+            return default
+        state = self.hass.states.get(entity_id)
+        if not state or state.state in ("unavailable", "unknown", ""):
+            return default
+        try:
+            return float(state.state)
+        except (ValueError, TypeError):
+            return default
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Return ESY Sunhome data assembled from HA entity states."""
+        if not self._energy_acc._last_update:
+            await self._energy_acc.async_restore()
+
+        if not self._entity_map:
+            self._discover_entities()
+
+        if not self._entity_map:
+            if self.data:
+                _LOGGER.warning("ESY Sunhome: entity map empty, returning stale data")
+                return self.data
+            raise UpdateFailed("ESY Sunhome entities not yet available — is esy_sunhome integration running?")
+
+        pv_w = self._state_float("pvPower", 0.0) or 0.0
+        grid_w = self._state_float("gridPower", 0.0) or 0.0   # positive = import (already HA convention)
+        load_w = self._state_float("loadPower", 0.0) or 0.0
+        battery_import_w = self._state_float("batteryImport")
+        battery_export_w = self._state_float("batteryExport")
+        battery_abs_w = self._state_float("batteryPower", 0.0) or 0.0
+
+        # Signed battery power: positive = discharging, negative = charging
+        if battery_import_w is not None or battery_export_w is not None:
+            battery_w = (battery_export_w or 0.0) - (battery_import_w or 0.0)
+        else:
+            battery_w = battery_abs_w  # unsigned fallback; direction unknown
+
+        solar_kw = pv_w / 1000.0
+        grid_kw = grid_w / 1000.0
+        battery_kw = battery_w / 1000.0
+        load_kw = load_w / 1000.0
+        battery_level = self._state_float("batterySoc")
+
+        rated_w = self._state_float("ratedPower", 5000.0) or 5000.0
+
+        work_mode_name = None
+        if self._mode_select_entity_id:
+            ms = self.hass.states.get(self._mode_select_entity_id)
+            if ms and ms.state not in ("unavailable", "unknown"):
+                work_mode_name = ms.state
+
+        buy, sell = _get_current_prices(self.hass, self._entry_id)
+        self._energy_acc.update(max(0.0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+
+        _LOGGER.debug(
+            "ESY Sunhome data: solar=%.2f kW, grid=%.2f kW, battery=%.2f kW (%.0f%%), load=%.2f kW",
+            solar_kw, grid_kw, battery_kw, battery_level or 0.0, load_kw,
+        )
+
+        return {
+            "solar_power": solar_kw,
+            "grid_power": grid_kw,
+            "battery_power": battery_kw,
+            "load_power": load_kw,
+            "battery_level": battery_level,
+            "last_update": dt_util.utcnow(),
+            "work_mode": work_mode_name,
+            "work_mode_name": work_mode_name,
+            "battery_max_charge_power_w": rated_w,
+            "battery_max_discharge_power_w": rated_w,
+            "battery_max_charge_power": round(rated_w / 1000.0, 2),
+            "battery_max_discharge_power": round(rated_w / 1000.0, 2),
+            "inverter_temperature": self._state_float("inverterTemp"),
+            "battery_status_text": (
+                self.hass.states.get(self._entity_map["batteryStatusText"]).state
+                if "batteryStatusText" in self._entity_map
+                   and self.hass.states.get(self._entity_map["batteryStatusText"]) is not None
+                   and self.hass.states.get(self._entity_map["batteryStatusText"]).state
+                      not in ("unavailable", "unknown")
+                else None
+            ),
+            "battery_soh": self._state_float("batterySoh"),
+            "daily_generation_kwh": self._state_float("dailyPowerGeneration"),
+            "daily_consumption_kwh": self._state_float("dailyPowerConsumption"),
+            "daily_battery_charge_kwh": self._state_float("dailyBattCharge"),
+            "daily_battery_discharge_kwh": self._state_float("dailyBattDischarge"),
+            "energy_summary": self._energy_acc.as_dict(),
+        }
+
+    async def _set_mode(self, option: str) -> bool:
+        """Switch the ESY operating mode via its mode-select entity."""
+        if not self._mode_select_entity_id:
+            self._discover_entities()
+        if not self._mode_select_entity_id:
+            _LOGGER.error("ESY Sunhome: mode select entity not found — cannot change mode")
+            return False
+        try:
+            await self.hass.services.async_call(
+                "select", "select_option",
+                {"entity_id": self._mode_select_entity_id, "option": option},
+                blocking=True,
+            )
+            _LOGGER.info("ESY Sunhome: set mode → '%s'", option)
+            return True
+        except Exception as exc:
+            _LOGGER.error("ESY Sunhome: failed to set mode '%s': %s", option, exc)
+            return False
+
+    async def force_charge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
+        """Force grid-charge via Emergency Mode (rate is inverter-decided)."""
+        return await self._set_mode("Emergency Mode")
+
+    async def force_discharge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
+        """Force grid-export via Electricity Sell Mode (rate is inverter-decided)."""
+        return await self._set_mode("Electricity Sell Mode")
+
+    async def restore_normal(self) -> bool:
+        """Return to Regular Mode (self-consumption)."""
+        return await self._set_mode("Regular Mode")
+
+    async def set_backup_reserve(self, percent: int) -> bool:
+        _LOGGER.info("ESY Sunhome: set_backup_reserve not supported on this hardware")
+        return True
+
+    async def set_self_consumption_mode(self) -> bool:
+        return await self._set_mode("Regular Mode")
+
+    async def set_autonomous_mode(self) -> bool:
+        return await self._set_mode("Regular Mode")
+
+    async def set_work_mode(self, mode: str) -> bool:
+        _mode_map = {
+            "self_consumption": "Regular Mode",
+            "regular": "Regular Mode",
+            "feed_in": "Electricity Sell Mode",
+            "electricity_sell": "Electricity Sell Mode",
+            "backup": "Emergency Mode",
+            "emergency": "Emergency Mode",
+        }
+        return await self._set_mode(_mode_map.get(mode.lower(), "Regular Mode"))
+
+    async def set_backup_mode(self) -> bool:
+        return await self._set_mode("Emergency Mode")
+
+    async def restore_work_mode_from_idle(self) -> bool:
+        return await self._set_mode("Regular Mode")
+
+    async def set_charge_rate_limit(self, amps: float) -> bool:
+        _LOGGER.info("ESY Sunhome: set_charge_rate_limit not supported on this hardware")
+        return True
+
+    async def set_discharge_rate_limit(self, amps: float) -> bool:
+        _LOGGER.info("ESY Sunhome: set_discharge_rate_limit not supported on this hardware")
+        return True
+
+    async def async_shutdown(self) -> None:
+        pass
+
+
 class SolcastForecastCoordinator(DataUpdateCoordinator):
     """Coordinator to fetch Solcast solar production forecasts.
 

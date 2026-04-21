@@ -428,6 +428,17 @@
         },
         "submit": "Connect"
       },
+      "esy_sunhome": {
+        "title": "ESY Sunhome connection",
+        "description": "PowerSync bridges through the ESY Sunhome integration. Select the ESY Sunhome config entry to use.",
+        "data": {
+          "esy_config_entry_id": "ESY Sunhome integration"
+        },
+        "data_description": {
+          "esy_config_entry_id": "The ESY Sunhome integration entry to read sensors and send mode commands through. Install it via HACS if it does not appear here."
+        },
+        "submit": "Connect"
+      },
       "sigenergy_credentials": {
         "title": "Sigenergy Cloud login",
         "description": "Enter your Sigenergy Cloud API credentials to connect your system.",
@@ -699,6 +710,8 @@
       "foxess_cloud_connection_error": "Cannot reach FoxESS Cloud. Check your internet connection and retry.",
       "goodwe_connect_failed": "Cannot connect to GoodWe inverter. Verify the IP address is correct and the inverter is powered on and reachable from Home Assistant.",
       "goodwe_no_battery": "This GoodWe model (DT/MS/XS series) does not support battery control. Only ET/EH/ES/EM series hybrid inverters are supported.",
+      "esy_sunhome_not_installed": "The ESY Sunhome integration is not installed. Install it via HACS (search 'ESY Sunhome') and add a device before continuing.",
+      "esy_sunhome_no_device": "No ESY Sunhome device found in the selected integration entry. Verify the ESY Sunhome integration is set up and has a paired device.",
       "invalid_credentials": "Email or password is incorrect. Check your Flow Power portal login credentials.",
       "invalid_mfa_code": "Verification code is incorrect or expired. Request a new SMS code and try again.",
       "zaptec_auth_failed": "Zaptec Cloud login failed. Check that your email and password are correct.",
@@ -715,7 +728,8 @@
       "no_stations": "No Sigenergy stations found. Check that your credentials are correct and your station is commissioned.",
       "reauth_successful": "Token updated -- PowerSync is reconnected.",
       "reauth_failed": "Re-authentication failed. Remove the integration and set it up again.",
-      "reauth_fleet_api_use_tesla_fleet": "PowerSync reads tokens from your Tesla Fleet integration. Go to Settings > Devices & Services > Tesla Fleet and re-authenticate there. PowerSync will pick up the new tokens automatically."
+      "reauth_fleet_api_use_tesla_fleet": "PowerSync reads tokens from your Tesla Fleet integration. Go to Settings > Devices & Services > Tesla Fleet and re-authenticate there. PowerSync will pick up the new tokens automatically.",
+      "esy_sunhome_not_installed": "The ESY Sunhome integration is not installed. Install it via HACS (search 'ESY Sunhome') and add a device before continuing."
     }
   },
   "options": {
@@ -730,6 +744,7 @@
           "sungrow_connection": "Sungrow Modbus connection",
           "foxess_connection_options": "FoxESS connection",
           "goodwe_connection_options": "GoodWe connection",
+          "esy_sunhome_connection": "ESY Sunhome connection",
           "optimization": "Optimization mode",
           "inverter": "AC inverter curtailment",
           "curtailment": "Curtailment settings",
@@ -849,6 +864,17 @@
           "goodwe_host": "Local IP address of your GoodWe inverter.",
           "goodwe_protocol": "UDP for WiFi dongles (port 8899), TCP for LAN dongles (port 502).",
           "goodwe_port": "Default: 8899 for UDP, 502 for TCP."
+        },
+        "submit": "Save"
+      },
+      "esy_sunhome_connection": {
+        "title": "ESY Sunhome connection",
+        "description": "Update the ESY Sunhome integration entry PowerSync bridges through.",
+        "data": {
+          "esy_config_entry_id": "ESY Sunhome integration"
+        },
+        "data_description": {
+          "esy_config_entry_id": "The ESY Sunhome integration entry to read sensors and send mode commands through."
         },
         "submit": "Save"
       },

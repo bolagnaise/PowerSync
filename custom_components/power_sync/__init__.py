@@ -199,6 +199,8 @@ from .const import (
     DEFAULT_ALPHAESS_MODBUS_PORT,
     DEFAULT_ALPHAESS_MODBUS_SLAVE_ID,
     BATTERY_SYSTEM_ALPHAESS,
+    BATTERY_SYSTEM_ESY_SUNHOME,
+    CONF_ESY_CONFIG_ENTRY_ID,
     # Battery system selection
     CONF_BATTERY_SYSTEM,
     BATTERY_SYSTEM_SUNGROW,
@@ -333,6 +335,7 @@ from .coordinator import (
     FoxESSEnergyCoordinator,
     GoodWeEnergyCoordinator,
     AlphaESSEnergyCoordinator,
+    ESYSunhomeEnergyCoordinator,
     DemandChargeCoordinator,
     AEMOSensorCoordinator,
     OctopusPriceCoordinator,
@@ -12556,12 +12559,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("Failed to start Amber usage coordinator: %s", e)
             amber_usage_coordinator = None
 
-    # Check if this is a Sigenergy, Sungrow, FoxESS, GoodWe, or AlphaESS setup (no Tesla needed)
+    # Check if this is a Sigenergy, Sungrow, FoxESS, GoodWe, AlphaESS, or ESY Sunhome setup (no Tesla needed)
     is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
     is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
     is_foxess = bool(entry.data.get(CONF_FOXESS_HOST) or entry.data.get(CONF_FOXESS_SERIAL_PORT))
     is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
     is_alphaess = bool(entry.data.get(CONF_ALPHAESS_MODBUS_HOST))
+    is_esy_sunhome = bool(entry.data.get(CONF_ESY_CONFIG_ENTRY_ID))
     tesla_coordinator = None
     sigenergy_coordinator = None
     sungrow_coordinator = None
@@ -12569,6 +12573,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     foxess_coordinator = None
     goodwe_coordinator = None
     alphaess_coordinator = None
+    esy_sunhome_coordinator = None
     token_getter = None  # Will be set for Tesla users
 
     if is_sigenergy:
@@ -12751,6 +12756,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             max_export_limit_kw=alphaess_export_limit_kw,
             cloud_client=alphaess_cloud_client,
         )
+    elif is_esy_sunhome:
+        _LOGGER.info("Running in ESY Sunhome mode — bridging via esy_sunhome companion integration")
+        esy_sunhome_coordinator = ESYSunhomeEnergyCoordinator(
+            hass,
+            esy_entry_id=entry.data[CONF_ESY_CONFIG_ENTRY_ID],
+            entry_id=entry.entry_id,
+        )
     else:
         # Get initial Tesla API token and provider
         # Use get_tesla_api_token() which fetches fresh from tesla_fleet if available
@@ -12852,6 +12864,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.warning("AlphaESS coordinator failed to initialize: %s", e)
             alphaess_coordinator = None
+    if esy_sunhome_coordinator:
+        try:
+            await esy_sunhome_coordinator.async_config_entry_first_refresh()
+            _LOGGER.info("ESY Sunhome coordinator initialized successfully")
+        except Exception as e:
+            _LOGGER.warning("ESY Sunhome coordinator failed to initialize: %s", e)
+            esy_sunhome_coordinator = None
 
     # Initialize demand charge coordinator if enabled (any battery system with grid power data)
     demand_charge_coordinator = None
@@ -12862,6 +12881,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     energy_coord_for_demand = (
         tesla_coordinator or foxess_coordinator or goodwe_coordinator
         or sigenergy_coordinator or sungrow_coordinator or alphaess_coordinator
+        or esy_sunhome_coordinator
     )
     if demand_charge_enabled and energy_coord_for_demand:
         demand_charge_rate = entry.options.get(
@@ -12921,7 +12941,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     # Tesla AEMO Spike Manager (tariff-based) — only for Tesla
-    if aemo_spike_enabled and has_tesla_site and not is_sigenergy and not is_sungrow and not is_foxess and not is_goodwe:
+    if aemo_spike_enabled and has_tesla_site and not is_sigenergy and not is_sungrow and not is_foxess and not is_goodwe and not is_esy_sunhome:
         aemo_region = entry.options.get(
             CONF_AEMO_REGION,
             entry.data.get(CONF_AEMO_REGION)
@@ -12951,7 +12971,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("AEMO spike detection enabled but no region configured")
 
     # Generic AEMO Spike Manager (service-call-based) for non-Tesla systems
-    if aemo_spike_enabled and (is_sigenergy or is_sungrow or is_foxess):
+    if aemo_spike_enabled and (is_sigenergy or is_sungrow or is_foxess or is_esy_sunhome):
         aemo_region = entry.options.get(
             CONF_AEMO_REGION,
             entry.data.get(CONF_AEMO_REGION)
@@ -12962,7 +12982,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
         if aemo_region:
-            battery_type = "sigenergy" if is_sigenergy else "sungrow" if is_sungrow else "goodwe" if is_goodwe else "foxess"
+            battery_type = (
+                "sigenergy" if is_sigenergy else
+                "sungrow" if is_sungrow else
+                "esy_sunhome" if is_esy_sunhome else
+                "foxess"
+            )
             generic_aemo_spike_manager = GenericAEMOSpikeManager(
                 hass=hass,
                 entry=entry,
@@ -13072,8 +13097,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.info("Saving Session Tariff Manager initialized for Tesla")
 
             # Non-Tesla generic manager
-            elif is_sigenergy or is_sungrow or is_foxess or is_goodwe:
-                battery_type = "sigenergy" if is_sigenergy else "sungrow" if is_sungrow else "goodwe" if is_goodwe else "foxess"
+            elif is_sigenergy or is_sungrow or is_foxess or is_goodwe or is_esy_sunhome:
+                battery_type = (
+                    "sigenergy" if is_sigenergy else
+                    "sungrow" if is_sungrow else
+                    "goodwe" if is_goodwe else
+                    "esy_sunhome" if is_esy_sunhome else
+                    "foxess"
+                )
                 generic_saving_session_manager = GenericSavingSessionManager(
                     hass=hass,
                     entry=entry,
@@ -13392,6 +13423,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "foxess_coordinator": foxess_coordinator,  # For FoxESS Modbus energy/battery data
         "goodwe_coordinator": goodwe_coordinator,  # For GoodWe energy/battery data
         "alphaess_coordinator": alphaess_coordinator,  # For AlphaESS Modbus + cloud fallback
+        "esy_sunhome_coordinator": esy_sunhome_coordinator,  # For ESY Sunhome (bridges via esy_sunhome integration)
         "demand_charge_coordinator": demand_charge_coordinator,
         "aemo_spike_manager": aemo_spike_manager,
         "generic_aemo_spike_manager": generic_aemo_spike_manager,  # For non-Tesla AEMO spike detection
@@ -13422,6 +13454,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "is_foxess": is_foxess,  # Track if FoxESS battery system
         "is_goodwe": is_goodwe,  # Track if GoodWe battery system
         "is_alphaess": is_alphaess,  # Track if AlphaESS battery system
+        "is_esy_sunhome": is_esy_sunhome,  # Track if ESY Sunhome battery system
         "foxess_curtailment_state": "normal",  # Track FoxESS DC curtailment state
         "sigenergy_curtailment_state": "normal",  # Track Sigenergy DC curtailment state
         "alphaess_curtailment_state": "normal",  # Track AlphaESS DC curtailment state
@@ -17240,6 +17273,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 await alphaess_coord.force_discharge(duration, power_w=power_w)
                 _LOGGER.debug(f"AlphaESS force discharge hardware extended ({duration}min, {power_w}W)")
                 return
+            esy_coord = entry_data.get("esy_sunhome_coordinator")
+            if esy_coord:
+                await esy_coord.force_discharge(duration, power_w=power_w)
+                _LOGGER.debug(f"ESY Sunhome force discharge hardware extended ({duration}min)")
+                return
             _LOGGER.warning("_extend_hardware: no coordinator found, falling through to full handler")
 
         _LOGGER.info(f"🔋 FORCE DISCHARGE: Activating for {duration} minutes (source={source})")
@@ -17527,6 +17565,60 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 force_discharge_state["active"] = False
                 _LOGGER.error(f"Error in AlphaESS force discharge: {e}", exc_info=True)
                 hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "AlphaESS Modbus communication error"))
+                return
+
+        # Check if this is an ESY Sunhome system
+        is_esy_sunhome = bool(entry.data.get(CONF_ESY_CONFIG_ENTRY_ID))
+        if is_esy_sunhome:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                esy_coord = entry_data.get("esy_sunhome_coordinator")
+                if not esy_coord:
+                    force_discharge_state["active"] = False
+                    _LOGGER.error("Force discharge: ESY Sunhome coordinator not available")
+                    return
+
+                power_w = call.data.get("power_w", 0)
+                discharge_result = await esy_coord.force_discharge(duration, power_w=power_w)
+
+                if discharge_result:
+                    force_discharge_state["active"] = True
+                    force_discharge_state["source"] = source
+                    force_discharge_state["duration"] = duration
+                    force_discharge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
+                    _LOGGER.info(f"ESY Sunhome FORCE DISCHARGE ACTIVE for {duration} minutes (Electricity Sell Mode)")
+
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                        "active": True,
+                        "expires_at": force_discharge_state["expires_at"].isoformat(),
+                        "duration": duration,
+                    })
+
+                    if force_discharge_state.get("cancel_expiry_timer"):
+                        force_discharge_state["cancel_expiry_timer"]()
+
+                    async def auto_restore_discharge_esy(_now):
+                        if _command_generation[0] != _restore_gen:
+                            _LOGGER.debug("ESY Sunhome force discharge timer superseded — skipping restore")
+                            return
+                        if force_discharge_state["active"]:
+                            _LOGGER.info("ESY Sunhome force discharge expired, auto-restoring")
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+
+                    force_discharge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass,
+                        auto_restore_discharge_esy,
+                        force_discharge_state["expires_at"],
+                    )
+                    await persist_force_mode_state()
+                else:
+                    force_discharge_state["active"] = False
+                    _LOGGER.error("ESY Sunhome force discharge failed")
+                return
+            except Exception as e:
+                force_discharge_state["active"] = False
+                _LOGGER.error(f"Error in ESY Sunhome force discharge: {e}", exc_info=True)
+                hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "ESY Sunhome mode switch error"))
                 return
 
         # Check if this is a Sungrow system
@@ -18059,6 +18151,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 await alphaess_coord.force_charge(duration, power_w=power_w)
                 _LOGGER.debug(f"AlphaESS force charge hardware extended ({duration}min, {power_w}W)")
                 return
+            esy_coord = entry_data.get("esy_sunhome_coordinator")
+            if esy_coord:
+                await esy_coord.force_charge(duration, power_w=power_w)
+                _LOGGER.debug(f"ESY Sunhome force charge hardware extended ({duration}min)")
+                return
             # Fallback: no coordinator found, proceed with full handler
             _LOGGER.warning("_extend_hardware: no coordinator found, falling through to full handler")
 
@@ -18386,6 +18483,68 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 force_charge_state["active"] = False
                 _LOGGER.error(f"Error in AlphaESS force charge: {e}", exc_info=True)
                 hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "AlphaESS Modbus communication error"))
+                return
+
+        # Check if this is an ESY Sunhome system
+        is_esy_sunhome = bool(entry.data.get(CONF_ESY_CONFIG_ENTRY_ID))
+        if is_esy_sunhome:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                esy_coord = entry_data.get("esy_sunhome_coordinator")
+                if not esy_coord:
+                    force_charge_state["active"] = False
+                    _LOGGER.error("Force charge: ESY Sunhome coordinator not available")
+                    return
+
+                if force_discharge_state["active"]:
+                    _LOGGER.info("Canceling active discharge mode to enable charge mode")
+                    if force_discharge_state.get("cancel_expiry_timer"):
+                        force_discharge_state["cancel_expiry_timer"]()
+                        force_discharge_state["cancel_expiry_timer"] = None
+                    force_discharge_state["active"] = False
+                    force_discharge_state["expires_at"] = None
+
+                power_w = call.data.get("power_w", 0)
+                charge_result = await esy_coord.force_charge(duration, power_w=power_w)
+
+                if charge_result:
+                    force_charge_state["active"] = True
+                    force_charge_state["source"] = source
+                    force_charge_state["duration"] = duration
+                    force_charge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
+                    _LOGGER.info(f"ESY Sunhome FORCE CHARGE ACTIVE for {duration} minutes (Emergency Mode)")
+
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
+                        "active": True,
+                        "expires_at": force_charge_state["expires_at"].isoformat(),
+                        "duration": duration,
+                    })
+
+                    if force_charge_state.get("cancel_expiry_timer"):
+                        force_charge_state["cancel_expiry_timer"]()
+
+                    async def auto_restore_charge_esy(_now):
+                        if _command_generation[0] != _restore_gen:
+                            _LOGGER.debug("ESY Sunhome force charge timer superseded — skipping restore")
+                            return
+                        if force_charge_state["active"]:
+                            _LOGGER.info("ESY Sunhome force charge expired, auto-restoring")
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+
+                    force_charge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass,
+                        auto_restore_charge_esy,
+                        force_charge_state["expires_at"],
+                    )
+                    await persist_force_mode_state()
+                else:
+                    force_charge_state["active"] = False
+                    _LOGGER.error("ESY Sunhome force charge failed")
+                return
+            except Exception as e:
+                force_charge_state["active"] = False
+                _LOGGER.error(f"Error in ESY Sunhome force charge: {e}", exc_info=True)
+                hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "ESY Sunhome mode switch error"))
                 return
 
         # Check if this is a Sungrow system
@@ -19097,6 +19256,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
             except Exception as e:
                 _LOGGER.error(f"Error in AlphaESS restore normal: {e}", exc_info=True)
+                return
+
+        # Check if this is an ESY Sunhome system
+        is_esy_sunhome = bool(entry.data.get(CONF_ESY_CONFIG_ENTRY_ID))
+        if is_esy_sunhome:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                esy_coord = entry_data.get("esy_sunhome_coordinator")
+                if esy_coord:
+                    await esy_coord.restore_normal()
+
+                force_charge_state["active"] = False
+                force_discharge_state["active"] = False
+                force_charge_state["expires_at"] = None
+                force_discharge_state["expires_at"] = None
+
+                _LOGGER.info("ESY Sunhome NORMAL OPERATION RESTORED (Regular Mode)")
+
+                if not suppress_notification:
+                    try:
+                        from .automations.actions import _send_expo_push
+                        await _send_expo_push(hass, "Battery", "Normal operation restored")
+                    except Exception as notify_err:
+                        _LOGGER.debug(f"Could not send success notification: {notify_err}")
+
+                async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                    "active": False, "expires_at": None, "duration": 0,
+                })
+                async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
+                    "active": False, "expires_at": None, "duration": 0,
+                })
+
+                await persist_force_mode_state()
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error in ESY Sunhome restore normal: {e}", exc_info=True)
                 return
 
         # Check if this is a Sungrow system
@@ -22027,6 +22222,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             elif is_goodwe:
                 battery_system = "goodwe"
                 energy_coordinator = goodwe_coordinator
+            elif is_esy_sunhome:
+                battery_system = "esy_sunhome"
+                energy_coordinator = esy_sunhome_coordinator
             else:
                 battery_system = "tesla"
                 energy_coordinator = tesla_coordinator

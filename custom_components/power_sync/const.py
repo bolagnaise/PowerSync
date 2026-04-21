@@ -127,6 +127,7 @@ BATTERY_SYSTEM_SUNGROW = "sungrow"
 BATTERY_SYSTEM_FOXESS = "foxess"
 BATTERY_SYSTEM_GOODWE = "goodwe"
 BATTERY_SYSTEM_ALPHAESS = "alphaess"
+BATTERY_SYSTEM_ESY_SUNHOME = "esy_sunhome"
 
 BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_TESLA: "Tesla Powerwall — Fleet API or Teslemetry",
@@ -135,6 +136,7 @@ BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_FOXESS: "FoxESS — Modbus TCP or RS485 serial",
     BATTERY_SYSTEM_GOODWE: "GoodWe ET/EH/ES/EM — UDP or TCP",
     BATTERY_SYSTEM_ALPHAESS: "AlphaESS SMILE/Storion — Modbus TCP + optional Cloud API",
+    BATTERY_SYSTEM_ESY_SUNHOME: "ESY Sunhome — via esy_sunhome companion integration",
 }
 
 # Sungrow SH-series Battery System Configuration (Modbus TCP)
@@ -373,6 +375,10 @@ CONF_ALPHAESS_CLOUD_APP_ID = "alphaess_cloud_app_id"
 CONF_ALPHAESS_CLOUD_APP_SECRET = "alphaess_cloud_app_secret"
 CONF_ALPHAESS_CLOUD_SERIAL = "alphaess_cloud_serial"
 ALPHAESS_CLOUD_BASE_URL = "https://openapi.alphaess.com/api"
+
+# ESY Sunhome battery system — bridges via upstream esy_sunhome companion integration
+# Install the esy_sunhome integration from HACS first; PowerSync reads its entities.
+CONF_ESY_CONFIG_ENTRY_ID = "esy_config_entry_id"  # UUID of the upstream esy_sunhome config entry
 
 # Demand charge configuration
 CONF_DEMAND_CHARGE_ENABLED = "demand_charge_enabled"
@@ -1420,6 +1426,7 @@ OPTIMIZATION_PROVIDER_NATIVE_NAMES = {
     BATTERY_SYSTEM_FOXESS: "FoxESS",
     BATTERY_SYSTEM_GOODWE: "GoodWe",
     BATTERY_SYSTEM_ALPHAESS: "AlphaESS",
+    BATTERY_SYSTEM_ESY_SUNHOME: "ESY Sunhome",
 }
 
 OPTIMIZATION_PROVIDERS = {
@@ -1459,6 +1466,7 @@ BATTERY_CAPACITY_DEFAULTS = {
     BATTERY_SYSTEM_FOXESS: 10000,     # Varies, default 10 kWh
     BATTERY_SYSTEM_GOODWE: 10000,     # Varies, default 10 kWh
     BATTERY_SYSTEM_ALPHAESS: 10000,   # Varies (SMILE5 ~ 5.7 kWh, Storion ~ 30 kWh), default 10 kWh
+    BATTERY_SYSTEM_ESY_SUNHOME: 10000,  # HM6 varies; default 10 kWh
 }
 
 # Max charge/discharge power defaults by system (W)
@@ -1469,6 +1477,7 @@ BATTERY_POWER_DEFAULTS = {
     BATTERY_SYSTEM_FOXESS: 5000,      # Varies by model
     BATTERY_SYSTEM_GOODWE: 5000,      # Varies by model
     BATTERY_SYSTEM_ALPHAESS: 5000,    # Varies by model (SMILE5 = 5 kW, Storion-T30 larger)
+    BATTERY_SYSTEM_ESY_SUNHOME: 5000,  # HM6; rate is firmware-decided, using 5 kW default
 }
 
 # Optimization service

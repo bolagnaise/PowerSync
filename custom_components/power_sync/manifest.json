@@ -1,7 +1,7 @@
 {
   "domain": "power_sync",
   "name": "PowerSync",
-  "after_dependencies": ["lovelace", "recorder", "tesla_fleet", "zeroconf"],
+  "after_dependencies": ["lovelace", "recorder", "tesla_fleet", "zeroconf", "esy_sunhome"],
   "codeowners": ["@benboller"],
   "config_flow": true,
   "dependencies": ["frontend", "http"],

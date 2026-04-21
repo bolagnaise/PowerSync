@@ -72,7 +72,9 @@ from .const import (
     BATTERY_SYSTEM_SUNGROW,
     BATTERY_SYSTEM_FOXESS,
     BATTERY_SYSTEM_ALPHAESS,
+    BATTERY_SYSTEM_ESY_SUNHOME,
     BATTERY_SYSTEMS,
+    CONF_ESY_CONFIG_ENTRY_ID,
     # AlphaESS battery system configuration
     CONF_ALPHAESS_MODBUS_HOST,
     CONF_ALPHAESS_MODBUS_PORT,
@@ -1080,6 +1082,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return await self.async_step_goodwe_connection()
         elif self._selected_battery_system == BATTERY_SYSTEM_ALPHAESS:
             return await self.async_step_alphaess_modbus()
+        elif self._selected_battery_system == BATTERY_SYSTEM_ESY_SUNHOME:
+            return await self.async_step_esy_sunhome()
         else:
             return await self.async_step_tesla_provider()
 
@@ -1104,6 +1108,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             **getattr(self, "_foxess_data", {}),
             **getattr(self, "_goodwe_data", {}),
             **getattr(self, "_alphaess_data", {}),
+            **getattr(self, "_esy_sunhome_data", {}),
             CONF_ELECTRICITY_PROVIDER: self._selected_electricity_provider,
         }
 
@@ -1141,6 +1146,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             BATTERY_SYSTEM_FOXESS: "FoxESS",
             BATTERY_SYSTEM_GOODWE: "GoodWe",
             BATTERY_SYSTEM_ALPHAESS: "AlphaESS",
+            BATTERY_SYSTEM_ESY_SUNHOME: "ESY Sunhome",
         }.get(self._selected_battery_system, "")
 
         if battery_label:
@@ -1955,6 +1961,58 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "Leave blank to skip."
                 ),
             },
+        )
+
+    async def async_step_esy_sunhome(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Select the upstream esy_sunhome companion integration entry.
+
+        PowerSync bridges ESY Sunhome via the esy_sunhome integration which
+        handles the ESY cloud MQTT connection. Install esy_sunhome from HACS
+        first, configure it with your ESY app credentials, then return here.
+        """
+        esy_entries = self.hass.config_entries.async_entries("esy_sunhome")
+        if not esy_entries:
+            return self.async_abort(reason="esy_sunhome_not_installed")
+
+        errors: dict[str, str] = {}
+
+        if user_input is not None or len(esy_entries) == 1:
+            if len(esy_entries) == 1:
+                selected_entry_id = esy_entries[0].entry_id
+            else:
+                selected_entry_id = user_input.get(CONF_ESY_CONFIG_ENTRY_ID, "")
+
+            esy_entry = self.hass.config_entries.async_get_entry(selected_entry_id)
+            if not esy_entry or not esy_entry.data.get("device_id"):
+                errors["base"] = "esy_sunhome_no_device"
+            else:
+                self._esy_sunhome_data = {CONF_ESY_CONFIG_ENTRY_ID: selected_entry_id}
+                return self._create_final_entry()
+
+        if not errors and len(esy_entries) > 1:
+            entry_options = {e.entry_id: e.title or e.entry_id for e in esy_entries}
+            return self.async_show_form(
+                step_id="esy_sunhome",
+                data_schema=vol.Schema({
+                    vol.Required(CONF_ESY_CONFIG_ENTRY_ID): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=k, label=v)
+                                for k, v in entry_options.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                }),
+                errors=errors,
+            )
+
+        return self.async_show_form(
+            step_id="esy_sunhome",
+            data_schema=vol.Schema({}),
+            errors=errors,
         )
 
     async def async_step_sungrow(
@@ -3223,6 +3281,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             menu_options.append("foxess_connection_options")
         elif battery_system == BATTERY_SYSTEM_GOODWE:
             menu_options.append("goodwe_connection_options")
+        elif battery_system == BATTERY_SYSTEM_ESY_SUNHOME:
+            menu_options.append("esy_sunhome_connection")
 
         menu_options.extend([
             "optimization",
@@ -3837,6 +3897,54 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                 }
             ),
+            errors=errors,
+        )
+
+    async def async_step_esy_sunhome_connection(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: re-select the upstream esy_sunhome integration entry."""
+        esy_entries = self.hass.config_entries.async_entries("esy_sunhome")
+        if not esy_entries:
+            return self.async_abort(reason="esy_sunhome_not_installed")
+
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            selected_entry_id = user_input.get(CONF_ESY_CONFIG_ENTRY_ID, "")
+            esy_entry = self.hass.config_entries.async_get_entry(selected_entry_id)
+            if not esy_entry or not esy_entry.data.get("device_id"):
+                errors["base"] = "esy_sunhome_no_device"
+            else:
+                new_data = dict(self.config_entry.data)
+                new_data[CONF_ESY_CONFIG_ENTRY_ID] = selected_entry_id
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry, data=new_data
+                )
+                return self.async_create_entry(
+                    title="", data=dict(self.config_entry.options)
+                )
+
+        current_entry_id = self._get_option(
+            CONF_ESY_CONFIG_ENTRY_ID,
+            self.config_entry.data.get(CONF_ESY_CONFIG_ENTRY_ID, ""),
+        )
+        entry_options = {e.entry_id: e.title or e.entry_id for e in esy_entries}
+
+        return self.async_show_form(
+            step_id="esy_sunhome_connection",
+            data_schema=vol.Schema({
+                vol.Required(
+                    CONF_ESY_CONFIG_ENTRY_ID,
+                    default=current_entry_id,
+                ): SelectSelector(SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(value=k, label=v)
+                        for k, v in entry_options.items()
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )),
+            }),
             errors=errors,
         )
 

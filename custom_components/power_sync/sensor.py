@@ -588,6 +588,33 @@ ALPHAESS_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     ),
 )
 
+ESY_SUNHOME_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
+    PowerSyncSensorEntityDescription(
+        key="esy_inverter_temperature",
+        name="Inverter Temperature",
+        native_unit_of_measurement=UnitOfTemperature.CELSIUS,
+        device_class=SensorDeviceClass.TEMPERATURE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        icon="mdi:thermometer",
+        value_fn=lambda data: data.get("inverter_temperature") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key="esy_battery_status",
+        name="Battery Status",
+        icon="mdi:battery-heart",
+        value_fn=lambda data: data.get("battery_status_text") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key="esy_battery_soh",
+        name="Battery Health (SOH)",
+        native_unit_of_measurement=PERCENTAGE,
+        icon="mdi:battery-check",
+        suggested_display_precision=0,
+        value_fn=lambda data: data.get("battery_soh") if data else None,
+    ),
+)
+
 OPTIMIZER_ACTION_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_OPTIMIZATION_STATUS,
@@ -806,6 +833,7 @@ async def async_setup_entry(
     foxess_coordinator = domain_data.get("foxess_coordinator")
     goodwe_coordinator = domain_data.get("goodwe_coordinator")
     alphaess_coordinator = domain_data.get("alphaess_coordinator")
+    esy_sunhome_coordinator = domain_data.get("esy_sunhome_coordinator")
     demand_charge_coordinator: DemandChargeCoordinator | None = domain_data.get("demand_charge_coordinator")
     aemo_spike_manager = domain_data.get("aemo_spike_manager")
     is_sigenergy = domain_data.get("is_sigenergy", False)
@@ -813,6 +841,7 @@ async def async_setup_entry(
     is_foxess = domain_data.get("is_foxess", False)
     is_goodwe = domain_data.get("is_goodwe", False)
     is_alphaess = domain_data.get("is_alphaess", False)
+    is_esy_sunhome = domain_data.get("is_esy_sunhome", False)
 
     entities: list[SensorEntity] = []
 
@@ -886,6 +915,8 @@ async def async_setup_entry(
         energy_coordinator = sigenergy_coordinator
     elif is_alphaess:
         energy_coordinator = alphaess_coordinator
+    elif is_esy_sunhome:
+        energy_coordinator = esy_sunhome_coordinator
     else:
         energy_coordinator = tesla_coordinator
     if energy_coordinator:
@@ -958,6 +989,18 @@ async def async_setup_entry(
                 )
             )
         _LOGGER.info("AlphaESS BMS-limit sensors added")
+
+    # Add ESY Sunhome-specific sensors (inverter temp, battery status, SOH)
+    if is_esy_sunhome and energy_coordinator:
+        for description in ESY_SUNHOME_SENSORS:
+            entities.append(
+                TeslaEnergySensor(
+                    coordinator=energy_coordinator,
+                    description=description,
+                    entry=entry,
+                )
+            )
+        _LOGGER.info("ESY Sunhome-specific sensors added (inverter temp, battery status, SOH)")
 
     # Add EV sensors if EV charging is configured (Tesla, OCPP, or Zaptec)
     ev_enabled = entry.options.get(
