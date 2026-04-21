@@ -4194,10 +4194,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         entity_id: str,
         name: str | None = None,
         max_power_w: int = 7400,
-        min_power_w: int = 1400,
         target_soc: float = 0.8,
         departure_time: str | None = None,
         price_threshold: float | None = None,
+        min_power_w: int = 1400,
     ) -> bool:
         """Add an EV charger to smart charging coordination.
 
@@ -4205,14 +4205,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             entity_id: HA entity ID of the EV charger
             name: Friendly name for the charger
             max_power_w: Maximum charging power in watts
-            min_power_w: Minimum charging power in watts (vehicle-specific)
             target_soc: Target state of charge (0-1)
             departure_time: Time when car needs to be ready (HH:MM)
             price_threshold: Max $/kWh for smart charging
+            min_power_w: Minimum charging power in watts (vehicle-specific)
 
         Returns:
             True if added successfully
         """
+        if min_power_w <= 0 or min_power_w > max_power_w:
+            _LOGGER.error(
+                "Invalid EV power bounds for %s: min_power_w=%s, max_power_w=%s",
+                entity_id, min_power_w, max_power_w,
+            )
+            return False
+
         config = EVConfig(
             entity_id=entity_id,
             name=name or entity_id.split(".")[-1],
