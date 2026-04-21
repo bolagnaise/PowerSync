@@ -12340,11 +12340,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "_pricing", "_flow_power", "_aemo", "_ev_charging", "_octopus", "_controls",
     }
     for _dev in list(dev_reg.devices.values()):
-        for _domain, _ident in _dev.identifiers:
+        for _id_tuple in _dev.identifiers:
             if (
-                _domain == DOMAIN
-                and isinstance(_ident, str)
-                and any(_ident == f"{entry.entry_id}{sfx}" for sfx in _sub_device_suffixes)
+                len(_id_tuple) >= 2
+                and _id_tuple[0] == DOMAIN
+                and isinstance(_id_tuple[1], str)
+                and any(_id_tuple[1] == f"{entry.entry_id}{sfx}" for sfx in _sub_device_suffixes)
             ):
                 dev_reg.async_remove_device(_dev.id)
                 break
