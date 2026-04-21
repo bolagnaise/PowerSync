@@ -128,6 +128,7 @@ BATTERY_SYSTEM_FOXESS = "foxess"
 BATTERY_SYSTEM_GOODWE = "goodwe"
 BATTERY_SYSTEM_ALPHAESS = "alphaess"
 BATTERY_SYSTEM_ESY_SUNHOME = "esy_sunhome"
+BATTERY_SYSTEM_SOLAX = "solax"
 
 BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_TESLA: "Tesla Powerwall — Fleet API or Teslemetry",
@@ -137,6 +138,7 @@ BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_GOODWE: "GoodWe ET/EH/ES/EM — UDP or TCP",
     BATTERY_SYSTEM_ALPHAESS: "AlphaESS SMILE/Storion — Modbus TCP + optional Cloud API",
     BATTERY_SYSTEM_ESY_SUNHOME: "ESY Sunhome — via esy_sunhome companion integration",
+    BATTERY_SYSTEM_SOLAX: "Solax Hybrid — via Solax Modbus integration",
 }
 
 # Sungrow SH-series Battery System Configuration (Modbus TCP)
@@ -379,6 +381,20 @@ ALPHAESS_CLOUD_BASE_URL = "https://openapi.alphaess.com/api"
 # ESY Sunhome battery system — bridges via upstream esy_sunhome companion integration
 # Install the esy_sunhome integration from HACS first; PowerSync reads its entities.
 CONF_ESY_CONFIG_ENTRY_ID = "esy_config_entry_id"  # UUID of the upstream esy_sunhome config entry
+
+# Solax Hybrid battery system — bridges via wills106/homeassistant-solax-modbus integration
+# Install solax_modbus from HACS first; PowerSync reads/writes its entities.
+# Supports Gen4/Gen5/Gen6 Hybrid and AC Retro-Fit (X1/X3 families).
+CONF_SOLAX_ENTITY_PREFIX = "solax_entity_prefix"          # e.g. "solax" → sensor.solax_battery_capacity
+CONF_SOLAX_BATTERY_CAPACITY_KWH = "solax_battery_capacity_kwh"   # kWh, for LP optimizer
+CONF_SOLAX_BATTERY_NOMINAL_V = "solax_battery_nominal_v"         # V, for current→power conversion
+CONF_SOLAX_MAX_CHARGE_CURRENT_A = "solax_max_charge_current_a"   # A, hardware limit
+CONF_SOLAX_MAX_DISCHARGE_CURRENT_A = "solax_max_discharge_current_a"  # A, hardware limit
+DEFAULT_SOLAX_ENTITY_PREFIX = "solax"
+DEFAULT_SOLAX_BATTERY_CAPACITY_KWH = 11.6   # T-BAT-SYS-HV 11.6 kWh
+DEFAULT_SOLAX_BATTERY_NOMINAL_V = 51.2      # LFP T-BAT; override to 102.4 for HV packs
+DEFAULT_SOLAX_MAX_CHARGE_CURRENT_A = 25
+DEFAULT_SOLAX_MAX_DISCHARGE_CURRENT_A = 25
 
 # Demand charge configuration
 CONF_DEMAND_CHARGE_ENABLED = "demand_charge_enabled"
@@ -1427,6 +1443,7 @@ OPTIMIZATION_PROVIDER_NATIVE_NAMES = {
     BATTERY_SYSTEM_GOODWE: "GoodWe",
     BATTERY_SYSTEM_ALPHAESS: "AlphaESS",
     BATTERY_SYSTEM_ESY_SUNHOME: "ESY Sunhome",
+    BATTERY_SYSTEM_SOLAX: "Solax",
 }
 
 OPTIMIZATION_PROVIDERS = {
@@ -1467,6 +1484,7 @@ BATTERY_CAPACITY_DEFAULTS = {
     BATTERY_SYSTEM_GOODWE: 10000,     # Varies, default 10 kWh
     BATTERY_SYSTEM_ALPHAESS: 10000,   # Varies (SMILE5 ~ 5.7 kWh, Storion ~ 30 kWh), default 10 kWh
     BATTERY_SYSTEM_ESY_SUNHOME: 10000,  # HM6 varies; default 10 kWh
+    BATTERY_SYSTEM_SOLAX: 11600,      # T-BAT-SYS-HV 11.6 kWh typical
 }
 
 # Max charge/discharge power defaults by system (W)
@@ -1478,6 +1496,7 @@ BATTERY_POWER_DEFAULTS = {
     BATTERY_SYSTEM_GOODWE: 5000,      # Varies by model
     BATTERY_SYSTEM_ALPHAESS: 5000,    # Varies by model (SMILE5 = 5 kW, Storion-T30 larger)
     BATTERY_SYSTEM_ESY_SUNHOME: 5000,  # HM6; rate is firmware-decided, using 5 kW default
+    BATTERY_SYSTEM_SOLAX: 5000,        # Varies by model (X1-Hybrid G4: 3.7 kW, X3-Hybrid: 6 kW)
 }
 
 # Optimization service

@@ -834,6 +834,7 @@ async def async_setup_entry(
     goodwe_coordinator = domain_data.get("goodwe_coordinator")
     alphaess_coordinator = domain_data.get("alphaess_coordinator")
     esy_sunhome_coordinator = domain_data.get("esy_sunhome_coordinator")
+    solax_coordinator = domain_data.get("solax_coordinator")
     demand_charge_coordinator: DemandChargeCoordinator | None = domain_data.get("demand_charge_coordinator")
     aemo_spike_manager = domain_data.get("aemo_spike_manager")
     is_sigenergy = domain_data.get("is_sigenergy", False)
@@ -842,6 +843,7 @@ async def async_setup_entry(
     is_goodwe = domain_data.get("is_goodwe", False)
     is_alphaess = domain_data.get("is_alphaess", False)
     is_esy_sunhome = domain_data.get("is_esy_sunhome", False)
+    is_solax = domain_data.get("is_solax", False)
 
     entities: list[SensorEntity] = []
 
@@ -917,6 +919,8 @@ async def async_setup_entry(
         energy_coordinator = alphaess_coordinator
     elif is_esy_sunhome:
         energy_coordinator = esy_sunhome_coordinator
+    elif is_solax:
+        energy_coordinator = solax_coordinator
     else:
         energy_coordinator = tesla_coordinator
     if energy_coordinator:

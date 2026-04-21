@@ -201,6 +201,15 @@ from .const import (
     BATTERY_SYSTEM_ALPHAESS,
     BATTERY_SYSTEM_ESY_SUNHOME,
     CONF_ESY_CONFIG_ENTRY_ID,
+    BATTERY_SYSTEM_SOLAX,
+    CONF_SOLAX_ENTITY_PREFIX,
+    CONF_SOLAX_BATTERY_NOMINAL_V,
+    CONF_SOLAX_MAX_CHARGE_CURRENT_A,
+    CONF_SOLAX_MAX_DISCHARGE_CURRENT_A,
+    DEFAULT_SOLAX_ENTITY_PREFIX,
+    DEFAULT_SOLAX_BATTERY_NOMINAL_V,
+    DEFAULT_SOLAX_MAX_CHARGE_CURRENT_A,
+    DEFAULT_SOLAX_MAX_DISCHARGE_CURRENT_A,
     # Battery system selection
     CONF_BATTERY_SYSTEM,
     BATTERY_SYSTEM_SUNGROW,
@@ -336,6 +345,7 @@ from .coordinator import (
     GoodWeEnergyCoordinator,
     AlphaESSEnergyCoordinator,
     ESYSunhomeEnergyCoordinator,
+    SolaxBatteryEnergyCoordinator,
     DemandChargeCoordinator,
     AEMOSensorCoordinator,
     OctopusPriceCoordinator,
@@ -3682,7 +3692,7 @@ class BatteryHealthView(HomeAssistantView):
     def _get_coordinator_soh(self, entry) -> float | None:
         """Get battery_soh from the energy coordinator for non-Tesla systems."""
         entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-        for key in ("sungrow_coordinator", "sigenergy_coordinator", "goodwe_coordinator", "alphaess_coordinator"):
+        for key in ("sungrow_coordinator", "sigenergy_coordinator", "goodwe_coordinator", "alphaess_coordinator", "solax_coordinator"):
             coord = entry_data.get(key)
             if coord and coord.data:
                 soh = coord.data.get("battery_soh")
@@ -5397,7 +5407,7 @@ class ConfigView(HomeAssistantView):
                 }
             else:
                 # Fall back to coordinator battery_soh (Sungrow, Sigenergy, GoodWe)
-                for key in ("sungrow_coordinator", "sigenergy_coordinator", "goodwe_coordinator", "alphaess_coordinator"):
+                for key in ("sungrow_coordinator", "sigenergy_coordinator", "goodwe_coordinator", "alphaess_coordinator", "solax_coordinator"):
                     coord = entry_data.get(key)
                     if coord and coord.data:
                         soh = coord.data.get("battery_soh")
@@ -12566,6 +12576,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
     is_alphaess = bool(entry.data.get(CONF_ALPHAESS_MODBUS_HOST))
     is_esy_sunhome = bool(entry.data.get(CONF_ESY_CONFIG_ENTRY_ID))
+    is_solax = bool(entry.data.get(CONF_SOLAX_ENTITY_PREFIX))
     tesla_coordinator = None
     sigenergy_coordinator = None
     sungrow_coordinator = None
@@ -12574,6 +12585,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     goodwe_coordinator = None
     alphaess_coordinator = None
     esy_sunhome_coordinator = None
+    solax_coordinator = None
     token_getter = None  # Will be set for Tesla users
 
     if is_sigenergy:
@@ -12763,6 +12775,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             esy_entry_id=entry.data[CONF_ESY_CONFIG_ENTRY_ID],
             entry_id=entry.entry_id,
         )
+    elif is_solax:
+        _LOGGER.info("Running in Solax mode — bridging via homeassistant-solax-modbus integration")
+        solax_prefix = entry.options.get(CONF_SOLAX_ENTITY_PREFIX, entry.data.get(CONF_SOLAX_ENTITY_PREFIX, DEFAULT_SOLAX_ENTITY_PREFIX))
+        solax_nominal_v = entry.options.get(CONF_SOLAX_BATTERY_NOMINAL_V, entry.data.get(CONF_SOLAX_BATTERY_NOMINAL_V, DEFAULT_SOLAX_BATTERY_NOMINAL_V))
+        solax_max_charge_a = entry.options.get(CONF_SOLAX_MAX_CHARGE_CURRENT_A, entry.data.get(CONF_SOLAX_MAX_CHARGE_CURRENT_A, DEFAULT_SOLAX_MAX_CHARGE_CURRENT_A))
+        solax_max_discharge_a = entry.options.get(CONF_SOLAX_MAX_DISCHARGE_CURRENT_A, entry.data.get(CONF_SOLAX_MAX_DISCHARGE_CURRENT_A, DEFAULT_SOLAX_MAX_DISCHARGE_CURRENT_A))
+        _LOGGER.info("Initializing Solax coordinator: prefix=%s", solax_prefix)
+        solax_coordinator = SolaxBatteryEnergyCoordinator(
+            hass,
+            entity_prefix=solax_prefix,
+            battery_nominal_v=float(solax_nominal_v),
+            max_charge_current_a=float(solax_max_charge_a),
+            max_discharge_current_a=float(solax_max_discharge_a),
+            entry_id=entry.entry_id,
+        )
     else:
         # Get initial Tesla API token and provider
         # Use get_tesla_api_token() which fetches fresh from tesla_fleet if available
@@ -12871,6 +12898,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.warning("ESY Sunhome coordinator failed to initialize: %s", e)
             esy_sunhome_coordinator = None
+    if solax_coordinator:
+        try:
+            await solax_coordinator.async_config_entry_first_refresh()
+            _LOGGER.info("Solax coordinator initialized successfully")
+        except Exception as e:
+            _LOGGER.warning("Solax coordinator failed to initialize: %s", e)
+            solax_coordinator = None
 
     # Initialize demand charge coordinator if enabled (any battery system with grid power data)
     demand_charge_coordinator = None
@@ -12881,7 +12915,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     energy_coord_for_demand = (
         tesla_coordinator or foxess_coordinator or goodwe_coordinator
         or sigenergy_coordinator or sungrow_coordinator or alphaess_coordinator
-        or esy_sunhome_coordinator
+        or esy_sunhome_coordinator or solax_coordinator
     )
     if demand_charge_enabled and energy_coord_for_demand:
         demand_charge_rate = entry.options.get(
@@ -12971,7 +13005,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("AEMO spike detection enabled but no region configured")
 
     # Generic AEMO Spike Manager (service-call-based) for non-Tesla systems
-    if aemo_spike_enabled and (is_sigenergy or is_sungrow or is_foxess or is_esy_sunhome):
+    if aemo_spike_enabled and (is_sigenergy or is_sungrow or is_foxess or is_esy_sunhome or is_solax):
         aemo_region = entry.options.get(
             CONF_AEMO_REGION,
             entry.data.get(CONF_AEMO_REGION)
@@ -13097,12 +13131,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.info("Saving Session Tariff Manager initialized for Tesla")
 
             # Non-Tesla generic manager
-            elif is_sigenergy or is_sungrow or is_foxess or is_goodwe or is_esy_sunhome:
+            elif is_sigenergy or is_sungrow or is_foxess or is_goodwe or is_esy_sunhome or is_solax:
                 battery_type = (
                     "sigenergy" if is_sigenergy else
                     "sungrow" if is_sungrow else
                     "goodwe" if is_goodwe else
                     "esy_sunhome" if is_esy_sunhome else
+                    "solax" if is_solax else
                     "foxess"
                 )
                 generic_saving_session_manager = GenericSavingSessionManager(
@@ -13424,6 +13459,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "goodwe_coordinator": goodwe_coordinator,  # For GoodWe energy/battery data
         "alphaess_coordinator": alphaess_coordinator,  # For AlphaESS Modbus + cloud fallback
         "esy_sunhome_coordinator": esy_sunhome_coordinator,  # For ESY Sunhome (bridges via esy_sunhome integration)
+        "solax_coordinator": solax_coordinator,  # For Solax Hybrid (bridges via homeassistant-solax-modbus)
         "demand_charge_coordinator": demand_charge_coordinator,
         "aemo_spike_manager": aemo_spike_manager,
         "generic_aemo_spike_manager": generic_aemo_spike_manager,  # For non-Tesla AEMO spike detection
@@ -13455,6 +13491,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "is_goodwe": is_goodwe,  # Track if GoodWe battery system
         "is_alphaess": is_alphaess,  # Track if AlphaESS battery system
         "is_esy_sunhome": is_esy_sunhome,  # Track if ESY Sunhome battery system
+        "is_solax": is_solax,  # Track if Solax battery system
         "foxess_curtailment_state": "normal",  # Track FoxESS DC curtailment state
         "sigenergy_curtailment_state": "normal",  # Track Sigenergy DC curtailment state
         "alphaess_curtailment_state": "normal",  # Track AlphaESS DC curtailment state
@@ -17621,6 +17658,57 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "ESY Sunhome mode switch error"))
                 return
 
+        # Check if this is a Solax system
+        is_solax_local = bool(entry.data.get(CONF_SOLAX_ENTITY_PREFIX))
+        if is_solax_local:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                solax_coord = entry_data.get("solax_coordinator")
+                if not solax_coord:
+                    force_discharge_state["active"] = False
+                    _LOGGER.error("Force discharge: Solax coordinator not available")
+                    return
+
+                power_w = call.data.get("power_w", 0)
+                discharge_result = await solax_coord.force_discharge(duration, power_w=power_w)
+
+                if discharge_result:
+                    force_discharge_state["active"] = True
+                    force_discharge_state["source"] = source
+                    force_discharge_state["duration"] = duration
+                    force_discharge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
+                    _LOGGER.info("Solax FORCE DISCHARGE ACTIVE for %d minutes", duration)
+
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                        "active": True,
+                        "expires_at": force_discharge_state["expires_at"].isoformat(),
+                        "duration": duration,
+                    })
+
+                    if force_discharge_state.get("cancel_expiry_timer"):
+                        force_discharge_state["cancel_expiry_timer"]()
+
+                    async def auto_restore_discharge_solax(_now):
+                        if _command_generation[0] != _restore_gen:
+                            return
+                        if force_discharge_state["active"]:
+                            _LOGGER.info("Solax force discharge expired, auto-restoring")
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+
+                    force_discharge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass, auto_restore_discharge_solax, force_discharge_state["expires_at"]
+                    )
+                    await persist_force_mode_state()
+                else:
+                    force_discharge_state["active"] = False
+                    _LOGGER.error("Solax force discharge failed")
+                return
+            except Exception as e:
+                force_discharge_state["active"] = False
+                _LOGGER.error(f"Error in Solax force discharge: {e}", exc_info=True)
+                hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "Solax entity write error"))
+                return
+
         # Check if this is a Sungrow system
         is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
         if is_sungrow:
@@ -18547,6 +18635,65 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "ESY Sunhome mode switch error"))
                 return
 
+        # Check if this is a Solax system
+        is_solax_local = bool(entry.data.get(CONF_SOLAX_ENTITY_PREFIX))
+        if is_solax_local:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                solax_coord = entry_data.get("solax_coordinator")
+                if not solax_coord:
+                    force_charge_state["active"] = False
+                    _LOGGER.error("Force charge: Solax coordinator not available")
+                    return
+
+                if force_discharge_state["active"]:
+                    _LOGGER.info("Canceling active discharge mode to enable charge mode")
+                    if force_discharge_state.get("cancel_expiry_timer"):
+                        force_discharge_state["cancel_expiry_timer"]()
+                        force_discharge_state["cancel_expiry_timer"] = None
+                    force_discharge_state["active"] = False
+                    force_discharge_state["expires_at"] = None
+
+                power_w = call.data.get("power_w", 0)
+                charge_result = await solax_coord.force_charge(duration, power_w=power_w)
+
+                if charge_result:
+                    force_charge_state["active"] = True
+                    force_charge_state["source"] = source
+                    force_charge_state["duration"] = duration
+                    force_charge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
+                    _LOGGER.info("Solax FORCE CHARGE ACTIVE for %d minutes", duration)
+
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
+                        "active": True,
+                        "expires_at": force_charge_state["expires_at"].isoformat(),
+                        "duration": duration,
+                    })
+
+                    if force_charge_state.get("cancel_expiry_timer"):
+                        force_charge_state["cancel_expiry_timer"]()
+
+                    async def auto_restore_charge_solax(_now):
+                        if _command_generation[0] != _restore_gen:
+                            return
+                        if force_charge_state["active"]:
+                            _LOGGER.info("Solax force charge expired, auto-restoring")
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+
+                    force_charge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass, auto_restore_charge_solax, force_charge_state["expires_at"]
+                    )
+                    await persist_force_mode_state()
+                else:
+                    force_charge_state["active"] = False
+                    _LOGGER.error("Solax force charge failed")
+                return
+            except Exception as e:
+                force_charge_state["active"] = False
+                _LOGGER.error(f"Error in Solax force charge: {e}", exc_info=True)
+                hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "Solax entity write error"))
+                return
+
         # Check if this is a Sungrow system
         is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
         if is_sungrow:
@@ -19292,6 +19439,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
             except Exception as e:
                 _LOGGER.error(f"Error in ESY Sunhome restore normal: {e}", exc_info=True)
+                return
+
+        # Check if this is a Solax system
+        is_solax_local = bool(entry.data.get(CONF_SOLAX_ENTITY_PREFIX))
+        if is_solax_local:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                solax_coord = entry_data.get("solax_coordinator")
+                if solax_coord:
+                    await solax_coord.restore_normal()
+
+                force_charge_state["active"] = False
+                force_discharge_state["active"] = False
+                force_charge_state["expires_at"] = None
+                force_discharge_state["expires_at"] = None
+
+                _LOGGER.info("Solax NORMAL OPERATION RESTORED (Self Use)")
+
+                if not suppress_notification:
+                    try:
+                        from .automations.actions import _send_expo_push
+                        await _send_expo_push(hass, "Battery", "Normal operation restored")
+                    except Exception as notify_err:
+                        _LOGGER.debug(f"Could not send success notification: {notify_err}")
+
+                async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                    "active": False, "expires_at": None, "duration": 0,
+                })
+                async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
+                    "active": False, "expires_at": None, "duration": 0,
+                })
+
+                await persist_force_mode_state()
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error in Solax restore normal: {e}", exc_info=True)
                 return
 
         # Check if this is a Sungrow system

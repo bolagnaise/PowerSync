@@ -4513,6 +4513,101 @@ class GoodWeEnergyCoordinator(DataUpdateCoordinator):
         self._connected = False
 
 
+class SolaxBatteryEnergyCoordinator(DataUpdateCoordinator):
+    """Bridge coordinator for Solax Hybrid via the wills106/homeassistant-solax-modbus integration.
+
+    Reads entity states published by the solax_modbus integration and assembles
+    the standard PowerSync data dict. Control (force_charge, restore_normal, etc.)
+    is delegated to SolaxBatteryController which writes via HA service calls.
+    """
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entity_prefix: str = "solax",
+        battery_nominal_v: float = 51.2,
+        max_charge_current_a: float = 25.0,
+        max_discharge_current_a: float = 25.0,
+        entry_id: str = "",
+    ) -> None:
+        from .inverters.solax_battery import SolaxBatteryController
+
+        self._entry_id = entry_id
+        self._controller = SolaxBatteryController(
+            hass,
+            entity_prefix=entity_prefix,
+            battery_nominal_v=battery_nominal_v,
+            max_charge_current_a=max_charge_current_a,
+            max_discharge_current_a=max_discharge_current_a,
+        )
+        self._energy_acc = EnergyAccumulator(hass, "solax")
+
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_solax_energy",
+            update_interval=timedelta(seconds=30),
+        )
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Return Solax data assembled from HA entity states."""
+        if not self._energy_acc._last_update:
+            await self._energy_acc.async_restore()
+
+        try:
+            status = self._controller.get_status()
+        except Exception as exc:
+            if self.data:
+                _LOGGER.warning("Solax entity read failed, returning stale data: %s", exc)
+                return self.data
+            raise UpdateFailed(f"Solax entity read failed: {exc}") from exc
+
+        solar_kw = status.get("solar_power", 0.0) or 0.0
+        grid_kw = status.get("grid_power", 0.0) or 0.0
+        battery_kw = status.get("battery_power", 0.0) or 0.0
+        load_kw = status.get("load_power", 0.0) or 0.0
+        soc = status.get("battery_level", 0.0) or 0.0
+
+        buy, sell = _get_current_prices(self.hass, self._entry_id)
+        self._energy_acc.update(max(0.0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+
+        result = {
+            "solar_power": solar_kw,
+            "grid_power": grid_kw,
+            "battery_power": battery_kw,
+            "load_power": load_kw,
+            "battery_level": soc,
+            "battery_temperature": status.get("battery_temperature"),
+            "mode": status.get("mode"),
+        }
+        result.update(self._energy_acc.totals())
+        return result
+
+    async def force_charge(self, duration_minutes: int, power_w: int) -> bool:
+        return await self._controller.force_charge(duration_minutes, power_w)
+
+    async def force_discharge(self, duration_minutes: int, power_w: int) -> bool:
+        return await self._controller.force_discharge(duration_minutes, power_w)
+
+    async def restore_normal(self) -> bool:
+        return await self._controller.restore_normal()
+
+    async def set_backup_reserve(self, percent: int) -> bool:
+        return await self._controller.set_backup_reserve(percent)
+
+    async def set_operation_mode(self, mode: str) -> bool:
+        return await self._controller.set_operation_mode(mode)
+
+    async def curtail(self, home_load_w: int | None = None) -> bool:
+        return await self._controller.curtail(home_load_w)
+
+    async def restore_curtailment(self) -> bool:
+        return await self._controller.restore()
+
+    async def async_shutdown(self) -> None:
+        await self._controller.disconnect()
+
+
 class ESYSunhomeEnergyCoordinator(DataUpdateCoordinator):
     """Bridge coordinator for ESY Sunhome via the upstream esy_sunhome integration.
 

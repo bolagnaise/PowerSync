@@ -73,8 +73,20 @@ from .const import (
     BATTERY_SYSTEM_FOXESS,
     BATTERY_SYSTEM_ALPHAESS,
     BATTERY_SYSTEM_ESY_SUNHOME,
+    BATTERY_SYSTEM_SOLAX,
     BATTERY_SYSTEMS,
     CONF_ESY_CONFIG_ENTRY_ID,
+    # Solax battery system configuration
+    CONF_SOLAX_ENTITY_PREFIX,
+    CONF_SOLAX_BATTERY_CAPACITY_KWH,
+    CONF_SOLAX_BATTERY_NOMINAL_V,
+    CONF_SOLAX_MAX_CHARGE_CURRENT_A,
+    CONF_SOLAX_MAX_DISCHARGE_CURRENT_A,
+    DEFAULT_SOLAX_ENTITY_PREFIX,
+    DEFAULT_SOLAX_BATTERY_CAPACITY_KWH,
+    DEFAULT_SOLAX_BATTERY_NOMINAL_V,
+    DEFAULT_SOLAX_MAX_CHARGE_CURRENT_A,
+    DEFAULT_SOLAX_MAX_DISCHARGE_CURRENT_A,
     # AlphaESS battery system configuration
     CONF_ALPHAESS_MODBUS_HOST,
     CONF_ALPHAESS_MODBUS_PORT,
@@ -1084,6 +1096,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return await self.async_step_alphaess_modbus()
         elif self._selected_battery_system == BATTERY_SYSTEM_ESY_SUNHOME:
             return await self.async_step_esy_sunhome()
+        elif self._selected_battery_system == BATTERY_SYSTEM_SOLAX:
+            return await self.async_step_solax_battery()
         else:
             return await self.async_step_tesla_provider()
 
@@ -1109,6 +1123,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             **getattr(self, "_goodwe_data", {}),
             **getattr(self, "_alphaess_data", {}),
             **getattr(self, "_esy_sunhome_data", {}),
+            **getattr(self, "_solax_data", {}),
             CONF_ELECTRICITY_PROVIDER: self._selected_electricity_provider,
         }
 
@@ -1147,6 +1162,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             BATTERY_SYSTEM_GOODWE: "GoodWe",
             BATTERY_SYSTEM_ALPHAESS: "AlphaESS",
             BATTERY_SYSTEM_ESY_SUNHOME: "ESY Sunhome",
+            BATTERY_SYSTEM_SOLAX: "Solax",
         }.get(self._selected_battery_system, "")
 
         if battery_label:
@@ -2012,6 +2028,78 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="esy_sunhome",
             data_schema=vol.Schema({}),
+            errors=errors,
+        )
+
+    async def async_step_solax_battery(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure Solax Hybrid connection via the solax_modbus integration.
+
+        PowerSync bridges through the wills106/homeassistant-solax-modbus entities.
+        Install the solax_modbus integration from HACS first, then return here.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            prefix = user_input.get(CONF_SOLAX_ENTITY_PREFIX, DEFAULT_SOLAX_ENTITY_PREFIX).strip()
+            capacity_kwh = user_input.get(CONF_SOLAX_BATTERY_CAPACITY_KWH, DEFAULT_SOLAX_BATTERY_CAPACITY_KWH)
+            nominal_v = user_input.get(CONF_SOLAX_BATTERY_NOMINAL_V, DEFAULT_SOLAX_BATTERY_NOMINAL_V)
+            max_charge_a = user_input.get(CONF_SOLAX_MAX_CHARGE_CURRENT_A, DEFAULT_SOLAX_MAX_CHARGE_CURRENT_A)
+            max_discharge_a = user_input.get(CONF_SOLAX_MAX_DISCHARGE_CURRENT_A, DEFAULT_SOLAX_MAX_DISCHARGE_CURRENT_A)
+
+            try:
+                from .inverters.solax_battery import SolaxBatteryController
+                ctrl = SolaxBatteryController(
+                    self.hass,
+                    entity_prefix=prefix,
+                    battery_nominal_v=float(nominal_v),
+                    max_charge_current_a=float(max_charge_a),
+                    max_discharge_current_a=float(max_discharge_a),
+                )
+                await ctrl.connect()
+                self._solax_data = {
+                    CONF_SOLAX_ENTITY_PREFIX: prefix,
+                    CONF_SOLAX_BATTERY_CAPACITY_KWH: float(capacity_kwh),
+                    CONF_SOLAX_BATTERY_NOMINAL_V: float(nominal_v),
+                    CONF_SOLAX_MAX_CHARGE_CURRENT_A: float(max_charge_a),
+                    CONF_SOLAX_MAX_DISCHARGE_CURRENT_A: float(max_discharge_a),
+                }
+                return self._create_final_entry()
+            except ValueError as exc:
+                msg = str(exc)
+                if "solax_missing_entities:" in msg:
+                    missing = msg.split(":", 1)[1]
+                    _LOGGER.warning("Solax setup: missing entities: %s", missing)
+                    errors["base"] = "solax_missing_entities"
+                else:
+                    errors["base"] = "solax_connect_failed"
+            except Exception as exc:
+                _LOGGER.error("Solax setup error: %s", exc)
+                errors["base"] = "solax_connect_failed"
+
+        current_prefix = getattr(self, "_solax_data", {}).get(
+            CONF_SOLAX_ENTITY_PREFIX, DEFAULT_SOLAX_ENTITY_PREFIX
+        )
+        return self.async_show_form(
+            step_id="solax_battery",
+            data_schema=vol.Schema({
+                vol.Required(CONF_SOLAX_ENTITY_PREFIX, default=current_prefix): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.TEXT)
+                ),
+                vol.Required(CONF_SOLAX_BATTERY_CAPACITY_KWH, default=DEFAULT_SOLAX_BATTERY_CAPACITY_KWH): NumberSelector(
+                    NumberSelectorConfig(min=1, max=100, step=0.1, mode=NumberSelectorMode.BOX, unit_of_measurement="kWh")
+                ),
+                vol.Required(CONF_SOLAX_BATTERY_NOMINAL_V, default=DEFAULT_SOLAX_BATTERY_NOMINAL_V): NumberSelector(
+                    NumberSelectorConfig(min=24, max=500, step=0.1, mode=NumberSelectorMode.BOX, unit_of_measurement="V")
+                ),
+                vol.Required(CONF_SOLAX_MAX_CHARGE_CURRENT_A, default=DEFAULT_SOLAX_MAX_CHARGE_CURRENT_A): NumberSelector(
+                    NumberSelectorConfig(min=1, max=200, step=1, mode=NumberSelectorMode.BOX, unit_of_measurement="A")
+                ),
+                vol.Required(CONF_SOLAX_MAX_DISCHARGE_CURRENT_A, default=DEFAULT_SOLAX_MAX_DISCHARGE_CURRENT_A): NumberSelector(
+                    NumberSelectorConfig(min=1, max=200, step=1, mode=NumberSelectorMode.BOX, unit_of_measurement="A")
+                ),
+            }),
             errors=errors,
         )
 
@@ -3283,6 +3371,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             menu_options.append("goodwe_connection_options")
         elif battery_system == BATTERY_SYSTEM_ESY_SUNHOME:
             menu_options.append("esy_sunhome_connection")
+        elif battery_system == BATTERY_SYSTEM_SOLAX:
+            menu_options.append("solax_battery_options")
 
         menu_options.extend([
             "optimization",
@@ -3944,6 +4034,69 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     ],
                     mode=SelectSelectorMode.DROPDOWN,
                 )),
+            }),
+            errors=errors,
+        )
+
+    async def async_step_solax_battery_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: Solax connection settings."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            prefix = user_input.get(CONF_SOLAX_ENTITY_PREFIX, DEFAULT_SOLAX_ENTITY_PREFIX).strip()
+            try:
+                from .inverters.solax_battery import SolaxBatteryController
+                ctrl = SolaxBatteryController(
+                    self.hass,
+                    entity_prefix=prefix,
+                    battery_nominal_v=float(user_input.get(CONF_SOLAX_BATTERY_NOMINAL_V, DEFAULT_SOLAX_BATTERY_NOMINAL_V)),
+                    max_charge_current_a=float(user_input.get(CONF_SOLAX_MAX_CHARGE_CURRENT_A, DEFAULT_SOLAX_MAX_CHARGE_CURRENT_A)),
+                    max_discharge_current_a=float(user_input.get(CONF_SOLAX_MAX_DISCHARGE_CURRENT_A, DEFAULT_SOLAX_MAX_DISCHARGE_CURRENT_A)),
+                )
+                await ctrl.connect()
+                new_data = dict(self.config_entry.data)
+                new_data[CONF_SOLAX_ENTITY_PREFIX] = prefix
+                new_data[CONF_SOLAX_BATTERY_CAPACITY_KWH] = float(user_input.get(CONF_SOLAX_BATTERY_CAPACITY_KWH, DEFAULT_SOLAX_BATTERY_CAPACITY_KWH))
+                new_data[CONF_SOLAX_BATTERY_NOMINAL_V] = float(user_input.get(CONF_SOLAX_BATTERY_NOMINAL_V, DEFAULT_SOLAX_BATTERY_NOMINAL_V))
+                new_data[CONF_SOLAX_MAX_CHARGE_CURRENT_A] = float(user_input.get(CONF_SOLAX_MAX_CHARGE_CURRENT_A, DEFAULT_SOLAX_MAX_CHARGE_CURRENT_A))
+                new_data[CONF_SOLAX_MAX_DISCHARGE_CURRENT_A] = float(user_input.get(CONF_SOLAX_MAX_DISCHARGE_CURRENT_A, DEFAULT_SOLAX_MAX_DISCHARGE_CURRENT_A))
+                self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+                return self.async_create_entry(title="", data=dict(self.config_entry.options))
+            except ValueError as exc:
+                if "solax_missing_entities:" in str(exc):
+                    errors["base"] = "solax_missing_entities"
+                else:
+                    errors["base"] = "solax_connect_failed"
+            except Exception as exc:
+                _LOGGER.error("Solax options error: %s", exc)
+                errors["base"] = "solax_connect_failed"
+
+        current_prefix = self._get_option(CONF_SOLAX_ENTITY_PREFIX, self.config_entry.data.get(CONF_SOLAX_ENTITY_PREFIX, DEFAULT_SOLAX_ENTITY_PREFIX))
+        current_capacity = self._get_option(CONF_SOLAX_BATTERY_CAPACITY_KWH, self.config_entry.data.get(CONF_SOLAX_BATTERY_CAPACITY_KWH, DEFAULT_SOLAX_BATTERY_CAPACITY_KWH))
+        current_nominal_v = self._get_option(CONF_SOLAX_BATTERY_NOMINAL_V, self.config_entry.data.get(CONF_SOLAX_BATTERY_NOMINAL_V, DEFAULT_SOLAX_BATTERY_NOMINAL_V))
+        current_charge_a = self._get_option(CONF_SOLAX_MAX_CHARGE_CURRENT_A, self.config_entry.data.get(CONF_SOLAX_MAX_CHARGE_CURRENT_A, DEFAULT_SOLAX_MAX_CHARGE_CURRENT_A))
+        current_discharge_a = self._get_option(CONF_SOLAX_MAX_DISCHARGE_CURRENT_A, self.config_entry.data.get(CONF_SOLAX_MAX_DISCHARGE_CURRENT_A, DEFAULT_SOLAX_MAX_DISCHARGE_CURRENT_A))
+
+        return self.async_show_form(
+            step_id="solax_battery_options",
+            data_schema=vol.Schema({
+                vol.Required(CONF_SOLAX_ENTITY_PREFIX, default=current_prefix): TextSelector(
+                    TextSelectorConfig(type=TextSelectorType.TEXT)
+                ),
+                vol.Required(CONF_SOLAX_BATTERY_CAPACITY_KWH, default=current_capacity): NumberSelector(
+                    NumberSelectorConfig(min=1, max=100, step=0.1, mode=NumberSelectorMode.BOX, unit_of_measurement="kWh")
+                ),
+                vol.Required(CONF_SOLAX_BATTERY_NOMINAL_V, default=current_nominal_v): NumberSelector(
+                    NumberSelectorConfig(min=24, max=500, step=0.1, mode=NumberSelectorMode.BOX, unit_of_measurement="V")
+                ),
+                vol.Required(CONF_SOLAX_MAX_CHARGE_CURRENT_A, default=current_charge_a): NumberSelector(
+                    NumberSelectorConfig(min=1, max=200, step=1, mode=NumberSelectorMode.BOX, unit_of_measurement="A")
+                ),
+                vol.Required(CONF_SOLAX_MAX_DISCHARGE_CURRENT_A, default=current_discharge_a): NumberSelector(
+                    NumberSelectorConfig(min=1, max=200, step=1, mode=NumberSelectorMode.BOX, unit_of_measurement="A")
+                ),
             }),
             errors=errors,
         )

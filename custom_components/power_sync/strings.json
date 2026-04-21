@@ -701,6 +701,25 @@
           "optimization_backup_reserve": "The optimizer will not discharge below this level. Separate from your battery's hardware backup reserve (set in the mobile app)."
         },
         "submit": "Next"
+      },
+      "solax_battery": {
+        "title": "Solax Hybrid connection",
+        "description": "PowerSync bridges through the homeassistant-solax-modbus integration. Install it from HACS (search 'Solax Modbus') and configure your inverter, then return here.",
+        "data": {
+          "solax_entity_prefix": "Entity prefix",
+          "solax_battery_capacity_kwh": "Battery capacity",
+          "solax_battery_nominal_v": "Battery nominal voltage",
+          "solax_max_charge_current_a": "Max charge current",
+          "solax_max_discharge_current_a": "Max discharge current"
+        },
+        "data_description": {
+          "solax_entity_prefix": "The entity prefix used by the solax_modbus integration (e.g. 'solax' \u2192 sensor.solax_battery_capacity). Check Developer Tools > States if unsure.",
+          "solax_battery_capacity_kwh": "Usable battery capacity in kWh. Used by the LP optimizer.",
+          "solax_battery_nominal_v": "Nominal battery voltage in V (51.2 for LFP T-BAT, 102.4 for high-voltage packs).",
+          "solax_max_charge_current_a": "Maximum charge current your battery supports (A).",
+          "solax_max_discharge_current_a": "Maximum discharge current your battery supports (A)."
+        },
+        "submit": "Connect"
       }
     },
     "error": {
@@ -737,7 +756,9 @@
       "optimizer_not_installed": "Smart Optimization requires scipy, which is not installed. Check Home Assistant logs for installation errors.",
       "invalid_tariff": "This tariff code is not recognised for the selected network distributor. Check the code on your electricity bill.",
       "invalid_token_format": "Token format is not recognised. PowerSync tokens start with 'psync_' -- make sure you copied the full string.",
-      "unknown": "An unexpected error occurred. Check the Home Assistant logs for details and try again."
+      "unknown": "An unexpected error occurred. Check the Home Assistant logs for details and try again.",
+      "solax_missing_entities": "Some required solax_modbus entities were not found. Ensure the homeassistant-solax-modbus integration is installed and running, and that the entity prefix matches (check Developer Tools > States for 'sensor.<prefix>_battery_capacity').",
+      "solax_connect_failed": "Failed to validate Solax entities. Check the entity prefix and try again."
     },
     "abort": {
       "already_configured": "PowerSync is already configured. To change settings, use the Configure button on the integration card.",
@@ -767,7 +788,8 @@
           "curtailment": "Curtailment settings",
           "demand_charges": "Demand charge tracking",
           "ev_charging": "EV charging",
-          "weather": "Weather & solar forecast"
+          "weather": "Weather & solar forecast",
+          "solax_battery_options": "Solax connection"
         }
       },
       "pricing": {
@@ -1556,6 +1578,25 @@
           "solcast_enabled": "Enable solar forecasting. If the Solcast HA integration is installed, PowerSync reads from its sensors automatically.",
           "solcast_api_key": "Only needed without the Solcast HA integration. Get a free key from toolkit.solcast.com.au.",
           "solcast_resource_id": "Only needed without the Solcast HA integration. For split arrays, enter comma-separated IDs."
+        },
+        "submit": "Save"
+      },
+      "solax_battery_options": {
+        "title": "Solax connection settings",
+        "description": "Update the Solax Modbus integration entity prefix and battery parameters.",
+        "data": {
+          "solax_entity_prefix": "Entity prefix",
+          "solax_battery_capacity_kwh": "Battery capacity",
+          "solax_battery_nominal_v": "Battery nominal voltage",
+          "solax_max_charge_current_a": "Max charge current",
+          "solax_max_discharge_current_a": "Max discharge current"
+        },
+        "data_description": {
+          "solax_entity_prefix": "The entity prefix used by the solax_modbus integration.",
+          "solax_battery_capacity_kwh": "Usable battery capacity in kWh.",
+          "solax_battery_nominal_v": "Nominal battery voltage in V (51.2 for LFP, 102.4 for HV packs).",
+          "solax_max_charge_current_a": "Maximum charge current (A).",
+          "solax_max_discharge_current_a": "Maximum discharge current (A)."
         },
         "submit": "Save"
       }
