@@ -3794,6 +3794,152 @@ class BatteryHealthView(HomeAssistantView):
 
         return None
 
+    async def _try_fleet_api_bms_fetch(self, entry) -> dict | None:
+        """Attempt a signed DeviceControllerQuery via Fleet API and return a response dict.
+
+        Requires RSA key + DIN from Powerwall pairing and a valid Fleet API OAuth token.
+        Returns None on any missing prerequisite or failure — callers fall through gracefully.
+        """
+        import base64 as _b64
+        import aiohttp as _aio
+
+        from .const import (
+            CONF_POWERWALL_LOCAL_PRIVATE_KEY,
+            CONF_POWERWALL_LOCAL_DIN,
+        )
+        from .powerwall_local.views import _get_fleet_api_context
+        from .powerwall_local.fleet_api_bms import (
+            build_device_controller_query_envelope,
+            build_signed_routable_message,
+            parse_device_controller_response,
+        )
+
+        private_key_pem = entry.data.get(CONF_POWERWALL_LOCAL_PRIVATE_KEY)
+        din = entry.data.get(CONF_POWERWALL_LOCAL_DIN)
+        if not private_key_pem or not din:
+            return None
+
+        fleet_token, fleet_base, fleet_site_id = _get_fleet_api_context(self._hass, entry)
+        if not fleet_token or not fleet_base or not fleet_site_id:
+            return None
+
+        # Run RSA key loading + signing in an executor to avoid blocking the event loop.
+        try:
+            key_bytes = private_key_pem.encode() if isinstance(private_key_pem, str) else private_key_pem
+            envelope = build_device_controller_query_envelope(din)
+
+            def _sign_in_thread() -> bytes:
+                return build_signed_routable_message(envelope, din, key_bytes, ttl_seconds=300)
+
+            signed = await self._hass.async_add_executor_job(_sign_in_thread)
+        except Exception as err:
+            _LOGGER.error("fleet_api_bms: signing failed: %s", err)
+            return None
+
+        url = f"{fleet_base}/api/1/energy_sites/{fleet_site_id}/device_command"
+        headers = {
+            "Authorization": f"Bearer {fleet_token}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "data": {
+                "target_id": din,
+                "routable_message": _b64.b64encode(signed).decode(),
+                "command_timeout_s": 10,
+                "identifier_type": 1,
+            }
+        }
+
+        try:
+            async with _aio.ClientSession() as sess:
+                async with sess.post(
+                    url, json=payload, headers=headers,
+                    timeout=_aio.ClientTimeout(total=35),
+                ) as resp:
+                    if resp.status != 200:
+                        body_text = await resp.text()
+                        _LOGGER.warning(
+                            "fleet_api_bms: HTTP %d — %s", resp.status, body_text[:400]
+                        )
+                        return None
+                    body = await resp.json()
+        except Exception as err:
+            _LOGGER.error("fleet_api_bms: request error: %s", err)
+            return None
+
+        envelope_b64 = (body.get("response") or {}).get("message_envelope_as_bytes")
+        if not envelope_b64:
+            _LOGGER.warning("fleet_api_bms: no message_envelope_as_bytes in response: %s", str(body)[:400])
+            return None
+
+        try:
+            data = parse_device_controller_response(_b64.b64decode(envelope_b64))
+        except Exception as err:
+            _LOGGER.warning("fleet_api_bms: decode error: %s", err)
+            return None
+
+        if data is None:
+            _LOGGER.warning("fleet_api_bms: failed to extract text from response envelope")
+            return None
+
+        # Parse per-pack data from components.bms[]
+        packs = (data.get("components") or {}).get("msa") or []
+        individual = []
+        for i, pack in enumerate(packs):
+            sigs = {s["name"]: s.get("value") for s in (pack.get("signals") or [])}
+            full_wh = sigs.get("BMS_nominalFullPackEnergy") or 0
+            rem_wh = sigs.get("BMS_nominalEnergyRemaining") or 0
+            individual.append({
+                "nominalFullPackEnergyWh": full_wh,
+                "nominalEnergyRemainingWh": rem_wh,
+                "serialNumber": pack.get("serialNumber"),
+                "isExpansion": i > 0,
+            })
+
+        # Top-level capacity from systemStatus as fallback
+        status = ((data.get("control") or {}).get("systemStatus") or {})
+        top_full_wh = status.get("nominalFullPackEnergyWh") or 0
+        top_rem_wh = status.get("nominalEnergyRemainingWh") or 0
+
+        batt_count = len(individual) or 1
+        # Prefer summed per-pack values; fall back to top-level aggregate
+        current_wh = sum(p["nominalFullPackEnergyWh"] for p in individual) or top_full_wh
+        # Powerwall 3 rated per pack = 13 500 Wh (matches BatteryHealthScreen heuristic)
+        original_wh = 13500 * batt_count if individual else current_wh
+        health_percent = round((current_wh / original_wh) * 100, 1) if original_wh > 0 else 0
+
+        bms: dict = {}
+        if health_percent: bms["soh_percent"] = health_percent
+        if original_wh: bms["rated_capacity_kwh"] = round(original_wh / 1000, 2)
+        if current_wh: bms["current_capacity_kwh"] = round(current_wh / 1000, 2)
+
+        response: dict = {
+            "success": True,
+            "available": True,
+            "brand": "tesla",
+            "source": "ha_fleet_api_relay",
+            "health_percent": health_percent,
+            "original_capacity_wh": original_wh,
+            "current_capacity_wh": current_wh,
+            "original_capacity_kwh": round(original_wh / 1000, 2),
+            "current_capacity_kwh": round(current_wh / 1000, 2),
+            "battery_count": batt_count,
+            "last_scan": None,
+            "site": {"gateway_din": din, "energy_site_id": fleet_site_id},
+        }
+        if bms:
+            response["bms"] = bms
+        if individual:
+            response["individual_batteries"] = individual
+        if top_rem_wh:
+            response["nominal_energy_remaining_wh"] = top_rem_wh
+
+        _LOGGER.info(
+            "fleet_api_bms: Tesla health %.1f%% (%d Wh / %d Wh), %d pack(s)",
+            health_percent, current_wh, original_wh, batt_count,
+        )
+        return response
+
     async def get(self, request: web.Request) -> web.Response:
         """Handle GET request - return stored battery health data."""
         _LOGGER.info("🔋 Battery health HTTP request")
@@ -3824,7 +3970,37 @@ class BatteryHealthView(HomeAssistantView):
                     battery_health = stored_data.get("battery_health")
 
             if not battery_health:
-                # Try to get BMS telemetry from coordinator for non-Tesla systems
+                import time as _t
+
+                battery_system = entry.data.get(CONF_BATTERY_SYSTEM, "tesla")
+
+                # Tesla Fleet API tier: paired site with RSA key → signed DeviceControllerQuery
+                if battery_system == "tesla":
+                    refresh = request.query.get("refresh") == "1"
+                    entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                    cache = entry_data.get("battery_health_cloud")
+                    now = _t.monotonic()
+                    if not refresh and cache and cache.get("expires_at", 0) > now:
+                        return web.json_response(cache["value"])
+                    fleet_result = await self._try_fleet_api_bms_fetch(entry)
+                    if fleet_result:
+                        entry_data["battery_health_cloud"] = {
+                            "value": fleet_result,
+                            "expires_at": now + 3600,
+                        }
+                        return web.json_response(fleet_result)
+                    # No RSA key or Fleet API unavailable — fall through to "not available" message
+                    return web.json_response({
+                        "success": True,
+                        "available": False,
+                        "brand": "tesla",
+                        "message": (
+                            "Powerwall not paired. Complete pairing in Local Control "
+                            "to enable Battery Health."
+                        ),
+                    })
+
+                # Non-Tesla: return live BMS telemetry from modbus coordinator
                 bms_result = self._get_coordinator_bms(entry)
                 if bms_result:
                     brand, bms = bms_result
@@ -9824,6 +10000,46 @@ class VehicleChargingConfigView(HomeAssistantView):
 
         except Exception as e:
             _LOGGER.error(f"Error updating vehicle config: {e}", exc_info=True)
+            return web.json_response({
+                "success": False,
+                "error": str(e)
+            }, status=500)
+
+    async def delete(self, request: web.Request) -> web.Response:
+        """Handle DELETE request - remove a vehicle charging config."""
+        try:
+            vehicle_id = request.query.get("vehicle_id")
+            if not vehicle_id:
+                return web.json_response({
+                    "success": False,
+                    "error": "vehicle_id query parameter is required"
+                }, status=400)
+
+            store = self._get_store()
+            if not store:
+                return web.json_response({
+                    "success": False,
+                    "error": "Storage not available"
+                }, status=503)
+
+            stored_data = getattr(store, '_data', {}) or {}
+            vehicle_configs = stored_data.get("vehicle_charging_configs", [])
+            updated = [c for c in vehicle_configs if c.get("vehicle_id") != vehicle_id]
+
+            if len(updated) == len(vehicle_configs):
+                return web.json_response({
+                    "success": False,
+                    "error": f"Vehicle {vehicle_id} not found"
+                }, status=404)
+
+            store._data["vehicle_charging_configs"] = updated
+            await store.async_save()
+
+            _LOGGER.info("Removed vehicle config: %s", vehicle_id)
+            return web.json_response({"success": True})
+
+        except Exception as e:
+            _LOGGER.error(f"Error deleting vehicle config: {e}", exc_info=True)
             return web.json_response({
                 "success": False,
                 "error": str(e)

@@ -2485,10 +2485,16 @@ class ChargingPlanner:
         # Opportunistic: if current price is better than our best planned window, charge now
         # This handles the case where prices dropped since we made the plan
         if current_price_cents <= min_planned_price and current_price_cents < 20:
-            _LOGGER.info(
-                f"Opportunistic charging: current {current_price_cents:.1f}c <= "
-                f"best planned {min_planned_price:.1f}c"
-            )
+            if plan.windows:
+                _LOGGER.info(
+                    f"Opportunistic charging: current {current_price_cents:.1f}c <= "
+                    f"cheapest scheduled window {min_planned_price:.1f}c"
+                )
+            else:
+                _LOGGER.info(
+                    f"Opportunistic charging: current {current_price_cents:.1f}c <= "
+                    f"default threshold {min_planned_price:.1f}c (no schedule set)"
+                )
             return True, f"Better than planned ({current_price_cents:.0f}c ≤ {min_planned_price:.0f}c)", "grid_opportunistic"
 
         # Opportunistic: very cheap power (< 10c) - always charge

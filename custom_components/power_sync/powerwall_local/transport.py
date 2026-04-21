@@ -277,20 +277,25 @@ class TEDAPIv1rTransport:
         inner = resp_msg.protobuf_message_as_bytes
         return TEDAPIResponse(True, inner if inner else None)
 
-    def build_signed_bytes(self, envelope_bytes: bytes, din: str) -> bytes:
+    def build_signed_bytes(
+        self, envelope_bytes: bytes, din: str, *, ttl_seconds: int | None = None
+    ) -> bytes:
         """Build a signed ``RoutableMessage`` and return the raw bytes.
 
         Same signing as ``post_v1r`` but returns the serialized protobuf
         instead of posting locally. The caller can base64-encode these
         bytes and send them through the cloud ``device_command`` endpoint
         as ``energy_device_message``.
+
+        ``ttl_seconds`` overrides the default 12 s TTL. Use 300 for cloud
+        relay calls where gateway round-trip latency is higher.
         """
         routable = combined_pb2.RoutableMessage()
         routable.to_destination.domain = combined_pb2.DOMAIN_ENERGY_DEVICE
         routable.protobuf_message_as_bytes = envelope_bytes
         routable.uuid = str(uuid.uuid4()).encode()
 
-        expires_at = math.ceil(time.time()) + _SIGNATURE_TTL_SECONDS
+        expires_at = math.ceil(time.time()) + (ttl_seconds if ttl_seconds is not None else _SIGNATURE_TTL_SECONDS)
         tlv = self._build_tlv_payload(
             din, expires_at, routable.protobuf_message_as_bytes
         )

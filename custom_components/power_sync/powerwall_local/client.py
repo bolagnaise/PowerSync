@@ -482,6 +482,91 @@ class PowerwallLocalClient:
             _LOGGER.error("signed_device_command %s error: %s", action, err)
             return False
 
+    async def fetch_device_controller_json(self) -> dict | None:
+        """Fetch Tesla BMS JSON via signed DeviceControllerQuery + Fleet API relay.
+
+        Builds a signed RoutableMessage wrapping the DeviceControllerQuery envelope,
+        posts it to the Fleet API device_command endpoint, and returns the decoded
+        JSON payload from the gateway response. Returns None on any failure.
+        """
+        if not (self._fleet_api_base and self._fleet_api_token and self._energy_site_id):
+            return None
+        if not (self._transport and self._din):
+            return None
+
+        import base64
+        import aiohttp
+
+        from .fleet_api_bms import (
+            build_device_controller_query_envelope,
+            parse_device_controller_response,
+        )
+
+        try:
+            envelope = build_device_controller_query_envelope(self._din)
+            # Use 300 s TTL to absorb Cloudflare → Tesla → Gateway round-trip latency.
+            signed = self._transport.build_signed_bytes(
+                envelope, self._din, ttl_seconds=300
+            )
+        except Exception as err:
+            _LOGGER.error("fetch_device_controller_json: failed to build signed bytes: %s", err)
+            return None
+
+        msg_b64 = base64.b64encode(signed).decode()
+        url = (
+            f"{self._fleet_api_base}/api/1/energy_sites/"
+            f"{self._energy_site_id}/device_command"
+        )
+        headers = {
+            "Authorization": f"Bearer {self._fleet_api_token}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "data": {
+                "target_id": self._din,
+                "routable_message": msg_b64,
+                "command_timeout_s": 10,
+                "identifier_type": 1,
+            }
+        }
+
+        try:
+            async with aiohttp.ClientSession() as sess:
+                async with sess.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=35),
+                ) as resp:
+                    if resp.status != 200:
+                        body_text = await resp.text()
+                        _LOGGER.warning(
+                            "fetch_device_controller_json: HTTP %d — %s",
+                            resp.status, body_text[:400],
+                        )
+                        return None
+                    body = await resp.json()
+        except Exception as err:
+            _LOGGER.error("fetch_device_controller_json: request error: %s", err)
+            return None
+
+        envelope_b64 = (body.get("response") or {}).get("message_envelope_as_bytes")
+        if not envelope_b64:
+            _LOGGER.warning(
+                "fetch_device_controller_json: no message_envelope_as_bytes in response: %s",
+                str(body)[:400],
+            )
+            return None
+
+        try:
+            result = parse_device_controller_response(base64.b64decode(envelope_b64))
+            if result is None:
+                _LOGGER.warning("fetch_device_controller_json: failed to extract text from envelope")
+            return result
+        except Exception as err:
+            _LOGGER.warning("fetch_device_controller_json: decode error: %s", err)
+            return None
+
     async def verify_paired(self) -> bool:
         """Best-effort check that the RSA key is still accepted.
 
