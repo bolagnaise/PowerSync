@@ -69,8 +69,8 @@ class InverterController(ABC):
             model: Inverter model (optional)
         """
         self.host = host
-        self.port = port
-        self.slave_id = slave_id
+        self.port = int(port)
+        self.slave_id = int(slave_id)
         self.model = model
         self._connected = False
         self._last_state: Optional[InverterState] = None
