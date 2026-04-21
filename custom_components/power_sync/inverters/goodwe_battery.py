@@ -234,7 +234,7 @@ class GoodWeBatteryController:
         GoodWe uses DOD (depth of discharge) which is inverse:
         DOD = 100 - reserve_percent
         """
-        dod = max(0, min(89, 100 - percent))  # ET max DOD is 89%
+        dod = max(0, min(100, 100 - percent))  # GoodWe on-grid DOD max is 100%
         await self._inverter.set_ongrid_battery_dod(dod)
         _LOGGER.info("GoodWe backup reserve set to %d%% (DOD=%d%%)", percent, dod)
         return True
