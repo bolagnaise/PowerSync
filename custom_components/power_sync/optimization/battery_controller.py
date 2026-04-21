@@ -209,6 +209,26 @@ class BatteryControllerWrapper:
             _LOGGER.debug(f"get_backup_reserve failed: {e}")
             return None
 
+    async def get_tesla_operation_mode(self) -> str | None:
+        """
+        Read the actual default_real_mode from Tesla site_info cache.
+
+        Returns the live hardware mode string (e.g. "self_consumption",
+        "autonomous") or None if not a Tesla / cache not populated.
+        """
+        try:
+            from ..const import DOMAIN
+            for entry_id, entry_data in self.hass.data.get(DOMAIN, {}).items():
+                if not isinstance(entry_data, dict):
+                    continue
+                tesla_coord = entry_data.get("tesla_coordinator") or entry_data.get("coordinator")
+                if tesla_coord and hasattr(tesla_coord, "_site_info_cache") and tesla_coord._site_info_cache:
+                    return tesla_coord._site_info_cache.get("default_real_mode")
+            return None
+        except Exception as e:
+            _LOGGER.debug(f"get_tesla_operation_mode failed: {e}")
+            return None
+
     async def set_backup_reserve(self, percent: int) -> bool:
         """
         Set battery backup reserve percentage.

@@ -1699,10 +1699,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             else:
                 # self_consumption or consume — let battery operate naturally.
-                # Do NOT set backup_reserve here — self_consumption should be
-                # able to run all the way to 0% (powering the home naturally).
-                # The backup_reserve floor only applies to optimizer-controlled
-                # discharge/export (force_discharge to grid).
+                #
+                # For Tesla: also set backup_reserve = LP floor when entering
+                # self_consumption. Without this, if the hardware backup_reserve
+                # was previously restored to the user's configured value (e.g. 80%)
+                # by restore_normal after force_discharge, the Powerwall will charge
+                # from the grid to reach that reserve level even in self_consumption
+                # mode — backup reserve enforcement is independent of TOU mode.
+                #
+                # Setting backup_reserve = LP floor (e.g. 20%) on entry:
+                #   • prevents unwanted grid charging when SOC > LP floor
+                #   • allows natural self-consumption discharge to LP floor
+                #   • LP already won't plan below its configured floor, so the
+                #     hardware floor matches the software floor
                 #
                 # Off-grid exit hysteresis: if coming from off_grid, require
                 # 3 consecutive non-off_grid decisions before reconnecting.
@@ -1715,10 +1724,59 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if effective_action != "off_grid":
                     if self._last_executed_action == "self_consumption":
                         _LOGGER.debug("Optimizer: Already in self-consumption mode — skipping redundant API call")
-                    elif hasattr(battery, "set_self_consumption_mode"):
-                        await battery.set_self_consumption_mode()
-                    elif hasattr(battery, "restore_normal"):
-                        await battery.restore_normal()
+                        # Verify the hardware mode hasn't drifted (e.g. Tesla firmware
+                        # or a competing integration switched it away from self_consumption).
+                        if hasattr(battery, "get_tesla_operation_mode"):
+                            hw_mode = await battery.get_tesla_operation_mode()
+                            if hw_mode is not None and hw_mode != "self_consumption":
+                                _LOGGER.warning(
+                                    "Optimizer: hardware mode drift detected — optimizer believes "
+                                    "self_consumption but Tesla site_info reports '%s'. "
+                                    "Re-applying self_consumption mode.",
+                                    hw_mode,
+                                )
+                                if hasattr(battery, "set_self_consumption_mode"):
+                                    await battery.set_self_consumption_mode()
+                                # Also re-apply backup_reserve in case it was elevated
+                                if hasattr(battery, "set_backup_reserve"):
+                                    configured_reserve_pct = int(self._config.backup_reserve * 100)
+                                    startup = self._startup_backup_reserve
+                                    reserve_pct = (
+                                        min(startup, configured_reserve_pct)
+                                        if startup is not None
+                                        else configured_reserve_pct
+                                    )
+                                    await battery.set_backup_reserve(reserve_pct)
+                                # Force re-log actual mode next cycle so we confirm the fix took
+                                self._last_executed_action = None
+                    else:
+                        if hasattr(battery, "set_self_consumption_mode"):
+                            await battery.set_self_consumption_mode()
+                        elif hasattr(battery, "restore_normal"):
+                            await battery.restore_normal()
+                        # Reset hardware backup_reserve to prevent grid charging when
+                        # the user's hardware reserve (restored by restore_normal after
+                        # force_discharge) is above the current SOC.
+                        # Use min(startup_reserve, LP_floor): users with a reserve
+                        # already at or below the LP floor keep their setting unchanged;
+                        # users with a high reserve (e.g. 80%) get it capped to the LP
+                        # floor so the Powerwall doesn't charge from grid to reach it.
+                        if hasattr(battery, "set_backup_reserve"):
+                            configured_reserve_pct = int(self._config.backup_reserve * 100)
+                            startup = self._startup_backup_reserve
+                            reserve_pct = (
+                                min(startup, configured_reserve_pct)
+                                if startup is not None
+                                else configured_reserve_pct
+                            )
+                            await battery.set_backup_reserve(reserve_pct)
+                            _LOGGER.info(
+                                "Optimizer: self_consumption — set backup_reserve=%d%% "
+                                "(startup=%s%%, floor=%d%%)",
+                                reserve_pct,
+                                startup if startup is not None else "?",
+                                configured_reserve_pct,
+                            )
                     _LOGGER.debug("Optimizer: Self-consumption mode (action=%s)", effective_action)
 
             # Reset off-grid holdoffs when action is not off_grid related

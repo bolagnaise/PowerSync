@@ -18,6 +18,7 @@ from homeassistant.const import (
     CURRENCY_DOLLAR,
     UnitOfEnergy,
     UnitOfPower,
+    UnitOfTemperature,
     PERCENTAGE,
 )
 from homeassistant.core import HomeAssistant, callback
