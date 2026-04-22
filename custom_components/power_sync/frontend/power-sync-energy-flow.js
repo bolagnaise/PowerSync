@@ -1699,6 +1699,16 @@
           .flow-node.inactive .flow-node-guide {
             opacity: 0;
           }
+          /* Keep the grid node faintly visible when idle so it does not
+             disappear against darker rainy/night scene variants. */
+          .flow-node.inactive #flow-grid-label,
+          .flow-node.inactive #flow-grid-power,
+          .flow-node.inactive #flow-grid-status {
+            opacity: 0.72;
+          }
+          .flow-node.inactive #flow-grid-guide {
+            opacity: 0.22;
+          }
           .flow-node.inactive #flow-battery-pct {
             fill: #f8fafc !important;
             opacity: 0.95;
