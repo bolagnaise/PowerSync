@@ -647,11 +647,7 @@ class PowerwallCloudProbeView(HomeAssistantView):
         path_suffix = str(payload.get("path", "island_mode"))
         method = str(payload.get("method", "POST")).upper()
         body = payload.get("body")
-        # Allow overriding the base URL to hit owner-api directly
-        override_base = payload.get("base_url")
-        effective_base = override_base or base
-
-        url = f"{effective_base}/api/1/energy_sites/{site_id}/{path_suffix}"
+        url = f"{base}/api/1/energy_sites/{site_id}/{path_suffix}"
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
