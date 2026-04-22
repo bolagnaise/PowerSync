@@ -3882,30 +3882,42 @@ class BatteryHealthView(HomeAssistantView):
             _LOGGER.warning("fleet_api_bms: failed to extract text from response envelope")
             return None
 
-        # Parse per-pack data from components.bms[]
-        packs = (data.get("components") or {}).get("msa") or []
+        # Primary source: control.systemStatus aggregate (matches cloud worker)
+        status = ((data.get("control") or {}).get("systemStatus") or {})
+        current_wh = status.get("nominalFullPackEnergyWh") or 0
+        rem_wh = status.get("nominalEnergyRemainingWh") or 0
+
+        # Battery count from batteryBlocks — authoritative, one entry per physical unit
+        battery_blocks = (data.get("control") or {}).get("batteryBlocks") or []
+        batt_count = len(battery_blocks) if battery_blocks else 1
+
+        # Per-pack BMS breakdown — only PW3BMS components have these signals.
+        # components.msa contains ALL filtered types (PVS, PVAC, TESYNC, PW3BMS, …);
+        # filter to entries that actually carry a non-zero BMS energy value.
+        all_comps = (data.get("components") or {}).get("msa") or []
         individual = []
-        for i, pack in enumerate(packs):
+        for pack in all_comps:
             sigs = {s["name"]: s.get("value") for s in (pack.get("signals") or [])}
-            full_wh = sigs.get("BMS_nominalFullPackEnergy") or 0
-            rem_wh = sigs.get("BMS_nominalEnergyRemaining") or 0
+            pack_full_wh = sigs.get("BMS_nominalFullPackEnergy") or 0
+            pack_rem_wh = sigs.get("BMS_nominalEnergyRemaining") or 0
+            if not pack_full_wh:
+                continue  # skip non-BMS components (PVS, PVAC, etc.)
             individual.append({
-                "nominalFullPackEnergyWh": full_wh,
-                "nominalEnergyRemainingWh": rem_wh,
+                "nominalFullPackEnergyWh": pack_full_wh,
+                "nominalEnergyRemainingWh": pack_rem_wh,
                 "serialNumber": pack.get("serialNumber"),
-                "isExpansion": i > 0,
+                "isExpansion": len(individual) > 0,
             })
 
-        # Top-level capacity from systemStatus as fallback
-        status = ((data.get("control") or {}).get("systemStatus") or {})
-        top_full_wh = status.get("nominalFullPackEnergyWh") or 0
-        top_rem_wh = status.get("nominalEnergyRemainingWh") or 0
+        # If per-pack data is consistent, use it to refine count and current_wh
+        if individual:
+            pack_sum = sum(p["nominalFullPackEnergyWh"] for p in individual)
+            if pack_sum > 0:
+                batt_count = len(individual)
+                current_wh = pack_sum
 
-        batt_count = len(individual) or 1
-        # Prefer summed per-pack values; fall back to top-level aggregate
-        current_wh = sum(p["nominalFullPackEnergyWh"] for p in individual) or top_full_wh
-        # Powerwall 3 rated per pack = 13 500 Wh (matches BatteryHealthScreen heuristic)
-        original_wh = 13500 * batt_count if individual else current_wh
+        # Rated capacity: 13.5 kWh per Powerwall unit
+        original_wh = 13500 * batt_count
         health_percent = round((current_wh / original_wh) * 100, 1) if original_wh > 0 else 0
 
         bms: dict = {}
@@ -3932,8 +3944,8 @@ class BatteryHealthView(HomeAssistantView):
             response["bms"] = bms
         if individual:
             response["individual_batteries"] = individual
-        if top_rem_wh:
-            response["nominal_energy_remaining_wh"] = top_rem_wh
+        if rem_wh:
+            response["nominal_energy_remaining_wh"] = rem_wh
 
         _LOGGER.info(
             "fleet_api_bms: Tesla health %.1f%% (%d Wh / %d Wh), %d pack(s)",
