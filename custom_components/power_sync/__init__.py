@@ -3884,6 +3884,7 @@ class BatteryHealthView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         """Handle POST request - receive battery health scan data from mobile app."""
+        from homeassistant.util import dt as dt_util
         _LOGGER.info("🔋 Battery health scan data received via HTTP")
 
         # Find the power_sync entry
@@ -3905,7 +3906,7 @@ class BatteryHealthView(HomeAssistantView):
             current_capacity_wh = data.get("current_capacity_wh")
             degradation_percent = data.get("degradation_percent")
             battery_count = data.get("battery_count", 1)
-            scanned_at = data.get("scanned_at", datetime.now().isoformat())
+            scanned_at = data.get("scanned_at", dt_util.now().isoformat())
             individual_batteries = data.get("individual_batteries")
             # Extended fields (cloud RSA path provides richer metadata)
             source = data.get("source") or "mobile_app"
@@ -4140,8 +4141,8 @@ class InverterStatusView(HomeAssistantView):
                     is_night = sun_state.state == "below_horizon"
                 else:
                     # Fallback to hour-based check (6pm-6am)
-                    from datetime import datetime
-                    local_hour = datetime.now().hour
+                    from homeassistant.util import dt as dt_util
+                    local_hour = dt_util.now().hour
                     is_night = local_hour >= 18 or local_hour < 6
             except Exception:
                 pass
@@ -4179,8 +4180,8 @@ class InverterStatusView(HomeAssistantView):
                     is_night = sun_state.state == "below_horizon"
                 else:
                     # Fallback to hour-based check (6pm-6am)
-                    from datetime import datetime
-                    local_hour = datetime.now().hour
+                    from homeassistant.util import dt as dt_util
+                    local_hour = dt_util.now().hour
                     is_night = local_hour >= 18 or local_hour < 6
             except Exception:
                 pass
@@ -7496,6 +7497,7 @@ class PushTokenRegisterView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         """Handle POST request - register push token."""
+        from homeassistant.util import dt as dt_util
         _LOGGER.info("📱 PUSH REGISTER: Request received from mobile app")
 
         try:
@@ -7525,7 +7527,7 @@ class PushTokenRegisterView(HomeAssistantView):
                 "token": push_token,
                 "platform": platform,
                 "device_name": device_name,
-                "registered_at": datetime.now().isoformat(),
+                "registered_at": dt_util.now().isoformat(),
             }
 
             # Also persist to AutomationStore for survival across restarts
@@ -7576,6 +7578,7 @@ class PushTestView(HomeAssistantView):
 
     async def post(self, request: web.Request) -> web.Response:
         """Handle POST request - send test notification."""
+        from homeassistant.util import dt as dt_util
         from .automations.actions import _send_expo_push
 
         _LOGGER.info("📱 PUSH TEST: Test notification requested")
@@ -7598,7 +7601,7 @@ class PushTestView(HomeAssistantView):
             await _send_expo_push(
                 self._hass,
                 "PowerSync Test",
-                f"Test notification sent at {datetime.now().strftime('%H:%M:%S')}"
+                f"Test notification sent at {dt_util.now().strftime('%H:%M:%S')}"
             )
 
             return web.json_response({
@@ -8344,13 +8347,14 @@ class EVVehiclesView(HomeAssistantView):
             "plugged_in_definitive": plugged_in_definitive,
             "charger_power": charger_power,
             "is_online": is_online,
-            "data_updated_at": data_updated_at.isoformat() if data_updated_at else datetime.now().isoformat(),
+            "data_updated_at": data_updated_at.isoformat() if data_updated_at else dt_util.now().isoformat(),
             "source": "tesla_ble",
             "brand": "tesla",
         }
 
     def _get_byd_vehicles(self, start_id: int = 1) -> list[dict]:
         """Get BYD vehicles from hass-byd-vehicle integration."""
+        from homeassistant.util import dt as dt_util
         if BYD_INTEGRATION not in self._hass.config_entries.async_domains():
             return []
 
@@ -8443,7 +8447,7 @@ class EVVehiclesView(HomeAssistantView):
                 "charger_power": None,
                 "time_to_full_charge": time_to_full,
                 "is_online": is_online,
-                "data_updated_at": datetime.now().isoformat(),
+                "data_updated_at": dt_util.now().isoformat(),
                 "source": "byd_cloud",
                 "brand": "byd",
             })
@@ -8454,6 +8458,7 @@ class EVVehiclesView(HomeAssistantView):
 
     async def get(self, request: web.Request) -> web.Response:
         """Handle GET request for vehicle list."""
+        from homeassistant.util import dt as dt_util
         try:
             vehicles = []
 
@@ -8582,7 +8587,7 @@ class EVVehiclesView(HomeAssistantView):
                     if charging_state and charging_state.lower() != "charging":
                         charger_power = None
 
-                    fleet_updated_at = latest_entity_update.isoformat() if latest_entity_update else datetime.now().isoformat()
+                    fleet_updated_at = latest_entity_update.isoformat() if latest_entity_update else dt_util.now().isoformat()
                     vehicles.append({
                         "id": vin or str(device.id),
                         "vehicle_id": vin or str(device.id),
@@ -8711,7 +8716,7 @@ class EVVehiclesView(HomeAssistantView):
                     "is_plugged_in": is_plugged_in,
                     "charger_power": None,
                     "is_online": True,
-                    "data_updated_at": datetime.now().isoformat(),
+                    "data_updated_at": dt_util.now().isoformat(),
                     "source": "generic_charger",
                     "brand": "generic",
                 })
@@ -14380,8 +14385,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     hass.data[DOMAIN][entry.entry_id]["inverter_last_state"] = "curtailed"
                     hass.data[DOMAIN][entry.entry_id]["inverter_power_limit_w"] = home_load_w
                     # Track DPEL update time for Enphase refresh logic
-                    from datetime import datetime
-                    hass.data[DOMAIN][entry.entry_id]["last_dpel_update_time"] = datetime.now()
+                    from homeassistant.util import dt as dt_util
+                    hass.data[DOMAIN][entry.entry_id]["last_dpel_update_time"] = dt_util.now()
                     # Inverter handled curtailment cleanly — make sure any
                     # prior off-grid fallback session is released now that
                     # the AC path is working again.
@@ -14680,6 +14685,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         - Chip Mode: Suppress exports unless price exceeds threshold
         - Spike Protection: Cap buy prices during extreme spikes
         """
+        from homeassistant.util import dt as dt_util
         try:
             from .sigenergy_api import (
                 SigenergyAPIClient,
@@ -14866,7 +14872,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     hass.data[DOMAIN][entry.entry_id]["sigenergy_tariff"] = {
                         "buy_prices": buy_prices,
                         "sell_prices": sell_prices if sell_prices else buy_prices,
-                        "synced_at": datetime.now().isoformat(),
+                        "synced_at": dt_util.now().isoformat(),
                         "sync_mode": sync_mode,
                     }
                 else:
@@ -14884,6 +14890,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         Converts price data to FoxESS scheduler groups and uploads via Cloud API.
         Skipped when LP optimizer is active (LP controls via Modbus directly).
         """
+        from homeassistant.util import dt as dt_util
         try:
             from .foxess_api import FoxESSCloudClient, convert_prices_to_foxess_schedule
             from .sigenergy_api import convert_amber_prices_to_sigenergy
@@ -14967,7 +14974,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "groups": groups,
                     "buy_prices": buy_prices,
                     "sell_prices": sell_prices if sell_prices else buy_prices,
-                    "synced_at": datetime.now().isoformat(),
+                    "synced_at": dt_util.now().isoformat(),
                     "sync_mode": sync_mode,
                 }
             finally:
@@ -21622,11 +21629,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def handle_sync_battery_health(call: ServiceCall) -> dict:
         """Handle sync_battery_health service call - receives battery health from mobile app."""
+        from homeassistant.util import dt as dt_util
         original_capacity_wh = call.data.get("original_capacity_wh")
         current_capacity_wh = call.data.get("current_capacity_wh")
         degradation_percent = call.data.get("degradation_percent")
         battery_count = call.data.get("battery_count", 1)
-        scanned_at = call.data.get("scanned_at", datetime.now().isoformat())
+        scanned_at = call.data.get("scanned_at", dt_util.now().isoformat())
         individual_batteries = call.data.get("individual_batteries")  # Optional per-battery data
 
         # Validate required fields
@@ -21958,6 +21966,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # This only updates the power limit when already in load-following mode, doesn't change curtail/restore decisions
     async def fast_load_following_update(now):
         """Update inverter power limit based on current home load (runs every 30s when in load-following mode)."""
+        from homeassistant.util import dt as dt_util
         try:
             entry_data = hass.data[DOMAIN].get(entry.entry_id, {})
 
@@ -22004,7 +22013,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             # For Enphase, always re-apply DPEL at least every 45 seconds since it may timeout
             # For other brands, only update if changed by more than 50W
-            now_time = datetime.now()
+            now_time = dt_util.now()
             force_reapply = False
             if inverter_brand == "enphase":
                 if last_dpel_time is None or (now_time - last_dpel_time) > timedelta(seconds=45):
@@ -22028,7 +22037,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if success:
                         _LOGGER.debug(f"⚡ Fast load-following update: {home_load_w}W")
                         hass.data[DOMAIN][entry.entry_id]["inverter_power_limit_w"] = home_load_w
-                        hass.data[DOMAIN][entry.entry_id]["last_dpel_update_time"] = datetime.now()
+                        hass.data[DOMAIN][entry.entry_id]["last_dpel_update_time"] = dt_util.now()
         except Exception as err:
             _LOGGER.debug(f"Fast load-following update error (non-critical): {err}")
 
@@ -22331,7 +22340,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if buy_prices:
                         # Find current time slot price
                         # Format: [{"timeRange": "10:00-10:30", "price": 25.0}, ...]
-                        now = datetime.now()
+                        now = dt_util.now()
                         current_time = f"{now.hour:02d}:{30 if now.minute >= 30 else 0:02d}"
                         for slot in buy_prices:
                             time_range = slot.get("timeRange", "")
