@@ -3905,6 +3905,11 @@ class BatteryHealthView(HomeAssistantView):
                if s["name"] in ("BMS_nominalFullPackEnergy", "BMS_nominalEnergyRemaining")})
              for c in all_comps],
         )
+        # Dump esCan.bus.POD — per-Powerwall Over CAN telemetry — to inspect follower shape.
+        _LOGGER.debug(
+            "fleet_api_bms: esCan.bus.POD=%s",
+            (data.get("esCan") or {}).get("bus", {}).get("POD"),
+        )
         individual = []
         bms_module_count = 0
         for pack in all_comps:
