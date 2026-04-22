@@ -3807,6 +3807,8 @@ class BatteryHealthView(HomeAssistantView):
         from .const import (
             CONF_POWERWALL_LOCAL_PRIVATE_KEY,
             CONF_POWERWALL_LOCAL_DIN,
+            CONF_POWERWALL_LOCAL_IP,
+            CONF_POWERWALL_LOCAL_ENERGY_SITE_ID,
         )
         from .powerwall_local.views import _get_fleet_api_context
         from .powerwall_local.fleet_api_bms import (
@@ -3821,8 +3823,7 @@ class BatteryHealthView(HomeAssistantView):
             return None
 
         fleet_token, fleet_base, fleet_site_id = _get_fleet_api_context(self._hass, entry)
-        if not fleet_token or not fleet_base or not fleet_site_id:
-            return None
+        # Don't bail yet — local gateway path can succeed without Fleet API credentials.
 
         # Run RSA key loading + signing in an executor to avoid blocking the event loop.
         try:
@@ -3837,51 +3838,105 @@ class BatteryHealthView(HomeAssistantView):
             _LOGGER.error("fleet_api_bms: signing failed: %s", err)
             return None
 
-        url = f"{fleet_base}/api/1/energy_sites/{fleet_site_id}/device_command"
-        headers = {
-            "Authorization": f"Bearer {fleet_token}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "data": {
-                "target_id": din,
-                "routable_message": _b64.b64encode(signed).decode(),
-                "command_timeout_s": 10,
-                "identifier_type": 1,
-            }
-        }
-
-        try:
-            async with _aio.ClientSession() as sess:
-                async with sess.post(
-                    url, json=payload, headers=headers,
-                    timeout=_aio.ClientTimeout(total=35),
-                ) as resp:
-                    if resp.status != 200:
-                        body_text = await resp.text()
-                        _LOGGER.warning(
-                            "fleet_api_bms: HTTP %d — %s", resp.status, body_text[:400]
-                        )
-                        return None
-                    body = await resp.json()
-        except Exception as err:
-            _LOGGER.error("fleet_api_bms: request error: %s", err)
-            return None
-
-        envelope_b64 = (body.get("response") or {}).get("message_envelope_as_bytes")
-        if not envelope_b64:
-            _LOGGER.warning("fleet_api_bms: no message_envelope_as_bytes in response: %s", str(body)[:400])
-            return None
-
-        try:
-            data = parse_device_controller_response(_b64.b64decode(envelope_b64))
-        except Exception as err:
-            _LOGGER.warning("fleet_api_bms: decode error: %s", err)
-            return None
+        # Try local TEDAPI gateway first — it has direct CAN bus visibility of all
+        # connected Powerwall units, so follower BMS signals are non-None here even
+        # though the Fleet API relay drops them. Fall back to Fleet API when the
+        # gateway is unreachable (e.g. user is away from home).
+        data = None
+        source = "ha_local_tedapi"
+        local_ip = entry.data.get(CONF_POWERWALL_LOCAL_IP)
+        if local_ip:
+            try:
+                from .powerwall_local.transport import get_insecure_ssl_context
+                from .powerwall_local import tedapi_combined_pb2 as _pb2
+                ssl_ctx = await get_insecure_ssl_context(self._hass)
+                connector = _aio.TCPConnector(ssl=ssl_ctx, limit=2)
+                async with _aio.ClientSession(
+                    connector=connector,
+                    timeout=_aio.ClientTimeout(total=12),
+                ) as sess:
+                    async with sess.post(
+                        f"https://{local_ip}/tedapi/v1r",
+                        data=signed,
+                        headers={"Content-Type": "application/octet-stream"},
+                    ) as resp:
+                        if resp.status == 200:
+                            raw = await resp.read()
+                            resp_msg = _pb2.RoutableMessage()
+                            resp_msg.ParseFromString(raw)
+                            fault = resp_msg.signed_message_status.message_fault
+                            if fault == _pb2.MESSAGEFAULT_ERROR_NONE:
+                                local_data = parse_device_controller_response(
+                                    resp_msg.protobuf_message_as_bytes
+                                )
+                                if local_data:
+                                    _LOGGER.info("fleet_api_bms: local gateway BMS fetch OK")
+                                    data = local_data
+                            else:
+                                _LOGGER.debug(
+                                    "fleet_api_bms: local gateway fault %s",
+                                    _pb2.MessageFault_E.Name(fault),
+                                )
+                        else:
+                            body_text = await resp.text()
+                            _LOGGER.debug(
+                                "fleet_api_bms: local gateway HTTP %d — %s",
+                                resp.status, body_text[:200],
+                            )
+            except Exception as err:
+                _LOGGER.debug("fleet_api_bms: local gateway unreachable: %s", err)
 
         if data is None:
-            _LOGGER.warning("fleet_api_bms: failed to extract text from response envelope")
-            return None
+            # Fleet API relay fallback.
+            if not fleet_token or not fleet_base or not fleet_site_id:
+                _LOGGER.debug("fleet_api_bms: no local gateway and no Fleet API credentials")
+                return None
+            source = "ha_fleet_api_relay"
+            fleet_url = f"{fleet_base}/api/1/energy_sites/{fleet_site_id}/device_command"
+            fleet_headers = {
+                "Authorization": f"Bearer {fleet_token}",
+                "Content-Type": "application/json",
+            }
+            fleet_payload = {
+                "data": {
+                    "target_id": din,
+                    "routable_message": _b64.b64encode(signed).decode(),
+                    "command_timeout_s": 10,
+                    "identifier_type": 1,
+                }
+            }
+            try:
+                async with _aio.ClientSession() as sess:
+                    async with sess.post(
+                        fleet_url, json=fleet_payload, headers=fleet_headers,
+                        timeout=_aio.ClientTimeout(total=35),
+                    ) as resp:
+                        if resp.status != 200:
+                            body_text = await resp.text()
+                            _LOGGER.warning(
+                                "fleet_api_bms: HTTP %d — %s", resp.status, body_text[:400]
+                            )
+                            return None
+                        body = await resp.json()
+            except Exception as err:
+                _LOGGER.error("fleet_api_bms: request error: %s", err)
+                return None
+
+            envelope_b64 = (body.get("response") or {}).get("message_envelope_as_bytes")
+            if not envelope_b64:
+                _LOGGER.warning(
+                    "fleet_api_bms: no message_envelope_as_bytes in response: %s",
+                    str(body)[:400],
+                )
+                return None
+            try:
+                data = parse_device_controller_response(_b64.b64decode(envelope_b64))
+            except Exception as err:
+                _LOGGER.warning("fleet_api_bms: decode error: %s", err)
+                return None
+            if data is None:
+                _LOGGER.warning("fleet_api_bms: failed to extract text from response envelope")
+                return None
 
         # Primary source: control.systemStatus aggregate (matches cloud worker).
         # This is authoritative for the whole site — never override with partial per-pack sums.
@@ -3930,101 +3985,6 @@ class BatteryHealthView(HomeAssistantView):
                 "isFollower": is_follower,
             })
 
-        # Query follower DINs: batteryBlocks contains one entry per inverter stack. In a
-        # leader+follower PW3 system the leader's msa response has None-valued BMS signals for
-        # the follower's base module. Send a second signed query to each non-leader DIN to get
-        # the follower's real per-pack telemetry. Falls back silently if the query fails.
-        follower_dins = [
-            block.get("din") for block in battery_blocks
-            if block.get("din") and block.get("din") != din
-        ]
-        for f_din in follower_dins:
-            try:
-                f_envelope = build_device_controller_query_envelope(f_din)
-                def _sign_follower(f_d=f_din, f_env=f_envelope):
-                    return build_signed_routable_message(f_env, f_d, key_bytes, ttl_seconds=300)
-                f_signed = await self._hass.async_add_executor_job(_sign_follower)
-            except Exception as err:
-                _LOGGER.warning("fleet_api_bms: follower %s signing failed: %s", f_din, err)
-                continue
-
-            f_payload = {
-                "data": {
-                    "target_id": f_din,
-                    "routable_message": _b64.b64encode(f_signed).decode(),
-                    "command_timeout_s": 10,
-                    "identifier_type": 1,
-                }
-            }
-            try:
-                async with _aio.ClientSession() as sess:
-                    async with sess.post(
-                        url, json=f_payload, headers=headers,
-                        timeout=_aio.ClientTimeout(total=35),
-                    ) as resp:
-                        if resp.status != 200:
-                            body_text = await resp.text()
-                            # 403 is expected: the RSA key is registered for the leader DIN
-                            # only; the follower requires its own key exchange.
-                            level = logging.DEBUG if resp.status == 403 else logging.WARNING
-                            _LOGGER.log(
-                                level,
-                                "fleet_api_bms: follower %s HTTP %d — %s",
-                                f_din, resp.status, body_text[:200],
-                            )
-                            continue
-                        f_body = await resp.json()
-            except Exception as err:
-                _LOGGER.warning("fleet_api_bms: follower %s request error: %s", f_din, err)
-                continue
-
-            f_env_b64 = (f_body.get("response") or {}).get("message_envelope_as_bytes")
-            if not f_env_b64:
-                _LOGGER.warning(
-                    "fleet_api_bms: follower %s no envelope in response: %s",
-                    f_din, str(f_body)[:400],
-                )
-                continue
-            try:
-                f_data = parse_device_controller_response(_b64.b64decode(f_env_b64))
-            except Exception as err:
-                _LOGGER.warning("fleet_api_bms: follower %s decode error: %s", f_din, err)
-                continue
-            if f_data is None:
-                continue
-
-            f_comps = (f_data.get("components") or {}).get("msa") or []
-            _LOGGER.debug("fleet_api_bms: follower %s msa=%d entries", f_din, len(f_comps))
-            for pack in f_comps:
-                sigs = {s["name"]: s.get("value") for s in (pack.get("signals") or [])}
-                if "BMS_nominalFullPackEnergy" not in sigs:
-                    continue
-                pack_full_wh = (sigs.get("BMS_nominalFullPackEnergy") or 0) * 1000
-                pack_rem_wh = (sigs.get("BMS_nominalEnergyRemaining") or 0) * 1000
-                # Replace the first placeholder follower entry (0 Wh, isFollower) with real data.
-                # If no placeholder exists, append as a new entry (additional follower expansion).
-                replaced = False
-                for idx, existing in enumerate(individual):
-                    if existing.get("isFollower") and existing.get("nominalFullPackEnergyWh") == 0:
-                        individual[idx] = {
-                            "nominalFullPackEnergyWh": pack_full_wh,
-                            "nominalEnergyRemainingWh": pack_rem_wh,
-                            "serialNumber": pack.get("serialNumber") or None,
-                            "isExpansion": False,
-                            "isFollower": True,
-                        }
-                        replaced = True
-                        break
-                if not replaced:
-                    individual.append({
-                        "nominalFullPackEnergyWh": pack_full_wh,
-                        "nominalEnergyRemainingWh": pack_rem_wh,
-                        "serialNumber": pack.get("serialNumber") or None,
-                        "isExpansion": False,
-                        "isFollower": True,
-                    })
-                    bms_module_count += 1
-
         # Module count: BMS signal presence is the most accurate count (includes follower packs
         # that report the signal key but have None values). batteryBlocks counts inverter units
         # (one per PW3 stack), not individual battery modules — use it only as a floor.
@@ -4044,7 +4004,7 @@ class BatteryHealthView(HomeAssistantView):
             "success": True,
             "available": True,
             "brand": "tesla",
-            "source": "ha_fleet_api_relay",
+            "source": source,
             "health_percent": health_percent,
             "original_capacity_wh": original_wh,
             "current_capacity_wh": current_wh,
@@ -4052,7 +4012,10 @@ class BatteryHealthView(HomeAssistantView):
             "current_capacity_kwh": round(current_wh / 1000, 2),
             "battery_count": batt_count,
             "last_scan": _dt.now().isoformat(),
-            "site": {"gateway_din": din, "energy_site_id": fleet_site_id},
+            "site": {
+                "gateway_din": din,
+                "energy_site_id": fleet_site_id or entry.data.get(CONF_POWERWALL_LOCAL_ENERGY_SITE_ID),
+            },
         }
         if bms:
             response["bms"] = bms
@@ -4062,8 +4025,8 @@ class BatteryHealthView(HomeAssistantView):
             response["nominal_energy_remaining_wh"] = rem_wh
 
         _LOGGER.info(
-            "fleet_api_bms: Tesla health %.1f%% (%d Wh / %d Wh), %d module(s), %d batteryBlock(s), %d msa_bms",
-            health_percent, current_wh, original_wh, batt_count, bb_count, len(individual),
+            "fleet_api_bms: Tesla health %.1f%% (%d Wh / %d Wh), %d module(s), %d batteryBlock(s), %d msa_bms [%s]",
+            health_percent, current_wh, original_wh, batt_count, bb_count, len(individual), source,
         )
         return response
 
