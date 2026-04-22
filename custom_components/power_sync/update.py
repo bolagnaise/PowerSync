@@ -59,7 +59,8 @@ async def async_setup_entry(
     """Set up the PowerSync update entity."""
     coordinator = PowerSyncUpdateCoordinator(hass)
     await coordinator.async_config_entry_first_refresh()
-    async_add_entities([PowerSyncUpdateEntity(coordinator, entry)])
+    installed_version = await hass.async_add_executor_job(_installed_version)
+    async_add_entities([PowerSyncUpdateEntity(coordinator, entry, installed_version)])
 
 
 class PowerSyncUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -113,12 +114,13 @@ class PowerSyncUpdateEntity(CoordinatorEntity, UpdateEntity):
         self,
         coordinator: PowerSyncUpdateCoordinator,
         entry: ConfigEntry,
+        installed_version: str,
     ) -> None:
         """Initialize the update entity."""
         super().__init__(coordinator)
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_update"
-        self._installed = _installed_version()
+        self._installed = installed_version
 
     @property
     def device_info(self) -> dict[str, Any]:

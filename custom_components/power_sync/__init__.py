@@ -3959,9 +3959,13 @@ class BatteryHealthView(HomeAssistantView):
                     ) as resp:
                         if resp.status != 200:
                             body_text = await resp.text()
-                            _LOGGER.warning(
+                            # 403 is expected: the RSA key is registered for the leader DIN
+                            # only; the follower requires its own key exchange.
+                            level = logging.DEBUG if resp.status == 403 else logging.WARNING
+                            _LOGGER.log(
+                                level,
                                 "fleet_api_bms: follower %s HTTP %d — %s",
-                                f_din, resp.status, body_text[:400],
+                                f_din, resp.status, body_text[:200],
                             )
                             continue
                         f_body = await resp.json()
