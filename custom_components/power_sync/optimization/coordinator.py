@@ -190,6 +190,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Price monitoring
         self._is_dynamic_pricing = False
         self._price_listener_unsub: Callable | None = None
+        # Deduplication key for AEMO price-update trigger — LP only fires on new dispatch files
+        self._last_aemo_dispatch_file: str | None = None
 
         # Track last executed action for IDLE→non-IDLE transition
         self._last_executed_action: str | None = None
@@ -520,6 +522,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Callback when price coordinator updates."""
         if not self._enabled or not self._is_dynamic_pricing:
             return
+
+        # AEMO coordinator polls at 1-second intervals while searching for a new
+        # dispatch file (ACTIVE mode). HA fires all listeners on every successful
+        # poll, even when the file hasn't changed. Guard against that: only
+        # re-optimize when the dispatch_file key in the coordinator's data
+        # actually changes. Non-AEMO coordinators don't set dispatch_file so
+        # this check is skipped for Amber/Octopus.
+        if self.price_coordinator and hasattr(self.price_coordinator, "_polling_mode"):
+            current_file = (self.price_coordinator.data or {}).get("dispatch_file")
+            if current_file is not None and current_file == self._last_aemo_dispatch_file:
+                return
+            self._last_aemo_dispatch_file = current_file
 
         # Re-optimize with new prices and update dashboard sensors
         self.hass.async_create_background_task(

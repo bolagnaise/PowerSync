@@ -2808,6 +2808,7 @@ class AEMOPriceCoordinator(DataUpdateCoordinator):
                 "forecast": forecast,
                 "last_update": dt_util.utcnow(),
                 "source": "aemo_api",
+                "dispatch_file": dispatch_file,
             }
 
         except Exception as err:
