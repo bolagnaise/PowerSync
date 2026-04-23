@@ -1476,10 +1476,18 @@ import {
     }
 
     _sceneFlowComponentMap() {
-      return deepMerge(
-        deepMerge(ABSOLUTE_LEGACY_SCENE_FLOW_COMPONENT_MAP, GENERATED_SCENE_FLOW_COMPONENT_MAP),
-        this._config.scene_component_map || {}
-      );
+      return this._config.scene_component_map || {};
+    }
+
+    _sceneFlowComponentProfile(sceneKey) {
+      const overrideMap = this._sceneFlowComponentMap();
+      const overrideProfile = overrideMap[sceneKey];
+      const baseProfile = GENERATED_SCENE_FLOW_COMPONENT_MAP[sceneKey]
+        || ABSOLUTE_LEGACY_SCENE_FLOW_COMPONENT_MAP[sceneKey]
+        || GENERATED_SCENE_FLOW_COMPONENT_MAP['scene_day_clear_idle.png']
+        || ABSOLUTE_LEGACY_SCENE_FLOW_COMPONENT_MAP['scene_day_clear_idle.png'];
+      if (!baseProfile) return overrideProfile || null;
+      return deepMerge(baseProfile, overrideProfile || {});
     }
 
     _resolveBackground(evCharging, hasSecondaryEv = false) {
@@ -1599,40 +1607,14 @@ import {
           applied = true;
         });
       });
-      // Legacy themes shipped before grid-status positioning was tracked only
-      // override grid-label + grid-power. Without an explicit grid-status entry
-      // the status text stays at its default SVG y=100 and collides with
-      // whichever y the theme chose for grid-power. Auto-derive grid-status
-      // from grid-power (same x, y + 15) to match the default 85→100 spacing.
-      if (profile['grid-power'] && !profile['grid-status']) {
-        const gp = profile['grid-power'];
-        const statusEl = this.shadowRoot.querySelector('#flow-grid-status');
-        if (statusEl) {
-          if (typeof gp.x === 'number') {
-            const nextX = String(gp.x);
-            if (statusEl.getAttribute('x') !== nextX) {
-              statusEl.setAttribute('x', nextX);
-              applied = true;
-            }
-          }
-          if (typeof gp.y === 'number') {
-            const nextY = String(gp.y + 15);
-            if (statusEl.getAttribute('y') !== nextY) {
-              statusEl.setAttribute('y', nextY);
-              applied = true;
-            }
-          }
-        }
-      }
       if (applied && marker) this._lastAppliedSceneFlowComponentProfile = marker;
       return applied;
     }
 
     _applySceneFlowComponents(sceneHref) {
       const sceneKey = sceneFileName(sceneHref);
-      const map = this._sceneFlowComponentMap();
-      const sceneProfile = map[sceneKey] || map['scene_day_clear_idle.png'];
-      const marker = map[sceneKey] ? sceneKey : 'scene_day_clear_idle.png';
+      const sceneProfile = this._sceneFlowComponentProfile(sceneKey);
+      const marker = sceneProfile ? sceneKey : 'scene_day_clear_idle.png';
       if (!sceneProfile) return;
       if (this._lastAppliedSceneFlowComponentProfile !== marker) {
         this._applyComponentProfile(sceneProfile, marker);
@@ -2020,6 +2002,9 @@ import {
       this._setBackground(sceneHref);
       this._applySceneFlowPaths(sceneHref);
       this._applySceneFlowComponents(sceneHref);
+      const activeSceneComponentProfile = this._sceneFlowComponentProfile(sceneFileName(sceneHref)) || {};
+      const hasBatteryStatusPosition = !!activeSceneComponentProfile['battery-status'];
+      const hasGridStatusPosition = !!activeSceneComponentProfile['grid-status'];
 
       this._setText('#flow-solar-power', this._formatKW(solarPower));
       this._setText('#flow-grid-power', this._formatKW(gridPower));
@@ -2062,7 +2047,7 @@ import {
 
       const batteryStatusEl = this.shadowRoot.querySelector('#flow-battery-status');
       if (batteryStatusEl) {
-        if (!batteryConfigured) {
+        if (!hasBatteryStatusPosition || !batteryConfigured) {
           this._setText('#flow-battery-status', '');
           batteryStatusEl.style.display = 'none';
         } else if (batteryPower > batteryMin) {
@@ -2084,7 +2069,10 @@ import {
         const gridStatusState = gridStatusEntity ? this._entityState(gridStatusEntity) : null;
         const gs = gridStatusState ? gridStatusState.state.toLowerCase() : '';
         const isOffGrid = gs.includes('island') || gs === 'inactive';
-        if (isOffGrid) {
+        if (!hasGridStatusPosition) {
+          this._setText('#flow-grid-status', '');
+          gridStatusEl.style.display = 'none';
+        } else if (isOffGrid) {
           this._setText('#flow-grid-status', this._t('card.status.off_grid', 'OFF GRID'));
           gridStatusEl.style.fill = '#ff5d73';
           gridStatusEl.style.display = 'inline';
