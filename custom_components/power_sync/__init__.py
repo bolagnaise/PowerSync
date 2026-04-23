@@ -4105,6 +4105,25 @@ class BatteryHealthView(HomeAssistantView):
                 n_followers, inferred_full_wh,
             )
 
+        # Ghost expansion pack filter: Tesla Fleet API sometimes returns BMS entries for
+        # expansion pack slots that are registered but not physically installed. These show
+        # plausible-looking full-capacity values (~13.5–14.5 kWh) but near-zero remaining energy
+        # (< 500 Wh). Cross-validate: if the system-level nominalFullPackEnergyWh (current_wh)
+        # matches just the non-expansion packs within 10%, the expansion entries are stale phantom
+        # data and should be dropped before battery_count / rated_capacity are calculated.
+        if individual and current_wh > 0 and any(p.get("isExpansion") for p in individual):
+            non_exp = [p for p in individual if not p.get("isExpansion")]
+            non_exp_full_wh = sum(p["nominalFullPackEnergyWh"] for p in non_exp)
+            if non_exp_full_wh > 0 and abs(current_wh - non_exp_full_wh) / current_wh < 0.10:
+                ghost_count = sum(1 for p in individual if p.get("isExpansion"))
+                _LOGGER.warning(
+                    "fleet_api_bms: Dropping %d ghost expansion pack(s) — system %.0f Wh matches "
+                    "non-expansion sum %.0f Wh (ratio %.3f); expansion slots registered but not installed",
+                    ghost_count, current_wh, non_exp_full_wh, non_exp_full_wh / current_wh,
+                )
+                individual = non_exp
+                bms_module_count -= ghost_count
+
         # Module count: BMS signal presence is the most accurate count (includes follower packs
         # that report the signal key but have None values). batteryBlocks counts inverter units
         # (one per PW3 stack), not individual battery modules — use it only as a floor.
