@@ -68,8 +68,15 @@ class FoxESSRegisterMap:
     battery_power: int          # Scaled by battery_pv_gain, signed (neg=charge, pos=discharge)
     battery_power_is_32bit: bool = False  # H3-Pro uses 32-bit battery power
     battery_voltage: int = 0
+    battery_voltage_gain: int = GAIN_VOLTAGE   # default scale 0.1; H3-Smart uses 100 (scale 0.01)
     battery_current: int = 0
     battery_temperature: int = 0
+
+    # Static battery/inverter info (H3-Smart only)
+    internal_temperature: int = 0    # Inverter internal temperature, scale 0.1
+    nominal_power_w: int = 0         # Rated inverter power, 32-bit high word, scale 1.0
+    soh: int = 0                     # State of health %, scale 1.0
+    nominal_energy_kwh: int = 0      # Nominal battery capacity, scale 0.01
 
     # PV registers
     pv1_power: int = 0         # Scaled by battery_pv_gain
@@ -264,9 +271,14 @@ REGISTER_MAPS: dict[FoxESSModelFamily, FoxESSRegisterMap] = {
         battery_soc=37612,
         battery_power=39238,      # 32-bit: scale 0.001
         battery_power_is_32bit=True,
-        battery_voltage=37610,
+        battery_voltage=39227,    # pack voltage, scale 0.01 (gain 100)
+        battery_voltage_gain=100,
         battery_current=37611,
         battery_temperature=37613,
+        internal_temperature=39141,  # scale 0.1
+        nominal_power_w=39053,    # 32-bit: 39053 (high) + 39054 (low), scale 1.0
+        soh=37624,                # state of health %, scale 1.0
+        nominal_energy_kwh=37635, # scale 0.01
         pv1_power=39280,          # 32-bit: 39279 (high) + 39280 (low), scale 0.001
         pv2_power=39282,          # 32-bit: 39281 (high) + 39282 (low), scale 0.001
         pv_power_is_32bit=True,
@@ -774,8 +786,37 @@ class FoxESSController(InverterController):
             if reg.battery_voltage:
                 bv_raw = await self._read_data_register(reg.battery_voltage, 1)
                 if bv_raw:
-                    battery_voltage_v = bv_raw[0] / GAIN_VOLTAGE
+                    battery_voltage_v = bv_raw[0] / reg.battery_voltage_gain
             attrs["battery_voltage_v"] = battery_voltage_v
+
+            # Battery temperature
+            battery_temp = None
+            if reg.battery_temperature:
+                bt_raw = await self._read_data_register(reg.battery_temperature, 1)
+                if bt_raw:
+                    battery_temp = self._to_signed16(bt_raw[0]) / GAIN_TEMPERATURE
+            attrs["battery_temperature"] = battery_temp
+
+            # H3-Smart extended registers
+            if reg.internal_temperature:
+                it_raw = await self._read_data_register(reg.internal_temperature, 1)
+                attrs["internal_temperature"] = (
+                    self._to_signed16(it_raw[0]) / GAIN_TEMPERATURE if it_raw else None
+                )
+
+            if reg.soh:
+                soh_raw = await self._read_data_register(reg.soh, 1)
+                attrs["soh"] = soh_raw[0] if soh_raw else None
+
+            if reg.nominal_power_w:
+                np_raw = await self._read_data_register(reg.nominal_power_w, 2)
+                attrs["nominal_power_w"] = (
+                    (np_raw[0] << 16) | np_raw[1] if np_raw and len(np_raw) == 2 else None
+                )
+
+            if reg.nominal_energy_kwh:
+                ne_raw = await self._read_data_register(reg.nominal_energy_kwh, 1)
+                attrs["nominal_energy_kwh"] = ne_raw[0] / 100.0 if ne_raw else None
 
             is_curtailed = False  # Determined by export limit state if tracked
 

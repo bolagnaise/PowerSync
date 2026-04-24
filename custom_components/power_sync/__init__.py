@@ -3868,10 +3868,11 @@ class BatteryHealthView(HomeAssistantView):
                 if (v := d.get("battery_max_discharge_power_w")) is not None: bms["max_discharge_power_w"] = int(v)
 
             elif brand == "foxess":
-                # FoxESS has no SOH on any model — excluded intentionally
+                if (v := d.get("soh")) is not None: bms["soh_percent"] = round(float(v), 1)
                 if (v := d.get("battery_temperature")) is not None: bms["temperature_c"] = round(float(v), 1)
                 if (v := d.get("battery_level")) is not None: bms["soc_percent"] = round(float(v), 1)
                 if (v := d.get("battery_voltage_v")) is not None: bms["voltage_v"] = round(float(v), 1)
+                if (v := d.get("nominal_energy_kwh")) is not None: bms["rated_capacity_kwh"] = round(float(v), 2)
                 if (v := d.get("min_soc")) is not None: bms["min_soc_percent"] = round(float(v), 1)
                 if (v := d.get("max_charge_current_a")) is not None: bms["max_charge_current_a"] = round(float(v), 1)
                 if (v := d.get("max_discharge_current_a")) is not None: bms["max_discharge_current_a"] = round(float(v), 1)
@@ -5184,6 +5185,8 @@ class FoxESSSettingsView(HomeAssistantView):
                 "min_soc": data.get("min_soc"),
                 "max_charge_current_a": data.get("max_charge_current_a"),
                 "max_discharge_current_a": data.get("max_discharge_current_a"),
+                "battery_max_charge_power": data.get("battery_max_charge_power"),
+                "battery_max_discharge_power": data.get("battery_max_discharge_power"),
                 "model_family": data.get("model_family"),
             }
 
