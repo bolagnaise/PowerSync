@@ -121,6 +121,51 @@ class PowerSyncUpdateEntity(CoordinatorEntity, UpdateEntity):
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_update"
         self._installed = installed_version
+        self._notified_version: str | None = None
+
+    async def async_added_to_hass(self) -> None:
+        """Run when entity is added — check for update immediately."""
+        await super().async_added_to_hass()
+        self._check_and_notify()
+
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        self._check_and_notify()
+        super()._handle_coordinator_update()
+
+    def _check_and_notify(self) -> None:
+        """Create persistent notification if a newer version is available."""
+        if not self.coordinator.data or not self.hass:
+            return
+        latest = self.coordinator.data.get("latest_version")
+        if not latest or latest == self._installed or latest == self._notified_version:
+            return
+        # Only notify for newer versions, not downgrades
+        try:
+            from packaging.version import Version
+            if Version(latest) <= Version(self._installed):
+                return
+        except Exception:
+            if latest <= self._installed:
+                return
+        self._notified_version = latest
+        release_url = self.coordinator.data.get("release_url", "")
+        notes_line = f"\n\n[View release notes]({release_url})" if release_url else ""
+        self.hass.async_create_task(
+            self.hass.services.async_call(
+                "persistent_notification",
+                "create",
+                {
+                    "title": "PowerSync Update Available",
+                    "message": (
+                        f"PowerSync **v{latest}** is available "
+                        f"(installed: v{self._installed}).{notes_line}"
+                    ),
+                    "notification_id": f"power_sync_update_{latest}",
+                },
+            )
+        )
+        _LOGGER.info("PowerSync update available: v%s → v%s", self._installed, latest)
 
     @property
     def device_info(self) -> dict[str, Any]:
