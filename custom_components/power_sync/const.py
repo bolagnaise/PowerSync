@@ -1475,6 +1475,8 @@ CONF_OPTIMIZATION_BATTERY_CAPACITY_WH = "optimization_battery_capacity_wh"
 CONF_OPTIMIZATION_MAX_CHARGE_W = "optimization_max_charge_w"
 CONF_OPTIMIZATION_MAX_DISCHARGE_W = "optimization_max_discharge_w"
 CONF_OPTIMIZATION_WEATHER_INTEGRATION = "optimization_weather_integration"
+CONF_AWAY_ENABLED_AT = "away_enabled_at"    # ISO timestamp when away mode was turned on
+CONF_AWAY_DISABLED_AT = "away_disabled_at"  # ISO timestamp when away mode was turned off
 
 # Optimization cost function (only cost minimization — self-consumption is the battery's native mode)
 COST_FUNCTION_COST = "cost"

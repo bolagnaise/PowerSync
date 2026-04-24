@@ -1762,6 +1762,10 @@ LP_FORECAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
             "hourly_forecast": data.get("load_hourly_today_remaining"),
             "temperature_adjusted": data.get("load_temperature_adjusted", False),
             "away_mode": data.get("load_away_mode", False),
+            "away_in_recovery": data.get("load_away_in_recovery", False),
+            "away_recovery_remaining_hours": data.get("load_away_recovery_remaining_hours"),
+            "away_enabled_at": data.get("load_away_enabled_at"),
+            "away_disabled_at": data.get("load_away_disabled_at"),
         } if data and data.get("available") else {},
     ),
     PowerSyncSensorEntityDescription(
@@ -1777,6 +1781,8 @@ LP_FORECAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
             "hourly_forecast": data.get("load_hourly_tomorrow"),
             "temperature_adjusted": data.get("load_temperature_adjusted", False),
             "away_mode": data.get("load_away_mode", False),
+            "away_in_recovery": data.get("load_away_in_recovery", False),
+            "away_recovery_remaining_hours": data.get("load_away_recovery_remaining_hours"),
         } if data and data.get("available") else {},
     ),
 )

@@ -254,16 +254,52 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @property
     def away_mode(self) -> bool:
-        """Return whether away mode is active."""
+        """Return whether away mode is active (user is currently away)."""
         return self._load_estimator.away_mode if self._load_estimator else False
 
     def set_away_mode(self, enabled: bool) -> None:
-        """Enable or disable away mode and invalidate the load forecast cache."""
-        if self._load_estimator:
-            if self._load_estimator.away_mode != enabled:
-                self._load_estimator.away_mode = enabled
-                self._load_estimator.invalidate_cache()
-                _LOGGER.info("Away mode %s — load forecast cache cleared", "enabled" if enabled else "disabled")
+        """Enable or disable away mode.
+
+        Turning ON records departure timestamp (enables vacation-low LP bias).
+        Turning OFF records return timestamp and starts the 7-day recovery window
+        during which vacation data is excluded from the load history.
+        Short toggles under 1 hour are treated as no-ops to avoid polluting history.
+        """
+        if not self._load_estimator:
+            return
+
+        from ..const import CONF_AWAY_ENABLED_AT, CONF_AWAY_DISABLED_AT
+
+        now = dt_util.utcnow()
+
+        if enabled:
+            self._load_estimator.away_enabled_at = now
+            self._load_estimator.away_disabled_at = None
+            self._load_estimator.invalidate_cache()
+            _LOGGER.info("Away mode ENABLED — departure recorded at %s", now.isoformat())
+        else:
+            enabled_at = self._load_estimator.away_enabled_at
+            if enabled_at and (now - enabled_at) < timedelta(hours=1):
+                # Short toggle — treat as no-op, clear both timestamps
+                _LOGGER.info("Away mode toggle ignored (under 1 hour) — no recovery window set")
+                self._load_estimator.away_enabled_at = None
+                self._load_estimator.away_disabled_at = None
+            else:
+                self._load_estimator.away_disabled_at = now
+                _LOGGER.info(
+                    "Away mode DISABLED — return recorded at %s, recovery window active for 7 days",
+                    now.isoformat(),
+                )
+            self._load_estimator.invalidate_cache()
+
+        # Persist timestamps to config entry so they survive HA restarts
+        if self._entry:
+            new_options = dict(self._entry.options)
+            en = self._load_estimator.away_enabled_at
+            dis = self._load_estimator.away_disabled_at
+            new_options[CONF_AWAY_ENABLED_AT] = en.isoformat() if en else None
+            new_options[CONF_AWAY_DISABLED_AT] = dis.isoformat() if dis else None
+            self.hass.config_entries.async_update_entry(self._entry, options=new_options)
 
     def _summarise_load_forecast(self) -> dict | None:
         """Slice the cached load forecast into today-remaining and tomorrow kWh totals."""
@@ -341,6 +377,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if self._load_estimator else False
             ),
             "away_mode": self.away_mode,
+            "away_in_recovery": self._load_estimator._in_recovery if self._load_estimator else False,
+            "away_enabled_at": (
+                self._load_estimator.away_enabled_at.isoformat()
+                if self._load_estimator and self._load_estimator.away_enabled_at else None
+            ),
+            "away_disabled_at": (
+                self._load_estimator.away_disabled_at.isoformat()
+                if self._load_estimator and self._load_estimator.away_disabled_at else None
+            ),
+            "away_recovery_remaining_hours": (
+                round(
+                    (timedelta(days=7) - (dt_util.utcnow() - self._load_estimator.away_disabled_at))
+                    .total_seconds() / 3600, 1
+                )
+                if self._load_estimator and self._load_estimator._in_recovery else None
+            ),
         }
 
     async def async_setup(self) -> bool:
@@ -380,6 +432,26 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             interval_minutes=self._config.interval_minutes,
             weather_entity_id=weather_entity,
         )
+
+        # Restore away mode timestamps from config entry (persisted across HA restarts)
+        if self._entry:
+            from ..const import CONF_AWAY_ENABLED_AT, CONF_AWAY_DISABLED_AT
+            raw_en = self._entry.options.get(CONF_AWAY_ENABLED_AT) or self._entry.data.get(CONF_AWAY_ENABLED_AT)
+            raw_dis = self._entry.options.get(CONF_AWAY_DISABLED_AT) or self._entry.data.get(CONF_AWAY_DISABLED_AT)
+            try:
+                self._load_estimator.away_enabled_at = (
+                    datetime.fromisoformat(raw_en) if raw_en else None
+                )
+                self._load_estimator.away_disabled_at = (
+                    datetime.fromisoformat(raw_dis) if raw_dis else None
+                )
+                if raw_en or raw_dis:
+                    _LOGGER.info(
+                        "Restored away mode state: enabled_at=%s, disabled_at=%s",
+                        raw_en, raw_dis,
+                    )
+            except (ValueError, TypeError) as exc:
+                _LOGGER.warning("Could not restore away mode timestamps: %s", exc)
 
         # Initialize solar forecaster
         self._solar_forecaster = SolcastForecaster(
@@ -3766,6 +3838,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 data["load_hourly_tomorrow"] = load_summary["hourly_tomorrow"]
                 data["load_temperature_adjusted"] = load_summary["temperature_adjusted"]
                 data["load_away_mode"] = load_summary["away_mode"]
+                data["load_away_in_recovery"] = load_summary.get("away_in_recovery", False)
+                data["load_away_enabled_at"] = load_summary.get("away_enabled_at")
+                data["load_away_disabled_at"] = load_summary.get("away_disabled_at")
+                data["load_away_recovery_remaining_hours"] = load_summary.get("away_recovery_remaining_hours")
 
         # Use actual tariff prices for display (not LP-adjusted values)
         disp_import = self._last_display_import_prices or self._last_import_prices

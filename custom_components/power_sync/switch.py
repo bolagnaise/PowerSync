@@ -623,7 +623,12 @@ class AwayModeSwitch(SwitchEntity):
         self._attr_suggested_object_id = f"power_sync_{SWITCH_TYPE_AWAY_MODE}"
         self._attr_name = "Away Mode"
         self._attr_icon = "mdi:home-export-outline"
-        self._attr_is_on = False
+        # Restore from persisted config entry options — switch is ON when
+        # away_enabled_at is set and away_disabled_at is not.
+        from .const import CONF_AWAY_ENABLED_AT, CONF_AWAY_DISABLED_AT
+        en = entry.options.get(CONF_AWAY_ENABLED_AT) or entry.data.get(CONF_AWAY_ENABLED_AT)
+        dis = entry.options.get(CONF_AWAY_DISABLED_AT) or entry.data.get(CONF_AWAY_DISABLED_AT)
+        self._attr_is_on = bool(en and not dis)
 
     @property
     def device_info(self):

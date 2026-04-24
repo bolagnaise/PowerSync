@@ -287,7 +287,8 @@ class LoadEstimator:
         self.load_entity_id = load_entity_id
         self.interval_minutes = interval_minutes
         self.weather_entity_id = weather_entity_id
-        self.away_mode: bool = False
+        self.away_enabled_at: datetime | None = None   # when switch turned ON (departure)
+        self.away_disabled_at: datetime | None = None  # when switch turned OFF (return)
         self._history_cache: dict[str, list[tuple[datetime, float]]] = {}
         self._cache_time: datetime | None = None
         self._cache_duration = timedelta(hours=1)
@@ -301,6 +302,18 @@ class LoadEstimator:
         # Initialize HAFO forecaster
         self._hafo = HAFOForecaster(hass, load_entity_id, interval_minutes)
         self._hafo_available: bool | None = None
+
+    @property
+    def away_mode(self) -> bool:
+        """True when the user is currently away (switch ON, not yet returned)."""
+        return bool(self.away_enabled_at and not self.away_disabled_at)
+
+    @property
+    def _in_recovery(self) -> bool:
+        """True during the 7-day window after returning from a trip."""
+        if not self.away_disabled_at or not self.away_enabled_at:
+            return False
+        return (dt_util.utcnow() - self.away_disabled_at) < timedelta(days=7)
 
     @property
     def hafo_available(self) -> bool:
@@ -331,8 +344,7 @@ class LoadEstimator:
 
         n_intervals = horizon_hours * 60 // self.interval_minutes
 
-        # Away mode: skip HAFO — it relies on recent history which was near-zero during vacation
-        if self.hafo_available and not self.away_mode:
+        if self.hafo_available and not self._in_recovery:
             try:
                 hafo_forecast = await self._hafo.get_forecast(horizon_hours, start_time)
                 if hafo_forecast and len(hafo_forecast) >= n_intervals * 0.5:
@@ -367,7 +379,7 @@ class LoadEstimator:
                     "Using historical load forecast (%d history points, avg %.0fW%s%s)",
                     len(history), avg_w,
                     ", temperature-adjusted" if alpha is not None else "",
-                    ", away-mode (pre-vacation history)" if self.away_mode else "",
+                    ", recovery mode (vacation period excluded)" if self._in_recovery else "",
                 )
                 return forecast
         except Exception as e:
@@ -385,18 +397,32 @@ class LoadEstimator:
     async def _get_load_history(self) -> list[tuple[datetime, float]]:
         """Get historical load data from Home Assistant recorder.
 
-        In away mode, fetches 28 days but excludes the most recent 7 to use
-        pre-vacation behaviour for post-return forecasting.
+        During recovery (7 days after returning from a trip) the vacation window
+        [away_enabled_at, away_disabled_at] is excluded so the LP uses pre-vacation
+        load patterns. Outside recovery, the most recent 7 days are used as normal.
         """
         if not self.load_entity_id:
             _LOGGER.debug("No load entity ID configured, skipping history")
             return []
 
-        days = 28 if self.away_mode else 7
-        cache_key = f"{self.load_entity_id}:away={self.away_mode}"
+        now = dt_util.utcnow()
+
+        # Auto-clear expired recovery state
+        if self.away_disabled_at and (now - self.away_disabled_at) >= timedelta(days=7):
+            _LOGGER.info("Away mode recovery window expired — clearing timestamps")
+            self.away_enabled_at = None
+            self.away_disabled_at = None
+
+        in_recovery = self._in_recovery
+        if in_recovery:
+            vacation_days = max(1, (self.away_disabled_at - self.away_enabled_at).days)
+            days = min(60, vacation_days + 14)
+        else:
+            days = 7
+
+        cache_key = f"{self.load_entity_id}:en={self.away_enabled_at}:dis={self.away_disabled_at}"
 
         # Check cache
-        now = dt_util.utcnow()
         if (
             self._cache_time
             and now - self._cache_time < self._cache_duration
@@ -440,20 +466,31 @@ class LoadEstimator:
 
             # Parse states into (timestamp, value_watts) tuples
             result = []
-            recent_cutoff = now - timedelta(days=7) if self.away_mode else None
             for state in history[self.load_entity_id]:
                 try:
                     value = float(state.state)
                     value_watts = value * multiplier
                     # Filter invalid values: must be positive and < 100kW residential max
                     if 0 < value_watts < 100_000:
-                        ts = state.last_changed
-                        # Away mode: exclude recent 7 days (vacation-distorted data)
-                        if recent_cutoff is not None and ts > recent_cutoff:
-                            continue
-                        result.append((ts, value_watts))
+                        result.append((state.last_changed, value_watts))
                 except (ValueError, TypeError):
                     continue
+
+            # Recovery: exclude the vacation window [enabled_at, disabled_at], then
+            # keep only the most recent 7 days' worth of the remaining data so the
+            # LP sees pre-vacation patterns until new post-return history fills the window.
+            excluded = 0
+            if in_recovery:
+                before = len(result)
+                result = [
+                    (ts, w) for (ts, w) in result
+                    if not (self.away_enabled_at <= ts <= self.away_disabled_at)
+                ]
+                excluded = before - len(result)
+                if result:
+                    result.sort(key=lambda h: h[0])
+                    cutoff = result[-1][0] - timedelta(days=7)
+                    result = [h for h in result if h[0] >= cutoff]
 
             # Cache the result
             self._history_cache[cache_key] = result
@@ -464,7 +501,7 @@ class LoadEstimator:
                 _LOGGER.info(
                     "Loaded %d history points for %s (avg %.0fW, %.1f days%s)",
                     len(result), self.load_entity_id, avg_w, days,
-                    ", excluding last 7 days (away mode)" if self.away_mode else "",
+                    f", recovery mode ({excluded} vacation points excluded)" if in_recovery else "",
                 )
             else:
                 _LOGGER.warning(
@@ -591,10 +628,12 @@ class LoadEstimator:
             # return None so scaling is skipped if cache regenerated below
             return forecast_temps or None, None, None
 
-        # Fetch historical temperatures for the same window as load history
-        if self.away_mode:
-            hist_start = now - timedelta(days=28)
-            hist_end = now - timedelta(days=7)
+        # Fetch historical temperatures matching the load history window.
+        # During recovery, use the pre-vacation window for α fitting so the
+        # temperature sensitivity is calibrated against normal household patterns.
+        if self._in_recovery and self.away_enabled_at:
+            hist_end = self.away_enabled_at
+            hist_start = hist_end - timedelta(days=7)
         else:
             hist_start = now - timedelta(days=7)
             hist_end = now
