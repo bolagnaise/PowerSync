@@ -193,8 +193,9 @@ class BatteryControllerWrapper:
             for entry_id, entry_data in self.hass.data.get(DOMAIN, {}).items():
                 if not isinstance(entry_data, dict):
                     continue
-                # Modbus-based batteries: read from controller
-                for coord_key in ("sigenergy_coordinator", "sungrow_coordinator", "foxess_coordinator", "goodwe_coordinator"):
+                # Modbus-based batteries: read from controller. Voltx follows
+                # the same native coordinator/controller pattern as the others.
+                for coord_key in ("sigenergy_coordinator", "sungrow_coordinator", "foxess_coordinator", "goodwe_coordinator", "voltx_coordinator"):
                     coord = entry_data.get(coord_key)
                     if coord and hasattr(coord, "_controller") and hasattr(coord._controller, "get_backup_reserve"):
                         return await coord._controller.get_backup_reserve()

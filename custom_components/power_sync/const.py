@@ -127,6 +127,9 @@ BATTERY_SYSTEM_SUNGROW = "sungrow"
 BATTERY_SYSTEM_FOXESS = "foxess"
 BATTERY_SYSTEM_GOODWE = "goodwe"
 BATTERY_SYSTEM_ALPHAESS = "alphaess"
+# Voltx is treated as a first-class battery system so it shows up in the
+# main setup flow and participates in the generic battery service routing.
+BATTERY_SYSTEM_VOLTX = "voltx"
 
 BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_TESLA: "Tesla Powerwall — Fleet API or Teslemetry",
@@ -135,7 +138,17 @@ BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_FOXESS: "FoxESS — Modbus TCP or RS485 serial",
     BATTERY_SYSTEM_GOODWE: "GoodWe ET/EH/ES/EM — UDP or TCP",
     BATTERY_SYSTEM_ALPHAESS: "AlphaESS SMILE/Storion — Modbus TCP + optional Cloud API",
+    BATTERY_SYSTEM_VOLTX: "Voltx / Solplanet hybrid — Modbus TCP",
 }
+
+# Voltx / Solplanet Battery System Configuration (Modbus TCP)
+# Defaults mirror the proof-of-concept integration and the observed inverter
+# Monitor-port Modbus settings used during development.
+CONF_VOLTX_HOST = "voltx_host"
+CONF_VOLTX_PORT = "voltx_port"
+CONF_VOLTX_SLAVE_ID = "voltx_slave_id"
+DEFAULT_VOLTX_PORT = 502
+DEFAULT_VOLTX_SLAVE_ID = 3
 
 # Sungrow SH-series Battery System Configuration (Modbus TCP)
 # Hybrid inverters with integrated battery control
@@ -1419,6 +1432,7 @@ OPTIMIZATION_PROVIDER_NATIVE_NAMES = {
     BATTERY_SYSTEM_FOXESS: "FoxESS",
     BATTERY_SYSTEM_GOODWE: "GoodWe",
     BATTERY_SYSTEM_ALPHAESS: "AlphaESS",
+    BATTERY_SYSTEM_VOLTX: "Voltx",
 }
 
 OPTIMIZATION_PROVIDERS = {
@@ -1458,6 +1472,7 @@ BATTERY_CAPACITY_DEFAULTS = {
     BATTERY_SYSTEM_FOXESS: 10000,     # Varies, default 10 kWh
     BATTERY_SYSTEM_GOODWE: 10000,     # Varies, default 10 kWh
     BATTERY_SYSTEM_ALPHAESS: 10000,   # Varies (SMILE5 ~ 5.7 kWh, Storion ~ 30 kWh), default 10 kWh
+    BATTERY_SYSTEM_VOLTX: 10000,      # Varies, default 10 kWh
 }
 
 # Max charge/discharge power defaults by system (W)
@@ -1468,6 +1483,7 @@ BATTERY_POWER_DEFAULTS = {
     BATTERY_SYSTEM_FOXESS: 5000,      # Varies by model
     BATTERY_SYSTEM_GOODWE: 5000,      # Varies by model
     BATTERY_SYSTEM_ALPHAESS: 5000,    # Varies by model (SMILE5 = 5 kW, Storion-T30 larger)
+    BATTERY_SYSTEM_VOLTX: 5000,       # Varies by inverter/battery pairing
 }
 
 # Optimization service

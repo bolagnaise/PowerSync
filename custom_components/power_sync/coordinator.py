@@ -3440,6 +3440,130 @@ def _normalize_alphaess_cloud_data(cloud_data: dict) -> dict:
     return attrs
 
 
+class VoltxEnergyCoordinator(DataUpdateCoordinator):
+    """Coordinator for Voltx / Solplanet Modbus battery systems."""
+
+    _DEFAULT_FORCE_POWER_W = 5000.0
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        host: str,
+        port: int = 502,
+        slave_id: int = 3,
+        entry_id: str = "",
+    ) -> None:
+        from .inverters.voltx import VoltxController
+
+        self.host = host
+        self.port = port
+        self.slave_id = slave_id
+        self._entry_id = entry_id
+        # Reuse the native controller so polling and service handlers share the
+        # same Voltx register knowledge and connection behavior.
+        self._controller = VoltxController(host, port, slave_id)
+        self._energy_acc = EnergyAccumulator(hass, "voltx")
+
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_voltx_energy",
+            update_interval=UPDATE_INTERVAL_ENERGY,
+        )
+
+    def _resolve_force_power_w(self, requested_w: float, direction: str) -> float:
+        """Choose the requested power or a safe/device-reported default."""
+        if requested_w and requested_w > 0:
+            return float(requested_w)
+
+        field = (
+            "battery_max_charge_power_w"
+            if direction == "charge"
+            else "battery_max_discharge_power_w"
+        )
+        max_w = (self.data or {}).get(field)
+        if max_w and max_w > 0:
+            return float(max_w)
+        return self._DEFAULT_FORCE_POWER_W
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Fetch Voltx telemetry and normalize it to PowerSync fields."""
+        if not self._energy_acc._last_update:
+            await self._energy_acc.async_restore()
+
+        try:
+            status = await self._controller.get_status()
+            attrs = status.attributes or {}
+            if "battery_soc" not in attrs:
+                raise UpdateFailed("Voltx Modbus returned no battery data")
+        except Exception as err:
+            if self.data:
+                return self.data
+            raise UpdateFailed(f"Error fetching Voltx energy data: {err}") from err
+
+        solar_kw = attrs.get("pv_power_kw", 0) or 0
+        grid_kw = attrs.get("grid_power_kw", 0) or 0
+        battery_kw = attrs.get("battery_power_kw", 0) or 0
+        load_kw = attrs.get("load_power_kw")
+        if load_kw is None:
+            # Voltx Modbus TCP does not expose the full CT/meter view, so use a
+            # simple balance fallback when the controller cannot infer load.
+            load_kw = solar_kw + grid_kw + battery_kw
+
+        buy, sell = _get_current_prices(self.hass, self._entry_id)
+        self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+
+        max_charge_w = attrs.get("battery_max_charge_power_w")
+        max_discharge_w = attrs.get("battery_max_discharge_power_w")
+
+        return {
+            "solar_power": solar_kw,
+            "grid_power": grid_kw,
+            "battery_power": battery_kw,
+            "load_power": load_kw,
+            "battery_level": attrs.get("battery_soc", 0),
+            "battery_soh": attrs.get("battery_soh"),
+            "battery_max_charge_power_w": max_charge_w,
+            "battery_max_discharge_power_w": max_discharge_w,
+            "battery_max_charge_power": (max_charge_w / 1000.0) if max_charge_w else None,
+            "battery_max_discharge_power": (max_discharge_w / 1000.0) if max_discharge_w else None,
+            "backup_reserve_percent": attrs.get("backup_reserve_percent"),
+            "work_mode_raw": attrs.get("work_mode_raw"),
+            "charge_power_command_w": attrs.get("charge_power_command_w"),
+            "last_update": dt_util.utcnow(),
+            "energy_summary": self._energy_acc.as_dict(),
+        }
+
+    async def force_charge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
+        """Force charge via Voltx custom mode."""
+        # PowerSync owns the countdown/auto-restore lifecycle; Voltx only needs
+        # the immediate custom-mode power command.
+        power_w = self._resolve_force_power_w(power_w, "charge")
+        async with self._controller:
+            return await self._controller.force_charge(power_kw=power_w / 1000.0)
+
+    async def force_discharge(self, duration_minutes: int = 30, power_w: float = 0) -> bool:
+        """Force discharge via Voltx custom mode."""
+        # Duration is handled in the shared service layer, not in the inverter.
+        power_w = self._resolve_force_power_w(power_w, "discharge")
+        async with self._controller:
+            return await self._controller.force_discharge(power_kw=power_w / 1000.0)
+
+    async def restore_normal(self) -> bool:
+        """Restore self-consumption mode."""
+        async with self._controller:
+            return await self._controller.restore_normal()
+
+    async def set_backup_reserve(self, percent: int) -> bool:
+        """Set Voltx minimum SOC reserve."""
+        async with self._controller:
+            return await self._controller.set_backup_reserve(percent)
+
+    async def async_shutdown(self) -> None:
+        """Disconnect controller on unload."""
+        await self._controller.disconnect()
+
+
 class SungrowEnergyCoordinator(DataUpdateCoordinator):
     """Coordinator to fetch Sungrow SH-series battery system data via Modbus.
 

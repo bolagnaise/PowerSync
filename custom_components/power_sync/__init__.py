@@ -240,6 +240,12 @@ from .const import (
     CONF_GOODWE_PROTOCOL,
     DEFAULT_GOODWE_PORT_UDP,
     DEFAULT_GOODWE_PORT_TCP,
+    # Voltx battery system configuration
+    CONF_VOLTX_HOST,
+    CONF_VOLTX_PORT,
+    CONF_VOLTX_SLAVE_ID,
+    DEFAULT_VOLTX_PORT,
+    DEFAULT_VOLTX_SLAVE_ID,
     # Octopus Energy UK configuration
     CONF_OCTOPUS_PRODUCT_CODE,
     CONF_OCTOPUS_TARIFF_CODE,
@@ -329,6 +335,7 @@ from .coordinator import (
     FoxESSEnergyCoordinator,
     GoodWeEnergyCoordinator,
     AlphaESSEnergyCoordinator,
+    VoltxEnergyCoordinator,
     DemandChargeCoordinator,
     AEMOSensorCoordinator,
     OctopusPriceCoordinator,
@@ -9430,6 +9437,7 @@ class SolarSurplusStatusView(HomeAssistantView):
             sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
             sungrow_coordinator = entry_data.get("sungrow_coordinator")
             foxess_coordinator = entry_data.get("foxess_coordinator")
+            voltx_coordinator = entry_data.get("voltx_coordinator")
 
             if tesla_coordinator and tesla_coordinator.data:
                 # Tesla coordinator stores values in kW
@@ -9460,6 +9468,15 @@ class SolarSurplusStatusView(HomeAssistantView):
                 load_power_kw = foxess_coordinator.data.get("load_power", 0)
                 battery_soc = foxess_coordinator.data.get("battery_level", 0)
                 _LOGGER.debug(f"Solar surplus status from foxess_coordinator: battery_soc={battery_soc}%")
+            elif voltx_coordinator and voltx_coordinator.data:
+                # Voltx uses the same normalized coordinator payload as the
+                # other native batteries, so this shared view can consume it directly.
+                solar_power_kw = voltx_coordinator.data.get("solar_power", 0)
+                grid_power_kw = voltx_coordinator.data.get("grid_power", 0)
+                battery_power_kw = voltx_coordinator.data.get("battery_power", 0)
+                load_power_kw = voltx_coordinator.data.get("load_power", 0)
+                battery_soc = voltx_coordinator.data.get("battery_level", 0)
+                _LOGGER.debug(f"Solar surplus status from voltx_coordinator: battery_soc={battery_soc}%")
 
             # Calculate surplus
             live_status = {
@@ -10615,6 +10632,7 @@ class EVWidgetDataView(HomeAssistantView):
             sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
             sungrow_coordinator = entry_data.get("sungrow_coordinator")
             foxess_coordinator = entry_data.get("foxess_coordinator")
+            voltx_coordinator = entry_data.get("voltx_coordinator")
 
             if tesla_coordinator and tesla_coordinator.data:
                 solar_power_kw = tesla_coordinator.data.get("solar_power", 0)
@@ -10640,6 +10658,14 @@ class EVWidgetDataView(HomeAssistantView):
                 battery_power_kw = foxess_coordinator.data.get("battery_power", 0)
                 load_power_kw = foxess_coordinator.data.get("load_power", 0)
                 battery_soc = foxess_coordinator.data.get("battery_level", 0)
+            elif voltx_coordinator and voltx_coordinator.data:
+                # Reuse the same normalized Voltx payload for the EV widget's
+                # live battery/solar snapshot.
+                solar_power_kw = voltx_coordinator.data.get("solar_power", 0)
+                grid_power_kw = voltx_coordinator.data.get("grid_power", 0)
+                battery_power_kw = voltx_coordinator.data.get("battery_power", 0)
+                load_power_kw = voltx_coordinator.data.get("load_power", 0)
+                battery_soc = voltx_coordinator.data.get("battery_level", 0)
 
             # Build live_status dict for surplus calculation (expects watts)
             live_status = {
@@ -11165,6 +11191,7 @@ class PriceRecommendationView(HomeAssistantView):
             sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
             sungrow_coordinator = entry_data.get("sungrow_coordinator")
             foxess_coordinator = entry_data.get("foxess_coordinator")
+            voltx_coordinator = entry_data.get("voltx_coordinator")
 
             if tesla_coordinator and tesla_coordinator.data:
                 solar_power_kw = tesla_coordinator.data.get("solar_power", 0)
@@ -11190,6 +11217,14 @@ class PriceRecommendationView(HomeAssistantView):
                 battery_power_kw = foxess_coordinator.data.get("battery_power", 0)
                 load_power_kw = foxess_coordinator.data.get("load_power", 0)
                 battery_soc = foxess_coordinator.data.get("battery_level", 0)
+            elif voltx_coordinator and voltx_coordinator.data:
+                # Reuse the same normalized Voltx payload for price guidance and
+                # surplus calculations shown in the mobile/web UI.
+                solar_power_kw = voltx_coordinator.data.get("solar_power", 0)
+                grid_power_kw = voltx_coordinator.data.get("grid_power", 0)
+                battery_power_kw = voltx_coordinator.data.get("battery_power", 0)
+                load_power_kw = voltx_coordinator.data.get("load_power", 0)
+                battery_soc = voltx_coordinator.data.get("battery_level", 0)
 
             # Build live_status dict for surplus calculation (expects watts)
             live_status = {
@@ -12512,12 +12547,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("Failed to start Amber usage coordinator: %s", e)
             amber_usage_coordinator = None
 
-    # Check if this is a Sigenergy, Sungrow, FoxESS, GoodWe, or AlphaESS setup (no Tesla needed)
+    # Check if this is a non-Tesla battery system setup (no Tesla needed)
     is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
     is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
     is_foxess = bool(entry.data.get(CONF_FOXESS_HOST) or entry.data.get(CONF_FOXESS_SERIAL_PORT))
     is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
     is_alphaess = bool(entry.data.get(CONF_ALPHAESS_MODBUS_HOST))
+    is_voltx = bool(entry.data.get(CONF_VOLTX_HOST))
     tesla_coordinator = None
     sigenergy_coordinator = None
     sungrow_coordinator = None
@@ -12525,6 +12561,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     foxess_coordinator = None
     goodwe_coordinator = None
     alphaess_coordinator = None
+    voltx_coordinator = None
     token_getter = None  # Will be set for Tesla users
 
     if is_sigenergy:
@@ -12698,6 +12735,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             max_export_limit_kw=alphaess_export_limit_kw,
             cloud_client=alphaess_cloud_client,
         )
+    elif is_voltx:
+        _LOGGER.info("Running in Voltx mode - Tesla credentials not required")
+
+        # Voltx is a native non-Tesla path: setup only needs the stored Modbus
+        # endpoint so the runtime can bootstrap the energy coordinator.
+        voltx_host = entry.options.get(CONF_VOLTX_HOST, entry.data.get(CONF_VOLTX_HOST))
+        voltx_port = entry.options.get(
+            CONF_VOLTX_PORT,
+            entry.data.get(CONF_VOLTX_PORT, DEFAULT_VOLTX_PORT),
+        )
+        voltx_slave_id = entry.options.get(
+            CONF_VOLTX_SLAVE_ID,
+            entry.data.get(CONF_VOLTX_SLAVE_ID, DEFAULT_VOLTX_SLAVE_ID),
+        )
+
+        _LOGGER.info(
+            "Initializing Voltx Modbus coordinator: %s:%s (slave %s)",
+            voltx_host, voltx_port, voltx_slave_id,
+        )
+        voltx_coordinator = VoltxEnergyCoordinator(
+            hass,
+            voltx_host,
+            port=int(voltx_port),
+            slave_id=int(voltx_slave_id),
+            entry_id=entry.entry_id,
+        )
     else:
         # Get initial Tesla API token and provider
         # Use get_tesla_api_token() which fetches fresh from tesla_fleet if available
@@ -12799,6 +12862,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.warning("AlphaESS coordinator failed to initialize: %s", e)
             alphaess_coordinator = None
+    if voltx_coordinator:
+        try:
+            # Probe the inverter during setup so we surface missing telemetry
+            # early instead of deferring the failure until entities start polling.
+            await voltx_coordinator.async_config_entry_first_refresh()
+            _LOGGER.info("Voltx coordinator initialized successfully")
+        except Exception as e:
+            _LOGGER.warning("Voltx coordinator failed to initialize: %s", e)
+            voltx_coordinator = None
 
     # Initialize demand charge coordinator if enabled (any battery system with grid power data)
     demand_charge_coordinator = None
@@ -12868,7 +12940,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     # Tesla AEMO Spike Manager (tariff-based) — only for Tesla
-    if aemo_spike_enabled and has_tesla_site and not is_sigenergy and not is_sungrow and not is_foxess and not is_goodwe:
+    if aemo_spike_enabled and has_tesla_site and not is_sigenergy and not is_sungrow and not is_foxess and not is_goodwe and not is_voltx:
         aemo_region = entry.options.get(
             CONF_AEMO_REGION,
             entry.data.get(CONF_AEMO_REGION)
@@ -12898,7 +12970,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("AEMO spike detection enabled but no region configured")
 
     # Generic AEMO Spike Manager (service-call-based) for non-Tesla systems
-    if aemo_spike_enabled and (is_sigenergy or is_sungrow or is_foxess):
+    if aemo_spike_enabled and (is_sigenergy or is_sungrow or is_foxess or is_goodwe or is_voltx):
         aemo_region = entry.options.get(
             CONF_AEMO_REGION,
             entry.data.get(CONF_AEMO_REGION)
@@ -12909,7 +12981,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
         if aemo_region:
-            battery_type = "sigenergy" if is_sigenergy else "sungrow" if is_sungrow else "goodwe" if is_goodwe else "foxess"
+            # Voltx fits the existing non-Tesla service-call manager model, so
+            # it can participate without a Tesla-specific tariff implementation.
+            battery_type = (
+                "sigenergy"
+                if is_sigenergy
+                else "sungrow"
+                if is_sungrow
+                else "goodwe"
+                if is_goodwe
+                else "voltx"
+                if is_voltx
+                else "foxess"
+            )
             generic_aemo_spike_manager = GenericAEMOSpikeManager(
                 hass=hass,
                 entry=entry,
@@ -13005,7 +13089,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Create session managers for non-LP battery control
         if saving_session_coordinator:
             # Tesla TOU mode manager
-            if has_tesla_site and not is_sigenergy and not is_sungrow and not is_foxess and not is_goodwe:
+            if has_tesla_site and not is_sigenergy and not is_sungrow and not is_foxess and not is_goodwe and not is_voltx:
                 saving_session_tariff_manager = SavingSessionTariffManager(
                     hass=hass,
                     entry=entry,
@@ -13019,8 +13103,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.info("Saving Session Tariff Manager initialized for Tesla")
 
             # Non-Tesla generic manager
-            elif is_sigenergy or is_sungrow or is_foxess or is_goodwe:
-                battery_type = "sigenergy" if is_sigenergy else "sungrow" if is_sungrow else "goodwe" if is_goodwe else "foxess"
+            elif is_sigenergy or is_sungrow or is_foxess or is_goodwe or is_voltx:
+                # Voltx reuses the same generic saving-session service routing
+                # as the other native non-Tesla battery integrations.
+                battery_type = (
+                    "sigenergy"
+                    if is_sigenergy
+                    else "sungrow"
+                    if is_sungrow
+                    else "goodwe"
+                    if is_goodwe
+                    else "voltx"
+                    if is_voltx
+                    else "foxess"
+                )
                 generic_saving_session_manager = GenericSavingSessionManager(
                     hass=hass,
                     entry=entry,
@@ -13339,6 +13435,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "foxess_coordinator": foxess_coordinator,  # For FoxESS Modbus energy/battery data
         "goodwe_coordinator": goodwe_coordinator,  # For GoodWe energy/battery data
         "alphaess_coordinator": alphaess_coordinator,  # For AlphaESS Modbus + cloud fallback
+        "voltx_coordinator": voltx_coordinator,  # For Voltx Modbus energy/battery data
         "demand_charge_coordinator": demand_charge_coordinator,
         "aemo_spike_manager": aemo_spike_manager,
         "generic_aemo_spike_manager": generic_aemo_spike_manager,  # For non-Tesla AEMO spike detection
@@ -13369,6 +13466,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "is_foxess": is_foxess,  # Track if FoxESS battery system
         "is_goodwe": is_goodwe,  # Track if GoodWe battery system
         "is_alphaess": is_alphaess,  # Track if AlphaESS battery system
+        "is_voltx": is_voltx,  # Track if Voltx battery system
         "foxess_curtailment_state": "normal",  # Track FoxESS DC curtailment state
         "sigenergy_curtailment_state": "normal",  # Track Sigenergy DC curtailment state
         "alphaess_curtailment_state": "normal",  # Track AlphaESS DC curtailment state
@@ -16132,6 +16230,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await handle_alphaess_curtailment()
             return
 
+        if is_voltx:
+            # The Voltx Modbus TCP registers used here do not expose full site
+            # CT telemetry, so PowerSync cannot safely run curtailment logic.
+            _LOGGER.debug("Solar curtailment is not implemented for Voltx battery systems")
+            return
+
         # Find an available price coordinator (Amber, AEMO, or Octopus)
         _price_coord = amber_coordinator or localvolts_coordinator or aemo_sensor_coordinator or octopus_coordinator
         if not _price_coord:
@@ -16469,6 +16573,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             feedin_price = websocket_data.get('feedIn', {}).get('perKwh') if websocket_data else None
             import_price = websocket_data.get('general', {}).get('perKwh') if websocket_data else None
             await handle_alphaess_curtailment(feedin_price=feedin_price, import_price=import_price)
+            return
+
+        if is_voltx:
+            # Same limitation as the polling path above: no site CT telemetry is
+            # available here for a safe Voltx curtailment decision.
+            _LOGGER.debug("WebSocket solar curtailment is not implemented for Voltx battery systems")
             return
 
         _LOGGER.info("=== Starting solar curtailment check (WebSocket event-driven) ===")
@@ -17095,6 +17205,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 await alphaess_coord.force_discharge(duration, power_w=power_w)
                 _LOGGER.debug(f"AlphaESS force discharge hardware extended ({duration}min, {power_w}W)")
                 return
+            voltx_coord = entry_data.get("voltx_coordinator")
+            if voltx_coord:
+                # Optimizer refreshes and manual "extend hardware" calls reuse
+                # the native Voltx write path without touching UI timer state.
+                await voltx_coord.force_discharge(duration, power_w=power_w)
+                _LOGGER.debug(f"Voltx force discharge hardware extended ({duration}min, {power_w}W)")
+                return
             _LOGGER.warning("_extend_hardware: no coordinator found, falling through to full handler")
 
         _LOGGER.info(f"🔋 FORCE DISCHARGE: Activating for {duration} minutes (source={source})")
@@ -17382,6 +17499,61 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 force_discharge_state["active"] = False
                 _LOGGER.error(f"Error in AlphaESS force discharge: {e}", exc_info=True)
                 hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "AlphaESS Modbus communication error"))
+                return
+
+        # Check if this is a Voltx system
+        is_voltx = bool(entry.data.get(CONF_VOLTX_HOST))
+        if is_voltx:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                voltx_coord = entry_data.get("voltx_coordinator")
+                if not voltx_coord:
+                    force_discharge_state["active"] = False
+                    _LOGGER.error("Force discharge: Voltx coordinator not available")
+                    return
+
+                # Reuse the shared PowerSync timer/state machinery while sending
+                # the actual force-discharge command through native Voltx Modbus.
+                power_w = call.data.get("power_w", 0)
+                discharge_result = await voltx_coord.force_discharge(duration, power_w=power_w)
+
+                if discharge_result:
+                    force_discharge_state["active"] = True
+                    force_discharge_state["source"] = source
+                    force_discharge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
+                    _LOGGER.info(f"Voltx FORCE DISCHARGE ACTIVE for {duration} minutes (power_w={power_w})")
+
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                        "active": True,
+                        "expires_at": force_discharge_state["expires_at"].isoformat(),
+                        "duration": duration,
+                    })
+
+                    if force_discharge_state.get("cancel_expiry_timer"):
+                        force_discharge_state["cancel_expiry_timer"]()
+
+                    async def auto_restore_discharge_voltx(_now):
+                        if _command_generation[0] != _restore_gen:
+                            _LOGGER.debug("Voltx force discharge timer superseded — skipping restore")
+                            return
+                        if force_discharge_state["active"]:
+                            _LOGGER.info("Voltx force discharge expired, auto-restoring")
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+
+                    force_discharge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass,
+                        auto_restore_discharge_voltx,
+                        force_discharge_state["expires_at"],
+                    )
+                    await persist_force_mode_state()
+                else:
+                    force_discharge_state["active"] = False
+                    _LOGGER.error("Voltx force discharge failed")
+                return
+            except Exception as e:
+                force_discharge_state["active"] = False
+                _LOGGER.error(f"Error in Voltx force discharge: {e}", exc_info=True)
+                hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "Voltx Modbus communication error"))
                 return
 
         # Check if this is a Sungrow system
@@ -17914,6 +18086,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 await alphaess_coord.force_charge(duration, power_w=power_w)
                 _LOGGER.debug(f"AlphaESS force charge hardware extended ({duration}min, {power_w}W)")
                 return
+            voltx_coord = entry_data.get("voltx_coordinator")
+            if voltx_coord:
+                await voltx_coord.force_charge(duration, power_w=power_w)
+                _LOGGER.debug(f"Voltx force charge hardware extended ({duration}min, {power_w}W)")
+                return
             # Fallback: no coordinator found, proceed with full handler
             _LOGGER.warning("_extend_hardware: no coordinator found, falling through to full handler")
 
@@ -18241,6 +18418,69 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 force_charge_state["active"] = False
                 _LOGGER.error(f"Error in AlphaESS force charge: {e}", exc_info=True)
                 hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "AlphaESS Modbus communication error"))
+                return
+
+        # Check if this is a Voltx system
+        is_voltx = bool(entry.data.get(CONF_VOLTX_HOST))
+        if is_voltx:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                voltx_coord = entry_data.get("voltx_coordinator")
+                if not voltx_coord:
+                    force_charge_state["active"] = False
+                    _LOGGER.error("Force charge: Voltx coordinator not available")
+                    return
+
+                if force_discharge_state["active"]:
+                    _LOGGER.info("Canceling active discharge mode to enable charge mode")
+                    if force_discharge_state.get("cancel_expiry_timer"):
+                        force_discharge_state["cancel_expiry_timer"]()
+                        force_discharge_state["cancel_expiry_timer"] = None
+                    force_discharge_state["active"] = False
+                    force_discharge_state["expires_at"] = None
+
+                # PowerSync owns the duration countdown; the coordinator only
+                # needs the immediate "force charge now" Modbus write.
+                power_w = call.data.get("power_w", 0)
+                charge_result = await voltx_coord.force_charge(duration, power_w=power_w)
+
+                if charge_result:
+                    force_charge_state["active"] = True
+                    force_charge_state["source"] = source
+                    force_charge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
+                    _LOGGER.info(f"Voltx FORCE CHARGE ACTIVE for {duration} minutes (power_w={power_w})")
+
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
+                        "active": True,
+                        "expires_at": force_charge_state["expires_at"].isoformat(),
+                        "duration": duration,
+                    })
+
+                    if force_charge_state.get("cancel_expiry_timer"):
+                        force_charge_state["cancel_expiry_timer"]()
+
+                    async def auto_restore_charge_voltx(_now):
+                        if _command_generation[0] != _restore_gen:
+                            _LOGGER.debug("Voltx force charge timer superseded — skipping restore")
+                            return
+                        if force_charge_state["active"]:
+                            _LOGGER.info("Voltx force charge expired, auto-restoring")
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+
+                    force_charge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass,
+                        auto_restore_charge_voltx,
+                        force_charge_state["expires_at"],
+                    )
+                    await persist_force_mode_state()
+                else:
+                    force_charge_state["active"] = False
+                    _LOGGER.error("Voltx force charge failed")
+                return
+            except Exception as e:
+                force_charge_state["active"] = False
+                _LOGGER.error(f"Error in Voltx force charge: {e}", exc_info=True)
+                hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "Voltx Modbus communication error"))
                 return
 
         # Check if this is a Sungrow system
@@ -18954,6 +19194,44 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error in AlphaESS restore normal: {e}", exc_info=True)
                 return
 
+        # Check if this is a Voltx system
+        is_voltx = bool(entry.data.get(CONF_VOLTX_HOST))
+        if is_voltx:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                voltx_coord = entry_data.get("voltx_coordinator")
+                if voltx_coord:
+                    # restore_normal maps back to Voltx self-consumption mode
+                    # and clears any custom charge/discharge command.
+                    await voltx_coord.restore_normal()
+
+                force_charge_state["active"] = False
+                force_discharge_state["active"] = False
+                force_charge_state["expires_at"] = None
+                force_discharge_state["expires_at"] = None
+
+                _LOGGER.info("Voltx NORMAL OPERATION RESTORED")
+
+                if not suppress_notification:
+                    try:
+                        from .automations.actions import _send_expo_push
+                        await _send_expo_push(hass, "Battery", "Normal operation restored")
+                    except Exception as notify_err:
+                        _LOGGER.debug(f"Could not send success notification: {notify_err}")
+
+                async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                    "active": False, "expires_at": None, "duration": 0,
+                })
+                async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
+                    "active": False, "expires_at": None, "duration": 0,
+                })
+
+                await persist_force_mode_state()
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error in Voltx restore normal: {e}", exc_info=True)
+                return
+
         # Check if this is a Sungrow system
         is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
         if is_sungrow:
@@ -19593,6 +19871,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error setting AlphaESS self-consumption: {e}", exc_info=True)
                 return
 
+        # Check if this is a Voltx system
+        is_voltx = bool(entry.data.get(CONF_VOLTX_HOST))
+        if is_voltx:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                voltx_coord = entry_data.get("voltx_coordinator")
+                if voltx_coord and hasattr(voltx_coord, '_controller') and voltx_coord._controller:
+                    # The generic self-consumption service maps directly to the
+                    # same Voltx register write used by restore_normal.
+                    controller = voltx_coord._controller
+                    result = await controller.set_self_consumption_mode()
+                    if result:
+                        _LOGGER.info("Voltx self-consumption mode set")
+                    else:
+                        _LOGGER.warning("Voltx set_self_consumption_mode failed")
+                else:
+                    _LOGGER.error("Self-consumption: Voltx coordinator/controller not available")
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error setting Voltx self-consumption: {e}", exc_info=True)
+                return
+
         # Tesla Powerwall
         try:
             site_configs = _get_tesla_site_configs(hass, entry)
@@ -19643,7 +19943,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
         is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
         is_alphaess = bool(entry.data.get(CONF_ALPHAESS_MODBUS_HOST))
-        if is_foxess or is_sungrow or is_sigenergy or is_goodwe or is_alphaess:
+        is_voltx = bool(entry.data.get(CONF_VOLTX_HOST))
+        if is_foxess or is_sungrow or is_sigenergy or is_goodwe or is_alphaess or is_voltx:
             _LOGGER.debug("Non-Tesla system — autonomous mode is implicit, skipping")
             return
 
@@ -19711,6 +20012,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
         # Check if this is a GoodWe system
         is_goodwe = bool(entry.data.get(CONF_GOODWE_HOST))
+        # Check if this is a Voltx system
+        is_voltx = bool(entry.data.get(CONF_VOLTX_HOST))
 
         if is_goodwe:
             # GoodWe via goodwe library (DOD)
@@ -19803,6 +20106,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             except Exception as e:
                 _LOGGER.error(f"Error setting SigEnergy backup reserve: {e}", exc_info=True)
+        elif is_voltx:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                voltx_coord = entry_data.get("voltx_coordinator")
+                if not voltx_coord:
+                    _LOGGER.error("Voltx coordinator not available for set_backup_reserve")
+                    return
+
+                # Voltx reserve writes map directly to soc_min, so the shared
+                # backup-reserve service can call the coordinator wrapper.
+                success = await voltx_coord.set_backup_reserve(percent)
+                if success:
+                    _LOGGER.info(f"✅ Voltx backup reserve set to {percent}%")
+                else:
+                    _LOGGER.error("Failed to set Voltx backup reserve")
+            except Exception as e:
+                _LOGGER.error(f"Error setting Voltx backup reserve: {e}", exc_info=True)
         else:
             # Tesla Powerwall via Fleet API
             try:
@@ -22626,7 +22946,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Flush energy accumulator so the next restore has the latest values
     # (prevents total_increasing sensors from going backwards after reload)
     for coord_key in ("tesla_coordinator", "sigenergy_coordinator", "sungrow_coordinator",
-                      "foxess_coordinator", "goodwe_coordinator"):
+                      "foxess_coordinator", "goodwe_coordinator", "alphaess_coordinator",
+                      "voltx_coordinator"):
         coord = entry_data.get(coord_key)
         if coord and hasattr(coord, "_energy_acc"):
             try:
