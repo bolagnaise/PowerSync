@@ -4166,22 +4166,21 @@ class FoxESSEnergyCoordinator(DataUpdateCoordinator):
                 "battery_temperature": attrs.get("battery_temperature"),
                 "model_family": attrs.get("model_family"),
                 "energy_summary": acc,
+                "battery_soh": attrs.get("soh"),
+                "nominal_power_w": attrs.get("nominal_power_w"),
+                "nominal_energy_kwh": attrs.get("nominal_energy_kwh"),
+                "total_charged_energy_kwh": attrs.get("total_charged_energy_kwh"),
             }
 
-            # Derive BMS-reported max charge/discharge power (kW) so the mobile
-            # app picker can render a correct "Max" chip without re-doing the
-            # current×voltage math. Uses the live pack voltage when available,
-            # else the model-aware fallback from _resolve_pack_voltage.
-            _max_charge_a = attrs.get("max_charge_current_a") or 0
-            _max_discharge_a = attrs.get("max_discharge_current_a") or 0
-            if _max_charge_a > 0 or _max_discharge_a > 0:
-                _pack_v = self._resolve_pack_voltage_from_attrs(attrs)
-                if _max_charge_a > 0:
-                    energy_data["battery_max_charge_power_w"] = int(_max_charge_a * _pack_v)
-                    energy_data["battery_max_charge_power"] = round(_max_charge_a * _pack_v / 1000.0, 2)
-                if _max_discharge_a > 0:
-                    energy_data["battery_max_discharge_power_w"] = int(_max_discharge_a * _pack_v)
-                    energy_data["battery_max_discharge_power"] = round(_max_discharge_a * _pack_v / 1000.0, 2)
+            # Max charge/discharge power is taken directly from nominal_power_w
+            # (register 39053 on H3-Smart). Empirically this matches the inverter's
+            # rated capacity and is more reliable than current×voltage arithmetic.
+            _nominal_w = attrs.get("nominal_power_w")
+            if _nominal_w and _nominal_w > 0:
+                energy_data["battery_max_charge_power_w"] = int(_nominal_w)
+                energy_data["battery_max_charge_power"] = round(_nominal_w / 1000.0, 2)
+                energy_data["battery_max_discharge_power_w"] = int(_nominal_w)
+                energy_data["battery_max_discharge_power"] = round(_nominal_w / 1000.0, 2)
 
             _LOGGER.debug(
                 "FoxESS data: solar=%.2f kW, grid=%.2f kW, battery=%.2f kW (%.0f%%), load=%.2f kW, mode=%s",
