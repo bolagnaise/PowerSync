@@ -23456,6 +23456,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass.data[DOMAIN][entry.entry_id]["optimization_coordinator"] = optimization_coordinator
             _LOGGER.info("Smart Optimization coordinator initialized and enabled")
 
+            # Add Away Mode switch (deferred from switch platform setup).
+            add_away_mode = hass.data[DOMAIN][entry.entry_id].pop("switch_add_away_mode", None)
+            if add_away_mode:
+                add_away_mode(optimization_coordinator)
+
             # Add LP forecast + optimizer action sensors (deferred from sensor platform setup).
             # Sensor platform is set up before the optimizer, so sensor.py stores
             # the async_add_entities callback for us to call here.

@@ -121,12 +121,14 @@ async def async_setup_entry(
     if is_tesla and entry.data.get(CONF_POWERWALL_LOCAL_PAIRED):
         entities.append(OffGridSwitch(hass=hass, entry=entry))
 
-    # Away Mode switch — available when the LP optimizer is active
-    optimization_coordinator = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get(
-        "optimization_coordinator"
-    )
-    if optimization_coordinator is not None:
-        entities.append(AwayModeSwitch(hass=hass, entry=entry, coordinator=optimization_coordinator))
+    # Away Mode switch — added later via deferred callback once the
+    # OptimizationCoordinator is created (it's set up after platforms start).
+    def _add_away_mode_switch(coordinator: Any) -> None:
+        async_add_entities([AwayModeSwitch(hass=hass, entry=entry, coordinator=coordinator)])
+
+    hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})[
+        "switch_add_away_mode"
+    ] = _add_away_mode_switch
 
     async_add_entities(entities)
 
