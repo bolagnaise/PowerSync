@@ -279,7 +279,7 @@ class EnergyAccumulator:
 def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | None, float | None]:
     """Get current buy/sell prices in $/kWh for cost tracking.
 
-    Tries Amber coordinator data first, then falls back to tariff schedule.
+    Priority: Amber coordinator → AEMO/Flow Power coordinator → tariff schedule.
     Returns (buy_price_per_kwh, sell_price_per_kwh) or (None, None) on failure.
     """
     try:
@@ -305,7 +305,66 @@ def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | Non
                 # Negate so sell_price is positive when earning, negative when paying
                 return (buy_dollar, -sell_dollar)
 
-        # Fall back to tariff schedule (TOU rates)
+        # Try AEMO sensor coordinator (Flow Power and AEMO users)
+        aemo_coordinator = entry_data.get("aemo_sensor_coordinator")
+        if aemo_coordinator and aemo_coordinator.data:
+            current_prices = aemo_coordinator.data.get("current", [])
+            wholesale_cents = None
+            sell_cents_raw = None
+            for price in current_prices:
+                channel = price.get("channelType", "")
+                if channel == "general":
+                    wholesale_cents = price.get("perKwh")
+                elif channel == "feedIn":
+                    sell_cents_raw = price.get("perKwh")
+            if wholesale_cents is not None:
+                config_entry = hass.config_entries.async_get_entry(entry_id)
+                if config_entry:
+                    from .const import (
+                        CONF_ELECTRICITY_PROVIDER,
+                        CONF_PEA_ENABLED,
+                        CONF_FLOW_POWER_BASE_RATE,
+                        CONF_PEA_CUSTOM_VALUE,
+                        FLOW_POWER_DEFAULT_BASE_RATE,
+                        FLOW_POWER_MARKET_AVG,
+                        FLOW_POWER_BENCHMARK,
+                    )
+                    provider = config_entry.options.get(
+                        CONF_ELECTRICITY_PROVIDER,
+                        config_entry.data.get(CONF_ELECTRICITY_PROVIDER, ""),
+                    )
+                    if provider == "flow_power":
+                        pea_enabled = config_entry.options.get(CONF_PEA_ENABLED, True)
+                        fp_base_rate = config_entry.options.get(
+                            CONF_FLOW_POWER_BASE_RATE, FLOW_POWER_DEFAULT_BASE_RATE
+                        )
+                        fp_custom_pea = config_entry.options.get(CONF_PEA_CUSTOM_VALUE)
+                        if fp_custom_pea is not None:
+                            pea = fp_custom_pea
+                        elif pea_enabled:
+                            twap_tracker = entry_data.get("flow_power_twap_tracker")
+                            market_avg = (
+                                twap_tracker.twap
+                                if twap_tracker and twap_tracker.twap is not None
+                                else FLOW_POWER_MARKET_AVG
+                            )
+                            pea = wholesale_cents - market_avg - FLOW_POWER_BENCHMARK
+                        else:
+                            pea = 0.0
+                        buy_cents_fp = max(0.0, fp_base_rate + pea)
+                        # feedIn for Flow Power: AEMO stores as negative-of-wholesale; negate to get positive earnings
+                        sell_cents_fp = max(0.0, -(sell_cents_raw or 0))
+                        return (buy_cents_fp / 100.0, sell_cents_fp / 100.0)
+                    else:
+                        # Generic AEMO (non-Flow-Power): wholesale price is the retail price
+                        buy_dollar = wholesale_cents / 100.0
+                        sell_dollar = max(0.0, -(sell_cents_raw or 0)) / 100.0
+                        return (buy_dollar, sell_dollar)
+
+        # Fall back to tariff schedule (TOU rates).
+        # Note: buy_prices/sell_prices in tariff_schedule are stored in $/kWh (Tesla
+        # tariff format). get_current_price_from_tariff_schedule() multiplies by 100
+        # internally for the PERIOD_HH_MM branch, so the return value is always c/kWh.
         tariff_schedule = entry_data.get("tariff_schedule")
         if tariff_schedule:
             from . import get_current_price_from_tariff_schedule

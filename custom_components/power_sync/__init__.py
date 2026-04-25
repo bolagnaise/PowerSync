@@ -7242,19 +7242,20 @@ def get_current_price_from_tariff_schedule(tariff_schedule: dict) -> tuple[float
         buy_rates = tariff_schedule.get("buy_rates", {})
         sell_rates = tariff_schedule.get("sell_rates", {})
 
-        # If no TOU periods, try Amber format (PERIOD_HH_MM keys) or fall back to cached
+        # If no TOU periods, try PERIOD_HH_MM key format or fall back to cached
         if not tou_periods:
             buy_prices = tariff_schedule.get("buy_prices", {})
             sell_prices = tariff_schedule.get("sell_prices", {})
             if buy_prices:
-                # Amber format: find current 30-min slot
+                # buy_prices / sell_prices are stored in $/kWh (Tesla tariff format).
+                # Convert to c/kWh so the return value matches the documented contract.
                 current_min = now.minute
                 slot_min = 0 if current_min < 30 else 30
                 period_key = f"PERIOD_{current_hour:02d}_{slot_min:02d}"
                 buy_val = buy_prices.get(period_key)
                 sell_val = sell_prices.get(period_key, 0)
                 if buy_val is not None:
-                    return (buy_val, sell_val, f"{current_hour:02d}:{slot_min:02d}")
+                    return (buy_val * 100, sell_val * 100, f"{current_hour:02d}:{slot_min:02d}")
             # Fall back to cached prices
             return (
                 tariff_schedule.get("buy_price", 25.0),
@@ -14042,6 +14043,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if cached_export_rule:
         _LOGGER.info(f"Restored cached_export_rule='{cached_export_rule}' from persistent storage")
 
+    # Restore manual export override (set via PS app Grid Export toggle)
+    stored_manual_export_override = stored_data.get("manual_export_override", False)
+    stored_manual_export_rule = stored_data.get("manual_export_rule")
+    if stored_manual_export_override:
+        _LOGGER.info("Restored manual_export_override=True (rule='%s') from persistent storage", stored_manual_export_rule)
+
     # Restore battery health data from storage
     battery_health = stored_data.get("battery_health")
     if battery_health:
@@ -14086,6 +14093,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get(CONF_DEMAND_ALLOW_GRID_CHARGING, False)
         ),  # Allow grid charging during demand peak periods
         "cached_export_rule": cached_export_rule,  # Restored from persistent storage
+        "manual_export_override": stored_manual_export_override,  # Restored from persistent storage
+        "manual_export_rule": stored_manual_export_rule,  # Restored from persistent storage
         "battery_health": battery_health,  # Restored from persistent storage (from mobile app TEDAPI scans)
         "force_mode_state": force_mode_state,  # Restored force charge/discharge state
         "store": store,  # Reference to Store for saving updates
@@ -21447,6 +21456,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             entry_data["manual_export_override"] = True
                             entry_data["manual_export_rule"] = rule
                             _LOGGER.info("Manual export override enabled: %s", rule)
+                            # Persist so the override survives HA restarts / config reloads
+                            try:
+                                _store = entry_data.get("store")
+                                if _store:
+                                    _sd = await _store.async_load() or {}
+                                    _sd["manual_export_override"] = True
+                                    _sd["manual_export_rule"] = rule
+                                    await _store.async_save(_sd)
+                            except Exception as _persist_err:
+                                _LOGGER.debug("Could not persist manual_export_override: %s", _persist_err)
                     else:
                         text = await response.text()
                         _LOGGER.error("Failed to set grid export rule for site %s: %s - %s", site_id, response.status, text)
@@ -21461,6 +21480,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
             entry_data["manual_export_override"] = False
             entry_data["manual_export_rule"] = None
+            # Clear persisted override so it doesn't come back after a reload
+            try:
+                _store = entry_data.get("store")
+                if _store:
+                    _sd = await _store.async_load() or {}
+                    _sd["manual_export_override"] = False
+                    _sd["manual_export_rule"] = None
+                    await _store.async_save(_sd)
+            except Exception as _persist_err:
+                _LOGGER.debug("Could not clear persisted manual_export_override: %s", _persist_err)
             _LOGGER.info("✅ Manual export override cleared")
         except Exception as e:
             _LOGGER.error(f"Error clearing manual export override: {e}", exc_info=True)

@@ -856,6 +856,28 @@ async def execute_actions(
     return success_count > 0
 
 
+_BATTERY_CONTROL_ACTIONS = frozenset({
+    "set_backup_reserve",
+    "preserve_charge",
+    "set_operation_mode",
+    "force_discharge",
+    "force_charge",
+    "curtail_inverter",
+    "restore_inverter",
+    "set_grid_export",
+    "set_grid_charging",
+    "set_storm_watch",
+    "set_off_grid_ev_reserve",
+    "set_vpp_enrollment",
+    "restore_normal",
+    "set_charge_rate",
+    "set_discharge_rate",
+    "set_export_limit",
+    "powerwall_go_off_grid",
+    "powerwall_reconnect_grid",
+})
+
+
 async def _execute_single_action(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -876,6 +898,19 @@ async def _execute_single_action(
     Returns:
         True if action executed successfully
     """
+    # Monitoring mode: block battery/grid control actions so automations
+    # don't override the user's manual settings while the optimizer observes only.
+    if action_type in _BATTERY_CONTROL_ACTIONS:
+        from ..const import CONF_MONITORING_MODE
+        if config_entry.options.get(
+            CONF_MONITORING_MODE, config_entry.data.get(CONF_MONITORING_MODE, False)
+        ):
+            _LOGGER.info(
+                "[MONITORING] Automation action '%s' blocked by monitoring mode",
+                action_type,
+            )
+            return None  # Treat as skipped (not applicable), not a failure
+
     if action_type == "set_backup_reserve":
         return await _action_set_backup_reserve(hass, config_entry, params)
     elif action_type == "preserve_charge":
