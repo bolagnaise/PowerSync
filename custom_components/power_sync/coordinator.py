@@ -33,6 +33,7 @@ from .const import (
     DEFAULT_TWAP_WINDOW_DAYS,
     MIN_TWAP_SAMPLES,
     FLOW_POWER_MARKET_AVG,
+    CONF_FLEET_API_BASE_URL,
 )
 
 
@@ -1489,6 +1490,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
         api_provider: str = TESLA_PROVIDER_TESLEMETRY,
         token_getter: callable = None,
         entry_id: str = "",
+        fleet_base_url: str | None = None,
     ) -> None:
         """Initialize the coordinator.
 
@@ -1500,12 +1502,15 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             token_getter: Optional callable that returns (token, provider) tuple.
                           If provided, this is called before each request to get fresh token.
             entry_id: Config entry ID for price lookups
+            fleet_base_url: Regional Fleet API base URL override (EU/AP users).
+                            Stored in entry.data[CONF_FLEET_API_BASE_URL].
         """
         self.site_id = site_id
         self._api_token = api_token  # Fallback token
         self._token_getter = token_getter  # Callable to get fresh token
         self.api_provider = api_provider
         self._entry_id = entry_id
+        self._fleet_base_url = fleet_base_url  # Per-entry regional URL override
         self.session = async_get_clientsession(hass)
         self._site_info_cache = None  # Cache site_info (refreshed every 6 hours)
         self._site_info_last_fetch: float = 0  # Timestamp of last successful fetch
@@ -1540,8 +1545,8 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             self.api_base_url = POWERSYNC_API_BASE_URL
             _LOGGER.info(f"TeslaEnergyCoordinator initialized with PowerSync.cc proxy for site {site_id}")
         elif api_provider == TESLA_PROVIDER_FLEET_API:
-            self.api_base_url = FLEET_API_BASE_URL
-            _LOGGER.info(f"TeslaEnergyCoordinator initialized with Fleet API for site {site_id}")
+            self.api_base_url = fleet_base_url or FLEET_API_BASE_URL
+            _LOGGER.info(f"TeslaEnergyCoordinator initialized with Fleet API for site {site_id} (base: {self.api_base_url})")
         else:
             self.api_base_url = TESLEMETRY_API_BASE_URL
             _LOGGER.info(f"TeslaEnergyCoordinator initialized with Teslemetry for site {site_id}")
@@ -1570,7 +1575,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                         if provider == TESLA_PROVIDER_POWERSYNC:
                             self.api_base_url = POWERSYNC_API_BASE_URL
                         elif provider == TESLA_PROVIDER_FLEET_API:
-                            self.api_base_url = FLEET_API_BASE_URL
+                            self.api_base_url = self._fleet_base_url or FLEET_API_BASE_URL
                         else:
                             self.api_base_url = TESLEMETRY_API_BASE_URL
                         _LOGGER.debug("Token provider changed to %s", provider)

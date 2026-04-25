@@ -62,6 +62,7 @@ from .const import (
     AMBER_API_BASE_URL,
     TESLEMETRY_API_BASE_URL,
     FLEET_API_BASE_URL,
+    CONF_FLEET_API_BASE_URL,
     POWERSYNC_API_BASE_URL,
     POWERSYNC_AUTH_START_URL,
     POWERSYNC_AUTH_ME_URL,
@@ -452,44 +453,61 @@ async def validate_teslemetry_token(
         return {"success": False, "error": "unknown"}
 
 
-async def validate_fleet_api_token(
-    hass: HomeAssistant, api_token: str
+async def _validate_fleet_api_token_at(
+    hass: HomeAssistant, api_token: str, base_url: str
 ) -> dict[str, Any]:
-    """Validate the Fleet API token and get sites."""
+    """Validate a Fleet API token against a specific base URL."""
     session = async_get_clientsession(hass)
     headers = {
         "Authorization": f"Bearer {api_token}",
         "Content-Type": "application/json",
     }
+    async with session.get(
+        f"{base_url}/api/1/products",
+        headers=headers,
+        timeout=aiohttp.ClientTimeout(total=30),
+    ) as response:
+        if response.status == 200:
+            data = await response.json()
+            products = data.get("response", [])
+            energy_sites = [p for p in products if "energy_site_id" in p]
+            if energy_sites:
+                return {"success": True, "sites": energy_sites, "base_url": base_url}
+            return {"success": False, "error": "no_energy_sites"}
+        if response.status == 401:
+            return {"success": False, "error": "invalid_auth"}
+        if response.status == 421:
+            error_text = await response.text()
+            return {"success": False, "error": "out_of_region", "error_text": error_text}
+        error_text = await response.text()
+        _LOGGER.error("Fleet API error %s: %s", response.status, error_text[:200])
+        return {"success": False, "error": "cannot_connect"}
 
+
+async def validate_fleet_api_token(
+    hass: HomeAssistant, api_token: str
+) -> dict[str, Any]:
+    """Validate the Fleet API token and get sites.
+
+    On a 421 "user out of region" response, Tesla returns the correct regional
+    base URL in the error body.  We parse it out and retry automatically so EU
+    and AP users don't hit a dead end during setup.
+    """
     try:
-        async with session.get(
-            f"{FLEET_API_BASE_URL}/api/1/products",
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=30),
-        ) as response:
-            if response.status == 200:
-                data = await response.json()
-                products = data.get("response", [])
-
-                # Filter for energy sites
-                energy_sites = [p for p in products if "energy_site_id" in p]
-
-                if energy_sites:
-                    return {
-                        "success": True,
-                        "sites": energy_sites,
-                    }
-                else:
-                    return {"success": False, "error": "no_energy_sites"}
-            elif response.status == 401:
-                return {"success": False, "error": "invalid_auth"}
-            else:
-                error_text = await response.text()
-                _LOGGER.error(
-                    "Fleet API error %s: %s", response.status, error_text[:200]
+        result = await _validate_fleet_api_token_at(hass, api_token, FLEET_API_BASE_URL)
+        if result.get("error") == "out_of_region":
+            import re
+            error_text = result.get("error_text", "")
+            match = re.search(r"use base URL:\s*(https://[^\s,]+)", error_text)
+            if match:
+                regional_url = match.group(1).rstrip("/")
+                _LOGGER.info(
+                    "Fleet API 421 — retrying with regional endpoint: %s", regional_url
                 )
-                return {"success": False, "error": "cannot_connect"}
+                return await _validate_fleet_api_token_at(hass, api_token, regional_url)
+            _LOGGER.error("Fleet API 421 but could not parse regional URL from: %s", error_text[:300])
+            return {"success": False, "error": "cannot_connect"}
+        return result
     except aiohttp.ClientError as err:
         _LOGGER.exception("Error connecting to Fleet API: %s", err)
         return {"success": False, "error": "cannot_connect"}
@@ -2786,9 +2804,12 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     # integration remembers we picked Fleet API instead of
                     # defaulting back to Teslemetry (which would then 401 on
                     # the empty token and break the Tesla coordinator).
+                    # Also persist the regional base URL so EU/AP users don't hit
+                    # the hardcoded NA endpoint on every subsequent API call.
                     self._teslemetry_data = {
                         CONF_TESLEMETRY_API_TOKEN: "",
                         CONF_TESLA_API_PROVIDER: TESLA_PROVIDER_FLEET_API,
+                        CONF_FLEET_API_BASE_URL: validation_result.get("base_url", FLEET_API_BASE_URL),
                     }
                     self._tesla_sites = validation_result.get("sites", [])
                     return await self.async_step_site_selection()
@@ -3430,7 +3451,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     "Cannot restore export rule - Fleet API token not available"
                 )
                 return
-            base_url = FLEET_API_BASE_URL
+            base_url = self.config_entry.data.get(CONF_FLEET_API_BASE_URL, FLEET_API_BASE_URL)
         elif api_provider == TESLA_PROVIDER_POWERSYNC:
             # PowerSync.cc proxy users store their `psync_...` token in the
             # same CONF_TESLEMETRY_API_TOKEN slot, but it must be sent to

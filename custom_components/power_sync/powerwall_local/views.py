@@ -114,10 +114,10 @@ def _get_fleet_api_context(
     """
     # Lazy import to avoid circular dependencies at module load.
     from .. import get_tesla_api_token
-    from ..const import CONF_TESLA_ENERGY_SITE_ID, get_tesla_api_base_url
+    from ..const import CONF_TESLA_ENERGY_SITE_ID, CONF_FLEET_API_BASE_URL, get_tesla_api_base_url
 
     token, provider = get_tesla_api_token(hass, entry)
-    base = get_tesla_api_base_url(provider)
+    base = get_tesla_api_base_url(provider, entry.data.get(CONF_FLEET_API_BASE_URL))
     site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
     try:
         site_id = int(site_id) if site_id is not None else None
@@ -763,11 +763,11 @@ class PowerwallGatewayInfoView(HomeAssistantView):
             # Teslemetry, Fleet API) work identically here.
             try:
                 from .. import get_tesla_api_token
-                from ..const import CONF_TESLA_ENERGY_SITE_ID, get_tesla_api_base_url
+                from ..const import CONF_TESLA_ENERGY_SITE_ID, CONF_FLEET_API_BASE_URL, get_tesla_api_base_url
                 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
                 token, provider = get_tesla_api_token(self._hass, entry)
-                base = get_tesla_api_base_url(provider)
+                base = get_tesla_api_base_url(provider, entry.data.get(CONF_FLEET_API_BASE_URL))
                 site_id = entry.data.get(CONF_TESLA_ENERGY_SITE_ID)
                 if not token or not base or not site_id:
                     return web.json_response(

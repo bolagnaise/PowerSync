@@ -288,6 +288,7 @@ BYD_INTEGRATION = "byd_vehicle"
 CONF_FLEET_API_ACCESS_TOKEN = "fleet_api_access_token"
 CONF_FLEET_API_REFRESH_TOKEN = "fleet_api_refresh_token"
 CONF_FLEET_API_TOKEN_EXPIRES_AT = "fleet_api_token_expires_at"
+CONF_FLEET_API_BASE_URL = "fleet_api_base_url"
 CONF_FLEET_API_CLIENT_ID = "fleet_api_client_id"
 CONF_FLEET_API_CLIENT_SECRET = "fleet_api_client_secret"
 
@@ -937,17 +938,22 @@ POWERSYNC_AUTH_START_URL = "https://api.powersync.cc/auth/start"
 POWERSYNC_AUTH_ME_URL = "https://api.powersync.cc/auth/me"
 
 
-def get_tesla_api_base_url(provider: str | None) -> str:
+def get_tesla_api_base_url(
+    provider: str | None, fleet_base_url: str | None = None
+) -> str:
     """Return the Tesla API base URL for a given provider.
 
     Used by all Tesla service handlers to construct API request URLs.
     All three providers expose the same /api/1/... path structure, only
     the base differs.
+
+    fleet_base_url overrides FLEET_API_BASE_URL for Fleet API provider — pass
+    entry.data.get(CONF_FLEET_API_BASE_URL) to support EU/AP regional endpoints.
     """
     if provider == TESLA_PROVIDER_POWERSYNC:
         return POWERSYNC_API_BASE_URL
     if provider == TESLA_PROVIDER_FLEET_API:
-        return FLEET_API_BASE_URL
+        return fleet_base_url or FLEET_API_BASE_URL
     return TESLEMETRY_API_BASE_URL
 
 # Services
