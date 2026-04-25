@@ -325,9 +325,12 @@ def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | Non
                         CONF_PEA_ENABLED,
                         CONF_FLOW_POWER_BASE_RATE,
                         CONF_PEA_CUSTOM_VALUE,
+                        CONF_FLOW_POWER_STATE,
                         FLOW_POWER_DEFAULT_BASE_RATE,
                         FLOW_POWER_MARKET_AVG,
                         FLOW_POWER_BENCHMARK,
+                        FLOW_POWER_EXPORT_RATES,
+                        FLOW_POWER_HAPPY_HOUR_PERIODS,
                     )
                     provider = config_entry.options.get(
                         CONF_ELECTRICITY_PROVIDER,
@@ -352,9 +355,21 @@ def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | Non
                         else:
                             pea = 0.0
                         buy_cents_fp = max(0.0, fp_base_rate + pea)
-                        # feedIn for Flow Power: AEMO stores as negative-of-wholesale; negate to get positive earnings
-                        sell_cents_fp = max(0.0, -(sell_cents_raw or 0))
-                        return (buy_cents_fp / 100.0, sell_cents_fp / 100.0)
+                        # Export: Flow Power pays a flat happy hour rate, not the AEMO spot price.
+                        # The AEMO feedIn channel reflects the wholesale price, which is unrelated
+                        # to the fixed 45c/kWh happy hour credit Flow Power actually pays.
+                        fp_state = config_entry.options.get(
+                            CONF_FLOW_POWER_STATE,
+                            config_entry.data.get(CONF_FLOW_POWER_STATE, "QLD1"),
+                        )
+                        now_local = dt_util.now()
+                        period_key = f"PERIOD_{now_local.hour:02d}_{(now_local.minute // 30) * 30:02d}"
+                        sell_dollar_fp = (
+                            FLOW_POWER_EXPORT_RATES.get(fp_state, 0.0)
+                            if period_key in FLOW_POWER_HAPPY_HOUR_PERIODS
+                            else 0.0
+                        )
+                        return (buy_cents_fp / 100.0, sell_dollar_fp)
                     else:
                         # Generic AEMO (non-Flow-Power): wholesale price is the retail price
                         buy_dollar = wholesale_cents / 100.0
