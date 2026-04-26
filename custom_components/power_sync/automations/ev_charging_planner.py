@@ -3922,6 +3922,26 @@ class AutoScheduleExecutor:
                 should_charge = False
                 reason = "Solar-only mode - no grid charging"
 
+        # For opportunistic grid charging, defer to price-level policy if configured.
+        # The plan's cheapest window (e.g. 30c) can make even 12c look "opportunistic",
+        # but the user may have a tighter threshold (e.g. 5c) in price-level settings.
+        # Planned windows (source != "grid_opportunistic") are never blocked this way.
+        if should_charge and source == "grid_opportunistic":
+            executor = get_price_level_executor()
+            if executor is not None:
+                pl_settings = executor._get_settings()
+                if pl_settings.get("enabled", False):
+                    pl_should_charge, pl_reason, _ = await executor.get_charging_decision_for_vehicle(
+                        vehicle_vin, current_price_cents
+                    )
+                    if not pl_should_charge:
+                        should_charge = False
+                        reason = f"Opportunistic blocked by price policy: {pl_reason}"
+                        _LOGGER.debug(
+                            f"Auto-schedule: opportunistic grid charging for {vehicle_id} "
+                            f"blocked by price-level policy: {pl_reason}"
+                        )
+
         # Check surplus constraint for solar charging
         # Tesla requires minimum 5A to charge:
         # - Single phase: 5A × 230V = 1.15kW
