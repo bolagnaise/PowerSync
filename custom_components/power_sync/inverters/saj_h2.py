@@ -3,6 +3,21 @@
 PowerSync does not open a second Modbus connection here. Instead it discovers
 the entities created by `stanus74/home-assistant-saj-h2-modbus` and controls
 them through Home Assistant services.
+
+Control model (discovered via live testing):
+  - Normal mode: AppMode=1 (TOU), discharging_control=ON — inverter follows its
+    own time schedule, covers home load, zero grid export.
+  - Passive mode (AppMode=3): entered by turning on passive_charge_control (charge)
+    or passive_discharge_control (discharge) via stanus74. Both switches write to
+    the same passive_charge_enable register (0x3636): value 2 = charge, 1 = discharge,
+    0 = exit passive. stanus74 captures AppMode before entering passive and restores
+    it when passive is exited.
+  - passive_grid_charge_power / passive_grid_discharge_power must be set alongside
+    passive_bat_charge/discharge_power — the grid-side register gates the actual
+    power flow. Setting battery power alone without the grid register leaves the
+    battery at partial rate.
+  - All number writes must come before switch writes: any passive register write
+    resets the switch state as a side-effect.
 """
 
 from __future__ import annotations
@@ -34,20 +49,20 @@ _SENSOR_KEYS: dict[str, tuple[str, ...]] = {
 }
 
 # Maps internal slot → unique_id suffix for writable number entities.
-# stanus74 constructs: f"{hub_name}_{key}_input" — so we search for endswith("_{key}_input")
 _NUMBER_KEYS: dict[str, str] = {
-    # stanus74 unique_id uses abbreviated 'bat', not 'battery' — entity_id uses 'battery' (from display name)
-    "charge_power":        "passive_bat_charge_power_input",
-    # 0–1100 (% of rated power × 10): 0=locked/idle, 1100=full rate for force-discharge or self-consumption
-    "discharge_power_pct": "passive_bat_discharge_power_input",
-    # 0=disabled (inverter follows grid charge schedule), 2=passive self-consumption
-    "passive_enable":      "passive_charge_enable_input",
+    "charge_power":         "passive_bat_charge_power_input",
+    "discharge_power_pct":  "passive_bat_discharge_power_input",
+    "passive_enable":       "passive_charge_enable_input",
+    # Grid-side power gates — must be set alongside battery power or the inverter
+    # operates at partial rate regardless of the battery setpoint.
+    "grid_charge_power":    "passive_grid_charge_power_input",
+    "grid_discharge_power": "passive_grid_discharge_power_input",
 }
 
 # Maps internal slot → unique_id suffix for writable switch entities.
-# passive_charge_control / passive_discharge_control are the actual on/off gates for battery
-# charge and discharge. charging_control / discharging_control are read-back status indicators
-# and cannot be set directly — the inverter firmware drives them.
+# passive_charge_control / passive_discharge_control both write to passive_charge_enable
+# register (0x3636) via stanus74: turn_on(charge) → value 2, turn_on(discharge) → value 1,
+# turn_off(either) → value 0 + AppMode restored to pre-passive value.
 _SWITCH_KEYS: dict[str, str] = {
     "charge_switch":    "passive_charge_control",
     "discharge_switch": "passive_discharge_control",
@@ -217,65 +232,69 @@ class SajH2BatteryController:
         }
 
     async def force_charge(self, duration_minutes: int, power_w: int) -> bool:
-        """Prevent battery discharge so grid/solar charges the battery.
+        """Force battery to charge from grid at maximum rate.
 
-        All number writes before switch writes — any passive number write may reset
-        switch states (same side-effect as passive_enable=2). turn_on(charge_switch)
-        is the final operation so it is not clobbered.
+        Exits any active passive discharge mode first so stanus74 captures AppMode=1
+        (TOU) before entering passive charge mode. All number writes before the switch
+        — any passive register write resets switch state as a side-effect.
+        Both battery and grid power registers must be set: the grid-side register gates
+        actual power flow independently of the battery setpoint.
         """
+        await self._turn_off("discharge_switch")
         await self._set_number("passive_enable", 2)
         await self._set_number("discharge_power_pct", 0)
+        await self._set_number("grid_discharge_power", 0)
         await self._set_number("charge_power", 1100)
-        await self._turn_off("discharge_switch")
+        await self._set_number("grid_charge_power", 1100)
         await self._turn_on("charge_switch")
-        _LOGGER.info("SAJ H2 force charge: passive_discharge_control=OFF, discharge_pct=0")
+        _LOGGER.info("SAJ H2 force charge: passive charge mode, bat+grid charge power=1100")
         return True
 
     async def force_discharge(self, duration_minutes: int, power_w: int) -> bool:
-        """Enable SAJ passive discharge mode at full rate.
+        """Enable passive discharge mode at maximum rate.
 
-        All number writes come before the switch write. Writing any passive number entity
-        appears to reset the passive switch states (same side-effect as passive_enable=2),
-        so turn_on(discharge_switch) must be the final operation — mirroring how force_charge
-        works (turn_on charge_switch is always last).
+        Exits any active passive charge mode first so stanus74 captures AppMode=1
+        before entering passive discharge mode. All number writes before the switch.
+        Note: SAJ H2 passive discharge is load-following — the battery covers home
+        load and exports any surplus, but does not unconditionally push maximum power
+        to grid. This is a hardware limitation of passive mode on this inverter.
         """
+        await self._turn_off("charge_switch")
         await self._set_number("passive_enable", 2)
         await self._set_number("discharge_power_pct", 1100)
+        await self._set_number("grid_discharge_power", 1100)
         await self._set_number("charge_power", 0)
+        await self._set_number("grid_charge_power", 0)
         await self._turn_on("discharge_switch")
-        _LOGGER.info("SAJ H2 force discharge: passive_discharge_control=ON, discharge_pct=1100")
+        _LOGGER.info("SAJ H2 force discharge: passive discharge mode, bat+grid discharge power=1100")
         return True
 
     async def set_idle(self) -> bool:
         """Hold battery at current SOC — no charge or discharge, grid serves home load.
 
-        All number writes before switch writes (see force_discharge docstring).
-        passive_enable=2 resets both switches to OFF; explicit turn_off calls follow
-        to make intent clear, but they are effectively no-ops.
+        Enters passive charge mode with all power registers zeroed. The charge switch
+        keeps AppMode=3 (passive) so the TOU schedule cannot drive discharge.
         """
+        await self._turn_off("discharge_switch")
         await self._set_number("passive_enable", 2)
         await self._set_number("discharge_power_pct", 0)
+        await self._set_number("grid_discharge_power", 0)
         await self._set_number("charge_power", 0)
-        await self._turn_off("discharge_switch")
-        await self._turn_off("charge_switch")
-        _LOGGER.info("SAJ H2 idle: both passive charge and discharge disabled")
+        await self._set_number("grid_charge_power", 0)
+        await self._turn_on("charge_switch")
+        _LOGGER.info("SAJ H2 idle: passive charge mode with zero power — battery held")
         return True
 
     async def restore_normal(self) -> bool:
-        """Return to self-consumption.
+        """Return to normal TOU self-consumption mode (AppMode=1).
 
-        All number writes before switch writes (see force_discharge docstring).
-        Switch writes must be last; any earlier number write may reset switch states.
-        charge_switch is turned on last — mutual exclusion means this also resets
-        discharge_switch, which is intentional for self-consumption mode (inverter
-        decides charge/discharge direction autonomously).
+        Turning off the passive discharge switch causes stanus74 to write
+        passive_enable=0 to register 0x3636 and restore the previously-captured
+        AppMode (AppMode=1, TOU). The inverter resumes its own discharge schedule,
+        covering home load with zero grid export.
         """
-        await self._set_number("passive_enable", 2)
-        await self._set_number("discharge_power_pct", 1100)
-        await self._set_number("charge_power", 1100)
-        await self._turn_on("discharge_switch")
-        await self._turn_on("charge_switch")
-        _LOGGER.info("SAJ H2 restored to normal operation")
+        await self._turn_off("discharge_switch")
+        _LOGGER.info("SAJ H2 restored to normal TOU operation (AppMode=1)")
         return True
 
     async def disconnect(self) -> None:
