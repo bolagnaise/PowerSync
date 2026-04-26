@@ -36,10 +36,11 @@ _SENSOR_KEYS: dict[str, tuple[str, ...]] = {
 # Maps internal slot → unique_id suffix for writable number entities.
 # stanus74 constructs: f"{hub_name}_{key}_input" — so we search for endswith("_{key}_input")
 _NUMBER_KEYS: dict[str, str] = {
-    "charge_power":    "passive_battery_charge_power_input",
-    "discharge_power": "passive_battery_discharge_power_input",
-    # 0=disabled (inverter follows schedule), 2=passive self-consumption (normal idle state)
-    "passive_enable":  "passive_charge_enable_input",
+    "charge_power":      "passive_battery_charge_power_input",
+    # 0–1100 (% of rated power × 10): 0=locked/idle, 1100=full rate for force-discharge or self-consumption
+    "discharge_power_pct": "passive_battery_discharge_power_input",
+    # 0=disabled (inverter follows grid charge schedule), 2=passive self-consumption
+    "passive_enable":    "passive_charge_enable_input",
 }
 
 # Maps internal slot → unique_id suffix for writable switch entities.
@@ -83,7 +84,7 @@ class SajH2BatteryController:
             self._saj_entry_id,
             {k: v for k, v in self._entity_map.items()},
         )
-        control_missing = [k for k in ("charge_power", "discharge_power", "charge_switch") if k not in self._entity_map]
+        control_missing = [k for k in ("charge_power", "discharge_power_pct", "charge_switch") if k not in self._entity_map]
         if control_missing:
             _LOGGER.warning(
                 "SAJ H2: control entities not found (%s) — force charge/discharge will not work. "
@@ -218,30 +219,39 @@ class SajH2BatteryController:
         max_w = self._read_float("battery_max_charge_power_w")
         actual_w = min(float(power_w), max_w) if max_w and max_w > 0 else float(power_w)
         await self._set_number("charge_power", actual_w)
+        await self._set_number("discharge_power_pct", 0)   # prevent discharge during forced charge
         await self._turn_off("discharge_switch")
         await self._turn_on("charge_switch")
         _LOGGER.info("SAJ H2 passive charge enabled at %.0fW", actual_w)
         return True
 
     async def force_discharge(self, duration_minutes: int, power_w: int) -> bool:
-        """Enable SAJ passive discharge mode."""
-        max_w = self._read_float("battery_max_discharge_power_w")
-        actual_w = min(float(power_w), max_w) if max_w and max_w > 0 else float(power_w)
-        await self._set_number("discharge_power", actual_w)
+        """Enable SAJ passive discharge mode at full rate."""
+        await self._set_number("discharge_power_pct", 1100)  # 110% of rated = full discharge rate
         await self._turn_off("charge_switch")
         await self._turn_on("discharge_switch")
-        _LOGGER.info("SAJ H2 passive discharge enabled at %.0fW", actual_w)
+        _LOGGER.info("SAJ H2 passive discharge enabled (full rate)")
+        return True
+
+    async def set_idle(self) -> bool:
+        """Hold battery at current SOC — no discharge, no grid charge."""
+        # discharge_power_pct=0 locks discharge; passive_enable=2 prevents grid charge schedule;
+        # charge_switch must be on for passive_enable to take effect.
+        await self._set_number("discharge_power_pct", 0)
+        await self._set_number("passive_enable", 2)
+        await self._turn_on("charge_switch")
+        _LOGGER.info("SAJ H2 idle mode: battery locked at current SOC")
         return True
 
     async def restore_normal(self) -> bool:
-        """Return to self-consumption — reset passive power targets and re-enable passive mode."""
+        """Return to self-consumption — allow full charge/discharge in passive mode."""
         await self._set_number("charge_power", 0)
-        await self._set_number("discharge_power", 0)
+        await self._set_number("discharge_power_pct", 1100)  # re-enable full self-consumption discharge
         await self._turn_off("discharge_switch")
         # passive_enable must be set before turning on the switch — switch is ignored when enable=0
         await self._set_number("passive_enable", 2)
         await self._turn_on("charge_switch")
-        _LOGGER.info("SAJ H2 restored to normal operation (passive_enable=2, charge_switch=on)")
+        _LOGGER.info("SAJ H2 restored to normal operation (passive_enable=2, discharge_pct=1100, charge_switch=on)")
         return True
 
     async def disconnect(self) -> None:

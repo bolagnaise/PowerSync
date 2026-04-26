@@ -4769,6 +4769,14 @@ class SajH2EnergyCoordinator(DataUpdateCoordinator):
     async def restore_normal(self) -> bool:
         return await self._controller.restore_normal()
 
+    async def set_backup_mode(self) -> bool:
+        """IDLE hold — lock battery at current SOC, no discharge."""
+        return await self._controller.set_idle()
+
+    async def restore_work_mode_from_idle(self) -> bool:
+        """Exit IDLE — restore full self-consumption."""
+        return await self._controller.restore_normal()
+
     async def async_shutdown(self) -> None:
         await self._controller.disconnect()
 
