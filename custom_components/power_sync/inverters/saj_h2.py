@@ -235,12 +235,15 @@ class SajH2BatteryController:
         """Enable SAJ passive discharge mode at full rate.
 
         passive_enable=2 written first to avoid switch reset (see force_charge docstring).
+        charge_switch is intentionally NOT turned off — any write to passive_charge_control
+        (even OFF) resets passive_discharge_control back to OFF via the stanus74 integration.
+        passive_enable=2 already resets both switches to OFF; turning on discharge_switch then
+        leaves charge_switch OFF without a second write.
         """
         await self._set_number("passive_enable", 2)
         await self._set_number("discharge_power_pct", 1100)
         await self._turn_on("discharge_switch")
         await self._set_number("charge_power", 0)
-        await self._turn_off("charge_switch")
         _LOGGER.info("SAJ H2 force discharge: passive_discharge_control=ON, discharge_pct=1100")
         return True
 
