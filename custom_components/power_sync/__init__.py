@@ -9284,6 +9284,10 @@ class EVVehicleCommandView(HomeAssistantView):
         Also accepts BLE identifiers (ble_*) and VINs (17-char) directly,
         returning them as-is for robustness.
         """
+        # Accept pseudo-VINs for non-Tesla chargers directly
+        if vehicle_id in ("generic_ev", "zaptec_standalone"):
+            return vehicle_id
+
         # Accept BLE identifiers directly (e.g. "ble_joanna_model_3_local")
         if vehicle_id and vehicle_id.startswith("ble_"):
             _LOGGER.debug(f"Vehicle ID {vehicle_id} is already a BLE identifier")
