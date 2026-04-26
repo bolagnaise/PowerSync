@@ -36,8 +36,10 @@ _SENSOR_KEYS: dict[str, tuple[str, ...]] = {
 # Maps internal slot → unique_id suffix for writable number entities.
 # stanus74 constructs: f"{hub_name}_{key}_input" — so we search for endswith("_{key}_input")
 _NUMBER_KEYS: dict[str, str] = {
-    "charge_power":   "passive_battery_charge_power_input",
+    "charge_power":    "passive_battery_charge_power_input",
     "discharge_power": "passive_battery_discharge_power_input",
+    # 0=disabled (inverter follows schedule), 2=passive self-consumption (normal idle state)
+    "passive_enable":  "passive_charge_enable_input",
 }
 
 # Maps internal slot → unique_id suffix for writable switch entities.
@@ -232,10 +234,13 @@ class SajH2BatteryController:
         return True
 
     async def restore_normal(self) -> bool:
-        """Disable passive charge/discharge."""
-        await self._turn_off("charge_switch")
+        """Return to self-consumption — reset passive power targets and re-enable passive mode."""
+        await self._set_number("charge_power", 0)
+        await self._set_number("discharge_power", 0)
         await self._turn_off("discharge_switch")
-        _LOGGER.info("SAJ H2 restored to normal operation")
+        # Value 2 = passive self-consumption mode; 0 = disabled (inverter follows charge schedule)
+        await self._set_number("passive_enable", 2)
+        _LOGGER.info("SAJ H2 restored to normal operation (passive_enable=2)")
         return True
 
     async def disconnect(self) -> None:
