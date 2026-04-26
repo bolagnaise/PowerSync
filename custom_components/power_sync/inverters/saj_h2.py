@@ -36,11 +36,12 @@ _SENSOR_KEYS: dict[str, tuple[str, ...]] = {
 # Maps internal slot → unique_id suffix for writable number entities.
 # stanus74 constructs: f"{hub_name}_{key}_input" — so we search for endswith("_{key}_input")
 _NUMBER_KEYS: dict[str, str] = {
-    "charge_power":      "passive_battery_charge_power_input",
+    # stanus74 unique_id uses abbreviated 'bat', not 'battery' — entity_id uses 'battery' (from display name)
+    "charge_power":        "passive_bat_charge_power_input",
     # 0–1100 (% of rated power × 10): 0=locked/idle, 1100=full rate for force-discharge or self-consumption
-    "discharge_power_pct": "passive_battery_discharge_power_input",
+    "discharge_power_pct": "passive_bat_discharge_power_input",
     # 0=disabled (inverter follows grid charge schedule), 2=passive self-consumption
-    "passive_enable":    "passive_charge_enable_input",
+    "passive_enable":      "passive_charge_enable_input",
 }
 
 # Maps internal slot → unique_id suffix for writable switch entities.
