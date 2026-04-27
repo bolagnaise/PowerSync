@@ -193,6 +193,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._price_listener_unsub: Callable | None = None
         # Deduplication key for AEMO price-update trigger — LP only fires on new dispatch files
         self._last_aemo_dispatch_file: str | None = None
+        # Rate-limit for non-AEMO price-triggered LP runs (Amber/Octopus send 2 updates per
+        # 5-min window — usage price + spot price — which would otherwise fire two consecutive
+        # LP solves and let the 2-consecutive-CHARGE hysteresis clear in a single interval,
+        # causing force_charge↔restore_normal oscillation that can trip battery BMS protections).
+        self._last_price_triggered_optimization: datetime | None = None
 
         # Track last executed action for IDLE→non-IDLE transition
         self._last_executed_action: str | None = None
@@ -636,6 +641,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if current_file is not None and current_file == self._last_aemo_dispatch_file:
                 return
             self._last_aemo_dispatch_file = current_file
+
+        # Rate-limit: Amber/Octopus fire two coordinator updates per 5-min window (usage
+        # price + spot price). Without this guard both updates trigger an LP run, letting
+        # two consecutive CHARGE decisions satisfy the holdoff counter within seconds and
+        # causing force_charge↔restore_normal oscillation that can trip battery BMS protections.
+        now = dt_util.utcnow()
+        min_interval_seconds = (self._config.interval_minutes if self._config else 5) * 60
+        if self._last_price_triggered_optimization is not None:
+            elapsed = (now - self._last_price_triggered_optimization).total_seconds()
+            if elapsed < min_interval_seconds:
+                _LOGGER.debug(
+                    "Price update: skipping LP (last ran %.0fs ago, interval %ds)",
+                    elapsed, min_interval_seconds,
+                )
+                return
+        self._last_price_triggered_optimization = now
 
         # Re-optimize with new prices and update dashboard sensors
         self.hass.async_create_background_task(
