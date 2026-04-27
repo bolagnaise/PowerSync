@@ -10,7 +10,7 @@
   [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/custom-components/hacs)
 
   <a href="https://testflight.apple.com/join/FhnUtSFy"><img src="https://img.shields.io/badge/iOS-TestFlight-blue?logo=apple&logoColor=white" alt="iOS TestFlight"></a>
-  <a href="https://play.google.com/apps/testing/com.powersync.mobile"><img src="https://img.shields.io/badge/Android-Beta-3DDC84?logo=android&logoColor=white" alt="Android Beta"></a>
+  <a href="https://play.google.com/store/apps/details?id=com.powersync.mobile"><img src="https://img.shields.io/badge/Android-Google%20Play-3DDC84?logo=android&logoColor=white" alt="Android Google Play"></a>
 
 </div>
 
@@ -123,7 +123,7 @@ Or manually:
 
 Remote monitoring and control via iOS and Android.
 
-**iOS:** [Join TestFlight](https://testflight.apple.com/join/FhnUtSFy) | **Android:** [Join Beta](https://play.google.com/apps/testing/com.powersync.mobile) (join [testers group](https://groups.google.com/g/powersync-testers) first)
+**iOS:** [Join TestFlight](https://testflight.apple.com/join/FhnUtSFy) | **Android:** [Google Play](https://play.google.com/store/apps/details?id=com.powersync.mobile)
 
 ### Setup
 
