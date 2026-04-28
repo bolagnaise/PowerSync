@@ -431,14 +431,18 @@ class SajH2BatteryController:
         """Convert watts to SAJ's 0–1100 scale.
 
         0–1000 = 0–100% of the inverter's rated capacity (percentage × 10).
-        1100   = stanus74 default meaning "no explicit limit, use inverter max".
+        1100   = stanus74 sentinel meaning "no explicit limit, use inverter max" —
+                 lets the inverter exceed its AC nameplate. Field testing on H2-8K
+                 showed the inverter trips its grid-side protection when total grid
+                 pull (charge target + home load) exceeds the AC rating, which 1100
+                 makes trivial. So we cap at 1000 (= 100% of rated) instead — the
+                 inverter then self-balances charge against load within the AC rating.
 
-        Falls back to 1100 when max_w is unknown so the inverter applies its own
-        hardware protection limits rather than capping at an arbitrary 100%.
+        Falls back to 1000 when max_w is unknown.
         """
         if requested_w and requested_w > 0 and max_w and max_w > 0:
             return max(0, min(1000, int(round((requested_w / max_w) * 1000))))
-        return 1100
+        return 1000
 
     def _read_float(self, key: str) -> float | None:
         entity_id = self._entity_map.get(key)
