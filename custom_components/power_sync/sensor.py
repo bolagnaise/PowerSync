@@ -1494,6 +1494,23 @@ _LOCAL_OVERRIDABLE = {
     SENSOR_TYPE_GRID_STATUS,
 }
 
+# How recently the local coordinator must have ticked for its data to be
+# trusted by the local-prefer override. The local coord polls every 2s, so
+# 30s is ~15 missed ticks — comfortably past transient blips, well before
+# the data turns into a "stuck at 41%" disaster.
+_LOCAL_STALE_SECONDS = 30
+
+
+def _local_data_is_fresh(local_coord: Any) -> bool:
+    """True iff the local coordinator's last successful update is recent."""
+    if local_coord is None or local_coord.data is None:
+        return False
+    last_ts = getattr(local_coord, "last_success_ts", None)
+    if last_ts is None:
+        return False
+    import time as _time
+    return (_time.time() - last_ts) <= _LOCAL_STALE_SECONDS
+
 
 class TeslaEnergySensor(CoordinatorEntity, SensorEntity):
     """Sensor for Tesla energy data.
@@ -1543,13 +1560,23 @@ class TeslaEnergySensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self) -> Any:
-        """Prefer local snapshot value when paired; else cloud value_fn."""
+        """Prefer local snapshot value when paired AND fresh; else cloud value_fn.
+
+        Freshness guard: if the local coordinator's last successful update is
+        older than ``_LOCAL_STALE_SECONDS``, fall through to cloud. The local
+        coordinator can die silently (eg gateway unreachable, key rejection,
+        unhandled exception in update loop) and its ``data`` attribute keeps
+        the last successful snapshot. Without this guard, sensors would
+        cling to that stale value indefinitely.
+        """
         if self.entity_description.key in _LOCAL_OVERRIDABLE:
             local_coord = self._local_coordinator()
-            snap = local_coord.data if local_coord is not None else None
-            local_v = _local_value_for(self.entity_description.key, snap)
-            if local_v is not None:
-                return local_v
+            if local_coord is not None and _local_data_is_fresh(local_coord):
+                local_v = _local_value_for(
+                    self.entity_description.key, local_coord.data
+                )
+                if local_v is not None:
+                    return local_v
         if self.entity_description.value_fn:
             return self.entity_description.value_fn(self.coordinator.data)
         return None
