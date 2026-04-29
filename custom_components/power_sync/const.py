@@ -310,8 +310,9 @@ CONF_POWERWALL_LOCAL_PAIRED_AT = "powerwall_local_paired_at"
 # Minimum battery SOC (%) below which off-grid commands are refused.
 CONF_POWERWALL_OFF_GRID_MIN_SOC = "powerwall_off_grid_min_soc"
 DEFAULT_POWERWALL_OFF_GRID_MIN_SOC = 20
-# Local poll interval for meters/SOC/grid_status when paired.
-POWERWALL_LOCAL_POLL_INTERVAL = 10  # seconds
+# Local poll interval for meters/SOC/grid_status when paired. Gateway samples
+# at ~1 Hz natively; 2s gives near-real-time updates with a small margin.
+POWERWALL_LOCAL_POLL_INTERVAL = 2  # seconds
 # Pairing window the user has to toggle the Powerwall switch.
 POWERWALL_PAIRING_WINDOW_SECONDS = 120
 

@@ -21401,11 +21401,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # SAJ H2: no backup reserve register — no-op
             _LOGGER.debug("SAJ H2 does not support backup reserve (no-op)")
         else:
-            # Tesla Powerwall via Fleet API
+            # Tesla Powerwall — local V1R first when paired, cloud Fleet API as fallback.
             try:
                 # Tesla constraint (July 2025): only 0-80% and 100% are valid.
                 # Values 81-99% are rejected and auto-clamped to 80%.
-                # Clamp here to avoid silent misbehaviour.
                 if 81 <= percent <= 99:
                     _LOGGER.info(
                         "Clamping backup reserve %d%% → 100%% (Tesla rejects 81-99%%)",
@@ -21413,56 +21412,79 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     percent = 100
 
-                site_configs = _get_tesla_site_configs(hass, entry)
-                if not site_configs:
-                    _LOGGER.error("Missing Tesla site ID or token for set_backup_reserve")
-                    return
+                from .const import CONF_POWERWALL_LOCAL_DIN
+                from .powerwall_local.dispatch import dispatch_powerwall_write
 
-                session = async_get_clientsession(hass)
-                for site_id, current_token, provider in site_configs:
-                    headers = {
-                        "Authorization": f"Bearer {current_token}",
-                        "Content-Type": "application/json",
-                    }
-                    api_base = get_tesla_api_base_url(provider, entry.data.get(CONF_FLEET_API_BASE_URL))
+                async def _local(transport) -> bool:
+                    din = entry.data.get(CONF_POWERWALL_LOCAL_DIN)
+                    if not din:
+                        return False
+                    return await transport.write_config(
+                        din, {"site_info.backup_reserve_percent": percent}
+                    )
 
-                    # Retry up to 3 times for backup reserve
-                    for attempt in range(1, 4):
-                        try:
-                            async with session.post(
-                                f"{api_base}/api/1/energy_sites/{site_id}/backup",
-                                headers=headers,
-                                json={"backup_reserve_percent": percent},
-                                timeout=aiohttp.ClientTimeout(total=30),
-                            ) as response:
-                                if response.status == 200:
-                                    _LOGGER.info("Tesla site %s backup reserve set to %d%%", site_id, percent)
-                                    _tesla_coord_for_cache = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("tesla_coordinator")
-                                    if _tesla_coord_for_cache is not None:
-                                        _tesla_coord_for_cache.invalidate_site_info_cache()
-                                    if percent == 100:
-                                        hass.async_create_task(_tesla_charge_kick("backup_reserve_100"))
-                                    break
-                                elif response.status in (429, 500, 502, 503, 504):
-                                    text = await response.text()
-                                    _LOGGER.warning(
-                                        "Tesla backup reserve attempt %d/3 failed for site %s: %s",
-                                        attempt, site_id, response.status,
-                                    )
-                                    if attempt < 3:
-                                        await asyncio.sleep(2 ** attempt)
+                async def _cloud() -> bool:
+                    site_configs = _get_tesla_site_configs(hass, entry)
+                    if not site_configs:
+                        _LOGGER.error("Missing Tesla site ID or token for set_backup_reserve")
+                        return False
+
+                    any_ok = False
+                    session = async_get_clientsession(hass)
+                    for site_id, current_token, provider in site_configs:
+                        headers = {
+                            "Authorization": f"Bearer {current_token}",
+                            "Content-Type": "application/json",
+                        }
+                        api_base = get_tesla_api_base_url(provider, entry.data.get(CONF_FLEET_API_BASE_URL))
+
+                        # Retry up to 3 times for backup reserve
+                        for attempt in range(1, 4):
+                            try:
+                                async with session.post(
+                                    f"{api_base}/api/1/energy_sites/{site_id}/backup",
+                                    headers=headers,
+                                    json={"backup_reserve_percent": percent},
+                                    timeout=aiohttp.ClientTimeout(total=30),
+                                ) as response:
+                                    if response.status == 200:
+                                        _LOGGER.info("Tesla site %s backup reserve set to %d%%", site_id, percent)
+                                        any_ok = True
+                                        break
+                                    elif response.status in (429, 500, 502, 503, 504):
+                                        text = await response.text()
+                                        _LOGGER.warning(
+                                            "Tesla backup reserve attempt %d/3 failed for site %s: %s",
+                                            attempt, site_id, response.status,
+                                        )
+                                        if attempt < 3:
+                                            await asyncio.sleep(2 ** attempt)
+                                        else:
+                                            _LOGGER.error("Failed to set Tesla backup reserve for site %s after 3 attempts: %s - %s", site_id, response.status, text[:200])
+                                            hass.async_create_task(_notify_api_error(hass, "Backup Reserve Failed", f"Could not set backup reserve after 3 attempts — Tesla API {response.status}"))
                                     else:
-                                        _LOGGER.error("Failed to set Tesla backup reserve for site %s after 3 attempts: %s - %s", site_id, response.status, text[:200])
-                                        hass.async_create_task(_notify_api_error(hass, "Backup Reserve Failed", f"Could not set backup reserve after 3 attempts — Tesla API {response.status}"))
-                                else:
-                                    text = await response.text()
-                                    _LOGGER.error("Failed to set Tesla backup reserve for site %s: %s - %s", site_id, response.status, text[:200])
-                                    hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "Could not set backup reserve — Tesla API error"))
-                                    break
-                        except asyncio.TimeoutError:
-                            _LOGGER.warning("Tesla backup reserve attempt %d/3 timed out for site %s", attempt, site_id)
-                            if attempt < 3:
-                                await asyncio.sleep(2 ** attempt)
+                                        text = await response.text()
+                                        _LOGGER.error("Failed to set Tesla backup reserve for site %s: %s - %s", site_id, response.status, text[:200])
+                                        hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "Could not set backup reserve — Tesla API error"))
+                                        break
+                            except asyncio.TimeoutError:
+                                _LOGGER.warning("Tesla backup reserve attempt %d/3 timed out for site %s", attempt, site_id)
+                                if attempt < 3:
+                                    await asyncio.sleep(2 ** attempt)
+                    return any_ok
+
+                success = await dispatch_powerwall_write(
+                    hass, entry,
+                    local_call=_local,
+                    cloud_call=_cloud,
+                    label="set_backup_reserve",
+                )
+                if success:
+                    _tesla_coord_for_cache = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("tesla_coordinator")
+                    if _tesla_coord_for_cache is not None:
+                        _tesla_coord_for_cache.invalidate_site_info_cache()
+                    if percent == 100:
+                        hass.async_create_task(_tesla_charge_kick("backup_reserve_100"))
 
             except Exception as e:
                 _LOGGER.error(f"Error setting Tesla backup reserve: {e}", exc_info=True)
@@ -21494,7 +21516,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.debug("Could not persist backup reserve: %s", e)
 
     async def handle_set_operation_mode(call: ServiceCall) -> None:
-        """Set the Powerwall operation mode."""
+        """Set the Powerwall operation mode.
+
+        Local V1R first when paired; cloud Fleet API as fallback.
+        """
         mode = call.data.get("mode")
         if mode not in ("autonomous", "self_consumption"):
             _LOGGER.error(f"Invalid operation mode: {mode}. Must be 'autonomous' or 'self_consumption'.")
@@ -21502,12 +21527,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         _LOGGER.info(f"⚙️ Setting operation mode to {mode}")
 
-        try:
+        from .const import CONF_POWERWALL_LOCAL_DIN
+        from .powerwall_local.dispatch import dispatch_powerwall_write
+
+        async def _local(transport) -> bool:
+            din = entry.data.get(CONF_POWERWALL_LOCAL_DIN)
+            if not din:
+                return False
+            # default_real_mode lives at the top level of config.json, not under site_info.
+            return await transport.write_config(din, {"default_real_mode": mode})
+
+        async def _cloud() -> bool:
             site_configs = _get_tesla_site_configs(hass, entry)
             if not site_configs:
                 _LOGGER.error("Missing Tesla site ID or token for set_operation_mode")
-                return
+                return False
 
+            any_ok = False
             session = async_get_clientsession(hass)
             for site_id, current_token, provider in site_configs:
                 headers = {
@@ -21527,13 +21563,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         ) as response:
                             if response.status == 200:
                                 _LOGGER.info("Operation mode set to %s for site %s", mode, site_id)
-                                _tesla_coord_for_cache = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("tesla_coordinator")
-                                if _tesla_coord_for_cache is not None:
-                                    _tesla_coord_for_cache.invalidate_site_info_cache()
-                                if mode == "self_consumption":
-                                    if entry.entry_id in hass.data[DOMAIN]:
-                                        hass.data[DOMAIN][entry.entry_id].pop("last_force_toggle_time", None)
-                                        _LOGGER.debug("Cleared last_force_toggle_time (user set self_consumption)")
+                                any_ok = True
                                 break
                             elif response.status in (429, 500, 502, 503, 504):
                                 _LOGGER.warning(
@@ -21555,7 +21585,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _LOGGER.warning("Tesla operation mode attempt %d/3 timed out for site %s", attempt, site_id)
                         if attempt < 3:
                             await asyncio.sleep(2 ** attempt)
+            return any_ok
 
+        try:
+            success = await dispatch_powerwall_write(
+                hass, entry,
+                local_call=_local,
+                cloud_call=_cloud,
+                label="set_operation_mode",
+            )
+            if success:
+                _tesla_coord_for_cache = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("tesla_coordinator")
+                if _tesla_coord_for_cache is not None:
+                    _tesla_coord_for_cache.invalidate_site_info_cache()
+                if mode == "self_consumption":
+                    if entry.entry_id in hass.data[DOMAIN]:
+                        hass.data[DOMAIN][entry.entry_id].pop("last_force_toggle_time", None)
+                        _LOGGER.debug("Cleared last_force_toggle_time (user set self_consumption)")
         except Exception as e:
             _LOGGER.error(f"Error setting operation mode: {e}", exc_info=True)
 
@@ -21614,52 +21660,75 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         _LOGGER.error("GoodWe: failed to restore export limit")
                 return
 
-            site_configs = _get_tesla_site_configs(hass, entry)
-            if not site_configs:
-                _LOGGER.debug("set_grid_export: no Tesla site config (non-Tesla system)")
-                return
+            from .const import CONF_POWERWALL_LOCAL_DIN
+            from .powerwall_local.dispatch import dispatch_powerwall_write
 
-            session = async_get_clientsession(hass)
-            for site_id, current_token, provider in site_configs:
-                headers = {
-                    "Authorization": f"Bearer {current_token}",
-                    "Content-Type": "application/json",
-                }
-                api_base = get_tesla_api_base_url(provider, entry.data.get(CONF_FLEET_API_BASE_URL))
+            async def _local(transport) -> bool:
+                din = entry.data.get(CONF_POWERWALL_LOCAL_DIN)
+                if not din:
+                    return False
+                return await transport.write_config(
+                    din, {"site_info.customer_preferred_export_rule": rule}
+                )
 
-                async with session.post(
-                    f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
-                    headers=headers,
-                    json={"customer_preferred_export_rule": rule},
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    if response.status == 200:
-                        _LOGGER.info("Grid export rule set to %s for site %s", rule, site_id)
-                        _tesla_coord_for_cache = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("tesla_coordinator")
-                        if _tesla_coord_for_cache is not None:
-                            _tesla_coord_for_cache.invalidate_site_info_cache()
-                        solar_curtailment_enabled = entry.options.get(
-                            CONF_BATTERY_CURTAILMENT_ENABLED,
-                            entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
-                        )
-                        if solar_curtailment_enabled:
-                            entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
-                            entry_data["manual_export_override"] = True
-                            entry_data["manual_export_rule"] = rule
-                            _LOGGER.info("Manual export override enabled: %s", rule)
-                            # Persist so the override survives HA restarts / config reloads
-                            try:
-                                _store = entry_data.get("store")
-                                if _store:
-                                    _sd = await _store.async_load() or {}
-                                    _sd["manual_export_override"] = True
-                                    _sd["manual_export_rule"] = rule
-                                    await _store.async_save(_sd)
-                            except Exception as _persist_err:
-                                _LOGGER.debug("Could not persist manual_export_override: %s", _persist_err)
-                    else:
-                        text = await response.text()
-                        _LOGGER.error("Failed to set grid export rule for site %s: %s - %s", site_id, response.status, text)
+            async def _cloud() -> bool:
+                site_configs = _get_tesla_site_configs(hass, entry)
+                if not site_configs:
+                    _LOGGER.debug("set_grid_export: no Tesla site config (non-Tesla system)")
+                    return False
+
+                any_ok = False
+                session = async_get_clientsession(hass)
+                for site_id, current_token, provider in site_configs:
+                    headers = {
+                        "Authorization": f"Bearer {current_token}",
+                        "Content-Type": "application/json",
+                    }
+                    api_base = get_tesla_api_base_url(provider, entry.data.get(CONF_FLEET_API_BASE_URL))
+
+                    async with session.post(
+                        f"{api_base}/api/1/energy_sites/{site_id}/grid_import_export",
+                        headers=headers,
+                        json={"customer_preferred_export_rule": rule},
+                        timeout=aiohttp.ClientTimeout(total=30),
+                    ) as response:
+                        if response.status == 200:
+                            _LOGGER.info("Grid export rule set to %s for site %s", rule, site_id)
+                            any_ok = True
+                        else:
+                            text = await response.text()
+                            _LOGGER.error("Failed to set grid export rule for site %s: %s - %s", site_id, response.status, text)
+                return any_ok
+
+            success = await dispatch_powerwall_write(
+                hass, entry,
+                local_call=_local,
+                cloud_call=_cloud,
+                label="set_grid_export",
+            )
+            if success:
+                _tesla_coord_for_cache = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("tesla_coordinator")
+                if _tesla_coord_for_cache is not None:
+                    _tesla_coord_for_cache.invalidate_site_info_cache()
+                solar_curtailment_enabled = entry.options.get(
+                    CONF_BATTERY_CURTAILMENT_ENABLED,
+                    entry.data.get(CONF_BATTERY_CURTAILMENT_ENABLED, False)
+                )
+                if solar_curtailment_enabled:
+                    entry_data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+                    entry_data["manual_export_override"] = True
+                    entry_data["manual_export_rule"] = rule
+                    _LOGGER.info("Manual export override enabled: %s", rule)
+                    # Persist so the override survives HA restarts / config reloads
+                    try:
+                        _store = entry_data.get("store")
+                        if _store:
+                            _sd = await _store.async_load() or {}
+                            _sd["manual_export_override"] = True
+                            _sd["manual_export_rule"] = rule
+                            await _store.async_save(_sd)
+                    except Exception as _persist_err:
+                        _LOGGER.debug("Could not persist manual_export_override: %s", _persist_err)
 
         except Exception as e:
             _LOGGER.error(f"Error setting grid export rule: {e}", exc_info=True)
@@ -21686,7 +21755,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.error(f"Error clearing manual export override: {e}", exc_info=True)
 
     async def handle_set_grid_charging(call: ServiceCall) -> None:
-        """Enable or disable grid charging."""
+        """Enable or disable grid charging.
+
+        Cloud-only — disallow_charge_from_grid_with_solar_installed isn't stored
+        in the gateway's local config.json (verified empirically against PW3
+        firmware 26.2.1). It's cloud-side state Tesla pushes to the gateway.
+        """
         enabled = call.data.get("enabled")
         if enabled is None:
             _LOGGER.error("Missing 'enabled' parameter for set_grid_charging")
@@ -21738,7 +21812,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return coord
 
     async def handle_set_storm_watch(call: ServiceCall) -> None:
-        """Enable or disable Tesla Storm Watch for the energy site."""
+        """Enable or disable Tesla Storm Watch for the energy site.
+
+        Cloud-only — storm_mode_enabled isn't stored in the gateway's local
+        config.json (verified empirically against PW3 firmware 26.2.1). Tesla
+        keeps storm mode as cloud-side state.
+        """
         enabled = call.data.get("enabled")
         if enabled is None:
             _LOGGER.error("Missing 'enabled' parameter for set_storm_watch")
