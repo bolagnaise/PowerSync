@@ -112,20 +112,53 @@ class PowerwallPairButton(_PowerwallPairButtonBase):
 
 
 class PowerwallUnpairButton(_PowerwallPairButtonBase):
-    """Clear stored RSA key + local paired flag; commands revert to cloud."""
+    """Clear stored RSA key + local paired flag; commands revert to cloud.
+
+    Two-press confirmation: the first press posts a "press again within 30s
+    to confirm" notification and returns without changing state. A second
+    press within the window does the actual unpair. Outside the window the
+    counter resets.
+
+    Wiping the key is recoverable (the user can re-pair via the Pair
+    Powerwall Gateway button), but re-pairing requires physical access to
+    the DC isolator. So a single accidental press shouldn't be enough.
+    """
 
     _attr_name = "Unpair Powerwall Gateway"
     _attr_icon = "mdi:key-minus"
 
+    _CONFIRM_WINDOW_SECONDS = 30
+
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(hass, entry)
         self._attr_unique_id = f"{entry.entry_id}_unpair_powerwall"
+        self._first_press_ts: float | None = None
 
     @property
     def available(self) -> bool:
         return bool(self._entry.data.get(CONF_POWERWALL_LOCAL_PAIRED))
 
     async def async_press(self) -> None:
+        now = time.time()
+        if (
+            self._first_press_ts is None
+            or (now - self._first_press_ts) > self._CONFIRM_WINDOW_SECONDS
+        ):
+            self._first_press_ts = now
+            await _notify(
+                self._hass,
+                "⚠ Confirm Unpair Powerwall",
+                (
+                    f"Press **Unpair Powerwall Gateway** again within "
+                    f"{self._CONFIRM_WINDOW_SECONDS}s to wipe the RSA key and "
+                    f"revert all commands to the Tesla cloud path.\n\n"
+                    f"Re-pairing requires physical access to the DC isolator "
+                    f"(toggle off/on), so don't unpair unless you have it."
+                ),
+            )
+            return
+        # Second press inside the confirmation window → execute.
+        self._first_press_ts = None
         await _unpair_powerwall(self._hass, self._entry)
 
 
