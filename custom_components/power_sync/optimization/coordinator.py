@@ -1685,8 +1685,21 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # backup_reserve=0%, so if the LP planned discharge based on
                 # stale/forecast data but SOC has already dropped past the
                 # reserve, the battery would drain to 0%.
+                #
+                # Modbus batteries (Sigenergy/Sungrow/FoxESS/GoodWe/AlphaESS/
+                # ESY/Solax/SAJ) respect the inverter's own minimum SOC (set
+                # via set_backup_reserve / DOD register), so force_discharge
+                # is bounded by the BMS regardless of the LP's planned floor.
+                # Applying this guard to them caused exports to stop in the
+                # last ~30 min of Flow Power Happy Hour: as SOC tapered toward
+                # the 20% reserve, the executor flipped to self_consumption,
+                # cancelling the optimizer's force_discharge and letting the
+                # battery drift to load-following only — losing the tail of
+                # HH revenue. Tesla still needs the guard because its
+                # force_discharge actively zeros the soft reserve.
+                _tesla_only_guard = self.battery_system == "tesla"
                 soc_now, _ = await self._get_battery_state()
-                if soc_now <= self._config.backup_reserve + 0.05:
+                if _tesla_only_guard and soc_now <= self._config.backup_reserve + 0.05:
                     _LOGGER.warning(
                         "Optimizer: Skipping %s — SOC %.1f%% at/below backup "
                         "reserve %.0f%%, switching to self_consumption",
