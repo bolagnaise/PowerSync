@@ -20957,6 +20957,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ("foxess_coordinator", "foxess"),
             ("goodwe_coordinator", "goodwe"),
             ("alphaess_coordinator", "alphaess"),
+            ("saj_h2_coordinator", "saj_h2"),
         ):
             coord = entry_data.get(coord_key)
             if coord:
@@ -22817,6 +22818,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             except Exception as e:
                 _LOGGER.debug("OCPP session poll error: %s", e)
 
+        from homeassistant.helpers.event import async_track_time_interval
         await _poll_ocpp_sessions()
         unsub_ocpp_poll = async_track_time_interval(
             hass, _poll_ocpp_sessions, timedelta(seconds=30)
