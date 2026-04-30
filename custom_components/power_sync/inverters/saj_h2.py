@@ -289,36 +289,27 @@ class SajH2BatteryController:
     def _check_engaged(self, operation: str) -> bool:
         """Refuse Modbus commands when the inverter's battery converter is offline.
 
-        SAJ H2 firmware shuts off the battery DC-DC converter when SOC reaches the
-        on-grid discharge floor and does NOT auto-recover. Working mode goes to 4
-        and the R-phase inverter voltage drops to 0V. Sending charge/discharge
-        commands in that state writes registers that the inverter silently ignores
-        — the only fix is a physical power-cycle. Catch it early so the user sees
-        a clear error instead of a silent no-op.
+        Real low-SOC lockout: working_mode goes to 4 AND R-phase inverter voltage
+        drops to 0V together. The DC-DC converter is offline and the only fix is a
+        physical power-cycle.
 
-        working_mode is the authoritative signal: 2 = running, 4 = lockout.
-        RInvVolt is unreliable on some firmwares (reports 0V even when running),
-        so it's only consulted as a fallback when working_mode is unavailable.
+        Either signal alone is unreliable: working_mode oscillates 2↔4 every minute
+        or two on healthy systems, and stanus74's RInvVolt register sometimes reads
+        0V even while the inverter is exporting normally on certain firmwares.
+        Refuse only when BOTH signals say lockout.
         """
         wm = self._read_float("inverter_working_mode")
-        if wm is not None:
-            if int(wm) != 2:
-                _LOGGER.error(
-                    "SAJ H2: %s refused — inverter working_mode=%s (need 2). "
-                    "Battery converter is offline (low-SOC lockout). Power-cycle required.",
-                    operation, int(wm),
-                )
-                return False
-            return True
         rv = self._read_float("inverter_voltage_r")
-        if rv is not None and rv < self._MIN_ENGAGED_INV_VOLTAGE:
-            _LOGGER.error(
-                "SAJ H2: %s refused — inverter R-phase voltage %.1fV (need ≥%.0fV) "
-                "and working_mode unavailable. Battery converter likely offline.",
-                operation, rv, self._MIN_ENGAGED_INV_VOLTAGE,
-            )
-            return False
-        return True
+        mode_ok = wm is None or int(wm) == 2
+        voltage_ok = rv is None or rv >= self._MIN_ENGAGED_INV_VOLTAGE
+        if mode_ok or voltage_ok:
+            return True
+        _LOGGER.error(
+            "SAJ H2: %s refused — inverter working_mode=%s and R-phase voltage %.1fV "
+            "(need ≥%.0fV). Battery converter offline (low-SOC lockout). Power-cycle required.",
+            operation, int(wm), rv, self._MIN_ENGAGED_INV_VOLTAGE,
+        )
+        return False
 
     async def force_charge(self, duration_minutes: int, power_w: int) -> bool:
         """Force battery to charge from grid.
