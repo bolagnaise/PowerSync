@@ -818,8 +818,9 @@ class PowerSyncStrategy {
 
 // ─── Section Builders ────────────────────────────────────────
 
-function _priceGaugeCentsCard(entityId, label, minCents, maxCents, thresholds) {
-  // thresholds: { green, yellow, red } in cents (ascending — value crosses to next color at each threshold)
+function _svgArcGaugeCard({ entityId, label, unit, min, max, thresholds, multiplier = 1, decimals = 1 }) {
+  // thresholds: { green, yellow, red } in display units (after multiplier).
+  // Color picked is the one whose threshold is the highest <= displayed value.
   return {
     type: 'custom:button-card',
     entity: entityId,
@@ -829,23 +830,23 @@ function _priceGaugeCentsCard(entityId, label, minCents, maxCents, thresholds) {
     show_label: false,
     custom_fields: {
       gauge: `[[[
-        const v = parseFloat(entity?.state);
-        if (isNaN(v)) {
+        const raw = parseFloat(entity?.state);
+        if (isNaN(raw)) {
           return '<div style="text-align:center;padding-top:30px;color:#888;">—</div>';
         }
-        const cents = v * 100;
-        const min = ${minCents}, max = ${maxCents};
-        const pct = Math.max(0, Math.min(1, (cents - min) / (max - min)));
+        const value = raw * ${multiplier};
+        const min = ${min}, max = ${max};
+        const pct = Math.max(0, Math.min(1, (value - min) / (max - min)));
         const t = ${JSON.stringify(thresholds)};
-        // Pick the color whose threshold is the highest one <= cents
         const stops = [['#f44336', t.red], ['#ff9800', t.yellow], ['#4caf50', t.green]]
-          .filter(([_, threshold]) => threshold !== undefined && cents >= threshold)
+          .filter(([_, th]) => th !== undefined && value >= th)
           .sort((a, b) => b[1] - a[1]);
         const color = stops.length > 0 ? stops[0][0] : '#9e9e9e';
         const r = 50;
         const circ = Math.PI * r;
         const fill = pct * circ;
-        const display = cents.toFixed(Math.abs(cents) >= 100 ? 0 : 1);
+        const decimals = ${decimals};
+        const display = Math.abs(value) >= 100 ? value.toFixed(0) : value.toFixed(decimals);
         return \`
           <div style="display:flex;flex-direction:column;align-items:center;">
             <div style="font-size:0.85em;color:var(--secondary-text-color);margin-bottom:2px;">${label}</div>
@@ -853,7 +854,7 @@ function _priceGaugeCentsCard(entityId, label, minCents, maxCents, thresholds) {
               <path d="M 10,60 A 50,50 0 0,1 110,60" fill="none" stroke="var(--divider-color, #444)" stroke-width="10" stroke-linecap="round"/>
               <path d="M 10,60 A 50,50 0 0,1 110,60" fill="none" stroke="\${color}" stroke-width="10" stroke-linecap="round" stroke-dasharray="\${fill} \${circ}"/>
               <text x="60" y="54" text-anchor="middle" font-size="20" font-weight="600" fill="var(--primary-text-color)">\${display}</text>
-              <text x="60" y="68" text-anchor="middle" font-size="9" fill="var(--secondary-text-color)">c/kWh</text>
+              <text x="60" y="68" text-anchor="middle" font-size="9" fill="var(--secondary-text-color)">${unit}</text>
             </svg>
           </div>
         \`;
@@ -882,19 +883,33 @@ function _priceGauges(e) {
   return {
     type: 'horizontal-stack',
     cards: [
-      _priceGaugeCentsCard(e('current_import_price'), 'Import Price', 0, 60, { green: 0, yellow: 25, red: 40 }),
-      _priceGaugeCentsCard(e('current_export_price'), 'Export Price', -10, 30, { green: 5, yellow: 0, red: -10 }),
-      {
-        type: 'gauge',
-        entity: e('battery_level'),
-        name: 'Battery',
+      _svgArcGaugeCard({
+        entityId: e('current_import_price'),
+        label: 'Import Price',
+        unit: 'c/kWh',
+        min: 0,
+        max: 60,
+        thresholds: { green: 0, yellow: 25, red: 40 },
+        multiplier: 100,
+      }),
+      _svgArcGaugeCard({
+        entityId: e('current_export_price'),
+        label: 'Export Price',
+        unit: 'c/kWh',
+        min: -10,
+        max: 30,
+        thresholds: { green: 5, yellow: 0, red: -10 },
+        multiplier: 100,
+      }),
+      _svgArcGaugeCard({
+        entityId: e('battery_level'),
+        label: 'Battery',
         unit: '%',
         min: 0,
         max: 100,
-        needle: true,
-        severity: { red: 0, yellow: 30, green: 60 },
-        card_mod: { style: 'ha-card { height: 110px; }' },
-      },
+        thresholds: { green: 60, yellow: 30, red: 0 },
+        decimals: 0,
+      }),
     ],
   };
 }
