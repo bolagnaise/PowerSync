@@ -3645,7 +3645,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
     async def async_step_tesla_connection(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Menu handler: Tesla Energy/EV API provider settings."""
+        """Menu handler: Tesla Energy/EV API provider + local gateway IP."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -3655,6 +3655,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             ev_choice = user_input.get(
                 CONF_TESLA_EV_API_PROVIDER, TESLA_EV_API_PROVIDER_NONE
             )
+            # Optional Powerwall gateway IP. Empty string clears it (back to
+            # cloud-only mode); a non-empty value enables local LAN features.
+            gateway_ip_raw = user_input.get(CONF_POWERWALL_LOCAL_IP, "")
+            gateway_ip = (gateway_ip_raw or "").strip()
 
             # Validate EV provider
             detected = _detect_tesla_ev_integrations(self.hass)
@@ -3676,6 +3680,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 new_data = dict(self.config_entry.data)
                 new_data[CONF_TESLA_API_PROVIDER] = tesla_provider
                 new_data[CONF_TESLA_EV_API_PROVIDER] = ev_choice
+                # Persist gateway IP changes; remove the key entirely when
+                # cleared so the diagnostic binary_sensor flips correctly
+                # rather than reading an empty string as "set".
+                if gateway_ip:
+                    new_data[CONF_POWERWALL_LOCAL_IP] = gateway_ip
+                else:
+                    new_data.pop(CONF_POWERWALL_LOCAL_IP, None)
                 self.hass.config_entries.async_update_entry(
                     self.config_entry, data=new_data
                 )
@@ -3699,6 +3710,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         )
         current_ev_provider = self.config_entry.data.get(
             CONF_TESLA_EV_API_PROVIDER, TESLA_EV_API_PROVIDER_NONE
+        )
+        current_gateway_ip = self.config_entry.data.get(
+            CONF_POWERWALL_LOCAL_IP, ""
         )
 
         tesla_providers = {
@@ -3732,6 +3746,16 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         ],
                         mode=SelectSelectorMode.DROPDOWN,
                     )),
+                    # Optional: gateway LAN IP. Pairing itself is cloud-based,
+                    # so this isn't required for off-grid / reconnect — but it
+                    # is required for per-Powerwall snapshot polling, automated
+                    # curtailment, and fast operation-mode / grid-charging
+                    # toggles. Leave blank to run cloud-only. Clearing a
+                    # previously-set value reverts to cloud-only.
+                    vol.Optional(
+                        CONF_POWERWALL_LOCAL_IP,
+                        default=current_gateway_ip,
+                    ): str,
                 }
             ),
             errors=errors,
