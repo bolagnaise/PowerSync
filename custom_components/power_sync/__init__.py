@@ -9,6 +9,8 @@ import pathlib
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+from homeassistant.util import dt as dt_util
+
 # Module-level state for alert cooldowns (keyed by entry_id)
 _last_discrepancy_alert: dict[str, datetime] = {}
 _discrepancy_alert_count: dict[str, int] = {}
@@ -3874,7 +3876,7 @@ class BatteryHealthView(HomeAssistantView):
                 else None
             ),
             "battery_count": payload.get("battery_count", 1),
-            "scanned_at": payload.get("last_scan", datetime.now().isoformat()),
+            "scanned_at": payload.get("last_scan", dt_util.now().isoformat()),
             "source": payload.get("source", "ha_local_tedapi"),
         }
 
@@ -4275,7 +4277,6 @@ class BatteryHealthView(HomeAssistantView):
         if original_wh: bms["rated_capacity_kwh"] = round(original_wh / 1000, 2)
         if current_wh: bms["current_capacity_kwh"] = round(current_wh / 1000, 2)
 
-        from datetime import datetime as _dt
         response: dict = {
             "success": True,
             "available": True,
@@ -4287,7 +4288,7 @@ class BatteryHealthView(HomeAssistantView):
             "original_capacity_kwh": round(original_wh / 1000, 2),
             "current_capacity_kwh": round(current_wh / 1000, 2),
             "battery_count": batt_count,
-            "last_scan": _dt.now().isoformat(),
+            "last_scan": dt_util.now().isoformat(),
             "site": {
                 "gateway_din": din,
                 "energy_site_id": fleet_site_id or entry.data.get(CONF_POWERWALL_LOCAL_ENERGY_SITE_ID),
@@ -4404,7 +4405,7 @@ class BatteryHealthView(HomeAssistantView):
             current_capacity_wh = data.get("current_capacity_wh")
             degradation_percent = data.get("degradation_percent")
             battery_count = data.get("battery_count", 1)
-            scanned_at = data.get("scanned_at", datetime.now().isoformat())
+            scanned_at = data.get("scanned_at", dt_util.now().isoformat())
             individual_batteries = data.get("individual_batteries")
             # Extended fields (cloud RSA path provides richer metadata)
             source = data.get("source") or "mobile_app"
@@ -7340,7 +7341,7 @@ def convert_custom_tariff_to_schedule(custom_tariff: dict) -> dict:
             "seasons": seasons,
             "utility": custom_tariff.get("utility", "Custom"),
             "plan_name": custom_tariff.get("name", "Custom Tariff"),
-            "last_sync": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "last_sync": dt_util.now().strftime("%Y-%m-%d %H:%M:%S"),
             "is_custom": True,  # Flag to indicate this is a custom tariff
         }
 
@@ -8057,7 +8058,7 @@ class PushTokenRegisterView(HomeAssistantView):
                 "token": push_token,
                 "platform": platform,
                 "device_name": device_name,
-                "registered_at": datetime.now().isoformat(),
+                "registered_at": dt_util.now().isoformat(),
             }
 
             # Also persist to AutomationStore for survival across restarts
@@ -8130,7 +8131,7 @@ class PushTestView(HomeAssistantView):
             await _send_expo_push(
                 self._hass,
                 "PowerSync Test",
-                f"Test notification sent at {datetime.now().strftime('%H:%M:%S')}"
+                f"Test notification sent at {dt_util.now().strftime('%H:%M:%S')}"
             )
 
             return web.json_response({
@@ -8876,7 +8877,7 @@ class EVVehiclesView(HomeAssistantView):
             "plugged_in_definitive": plugged_in_definitive,
             "charger_power": charger_power,
             "is_online": is_online,
-            "data_updated_at": data_updated_at.isoformat() if data_updated_at else datetime.now().isoformat(),
+            "data_updated_at": data_updated_at.isoformat() if data_updated_at else dt_util.now().isoformat(),
             "source": "tesla_ble",
             "brand": "tesla",
         }
@@ -8975,7 +8976,7 @@ class EVVehiclesView(HomeAssistantView):
                 "charger_power": None,
                 "time_to_full_charge": time_to_full,
                 "is_online": is_online,
-                "data_updated_at": datetime.now().isoformat(),
+                "data_updated_at": dt_util.now().isoformat(),
                 "source": "byd_cloud",
                 "brand": "byd",
             })
@@ -9114,7 +9115,7 @@ class EVVehiclesView(HomeAssistantView):
                     if charging_state and charging_state.lower() != "charging":
                         charger_power = None
 
-                    fleet_updated_at = latest_entity_update.isoformat() if latest_entity_update else datetime.now().isoformat()
+                    fleet_updated_at = latest_entity_update.isoformat() if latest_entity_update else dt_util.now().isoformat()
                     vehicles.append({
                         "id": vin or str(device.id),
                         "vehicle_id": vin or str(device.id),
@@ -9243,7 +9244,7 @@ class EVVehiclesView(HomeAssistantView):
                     "is_plugged_in": is_plugged_in,
                     "charger_power": None,
                     "is_online": True,
-                    "data_updated_at": datetime.now().isoformat(),
+                    "data_updated_at": dt_util.now().isoformat(),
                     "source": "generic_charger",
                     "brand": "generic",
                 })
@@ -15619,7 +15620,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     hass.data[DOMAIN][entry.entry_id]["sigenergy_tariff"] = {
                         "buy_prices": buy_prices,
                         "sell_prices": sell_prices if sell_prices else buy_prices,
-                        "synced_at": datetime.now().isoformat(),
+                        "synced_at": dt_util.now().isoformat(),
                         "sync_mode": sync_mode,
                     }
                 else:
@@ -15730,7 +15731,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "groups": groups,
                     "buy_prices": buy_prices,
                     "sell_prices": sell_prices if sell_prices else buy_prices,
-                    "synced_at": datetime.now().isoformat(),
+                    "synced_at": dt_util.now().isoformat(),
                     "sync_mode": sync_mode,
                 }
             finally:
@@ -16252,14 +16253,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             if tariff:
                 tariff = _apply_provider_tariff_adjustments(tariff, forecast_data, electricity_provider)
-                from datetime import datetime as dt
                 from homeassistant.helpers.dispatcher import async_dispatcher_send
                 buy_prices = tariff.get("energy_charges", {}).get("Summer", {}).get("rates", {})
                 sell_prices = tariff.get("sell_tariff", {}).get("energy_charges", {}).get("Summer", {}).get("rates", {})
                 hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = {
                     "buy_prices": buy_prices,
                     "sell_prices": sell_prices,
-                    "last_sync": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "last_sync": dt_util.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
                 async_dispatcher_send(hass, f"power_sync_tariff_updated_{entry.entry_id}")
                 _LOGGER.info("Tariff schedule stored for foxess dashboard (%d periods)", len(buy_prices))
@@ -16291,14 +16291,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             if tariff:
                 tariff = _apply_provider_tariff_adjustments(tariff, forecast_data, electricity_provider)
-                from datetime import datetime as dt
                 from homeassistant.helpers.dispatcher import async_dispatcher_send
                 buy_prices = tariff.get("energy_charges", {}).get("Summer", {}).get("rates", {})
                 sell_prices = tariff.get("sell_tariff", {}).get("energy_charges", {}).get("Summer", {}).get("rates", {})
                 hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = {
                     "buy_prices": buy_prices,
                     "sell_prices": sell_prices,
-                    "last_sync": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "last_sync": dt_util.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
                 async_dispatcher_send(hass, f"power_sync_tariff_updated_{entry.entry_id}")
                 _LOGGER.info("Tariff schedule stored for sungrow dashboard (%d periods)", len(buy_prices))
@@ -16480,7 +16479,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 tariff = apply_chip_mode(tariff, chip_start, chip_end, chip_threshold)
 
         # Store tariff schedule in hass.data for the sensor to read
-        from datetime import datetime as dt
         from homeassistant.helpers.dispatcher import async_dispatcher_send
         # Buy prices are at top level, sell prices are under sell_tariff
         buy_prices = tariff.get("energy_charges", {}).get("Summer", {}).get("rates", {})
@@ -16489,7 +16487,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = {
             "buy_prices": buy_prices,
             "sell_prices": sell_prices,
-            "last_sync": dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "last_sync": dt_util.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
         # Log price summary for debugging dashboard display issues
@@ -22983,7 +22981,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         current_capacity_wh = call.data.get("current_capacity_wh")
         degradation_percent = call.data.get("degradation_percent")
         battery_count = call.data.get("battery_count", 1)
-        scanned_at = call.data.get("scanned_at", datetime.now().isoformat())
+        scanned_at = call.data.get("scanned_at", dt_util.now().isoformat())
         individual_batteries = call.data.get("individual_batteries")  # Optional per-battery data
 
         # Validate required fields

@@ -13,10 +13,26 @@ import statistics
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
+
+from homeassistant.util import dt as dt_util
 from enum import Enum
 from pathlib import Path
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _parse_aware(s: str) -> datetime:
+    """Parse an ISO timestamp and return a tz-aware datetime in HA's local tz.
+
+    Handles three formats produced by past and current versions:
+      - aware with offset (current): ``2026-04-30T22:57:34+09:30``
+      - aware with Z (legacy UTC): ``2026-04-30T13:27:34Z``
+      - naive (legacy pre-tz-fix): ``2026-04-30T13:27:34`` — assumed HA-local
+    """
+    parsed = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt_util.DEFAULT_TIME_ZONE)
+    return parsed
 
 
 class ChargingSource(Enum):
@@ -153,10 +169,10 @@ class ChargingSession:
         """Calculate session duration in minutes."""
         try:
             if not self.end_time:
-                end = datetime.now()
+                end = dt_util.now()
             else:
-                end = datetime.fromisoformat(self.end_time.replace("Z", "+00:00"))
-            start = datetime.fromisoformat(self.start_time.replace("Z", "+00:00"))
+                end = _parse_aware(self.end_time)
+            start = _parse_aware(self.start_time)
             return (end - start).total_seconds() / 60
         except (ValueError, TypeError):
             return 0.0
@@ -167,7 +183,7 @@ class ChargingSession:
         if self._current_segment_start:
             self.end_segment()
 
-        self._current_segment_start = datetime.now().isoformat()
+        self._current_segment_start = dt_util.now().isoformat()
         self._current_segment_source = source
         self._current_segment_readings = []
 
@@ -197,10 +213,10 @@ class ChargingSession:
             self.start_segment(source)
 
         # Calculate elapsed time from last reading
-        now = datetime.now()
+        now = dt_util.now()
         if self.last_reading_time:
             try:
-                last = datetime.fromisoformat(self.last_reading_time)
+                last = _parse_aware(self.last_reading_time)
                 interval_seconds = (now - last).total_seconds()
                 # Cap at 120s to avoid huge energy spikes from delayed readings
                 interval_seconds = min(interval_seconds, 120.0)
@@ -231,7 +247,7 @@ class ChargingSession:
 
         # Store reading for segment aggregation
         self._current_segment_readings.append({
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": dt_util.now().isoformat(),
             "power_kw": power_kw,
             "amps": amps,
             "energy_kwh": energy_kwh,
@@ -269,7 +285,7 @@ class ChargingSession:
         # Aggregate readings into segment
         segment = ChargingSegment(
             start_time=self._current_segment_start,
-            end_time=datetime.now().isoformat(),
+            end_time=dt_util.now().isoformat(),
             source=self._current_segment_source or ChargingSource.MIXED.value,
             energy_kwh=sum(r["energy_kwh"] for r in readings),
             avg_power_kw=statistics.mean(r["power_kw"] for r in readings) if readings else 0,
@@ -344,7 +360,7 @@ class ChargingSessionManager:
         """Save sessions to storage."""
         try:
             # Keep last 365 days of sessions
-            cutoff = datetime.now() - timedelta(days=365)
+            cutoff = dt_util.now() - timedelta(days=365)
             cutoff_str = cutoff.isoformat()
 
             sessions_to_save = [
@@ -390,7 +406,7 @@ class ChargingSessionManager:
             session = ChargingSession(
                 id=str(uuid.uuid4()),
                 vehicle_id=vehicle_id,
-                start_time=datetime.now().isoformat(),
+                start_time=dt_util.now().isoformat(),
                 mode=mode,
                 start_soc=start_soc,
                 target_soc=target_soc,
@@ -486,7 +502,7 @@ class ChargingSessionManager:
         session.end_segment()
 
         # Finalize session
-        session.end_time = datetime.now().isoformat()
+        session.end_time = dt_util.now().isoformat()
         session.completed = True
         session.stopped_reason = reason
         session.end_soc = end_soc
@@ -517,16 +533,14 @@ class ChargingSessionManager:
             return []
         self._last_cleanup_time = now_mono
 
-        now = datetime.now()
+        now = dt_util.now()
         stale: list[str] = []
         for vehicle_id, session in list(self.active_sessions.items()):
             last_time_str = session.last_reading_time or session.start_time
             if last_time_str:
                 try:
-                    last = datetime.fromisoformat(last_time_str)
-                    last_naive = last.replace(tzinfo=None)
-                    now_naive = now.replace(tzinfo=None)
-                    if (now_naive - last_naive).total_seconds() >= timeout_minutes * 60:
+                    last = _parse_aware(last_time_str)
+                    if (now - last).total_seconds() >= timeout_minutes * 60:
                         stale.append(vehicle_id)
                 except (ValueError, TypeError):
                     pass
@@ -561,7 +575,7 @@ class ChargingSessionManager:
         """
         await self._load_sessions()
 
-        cutoff = datetime.now() - timedelta(days=days)
+        cutoff = dt_util.now() - timedelta(days=days)
         cutoff_str = cutoff.isoformat()
 
         sessions = [
