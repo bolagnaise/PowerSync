@@ -474,6 +474,80 @@ class PowerwallPairUnpairView(HomeAssistantView):
         return web.json_response({"success": True})
 
 
+class PowerwallSetGatewayIpView(HomeAssistantView):
+    """POST: update CONF_POWERWALL_LOCAL_IP without re-pairing.
+
+    Use case: a user pairs without supplying the gateway IP (cloud-only
+    pairing), then later wants to enable LAN-dependent features (snapshot
+    polling, automated curtailment, fast operation-mode toggles). This
+    endpoint writes the new IP into entry.data and tears down the cached
+    client + coordinator so the next ``ensure_coordinator`` call rebuilds
+    against the new host.
+
+    Body: ``{"gateway_ip": "192.168.1.50"}`` — empty string clears the IP
+    and reverts the install to cloud-only mode.
+    """
+
+    url = "/api/power_sync/powerwall/set_gateway_ip"
+    name = "api:power_sync:powerwall:set_gateway_ip"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    async def post(self, request: web.Request) -> web.Response:
+        entry = _get_entry(self._hass)
+        if entry is None:
+            return web.json_response(
+                {"success": False, "error": "PowerSync not configured"}, status=503
+            )
+
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+
+        gateway_ip_raw = payload.get("gateway_ip") or payload.get("ip") or ""
+        if not isinstance(gateway_ip_raw, str):
+            return web.json_response(
+                {"success": False, "error": "gateway_ip must be a string"}, status=400
+            )
+        gateway_ip = gateway_ip_raw.strip()
+
+        new_data = {**entry.data}
+        if gateway_ip:
+            new_data[CONF_POWERWALL_LOCAL_IP] = gateway_ip
+        else:
+            # Clearing the IP reverts to cloud-only operation. Pop the key
+            # entirely so the diagnostic binary_sensor flips correctly
+            # rather than treating "" as a valid IP.
+            new_data.pop(CONF_POWERWALL_LOCAL_IP, None)
+        self._hass.config_entries.async_update_entry(entry, data=new_data)
+
+        # Drop the cached client + coordinator so the next ensure_coordinator
+        # call rebuilds against the new host. Don't await the rebuild here —
+        # the next data fetch (snapshot poll, off-grid call, etc.) triggers
+        # it lazily and the response stays snappy.
+        runtime = _runtime(self._hass, entry)
+        runtime["client"] = None
+        existing_coord = runtime.get("coordinator")
+        if existing_coord is not None:
+            try:
+                existing_coord.update_interval = None
+            except Exception:
+                pass
+        runtime["coordinator"] = None
+
+        _LOGGER.info(
+            "Gateway IP updated to %r — local client will rebuild on next access",
+            gateway_ip or "(cleared)",
+        )
+        return web.json_response({
+            "success": True,
+            "gateway_ip": gateway_ip or None,
+        })
+
+
 class PowerwallOffGridView(HomeAssistantView):
     """POST: go off-grid or reconnect to grid."""
 
@@ -1161,6 +1235,7 @@ def register_views(hass: HomeAssistant) -> None:
     hass.http.register_view(PowerwallPairStatusView(hass))
     hass.http.register_view(PowerwallPairCancelView(hass))
     hass.http.register_view(PowerwallPairUnpairView(hass))
+    hass.http.register_view(PowerwallSetGatewayIpView(hass))
     hass.http.register_view(PowerwallOffGridView(hass))
     hass.http.register_view(PowerwallLocalStatusView(hass))
     hass.http.register_view(PowerwallSafetyConfigView(hass))
