@@ -233,6 +233,76 @@ def test_price_level_stop_allows_unowned_high_price_stop(fake_actions):
     assert params["stop_reason"] == "Price above threshold"
 
 
+def test_price_level_start_uses_vehicle_charger_config(fake_actions):
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
+        "vehicle_charging_configs"
+    ] = [{
+        "vehicle_id": "generic_ev",
+        "charger_type": "generic",
+        "charger_switch_entity": "switch.garage_ev",
+        "charger_amps_entity": "number.garage_ev_current",
+        "charger_status_entity": "sensor.garage_ev_status",
+        "min_amps": 6,
+        "max_amps": 24,
+        "voltage": 240,
+        "phases": 3,
+    }]
+
+    executor = ev_planner.PriceLevelChargingExecutor(hass, _FakeConfigEntry())
+    result = asyncio.run(
+        executor._start_charging(
+            "price_level_recovery",
+            "Cheap price",
+            vehicle_vin="generic_ev",
+        )
+    )
+
+    assert result is True
+    fake_actions._action_start_ev_charging_dynamic.assert_awaited_once()
+    _hass, _entry, params = fake_actions._action_start_ev_charging_dynamic.await_args.args
+    assert params["vehicle_id"] == "generic_ev"
+    assert params["charger_type"] == "generic"
+    assert params["charger_switch_entity"] == "switch.garage_ev"
+    assert params["charger_amps_entity"] == "number.garage_ev_current"
+    assert params["charger_status_entity"] == "sensor.garage_ev_status"
+    assert params["max_charge_amps"] == 24
+    assert params["phases"] == 3
+
+
+def test_price_level_stop_uses_vehicle_charger_config(fake_actions):
+    fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["automation_store"]._data[
+        "vehicle_charging_configs"
+    ] = [{
+        "vehicle_id": "generic_ev",
+        "charger_type": "generic",
+        "charger_switch_entity": "switch.garage_ev",
+        "charger_amps_entity": "number.garage_ev_current",
+        "charger_status_entity": "sensor.garage_ev_status",
+    }]
+
+    executor = ev_planner.PriceLevelChargingExecutor(hass, _FakeConfigEntry())
+    result = asyncio.run(
+        executor._stop_charging("Price above threshold", vehicle_vin="generic_ev")
+    )
+
+    assert result is True
+    fake_actions._action_stop_ev_charging_dynamic.assert_awaited_once()
+    _hass, _entry, params = fake_actions._action_stop_ev_charging_dynamic.await_args.args
+    assert params["vehicle_id"] == "generic_ev"
+    assert params["vehicle_vin"] == "generic_ev"
+    assert params["charger_type"] == "generic"
+    assert params["charger_switch_entity"] == "switch.garage_ev"
+    assert params["charger_amps_entity"] == "number.garage_ev_current"
+    assert params["charger_status_entity"] == "sensor.garage_ev_status"
+    assert params["stop_untracked"] is True
+
+
 def test_price_level_stop_blocks_manual_owned_dynamic_stop(fake_actions):
     ev_ownership = importlib.import_module("power_sync.automations.ev_ownership")
     fake_actions._action_stop_ev_charging_dynamic = AsyncMock(return_value=True)

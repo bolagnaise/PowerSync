@@ -5114,6 +5114,9 @@ def _build_dynamic_charging_params(
 
 
 def _build_dynamic_stop_params(
+    hass: "HomeAssistant",
+    domain: str,
+    config_entry: "ConfigEntry",
     opts: Mapping[str, Any],
     *,
     vehicle_vin: Optional[str] = None,
@@ -5121,12 +5124,19 @@ def _build_dynamic_stop_params(
     reason: Optional[str] = None,
 ) -> dict:
     """Build dynamic EV stop params consistently for all coordinated modes."""
-    charger_type = _configured_charger_type(opts)
+    vehicle_charger_params = _get_vehicle_charger_params(
+        hass,
+        domain,
+        config_entry,
+        vehicle_vin,
+    )
+    charger_type = vehicle_charger_params.get("charger_type") or _configured_charger_type(opts)
     loadpoint_id = vehicle_vin
     if charger_type == "zaptec":
         loadpoint_id = vehicle_vin or "zaptec_standalone"
 
     params = {
+        **vehicle_charger_params,
         "vehicle_id": loadpoint_id,
         "vehicle_vin": loadpoint_id,
         "charger_type": charger_type,
@@ -5152,7 +5162,16 @@ async def _start_coordinated_charging(
 ) -> bool:
     """Start charging through the configured dynamic charger action."""
     opts = {**config_entry.data, **config_entry.options}
-    charger_type = _configured_charger_type(opts)
+    params = _build_dynamic_charging_params(
+        hass,
+        domain,
+        config_entry,
+        opts,
+        owner_mode=owner_mode,
+        vehicle_vin=vehicle_vin,
+        no_grid_import=no_grid_import,
+    )
+    charger_type = params.get("charger_type", _configured_charger_type(opts))
     if (
         charger_type == "zaptec"
         and cooldown_state is not None
@@ -5163,16 +5182,6 @@ async def _start_coordinated_charging(
         return False
 
     from .actions import _action_start_ev_charging_dynamic
-
-    params = _build_dynamic_charging_params(
-        hass,
-        domain,
-        config_entry,
-        opts,
-        owner_mode=owner_mode,
-        vehicle_vin=vehicle_vin,
-        no_grid_import=no_grid_import,
-    )
 
     try:
         success = await _action_start_ev_charging_dynamic(
@@ -5217,10 +5226,18 @@ async def _stop_coordinated_charging(
 ) -> bool:
     """Stop charging through the configured dynamic charger action."""
     opts = {**config_entry.data, **config_entry.options}
-    charger_type = _configured_charger_type(opts)
-    loadpoint_id = vehicle_vin
+    params = _build_dynamic_stop_params(
+        hass,
+        domain,
+        config_entry,
+        opts,
+        vehicle_vin=vehicle_vin,
+        stop_untracked=stop_untracked,
+        reason=reason,
+    )
+    charger_type = params.get("charger_type", _configured_charger_type(opts))
+    loadpoint_id = params.get("vehicle_id") or params.get("vehicle_vin")
     if charger_type == "zaptec":
-        loadpoint_id = vehicle_vin or "zaptec_standalone"
         if cooldown_state is not None and time.time() < getattr(cooldown_state, "stop_cooldown_until", 0.0):
             remaining = getattr(cooldown_state, "stop_cooldown_until", 0.0) - time.time()
             _LOGGER.debug("Zaptec stop in cooldown (%.0fs remaining)", remaining)
@@ -5238,13 +5255,6 @@ async def _stop_coordinated_charging(
         return False
 
     from .actions import _action_stop_ev_charging_dynamic
-
-    params = _build_dynamic_stop_params(
-        opts,
-        vehicle_vin=vehicle_vin,
-        stop_untracked=stop_untracked,
-        reason=reason,
-    )
 
     try:
         success = await _action_stop_ev_charging_dynamic(hass, config_entry, params)
