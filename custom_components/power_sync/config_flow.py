@@ -36,6 +36,9 @@ from .const import (
     CONF_AMBER_SITE_ID,
     CONF_AMBER_FORECAST_TYPE,
     CONF_BATTERY_CURTAILMENT_ENABLED,
+    CONF_AUTO_UPDATE_ENABLED,
+    CONF_AUTO_UPDATE_TIME,
+    DEFAULT_AUTO_UPDATE_TIME,
     CONF_TESLEMETRY_API_TOKEN,
     CONF_TESLA_ENERGY_SITE_ID,
     CONF_POWERWALL_LOCAL_IP,
@@ -3611,11 +3614,54 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             "demand_charges",
             "ev_charging",
             "weather",
+            "auto_update",
         ])
 
         return self.async_show_menu(
             step_id="init",
             menu_options=menu_options,
+        )
+
+    async def async_step_auto_update(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: scheduled PowerSync HACS auto-update settings."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            from .auto_update import normalize_auto_update_time
+
+            try:
+                update_time = normalize_auto_update_time(
+                    user_input.get(CONF_AUTO_UPDATE_TIME, DEFAULT_AUTO_UPDATE_TIME)
+                )
+            except (TypeError, ValueError):
+                errors[CONF_AUTO_UPDATE_TIME] = "invalid_time"
+            else:
+                return self._save_and_finish({
+                    CONF_AUTO_UPDATE_ENABLED: user_input.get(
+                        CONF_AUTO_UPDATE_ENABLED,
+                        False,
+                    ),
+                    CONF_AUTO_UPDATE_TIME: update_time,
+                })
+
+        return self.async_show_form(
+            step_id="auto_update",
+            data_schema=vol.Schema({
+                vol.Optional(
+                    CONF_AUTO_UPDATE_ENABLED,
+                    default=self._get_option(CONF_AUTO_UPDATE_ENABLED, False),
+                ): BooleanSelector(),
+                vol.Optional(
+                    CONF_AUTO_UPDATE_TIME,
+                    default=self._get_option(
+                        CONF_AUTO_UPDATE_TIME,
+                        DEFAULT_AUTO_UPDATE_TIME,
+                    ),
+                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            }),
+            errors=errors,
         )
 
     async def async_step_pricing(

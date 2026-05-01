@@ -14488,6 +14488,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "_calibration_check_unsub": None,
     }
 
+    from .auto_update import async_setup_auto_update
+    hass.data[DOMAIN][entry.entry_id]["auto_update_cancel"] = async_setup_auto_update(
+        hass,
+        entry,
+    )
+
     # Track firmware version for change notifications (Tesla only)
     if tesla_coordinator:
         last_known_firmware = stored_data.get("last_known_firmware")
@@ -24886,6 +24892,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if octopus_cancel := entry_data.get("octopus_sync_cancel"):
         octopus_cancel()
         _LOGGER.debug("Cancelled Octopus :00/:30 sync cron")
+
+    # Cancel PowerSync HACS auto-update scheduler if it exists
+    if auto_update_cancel := entry_data.get("auto_update_cancel"):
+        auto_update_cancel()
+        _LOGGER.debug("Cancelled PowerSync auto-update scheduler")
 
     # Cancel the curtailment timer if it exists
     if curtailment_cancel := entry_data.get("curtailment_cancel"):

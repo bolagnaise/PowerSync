@@ -756,6 +756,7 @@
       "optimizer_not_installed": "Smart Optimization requires scipy, which is not installed. Check Home Assistant logs for installation errors.",
       "invalid_tariff": "This tariff code is not recognised for the selected network distributor. Check the code on your electricity bill.",
       "invalid_token_format": "Token format is not recognised. PowerSync tokens start with 'psync_' -- make sure you copied the full string.",
+      "invalid_time": "Enter a valid 24-hour time in HH:MM format.",
       "unknown": "An unexpected error occurred. Check the Home Assistant logs for details and try again.",
       "solax_missing_entities": "Could not find the required solax_modbus entities in the selected integration entry. The first missing entity was: {first_missing}. Make sure you selected the correct Solax Modbus integration. If your entities use a prefix like solax_modbus, enter that in Entity prefix override.",
       "solax_connect_failed": "Failed to validate Solax entities. Check the selected integration entry and try again.",
@@ -794,8 +795,22 @@
           "demand_charges": "Demand charge tracking",
           "ev_charging": "EV charging",
           "weather": "Weather & solar forecast",
+          "auto_update": "PowerSync auto-update",
           "solax_battery_options": "Solax connection"
         }
+      },
+      "auto_update": {
+        "title": "PowerSync auto-update",
+        "description": "Install available HACS updates for PowerSync at the scheduled time, then restart Home Assistant.",
+        "data": {
+          "auto_update_enabled": "Enable scheduled auto-update",
+          "auto_update_time": "Update time (HH:MM)"
+        },
+        "data_description": {
+          "auto_update_enabled": "When enabled, PowerSync looks for an install-capable HACS update entity once per day.",
+          "auto_update_time": "Local Home Assistant time. Default is 03:00."
+        },
+        "submit": "Save"
       },
       "pricing": {
         "title": "Electricity pricing",
