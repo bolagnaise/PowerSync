@@ -3752,7 +3752,7 @@ class BatteryHealthSensor(SensorEntity):
     """Sensor for battery health / state of health.
 
     Data sources:
-    - Tesla: TEDAPI scan via mobile app (capacity-based, with per-battery breakdown)
+    - Tesla: TEDAPI / Fleet API BMS scan (capacity-based, with per-battery breakdown)
     - Sungrow/Sigenergy/GoodWe: battery_soh from coordinator (Modbus SOH%)
     - FoxESS: no SOH register available (shows Unknown)
 
@@ -3789,6 +3789,7 @@ class BatteryHealthSensor(SensorEntity):
         self._degradation_percent: float | None = None
         self._battery_count: int | None = None
         self._scanned_at: str | None = None
+        self._source: str | None = None
         self._individual_batteries: list | None = None
 
     @property
@@ -3815,6 +3816,7 @@ class BatteryHealthSensor(SensorEntity):
             self._degradation_percent = stored_health.get("degradation_percent")
             self._battery_count = stored_health.get("battery_count")
             self._scanned_at = stored_health.get("scanned_at")
+            self._source = stored_health.get("source")
             self._individual_batteries = stored_health.get("individual_batteries")
             _LOGGER.info(f"Restored battery health from storage: {self._calculate_health_percent()}% health")
 
@@ -3835,6 +3837,7 @@ class BatteryHealthSensor(SensorEntity):
         self._degradation_percent = data.get("degradation_percent")
         self._battery_count = data.get("battery_count")
         self._scanned_at = data.get("scanned_at")
+        self._source = data.get("source")
         self._individual_batteries = data.get("individual_batteries")
 
         _LOGGER.info(
@@ -3928,7 +3931,7 @@ class BatteryHealthSensor(SensorEntity):
 
         # Source attribution
         if self._original_capacity_wh is not None:
-            attributes["source"] = "mobile_app_tedapi"
+            attributes["source"] = self._source or "mobile_app_tedapi"
         elif self._soh_percent is not None:
             attributes["source"] = "inverter_modbus"
             attributes["state_of_health_percent"] = self._soh_percent

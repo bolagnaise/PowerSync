@@ -986,6 +986,14 @@ class SolcastForecaster:
         self.solcast_entity = solcast_entity
         self.interval_minutes = interval_minutes
 
+    def _find_solcast_state(self, patterns: list[str]):
+        """Find the first usable Solcast forecast sensor from common entity ids."""
+        for entity_id in patterns:
+            state = self.hass.states.get(entity_id)
+            if state and state.state not in ("unavailable", "unknown", None, ""):
+                return state
+        return None
+
     async def get_forecast(
         self,
         horizon_hours: int = 48,
@@ -1108,11 +1116,12 @@ class SolcastForecaster:
             pv_estimate10: P10 estimate
             pv_estimate90: P90 estimate
         """
-        # Try common entity ID patterns
-        today_entity = "sensor.solcast_pv_forecast_forecast_today"
-        tomorrow_entity = "sensor.solcast_pv_forecast_forecast_tomorrow"
-
-        today_state = self.hass.states.get(today_entity)
+        # Try common entity ID patterns used by Solcast integrations.
+        today_state = self._find_solcast_state([
+            "sensor.solcast_pv_forecast_forecast_today",
+            "sensor.solcast_forecast_today",
+            "sensor.solcast_pv_forecast_today",
+        ])
         if not today_state:
             return None
 
@@ -1123,55 +1132,82 @@ class SolcastForecaster:
         # Combine today + tomorrow for 48h coverage
         combined_forecast = list(today_detailed)
 
-        tomorrow_state = self.hass.states.get(tomorrow_entity)
+        tomorrow_state = self._find_solcast_state([
+            "sensor.solcast_pv_forecast_forecast_tomorrow",
+            "sensor.solcast_forecast_tomorrow",
+            "sensor.solcast_pv_forecast_tomorrow",
+        ])
         if tomorrow_state:
-            tomorrow_detailed = tomorrow_state.attributes.get("detailedForecast")
+            tomorrow_detailed = (
+                tomorrow_state.attributes.get("detailedForecast")
+                or tomorrow_state.attributes.get("forecast_tomorrow")
+                or tomorrow_state.attributes.get("detailedHourly")
+                or tomorrow_state.attributes.get("forecasts")
+            )
             if tomorrow_detailed and isinstance(tomorrow_detailed, list):
                 combined_forecast.extend(tomorrow_detailed)
 
         if not combined_forecast:
             return None
 
-        # Build time-indexed lookup (period_start → power in W)
-        forecast_by_time: dict[datetime, float] = {}
+        # Build period-indexed lookup. Newer sensors expose period_start;
+        # Solcast API-style payloads expose period_end. Treat the estimate as
+        # applying to the whole 30-minute period instead of nearest-point
+        # matching, otherwise the LP can shift solar into the wrong slots.
+        forecast_periods: list[tuple[datetime, datetime, float]] = []
         for item in combined_forecast:
             if not isinstance(item, dict):
                 continue
             period_start_str = item.get("period_start")
-            if not period_start_str:
+            period_end_str = item.get("period_end") or item.get("period")
+            if not period_start_str and not period_end_str:
                 continue
             try:
-                if isinstance(period_start_str, datetime):
-                    period_start = period_start_str
+                if period_start_str:
+                    period_start = (
+                        period_start_str
+                        if isinstance(period_start_str, datetime)
+                        else datetime.fromisoformat(period_start_str.replace("Z", "+00:00"))
+                    )
+                    period_end = period_start + timedelta(minutes=30)
                 else:
-                    period_start = datetime.fromisoformat(
-                        period_start_str.replace("Z", "+00:00")
+                    period_end = (
+                        period_end_str
+                        if isinstance(period_end_str, datetime)
+                        else datetime.fromisoformat(period_end_str.replace("Z", "+00:00"))
+                    )
+                    period_start = period_end - timedelta(minutes=30)
+                if start_time.tzinfo is not None:
+                    period_start = (
+                        period_start.replace(tzinfo=start_time.tzinfo)
+                        if period_start.tzinfo is None
+                        else period_start.astimezone(start_time.tzinfo)
+                    )
+                    period_end = (
+                        period_end.replace(tzinfo=start_time.tzinfo)
+                        if period_end.tzinfo is None
+                        else period_end.astimezone(start_time.tzinfo)
                     )
                 pv_kw = item.get("pv_estimate", 0) or 0
-                forecast_by_time[period_start] = pv_kw * 1000  # kW → W
+                forecast_periods.append((period_start, period_end, pv_kw * 1000))
             except (ValueError, TypeError):
                 continue
 
-        if not forecast_by_time:
+        if not forecast_periods:
             return None
 
         # Generate interval forecast aligned to start_time
         result: list[float] = []
         current_time = start_time
-        sorted_times = sorted(forecast_by_time.keys())
+        sorted_periods = sorted(forecast_periods, key=lambda p: p[0])
 
         for _ in range(n_intervals):
-            # Find the forecast period that contains current_time
-            # Solcast uses period_start (beginning of 30-min window)
             power_w = 0.0
-            for i, ft in enumerate(sorted_times):
-                # Check if current_time falls within this period
-                next_ft = sorted_times[i + 1] if i + 1 < len(sorted_times) else ft + timedelta(minutes=30)
-                if ft <= current_time < next_ft:
-                    power_w = forecast_by_time[ft]
+            for period_start, period_end, period_power_w in sorted_periods:
+                if period_start <= current_time < period_end:
+                    power_w = period_power_w
                     break
-                elif ft > current_time:
-                    # Past all known periods — nighttime
+                if period_start > current_time:
                     break
 
             result.append(power_w)
@@ -1185,7 +1221,7 @@ class SolcastForecaster:
         _LOGGER.info(
             "Solcast sensor forecast: %d periods from %d entries, "
             "peak=%.1fW, total=%.1fkWh (48h)",
-            len(result), len(forecast_by_time),
+            len(result), len(forecast_periods),
             max(result) if result else 0,
             total_kwh,
         )
@@ -1320,49 +1356,7 @@ class SolcastForecaster:
         n_intervals: int,
     ) -> list[float]:
         """Parse detailedForecast format from Solcast Solar integration."""
-        # Build a time-indexed lookup of power values
-        forecast_by_time: dict[datetime, float] = {}
-
-        for item in detailed:
-            try:
-                # Parse period_end timestamp
-                period_end_str = item.get('period_end')
-                if not period_end_str:
-                    continue
-
-                if isinstance(period_end_str, datetime):
-                    period_end = period_end_str
-                else:
-                    period_end = datetime.fromisoformat(period_end_str.replace('Z', '+00:00'))
-
-                # Get power estimate (could be pv_estimate, pv_estimate10, pv_estimate90)
-                pv_kw = item.get('pv_estimate', 0) or item.get('pv_estimate50', 0) or 0
-                forecast_by_time[period_end] = pv_kw * 1000  # Convert kW to W
-
-            except (KeyError, ValueError, TypeError) as e:
-                _LOGGER.debug(f"Error parsing forecast item: {e}")
-                continue
-
-        if not forecast_by_time:
-            return []
-
-        # Generate interval forecast
-        result = []
-        current_time = start_time
-        sorted_times = sorted(forecast_by_time.keys())
-
-        for _ in range(n_intervals):
-            # Find the closest forecast time
-            power_w = 0.0
-            for ft in sorted_times:
-                if ft >= current_time:
-                    power_w = forecast_by_time[ft]
-                    break
-
-            result.append(power_w)
-            current_time += timedelta(minutes=self.interval_minutes)
-
-        return result
+        return self._parse_solcast_data(detailed, start_time, n_intervals)
 
     def _parse_hourly_forecast(
         self,
@@ -1403,35 +1397,62 @@ class SolcastForecaster:
         n_intervals: int,
     ) -> list[float]:
         """Parse Solcast forecast data into interval values."""
-        # Create time index for forecasts
-        forecast_by_time: dict[datetime, float] = {}
+        forecast_periods: list[tuple[datetime, datetime, float]] = []
 
         for item in forecasts:
             try:
-                # Solcast provides period_end and pv_estimate (kW)
-                end_time = datetime.fromisoformat(item["period_end"].replace("Z", "+00:00"))
-                pv_kw = item.get("pv_estimate", 0) or 0
-                forecast_by_time[end_time] = pv_kw * 1000  # Convert to W
-            except (KeyError, ValueError):
+                period_start_str = item.get("period_start")
+                period_end_str = item.get("period_end") or item.get("period")
+                if not period_start_str and not period_end_str:
+                    continue
+                if period_start_str:
+                    start = (
+                        period_start_str
+                        if isinstance(period_start_str, datetime)
+                        else datetime.fromisoformat(period_start_str.replace("Z", "+00:00"))
+                    )
+                    end = start + timedelta(minutes=30)
+                else:
+                    end = (
+                        period_end_str
+                        if isinstance(period_end_str, datetime)
+                        else datetime.fromisoformat(period_end_str.replace("Z", "+00:00"))
+                    )
+                    start = end - timedelta(minutes=30)
+                if start_time.tzinfo is not None:
+                    start = (
+                        start.replace(tzinfo=start_time.tzinfo)
+                        if start.tzinfo is None
+                        else start.astimezone(start_time.tzinfo)
+                    )
+                    end = (
+                        end.replace(tzinfo=start_time.tzinfo)
+                        if end.tzinfo is None
+                        else end.astimezone(start_time.tzinfo)
+                    )
+                pv_kw = item.get("pv_estimate", 0) or item.get("pv_estimate50", 0) or 0
+                forecast_periods.append((start, end, pv_kw * 1000))
+            except (KeyError, ValueError, TypeError) as e:
+                _LOGGER.debug(f"Error parsing Solcast forecast item: {e}")
                 continue
+
+        if not forecast_periods:
+            return []
 
         # Generate interval forecast
         result = []
         current_time = start_time
+        sorted_periods = sorted(forecast_periods, key=lambda p: p[0])
 
         for _ in range(n_intervals):
-            # Find closest forecast
-            closest_time = min(
-                forecast_by_time.keys(),
-                key=lambda t: abs((t - current_time).total_seconds()),
-                default=None,
-            )
-
-            if closest_time and abs((closest_time - current_time).total_seconds()) < 3600:
-                result.append(forecast_by_time[closest_time])
-            else:
-                result.append(0.0)
-
+            power_w = 0.0
+            for period_start, period_end, period_power_w in sorted_periods:
+                if period_start <= current_time < period_end:
+                    power_w = period_power_w
+                    break
+                if period_start > current_time:
+                    break
+            result.append(power_w)
             current_time += timedelta(minutes=self.interval_minutes)
 
         return result

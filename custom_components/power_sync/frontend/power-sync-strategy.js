@@ -2184,8 +2184,9 @@ function _batteryHealth(e, hass) {
 {% set scan = state_attr('${healthEntity}', 'last_scan') %}
 {% set soh = state_attr('${healthEntity}', 'state_of_health_percent') %}
 {% set has_follower = state_attr('${healthEntity}', 'battery_1_is_follower') or state_attr('${healthEntity}', 'battery_2_is_follower') or state_attr('${healthEntity}', 'battery_3_is_follower') or state_attr('${healthEntity}', 'battery_4_is_follower') %}
-{%- if source in ('mobile_app_tedapi', 'mobile_app', 'fleet_api') %}
-**Capacity:** {{ current }} / {{ original }} kWh | **Last scan:** {{ scan[:10] if scan else 'N/A' }}
+{% set source_label = 'local gateway' if source == 'ha_local_tedapi' else 'Fleet API relay' if source == 'ha_fleet_api_relay' else 'mobile local scan' if source == 'mobile_app_tedapi' else 'mobile cloud RSA' if source == 'mobile_app_cloud_rsa' else source %}
+{%- if source in ('mobile_app_tedapi', 'mobile_app', 'fleet_api', 'ha_local_tedapi', 'ha_fleet_api_relay', 'mobile_app_cloud_rsa') %}
+**Capacity:** {{ current }} / {{ original }} kWh | **Last scan:** {{ scan[:10] if scan else 'N/A' }} | **Source:** {{ source_label }}
 {%- if has_follower %} *(follower capacity inferred from aggregate)*{%- endif %}
 {%- elif source == 'inverter_modbus' %}
 **State of Health:** {{ soh }}% (from inverter)

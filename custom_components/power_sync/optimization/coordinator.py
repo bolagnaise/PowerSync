@@ -164,6 +164,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_export_prices: list[float] | None = None     # $/kWh values (LP-adjusted)
         self._last_display_import_prices: list[float] | None = None  # $/kWh actual tariff
         self._last_display_export_prices: list[float] | None = None  # $/kWh actual tariff
+        self._solar_nowcast_derate: float = 1.0
+        self._last_solar_nowcast_ratio: float | None = None
+        self._last_logged_solar_nowcast_derate: float | None = None
 
         # Battery specs source tracking
         self._battery_specs_source = "default"  # "default", "auto", or "manual"
@@ -1019,6 +1022,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # Convert forecasts from Watts (forecaster output) to kW (LP input)
             solar_forecast = [v / 1000.0 for v in solar] if solar else []
             load_forecast = [v / 1000.0 for v in load] if load else []
+
+            if solar_forecast:
+                solar_forecast = self._apply_solar_nowcast_derate(solar_forecast, soc)
 
             # Curtailment-aware solar: cap forecast during predicted curtailment periods
             if solar_forecast and load_forecast and export_prices and self._entry:
@@ -2806,6 +2812,84 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return (decayed_import, decayed_export)
 
+    def _apply_solar_nowcast_derate(
+        self,
+        solar_forecast: list[float],
+        soc: float,
+        fade_hours: float = 6.0,
+    ) -> list[float]:
+        """Reduce near-term solar forecast when live production is under forecast.
+
+        The LP is deterministic: if the solar forecast says energy is coming, it
+        will rationally wait for that energy instead of grid-charging earlier.
+        Prices can be treated as firm over the near horizon, but solar needs a
+        live reality check. When current production is materially below the
+        first forecast slots, derate the next few hours and fade back to the raw
+        Solcast forecast.
+        """
+        if not solar_forecast:
+            return solar_forecast
+        if soc >= 0.98:
+            # Near-full batteries and curtailment can make measured solar lower
+            # than potential production. Don't learn a false cloud signal there.
+            return solar_forecast
+        if not self.energy_coordinator or not self.energy_coordinator.data:
+            return solar_forecast
+
+        data = self.energy_coordinator.data
+        try:
+            actual_kw = max(0.0, float(data.get("solar_power", 0) or 0))
+        except (TypeError, ValueError):
+            return solar_forecast
+
+        window = [max(0.0, v) for v in solar_forecast[:3] if v is not None]
+        if not window:
+            return solar_forecast
+        forecast_now_kw = sum(window) / len(window)
+        if forecast_now_kw < 0.5:
+            # Dawn/dusk and very low production are too noisy to learn from.
+            return solar_forecast
+
+        ratio = actual_kw / forecast_now_kw if forecast_now_kw > 0 else 1.0
+        ratio = max(0.0, min(1.5, ratio))
+        self._last_solar_nowcast_ratio = ratio
+
+        if ratio < 0.75:
+            target = max(0.35, min(1.0, ratio + 0.10))
+            self._solar_nowcast_derate = min(
+                self._solar_nowcast_derate,
+                (self._solar_nowcast_derate * 0.35) + (target * 0.65),
+            )
+        elif ratio >= 0.9:
+            self._solar_nowcast_derate = min(1.0, self._solar_nowcast_derate + 0.08)
+
+        if self._solar_nowcast_derate >= 0.98:
+            return solar_forecast
+
+        interval = self._config.interval_minutes
+        adjusted: list[float] = []
+        for t, value in enumerate(solar_forecast):
+            hours_ahead = (t * interval) / 60.0
+            weight = max(0.0, 1.0 - (hours_ahead / fade_hours))
+            factor = 1.0 - ((1.0 - self._solar_nowcast_derate) * weight)
+            adjusted.append(value * factor)
+
+        if (
+            self._last_logged_solar_nowcast_derate is None
+            or abs(self._last_logged_solar_nowcast_derate - self._solar_nowcast_derate) >= 0.05
+        ):
+            _LOGGER.info(
+                "Solar forecast nowcast derate: live %.1fkW vs forecast %.1fkW "
+                "(%.0f%%), applying %.0f%% factor now fading to 100%% over %.0fh",
+                actual_kw,
+                forecast_now_kw,
+                ratio * 100,
+                self._solar_nowcast_derate * 100,
+                fade_hours,
+            )
+            self._last_logged_solar_nowcast_derate = self._solar_nowcast_derate
+        return adjusted
+
     @staticmethod
     def _get_entry_start_time(e: dict) -> str:
         """Get the start time of a price entry across all provider formats.
@@ -4123,7 +4207,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         data: dict[str, Any] = {
             "available": self._last_solar_forecast is not None,
+            "solar_nowcast_derate": round(self._solar_nowcast_derate, 3),
         }
+        if self._last_solar_nowcast_ratio is not None:
+            data["solar_nowcast_ratio"] = round(self._last_solar_nowcast_ratio, 3)
         dt_h = self._config.interval_minutes / 60
 
         if self._last_solar_forecast:
