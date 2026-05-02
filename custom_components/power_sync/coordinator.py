@@ -6418,6 +6418,18 @@ class OctopusPriceCoordinator(DataUpdateCoordinator):
                 current_prices.append(amber_entry)
             export_forecast.append(amber_entry)
 
+        if not export_forecast:
+            default_export_pence = 4.1
+            for price in forecast_prices:
+                amber_entry = dict(price)
+                amber_entry["perKwh"] = -default_export_pence
+                amber_entry["channelType"] = "feedIn"
+
+                if amber_entry.get("type") == "CurrentInterval":
+                    current_prices.append(amber_entry)
+                export_forecast.append(amber_entry)
+            export_tariff = export_tariff or "synthetic_seg"
+
         combined_forecast = forecast_prices + export_forecast
 
         current_import = next(

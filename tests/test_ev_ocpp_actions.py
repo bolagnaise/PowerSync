@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import sys
 import types
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -154,6 +155,57 @@ def _zaptec_hass(cached_state: dict):
         "zaptec_cached_state": cached_state,
     })
     return hass, client
+
+
+def _install_solar_surplus_runtime_stubs(monkeypatch, live_status: dict):
+    ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
+
+    async def get_ev_location(*args, **kwargs):
+        return "home"
+
+    ev_planner.get_ev_location = get_ev_location
+    monkeypatch.setitem(sys.modules, "power_sync.automations.ev_charging_planner", ev_planner)
+
+    ev_session = types.ModuleType("power_sync.automations.ev_charging_session")
+    ev_session.get_session_manager = lambda: None
+    monkeypatch.setitem(sys.modules, "power_sync.automations.ev_charging_session", ev_session)
+
+    async def fake_live_status(*args, **kwargs):
+        return live_status
+
+    set_amps_calls: list[int] = []
+
+    async def fake_set_vehicle_amps(hass, config_entry, vehicle_id, amps, params):
+        set_amps_calls.append(amps)
+        return True
+
+    monkeypatch.setattr(actions, "_get_tesla_live_status", fake_live_status)
+    monkeypatch.setattr(actions, "_set_vehicle_amps", fake_set_vehicle_amps)
+    return set_amps_calls
+
+
+def _solar_surplus_state(current_amps: int = 8) -> dict:
+    return {
+        "active": True,
+        "current_amps": current_amps,
+        "target_amps": current_amps,
+        "charging_started": True,
+        "entity_max_rechecked": True,
+        "params": {
+            "dynamic_mode": "solar_surplus",
+            "charger_type": "tesla",
+            "min_charge_amps": 1,
+            "max_charge_amps": 32,
+            "voltage": 240,
+            "phases": 1,
+            "household_buffer_kw": 0.5,
+            "surplus_calculation": "grid_based",
+            "sustained_surplus_minutes": 3,
+            "stop_delay_minutes": 5,
+            "min_battery_soc": 20,
+            "pause_below_soc": 10,
+        },
+    }
 
 
 def test_ocpp_amps_falls_back_to_hacs_number_entity():
@@ -523,6 +575,61 @@ def test_manual_session_replaces_existing_owner_without_physical_stop():
     assert hass.data["power_sync"]["entry-1"]["ev_ownership"]["VIN123"]["owner_mode"] == "manual"
     assert cancelled == [True]
     assert hass.services.calls == []
+
+
+def test_solar_surplus_stop_delay_holds_current_amps_on_first_low_sample(monkeypatch):
+    hass = _Hass([])
+    vehicle_id = "VIN123"
+    actions._dynamic_ev_state.clear()
+    actions._dynamic_ev_state["entry-1"] = {
+        vehicle_id: _solar_surplus_state(current_amps=8),
+    }
+    set_amps_calls = _install_solar_surplus_runtime_stubs(
+        monkeypatch,
+        {
+            "battery_soc": 40,
+            "grid_power": 2000,
+            "battery_power": 0,
+            "solar_power": 0,
+            "load_power": 0,
+        },
+    )
+
+    asyncio.run(
+        actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id)
+    )
+
+    state = actions._dynamic_ev_state["entry-1"][vehicle_id]
+    assert state["current_amps"] == 8
+    assert state["target_amps"] == 8
+    assert state["low_surplus_start"] is not None
+    assert set_amps_calls == []
+
+
+def test_solar_surplus_stop_delay_stops_after_elapsed_delay(monkeypatch):
+    hass = _Hass([])
+    vehicle_id = "VIN123"
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=8)
+    state["low_surplus_start"] = datetime.now() - timedelta(minutes=6)
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+    set_amps_calls = _install_solar_surplus_runtime_stubs(
+        monkeypatch,
+        {
+            "battery_soc": 40,
+            "grid_power": 2000,
+            "battery_power": 0,
+            "solar_power": 0,
+            "load_power": 0,
+        },
+    )
+
+    asyncio.run(
+        actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id)
+    )
+
+    assert actions._dynamic_ev_state["entry-1"][vehicle_id]["current_amps"] == 0
+    assert set_amps_calls == [0]
 
 
 def test_clear_tracked_session_does_not_send_physical_stop():

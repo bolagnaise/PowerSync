@@ -13245,6 +13245,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.info("Entry state: %s", entry.state)
     _LOGGER.info("=" * 60)
 
+    def _entry_value(key: str, default: Any = None) -> Any:
+        """Read config entry options with data fallback."""
+        return entry.options.get(key, entry.data.get(key, default))
+
     # Register the parent (hub) device.
     dev_reg = dr.async_get(hass)
     dev_reg.async_get_or_create(
@@ -13343,17 +13347,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber")
     )
 
-    # Only treat stored Amber token as active when the provider actually uses Amber prices.
-    # GloBird / AEMO VPP / other custom-tariff entries may have a stale token from a prior
-    # configuration; creating an AmberPriceCoordinator for them causes a 403 on first
-    # refresh → ConfigEntryNotReady → "Failed setup, will retry".
-    has_amber = (
-        bool(entry.data.get(CONF_AMBER_API_TOKEN))
-        and electricity_provider not in ("globird", "aemo_vpp", "tou_only", "other", "nz")
-    )
     flow_power_price_source = entry.options.get(
         CONF_FLOW_POWER_PRICE_SOURCE,
         entry.data.get(CONF_FLOW_POWER_PRICE_SOURCE, "amber")
+    )
+    # Only treat a stored Amber token as active when the selected provider
+    # actually uses Amber prices. Other providers can carry stale Amber tokens
+    # from a previous configuration, and using them masks the real provider
+    # coordinator.
+    has_amber = (
+        bool(entry.data.get(CONF_AMBER_API_TOKEN))
+        and (
+            electricity_provider == "amber"
+            or (
+                electricity_provider == "flow_power"
+                and flow_power_price_source == "amber"
+            )
+        )
     )
     has_flow_power_aemo = (
         electricity_provider == "flow_power" and
@@ -13367,7 +13377,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Check for Octopus Energy UK configuration
     has_octopus = electricity_provider == "octopus" and bool(
-        entry.data.get(CONF_OCTOPUS_PRODUCT_CODE)
+        _entry_value(CONF_OCTOPUS_PRODUCT_CODE)
     )
 
     # Check for EPEX Day-Ahead (EU) configuration
@@ -14286,11 +14296,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Initialize Octopus Energy UK Price Coordinator if configured
     octopus_coordinator = None
     if has_octopus:
-        octopus_product_code = entry.data.get(CONF_OCTOPUS_PRODUCT_CODE)
-        octopus_tariff_code = entry.data.get(CONF_OCTOPUS_TARIFF_CODE)
-        octopus_region = entry.data.get(CONF_OCTOPUS_REGION, "C")
-        octopus_export_product_code = entry.data.get(CONF_OCTOPUS_EXPORT_PRODUCT_CODE)
-        octopus_export_tariff_code = entry.data.get(CONF_OCTOPUS_EXPORT_TARIFF_CODE)
+        octopus_product_code = _entry_value(CONF_OCTOPUS_PRODUCT_CODE)
+        octopus_tariff_code = _entry_value(CONF_OCTOPUS_TARIFF_CODE)
+        octopus_region = _entry_value(CONF_OCTOPUS_REGION, "C")
+        octopus_export_product_code = _entry_value(CONF_OCTOPUS_EXPORT_PRODUCT_CODE)
+        octopus_export_tariff_code = _entry_value(CONF_OCTOPUS_EXPORT_TARIFF_CODE)
 
         # Try to discover actual export tariff from user's Octopus account
         if not octopus_export_product_code:
@@ -14316,7 +14326,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Fallback: derive export codes from product key if not stored or discovered
         if not octopus_export_product_code:
-            octopus_product_key = entry.data.get(CONF_OCTOPUS_PRODUCT, "")
+            octopus_product_key = _entry_value(CONF_OCTOPUS_PRODUCT, "")
             fallback_export_code = OCTOPUS_EXPORT_PRODUCT_CODES.get(octopus_product_key)
             if fallback_export_code:
                 octopus_export_product_code = fallback_export_code

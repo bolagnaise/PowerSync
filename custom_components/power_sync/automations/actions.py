@@ -3932,6 +3932,7 @@ async def _dynamic_ev_update_surplus(
             low_surplus_start = state.get("low_surplus_start")
             if low_surplus_start is None:
                 state["low_surplus_start"] = datetime.now()
+                new_amps = current_amps
             elif (datetime.now() - low_surplus_start).total_seconds() >= stop_delay_minutes * 60:
                 # Stop charging after delay
                 _LOGGER.info(f"⚡ Solar surplus EV: Stopping - insufficient surplus for {stop_delay_minutes} min")

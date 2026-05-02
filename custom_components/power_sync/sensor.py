@@ -184,7 +184,14 @@ from .const import (
     SENSOR_FAMILY_EV_CHARGING,
     SENSOR_FAMILY_OCTOPUS,
 )
-from .coordinator import AmberPriceCoordinator, LocalvoltsPriceCoordinator, TeslaEnergyCoordinator, DemandChargeCoordinator, SolcastForecastCoordinator
+from .coordinator import (
+    AmberPriceCoordinator,
+    LocalvoltsPriceCoordinator,
+    OctopusPriceCoordinator,
+    TeslaEnergyCoordinator,
+    DemandChargeCoordinator,
+    SolcastForecastCoordinator,
+)
 from . import get_current_price_from_tariff_schedule
 
 _LOGGER = logging.getLogger(__name__)
@@ -1055,6 +1062,7 @@ async def async_setup_entry(
     domain_data = hass.data[DOMAIN][entry.entry_id]
     amber_coordinator: AmberPriceCoordinator | None = domain_data.get("amber_coordinator")
     localvolts_coordinator: LocalvoltsPriceCoordinator | None = domain_data.get("localvolts_coordinator")
+    octopus_coordinator: OctopusPriceCoordinator | None = domain_data.get("octopus_coordinator")
     tesla_coordinator: TeslaEnergyCoordinator | None = domain_data.get("tesla_coordinator")
     sigenergy_coordinator = domain_data.get("sigenergy_coordinator")
     sungrow_coordinator = domain_data.get("sungrow_coordinator")
@@ -1096,6 +1104,16 @@ async def async_setup_entry(
             entities.append(
                 AmberPriceSensor(
                     coordinator=localvolts_coordinator,
+                    description=description,
+                    entry=entry,
+                )
+            )
+    elif octopus_coordinator:
+        _LOGGER.info("Adding Octopus price sensors (import and export)")
+        for description in PRICE_SENSORS:
+            entities.append(
+                AmberPriceSensor(
+                    coordinator=octopus_coordinator,
                     description=description,
                     entry=entry,
                 )
