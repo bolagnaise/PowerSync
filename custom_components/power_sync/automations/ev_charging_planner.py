@@ -1502,7 +1502,11 @@ class PriceForecaster:
                     if custom_tariff:
                         # Convert custom_tariff to tariff_schedule format
                         from .. import convert_custom_tariff_to_schedule
-                        tariff_schedule = convert_custom_tariff_to_schedule(custom_tariff)
+                        from ..currency import currency_for_entry
+                        tariff_schedule = convert_custom_tariff_to_schedule(
+                            custom_tariff,
+                            currency=currency_for_entry(self.config_entry, self.hass),
+                        )
                         _LOGGER.debug(f"Using custom tariff for forecast: {custom_tariff.get('name')}")
 
             if not tariff_schedule:

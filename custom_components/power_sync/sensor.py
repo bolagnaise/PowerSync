@@ -15,7 +15,6 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
-    CURRENCY_DOLLAR,
     UnitOfEnergy,
     UnitOfPower,
     UnitOfTemperature,
@@ -192,6 +191,14 @@ from .coordinator import (
     DemandChargeCoordinator,
     SolcastForecastCoordinator,
 )
+from .currency import (
+    currency_for_entry,
+    currency_metadata,
+    major_price_unit,
+    minor_price_unit,
+    money_unit,
+    normalize_currency,
+)
 from . import get_current_price_from_tariff_schedule
 
 _LOGGER = logging.getLogger(__name__)
@@ -207,6 +214,92 @@ class PowerSyncSensorEntityDescription(SensorEntityDescription):
     # Currently only "powerwall" is recognised — anything else falls back to
     # the default family_device_info routing so existing sensors are unaffected.
     device_section: str | None = None
+    # Currency unit kind. "money" is a pure monetary total, "major_rate" is
+    # ISO/kWh, "market_rate" is ISO/MWh, and "minor_rate" is p/ct/c per kWh.
+    currency_unit: str | None = None
+    currency_attrs: bool = False
+
+
+RATE_CURRENCY_UNITS = {"major_rate", "market_rate", "minor_rate"}
+
+
+def _currency_unit_for_kind(kind: str | None, currency: str) -> str | None:
+    """Return a unit string for a PowerSync currency unit kind."""
+    if kind == "money":
+        return money_unit(currency)
+    if kind == "major_rate":
+        return major_price_unit(currency)
+    if kind == "market_rate":
+        return major_price_unit(currency, "MWh")
+    if kind == "minor_rate":
+        return minor_price_unit(currency)
+    return None
+
+
+def _entity_currency(entity: Any, tariff_data: dict[str, Any] | None = None) -> str:
+    """Return the currency for an entity, optionally preferring tariff metadata."""
+    if tariff_data:
+        tariff_currency = normalize_currency(tariff_data.get("currency"), "")
+        if tariff_currency:
+            return tariff_currency
+    return currency_for_entry(getattr(entity, "_entry", None), getattr(entity, "hass", None))
+
+
+def _entity_currency_attrs(
+    entity: Any,
+    attrs: dict[str, Any] | None,
+    tariff_data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Merge currency metadata into attributes for currency-aware sensors."""
+    base = dict(attrs or {})
+    description = getattr(entity, "entity_description", None)
+    kind = getattr(description, "currency_unit", None) or getattr(entity, "_attr_currency_unit", None)
+    include = (
+        getattr(description, "currency_attrs", False)
+        or getattr(entity, "_attr_currency_attrs", False)
+    )
+    if kind and include:
+        base.update(currency_metadata(_entity_currency(entity, tariff_data)))
+    return base
+
+
+class PowerSyncCurrencyMixin:
+    """Mixin for dynamic currency units on PowerSync sensors."""
+
+    def _currency_source_data(self) -> dict[str, Any] | None:
+        """Return optional tariff data that should override entry currency."""
+        return None
+
+    @property
+    def _currency_unit_kind(self) -> str | None:
+        description = getattr(self, "entity_description", None)
+        return getattr(description, "currency_unit", None) or getattr(self, "_attr_currency_unit", None)
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        """Return a provider/HA currency-aware unit when requested."""
+        unit = _currency_unit_for_kind(
+            self._currency_unit_kind,
+            _entity_currency(self, self._currency_source_data()),
+        )
+        if unit:
+            return unit
+        description = getattr(self, "entity_description", None)
+        return (
+            getattr(self, "_attr_native_unit_of_measurement", None)
+            or getattr(description, "native_unit_of_measurement", None)
+        )
+
+    @property
+    def device_class(self) -> SensorDeviceClass | None:
+        """Avoid monetary device class for price-rate sensors."""
+        if self._currency_unit_kind in RATE_CURRENCY_UNITS:
+            return None
+        description = getattr(self, "entity_description", None)
+        return (
+            getattr(self, "_attr_device_class", None)
+            or getattr(description, "device_class", None)
+        )
 
 
 def _get_import_price(data):
@@ -265,8 +358,8 @@ PRICE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_CURRENT_IMPORT_PRICE,
         name="Current Import Price",
-        native_unit_of_measurement=f"{CURRENCY_DOLLAR}/{UnitOfEnergy.KILO_WATT_HOUR}",
-        device_class=SensorDeviceClass.MONETARY,
+        currency_unit="major_rate",
+        currency_attrs=True,
         suggested_display_precision=4,
         value_fn=_get_import_price,
         attr_fn=lambda data: {
@@ -284,8 +377,8 @@ PRICE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_CURRENT_EXPORT_PRICE,
         name="Current Export Price",
-        native_unit_of_measurement=f"{CURRENCY_DOLLAR}/{UnitOfEnergy.KILO_WATT_HOUR}",
-        device_class=SensorDeviceClass.MONETARY,
+        currency_unit="major_rate",
+        currency_attrs=True,
         suggested_display_precision=4,
         icon="mdi:transmission-tower-export",
         value_fn=_get_export_price,
@@ -410,7 +503,8 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DAILY_IMPORT_COST,
         name="Daily Import Cost",
-        native_unit_of_measurement=CURRENCY_DOLLAR,
+        currency_unit="money",
+        currency_attrs=True,
         device_class=SensorDeviceClass.MONETARY,
         state_class=SensorStateClass.TOTAL,
         suggested_display_precision=2,
@@ -420,7 +514,8 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DAILY_EXPORT_EARNINGS,
         name="Daily Export Earnings",
-        native_unit_of_measurement=CURRENCY_DOLLAR,
+        currency_unit="money",
+        currency_attrs=True,
         device_class=SensorDeviceClass.MONETARY,
         state_class=SensorStateClass.TOTAL,
         suggested_display_precision=2,
@@ -430,7 +525,8 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DAILY_AVG_COST_PER_KWH,
         name="Average Cost per kWh Today",
-        native_unit_of_measurement=f"{CURRENCY_DOLLAR}/kWh",
+        currency_unit="major_rate",
+        currency_attrs=True,
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=3,
         icon="mdi:cash-clock",
@@ -439,7 +535,8 @@ ENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_MTD_AVG_COST_PER_KWH,
         name="Average Cost per kWh Month to Date",
-        native_unit_of_measurement=f"{CURRENCY_DOLLAR}/kWh",
+        currency_unit="major_rate",
+        currency_attrs=True,
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=3,
         icon="mdi:calendar-month",
@@ -891,7 +988,8 @@ DEMAND_CHARGE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DEMAND_CHARGE_COST,
         name="Estimated Demand Charge Cost",
-        native_unit_of_measurement=CURRENCY_DOLLAR,
+        currency_unit="money",
+        currency_attrs=True,
         device_class=SensorDeviceClass.MONETARY,
         suggested_display_precision=2,
         value_fn=lambda data: data.get("estimated_cost", 0.0) if data else 0.0,
@@ -899,7 +997,8 @@ DEMAND_CHARGE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_DAILY_SUPPLY_CHARGE_COST,
         name="Daily Supply Charge Cost This Month",
-        native_unit_of_measurement=CURRENCY_DOLLAR,
+        currency_unit="money",
+        currency_attrs=True,
         device_class=SensorDeviceClass.MONETARY,
         state_class=SensorStateClass.TOTAL,  # MONETARY only supports 'total', not 'total_increasing'
         suggested_display_precision=2,
@@ -908,7 +1007,8 @@ DEMAND_CHARGE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_MONTHLY_SUPPLY_CHARGE,
         name="Monthly Supply Charge",
-        native_unit_of_measurement=CURRENCY_DOLLAR,
+        currency_unit="money",
+        currency_attrs=True,
         device_class=SensorDeviceClass.MONETARY,
         suggested_display_precision=2,
         value_fn=lambda data: data.get("monthly_supply_charge", 0.0) if data else 0.0,
@@ -916,7 +1016,8 @@ DEMAND_CHARGE_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_TOTAL_MONTHLY_COST,
         name="Total Estimated Monthly Cost",
-        native_unit_of_measurement=CURRENCY_DOLLAR,
+        currency_unit="money",
+        currency_attrs=True,
         device_class=SensorDeviceClass.MONETARY,
         state_class=SensorStateClass.TOTAL,
         suggested_display_precision=2,
@@ -930,8 +1031,8 @@ AEMO_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_AEMO_PRICE,
         name="AEMO Wholesale Price",
-        native_unit_of_measurement="$/MWh",
-        device_class=SensorDeviceClass.MONETARY,
+        currency_unit="market_rate",
+        currency_attrs=True,
         suggested_display_precision=2,
         value_fn=lambda data: data.get("last_price") if data else None,
         attr_fn=lambda data: {
@@ -1620,7 +1721,7 @@ async def _async_add_powerwall_block_sensors(
         )
 
 
-class AmberPriceSensor(CoordinatorEntity, SensorEntity):
+class AmberPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEntity):
     """Sensor for Amber electricity prices."""
 
     entity_description: PowerSyncSensorEntityDescription
@@ -1661,8 +1762,10 @@ class AmberPriceSensor(CoordinatorEntity, SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return additional attributes."""
         if self.entity_description.attr_fn:
-            return self.entity_description.attr_fn(self.coordinator.data)
-        return {}
+            attrs = self.entity_description.attr_fn(self.coordinator.data)
+        else:
+            attrs = {}
+        return _entity_currency_attrs(self, attrs)
 
 
 _LOCAL_GRID_STATUS_TO_CLOUD = {
@@ -1728,7 +1831,7 @@ def _local_data_is_fresh(local_coord: Any) -> bool:
     return (_time.time() - last_ts) <= _LOCAL_STALE_SECONDS
 
 
-class TeslaEnergySensor(CoordinatorEntity, SensorEntity):
+class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEntity):
     """Sensor for Tesla energy data.
 
     Reads cloud-coordinator data via the entity description's ``value_fn`` by
@@ -1815,6 +1918,15 @@ class TeslaEnergySensor(CoordinatorEntity, SensorEntity):
             self._local_unsub()
             self._local_unsub = None
         await super().async_will_remove_from_hass()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return additional attributes."""
+        if self.entity_description.attr_fn:
+            attrs = self.entity_description.attr_fn(self.coordinator.data)
+        else:
+            attrs = {}
+        return _entity_currency_attrs(self, attrs)
 
 
 class _PowerwallLocalSensorBase(CoordinatorEntity, SensorEntity):
@@ -2078,7 +2190,7 @@ class OptimizerActionSensor(CoordinatorEntity, SensorEntity):
         return {}
 
 
-class DemandChargeSensor(CoordinatorEntity, SensorEntity):
+class DemandChargeSensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEntity):
     """Sensor for demand charge tracking (simplified - uses coordinator data)."""
 
     entity_description: PowerSyncSensorEntityDescription
@@ -2133,10 +2245,10 @@ class DemandChargeSensor(CoordinatorEntity, SensorEntity):
             attributes["peak_kw"] = peak_kw
             attributes["rate"] = rate
 
-        return attributes
+        return _entity_currency_attrs(self, attributes)
 
 
-class AEMOSpikeSensor(SensorEntity):
+class AEMOSpikeSensor(PowerSyncCurrencyMixin, SensorEntity):
     """Sensor for AEMO spike detection status."""
 
     entity_description: PowerSyncSensorEntityDescription
@@ -2171,8 +2283,10 @@ class AEMOSpikeSensor(SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return additional attributes."""
         if self.entity_description.attr_fn:
-            return self.entity_description.attr_fn(self._spike_manager.get_status())
-        return {}
+            attrs = self.entity_description.attr_fn(self._spike_manager.get_status())
+        else:
+            attrs = {}
+        return _entity_currency_attrs(self, attrs)
 
 
 class SavingSessionSensor(CoordinatorEntity, SensorEntity):
@@ -2286,8 +2400,8 @@ LP_FORECAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_LP_IMPORT_PRICE_FORECAST,
         name="Import Price Forecast",
-        native_unit_of_measurement=f"{CURRENCY_DOLLAR}/{UnitOfEnergy.KILO_WATT_HOUR}",
-        device_class=SensorDeviceClass.MONETARY,
+        currency_unit="major_rate",
+        currency_attrs=True,
         suggested_display_precision=4,
         icon="mdi:cash-clock",
         value_fn=lambda data: data.get("import_price_avg") if data and data.get("available") else None,
@@ -2300,8 +2414,8 @@ LP_FORECAST_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_LP_EXPORT_PRICE_FORECAST,
         name="Export Price Forecast",
-        native_unit_of_measurement=f"{CURRENCY_DOLLAR}/{UnitOfEnergy.KILO_WATT_HOUR}",
-        device_class=SensorDeviceClass.MONETARY,
+        currency_unit="major_rate",
+        currency_attrs=True,
         suggested_display_precision=4,
         icon="mdi:cash-clock",
         value_fn=lambda data: data.get("export_price_avg") if data and data.get("available") else None,
@@ -2359,7 +2473,7 @@ AMBER_USAGE_SENSORS = (
 )
 
 
-class LPForecastSensor(CoordinatorEntity, SensorEntity):
+class LPForecastSensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEntity):
     """Sensor for LP optimizer forecast data (solar, load, prices).
 
     Reads forecast data stored by the OptimizationCoordinator each
@@ -2404,8 +2518,10 @@ class LPForecastSensor(CoordinatorEntity, SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return additional attributes."""
         if self.entity_description.attr_fn:
-            return self.entity_description.attr_fn(self._forecast_data)
-        return {}
+            attrs = self.entity_description.attr_fn(self._forecast_data)
+        else:
+            attrs = {}
+        return _entity_currency_attrs(self, attrs)
 
 
 SIGNAL_TARIFF_UPDATED = "power_sync_tariff_updated_{}"
@@ -2494,6 +2610,10 @@ class TariffScheduleSensor(SensorEntity):
         result = get_current_price_from_tariff_schedule(tariff_data)
         self._last_price_result = result
         return result
+
+    def _tariff_currency(self, tariff_data: dict[str, Any] | None = None) -> str:
+        """Return tariff currency, falling back to provider/HA metadata."""
+        return _entity_currency(self, tariff_data)
 
     def _rebuild_schedule_cache(self, tariff_data: dict) -> None:
         """Rebuild the static parts of extra_state_attributes (schedule lists, raw dicts).
@@ -2613,7 +2733,8 @@ class TariffScheduleSensor(SensorEntity):
         if tariff_data:
             buy_price_cents, _, current_period = self._refresh_price(tariff_data)
             if current_period and current_period != "UNKNOWN":
-                return f"{current_period} ({buy_price_cents:.1f}c/kWh)"
+                unit = minor_price_unit(self._tariff_currency(tariff_data))
+                return f"{current_period} ({buy_price_cents:.1f}{unit})"
             return tariff_data.get("last_sync", "Unknown")
         return "Not synced"
 
@@ -2638,6 +2759,7 @@ class TariffScheduleSensor(SensorEntity):
 
         return {
             **self._schedule_cache,
+            **currency_metadata(self._tariff_currency(tariff_data)),
             "current_period": current_period,
             "buy_price": round(buy_price_cents, 2),
             "sell_price": round(sell_price_cents, 2),
@@ -2647,7 +2769,7 @@ class TariffScheduleSensor(SensorEntity):
         }
 
 
-class TariffPriceSensor(SensorEntity):
+class TariffPriceSensor(PowerSyncCurrencyMixin, SensorEntity):
     """Sensor for current price derived from TOU tariff schedule.
 
     This sensor provides current import/export prices for non-Amber users
@@ -2671,13 +2793,17 @@ class TariffPriceSensor(SensorEntity):
         # Use same entity naming as AmberPriceSensor for mobile app compatibility
         # Creates: sensor.power_sync_current_import_price, sensor.power_sync_current_export_price
         self._attr_suggested_object_id = f"power_sync_{sensor_type}"
-        self._attr_native_unit_of_measurement = f"{CURRENCY_DOLLAR}/{UnitOfEnergy.KILO_WATT_HOUR}"
-        self._attr_device_class = SensorDeviceClass.MONETARY
+        self._attr_currency_unit = "major_rate"
+        self._attr_currency_attrs = True
         self._attr_suggested_display_precision = 4
-        self._attr_icon = "mdi:currency-usd" if "import" in sensor_type else "mdi:transmission-tower-export"
+        self._attr_icon = "mdi:cash" if "import" in sensor_type else "mdi:transmission-tower-export"
         self._unsub_dispatcher = None
         self._unsub_time_interval = None
         self._current_period = None
+
+    def _currency_source_data(self) -> dict[str, Any] | None:
+        """Use tariff schedule currency for this tariff-backed price sensor."""
+        return self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {}).get("tariff_schedule")
 
     @property
     def device_info(self):
@@ -2765,7 +2891,7 @@ class TariffPriceSensor(SensorEntity):
         else:
             attributes["channel_type"] = "feedIn"
 
-        return attributes
+        return _entity_currency_attrs(self, attributes, tariff_data)
 
 
 SIGNAL_CURTAILMENT_UPDATED = "power_sync_curtailment_updated_{}"
@@ -3188,7 +3314,7 @@ class InverterStatusSensor(SensorEntity):
         return attrs
 
 
-class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):
+class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEntity):
     """Sensor for Flow Power electricity prices with PEA adjustment.
 
     Shows real-time import price calculated as:
@@ -3228,7 +3354,7 @@ class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):
             self._attr_icon = "mdi:lightning-bolt"
         elif sensor_type == SENSOR_TYPE_CURRENT_IMPORT_PRICE:
             self._attr_name = "Current Import Price"
-            self._attr_icon = "mdi:currency-usd"
+            self._attr_icon = "mdi:cash"
         elif sensor_type == SENSOR_TYPE_CURRENT_EXPORT_PRICE:
             self._attr_name = "Current Export Price"
             self._attr_icon = "mdi:transmission-tower-export"
@@ -3236,8 +3362,8 @@ class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):
             self._attr_name = "Flow Power Export Price"
             self._attr_icon = "mdi:solar-power"
 
-        self._attr_native_unit_of_measurement = f"{CURRENCY_DOLLAR}/{UnitOfEnergy.KILO_WATT_HOUR}"
-        self._attr_device_class = SensorDeviceClass.MONETARY
+        self._attr_currency_unit = "major_rate"
+        self._attr_currency_attrs = True
         self._attr_suggested_display_precision = 4
 
     @property
@@ -3467,10 +3593,10 @@ class FlowPowerPriceSensor(CoordinatorEntity, SensorEntity):
             attributes["is_happy_hour"] = self._is_happy_hour()
             attributes["happy_hour_rate"] = FLOW_POWER_EXPORT_RATES.get(state, 0.0)
 
-        return attributes
+        return _entity_currency_attrs(self, attributes)
 
 
-class FlowPowerTWAPSensor(SensorEntity):
+class FlowPowerTWAPSensor(PowerSyncCurrencyMixin, SensorEntity):
     """Sensor exposing the 30-day rolling TWAP used in PEA calculation.
 
     Shows the dynamic Time Weighted Average Price that replaces the
@@ -3487,7 +3613,8 @@ class FlowPowerTWAPSensor(SensorEntity):
         self._attr_suggested_object_id = f"power_sync_{SENSOR_TYPE_FLOW_POWER_TWAP}"
         self._attr_name = "Flow Power TWAP 30-Day Average"
         self._attr_icon = "mdi:chart-line"
-        self._attr_native_unit_of_measurement = "c/kWh"
+        self._attr_currency_unit = "minor_rate"
+        self._attr_currency_attrs = True
         self._attr_suggested_display_precision = 2
 
     @property
@@ -3536,10 +3663,10 @@ class FlowPowerTWAPSensor(SensorEntity):
                 "using_fallback": True,
                 "twap_dollars": round(FLOW_POWER_MARKET_AVG / 100, 4),
             })
-        return attrs
+        return _entity_currency_attrs(self, attrs)
 
 
-class FlowPowerNetworkTariffSensor(SensorEntity):
+class FlowPowerNetworkTariffSensor(PowerSyncCurrencyMixin, SensorEntity):
     """Sensor showing the current TOU network tariff rate.
 
     Displays the network charge component from the aemo_to_tariff library
@@ -3556,7 +3683,8 @@ class FlowPowerNetworkTariffSensor(SensorEntity):
         self._attr_suggested_object_id = f"power_sync_{SENSOR_TYPE_NETWORK_TARIFF}"
         self._attr_name = "Flow Power Network Tariff"
         self._attr_icon = "mdi:transmission-tower"
-        self._attr_native_unit_of_measurement = "c/kWh"
+        self._attr_currency_unit = "minor_rate"
+        self._attr_currency_attrs = True
         self._attr_suggested_display_precision = 2
 
     @property
@@ -3590,10 +3718,10 @@ class FlowPowerNetworkTariffSensor(SensorEntity):
         }
         if avg_daily is not None:
             attrs["avg_daily_tariff"] = round(avg_daily, 2)
-        return attrs
+        return _entity_currency_attrs(self, attrs)
 
 
-class FlowPowerAmberComparisonSensor(SensorEntity):
+class FlowPowerAmberComparisonSensor(PowerSyncCurrencyMixin, SensorEntity):
     """Sensor showing what the current price would be on Amber Electric.
 
     Calculates: 1.1 * Spot + Tariff + Markup
@@ -3611,8 +3739,8 @@ class FlowPowerAmberComparisonSensor(SensorEntity):
         self._attr_suggested_object_id = f"power_sync_{SENSOR_TYPE_AMBER_COMPARISON}"
         self._attr_name = "Flow Power Amber Comparison"
         self._attr_icon = "mdi:compare-horizontal"
-        self._attr_native_unit_of_measurement = f"{CURRENCY_DOLLAR}/{UnitOfEnergy.KILO_WATT_HOUR}"
-        self._attr_device_class = SensorDeviceClass.MONETARY
+        self._attr_currency_unit = "major_rate"
+        self._attr_currency_attrs = True
         self._attr_suggested_display_precision = 4
 
     @property
@@ -3689,7 +3817,7 @@ class FlowPowerAmberComparisonSensor(SensorEntity):
             amber_cents = FLOW_POWER_GST * wholesale_cents + tariff_rate + markup
             attrs["price_cents"] = round(amber_cents, 2)
 
-        return attrs
+        return _entity_currency_attrs(self, attrs)
 
 
 class FlowPowerPortalSensor(SensorEntity):
@@ -4225,7 +4353,7 @@ class BatteryModeSensor(SensorEntity):
         return attributes
 
 
-class AmberUsageSensor(SensorEntity):
+class AmberUsageSensor(PowerSyncCurrencyMixin, SensorEntity):
     """Sensor for actual metered usage/cost data from Amber Usage API.
 
     Reads from AmberUsageCoordinator via hass.data. Refreshes hourly.
@@ -4233,7 +4361,8 @@ class AmberUsageSensor(SensorEntity):
 
     _attr_has_entity_name = True
     _attr_device_class = SensorDeviceClass.MONETARY
-    _attr_native_unit_of_measurement = CURRENCY_DOLLAR
+    _attr_currency_unit = "money"
+    _attr_currency_attrs = True
     _attr_state_class = SensorStateClass.TOTAL
     _attr_icon = "mdi:cash-check"
 
@@ -4302,7 +4431,7 @@ class AmberUsageSensor(SensorEntity):
         """Return additional attributes."""
         coord = self._get_usage_coordinator()
         if not coord:
-            return {"source": "amber_usage_api"}
+            return _entity_currency_attrs(self, {"source": "amber_usage_api"})
         summary = coord.get_savings_summary(self._period)
         attrs = {
             "import_kwh": summary.get("import_kwh"),
@@ -4316,4 +4445,4 @@ class AmberUsageSensor(SensorEntity):
         if self._value_key == "savings":
             attrs["baseline_cost"] = summary.get("baseline_cost")
             attrs["net_cost"] = summary.get("net_cost")
-        return attrs
+        return _entity_currency_attrs(self, attrs)

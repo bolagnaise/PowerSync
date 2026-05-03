@@ -22,7 +22,7 @@
         "description": "Enter your base rate from your Flow Power bill.",
         "data": {
           "flow_power_state": "NEM region",
-          "flow_power_base_rate": "Base rate (c/kWh)"
+          "flow_power_base_rate": "Base rate"
         },
         "data_description": {
           "flow_power_state": "Your NEM region determines which wholesale price feed is used. Check your bill if unsure.",
@@ -108,23 +108,23 @@
         "data": {
           "spike_protection_enabled": "Enable spike protection",
           "forecast_discrepancy_alert": "Enable forecast discrepancy alert",
-          "forecast_discrepancy_threshold": "Discrepancy threshold (c/kWh)",
+          "forecast_discrepancy_threshold": "Discrepancy threshold",
           "force_tariff_mode_toggle": "Force mode toggle after sync",
           "export_boost_enabled": "Enable export price boost",
-          "export_price_offset": "Offset to add (c/kWh)",
-          "export_min_price": "Minimum floor (c/kWh)",
+          "export_price_offset": "Offset to add",
+          "export_min_price": "Minimum floor",
           "export_boost_start": "Boost start time (HH:MM)",
           "export_boost_end": "Boost end time (HH:MM)",
-          "export_boost_threshold": "Only boost above (c/kWh)",
+          "export_boost_threshold": "Only boost above",
           "chip_mode_enabled": "Enable chip mode",
           "chip_mode_start": "Chip mode start (HH:MM)",
           "chip_mode_end": "Chip mode end (HH:MM)",
-          "chip_mode_threshold": "Price threshold (c/kWh)"
+          "chip_mode_threshold": "Price threshold"
         },
         "data_description": {
           "spike_protection_enabled": "When Amber detects a price spike, artificially inflate buy prices to prevent your battery from charging from grid.",
           "forecast_discrepancy_alert": "Send a mobile notification when predicted and conservative forecasts diverge significantly. Indicates the forecast may be unreliable.",
-          "forecast_discrepancy_threshold": "Average price difference that triggers the alert. Default 10 c/kWh.",
+          "forecast_discrepancy_threshold": "Average price difference that triggers the alert. Default 10 in the selected price unit.",
           "force_tariff_mode_toggle": "After uploading a new tariff, briefly toggle operation mode to force immediate recalculation. Tesla only, causes a ~5 second interruption.",
           "export_boost_enabled": "Artificially increase sell prices during configured hours to encourage battery export during high-value periods.",
           "export_price_offset": "Amount added to the actual Amber export price. Example: Amber 18c + Offset 5c = battery sees 23c.",
@@ -150,7 +150,7 @@
         "data_description": {
           "aemo_spike_enabled": "Required for Globird and AEMO VPP plans that include spike export payments. Disable if your plan does not pay for spike exports.",
           "aemo_region": "Your NEM region determines which AEMO price feed is monitored. Check your electricity bill if unsure.",
-          "aemo_spike_threshold": "Battery exports when the AEMO wholesale price exceeds this value. Default $3,000/MWh matches most Globird and VPP plans. Only change if your plan specifies a different threshold."
+          "aemo_spike_threshold": "Battery exports when the AEMO wholesale price exceeds this value. Default 3,000 in the selected market price unit matches most Globird and VPP plans. Only change if your plan specifies a different threshold."
         },
         "submit": "Next"
       },
@@ -212,9 +212,9 @@
           "skip_tariff": "Skip tariff configuration",
           "plan_name": "Plan name (optional)",
           "tariff_type": "Tariff type",
-          "flat_rate": "Flat rate (c/kWh)",
-          "offpeak_rate": "Off-peak rate (c/kWh)",
-          "fit_rate": "Default feed-in tariff (c/kWh)"
+          "flat_rate": "Flat rate",
+          "offpeak_rate": "Off-peak rate",
+          "fit_rate": "Default feed-in tariff"
         },
         "data_description": {
           "skip_tariff": "Check to use default estimation instead of configuring custom rates.",
@@ -234,8 +234,8 @@
           "period_start": "Start time",
           "period_end": "End time",
           "period_days": "Applies to",
-          "import_rate": "Import rate (c/kWh)",
-          "export_rate": "Export/feed-in rate (c/kWh)",
+          "import_rate": "Import rate",
+          "export_rate": "Export/feed-in rate",
           "add_another": "Add another period"
         },
         "data_description": {
@@ -266,12 +266,12 @@
         "title": "NZ electricity rates",
         "description": "Adjust rates to match your actual plan. All values are in NZD cents per kWh.",
         "data": {
-          "nz_peak_rate": "Peak rate (c/kWh)",
-          "nz_shoulder_rate": "Shoulder rate (c/kWh)",
-          "nz_offpeak_rate": "Off-peak rate (c/kWh)",
-          "nz_peak_export": "Peak export rate (c/kWh)",
-          "nz_offpeak_export": "Off-peak export rate (c/kWh)",
-          "nz_daily_supply": "Daily supply charge (c/day)"
+          "nz_peak_rate": "Peak rate",
+          "nz_shoulder_rate": "Shoulder rate",
+          "nz_offpeak_rate": "Off-peak rate",
+          "nz_peak_export": "Peak export rate",
+          "nz_offpeak_export": "Off-peak export rate",
+          "nz_daily_supply": "Daily supply charge"
         },
         "data_description": {
           "nz_peak_rate": "Weekday peak rate (typically 7-9am and 5-9pm).",
@@ -621,7 +621,7 @@
         "description": "Track peak demand during capacity-based billing periods. Leave unchecked to skip if your plan has no demand charges.",
         "data": {
           "demand_charge_enabled": "Enable demand charge tracking",
-          "demand_charge_rate": "Demand charge rate ($/kW)",
+          "demand_charge_rate": "Demand charge rate",
           "demand_charge_start_time": "Peak start time (HH:MM)",
           "demand_charge_end_time": "Peak end time (HH:MM)",
           "demand_allow_grid_charging": "Allow grid charging during demand windows"
@@ -1132,18 +1132,18 @@
           "battery_curtailment_enabled": "Stop export at negative prices",
           "spike_protection_enabled": "Enable spike protection",
           "forecast_discrepancy_alert": "Enable forecast discrepancy alert",
-          "forecast_discrepancy_threshold": "Discrepancy threshold (c/kWh)",
+          "forecast_discrepancy_threshold": "Discrepancy threshold",
           "force_tariff_mode_toggle": "Force mode toggle after sync",
           "export_boost_enabled": "Enable export price boost",
-          "export_price_offset": "Offset to add (c/kWh)",
-          "export_min_price": "Minimum floor (c/kWh)",
+          "export_price_offset": "Offset to add",
+          "export_min_price": "Minimum floor",
           "export_boost_start": "Boost start time (HH:MM)",
           "export_boost_end": "Boost end time (HH:MM)",
-          "export_boost_threshold": "Only boost above (c/kWh)",
+          "export_boost_threshold": "Only boost above",
           "chip_mode_enabled": "Enable chip mode",
           "chip_mode_start": "Chip mode start (HH:MM)",
           "chip_mode_end": "Chip mode end (HH:MM)",
-          "chip_mode_threshold": "Price threshold (c/kWh)",
+          "chip_mode_threshold": "Price threshold",
           "ac_inverter_curtailment_enabled": "Enable AC inverter curtailment",
           "inverter_brand": "Inverter brand",
           "inverter_model": "Inverter model",
@@ -1159,7 +1159,7 @@
           "spike_protection_enabled": "Artificially inflate buy prices during Amber price spikes to prevent grid charging.",
           "ac_inverter_curtailment_enabled": "Shut down AC-coupled solar inverter when feed-in price is negative. Use if solar bypasses your battery.",
           "forecast_discrepancy_alert": "Send a notification when predicted and conservative forecasts diverge significantly.",
-          "forecast_discrepancy_threshold": "Average price difference that triggers the alert. Default 10 c/kWh.",
+          "forecast_discrepancy_threshold": "Average price difference that triggers the alert. Default 10 in the selected price unit.",
           "force_tariff_mode_toggle": "After uploading a new tariff, briefly toggle operation mode to force recalculation. Tesla only, ~5 second interruption.",
           "export_boost_enabled": "Artificially increase sell prices during configured hours to encourage battery export.",
           "export_price_offset": "Amount added to the actual Amber export price. Example: Amber 18c + Offset 5c = 23c.",
@@ -1176,7 +1176,7 @@
         "data": {
           "flow_power_state": "NEM region",
           "flow_power_price_source": "Price source",
-          "flow_power_base_rate": "Base rate (c/kWh)",
+          "flow_power_base_rate": "Base rate",
           "pea_enabled": "Enable PEA pricing (recommended)",
           "auto_sync_enabled": "Enable automatic TOU sync",
           "connect_portal": "Re-authenticate Flow Power portal"
@@ -1228,20 +1228,20 @@
         "description": "Select your network tariff for accurate PEA pricing. Advanced overrides for manual rate entry are at the bottom.",
         "data": {
           "fp_network_tariff_combined": "Network & tariff code",
-          "fp_twap_override": "TWAP override (c/kWh)",
-          "fp_amber_markup": "Amber comparison markup (c/kWh)",
-          "pea_custom_value": "Custom PEA override (c/kWh)",
+          "fp_twap_override": "TWAP override",
+          "fp_amber_markup": "Amber comparison markup",
+          "pea_custom_value": "Custom PEA override",
           "network_use_manual_rates": "Use manual network rates",
           "network_tariff_type": "Network tariff type",
-          "network_flat_rate": "Flat rate (c/kWh)",
-          "network_peak_rate": "Peak rate (c/kWh)",
-          "network_shoulder_rate": "Shoulder rate (c/kWh)",
-          "network_offpeak_rate": "Off-peak rate (c/kWh)",
+          "network_flat_rate": "Flat rate",
+          "network_peak_rate": "Peak rate",
+          "network_shoulder_rate": "Shoulder rate",
+          "network_offpeak_rate": "Off-peak rate",
           "network_peak_start": "Peak start time",
           "network_peak_end": "Peak end time",
           "network_offpeak_start": "Off-peak start time",
           "network_offpeak_end": "Off-peak end time",
-          "network_other_fees": "Other fees (c/kWh)",
+          "network_other_fees": "Other fees",
           "network_include_gst": "Include GST (10%)"
         },
         "data_description": {
@@ -1261,13 +1261,13 @@
         "data": {
           "aemo_spike_enabled": "Enable AEMO spike export",
           "aemo_region": "AEMO NEM region",
-          "aemo_spike_threshold": "Spike threshold ($/MWh)",
+          "aemo_spike_threshold": "Spike threshold",
           "configure_custom_tariff": "Configure custom tariff"
         },
         "data_description": {
           "aemo_spike_enabled": "Enable if your plan includes payments for exporting during AEMO price spikes.",
           "aemo_region": "Your NEM region. Check your electricity bill if unsure.",
-          "aemo_spike_threshold": "Battery exports when the AEMO wholesale price exceeds this value. Default $3,000/MWh.",
+          "aemo_spike_threshold": "Battery exports when the AEMO wholesale price exceeds this value. Default 3,000 in the selected market price unit.",
           "configure_custom_tariff": "Recommended: TOU rates are needed for accurate price sensors, optimization, and EV charging."
         },
         "submit": "Save"
@@ -1356,12 +1356,12 @@
         "data": {
           "nz_retailer": "Retailer",
           "nz_distribution_zone": "Distribution zone",
-          "nz_peak_rate": "Peak rate (c/kWh)",
-          "nz_shoulder_rate": "Shoulder rate (c/kWh)",
-          "nz_offpeak_rate": "Off-peak rate (c/kWh)",
-          "nz_peak_export": "Peak export rate (c/kWh)",
-          "nz_offpeak_export": "Off-peak export rate (c/kWh)",
-          "nz_daily_supply": "Daily supply charge (c/day)"
+          "nz_peak_rate": "Peak rate",
+          "nz_shoulder_rate": "Shoulder rate",
+          "nz_offpeak_rate": "Off-peak rate",
+          "nz_peak_export": "Peak export rate",
+          "nz_offpeak_export": "Off-peak export rate",
+          "nz_daily_supply": "Daily supply charge"
         },
         "data_description": {
           "nz_retailer": "Select your NZ retailer. Rates will update to match the selected plan.",
@@ -1381,9 +1381,9 @@
         "data": {
           "plan_name": "Plan name (optional)",
           "tariff_type": "Tariff type",
-          "flat_rate": "Flat rate (c/kWh)",
-          "offpeak_rate": "Off-peak rate (c/kWh)",
-          "fit_rate": "Default feed-in tariff (c/kWh)"
+          "flat_rate": "Flat rate",
+          "offpeak_rate": "Off-peak rate",
+          "fit_rate": "Default feed-in tariff"
         },
         "data_description": {
           "plan_name": "Optional label for this tariff plan.",
@@ -1402,8 +1402,8 @@
           "period_start": "Start time",
           "period_end": "End time",
           "period_days": "Applies to",
-          "import_rate": "Import rate (c/kWh)",
-          "export_rate": "Export/feed-in rate (c/kWh)",
+          "import_rate": "Import rate",
+          "export_rate": "Export/feed-in rate",
           "add_another": "Add another period"
         },
         "data_description": {
@@ -1438,7 +1438,7 @@
         "description": "Track peak demand during capacity-based billing periods. Changes take effect immediately.",
         "data": {
           "demand_charge_enabled": "Enable demand charge tracking",
-          "demand_charge_rate": "Demand charge rate ($/kW)",
+          "demand_charge_rate": "Demand charge rate",
           "demand_charge_start_time": "Peak start time (HH:MM)",
           "demand_charge_end_time": "Peak end time (HH:MM)",
           "demand_charge_days": "Demand charge days",
@@ -1451,7 +1451,7 @@
         },
         "data_description": {
           "demand_charge_enabled": "Track your peak grid draw during demand periods and calculate monthly capacity fees.",
-          "demand_charge_rate": "Your network demand charge rate in $/kW of peak demand. Check your bill.",
+          "demand_charge_rate": "Your network demand charge rate per kW of peak demand. Check your bill.",
           "demand_charge_start_time": "Start of the demand charge measurement period (24-hour format).",
           "demand_charge_end_time": "End of the demand charge measurement period (24-hour format).",
           "demand_charge_days": "Which days demand charges apply (weekdays, all days, etc.).",

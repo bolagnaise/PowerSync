@@ -433,6 +433,12 @@ from .const import (
     BATTERY_CAPACITY_DEFAULTS,
     BATTERY_POWER_DEFAULTS,
 )
+from .currency import (
+    DEFAULT_CURRENCY,
+    currency_for_entry,
+    currency_metadata,
+    normalize_currency,
+)
 from .inverters import get_inverter_controller
 from .optimization.coordinator import OptimizationCoordinator
 from .coordinator import (
@@ -7069,6 +7075,7 @@ async def fetch_tesla_tariff_schedule(hass: HomeAssistant, entry: ConfigEntry) -
             "seasons": seasons,  # Include season definitions
             "utility": tariff.get("utility", "Unknown"),
             "plan_name": tariff.get("name", "Unknown"),
+            **currency_metadata(tariff.get("currency") or currency_for_entry(entry, hass)),
             "last_sync": now.strftime("%Y-%m-%d %H:%M:%S"),
         }
 
@@ -7084,7 +7091,10 @@ async def fetch_tesla_tariff_schedule(hass: HomeAssistant, entry: ConfigEntry) -
         return None
 
 
-def convert_custom_tariff_to_schedule(custom_tariff: dict) -> dict:
+def convert_custom_tariff_to_schedule(
+    custom_tariff: dict,
+    currency: str | None = None,
+) -> dict:
     """Convert custom_tariff format to tariff_schedule format.
 
     This converts the user-configured custom tariff (Tesla tariff_content format)
@@ -7092,6 +7102,7 @@ def convert_custom_tariff_to_schedule(custom_tariff: dict) -> dict:
 
     Args:
         custom_tariff: Custom tariff configuration from automation_store
+        currency: Optional ISO 4217 currency override for legacy saved tariffs
 
     Returns:
         tariff_schedule dict with: current_period, current_season, buy_price, sell_price,
@@ -7100,6 +7111,10 @@ def convert_custom_tariff_to_schedule(custom_tariff: dict) -> dict:
     from .tariff_time import find_matching_tou_period
 
     try:
+        tariff_currency = normalize_currency(
+            currency or custom_tariff.get("currency"),
+            DEFAULT_CURRENCY,
+        )
         # Get current time for determining current period — HA tz, not container UTC
         now = dt_util.now()
 
@@ -7181,6 +7196,8 @@ def convert_custom_tariff_to_schedule(custom_tariff: dict) -> dict:
             "seasons": seasons,
             "utility": custom_tariff.get("utility", "Custom"),
             "plan_name": custom_tariff.get("name", "Custom Tariff"),
+            "currency": tariff_currency,
+            **currency_metadata(tariff_currency),
             "last_sync": dt_util.now().strftime("%Y-%m-%d %H:%M:%S"),
             "is_custom": True,  # Flag to indicate this is a custom tariff
         }
@@ -7661,12 +7678,19 @@ class CustomTariffView(HomeAssistantView):
 
     def _get_store(self):
         """Get the automation store from hass.data."""
+        entry_data = self._get_entry_data()
+        if entry_data:
+            return entry_data["automation_store"]
+        return None
+
+    def _get_entry_data(self):
+        """Get the first PowerSync entry data with an automation store."""
         if DOMAIN not in self._hass.data:
             return None
         # Find any config entry to get the automation store
         for entry_id, entry_data in self._hass.data.get(DOMAIN, {}).items():
             if isinstance(entry_data, dict) and "automation_store" in entry_data:
-                return entry_data["automation_store"]
+                return entry_data
         return None
 
     async def get(self, request: web.Request) -> web.Response:
@@ -7721,11 +7745,22 @@ class CustomTariffView(HomeAssistantView):
                     status=400
                 )
 
+            entry_data = self._get_entry_data()
+            entry = entry_data.get("entry") if entry_data else None
+            tariff_currency = normalize_currency(
+                data.get("currency"),
+                currency_for_entry(entry, self._hass),
+            )
+            data["currency"] = tariff_currency
+
             store.set_custom_tariff(data)
             await store.async_save()
 
             # Also update the tariff_schedule in hass.data for immediate use
-            tariff_schedule = convert_custom_tariff_to_schedule(data)
+            tariff_schedule = convert_custom_tariff_to_schedule(
+                data,
+                currency=tariff_currency,
+            )
             for entry_id, entry_data in self._hass.data.get(DOMAIN, {}).items():
                 if isinstance(entry_data, dict) and "automation_store" in entry_data:
                     entry_data["tariff_schedule"] = tariff_schedule
@@ -14668,7 +14703,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if electricity_provider in ("globird", "aemo_vpp", "other", "tou_only", "nz"):
         initial_custom_tariff = entry.data.get("initial_custom_tariff")
         if initial_custom_tariff:
-            tariff_schedule = convert_custom_tariff_to_schedule(initial_custom_tariff)
+            tariff_schedule = convert_custom_tariff_to_schedule(
+                initial_custom_tariff,
+                currency=currency_for_entry(entry, hass),
+            )
             hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = tariff_schedule
             _LOGGER.info(f"Early tariff_schedule initialized for {electricity_provider} from config flow data")
 
@@ -16465,6 +16503,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 export_boost_enabled=export_boost_enabled,
                 export_price_offset=export_price_offset,
                 export_min_price=export_min_price,
+                currency=currency_for_entry(entry, hass),
             )
             if tariff:
                 tariff = _apply_provider_tariff_adjustments(tariff, forecast_data, electricity_provider)
@@ -16474,6 +16513,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = {
                     "buy_prices": buy_prices,
                     "sell_prices": sell_prices,
+                    **currency_metadata(tariff.get("currency")),
                     "last_sync": dt_util.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
                 async_dispatcher_send(hass, f"power_sync_tariff_updated_{entry.entry_id}")
@@ -16503,6 +16543,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 export_boost_enabled=export_boost_enabled,
                 export_price_offset=export_price_offset,
                 export_min_price=export_min_price,
+                currency=currency_for_entry(entry, hass),
             )
             if tariff:
                 tariff = _apply_provider_tariff_adjustments(tariff, forecast_data, electricity_provider)
@@ -16512,6 +16553,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = {
                     "buy_prices": buy_prices,
                     "sell_prices": sell_prices,
+                    **currency_metadata(tariff.get("currency")),
                     "last_sync": dt_util.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }
                 async_dispatcher_send(hass, f"power_sync_tariff_updated_{entry.entry_id}")
@@ -16538,6 +16580,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             export_boost_enabled=export_boost_enabled,
             export_price_offset=export_price_offset,
             export_min_price=export_min_price,
+            currency=currency_for_entry(entry, hass),
         )
 
         if not tariff:
@@ -16702,6 +16745,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = {
             "buy_prices": buy_prices,
             "sell_prices": sell_prices,
+            **currency_metadata(tariff.get("currency")),
             "last_sync": dt_util.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
@@ -19310,7 +19354,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "name": f"Force Discharge ({duration_minutes}min)",
             "utility": "PowerSync",
             "code": f"DISCHARGE_{duration_minutes}",
-            "currency": "AUD",
+            "currency": currency_for_entry(entry, hass),
             "daily_charges": [{"name": "Supply Charge"}],
             "demand_charges": {
                 "ALL": {"rates": {"ALL": 0}},
@@ -20346,7 +20390,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "name": f"Force Charge ({duration_minutes}min)",
             "utility": "PowerSync",
             "code": f"CHARGE_{duration_minutes}",
-            "currency": "AUD",
+            "currency": currency_for_entry(entry, hass),
             "daily_charges": [{"name": "Supply Charge"}],
             "demand_charges": {
                 "ALL": {"rates": {"ALL": 0}},
@@ -23221,7 +23265,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.info("Force mode recently expired - using saved tariff to avoid stale force-charge tariff")
 
             if saved_tariff:
-                tariff_data = convert_custom_tariff_to_schedule(saved_tariff)
+                tariff_data = convert_custom_tariff_to_schedule(
+                    saved_tariff,
+                    currency=currency_for_entry(entry, hass),
+                )
                 if tariff_data:
                     hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = tariff_data
             else:
@@ -23962,7 +24009,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         else:
             custom_tariff = automation_store.get_custom_tariff()
             if custom_tariff:
-                tariff_schedule = convert_custom_tariff_to_schedule(custom_tariff)
+                tariff_schedule = convert_custom_tariff_to_schedule(
+                    custom_tariff,
+                    currency=currency_for_entry(entry, hass),
+                )
                 hass.data[DOMAIN][entry.entry_id]["tariff_schedule"] = tariff_schedule
                 _LOGGER.info(f"Custom tariff loaded for {electricity_provider}: {custom_tariff.get('name')}")
 

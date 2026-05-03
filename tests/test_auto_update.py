@@ -42,6 +42,7 @@ _ha_const.ATTR_ENTITY_ID = "entity_id"
 
 _ha_core = sys.modules.setdefault("homeassistant.core", types.ModuleType("homeassistant.core"))
 _ha_core.HomeAssistant = object
+_ha_core.callback = lambda func: func
 
 _ha_helpers = sys.modules.setdefault("homeassistant.helpers", types.ModuleType("homeassistant.helpers"))
 _ha_event = sys.modules.setdefault(
@@ -49,7 +50,28 @@ _ha_event = sys.modules.setdefault(
     types.ModuleType("homeassistant.helpers.event"),
 )
 _ha_event.async_track_time_change = lambda *args, **kwargs: lambda: None
+_ha_event.async_call_later = lambda *args, **kwargs: lambda: None
 _ha_helpers.event = _ha_event
+
+_ha_storage = sys.modules.setdefault(
+    "homeassistant.helpers.storage",
+    types.ModuleType("homeassistant.helpers.storage"),
+)
+
+
+class _Store:
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    async def async_load(self):
+        return None
+
+    async def async_save(self, data):
+        return None
+
+
+_ha_storage.Store = _Store
+_ha_helpers.storage = _ha_storage
 
 _ha_util = sys.modules.setdefault("homeassistant.util", types.ModuleType("homeassistant.util"))
 _ha_dt = sys.modules.setdefault("homeassistant.util.dt", types.ModuleType("homeassistant.util.dt"))

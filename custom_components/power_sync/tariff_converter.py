@@ -7,6 +7,8 @@ from homeassistant.util import dt as dt_util
 import logging
 from typing import Any
 
+from .currency import DEFAULT_CURRENCY, currency_for_provider
+
 # Import aemo_to_tariff library for automatic network tariff calculation
 try:
     from aemo_to_tariff import spot_to_tariff, get_daily_fee
@@ -457,6 +459,7 @@ def convert_amber_to_tesla_tariff(
     export_boost_enabled: bool = False,
     export_price_offset: float = 0.0,
     export_min_price: float = 0.0,
+    currency: str | None = None,
 ) -> dict[str, Any] | None:
     """
     Convert Amber price forecast to Tesla tariff format.
@@ -481,6 +484,7 @@ def convert_amber_to_tesla_tariff(
         demand_charge_rate: Demand charge rate in $/kW (default: 0.0)
         demand_charge_start_time: Peak period start time in HH:MM format (default: "14:00")
         demand_charge_end_time: Peak period end time in HH:MM format (default: "20:00")
+        currency: ISO 4217 currency code for the generated tariff payload
 
     Returns:
         Tesla-compatible tariff structure or None if conversion fails
@@ -769,6 +773,7 @@ def convert_amber_to_tesla_tariff(
         demand_charge_rates,
         demand_charge_apply_to,
         electricity_provider,
+        currency=currency,
     )
 
     return tariff
@@ -1081,6 +1086,7 @@ def _build_tariff_structure(
     demand_charge_rates: dict[str, float] | None = None,
     demand_charge_apply_to: str = "Buy Only",
     electricity_provider: str = "amber",
+    currency: str | None = None,
 ) -> dict[str, Any]:
     """
     Build the complete Tesla tariff structure.
@@ -1091,10 +1097,12 @@ def _build_tariff_structure(
         demand_charge_rates: Demand charge rates for all 48 periods (optional)
         demand_charge_apply_to: Where to apply demand charges ("Buy Only", "Sell Only", "Both")
         electricity_provider: Provider code ("amber", "flow_power", "globird")
+        currency: ISO 4217 currency code for the tariff payload
 
     Returns:
         Complete Tesla tariff structure
     """
+    tariff_currency = currency or currency_for_provider(electricity_provider, fallback=DEFAULT_CURRENCY)
     # Map provider codes to display names
     provider_names = {
         "amber": "Amber Electric",
@@ -1127,7 +1135,7 @@ def _build_tariff_structure(
         "code": f"POWER_SYNC:{electricity_provider.upper()}",
         "name": f"{provider_name} (PowerSync)",
         "utility": provider_name,
-        "currency": "AUD",
+        "currency": tariff_currency,
         "daily_charges": [{"name": "Charge"}],
         "demand_charges": {
             "ALL": {"rates": {"ALL": 0}},

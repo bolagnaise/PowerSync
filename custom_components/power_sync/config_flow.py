@@ -365,6 +365,11 @@ from .const import (
     NZ_RETAILERS,
     NZ_DISTRIBUTION_ZONES,
 )
+from .currency import (
+    currency_for_provider,
+    normalize_currency,
+    selector_unit_for_provider,
+)
 
 # Combined network tariff key for config flow
 CONF_NETWORK_TARIFF_COMBINED = "network_tariff_combined"
@@ -854,6 +859,18 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._optimization_provider: str = OPT_PROVIDER_NATIVE
         self._ml_options: dict[str, Any] = {}  # Smart Optimization options
 
+    def _currency(self) -> str:
+        """Return the currency for the currently selected provider."""
+        return currency_for_provider(self._selected_electricity_provider, self.hass)
+
+    def _selector_unit(self, unit_kind: str = "minor_rate") -> str:
+        """Return a provider-aware unit label for setup selectors."""
+        return selector_unit_for_provider(
+            self._selected_electricity_provider,
+            self.hass,
+            unit_kind,
+        )
+
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -1095,7 +1112,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                             min=0.0,
                             max=100.0,
                             step=0.01,
-                            unit_of_measurement="c/kWh",
+                            unit_of_measurement=self._selector_unit(),
                             mode=NumberSelectorMode.BOX,
                         )
                     ),
@@ -3179,7 +3196,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         min=0,
                         max=20000,
                         step=100,
-                        unit_of_measurement="$/MWh",
+                        unit_of_measurement=self._selector_unit("market_rate"),
                         mode=NumberSelectorMode.BOX,
                     )
                 ),
@@ -3327,10 +3344,18 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         }.get(getattr(self, "_selected_electricity_provider", "other"), "Custom")
 
         plan_name = getattr(self, "_tariff_plan_name", "") or f"{provider_name} TOU"
+        tariff_currency = normalize_currency(
+            getattr(self, "_tariff_currency", None),
+            currency_for_provider(
+                getattr(self, "_selected_electricity_provider", "other"),
+                getattr(self, "hass", None),
+            ),
+        )
 
         return {
             "name": plan_name,
             "utility": provider_name,
+            "currency": tariff_currency,
             "seasons": {
                 "All Year": {
                     "fromMonth": 1,
@@ -3680,6 +3705,22 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         return self.config_entry.options.get(
             key, self.config_entry.data.get(key, default)
         )
+
+    def _electricity_provider(self) -> str:
+        """Return the configured electricity provider."""
+        return self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
+
+    def _selector_unit(self, unit_kind: str = "minor_rate") -> str:
+        """Return a provider-aware unit label for options selectors."""
+        return selector_unit_for_provider(
+            self._electricity_provider(),
+            self.hass,
+            unit_kind,
+        )
+
+    def _currency(self) -> str:
+        """Return the configured currency."""
+        return currency_for_provider(self._electricity_provider(), self.hass)
 
     def _save_and_finish(self, section_data: dict[str, Any]) -> FlowResult:
         """Save a single section's data merged with existing options and finish."""
@@ -6149,7 +6190,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     DEFAULT_FORECAST_DISCREPANCY_THRESHOLD,
                 ),
             ): NumberSelector(NumberSelectorConfig(
-                min=0.0, max=100.0, step=0.1, unit_of_measurement="c/kWh",
+                min=0.0, max=100.0, step=0.1, unit_of_measurement=self._selector_unit(),
                 mode=NumberSelectorMode.BOX,
             )),
         })
@@ -6173,14 +6214,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_EXPORT_PRICE_OFFSET,
                     default=self._get_option(CONF_EXPORT_PRICE_OFFSET, 0.0),
                 ): NumberSelector(NumberSelectorConfig(
-                    min=0.0, max=50.0, step=0.1, unit_of_measurement="c/kWh",
+                    min=0.0, max=50.0, step=0.1, unit_of_measurement=self._selector_unit(),
                     mode=NumberSelectorMode.BOX,
                 )),
                 vol.Optional(
                     CONF_EXPORT_MIN_PRICE,
                     default=self._get_option(CONF_EXPORT_MIN_PRICE, 0.0),
                 ): NumberSelector(NumberSelectorConfig(
-                    min=0.0, max=100.0, step=0.1, unit_of_measurement="c/kWh",
+                    min=0.0, max=100.0, step=0.1, unit_of_measurement=self._selector_unit(),
                     mode=NumberSelectorMode.BOX,
                 )),
                 vol.Optional(
@@ -6201,7 +6242,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_EXPORT_BOOST_THRESHOLD, DEFAULT_EXPORT_BOOST_THRESHOLD
                     ),
                 ): NumberSelector(NumberSelectorConfig(
-                    min=0.0, max=50.0, step=0.1, unit_of_measurement="c/kWh",
+                    min=0.0, max=50.0, step=0.1, unit_of_measurement=self._selector_unit(),
                     mode=NumberSelectorMode.BOX,
                 )),
                 # Chip Mode (inverse of export boost)
@@ -6225,7 +6266,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_CHIP_MODE_THRESHOLD, DEFAULT_CHIP_MODE_THRESHOLD
                     ),
                 ): NumberSelector(NumberSelectorConfig(
-                    min=0.0, max=200.0, step=0.1, unit_of_measurement="c/kWh",
+                    min=0.0, max=200.0, step=0.1, unit_of_measurement=self._selector_unit(),
                     mode=NumberSelectorMode.BOX,
                 )),
             }
@@ -6286,7 +6327,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_DEMAND_CHARGE_RATE,
                 default=self._get_option(CONF_DEMAND_CHARGE_RATE, 10.0),
             ): NumberSelector(NumberSelectorConfig(
-                min=0.0, max=100.0, step=0.1, unit_of_measurement="$/kW",
+                min=0.0, max=100.0, step=0.1, unit_of_measurement=self._selector_unit("demand_rate"),
                 mode=NumberSelectorMode.BOX,
             )),
             vol.Optional(
@@ -6338,14 +6379,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_DAILY_SUPPLY_CHARGE,
                     default=self._get_option(CONF_DAILY_SUPPLY_CHARGE, 0.0),
                 ): NumberSelector(NumberSelectorConfig(
-                    min=0.0, max=500.0, step=0.01, unit_of_measurement="$/day",
+                    min=0.0, max=500.0, step=0.01, unit_of_measurement=self._selector_unit("daily"),
                     mode=NumberSelectorMode.BOX,
                 )),
                 vol.Optional(
                     CONF_MONTHLY_SUPPLY_CHARGE,
                     default=self._get_option(CONF_MONTHLY_SUPPLY_CHARGE, 0.0),
                 ): NumberSelector(NumberSelectorConfig(
-                    min=0.0, max=500.0, step=0.01, unit_of_measurement="$/month",
+                    min=0.0, max=500.0, step=0.01, unit_of_measurement=self._selector_unit("monthly"),
                     mode=NumberSelectorMode.BOX,
                 )),
             }
@@ -7112,7 +7153,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_FLOW_POWER_BASE_RATE, FLOW_POWER_DEFAULT_BASE_RATE
                 ),
             ): NumberSelector(NumberSelectorConfig(
-                min=0.0, max=100.0, step=0.01, unit_of_measurement="c/kWh",
+                min=0.0, max=100.0, step=0.01, unit_of_measurement=self._selector_unit(),
                 mode=NumberSelectorMode.BOX,
             )),
             vol.Optional(
@@ -7355,21 +7396,21 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_FP_TWAP_OVERRIDE,
                         default=self._get_option(CONF_FP_TWAP_OVERRIDE, None) or 0.0,
                     ): NumberSelector(NumberSelectorConfig(
-                        min=0.0, max=50.0, step=0.01, unit_of_measurement="c/kWh",
+                        min=0.0, max=50.0, step=0.01, unit_of_measurement=self._selector_unit(),
                         mode=NumberSelectorMode.BOX,
                     )),
                     vol.Optional(
                         CONF_FP_AMBER_MARKUP,
                         default=self._get_option(CONF_FP_AMBER_MARKUP, None) or default_markup,
                     ): NumberSelector(NumberSelectorConfig(
-                        min=0.0, max=20.0, step=0.01, unit_of_measurement="c/kWh",
+                        min=0.0, max=20.0, step=0.01, unit_of_measurement=self._selector_unit(),
                         mode=NumberSelectorMode.BOX,
                     )),
                     vol.Optional(
                         CONF_PEA_CUSTOM_VALUE,
                         default=self._get_option(CONF_PEA_CUSTOM_VALUE, None) or 0.0,
                     ): NumberSelector(NumberSelectorConfig(
-                        min=-50.0, max=50.0, step=0.01, unit_of_measurement="c/kWh",
+                        min=-50.0, max=50.0, step=0.01, unit_of_measurement=self._selector_unit(),
                         mode=NumberSelectorMode.BOX,
                     )),
                     vol.Optional(
@@ -7390,28 +7431,28 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_NETWORK_FLAT_RATE,
                         default=self._get_option(CONF_NETWORK_FLAT_RATE, 8.0),
                     ): NumberSelector(NumberSelectorConfig(
-                        min=0.0, max=50.0, step=0.01, unit_of_measurement="c/kWh",
+                        min=0.0, max=50.0, step=0.01, unit_of_measurement=self._selector_unit(),
                         mode=NumberSelectorMode.BOX,
                     )),
                     vol.Optional(
                         CONF_NETWORK_PEAK_RATE,
                         default=self._get_option(CONF_NETWORK_PEAK_RATE, 15.0),
                     ): NumberSelector(NumberSelectorConfig(
-                        min=0.0, max=50.0, step=0.01, unit_of_measurement="c/kWh",
+                        min=0.0, max=50.0, step=0.01, unit_of_measurement=self._selector_unit(),
                         mode=NumberSelectorMode.BOX,
                     )),
                     vol.Optional(
                         CONF_NETWORK_SHOULDER_RATE,
                         default=self._get_option(CONF_NETWORK_SHOULDER_RATE, 5.0),
                     ): NumberSelector(NumberSelectorConfig(
-                        min=0.0, max=50.0, step=0.01, unit_of_measurement="c/kWh",
+                        min=0.0, max=50.0, step=0.01, unit_of_measurement=self._selector_unit(),
                         mode=NumberSelectorMode.BOX,
                     )),
                     vol.Optional(
                         CONF_NETWORK_OFFPEAK_RATE,
                         default=self._get_option(CONF_NETWORK_OFFPEAK_RATE, 2.0),
                     ): NumberSelector(NumberSelectorConfig(
-                        min=0.0, max=50.0, step=0.01, unit_of_measurement="c/kWh",
+                        min=0.0, max=50.0, step=0.01, unit_of_measurement=self._selector_unit(),
                         mode=NumberSelectorMode.BOX,
                     )),
                     vol.Optional(
@@ -7446,7 +7487,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_NETWORK_OTHER_FEES,
                         default=self._get_option(CONF_NETWORK_OTHER_FEES, 1.5),
                     ): NumberSelector(NumberSelectorConfig(
-                        min=0.0, max=20.0, step=0.01, unit_of_measurement="c/kWh",
+                        min=0.0, max=20.0, step=0.01, unit_of_measurement=self._selector_unit(),
                         mode=NumberSelectorMode.BOX,
                     )),
                     vol.Optional(
@@ -7513,7 +7554,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_AEMO_SPIKE_THRESHOLD,
                 default=self._get_option(CONF_AEMO_SPIKE_THRESHOLD, 3000.0),
             ): NumberSelector(NumberSelectorConfig(
-                min=0.0, max=20000.0, step=1.0, unit_of_measurement="$/MWh",
+                min=0.0, max=20000.0, step=1.0, unit_of_measurement=self._selector_unit("market_rate"),
                 mode=NumberSelectorMode.BOX,
             )),
         }
@@ -7982,6 +8023,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             custom_tariff = {
                 "name": f"{retailer_name} TOU",
                 "utility": retailer_name,
+                "currency": self._currency(),
                 "seasons": {
                     "All Year": {
                         "fromMonth": 1,
@@ -8014,7 +8056,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         from . import convert_custom_tariff_to_schedule
 
                         tariff_schedule = convert_custom_tariff_to_schedule(
-                            custom_tariff
+                            custom_tariff,
+                            currency=self._currency(),
                         )
                         entry_data["tariff_schedule"] = tariff_schedule
                         _LOGGER.info(
@@ -8053,42 +8096,42 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         CONF_NZ_PEAK_RATE,
                         default=self._get_option(CONF_NZ_PEAK_RATE, 40.0),
                     ): NumberSelector(NumberSelectorConfig(
-                        min=0, max=200, step=0.1, unit_of_measurement="c/kWh",
+                        min=0, max=200, step=0.1, unit_of_measurement=self._selector_unit(),
                         mode=NumberSelectorMode.BOX,
                     )),
                     vol.Required(
                         CONF_NZ_SHOULDER_RATE,
                         default=self._get_option(CONF_NZ_SHOULDER_RATE, 25.0),
                     ): NumberSelector(NumberSelectorConfig(
-                        min=0, max=200, step=0.1, unit_of_measurement="c/kWh",
+                        min=0, max=200, step=0.1, unit_of_measurement=self._selector_unit(),
                         mode=NumberSelectorMode.BOX,
                     )),
                     vol.Required(
                         CONF_NZ_OFFPEAK_RATE,
                         default=self._get_option(CONF_NZ_OFFPEAK_RATE, 15.0),
                     ): NumberSelector(NumberSelectorConfig(
-                        min=0, max=200, step=0.1, unit_of_measurement="c/kWh",
+                        min=0, max=200, step=0.1, unit_of_measurement=self._selector_unit(),
                         mode=NumberSelectorMode.BOX,
                     )),
                     vol.Required(
                         CONF_NZ_PEAK_EXPORT,
                         default=self._get_option(CONF_NZ_PEAK_EXPORT, 8.0),
                     ): NumberSelector(NumberSelectorConfig(
-                        min=0, max=100, step=0.1, unit_of_measurement="c/kWh",
+                        min=0, max=100, step=0.1, unit_of_measurement=self._selector_unit(),
                         mode=NumberSelectorMode.BOX,
                     )),
                     vol.Required(
                         CONF_NZ_OFFPEAK_EXPORT,
                         default=self._get_option(CONF_NZ_OFFPEAK_EXPORT, 8.0),
                     ): NumberSelector(NumberSelectorConfig(
-                        min=0, max=100, step=0.1, unit_of_measurement="c/kWh",
+                        min=0, max=100, step=0.1, unit_of_measurement=self._selector_unit(),
                         mode=NumberSelectorMode.BOX,
                     )),
                     vol.Required(
                         CONF_NZ_DAILY_SUPPLY,
                         default=self._get_option(CONF_NZ_DAILY_SUPPLY, 200.0),
                     ): NumberSelector(NumberSelectorConfig(
-                        min=0, max=1000, step=0.1, unit_of_measurement="c/day",
+                        min=0, max=1000, step=0.1, unit_of_measurement=self._selector_unit("minor_daily"),
                         mode=NumberSelectorMode.BOX,
                     )),
                 }
@@ -8185,19 +8228,19 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     ),
                     vol.Optional("flat_rate", default=30): NumberSelector(
                         NumberSelectorConfig(
-                            min=0, max=200, step=0.1, unit_of_measurement="c/kWh",
+                            min=0, max=200, step=0.1, unit_of_measurement=self._selector_unit(),
                             mode=NumberSelectorMode.BOX,
                         )
                     ),
                     vol.Required("offpeak_rate", default=default_offpeak): NumberSelector(
                         NumberSelectorConfig(
-                            min=0, max=200, step=0.1, unit_of_measurement="c/kWh",
+                            min=0, max=200, step=0.1, unit_of_measurement=self._selector_unit(),
                             mode=NumberSelectorMode.BOX,
                         )
                     ),
                     vol.Required("fit_rate", default=default_fit): NumberSelector(
                         NumberSelectorConfig(
-                            min=0, max=100, step=0.1, unit_of_measurement="c/kWh",
+                            min=0, max=100, step=0.1, unit_of_measurement=self._selector_unit(),
                             mode=NumberSelectorMode.BOX,
                         )
                     ),
@@ -8205,7 +8248,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             ),
             errors=errors,
             description_placeholders={
-                "info": "Configure your electricity tariff. All rates in cents/kWh.\nFor TOU, you'll add time periods in the next step.",
+                "info": f"Configure your electricity tariff. All rates in {self._selector_unit()}.\nFor TOU, you'll add time periods in the next step.",
             },
         )
 
@@ -8264,6 +8307,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         added_desc = ""
         if count > 0:
             lines = []
+            minor_unit = self._selector_unit()
             for i, p in enumerate(self._tariff_periods, 1):
                 label = {
                     "PEAK": "Peak",
@@ -8273,7 +8317,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 }.get(p["name"], p["name"])
                 lines.append(
                     f"{i}. {label} {p['start']:02d}:00-{p['end']:02d}:00 "
-                    f"({p['import_rate'] * 100:.0f}c import, {p['export_rate'] * 100:.0f}c export)"
+                    f"({p['import_rate'] * 100:.0f}{minor_unit} import, "
+                    f"{p['export_rate'] * 100:.0f}{minor_unit} export)"
                 )
             added_desc = "Periods added:\n" + "\n".join(lines)
 
@@ -8313,13 +8358,13 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     ),
                     vol.Required("import_rate", default=45): NumberSelector(
                         NumberSelectorConfig(
-                            min=0, max=200, step=0.1, unit_of_measurement="c/kWh",
+                            min=0, max=200, step=0.1, unit_of_measurement=self._selector_unit(),
                             mode=NumberSelectorMode.BOX,
                         )
                     ),
                     vol.Required("export_rate", default=5): NumberSelector(
                         NumberSelectorConfig(
-                            min=0, max=200, step=0.1, unit_of_measurement="c/kWh",
+                            min=0, max=200, step=0.1, unit_of_measurement=self._selector_unit(),
                             mode=NumberSelectorMode.BOX,
                         )
                     ),
@@ -8348,6 +8393,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         ctx._selected_electricity_provider = self.config_entry.data.get(
             CONF_ELECTRICITY_PROVIDER, "other"
         )
+        ctx._tariff_currency = self._currency()
+        ctx.hass = self.hass
         return PowerSyncConfigFlow._build_tariff_from_periods(ctx, periods)
 
     async def _save_custom_tariff(self, custom_tariff: dict) -> None:
@@ -8358,12 +8405,20 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             for entry_id, entry_data in self.hass.data.get(DOMAIN, {}).items():
                 if isinstance(entry_data, dict) and "automation_store" in entry_data:
                     store = entry_data["automation_store"]
+                    tariff_currency = normalize_currency(
+                        custom_tariff.get("currency"),
+                        self._currency(),
+                    )
+                    custom_tariff["currency"] = tariff_currency
                     store.set_custom_tariff(custom_tariff)
                     await store.async_save()
 
                     from . import convert_custom_tariff_to_schedule
 
-                    tariff_schedule = convert_custom_tariff_to_schedule(custom_tariff)
+                    tariff_schedule = convert_custom_tariff_to_schedule(
+                        custom_tariff,
+                        currency=tariff_currency,
+                    )
                     entry_data["tariff_schedule"] = tariff_schedule
                     _LOGGER.info("Custom tariff saved via options flow")
                     break

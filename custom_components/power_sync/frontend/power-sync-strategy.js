@@ -130,9 +130,10 @@ class PowerSyncChart extends HTMLElement {
     for (const tick of ticks) {
       const y = yScale(tick);
       svg += `<line x1="${pad.left}" y1="${y}" x2="${W - pad.right}" y2="${y}" stroke="var(--divider-color, #e0e0e0)" stroke-width="0.5" stroke-dasharray="4,3"/>`;
-      const label = config.yUnit === '¢'
-        ? tick.toFixed(tick === Math.round(tick) ? 0 : 1) + '¢'
-        : tick.toFixed(tick === Math.round(tick) ? 0 : 1) + ' ' + (config.yUnit || '');
+      const unit = config.yUnit || '';
+      const compactUnit = config.yUnitCompact || ['c', 'p', 'ct', 'c/kWh', 'p/kWh', 'ct/kWh'].includes(unit);
+      const label = tick.toFixed(tick === Math.round(tick) ? 0 : 1)
+        + (unit ? `${compactUnit ? '' : ' '}${unit}` : '');
       svg += `<text x="${pad.left - 8}" y="${y + 4}" text-anchor="end" font-size="11" fill="var(--secondary-text-color, #888)">${label}</text>`;
     }
 
@@ -614,7 +615,7 @@ class PowerSyncStrategy {
 
     // --- Left Column: Price Gauges ---
     if (hasE('current_import_price')) {
-      left.push(_priceGauges(e));
+      left.push(_priceGauges(e, hass));
     }
 
     // --- Left Column: Battery Controls (requires button-card) ---
@@ -661,12 +662,12 @@ class PowerSyncStrategy {
 
     // --- Right Column: Price Chart (Amber/Octopus 24h) — requires apexcharts ---
     if (hasApex && hasE('current_import_price')) {
-      right.push(_priceChart(e));
+      right.push(_priceChart(e, hass));
     }
 
     // --- Right Column: TOU Schedule (uses PowerSyncChart) ---
     if (hasE('tariff_schedule')) {
-      right.push(_touSchedule(e));
+      right.push(_touSchedule(e, hass));
     }
 
     // --- Center Column: LP Forecast Summary ---
@@ -708,7 +709,7 @@ class PowerSyncStrategy {
 
     // --- Center Column: LP Price Chart (48h) ---
     if (hasE('lp_import_price_forecast')) {
-      center.push(_lpPriceChart(e));
+      center.push(_lpPriceChart(e, hass));
     }
 
     // --- Right Column: LP Solar & Load Chart (48h) ---
@@ -860,6 +861,40 @@ class PowerSyncStrategy {
 
 // ─── Helpers ─────────────────────────────────────────────────
 
+function _hassCurrency(hass) {
+  return (hass?.config?.currency || 'AUD').toUpperCase();
+}
+
+function _minorCurrencyUnit(currency) {
+  const code = (currency || 'AUD').toUpperCase();
+  if (code === 'GBP') return 'p';
+  if (code === 'EUR') return 'ct';
+  return 'c';
+}
+
+function _currencyFromUnit(unit) {
+  const match = String(unit || '').match(/^([A-Z]{3})(?:\/|$)/);
+  return match ? match[1] : null;
+}
+
+function _priceMeta(hass, entityId) {
+  const attrs = hass?.states?.[entityId]?.attributes || {};
+  const currency = (attrs.currency || _currencyFromUnit(attrs.unit_of_measurement) || _hassCurrency(hass)).toUpperCase();
+  return {
+    currency,
+    priceUnit: attrs.price_unit || `${currency}/kWh`,
+    minorPriceUnit: attrs.minor_price_unit || `${_minorCurrencyUnit(currency)}/kWh`,
+    minorUnit: _minorCurrencyUnit(currency),
+  };
+}
+
+function _formatMajorPriceAsMinor(value, unit) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '';
+  const display = Number(value) * 100;
+  const decimals = Math.abs(display) >= 100 ? 0 : 1;
+  return `${display.toFixed(decimals)}${unit}`;
+}
+
 // ─── Section Builders ────────────────────────────────────────
 
 function _svgArcGaugeCard({ entityId, label, unit, min, max, thresholds, multiplier = 1, decimals = 1 }) {
@@ -923,14 +958,16 @@ function _svgArcGaugeCard({ entityId, label, unit, min, max, thresholds, multipl
   };
 }
 
-function _priceGauges(e) {
+function _priceGauges(e, hass) {
+  const importMeta = _priceMeta(hass, e('current_import_price'));
+  const exportMeta = _priceMeta(hass, e('current_export_price'));
   return {
     type: 'horizontal-stack',
     cards: [
       _svgArcGaugeCard({
         entityId: e('current_import_price'),
         label: 'Import Price',
-        unit: 'c/kWh',
+        unit: importMeta.minorPriceUnit,
         min: 0,
         max: 60,
         thresholds: { green: 0, yellow: 25, red: 40 },
@@ -939,7 +976,7 @@ function _priceGauges(e) {
       _svgArcGaugeCard({
         entityId: e('current_export_price'),
         label: 'Export Price',
-        unit: 'c/kWh',
+        unit: exportMeta.minorPriceUnit,
         min: -10,
         max: 30,
         thresholds: { green: 5, yellow: 0, red: -10 },
@@ -1705,7 +1742,11 @@ function _powerFlow(e) {
   };
 }
 
-function _priceChart(e) {
+function _priceChart(e, hass) {
+  const importMeta = _priceMeta(hass, e('current_import_price'));
+  const exportMeta = _priceMeta(hass, e('current_export_price'));
+  const importUnit = importMeta.minorPriceUnit;
+  const exportUnit = exportMeta.minorPriceUnit;
   return {
     type: 'custom:apexcharts-card',
     header: { show: true, title: 'Electricity Prices - 24 Hours', show_states: false },
@@ -1745,21 +1786,24 @@ function _priceChart(e) {
       tooltip: {
         x: { format: 'HH:mm' },
         y: {
-          formatter: "EVAL:function(value) { if (value === null || value === undefined) return ''; const cents = value * 100; if (Math.abs(cents) >= 1000) { return '$' + value.toFixed(2); } return cents.toFixed(0) + '¢'; }",
+          formatter: `EVAL:function(value, opts) { const units = ${JSON.stringify([importUnit, exportUnit])}; return (${_formatMajorPriceAsMinor.toString()})(value, units[opts.seriesIndex] || ${JSON.stringify(importUnit)}); }`,
         },
       },
     },
   };
 }
 
-function _touSchedule(e) {
+function _touSchedule(e, hass) {
+  const meta = _priceMeta(hass, e('tariff_schedule'));
   return {
     type: 'custom:power-sync-chart',
     title: 'TOU Schedule',
     entity: e('tariff_schedule'),
     mode: 'tou',
     stepLine: true,
-    yUnit: '¢',
+    yUnit: meta.minorPriceUnit,
+    yUnitCompact: true,
+    yMultiplier: 100,
     series: [
       { key: 'buy', name: 'Buy Price', color: '#FF9800' },
       { key: 'sell', name: 'Sell Price', color: '#4CAF50' },
@@ -1796,14 +1840,16 @@ function _lpSolarLoadChart(e) {
   };
 }
 
-function _lpPriceChart(e) {
+function _lpPriceChart(e, hass) {
+  const meta = _priceMeta(hass, e('lp_import_price_forecast'));
   return {
     type: 'custom:power-sync-chart',
     title: 'LP Forecast - Import & Export Prices (48h)',
     mode: 'forecast',
     intervalMinutes: 5,
     stepLine: true,
-    yUnit: '¢',
+    yUnit: meta.minorPriceUnit,
+    yUnitCompact: true,
     yMultiplier: 100,
     series: [
       { entity: e('lp_import_price_forecast'), attribute: 'price_values', name: 'Import', color: '#FF9800' },

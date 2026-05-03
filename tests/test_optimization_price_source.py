@@ -73,6 +73,7 @@ def _install_ha_stubs() -> None:
     ha_storage.Store = _Store
     ha_update.DataUpdateCoordinator = _DataUpdateCoordinator
     ha_event.async_track_time_change = lambda *args, **kwargs: (lambda: None)
+    ha_event.async_call_later = lambda *args, **kwargs: (lambda: None)
     ha_dt.now = lambda *args, **kwargs: datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
     ha_dt.utcnow = lambda *args, **kwargs: datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
     ha_dt.UTC = timezone.utc
