@@ -13621,6 +13621,18 @@ async def _notify_api_error(hass, title: str, message: str) -> None:
         pass  # Don't let notification failures cascade
 
 
+def _preload_powerwall_local_modules() -> None:
+    """Import protobuf C extension off the event loop.
+
+    google.protobuf loads a native C extension (google._upb._message) on first
+    import via importlib.import_module, which blocks the HA event loop and
+    triggers a WARNING. Importing the transport module here (called via
+    hass.async_add_executor_job) populates sys.modules before the async setup
+    chain needs them, so subsequent imports in the event loop are no-ops.
+    """
+    from .powerwall_local import transport  # noqa: F401
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up PowerSync from a config entry."""
     _LOGGER.info("=" * 60)
@@ -23067,6 +23079,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register HTTP endpoint for Powerwall type (for mobile app Settings)
     hass.http.register_view(PowerwallTypeView(hass))
     _LOGGER.info("🔋 Powerwall type HTTP endpoint registered at /api/power_sync/powerwall_type")
+
+    # Preload protobuf C extension off the event loop before the import chain runs.
+    await hass.async_add_executor_job(_preload_powerwall_local_modules)
 
     # Register Powerwall local pairing + off-grid HTTP endpoints
     from .powerwall_local.views import register_views as _register_powerwall_local_views
