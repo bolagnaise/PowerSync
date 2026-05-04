@@ -1666,36 +1666,17 @@ function _teslaStyleFlow(e, hass, findSensor) {
     }
   }
 
-  // Add PV array detail if available (FoxESS, GoodWe, or upstream inverter integrations).
-  const resolveSensor = (names, fallback) =>
-    (typeof findSensor === 'function' ? findSensor(names) : null) || e(fallback);
-  const pv1 = resolveSensor(['pv1_power', 'pv_1_power', 'ppv1'], 'pv1_power');
-  const pv2 = resolveSensor(['pv2_power', 'pv_2_power', 'ppv2'], 'pv2_power');
-  if (hass.states[pv1]) {
-    config.entities.roof_a_power = pv1;
-    config.roof_a_label = 'PV1';
-    const pv1Voltage = resolveSensor(['pv1_voltage', 'pv_1_voltage', 'vpv1'], 'pv1_voltage');
-    const pv1Current = resolveSensor(['pv1_current', 'pv_1_current', 'ipv1'], 'pv1_current');
-    if (hass.states[pv1Voltage]) config.entities.roof_a_voltage = pv1Voltage;
-    if (hass.states[pv1Current]) config.entities.roof_a_current = pv1Current;
-  }
-  if (hass.states[pv2]) {
-    config.entities.roof_b_power = pv2;
-    config.roof_b_label = 'PV2';
-    const pv2Voltage = resolveSensor(['pv2_voltage', 'pv_2_voltage', 'vpv2'], 'pv2_voltage');
-    const pv2Current = resolveSensor(['pv2_current', 'pv_2_current', 'ipv2'], 'pv2_current');
-    if (hass.states[pv2Voltage]) config.entities.roof_b_voltage = pv2Voltage;
-    if (hass.states[pv2Current]) config.entities.roof_b_current = pv2Current;
-  }
+  // Keep string-level PV telemetry in the details table; avoid adding it to the
+  // house scene by default, where it quickly becomes visual clutter.
 
   // Sigenergy DC/AC PV split
   const pvDc = e('pv_dc_power');
   const pvAc = e('pv_ac_power');
-  if (hass.states[pvDc] && !hass.states[pv1]) {
+  if (hass.states[pvDc]) {
     config.entities.roof_a_power = pvDc;
     config.roof_a_label = 'DC Solar';
   }
-  if (hass.states[pvAc] && !hass.states[pv2]) {
+  if (hass.states[pvAc]) {
     config.entities.roof_b_power = pvAc;
     config.roof_b_label = 'AC Solar';
   }
@@ -2117,12 +2098,15 @@ function _pvStringSensors(e, hass, findSensor) {
     entities.push(row);
   };
 
-  add(resolveSensor(['pv1_power', 'pv_1_power', 'ppv1'], 'pv1_power'), 'PV1 Power', 'mdi:solar-panel');
-  add(resolveSensor(['pv1_voltage', 'pv_1_voltage', 'vpv1'], 'pv1_voltage'), 'PV1 Voltage', 'mdi:sine-wave');
-  add(resolveSensor(['pv1_current', 'pv_1_current', 'ipv1'], 'pv1_current'), 'PV1 Current', 'mdi:current-dc');
-  add(resolveSensor(['pv2_power', 'pv_2_power', 'ppv2'], 'pv2_power'), 'PV2 Power', 'mdi:solar-panel');
-  add(resolveSensor(['pv2_voltage', 'pv_2_voltage', 'vpv2'], 'pv2_voltage'), 'PV2 Voltage', 'mdi:sine-wave');
-  add(resolveSensor(['pv2_current', 'pv_2_current', 'ipv2'], 'pv2_current'), 'PV2 Current', 'mdi:current-dc');
+  add(resolveSensor(['pv1_power', 'pv_1_power', 'pv_power_1', 'ppv1'], 'pv1_power'), 'PV1 Power', 'mdi:solar-panel');
+  add(resolveSensor(['pv1_voltage', 'pv_1_voltage', 'pv_voltage_1', 'vpv1'], 'pv1_voltage'), 'PV1 Voltage', 'mdi:sine-wave');
+  add(resolveSensor(['pv1_current', 'pv_1_current', 'pv_current_1', 'ipv1'], 'pv1_current'), 'PV1 Current', 'mdi:current-dc');
+  add(resolveSensor(['pv2_power', 'pv_2_power', 'pv_power_2', 'ppv2'], 'pv2_power'), 'PV2 Power', 'mdi:solar-panel');
+  add(resolveSensor(['pv2_voltage', 'pv_2_voltage', 'pv_voltage_2', 'vpv2'], 'pv2_voltage'), 'PV2 Voltage', 'mdi:sine-wave');
+  add(resolveSensor(['pv2_current', 'pv_2_current', 'pv_current_2', 'ipv2'], 'pv2_current'), 'PV2 Current', 'mdi:current-dc');
+  add(resolveSensor(['pv3_power', 'pv_3_power', 'pv_power_3', 'ppv3'], 'pv3_power'), 'PV3 Power', 'mdi:solar-panel');
+  add(resolveSensor(['pv3_voltage', 'pv_3_voltage', 'pv_voltage_3', 'vpv3'], 'pv3_voltage'), 'PV3 Voltage', 'mdi:sine-wave');
+  add(resolveSensor(['pv3_current', 'pv_3_current', 'pv_current_3', 'ipv3'], 'pv3_current'), 'PV3 Current', 'mdi:current-dc');
 
   add(e('ct2_power'), 'CT2 Power', 'mdi:current-ac');
   add(e('work_mode'), 'Work Mode', 'mdi:cog');

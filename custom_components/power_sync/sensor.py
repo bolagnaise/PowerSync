@@ -611,6 +611,99 @@ FOXESS_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     ),
 )
 
+SOLAX_PV_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
+    PowerSyncSensorEntityDescription(
+        key="pv1_power",
+        name="PV1 Power",
+        native_unit_of_measurement=UnitOfPower.KILO_WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=3,
+        icon="mdi:solar-panel",
+        value_fn=lambda data: data.get("pv1_power") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key="pv1_voltage",
+        name="PV1 Voltage",
+        native_unit_of_measurement="V",
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        icon="mdi:sine-wave",
+        value_fn=lambda data: data.get("pv1_voltage") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key="pv1_current",
+        name="PV1 Current",
+        native_unit_of_measurement="A",
+        device_class=SensorDeviceClass.CURRENT,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        icon="mdi:current-dc",
+        value_fn=lambda data: data.get("pv1_current") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key="pv2_power",
+        name="PV2 Power",
+        native_unit_of_measurement=UnitOfPower.KILO_WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=3,
+        icon="mdi:solar-panel",
+        value_fn=lambda data: data.get("pv2_power") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key="pv2_voltage",
+        name="PV2 Voltage",
+        native_unit_of_measurement="V",
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        icon="mdi:sine-wave",
+        value_fn=lambda data: data.get("pv2_voltage") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key="pv2_current",
+        name="PV2 Current",
+        native_unit_of_measurement="A",
+        device_class=SensorDeviceClass.CURRENT,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        icon="mdi:current-dc",
+        value_fn=lambda data: data.get("pv2_current") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key="pv3_power",
+        name="PV3 Power",
+        native_unit_of_measurement=UnitOfPower.KILO_WATT,
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=3,
+        icon="mdi:solar-panel",
+        value_fn=lambda data: data.get("pv3_power") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key="pv3_voltage",
+        name="PV3 Voltage",
+        native_unit_of_measurement="V",
+        device_class=SensorDeviceClass.VOLTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        icon="mdi:sine-wave",
+        value_fn=lambda data: data.get("pv3_voltage") if data else None,
+    ),
+    PowerSyncSensorEntityDescription(
+        key="pv3_current",
+        name="PV3 Current",
+        native_unit_of_measurement="A",
+        device_class=SensorDeviceClass.CURRENT,
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=2,
+        icon="mdi:current-dc",
+        value_fn=lambda data: data.get("pv3_current") if data else None,
+    ),
+)
+
 TESLA_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     PowerSyncSensorEntityDescription(
         key=SENSOR_TYPE_FIRMWARE,
@@ -1308,6 +1401,18 @@ async def async_setup_entry(
                 )
             )
         _LOGGER.info("FoxESS-specific sensors added (PV1, PV2, CT2, work mode, min SOC, daily energy)")
+
+    # Add Solax PV string sensors, including X3 Ultra PV3 and voltage/current detail.
+    if is_solax and energy_coordinator:
+        for description in SOLAX_PV_SENSORS:
+            entities.append(
+                TeslaEnergySensor(
+                    coordinator=energy_coordinator,
+                    description=description,
+                    entry=entry,
+                )
+            )
+        _LOGGER.info("Solax PV string sensors added (PV1/PV2/PV3 power, voltage, current)")
 
     # Add dual Sungrow per-inverter SOC sensors
     if is_sungrow and energy_coordinator and hasattr(energy_coordinator, '_coord2'):

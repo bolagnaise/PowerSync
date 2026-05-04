@@ -16,7 +16,7 @@ Sign conventions (PowerSync internal):
   solar_power_kw  : always >= 0
 
 Solax entity conventions (wills106):
-  sensor.*_measured_power      : positive = importing, negative = exporting
+  sensor.*_measured_power      : positive = exporting, negative = importing
   sensor.*_battery_power_charge: positive = charging (OPPOSITE -> negate)
 """
 
@@ -35,27 +35,51 @@ _LOGGER = logging.getLogger(__name__)
 # variants, and older firmware/plugin combinations may still surface
 # `manual_mode` rather than `manual_mode_select`.
 _READ_ENTITIES = {
-    "battery_level": ("battery_capacity", "battery_1_capacity"),  # %
+    "battery_level": (
+        "battery_capacity",
+        "battery_1_capacity",
+        "bms_battery_capacity",
+    ),                                                  # %
     "battery_power_raw": (
         "battery_power_charge",
         "total_battery_power_charge",
         "battery_1_power_charge",
         "energy_dashboard_solax_battery_power",
     ),                                                  # W, +charge/-discharge
-    "grid_power": ("measured_power",),                 # W, +import/-export
-    "pv1_power": ("pv_power_1",),                      # W
-    "pv2_power": ("pv_power_2",),                      # W
-    "pv3_power": ("pv_power_3",),                      # W
+    "grid_power": (
+        "measured_power",
+        "meter_2_measured_power",
+        "energy_dashboard_solax_grid_power",
+    ),                                                  # W, measured_power: +export/-import
+    "pv1_power": (
+        "pv_power_1",
+        "energy_dashboard_solax_pv_power_1",
+    ),                                                  # W
+    "pv2_power": (
+        "pv_power_2",
+        "energy_dashboard_solax_pv_power_2",
+    ),                                                  # W
+    "pv3_power": (
+        "pv_power_3",
+        "energy_dashboard_solax_pv_power_3",
+    ),                                                  # W
+    "pv1_voltage": ("pv_voltage_1",),                  # V
+    "pv2_voltage": ("pv_voltage_2",),                  # V
+    "pv3_voltage": ("pv_voltage_3",),                  # V
+    "pv1_current": ("pv_current_1",),                  # A
+    "pv2_current": ("pv_current_2",),                  # A
+    "pv3_current": ("pv_current_3",),                  # A
     "solar_power": (
         "solar_power",
+        "pv_power_total",
         "pv_total_power",
         "energy_dashboard_solax_solar_power",
     ),                                                  # W, Energy Dashboard / AC Retro-Fit
     "load_power": (
-        "inverter_power",
         "house_load",
         "house_load_alt",
         "energy_dashboard_solax_home_consumption_power",
+        "inverter_power",
     ),                                                  # W
     "battery_temp": ("battery_temperature",),          # C
 }
@@ -86,36 +110,46 @@ _WRITE_ENTITIES = {
     "remotecontrol_set_type": (
         "remotecontrol_set_type",
         "remotecontrol_set_type_mode_1",
+        "remotecontrol_set_type_mode_1_9",
         "remote_control_set_type",
         "inverter_remotecontrol_set_type",
         "inverter_remotecontrol_set_type_mode_1",
+        "inverter_remotecontrol_set_type_mode_1_9",
         "inverter_remote_control_set_type",
     ),
     "remotecontrol_active_power": (
         "remotecontrol_active_power",
         "remotecontrol_active_power_mode_1",
+        "remotecontrol_active_power_mode_1_direct",
         "remote_control_active_power",
         "inverter_remotecontrol_active_power",
         "inverter_remotecontrol_active_power_mode_1",
+        "inverter_remotecontrol_active_power_mode_1_direct",
         "inverter_remote_control_active_power",
     ),
     "remotecontrol_reactive_power": (
         "remotecontrol_reactive_power",
         "remotecontrol_reactive_power_mode_1",
+        "remotecontrol_reactive_power_mode_1_direct",
         "remote_control_reactive_power",
         "inverter_remotecontrol_reactive_power",
         "inverter_remotecontrol_reactive_power_mode_1",
+        "inverter_remotecontrol_reactive_power_mode_1_direct",
         "inverter_remote_control_reactive_power",
     ),
     "remotecontrol_duration": (
         "remotecontrol_duration",
         "remotecontrol_duration_mode_1",
+        "remotecontrol_duration_mode_1_8",
         "remote_control_duration",
         "inverter_remotecontrol_duration",
         "inverter_remotecontrol_duration_mode_1",
+        "inverter_remotecontrol_duration_mode_1_8",
         "inverter_remote_control_duration",
         "remotecontrol_duration_mode_1_9",
         "inverter_remotecontrol_duration_mode_1_9",
+        "remotecontrol_duration_mode_1_direct",
+        "inverter_remotecontrol_duration_mode_1_direct",
     ),
     "remotecontrol_autorepeat_duration": (
         "remotecontrol_autorepeat_duration",
@@ -130,9 +164,11 @@ _WRITE_ENTITIES = {
     "remotecontrol_trigger": (
         "remotecontrol_trigger",
         "remotecontrol_trigger_mode_1",
+        "remotecontrol_trigger_mode_1_7",
         "remote_control_trigger",
         "inverter_remotecontrol_trigger",
         "inverter_remotecontrol_trigger_mode_1",
+        "inverter_remotecontrol_trigger_mode_1_7",
         "inverter_remote_control_trigger",
     ),
     "allow_grid_charge": ("allow_grid_charge",),
@@ -213,6 +249,16 @@ class SolaxBatteryController:
         self._control_profile = "unknown"
         self._saved_force_time_states: dict[str, str] | None = None
 
+    async def _ensure_connected(self) -> None:
+        """Lazily discover entities before runtime service calls."""
+        if not self._entity_map or self._control_profile == "unknown":
+            await self.connect()
+
+    def _ensure_entity_map(self) -> None:
+        """Populate read mappings for status reads even before connect()."""
+        if not self._entity_map:
+            self._discover_entities()
+
     # -- Entity ID helpers -------------------------------------------------
 
     def _sensor(self, suffix: str) -> str:
@@ -275,7 +321,6 @@ class SolaxBatteryController:
             "charger_use_mode",
             "charge_current",
             "discharge_current",
-            "backup_reserve",
         )
         manual_required = ("manual_mode_select",)
         force_time_required = (
@@ -341,12 +386,19 @@ class SolaxBatteryController:
 
     def get_status(self) -> dict[str, Any]:
         """Read current inverter state and return PowerSync-canonical dict."""
+        self._ensure_entity_map()
         soc = self._read_float("battery_level") or 0.0
         bat_w_raw = self._read_float("battery_power_raw") or 0.0
         grid_w = self._read_float("grid_power") or 0.0
         pv1_w = self._read_float("pv1_power") or 0.0
         pv2_w = self._read_float("pv2_power") or 0.0
         pv3_w = self._read_float("pv3_power") or 0.0
+        pv1_v = self._read_float("pv1_voltage")
+        pv2_v = self._read_float("pv2_voltage")
+        pv3_v = self._read_float("pv3_voltage")
+        pv1_a = self._read_float("pv1_current")
+        pv2_a = self._read_float("pv2_current")
+        pv3_a = self._read_float("pv3_current")
         solar_total_w = self._read_float("solar_power")
         load_w = self._read_float("load_power") or 0.0
         bat_temp = self._read_float("battery_temp")
@@ -355,13 +407,27 @@ class SolaxBatteryController:
         # PowerSync battery_power_kw:    +discharge, -charge -> negate
         battery_kw = -(bat_w_raw / 1000.0)
 
-        # wills106 measured_power: +import, -export - matches PowerSync
+        grid_entity = self._entity_map.get("grid_power", "")
+        # wills106 measured_power: +export, -import.
+        # PowerSync grid_power:    +import, -export.
         grid_kw = grid_w / 1000.0
+        if "measured_power" in grid_entity:
+            grid_kw = -grid_kw
 
-        if solar_total_w is None:
-            solar_total_w = pv1_w + pv2_w + pv3_w
+        pv_total_w = pv1_w + pv2_w + pv3_w
+        if solar_total_w is None or (solar_total_w == 0 and pv_total_w > 0):
+            solar_total_w = pv_total_w
         solar_kw = max(0.0, solar_total_w / 1000.0)
+
+        if load_w <= 0:
+            balanced_load_w = solar_total_w + (grid_kw * 1000.0) + (battery_kw * 1000.0)
+            if balanced_load_w > 0:
+                load_w = balanced_load_w
         load_kw = max(0.0, load_w / 1000.0)
+
+        pv1_kw = max(0.0, pv1_w / 1000.0)
+        pv2_kw = max(0.0, pv2_w / 1000.0)
+        pv3_kw = max(0.0, pv3_w / 1000.0)
 
         mode_state = self.hass.states.get(self._entity_map.get("charger_use_mode", ""))
         mode = mode_state.state if mode_state else None
@@ -372,6 +438,15 @@ class SolaxBatteryController:
             "grid_power": grid_kw,
             "solar_power": solar_kw,
             "load_power": load_kw,
+            "pv1_power": pv1_kw,
+            "pv2_power": pv2_kw,
+            "pv3_power": pv3_kw,
+            "pv1_voltage": pv1_v,
+            "pv2_voltage": pv2_v,
+            "pv3_voltage": pv3_v,
+            "pv1_current": pv1_a,
+            "pv2_current": pv2_a,
+            "pv3_current": pv3_a,
             "battery_temperature": bat_temp,
             "mode": mode,
         }
@@ -381,6 +456,8 @@ class SolaxBatteryController:
     async def force_charge(self, duration_minutes: int, power_w: int) -> bool:
         """Force charge from grid for duration_minutes at approximately power_w."""
         from homeassistant.helpers.event import async_call_later
+
+        await self._ensure_connected()
 
         effective_power_w = power_w or int(self._max_charge_a * self._nominal_v)
         amps = min(effective_power_w / max(self._nominal_v, 1.0), self._max_charge_a)
@@ -421,6 +498,8 @@ class SolaxBatteryController:
         """Force discharge to grid for duration_minutes at approximately power_w."""
         from homeassistant.helpers.event import async_call_later
 
+        await self._ensure_connected()
+
         effective_power_w = power_w or int(self._max_discharge_a * self._nominal_v)
         amps = min(effective_power_w / max(self._nominal_v, 1.0), self._max_discharge_a)
         amps = max(0.0, amps)
@@ -458,6 +537,7 @@ class SolaxBatteryController:
 
     async def restore_normal(self) -> bool:
         """Restore to Self Use / stop manual mode."""
+        await self._ensure_connected()
         self._cancel_timer()
         if self._control_profile == "force_time":
             await self._restore_force_time_states()
@@ -480,6 +560,13 @@ class SolaxBatteryController:
 
     async def set_backup_reserve(self, percent: int) -> bool:
         """Set backup reserve (minimum SOC). Clamped to [15, 100]."""
+        await self._ensure_connected()
+        if not self._entity_exists("backup_reserve"):
+            _LOGGER.warning(
+                "Solax backup reserve entity not found; expected one of: %s",
+                ", ".join(_WRITE_ENTITIES["backup_reserve"]),
+            )
+            return False
         clamped = max(15, min(100, int(percent)))
         await self._set_number("backup_reserve", clamped)
         if self._control_profile == "force_time" and self._entity_exists("grid_tied_min_soc"):
@@ -489,6 +576,7 @@ class SolaxBatteryController:
 
     async def set_operation_mode(self, mode: str) -> bool:
         """Map PowerSync operation mode to Solax charger_use_mode."""
+        await self._ensure_connected()
         option = _OP_MODE_MAP.get(mode)
         if not option:
             _LOGGER.warning("Solax: unknown operation mode '%s'", mode)
@@ -503,6 +591,7 @@ class SolaxBatteryController:
 
     async def set_grid_export_limit(self, watts: int) -> bool:
         """Set grid export limit in watts."""
+        await self._ensure_connected()
         entity_id = self._entity_map.get("export_limit")
         if not entity_id or self.hass.states.get(entity_id) is None:
             _LOGGER.debug("Solax: export_control_user_limit entity not found, skipping")
@@ -585,18 +674,22 @@ class SolaxBatteryController:
                 if self.hass.states.get(candidate) is not None:
                     return candidate
 
-        matches: list[str] = []
         domain_prefix = f"{domain}."
         for suffix in suffixes:
+            matches: list[str] = []
             tail = f"_{suffix}"
             for entity_id in entity_ids:
                 if entity_id.startswith(domain_prefix) and entity_id.endswith(tail):
                     matches.append(entity_id)
+            if not matches:
+                continue
 
-        for entity_id in matches:
-            if self.hass.states.get(entity_id) is not None:
-                return entity_id
-        return matches[0] if matches else None
+            matches = sorted(matches, key=lambda entity_id: (len(entity_id), entity_id))
+            for entity_id in matches:
+                if self.hass.states.get(entity_id) is not None:
+                    return entity_id
+            return matches[0]
+        return None
 
     def _expected_entity_hint(self, key: str) -> str | None:
         """Return a likely entity-id hint for error reporting."""

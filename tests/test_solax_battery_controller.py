@@ -140,6 +140,41 @@ def _manual_states() -> list[_FakeState]:
     ]
 
 
+def _x3_ultra_states() -> list[_FakeState]:
+    return [
+        _FakeState("sensor.solax_inverter_bms_battery_capacity", "0"),
+        _FakeState("sensor.solax_battery_capacity", "72"),
+        _FakeState("sensor.solax_total_battery_power_charge", "-500"),
+        _FakeState("sensor.solax_inverter_meter_2_measured_power", "999"),
+        _FakeState("sensor.solax_measured_power", "-1500"),
+        _FakeState("sensor.solax_inverter_power", "0"),
+        _FakeState("sensor.solax_house_load", "2300"),
+        _FakeState("sensor.solax_energy_dashboard_solax_solar_power", "0"),
+        _FakeState("sensor.solax_pv_power_1", "2000"),
+        _FakeState("sensor.solax_pv_power_2", "1600"),
+        _FakeState("sensor.solax_pv_power_3", "900"),
+        _FakeState("sensor.solax_pv_voltage_1", "420"),
+        _FakeState("sensor.solax_pv_voltage_2", "410"),
+        _FakeState("sensor.solax_pv_voltage_3", "405"),
+        _FakeState("sensor.solax_pv_current_1", "4.8"),
+        _FakeState("sensor.solax_pv_current_2", "3.9"),
+        _FakeState("sensor.solax_pv_current_3", "2.2"),
+        _FakeState("select.solax_inverter_charger_use_mode", "Self Use Mode", ["Self Use Mode"]),
+        _FakeState("number.solax_inverter_battery_charge_max_current", "25"),
+        _FakeState("number.solax_inverter_battery_discharge_max_current", "25"),
+        _FakeState("select.solax_inverter_remotecontrol_power_control_mode_1", "Disabled", ["Disabled", "Enabled Battery Control"]),
+        _FakeState("select.solax_inverter_remotecontrol_set_type_mode_1_9", "Set", ["Set"]),
+        _FakeState("number.solax_inverter_remotecontrol_active_power_mode_1", "0"),
+        _FakeState("number.solax_inverter_remotecontrol_duration_mode_1_8", "0"),
+        _FakeState("number.solax_inverter_remotecontrol_autorepeat_duration_mode_1_9", "0"),
+        _FakeState("button.solax_inverter_remotecontrol_trigger_mode_1_7", "unknown"),
+    ]
+
+
+def _without_entity(states: list[_FakeState], entity_id: str) -> list[_FakeState]:
+    return [state for state in states if state.entity_id != entity_id]
+
+
 async def _connect_mode1_controller():
     hass = _FakeHass(_base_states() + _mode1_states())
     controller = SolaxBatteryController(hass, entity_prefix="solax")
@@ -165,6 +200,16 @@ def test_mode1_profile_preferred_when_manual_mode_also_exists():
     assert controller._control_profile == "remote_control"
 
 
+def test_status_lazily_discovers_entities():
+    hass = _FakeHass(_base_states() + _mode1_states())
+    controller = SolaxBatteryController(hass, entity_prefix="solax")
+
+    status = controller.get_status()
+
+    assert status["battery_level"] == 55.0
+    assert status["battery_power"] == -0.12
+
+
 def test_mode1_force_charge_uses_remotecontrol_entities():
     hass, controller = asyncio.run(_connect_mode1_controller())
 
@@ -185,6 +230,37 @@ def test_mode1_force_charge_uses_remotecontrol_entities():
     assert ("button", "press", {
         "entity_id": "button.solax_remotecontrol_trigger",
     }) in hass.services.calls
+
+
+def test_restore_normal_lazily_discovers_mode1_profile():
+    hass = _FakeHass(_base_states() + _mode1_states())
+    controller = SolaxBatteryController(hass, entity_prefix="solax")
+
+    assert controller._control_profile == "unknown"
+    assert asyncio.run(controller.restore_normal())
+
+    assert controller._control_profile == "remote_control"
+    assert ("select", "select_option", {
+        "entity_id": "select.solax_remotecontrol_power_control",
+        "option": "Disabled",
+    }) in hass.services.calls
+    assert all(
+        call[2].get("entity_id") != "select.solax_manual_mode_select"
+        for call in hass.services.calls
+    )
+
+
+def test_mode1_allows_missing_backup_reserve_entity():
+    states = _without_entity(
+        _base_states(),
+        "number.solax_selfuse_discharge_min_soc",
+    )
+    hass = _FakeHass(states + _mode1_states())
+    controller = SolaxBatteryController(hass, entity_prefix="solax")
+
+    assert asyncio.run(controller.connect())
+    assert controller._control_profile == "remote_control"
+    assert not asyncio.run(controller.set_backup_reserve(30))
 
 
 def test_discovery_prefers_live_state_over_stale_registry_entity():
@@ -219,3 +295,32 @@ def test_config_entry_discovery_falls_back_to_live_state_ids():
     assert asyncio.run(controller.connect())
     assert controller._entity_map["battery_level"] == "sensor.solax_battery_capacity"
     assert controller._entity_map["grid_power"] == "sensor.solax_measured_power"
+
+
+def test_x3_ultra_entity_aliases_map_live_telemetry():
+    entity_ids = [state.entity_id for state in _x3_ultra_states()]
+    hass = _FakeHass(
+        _x3_ultra_states(),
+        registry_entries={"solax-entry": entity_ids},
+    )
+    controller = SolaxBatteryController(hass, solax_entry_id="solax-entry")
+
+    assert asyncio.run(controller.connect())
+    assert controller._control_profile == "remote_control"
+    assert controller._entity_map["battery_level"] == "sensor.solax_battery_capacity"
+    assert controller._entity_map["grid_power"] == "sensor.solax_measured_power"
+    assert controller._entity_map["load_power"] == "sensor.solax_house_load"
+    assert controller._entity_map["pv3_power"] == "sensor.solax_pv_power_3"
+    assert controller._entity_map["remotecontrol_trigger"] == "button.solax_inverter_remotecontrol_trigger_mode_1_7"
+
+    status = controller.get_status()
+    assert status["battery_level"] == 72.0
+    assert status["battery_power"] == 0.5
+    assert status["grid_power"] == 1.5
+    assert status["load_power"] == 2.3
+    assert status["solar_power"] == 4.5
+    assert status["pv1_power"] == 2.0
+    assert status["pv2_power"] == 1.6
+    assert status["pv3_power"] == 0.9
+    assert status["pv1_voltage"] == 420.0
+    assert status["pv2_current"] == 3.9
