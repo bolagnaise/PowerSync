@@ -607,7 +607,8 @@ _LOW_SOE_RESERVE_PCT = 5.0
 
 
 def _snapshot_from_dcq(
-    dcq: dict[str, Any], cfg: dict[str, Any] | None
+    dcq: dict[str, Any],
+    cfg: dict[str, Any] | None,
 ) -> PowerwallSnapshot:
     """Map a DeviceControllerQuery JSON + config.json into a PowerwallSnapshot.
 
@@ -624,14 +625,14 @@ def _snapshot_from_dcq(
     control = dcq.get("control") or {}
 
     # Per-location power readings (watts).
-    meters = {
-        m.get("location"): m
-        for m in control.get("meterAggregates") or []
-        if isinstance(m, dict) and m.get("location")
-    }
+    meters = {}
+    for m in control.get("meterAggregates") or []:
+        if not isinstance(m, dict) or not m.get("location"):
+            continue
+        meters[str(m["location"]).strip().lower()] = m
 
     def _watts(location: str) -> float | None:
-        m = meters.get(location)
+        m = meters.get(location.strip().lower())
         if not isinstance(m, dict):
             return None
         return _float_or_none(m.get("realPowerW"))
@@ -715,5 +716,3 @@ def _snapshot_from_dcq(
         battery_blocks=battery_blocks,
         alerts=alerts,
     )
-
-

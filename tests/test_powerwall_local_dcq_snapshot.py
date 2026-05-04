@@ -154,6 +154,18 @@ def test_snapshot_from_dcq_missing_meters():
     assert snap.load_w is None
 
 
+def test_snapshot_from_dcq_uppercase_meter_locations():
+    """PW3 DCQ can return uppercase meter locations."""
+    dcq = _sample_dcq()
+    for meter in dcq["control"]["meterAggregates"]:
+        meter["location"] = meter["location"].upper()
+    snap = client_mod._snapshot_from_dcq(dcq, _sample_cfg())
+    assert snap.grid_w == 1234.5
+    assert snap.battery_w == -2000.0
+    assert snap.solar_w == 4500.0
+    assert snap.load_w == 3500.0
+
+
 def test_snapshot_from_dcq_no_config():
     """A failed config.json read should leave operation_mode/backup_reserve None."""
     snap = client_mod._snapshot_from_dcq(_sample_dcq(), None)
