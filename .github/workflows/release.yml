@@ -40,12 +40,60 @@ jobs:
         if: steps.check_tag.outputs.exists == 'false'
         id: notes
         run: |
+          set -euo pipefail
+
+          VERSION="${{ steps.version.outputs.version }}"
+
           # Prefer a hand-written RELEASE_NOTES.md if it exists (for
-          # feature releases with user-friendly descriptions). Fall back
-          # to auto-generating from commit messages for patch releases.
+          # feature releases with user-friendly descriptions), but only
+          # when it is explicitly marked for this manifest version. This
+          # prevents stale notes from a previous release being reused if
+          # the cleanup commit failed or was bypassed.
           if [ -f "RELEASE_NOTES.md" ] && [ -s "RELEASE_NOTES.md" ]; then
             echo "Using hand-written RELEASE_NOTES.md"
-            cp RELEASE_NOTES.md /tmp/release_notes.md
+            export VERSION
+            python3 - <<'PY' > /tmp/release_notes.md
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          version = os.environ["VERSION"]
+          path = Path("RELEASE_NOTES.md")
+          text = path.read_text()
+          marker = re.compile(
+              r"^\s*<!--\s*release:\s*v?([0-9]+(?:\.[0-9]+){2}(?:[-+][A-Za-z0-9_.-]+)?)\s*-->\s*",
+              re.IGNORECASE,
+          )
+          match = marker.match(text)
+          expected = f"<!-- release: v{version} -->"
+          if not match:
+              print(
+                  f"::error::Hand-written RELEASE_NOTES.md must start with {expected} "
+                  "so stale notes cannot be reused.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          notes_version = match.group(1)
+          if notes_version != version:
+              print(
+                  f"::error::RELEASE_NOTES.md is marked for v{notes_version}, "
+                  f"but manifest.json is v{version}. Update the marker before releasing.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          notes = text[match.end():].lstrip()
+          if not notes.strip():
+              print(
+                  "::error::RELEASE_NOTES.md marker is present but no release notes were found.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          sys.stdout.write(notes)
+          PY
           else
             echo "No RELEASE_NOTES.md found, generating from commits"
             PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
