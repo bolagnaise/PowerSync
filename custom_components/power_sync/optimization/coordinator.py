@@ -1212,6 +1212,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._optimizer.pre_window_soc_target = (
                 1.0 if self._optimizer.pre_window_slot is not None else 0.0
             )
+            battery_export_allowed = self._battery_export_allowed_slots(
+                len(import_prices),
+                export_prices,
+            )
 
             # Run LP in executor thread to avoid blocking event loop
             result: OptimizerResult = await self.hass.async_add_executor_job(
@@ -1223,6 +1227,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 soc,
                 self._cost_function.value,
                 acq_cost,
+                battery_export_allowed,
             )
 
             self._last_optimizer_result = result
@@ -2086,6 +2091,107 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         except Exception as e:
             _LOGGER.error("Failed to execute optimizer action: %s", e)
+
+    def _battery_export_allowed_slots(
+        self,
+        n: int,
+        export_prices: list[float] | None = None,
+    ) -> bool | list[bool]:
+        """Return per-slot permission for intentional battery-to-grid export."""
+        if n <= 0:
+            return []
+
+        # Profit maximisation is the explicit mode for whole-horizon arbitrage.
+        if self._config.profit_max_enabled:
+            return True
+
+        allowed = [False] * n
+        interval = self._config.interval_minutes
+        now = dt_util.now()
+
+        if self._entry:
+            from ..const import (
+                CONF_EXPORT_BOOST_ENABLED,
+                CONF_EXPORT_BOOST_START,
+                CONF_EXPORT_BOOST_END,
+                CONF_EXPORT_BOOST_THRESHOLD,
+                DEFAULT_EXPORT_BOOST_START,
+                DEFAULT_EXPORT_BOOST_END,
+                DEFAULT_EXPORT_BOOST_THRESHOLD,
+            )
+
+            opts = getattr(self._entry, "options", {}) or {}
+            data = getattr(self._entry, "data", {}) or {}
+            if opts.get(CONF_EXPORT_BOOST_ENABLED, data.get(CONF_EXPORT_BOOST_ENABLED, False)):
+                boost_start = opts.get(CONF_EXPORT_BOOST_START, DEFAULT_EXPORT_BOOST_START)
+                boost_end = opts.get(CONF_EXPORT_BOOST_END, DEFAULT_EXPORT_BOOST_END)
+                threshold = (
+                    opts.get(CONF_EXPORT_BOOST_THRESHOLD, DEFAULT_EXPORT_BOOST_THRESHOLD)
+                    or 0
+                ) / 100
+
+                try:
+                    sh, sm = map(int, boost_start.split(":"))
+                    eh, em = map(int, boost_end.split(":"))
+                except (ValueError, IndexError):
+                    sh = sm = eh = em = None
+
+                if sh is not None:
+                    start_min = sh * 60 + sm
+                    end_min = eh * 60 + em
+                    for t in range(n):
+                        if (
+                            export_prices
+                            and t < len(export_prices)
+                            and export_prices[t] < threshold
+                        ):
+                            continue
+
+                        ts = now + timedelta(minutes=t * interval)
+                        minutes_of_day = ts.hour * 60 + ts.minute
+                        if end_min <= start_min:
+                            in_window = minutes_of_day >= start_min or minutes_of_day < end_min
+                        else:
+                            in_window = start_min <= minutes_of_day < end_min
+                        if in_window:
+                            allowed[t] = True
+
+        data = getattr(self._saving_session_coordinator, "data", None)
+        sessions = data.get("sessions", []) if isinstance(data, dict) else []
+        for session in sessions:
+            if (
+                not getattr(session, "joined", False)
+                or getattr(session, "session_type", None) != "saving"
+            ):
+                continue
+
+            start = getattr(session, "start", None)
+            end = getattr(session, "end", None)
+            if start is None or end is None:
+                continue
+            if getattr(start, "tzinfo", None) is None:
+                start = start.replace(tzinfo=dt_util.UTC)
+            if getattr(end, "tzinfo", None) is None:
+                end = end.replace(tzinfo=dt_util.UTC)
+
+            for t in range(n):
+                ts = now + timedelta(minutes=t * interval)
+                ts_utc = (
+                    ts.astimezone(dt_util.UTC)
+                    if getattr(ts, "tzinfo", None) is not None
+                    else ts.replace(tzinfo=dt_util.UTC)
+                )
+                if start <= ts_utc < end:
+                    allowed[t] = True
+
+        allowed_count = sum(allowed)
+        if allowed_count:
+            _LOGGER.debug(
+                "Battery export allowed in %d/%d optimizer intervals",
+                allowed_count,
+                n,
+            )
+        return allowed
 
     def _apply_export_boost(
         self,

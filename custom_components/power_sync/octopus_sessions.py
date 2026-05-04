@@ -220,7 +220,14 @@ class OctopusSavingSessionsClient:
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
                 if resp.status != 200:
-                    _LOGGER.error("GraphQL request failed: HTTP %s", resp.status)
+                    body = (await resp.text()).strip()
+                    if len(body) > 500:
+                        body = f"{body[:500]}..."
+                    _LOGGER.error(
+                        "GraphQL request failed: HTTP %s: %s",
+                        resp.status,
+                        body or "<empty body>",
+                    )
                     return None
 
                 data = await resp.json()

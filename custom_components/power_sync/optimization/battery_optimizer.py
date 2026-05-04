@@ -163,6 +163,7 @@ class BatteryOptimizer:
         current_soc: float,
         cost_function: str = "cost",
         acquisition_cost_kwh: float = 0.0,
+        allow_battery_export: bool | list[bool] = True,
     ) -> OptimizerResult:
         """
         Run the LP optimization.
@@ -174,6 +175,9 @@ class BatteryOptimizer:
             load_forecast: Home load per time step (kW)
             current_soc: Current battery SOC (0-1)
             cost_function: Optimization objective (only "cost" is supported)
+            allow_battery_export: Whether battery-to-grid export is permitted.
+                A per-step list restricts export to explicit windows while still
+                allowing solar surplus export.
 
         Returns:
             OptimizerResult with schedule and metadata
@@ -194,6 +198,9 @@ class BatteryOptimizer:
         export_prices = self._pad_array(export_prices, n_steps, DEFAULT_EXPORT_PRICE)
         solar_forecast = self._pad_array(solar_forecast, n_steps, 0.0)
         load_forecast = self._pad_array(load_forecast, n_steps, 0.0)
+        allow_battery_export = self._normalize_battery_export_flags(
+            allow_battery_export, n_steps
+        )
 
         if SCIPY_AVAILABLE:
             try:
@@ -206,6 +213,7 @@ class BatteryOptimizer:
                     current_soc,
                     cost_function,
                     acquisition_cost_kwh,
+                    allow_battery_export,
                 )
                 result.solve_time_s = time.monotonic() - start_time
                 return result
@@ -222,6 +230,7 @@ class BatteryOptimizer:
             current_soc,
             cost_function,
             acquisition_cost_kwh,
+            allow_battery_export,
         )
         result.solve_time_s = time.monotonic() - start_time
         return result
@@ -257,6 +266,20 @@ class BatteryOptimizer:
         pad_value = arr[-1] if arr else default
         return arr + [pad_value] * (target_len - len(arr))
 
+    def _normalize_battery_export_flags(
+        self,
+        allow_battery_export: bool | list[bool],
+        target_len: int,
+    ) -> list[bool]:
+        """Normalize battery export permission into one flag per time step."""
+        if isinstance(allow_battery_export, bool):
+            return [allow_battery_export] * target_len
+
+        flags = [bool(v) for v in allow_battery_export[:target_len]]
+        if len(flags) < target_len:
+            flags.extend([False] * (target_len - len(flags)))
+        return flags
+
     def _solve_lp(
         self,
         n: int,
@@ -267,6 +290,7 @@ class BatteryOptimizer:
         soc_0: float,
         cost_function: str,
         acquisition_cost_kwh: float = 0.0,
+        allow_battery_export: list[bool] | None = None,
     ) -> OptimizerResult:
         """
         Solve the LP formulation using scipy.optimize.linprog.
@@ -301,7 +325,7 @@ class BatteryOptimizer:
         try:
             return self._solve_lp_inner(
                 n, import_prices, export_prices, solar, load, soc_0,
-                cost_function, acquisition_cost_kwh,
+                cost_function, acquisition_cost_kwh, allow_battery_export or [True] * n,
             )
         finally:
             if _soc_below_reserve:
@@ -317,11 +341,13 @@ class BatteryOptimizer:
         soc_0: float,
         cost_function: str,
         acquisition_cost_kwh: float = 0.0,
+        allow_battery_export: list[bool] | None = None,
     ) -> OptimizerResult:
         """Inner LP solver (separated for SOC-below-reserve guard in _solve_lp)."""
         dt = self.dt_hours
         eff = self.efficiency
         cap = self.capacity_kwh
+        allow_battery_export = allow_battery_export or [True] * n
 
         # === Objective function: cost minimization ===
         # minimize SUM(import_price * grid_import - export_price * grid_export) * dt
@@ -488,6 +514,15 @@ class BatteryOptimizer:
             A_ub.append(row_lower)
             b_ub.append(soc_0 - self.backup_reserve)
 
+            # Export must be backed by physical energy from solar surplus or
+            # battery discharge. This prevents impossible simultaneous
+            # grid-import -> grid-export passthrough arbitrage in the LP.
+            row_export_source = [0.0] * (4 * n)
+            row_export_source[n + t] = 1.0
+            row_export_source[3 * n + t] = -1.0
+            A_ub.append(row_export_source)
+            b_ub.append(max(0.0, solar[t] - load[t]))
+
         # === Pre-window SOC floor ===
         # Force soc[pre_window_slot - 1] >= target so the battery is filled
         # before a known high-value export window (e.g. Flow Power Happy Hour).
@@ -534,20 +569,28 @@ class BatteryOptimizer:
         for t in range(n):
             bounds.append((0, max_grid_kw))  # grid_import
 
-        # Grid export is always allowed — solar surplus must be exportable
-        # even when export price < acquisition cost. Battery-to-grid
-        # profitability is controlled via battery_discharge bounds below.
+        # Grid export is always allowed for solar surplus. When battery export is
+        # disabled, cap export to exogenous surplus so the LP cannot invent
+        # grid-import -> grid-export or battery -> grid arbitrage.
         for t in range(n):
-            bounds.append((0, max_grid_kw))  # grid_export
+            if allow_battery_export[t]:
+                bounds.append((0, max_grid_kw))  # grid_export
+            else:
+                solar_surplus_kw = max(0.0, solar[t] - load[t])
+                bounds.append((0, min(max_grid_kw, solar_surplus_kw)))
 
         for t in range(n):
             bounds.append((0, self.max_charge_kw))  # battery_charge
 
         for t in range(n):
-            if acquisition_cost_kwh > 0 and export_prices[t] < acquisition_cost_kwh:
+            restrict_to_self_consumption = (
+                not allow_battery_export[t]
+                or (acquisition_cost_kwh > 0 and export_prices[t] < acquisition_cost_kwh)
+            )
+            if restrict_to_self_consumption:
                 # Allow discharge only for self-consumption (serving home load)
                 net_load_kw = max(0.0, load[t] - solar[t])
-                max_self_consumption = net_load_kw / eff if eff > 0 else 0.0
+                max_self_consumption = net_load_kw
                 bounds.append((0, min(self.max_discharge_kw, max_self_consumption)))
             else:
                 bounds.append((0, self.max_discharge_kw))  # battery_discharge
@@ -573,11 +616,13 @@ class BatteryOptimizer:
                 return self._solve_lp_relaxed(
                     n, import_prices, export_prices, solar, load, soc_0, cost_function,
                     acquisition_cost_kwh,
+                    allow_battery_export,
                 )
             # Fall back to greedy
             return self._solve_greedy(
                 n, import_prices, export_prices, solar, load, soc_0, cost_function,
                 acquisition_cost_kwh,
+                allow_battery_export,
             )
 
         # === Extract solution ===
@@ -630,6 +675,7 @@ class BatteryOptimizer:
         soc_0: float,
         cost_function: str,
         acquisition_cost_kwh: float = 0.0,
+        allow_battery_export: list[bool] | None = None,
     ) -> OptimizerResult:
         """Retry LP with relaxed SOC constraints (lower backup reserve)."""
         _LOGGER.warning(
@@ -639,11 +685,13 @@ class BatteryOptimizer:
         original_reserve = self.backup_reserve
         self.backup_reserve = 0.05  # Minimal reserve
         self._relaxing = True  # Guard against infinite recursion
+        allow_battery_export = allow_battery_export or [True] * n
 
         try:
             result = self._solve_lp(
                 n, import_prices, export_prices, solar, load, soc_0, cost_function,
                 acquisition_cost_kwh,
+                allow_battery_export,
             )
             result.feasible = False  # Mark as relaxed
             return result
@@ -652,6 +700,7 @@ class BatteryOptimizer:
             return self._solve_greedy(
                 n, import_prices, export_prices, solar, load, soc_0, cost_function,
                 acquisition_cost_kwh,
+                allow_battery_export,
             )
         finally:
             self.backup_reserve = original_reserve
@@ -667,6 +716,7 @@ class BatteryOptimizer:
         soc_0: float,
         cost_function: str,
         acquisition_cost_kwh: float = 0.0,
+        allow_battery_export: list[bool] | None = None,
     ) -> OptimizerResult:
         """
         Greedy fallback optimizer.
@@ -677,6 +727,7 @@ class BatteryOptimizer:
         dt = self.dt_hours
         eff = self.efficiency
         cap = self.capacity_kwh
+        allow_battery_export = allow_battery_export or [True] * n
 
         grid_import = [0.0] * n
         grid_export = [0.0] * n
@@ -701,17 +752,20 @@ class BatteryOptimizer:
         # Pass 1: assign discharge/export to highest-spread periods
         soc_tracker = soc_0
         for spread, t, net_load in spreads:
-            # Acquisition cost gate: skip discharge/export when unprofitable
-            if (
-                acquisition_cost_kwh > 0
-                and export_prices[t] < acquisition_cost_kwh
-                and spread > 0
-            ):
-                continue
             if spread > 0:
-                # Profitable to discharge
+                # Profitable to discharge; cap to home load when battery export
+                # is not explicitly permitted or export is below acquisition cost.
+                discharge_limit = self.max_discharge_kw
+                if (
+                    not allow_battery_export[t]
+                    or (
+                        acquisition_cost_kwh > 0
+                        and export_prices[t] < acquisition_cost_kwh
+                    )
+                ):
+                    discharge_limit = min(discharge_limit, max(0.0, net_load))
                 discharge_room = (soc_tracker - self.backup_reserve) * cap * eff / dt
-                discharge_kw = min(self.max_discharge_kw, max(0, discharge_room))
+                discharge_kw = min(discharge_limit, max(0, discharge_room))
                 if discharge_kw > 0.01:
                     actions[t] = (0.0, discharge_kw)
                     soc_tracker -= discharge_kw * dt / (eff * cap)
