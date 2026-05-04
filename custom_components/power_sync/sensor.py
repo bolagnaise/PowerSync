@@ -1928,7 +1928,10 @@ def _setup_powerwall_pack_sensor_additions(
         _handle_battery_health_update,
     )
 
-    _cleanup_legacy_powerwall_pack_registry(hass, entry)
+    try:
+        _cleanup_legacy_powerwall_pack_registry(hass, entry)
+    except Exception:
+        _LOGGER.warning("Could not clean up legacy Powerwall pack registry entries", exc_info=True)
 
 
 def _cleanup_legacy_powerwall_pack_registry(hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -1947,11 +1950,13 @@ def _cleanup_legacy_powerwall_pack_registry(hass: HomeAssistant, entry: ConfigEn
     legacy_identifier_prefix = f"{entry.entry_id}_pw_"
     for device in list(device_registry.devices.values()):
         identifiers = getattr(device, "identifiers", set()) or set()
-        if any(
-            domain == DOMAIN and str(identifier).startswith(legacy_identifier_prefix)
-            for domain, identifier in identifiers
-        ):
-            legacy_device_ids.add(device.id)
+        for identifier_entry in identifiers:
+            if not isinstance(identifier_entry, (tuple, list)) or len(identifier_entry) < 2:
+                continue
+            domain, identifier = identifier_entry[0], identifier_entry[1]
+            if domain == DOMAIN and str(identifier).startswith(legacy_identifier_prefix):
+                legacy_device_ids.add(device.id)
+                break
 
     for entity in list(entity_registry.entities.values()):
         if (

@@ -24,6 +24,8 @@ def _install_sensor_stubs() -> None:
     ha_core = types.ModuleType("homeassistant.core")
     ha_helpers = types.ModuleType("homeassistant.helpers")
     ha_entity_platform = types.ModuleType("homeassistant.helpers.entity_platform")
+    ha_device_registry = types.ModuleType("homeassistant.helpers.device_registry")
+    ha_entity_registry = types.ModuleType("homeassistant.helpers.entity_registry")
     ha_update = types.ModuleType("homeassistant.helpers.update_coordinator")
     ha_dispatcher = types.ModuleType("homeassistant.helpers.dispatcher")
     ha_event = types.ModuleType("homeassistant.helpers.event")
@@ -75,6 +77,12 @@ def _install_sensor_stubs() -> None:
     ha_core.HomeAssistant = type("HomeAssistant", (), {})
     ha_core.callback = lambda func: func
     ha_entity_platform.AddEntitiesCallback = Any
+    ha_device_registry.async_get = lambda hass: getattr(
+        hass, "device_registry", SimpleNamespace(devices={})
+    )
+    ha_entity_registry.async_get = lambda hass: getattr(
+        hass, "entity_registry", SimpleNamespace(entities={})
+    )
     ha_update.CoordinatorEntity = CoordinatorEntity
     ha_dispatcher.async_dispatcher_connect = lambda *args, **kwargs: (lambda: None)
     ha_event.async_track_time_interval = lambda *args, **kwargs: (lambda: None)
@@ -84,6 +92,8 @@ def _install_sensor_stubs() -> None:
     ha_dt.utcnow = lambda *args, **kwargs: datetime(2026, 5, 3, 12, 0, tzinfo=timezone.utc)
     ha_util.dt = ha_dt
     ha_helpers.entity_platform = ha_entity_platform
+    ha_helpers.device_registry = ha_device_registry
+    ha_helpers.entity_registry = ha_entity_registry
     ha_helpers.update_coordinator = ha_update
     ha_helpers.dispatcher = ha_dispatcher
     ha_helpers.event = ha_event
@@ -103,6 +113,8 @@ def _install_sensor_stubs() -> None:
     sys.modules["homeassistant.core"] = ha_core
     sys.modules["homeassistant.helpers"] = ha_helpers
     sys.modules["homeassistant.helpers.entity_platform"] = ha_entity_platform
+    sys.modules["homeassistant.helpers.device_registry"] = ha_device_registry
+    sys.modules["homeassistant.helpers.entity_registry"] = ha_entity_registry
     sys.modules["homeassistant.helpers.update_coordinator"] = ha_update
     sys.modules["homeassistant.helpers.dispatcher"] = ha_dispatcher
     sys.modules["homeassistant.helpers.event"] = ha_event
@@ -339,4 +351,62 @@ def test_powerwall_pack_labels_leader_follower_and_expansions():
         "Follower PW3",
         "Expansion Pack 1",
         "Expansion Pack 2",
+    ]
+
+
+def test_powerwall_pack_registry_cleanup_tolerates_legacy_identifier_shape(monkeypatch):
+    sensor = _sensor_module()
+    entry = SimpleNamespace(entry_id="entry-1")
+    removed_entities = []
+    updated_devices = []
+
+    device_registry_module = types.ModuleType("homeassistant.helpers.device_registry")
+    entity_registry_module = types.ModuleType("homeassistant.helpers.entity_registry")
+
+    device_registry = SimpleNamespace(
+        devices={
+            "legacy-device": SimpleNamespace(
+                id="legacy-device",
+                identifiers={
+                    ("power_sync", "entry-1_pw_1", "legacy-extra"),
+                    ("other", "ignored"),
+                },
+            ),
+        },
+        async_update_device=lambda **kwargs: updated_devices.append(kwargs),
+    )
+    entity_registry = SimpleNamespace(
+        entities={
+            "sensor.legacy_temperature": SimpleNamespace(
+                platform="power_sync",
+                device_id="legacy-device",
+                unique_id="entry-1_pw1_temperature",
+                entity_id="sensor.legacy_temperature",
+            ),
+        },
+        async_remove=lambda entity_id: removed_entities.append(entity_id),
+    )
+
+    device_registry_module.async_get = lambda hass: device_registry
+    entity_registry_module.async_get = lambda hass: entity_registry
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.device_registry", device_registry_module)
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.entity_registry", entity_registry_module)
+    monkeypatch.setattr(
+        sys.modules["homeassistant.helpers"],
+        "device_registry",
+        device_registry_module,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        sys.modules["homeassistant.helpers"],
+        "entity_registry",
+        entity_registry_module,
+        raising=False,
+    )
+
+    sensor._cleanup_legacy_powerwall_pack_registry(SimpleNamespace(), entry)
+
+    assert removed_entities == ["sensor.legacy_temperature"]
+    assert updated_devices == [
+        {"device_id": "legacy-device", "remove_config_entry_id": "entry-1"}
     ]
