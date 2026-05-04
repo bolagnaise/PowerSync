@@ -82,7 +82,7 @@ def _optimizer(module):
     )
 
 
-def test_normal_cost_blocks_battery_export_when_fit_beats_import(battery_optimizer_module):
+def test_default_blocks_battery_export_when_fit_beats_import(battery_optimizer_module):
     optimizer = _optimizer(battery_optimizer_module)
 
     result = optimizer.optimize(
@@ -92,12 +92,30 @@ def test_normal_cost_blocks_battery_export_when_fit_beats_import(battery_optimiz
         load_forecast=[0.5] * 12,
         current_soc=0.80,
         acquisition_cost_kwh=0.0,
-        allow_battery_export=False,
     )
 
     assert max(result.grid_export_w) <= 1e-6
     assert all(action.action != "export" for action in result.schedule.actions)
     assert max(action.battery_discharge_w for action in result.schedule.actions) <= 500.1
+
+
+def test_explicit_battery_export_true_allows_export_when_profitable(
+    battery_optimizer_module,
+):
+    optimizer = _optimizer(battery_optimizer_module)
+
+    result = optimizer.optimize(
+        import_prices=[0.05] * 12,
+        export_prices=[0.50] * 12,
+        solar_forecast=[0.0] * 12,
+        load_forecast=[0.1] * 12,
+        current_soc=0.80,
+        acquisition_cost_kwh=0.0,
+        allow_battery_export=True,
+    )
+
+    assert max(result.grid_export_w) > 100.0
+    assert any(action.action == "export" for action in result.schedule.actions)
 
 
 def test_solar_surplus_export_still_works_when_battery_export_blocked(
@@ -118,6 +136,23 @@ def test_solar_surplus_export_still_works_when_battery_export_blocked(
     assert min(result.grid_export_w) >= 1499.0
     assert max(result.grid_export_w) <= 1500.1
     assert all(action.action != "export" for action in result.schedule.actions)
+
+
+def test_grid_export_cannot_come_from_grid_passthrough(battery_optimizer_module):
+    optimizer = _optimizer(battery_optimizer_module)
+
+    result = optimizer.optimize(
+        import_prices=[0.05] * 12,
+        export_prices=[0.50] * 12,
+        solar_forecast=[0.0] * 12,
+        load_forecast=[0.0] * 12,
+        current_soc=0.05,
+        acquisition_cost_kwh=0.0,
+        allow_battery_export=True,
+    )
+
+    assert max(result.grid_export_w) <= 1e-6
+    assert max(result.grid_import_w) <= 1e-6
 
 
 def test_battery_export_mask_allows_only_explicit_slots(battery_optimizer_module):

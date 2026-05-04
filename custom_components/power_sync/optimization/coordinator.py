@@ -164,6 +164,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_export_prices: list[float] | None = None     # $/kWh values (LP-adjusted)
         self._last_display_import_prices: list[float] | None = None  # $/kWh actual tariff
         self._last_display_export_prices: list[float] | None = None  # $/kWh actual tariff
+        self._last_export_boost_allowed_slots: list[bool] = []
         self._solar_nowcast_derate: float = 1.0
         self._last_solar_nowcast_ratio: float | None = None
         self._last_logged_solar_nowcast_derate: float | None = None
@@ -323,7 +324,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Enable or disable profit maximisation mode."""
         self._config.profit_max_enabled = enabled
         if self._optimizer:
-            self._optimizer.terminal_weight = 0.3 if enabled else 1.0
+            self._optimizer.terminal_weight = self._profit_max_terminal_weight()
         if self._load_estimator:
             self._load_estimator.invalidate_cache()
         _LOGGER.info("Profit Maximisation mode %s", "ENABLED" if enabled else "DISABLED")
@@ -343,6 +344,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             new_options[CONF_PROFIT_MAX_ENABLED] = enabled
             self.hass.data.setdefault(DOMAIN, {}).setdefault(self.entry_id, {})["_skip_reload"] = True
             self.hass.config_entries.async_update_entry(self._entry, options=new_options)
+
+    def _provider_key(self) -> str:
+        """Return the configured electricity provider key."""
+        if not self._entry:
+            return ""
+        from ..const import CONF_ELECTRICITY_PROVIDER
+
+        return self._entry.options.get(
+            CONF_ELECTRICITY_PROVIDER,
+            self._entry.data.get(CONF_ELECTRICITY_PROVIDER, ""),
+        )
+
+    def _profit_max_terminal_weight(self) -> float:
+        """Return the terminal SOC weight for the current profit mode/provider."""
+        if self._config.profit_max_enabled and self._provider_key() == "flow_power":
+            return 0.3
+        return 1.0
 
     def _summarise_load_forecast(self) -> dict | None:
         """Slice the cached load forecast into today-remaining and tomorrow kWh totals."""
@@ -505,7 +523,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             self._config.profit_max_enabled = bool(profit_max)
             if self._optimizer:
-                self._optimizer.terminal_weight = 0.3 if profit_max else 1.0
+                self._optimizer.terminal_weight = self._profit_max_terminal_weight()
             if profit_max:
                 _LOGGER.info("Restored profit maximisation mode: ENABLED")
 
@@ -1076,6 +1094,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
 
             # Collect forecast data
+            self._last_export_boost_allowed_slots = []
             prices = await self._get_price_forecast()
             solar = await self._get_solar_forecast()
             load = await self._get_load_forecast()
@@ -2101,63 +2120,142 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if n <= 0:
             return []
 
-        # Profit maximisation is the explicit mode for whole-horizon arbitrage.
-        if self._config.profit_max_enabled:
-            return True
-
         allowed = [False] * n
+
+        for slots in (
+            self._flow_power_profit_export_slots(n),
+            self._export_boost_mask_for_run(n, export_prices),
+            self._saving_session_export_slots(n),
+        ):
+            for idx, value in enumerate(slots[:n]):
+                allowed[idx] = allowed[idx] or value
+
+        allowed_count = sum(allowed)
+        if allowed_count:
+            _LOGGER.debug(
+                "Battery export allowed in %d/%d optimizer intervals",
+                allowed_count,
+                n,
+            )
+        return allowed
+
+    def _time_window_slots(
+        self,
+        n: int,
+        start_time: str,
+        end_time: str,
+        prices: list[float] | None = None,
+        threshold: float | None = None,
+    ) -> list[bool]:
+        """Return slots inside a local time window, optionally price-gated."""
+        try:
+            sh, sm = map(int, start_time.split(":"))
+            eh, em = map(int, end_time.split(":"))
+        except (ValueError, IndexError):
+            return [False] * n
+
+        start_min = sh * 60 + sm
+        end_min = eh * 60 + em
         interval = self._config.interval_minutes
         now = dt_util.now()
+        result = [False] * n
 
-        if self._entry:
-            from ..const import (
-                CONF_EXPORT_BOOST_ENABLED,
-                CONF_EXPORT_BOOST_START,
-                CONF_EXPORT_BOOST_END,
-                CONF_EXPORT_BOOST_THRESHOLD,
-                DEFAULT_EXPORT_BOOST_START,
-                DEFAULT_EXPORT_BOOST_END,
-                DEFAULT_EXPORT_BOOST_THRESHOLD,
-            )
+        for t in range(n):
+            if (
+                prices is not None
+                and threshold is not None
+                and (t >= len(prices) or prices[t] < threshold)
+            ):
+                continue
 
-            opts = getattr(self._entry, "options", {}) or {}
-            data = getattr(self._entry, "data", {}) or {}
-            if opts.get(CONF_EXPORT_BOOST_ENABLED, data.get(CONF_EXPORT_BOOST_ENABLED, False)):
-                boost_start = opts.get(CONF_EXPORT_BOOST_START, DEFAULT_EXPORT_BOOST_START)
-                boost_end = opts.get(CONF_EXPORT_BOOST_END, DEFAULT_EXPORT_BOOST_END)
-                threshold = (
-                    opts.get(CONF_EXPORT_BOOST_THRESHOLD, DEFAULT_EXPORT_BOOST_THRESHOLD)
-                    or 0
-                ) / 100
+            ts = now + timedelta(minutes=t * interval)
+            minutes_of_day = ts.hour * 60 + ts.minute
+            if end_min <= start_min:
+                in_window = minutes_of_day >= start_min or minutes_of_day < end_min
+            else:
+                in_window = start_min <= minutes_of_day < end_min
+            result[t] = in_window
 
-                try:
-                    sh, sm = map(int, boost_start.split(":"))
-                    eh, em = map(int, boost_end.split(":"))
-                except (ValueError, IndexError):
-                    sh = sm = eh = em = None
+        return result
 
-                if sh is not None:
-                    start_min = sh * 60 + sm
-                    end_min = eh * 60 + em
-                    for t in range(n):
-                        if (
-                            export_prices
-                            and t < len(export_prices)
-                            and export_prices[t] < threshold
-                        ):
-                            continue
+    def _flow_power_profit_export_slots(self, n: int) -> list[bool]:
+        """Allow Flow Power profit exports only during Happy Hour."""
+        if not self._config.profit_max_enabled or self._provider_key() != "flow_power":
+            return [False] * n
+        if not self._entry:
+            return [False] * n
 
-                        ts = now + timedelta(minutes=t * interval)
-                        minutes_of_day = ts.hour * 60 + ts.minute
-                        if end_min <= start_min:
-                            in_window = minutes_of_day >= start_min or minutes_of_day < end_min
-                        else:
-                            in_window = start_min <= minutes_of_day < end_min
-                        if in_window:
-                            allowed[t] = True
+        from ..const import CONF_FLOW_POWER_STATE, FLOW_POWER_EXPORT_RATES
 
+        state = self._entry.options.get(
+            CONF_FLOW_POWER_STATE,
+            self._entry.data.get(CONF_FLOW_POWER_STATE, ""),
+        )
+        if FLOW_POWER_EXPORT_RATES.get(state, 0.0) <= 0:
+            return [False] * n
+
+        return self._time_window_slots(n, "17:30", "19:30")
+
+    def _export_boost_allowed_slots(
+        self,
+        n: int,
+        export_prices: list[float] | None,
+    ) -> list[bool]:
+        """Return slots where export boost explicitly allows battery export."""
+        if not self._entry:
+            return [False] * n
+
+        from ..const import (
+            CONF_EXPORT_BOOST_ENABLED,
+            CONF_EXPORT_BOOST_START,
+            CONF_EXPORT_BOOST_END,
+            CONF_EXPORT_BOOST_THRESHOLD,
+            DEFAULT_EXPORT_BOOST_START,
+            DEFAULT_EXPORT_BOOST_END,
+            DEFAULT_EXPORT_BOOST_THRESHOLD,
+        )
+
+        opts = getattr(self._entry, "options", {}) or {}
+        data = getattr(self._entry, "data", {}) or {}
+        if not opts.get(CONF_EXPORT_BOOST_ENABLED, data.get(CONF_EXPORT_BOOST_ENABLED, False)):
+            return [False] * n
+
+        boost_start = opts.get(CONF_EXPORT_BOOST_START, DEFAULT_EXPORT_BOOST_START)
+        boost_end = opts.get(CONF_EXPORT_BOOST_END, DEFAULT_EXPORT_BOOST_END)
+        threshold = (
+            opts.get(CONF_EXPORT_BOOST_THRESHOLD, DEFAULT_EXPORT_BOOST_THRESHOLD)
+            or 0
+        ) / 100
+
+        return self._time_window_slots(
+            n,
+            boost_start,
+            boost_end,
+            export_prices,
+            threshold,
+        )
+
+    def _export_boost_mask_for_run(
+        self,
+        n: int,
+        export_prices: list[float] | None,
+    ) -> list[bool]:
+        """Return the export boost mask produced during price preparation."""
+        last_mask = getattr(self, "_last_export_boost_allowed_slots", [])
+        if len(last_mask) == n:
+            return list(last_mask)
+        return self._export_boost_allowed_slots(n, export_prices)
+
+    def _saving_session_export_slots(self, n: int) -> list[bool]:
+        """Allow battery export only for joined Octopus saving sessions."""
+        allowed = [False] * n
         data = getattr(self._saving_session_coordinator, "data", None)
         sessions = data.get("sessions", []) if isinstance(data, dict) else []
+        if not sessions:
+            return allowed
+
+        interval = self._config.interval_minutes
+        now = dt_util.now()
         for session in sessions:
             if (
                 not getattr(session, "joined", False)
@@ -2184,20 +2282,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if start <= ts_utc < end:
                     allowed[t] = True
 
-        allowed_count = sum(allowed)
-        if allowed_count:
-            _LOGGER.debug(
-                "Battery export allowed in %d/%d optimizer intervals",
-                allowed_count,
-                n,
-            )
         return allowed
 
     def _apply_export_boost(
         self,
         export_prices: list[float],
         import_prices: list[float] | None = None,
-    ) -> list[float]:
+    ) -> tuple[list[float], list[bool]]:
         """Apply export boost to LP export prices during configured window.
 
         Increases export prices by offset and applies a minimum floor so the LP
@@ -2209,8 +2300,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         Without this, the LP may import from grid to charge the battery for later
         export at the inflated boosted price — a net loss at real prices.
         """
+        allowed_slots = [False] * len(export_prices)
         if not self._entry:
-            return export_prices
+            self._last_export_boost_allowed_slots = allowed_slots
+            return export_prices, allowed_slots
 
         from ..const import (
             CONF_EXPORT_BOOST_ENABLED,
@@ -2227,7 +2320,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         opts = self._entry.options
         data = self._entry.data
         if not opts.get(CONF_EXPORT_BOOST_ENABLED, data.get(CONF_EXPORT_BOOST_ENABLED, False)):
-            return export_prices
+            self._last_export_boost_allowed_slots = allowed_slots
+            return export_prices, allowed_slots
 
         offset = (opts.get(CONF_EXPORT_PRICE_OFFSET, 0) or 0) / 100  # cents → $/kWh
         min_price = (opts.get(CONF_EXPORT_MIN_PRICE, 0) or 0) / 100
@@ -2240,7 +2334,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             sh, sm = map(int, boost_start.split(":"))
             eh, em = map(int, boost_end.split(":"))
         except (ValueError, IndexError):
-            return export_prices
+            self._last_export_boost_allowed_slots = allowed_slots
+            return export_prices, allowed_slots
 
         # Anti-arbitrage cap: the boosted export price must not create phantom
         # arbitrage where the LP charges from grid to export at inflated prices.
@@ -2262,6 +2357,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         capped = 0
 
         result = list(export_prices)
+        allowed_slots = self._export_boost_allowed_slots(len(result), export_prices)
+        self._last_export_boost_allowed_slots = allowed_slots
         for t in range(len(result)):
             ts = now + timedelta(minutes=t * interval)
             minutes_of_day = ts.hour * 60 + ts.minute
@@ -2272,7 +2369,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             else:
                 in_window = start_min <= minutes_of_day < end_min
 
-            if in_window and result[t] >= threshold:
+            if in_window and allowed_slots[t]:
                 real_price = result[t]
                 boosted_price = max(real_price + offset, min_price)
 
@@ -2298,7 +2395,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 (arbitrage_cap or 0) * 100, cap_msg,
             )
 
-        return result
+        return result, allowed_slots
 
     def _apply_saving_session_prices(
         self,
@@ -3416,7 +3513,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         self._last_display_export_prices = list(display_export_raw[:actual_price_intervals])
 
                         # Apply export boost, saving session overlay, and chip mode to LP prices
-                        export_prices = self._apply_export_boost(export_prices, import_prices)
+                        export_prices, _ = self._apply_export_boost(export_prices, import_prices)
                         import_prices, export_prices = self._apply_saving_session_prices(import_prices, export_prices)
                         export_prices = self._apply_chip_mode(export_prices)
 
@@ -4374,7 +4471,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 max_discharge_w=self._config.max_discharge_w,
                 backup_reserve=self._config.backup_reserve,
             )
-            self._optimizer.terminal_weight = 0.3 if self._config.profit_max_enabled else 1.0
+            self._optimizer.terminal_weight = self._profit_max_terminal_weight()
 
     async def force_reoptimize(self) -> Any:
         """Force immediate re-optimization."""

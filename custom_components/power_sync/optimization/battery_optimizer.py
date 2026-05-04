@@ -163,7 +163,7 @@ class BatteryOptimizer:
         current_soc: float,
         cost_function: str = "cost",
         acquisition_cost_kwh: float = 0.0,
-        allow_battery_export: bool | list[bool] = True,
+        allow_battery_export: bool | list[bool] = False,
     ) -> OptimizerResult:
         """
         Run the LP optimization.
@@ -515,10 +515,12 @@ class BatteryOptimizer:
             b_ub.append(soc_0 - self.backup_reserve)
 
             # Export must be backed by physical energy from solar surplus or
-            # battery discharge. This prevents impossible simultaneous
-            # grid-import -> grid-export passthrough arbitrage in the LP.
+            # battery discharge, net of any simultaneous battery charge. This
+            # prevents impossible grid -> battery -> grid passthrough arbitrage
+            # that keeps SOC flat by charging and discharging in the same slot.
             row_export_source = [0.0] * (4 * n)
             row_export_source[n + t] = 1.0
+            row_export_source[2 * n + t] = 1.0
             row_export_source[3 * n + t] = -1.0
             A_ub.append(row_export_source)
             b_ub.append(max(0.0, solar[t] - load[t]))
