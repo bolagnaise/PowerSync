@@ -14,7 +14,7 @@ Sessions:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -25,6 +25,9 @@ GRAPHQL_URL = "https://api.octopus.energy/v1/graphql/"
 
 # Token lifetime: Kraken tokens last ~60 minutes; refresh before expiry.
 TOKEN_REFRESH_BUFFER = timedelta(minutes=5)
+SUPPLY_POINTS_PAGE_SIZE = 20
+CAMPAIGN_EVENTS_PAGE_SIZE = 50
+FREE_ELECTRICITY_CAMPAIGN_SLUG = "free_electricity"
 
 
 @dataclass
@@ -80,6 +83,11 @@ class OctopusSavingSessionsClient:
         self._token: str | None = None
         self._refresh_token: str | None = None
         self._token_expiry: datetime | None = None
+        self._supply_point_identifiers: list[str] | None = None
+        self._free_electricity_identifier: str | None = None
+        self._saving_sessions_unsupported_logged = False
+        self._join_unsupported_logged = False
+        self._free_electricity_lookup_failed_logged = False
 
     async def authenticate(self) -> bool:
         """Authenticate with Octopus GraphQL API using API key.
@@ -196,7 +204,13 @@ class OctopusSavingSessionsClient:
             _LOGGER.debug("Token refresh exception: %s", err)
             return False
 
-    async def _graphql_request(self, query: str, variables: dict | None = None) -> dict | None:
+    async def _graphql_request(
+        self,
+        query: str,
+        variables: dict | None = None,
+        *,
+        log_errors: bool = True,
+    ) -> dict | None:
         """Make an authenticated GraphQL request.
 
         Returns:
@@ -223,7 +237,8 @@ class OctopusSavingSessionsClient:
                     body = (await resp.text()).strip()
                     if len(body) > 500:
                         body = f"{body[:500]}..."
-                    _LOGGER.error(
+                    log_method = _LOGGER.error if log_errors else _LOGGER.debug
+                    log_method(
                         "GraphQL request failed: HTTP %s: %s",
                         resp.status,
                         body or "<empty body>",
@@ -233,7 +248,8 @@ class OctopusSavingSessionsClient:
                 data = await resp.json()
                 errors = data.get("errors")
                 if errors:
-                    _LOGGER.error("GraphQL errors: %s", errors)
+                    log_method = _LOGGER.error if log_errors else _LOGGER.debug
+                    log_method("GraphQL errors: %s", errors)
                     return None
 
                 return data.get("data")
@@ -262,65 +278,96 @@ class OctopusSavingSessionsClient:
 
     async def _get_saving_sessions(self) -> list[SavingSession]:
         """Fetch saving session events."""
+        if not self._saving_sessions_unsupported_logged:
+            _LOGGER.warning(
+                "Octopus no longer exposes Saving Sessions through the Kraken "
+                "GraphQL API. Direct mode will continue to fetch Free Electricity "
+                "events only; use the octopus_energy/Bottlecap Dave source for "
+                "Saving Sessions."
+            )
+            self._saving_sessions_unsupported_logged = True
+        return []
+
+    async def _get_supply_point_identifiers(self) -> list[str]:
+        """Resolve candidate electricity supply point identifiers for the account."""
+        if self._supply_point_identifiers is not None:
+            return self._supply_point_identifiers
+
         query = """
-        query SavingSessions($accountNumber: String!) {
-            savingSessions(accountNumber: $accountNumber) {
-                events {
-                    code
-                    startAt
-                    endAt
-                    octoPointsPerKwh
-                    joinedEvents {
-                        eventId
+        query SupplyPoints($accountNumber: String!, $first: Int!) {
+            supplyPoints(accountNumber: $accountNumber, first: $first) {
+                edges {
+                    node {
+                        id
+                        externalIdentifier
+                        marketName
+                        meterPoint {
+                            __typename
+                            ... on ElectricityMeterPointType {
+                                mpan
+                            }
+                        }
                     }
                 }
             }
         }
         """
-        variables = {"accountNumber": self._account_number}
+        variables = {
+            "accountNumber": self._account_number,
+            "first": SUPPLY_POINTS_PAGE_SIZE,
+        }
         data = await self._graphql_request(query, variables)
         if not data:
+            self._supply_point_identifiers = []
             return []
 
-        sessions_data = data.get("savingSessions", {})
-        events = sessions_data.get("events", [])
-        results: list[SavingSession] = []
+        supply_points = data.get("supplyPoints", {})
+        identifiers: list[str] = []
 
-        for ev in events:
-            try:
-                code = ev.get("code", "")
-                start_str = ev.get("startAt", "")
-                end_str = ev.get("endAt", "")
-                if not start_str or not end_str:
-                    continue
+        for edge in supply_points.get("edges", []):
+            node = edge.get("node") or {}
+            meter_point = node.get("meterPoint") or {}
+            market_name = str(node.get("marketName") or "").upper()
+            is_electricity = (
+                meter_point.get("__typename") == "ElectricityMeterPointType"
+                or "ELECTRIC" in market_name
+            )
+            if not is_electricity:
+                continue
 
-                start = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
-                end = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
-                octopoints = ev.get("octoPointsPerKwh", 800)
-                joined_events = ev.get("joinedEvents") or []
-                joined = len(joined_events) > 0
+            for identifier in (
+                node.get("externalIdentifier"),
+                meter_point.get("mpan"),
+                node.get("id"),
+            ):
+                if identifier:
+                    identifier = str(identifier)
+                    if identifier not in identifiers:
+                        identifiers.append(identifier)
 
-                results.append(SavingSession(
-                    code=code,
-                    start=start,
-                    end=end,
-                    octopoints_per_kwh=octopoints,
-                    joined=joined,
-                    session_type="saving",
-                ))
-            except (ValueError, KeyError) as err:
-                _LOGGER.debug("Skipping malformed saving session event: %s", err)
+        if not identifiers:
+            _LOGGER.debug(
+                "No electricity supply point identifiers found for Octopus account %s",
+                self._account_number,
+            )
 
-        _LOGGER.debug("Fetched %d saving session events", len(results))
-        return results
+        self._supply_point_identifiers = identifiers
+        return identifiers
 
     async def _get_free_electricity_events(self) -> list[SavingSession]:
         """Fetch free electricity campaign events."""
         query = """
-        query FreeElectricity($accountNumber: String!) {
+        query FreeElectricity(
+            $accountNumber: String!
+            $supplyPointIdentifier: String!
+            $campaignSlug: String!
+            $first: Int!
+        ) {
             customerFlexibilityCampaignEvents(
                 accountNumber: $accountNumber
-                campaignSlug: "free_electricity"
+                supplyPointIdentifier: $supplyPointIdentifier
+                campaignSlug: $campaignSlug
+                first: $first
             ) {
                 edges {
                     node {
@@ -328,16 +375,52 @@ class OctopusSavingSessionsClient:
                         startAt
                         endAt
                         name
+                        isEventParticipant
                     }
                 }
             }
         }
         """
-        variables = {"accountNumber": self._account_number}
-        data = await self._graphql_request(query, variables)
-        if not data:
+
+        identifiers = (
+            [self._free_electricity_identifier]
+            if self._free_electricity_identifier
+            else await self._get_supply_point_identifiers()
+        )
+        if not identifiers:
+            if not self._free_electricity_lookup_failed_logged:
+                _LOGGER.warning(
+                    "Could not resolve an Octopus electricity supply point for "
+                    "Free Electricity events on account %s",
+                    self._account_number,
+                )
+                self._free_electricity_lookup_failed_logged = True
             return []
 
+        data = None
+        for identifier in identifiers:
+            variables = {
+                "accountNumber": self._account_number,
+                "supplyPointIdentifier": identifier,
+                "campaignSlug": FREE_ELECTRICITY_CAMPAIGN_SLUG,
+                "first": CAMPAIGN_EVENTS_PAGE_SIZE,
+            }
+            data = await self._graphql_request(query, variables, log_errors=False)
+            if data:
+                self._free_electricity_identifier = identifier
+                break
+
+        if not data:
+            if not self._free_electricity_lookup_failed_logged:
+                _LOGGER.warning(
+                    "Could not fetch Octopus Free Electricity events for account %s "
+                    "using resolved electricity supply point identifiers",
+                    self._account_number,
+                )
+                self._free_electricity_lookup_failed_logged = True
+            return []
+
+        self._free_electricity_lookup_failed_logged = False
         campaign_data = data.get("customerFlexibilityCampaignEvents", {})
         edges = campaign_data.get("edges", [])
         results: list[SavingSession] = []
@@ -359,7 +442,7 @@ class OctopusSavingSessionsClient:
                     start=start,
                     end=end,
                     octopoints_per_kwh=0,  # Free electricity has no octopoints
-                    joined=True,  # Free electricity events are auto-enrolled
+                    joined=bool(node.get("isEventParticipant")),
                     session_type="free_electricity",
                 ))
             except (ValueError, KeyError) as err:
@@ -377,26 +460,11 @@ class OctopusSavingSessionsClient:
         Returns:
             True if join succeeded.
         """
-        query = """
-        mutation JoinSavingSession($input: JoinSavingSessionsEventInput!) {
-            joinSavingSessionsEvent(input: $input) {
-                joinedEvent {
-                    eventId
-                }
-            }
-        }
-        """
-        variables = {
-            "input": {
-                "accountNumber": self._account_number,
-                "eventCode": event_code,
-            }
-        }
-
-        data = await self._graphql_request(query, variables)
-        if data and data.get("joinSavingSessionsEvent", {}).get("joinedEvent"):
-            _LOGGER.info("Joined saving session: %s", event_code)
-            return True
-
-        _LOGGER.warning("Failed to join saving session: %s", event_code)
+        if not self._join_unsupported_logged:
+            _LOGGER.warning(
+                "Octopus no longer exposes Saving Sessions join support through "
+                "the Kraken GraphQL API. Configure the octopus_energy/Bottlecap "
+                "Dave source if auto-join is required."
+            )
+            self._join_unsupported_logged = True
         return False
