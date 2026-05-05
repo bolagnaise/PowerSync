@@ -458,6 +458,21 @@
         },
         "submit": "Connect"
       },
+      "neovolt_battery": {
+        "title": "Neovolt connection",
+        "description": "PowerSync bridges through the Neovolt Modbus integration. Install it from HACS and configure your Neovolt/Bytewatt system, then return here.",
+        "data": {
+          "neovolt_config_entry_id": "Neovolt integration",
+          "neovolt_max_charge_kw": "Maximum charge power",
+          "neovolt_max_discharge_kw": "Maximum discharge power"
+        },
+        "data_description": {
+          "neovolt_config_entry_id": "The Neovolt integration entry to read combined sensors and send dispatch commands through.",
+          "neovolt_max_charge_kw": "Maximum charge power in kW. Used by the LP optimizer and dispatch command limits.",
+          "neovolt_max_discharge_kw": "Maximum discharge power in kW. Used by the LP optimizer and dispatch command limits."
+        },
+        "submit": "Connect"
+      },
       "sigenergy_credentials": {
         "title": "Sigenergy Cloud login",
         "description": "Enter your Sigenergy Cloud API credentials to connect your system.",
@@ -767,7 +782,9 @@
       "solax_missing_entities": "Could not find the required solax_modbus entities in the selected integration entry. The first missing entity was: {first_missing}. Make sure you selected the correct Solax Modbus integration. If your entities use a prefix like solax_modbus, enter that in Entity prefix override.",
       "solax_connect_failed": "Failed to validate Solax entities. Check the selected integration entry and try again.",
       "saj_missing_entities": "Could not find the required SAJ H2 entities in the selected saj_h2_modbus integration entry. Make sure the integration is installed, the inverter is online, and its entities have been created in Home Assistant.",
-      "saj_connect_failed": "Failed to validate SAJ H2 entities. Check the selected integration entry and try again."
+      "saj_connect_failed": "Failed to validate SAJ H2 entities. Check the selected integration entry and try again.",
+      "neovolt_missing_entities": "Could not find the required Neovolt entities in the selected Neovolt integration entry. Make sure the integration is installed, the system is online, and its entities have been created in Home Assistant.",
+      "neovolt_connect_failed": "Failed to validate Neovolt entities. Check the selected integration entry and try again."
     },
     "abort": {
       "already_configured": "PowerSync is already configured. To change settings, use the Configure button on the integration card.",
@@ -778,6 +795,7 @@
       "reauth_fleet_api_use_tesla_fleet": "PowerSync reads tokens from your Tesla Fleet integration. Go to Settings > Devices & Services > Tesla Fleet and re-authenticate there. PowerSync will pick up the new tokens automatically.",
       "esy_sunhome_not_installed": "The ESY Sunhome integration is not installed. Install it via HACS (search 'ESY Sunhome') and add a device before continuing.",
       "saj_h2_not_installed": "The SAJ H2 Modbus integration is not installed. Install it via HACS (search 'SAJ H2 Inverter Modbus') and add your inverter before continuing.",
+      "neovolt_not_installed": "The Neovolt Modbus integration is not installed. Install it via HACS and add your Neovolt/Bytewatt system before continuing.",
       "solax_not_installed": "The Solax Modbus integration is not installed. Install it via HACS (search 'Solax Modbus') and add your inverter before continuing."
     }
   },
@@ -795,6 +813,7 @@
           "goodwe_connection_options": "GoodWe connection",
           "esy_sunhome_connection": "ESY Sunhome connection",
           "saj_h2_connection": "SAJ H2 connection",
+          "neovolt_connection": "Neovolt connection",
           "optimization": "Optimization mode",
           "inverter": "AC inverter curtailment",
           "curtailment": "Curtailment settings",
@@ -957,6 +976,21 @@
           "saj_config_entry_id": "The saj_h2_modbus integration entry to read sensors and send passive charge/discharge commands through.",
           "saj_battery_capacity_kwh": "Usable battery capacity in kWh.",
           "saj_inverter_rated_kw": "Inverter AC rated power in kW (e.g. HS2-10K-T2-5 → 10). Used to convert LP-requested watts into the SAJ register encoding."
+        },
+        "submit": "Save"
+      },
+      "neovolt_connection": {
+        "title": "Neovolt connection",
+        "description": "Update the Neovolt integration entry and dispatch power limits PowerSync bridges through.",
+        "data": {
+          "neovolt_config_entry_id": "Neovolt integration",
+          "neovolt_max_charge_kw": "Maximum charge power",
+          "neovolt_max_discharge_kw": "Maximum discharge power"
+        },
+        "data_description": {
+          "neovolt_config_entry_id": "The Neovolt integration entry to read sensors and send dispatch commands through.",
+          "neovolt_max_charge_kw": "Maximum charge power in kW.",
+          "neovolt_max_discharge_kw": "Maximum discharge power in kW."
         },
         "submit": "Save"
       },

@@ -81,6 +81,7 @@ from .const import (
     BATTERY_SYSTEM_ESY_SUNHOME,
     BATTERY_SYSTEM_SOLAX,
     BATTERY_SYSTEM_SAJ_H2,
+    BATTERY_SYSTEM_NEOVOLT,
     BATTERY_SYSTEMS,
     CONF_ESY_CONFIG_ENTRY_ID,
     # Solax battery system configuration
@@ -100,6 +101,12 @@ from .const import (
     DEFAULT_SAJ_BATTERY_CAPACITY_KWH,
     CONF_SAJ_INVERTER_RATED_KW,
     DEFAULT_SAJ_INVERTER_RATED_KW,
+    # Neovolt battery system configuration
+    CONF_NEOVOLT_CONFIG_ENTRY_ID,
+    CONF_NEOVOLT_MAX_CHARGE_KW,
+    CONF_NEOVOLT_MAX_DISCHARGE_KW,
+    DEFAULT_NEOVOLT_MAX_CHARGE_KW,
+    DEFAULT_NEOVOLT_MAX_DISCHARGE_KW,
     # AlphaESS battery system configuration
     CONF_ALPHAESS_MODBUS_HOST,
     CONF_ALPHAESS_MODBUS_PORT,
@@ -845,6 +852,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._sungrow_data: dict[str, Any] = {}  # Sungrow Modbus configuration
         self._foxess_data: dict[str, Any] = {}  # FoxESS Modbus configuration
         self._goodwe_data: dict[str, Any] = {}  # GoodWe configuration
+        self._neovolt_data: dict[str, Any] = {}  # Neovolt bridge configuration
         self._aemo_only_mode: bool = False  # True if using AEMO spike only (no Amber)
         self._aemo_data: dict[str, Any] = {}
         self._flow_power_data: dict[str, Any] = {}
@@ -1199,6 +1207,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return await self.async_step_solax_battery()
         elif self._selected_battery_system == BATTERY_SYSTEM_SAJ_H2:
             return await self.async_step_saj_h2_battery()
+        elif self._selected_battery_system == BATTERY_SYSTEM_NEOVOLT:
+            return await self.async_step_neovolt_battery()
         else:
             return await self.async_step_tesla_provider()
 
@@ -1226,6 +1236,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             **getattr(self, "_esy_sunhome_data", {}),
             **getattr(self, "_solax_data", {}),
             **getattr(self, "_saj_h2_data", {}),
+            **getattr(self, "_neovolt_data", {}),
             CONF_ELECTRICITY_PROVIDER: self._selected_electricity_provider,
         }
 
@@ -1266,6 +1277,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             BATTERY_SYSTEM_ESY_SUNHOME: "ESY Sunhome",
             BATTERY_SYSTEM_SOLAX: "Solax",
             BATTERY_SYSTEM_SAJ_H2: "SAJ H2",
+            BATTERY_SYSTEM_NEOVOLT: "Neovolt",
         }.get(self._selected_battery_system, "")
 
         if battery_label:
@@ -2444,6 +2456,106 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return self.async_show_form(
             step_id="saj_h2_battery",
             data_schema=data_schema,
+            errors=errors,
+        )
+
+    async def async_step_neovolt_battery(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure Neovolt bridge via the upstream neovolt integration."""
+        from .inverters.neovolt import NeovoltBatteryController
+
+        neovolt_entries = self.hass.config_entries.async_entries("neovolt")
+        if not neovolt_entries:
+            return self.async_abort(reason="neovolt_not_installed")
+
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            if len(neovolt_entries) == 1:
+                selected_entry_id = neovolt_entries[0].entry_id
+            else:
+                selected_entry_id = user_input.get(CONF_NEOVOLT_CONFIG_ENTRY_ID, "")
+
+            max_charge_kw = user_input.get(
+                CONF_NEOVOLT_MAX_CHARGE_KW,
+                DEFAULT_NEOVOLT_MAX_CHARGE_KW,
+            )
+            max_discharge_kw = user_input.get(
+                CONF_NEOVOLT_MAX_DISCHARGE_KW,
+                DEFAULT_NEOVOLT_MAX_DISCHARGE_KW,
+            )
+
+            try:
+                ctrl = NeovoltBatteryController(
+                    self.hass,
+                    neovolt_entry_id=selected_entry_id,
+                    max_charge_kw=float(max_charge_kw),
+                    max_discharge_kw=float(max_discharge_kw),
+                )
+                await ctrl.connect()
+                self._neovolt_data = {
+                    CONF_NEOVOLT_CONFIG_ENTRY_ID: selected_entry_id,
+                    CONF_NEOVOLT_MAX_CHARGE_KW: float(max_charge_kw),
+                    CONF_NEOVOLT_MAX_DISCHARGE_KW: float(max_discharge_kw),
+                }
+                return self._create_final_entry()
+            except ValueError as exc:
+                if "neovolt_missing_entities:" in str(exc):
+                    errors["base"] = "neovolt_missing_entities"
+                else:
+                    errors["base"] = "neovolt_connect_failed"
+            except Exception as exc:
+                _LOGGER.error("Neovolt setup error: %s", exc)
+                errors["base"] = "neovolt_connect_failed"
+
+        schema_fields: dict[Any, Any] = {}
+        if len(neovolt_entries) > 1:
+            entry_options = {e.entry_id: e.title or e.entry_id for e in neovolt_entries}
+            schema_fields[
+                vol.Required(CONF_NEOVOLT_CONFIG_ENTRY_ID)
+            ] = SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(value=k, label=v)
+                        for k, v in entry_options.items()
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            )
+
+        schema_fields[
+            vol.Required(
+                CONF_NEOVOLT_MAX_CHARGE_KW,
+                default=DEFAULT_NEOVOLT_MAX_CHARGE_KW,
+            )
+        ] = NumberSelector(
+            NumberSelectorConfig(
+                min=0.5,
+                max=50,
+                step=0.1,
+                mode=NumberSelectorMode.BOX,
+                unit_of_measurement="kW",
+            )
+        )
+        schema_fields[
+            vol.Required(
+                CONF_NEOVOLT_MAX_DISCHARGE_KW,
+                default=DEFAULT_NEOVOLT_MAX_DISCHARGE_KW,
+            )
+        ] = NumberSelector(
+            NumberSelectorConfig(
+                min=0.5,
+                max=50,
+                step=0.1,
+                mode=NumberSelectorMode.BOX,
+                unit_of_measurement="kW",
+            )
+        )
+
+        return self.async_show_form(
+            step_id="neovolt_battery",
+            data_schema=vol.Schema(schema_fields),
             errors=errors,
         )
 
@@ -3756,6 +3868,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             menu_options.append("solax_battery_options")
         elif battery_system == BATTERY_SYSTEM_SAJ_H2:
             menu_options.append("saj_h2_connection")
+        elif battery_system == BATTERY_SYSTEM_NEOVOLT:
+            menu_options.append("neovolt_connection")
 
         menu_options.extend([
             "optimization",
@@ -4698,6 +4812,119 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             errors=errors,
         )
 
+    async def async_step_neovolt_connection(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: Neovolt bridge settings."""
+        from .inverters.neovolt import NeovoltBatteryController
+
+        neovolt_entries = self.hass.config_entries.async_entries("neovolt")
+        if not neovolt_entries:
+            return self.async_abort(reason="neovolt_not_installed")
+
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            if len(neovolt_entries) == 1:
+                selected_entry_id = neovolt_entries[0].entry_id
+            else:
+                selected_entry_id = user_input.get(CONF_NEOVOLT_CONFIG_ENTRY_ID, "")
+            max_charge_kw = user_input.get(
+                CONF_NEOVOLT_MAX_CHARGE_KW,
+                DEFAULT_NEOVOLT_MAX_CHARGE_KW,
+            )
+            max_discharge_kw = user_input.get(
+                CONF_NEOVOLT_MAX_DISCHARGE_KW,
+                DEFAULT_NEOVOLT_MAX_DISCHARGE_KW,
+            )
+            try:
+                ctrl = NeovoltBatteryController(
+                    self.hass,
+                    neovolt_entry_id=selected_entry_id,
+                    max_charge_kw=float(max_charge_kw),
+                    max_discharge_kw=float(max_discharge_kw),
+                )
+                await ctrl.connect()
+                new_data = dict(self.config_entry.data)
+                new_data[CONF_NEOVOLT_CONFIG_ENTRY_ID] = selected_entry_id
+                new_data[CONF_NEOVOLT_MAX_CHARGE_KW] = float(max_charge_kw)
+                new_data[CONF_NEOVOLT_MAX_DISCHARGE_KW] = float(max_discharge_kw)
+                self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
+                return self.async_create_entry(title="", data=dict(self.config_entry.options))
+            except ValueError as exc:
+                if "neovolt_missing_entities:" in str(exc):
+                    errors["base"] = "neovolt_missing_entities"
+                else:
+                    errors["base"] = "neovolt_connect_failed"
+            except Exception as exc:
+                _LOGGER.error("Neovolt options error: %s", exc)
+                errors["base"] = "neovolt_connect_failed"
+
+        entry_options = {e.entry_id: e.title or e.entry_id for e in neovolt_entries}
+        current_entry_id = self._get_option(
+            CONF_NEOVOLT_CONFIG_ENTRY_ID,
+            self.config_entry.data.get(CONF_NEOVOLT_CONFIG_ENTRY_ID, ""),
+        )
+        if not current_entry_id and entry_options:
+            current_entry_id = next(iter(entry_options))
+        current_max_charge_kw = self._get_option(
+            CONF_NEOVOLT_MAX_CHARGE_KW,
+            self.config_entry.data.get(
+                CONF_NEOVOLT_MAX_CHARGE_KW,
+                DEFAULT_NEOVOLT_MAX_CHARGE_KW,
+            ),
+        )
+        current_max_discharge_kw = self._get_option(
+            CONF_NEOVOLT_MAX_DISCHARGE_KW,
+            self.config_entry.data.get(
+                CONF_NEOVOLT_MAX_DISCHARGE_KW,
+                DEFAULT_NEOVOLT_MAX_DISCHARGE_KW,
+            ),
+        )
+
+        return self.async_show_form(
+            step_id="neovolt_connection",
+            data_schema=vol.Schema({
+                vol.Required(
+                    CONF_NEOVOLT_CONFIG_ENTRY_ID,
+                    default=current_entry_id,
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in entry_options.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    CONF_NEOVOLT_MAX_CHARGE_KW,
+                    default=current_max_charge_kw,
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=0.5,
+                        max=50,
+                        step=0.1,
+                        mode=NumberSelectorMode.BOX,
+                        unit_of_measurement="kW",
+                    )
+                ),
+                vol.Required(
+                    CONF_NEOVOLT_MAX_DISCHARGE_KW,
+                    default=current_max_discharge_kw,
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=0.5,
+                        max=50,
+                        step=0.1,
+                        mode=NumberSelectorMode.BOX,
+                        unit_of_measurement="kW",
+                    )
+                ),
+            }),
+            errors=errors,
+        )
+
     async def async_step_optimization(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -4812,6 +5039,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             BATTERY_SYSTEM_SUNGROW: "Sungrow built-in optimization",
             BATTERY_SYSTEM_FOXESS: "FoxESS built-in optimization",
             BATTERY_SYSTEM_GOODWE: "GoodWe built-in optimization",
+            BATTERY_SYSTEM_NEOVOLT: "Neovolt built-in optimization",
         }
         native_label = native_labels.get(battery_system, "Built-in optimization")
 

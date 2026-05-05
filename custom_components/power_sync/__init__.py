@@ -293,6 +293,7 @@ from .const import (
     BATTERY_SYSTEM_SOLAX,
     CONF_SOLAX_CONFIG_ENTRY_ID,
     BATTERY_SYSTEM_SAJ_H2,
+    BATTERY_SYSTEM_NEOVOLT,
     CONF_SOLAX_ENTITY_PREFIX,
     CONF_SOLAX_BATTERY_NOMINAL_V,
     CONF_SOLAX_MAX_CHARGE_CURRENT_A,
@@ -306,6 +307,11 @@ from .const import (
     DEFAULT_SAJ_BATTERY_CAPACITY_KWH,
     CONF_SAJ_INVERTER_RATED_KW,
     DEFAULT_SAJ_INVERTER_RATED_KW,
+    CONF_NEOVOLT_CONFIG_ENTRY_ID,
+    CONF_NEOVOLT_MAX_CHARGE_KW,
+    CONF_NEOVOLT_MAX_DISCHARGE_KW,
+    DEFAULT_NEOVOLT_MAX_CHARGE_KW,
+    DEFAULT_NEOVOLT_MAX_DISCHARGE_KW,
     # Battery system selection
     CONF_BATTERY_SYSTEM,
     BATTERY_SYSTEM_SUNGROW,
@@ -455,6 +461,7 @@ from .coordinator import (
     ESYSunhomeEnergyCoordinator,
     SolaxBatteryEnergyCoordinator,
     SajH2EnergyCoordinator,
+    NeovoltEnergyCoordinator,
     DemandChargeCoordinator,
     AEMOSensorCoordinator,
     OctopusPriceCoordinator,
@@ -3177,6 +3184,7 @@ _CALENDAR_ENERGY_SUMMARY_COORDINATORS = (
     ("esy_sunhome_coordinator", "ESY Sunhome"),
     ("solax_coordinator", "Solax"),
     ("saj_h2_coordinator", "SAJ H2"),
+    ("neovolt_coordinator", "Neovolt"),
 )
 
 
@@ -3997,6 +4005,7 @@ class BatteryHealthView(HomeAssistantView):
             "goodwe_coordinator": "goodwe",
             "alphaess_coordinator": "alphaess",
             "foxess_coordinator": "foxess",
+            "neovolt_coordinator": "neovolt",
         }
 
         for coord_key, brand in brand_map.items():
@@ -4034,6 +4043,13 @@ class BatteryHealthView(HomeAssistantView):
                 if (v := d.get("serial_number")) is not None: bms["serial_number"] = str(v)
 
             elif brand == "alphaess":
+                if (v := d.get("battery_soh")) is not None: bms["soh_percent"] = round(float(v), 1)
+                if (v := d.get("battery_capacity_kwh")) is not None: bms["rated_capacity_kwh"] = round(float(v), 2)
+                if (v := d.get("battery_level")) is not None: bms["soc_percent"] = round(float(v), 1)
+                if (v := d.get("battery_max_charge_power_w")) is not None: bms["max_charge_power_w"] = int(v)
+                if (v := d.get("battery_max_discharge_power_w")) is not None: bms["max_discharge_power_w"] = int(v)
+
+            elif brand == "neovolt":
                 if (v := d.get("battery_soh")) is not None: bms["soh_percent"] = round(float(v), 1)
                 if (v := d.get("battery_capacity_kwh")) is not None: bms["rated_capacity_kwh"] = round(float(v), 2)
                 if (v := d.get("battery_level")) is not None: bms["soc_percent"] = round(float(v), 1)
@@ -6170,7 +6186,7 @@ class ConfigView(HomeAssistantView):
 
             if not battery_health:
                 # Fall back to coordinator battery_soh (Sungrow, Sigenergy, GoodWe)
-                for key in ("sungrow_coordinator", "sigenergy_coordinator", "goodwe_coordinator", "alphaess_coordinator", "solax_coordinator"):
+                for key in ("sungrow_coordinator", "sigenergy_coordinator", "goodwe_coordinator", "alphaess_coordinator", "solax_coordinator", "saj_h2_coordinator", "neovolt_coordinator"):
                     coord = entry_data.get(key)
                     if coord and coord.data:
                         soh = coord.data.get("battery_soh")
@@ -13985,6 +14001,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         or entry.data.get(CONF_SOLAX_ENTITY_PREFIX)
     )
     is_saj_h2 = bool(entry.data.get(CONF_SAJ_CONFIG_ENTRY_ID))
+    is_neovolt = bool(entry.data.get(CONF_NEOVOLT_CONFIG_ENTRY_ID))
     tesla_coordinator = None
     sigenergy_coordinator = None
     sungrow_coordinator = None
@@ -13995,6 +14012,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     esy_sunhome_coordinator = None
     solax_coordinator = None
     saj_h2_coordinator = None
+    neovolt_coordinator = None
     token_getter = None  # Will be set for Tesla users
 
     if is_sigenergy:
@@ -14240,6 +14258,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             min_soc_pct=float(saj_reserve_pct or 5.0),
             inverter_rated_kw=float(saj_inverter_rated_kw),
         )
+    elif is_neovolt:
+        _LOGGER.info("Running in Neovolt mode — bridging via Neovolt Modbus integration")
+        neovolt_max_charge_kw = entry.options.get(
+            CONF_NEOVOLT_MAX_CHARGE_KW,
+            entry.data.get(CONF_NEOVOLT_MAX_CHARGE_KW, DEFAULT_NEOVOLT_MAX_CHARGE_KW),
+        )
+        neovolt_max_discharge_kw = entry.options.get(
+            CONF_NEOVOLT_MAX_DISCHARGE_KW,
+            entry.data.get(CONF_NEOVOLT_MAX_DISCHARGE_KW, DEFAULT_NEOVOLT_MAX_DISCHARGE_KW),
+        )
+        neovolt_reserve_pct = entry.options.get(
+            CONF_OPTIMIZATION_BACKUP_RESERVE,
+            entry.data.get(CONF_OPTIMIZATION_BACKUP_RESERVE, DEFAULT_OPTIMIZATION_BACKUP_RESERVE),
+        )
+        if neovolt_reserve_pct is not None and neovolt_reserve_pct <= 1:
+            neovolt_reserve_pct = neovolt_reserve_pct * 100
+        neovolt_coordinator = NeovoltEnergyCoordinator(
+            hass,
+            neovolt_entry_id=entry.data[CONF_NEOVOLT_CONFIG_ENTRY_ID],
+            entry_id=entry.entry_id,
+            max_charge_kw=float(neovolt_max_charge_kw),
+            max_discharge_kw=float(neovolt_max_discharge_kw),
+            min_soc_pct=float(neovolt_reserve_pct or 10.0),
+        )
     else:
         # Get initial Tesla API token and provider
         # Use get_tesla_api_token() which fetches fresh from tesla_fleet if available
@@ -14363,6 +14405,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         except Exception as e:
             _LOGGER.warning("SAJ H2 coordinator failed to initialize: %s", e)
             saj_h2_coordinator = None
+    if neovolt_coordinator:
+        try:
+            await neovolt_coordinator.async_config_entry_first_refresh()
+            _LOGGER.info("Neovolt coordinator initialized successfully")
+        except Exception as e:
+            _LOGGER.warning("Neovolt coordinator failed to initialize: %s", e)
+            neovolt_coordinator = None
 
     # Initialize demand charge coordinator if enabled (any battery system with grid power data)
     demand_charge_coordinator = None
@@ -14374,6 +14423,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         tesla_coordinator or foxess_coordinator or goodwe_coordinator
         or sigenergy_coordinator or sungrow_coordinator or alphaess_coordinator
         or esy_sunhome_coordinator or solax_coordinator or saj_h2_coordinator
+        or neovolt_coordinator
     )
     if demand_charge_enabled and energy_coord_for_demand:
         demand_charge_rate = entry.options.get(
@@ -14433,7 +14483,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     # Tesla AEMO Spike Manager (tariff-based) — only for Tesla
-    if aemo_spike_enabled and has_tesla_site and not is_sigenergy and not is_sungrow and not is_foxess and not is_goodwe and not is_alphaess and not is_esy_sunhome and not is_solax and not is_saj_h2:
+    if aemo_spike_enabled and has_tesla_site and not is_sigenergy and not is_sungrow and not is_foxess and not is_goodwe and not is_alphaess and not is_esy_sunhome and not is_solax and not is_saj_h2 and not is_neovolt:
         aemo_region = entry.options.get(
             CONF_AEMO_REGION,
             entry.data.get(CONF_AEMO_REGION)
@@ -14463,7 +14513,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("AEMO spike detection enabled but no region configured")
 
     # Generic AEMO Spike Manager (service-call-based) for non-Tesla systems
-    if aemo_spike_enabled and (is_sigenergy or is_sungrow or is_foxess or is_esy_sunhome or is_solax or is_saj_h2 or is_goodwe or is_alphaess):
+    if aemo_spike_enabled and (is_sigenergy or is_sungrow or is_foxess or is_esy_sunhome or is_solax or is_saj_h2 or is_neovolt or is_goodwe or is_alphaess):
         aemo_region = entry.options.get(
             CONF_AEMO_REGION,
             entry.data.get(CONF_AEMO_REGION)
@@ -14479,6 +14529,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "sungrow" if is_sungrow else
                 "solax" if is_solax else
                 "saj_h2" if is_saj_h2 else
+                "neovolt" if is_neovolt else
                 "esy_sunhome" if is_esy_sunhome else
                 "goodwe" if is_goodwe else
                 "alphaess" if is_alphaess else
@@ -14593,7 +14644,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.info("Saving Session Tariff Manager initialized for Tesla")
 
             # Non-Tesla generic manager
-            elif is_sigenergy or is_sungrow or is_foxess or is_goodwe or is_esy_sunhome or is_solax or is_saj_h2:
+            elif is_sigenergy or is_sungrow or is_foxess or is_goodwe or is_esy_sunhome or is_solax or is_saj_h2 or is_neovolt:
                 battery_type = (
                     "sigenergy" if is_sigenergy else
                     "sungrow" if is_sungrow else
@@ -14601,6 +14652,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "esy_sunhome" if is_esy_sunhome else
                     "solax" if is_solax else
                     "saj_h2" if is_saj_h2 else
+                    "neovolt" if is_neovolt else
                     "foxess"
                 )
                 generic_saving_session_manager = GenericSavingSessionManager(
@@ -14935,6 +14987,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "esy_sunhome_coordinator": esy_sunhome_coordinator,  # For ESY Sunhome (bridges via esy_sunhome integration)
         "solax_coordinator": solax_coordinator,  # For Solax Hybrid (bridges via homeassistant-solax-modbus)
         "saj_h2_coordinator": saj_h2_coordinator,  # For SAJ H2 (bridges via saj_h2_modbus)
+        "neovolt_coordinator": neovolt_coordinator,  # For Neovolt / Bytewatt (bridges via Neovolt integration)
         "demand_charge_coordinator": demand_charge_coordinator,
         "aemo_spike_manager": aemo_spike_manager,
         "generic_aemo_spike_manager": generic_aemo_spike_manager,  # For non-Tesla AEMO spike detection
@@ -14971,6 +15024,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "is_esy_sunhome": is_esy_sunhome,  # Track if ESY Sunhome battery system
         "is_solax": is_solax,  # Track if Solax battery system
         "is_saj_h2": is_saj_h2,  # Track if SAJ H2 battery system
+        "is_neovolt": is_neovolt,  # Track if Neovolt battery system
         "foxess_curtailment_state": "normal",  # Track FoxESS DC curtailment state
         "sigenergy_curtailment_state": "normal",  # Track Sigenergy DC curtailment state
         "alphaess_curtailment_state": "normal",  # Track AlphaESS DC curtailment state
@@ -19304,6 +19358,56 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "SAJ H2 entity write error"))
                 return
 
+        is_neovolt_local = bool(entry.data.get(CONF_NEOVOLT_CONFIG_ENTRY_ID))
+        if is_neovolt_local:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                neovolt_coord = entry_data.get("neovolt_coordinator")
+                if not neovolt_coord:
+                    force_discharge_state["active"] = False
+                    _LOGGER.error("Force discharge: Neovolt coordinator not available")
+                    return
+
+                power_w = call.data.get("power_w", 0)
+                discharge_result = await neovolt_coord.force_discharge(duration, power_w=power_w)
+
+                if discharge_result:
+                    force_discharge_state["active"] = True
+                    force_discharge_state["source"] = source
+                    force_discharge_state["duration"] = duration
+                    force_discharge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
+                    _LOGGER.info("Neovolt FORCE DISCHARGE ACTIVE for %d minutes", duration)
+
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                        "active": True,
+                        "expires_at": force_discharge_state["expires_at"].isoformat(),
+                        "duration": duration,
+                    })
+
+                    if force_discharge_state.get("cancel_expiry_timer"):
+                        force_discharge_state["cancel_expiry_timer"]()
+
+                    async def auto_restore_discharge_neovolt(_now):
+                        if _command_generation[0] != _restore_gen:
+                            return
+                        if force_discharge_state["active"]:
+                            _LOGGER.info("Neovolt force discharge expired, auto-restoring")
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+
+                    force_discharge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass, auto_restore_discharge_neovolt, force_discharge_state["expires_at"]
+                    )
+                    await persist_force_mode_state()
+                else:
+                    force_discharge_state["active"] = False
+                    _LOGGER.error("Neovolt force discharge failed")
+                return
+            except Exception as e:
+                force_discharge_state["active"] = False
+                _LOGGER.error(f"Error in Neovolt force discharge: {e}", exc_info=True)
+                hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "Neovolt entity write error"))
+                return
+
         # Check if this is a Sungrow system
         is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
         if is_sungrow:
@@ -20349,6 +20453,64 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "SAJ H2 entity write error"))
                 return
 
+        is_neovolt_local = bool(entry.data.get(CONF_NEOVOLT_CONFIG_ENTRY_ID))
+        if is_neovolt_local:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                neovolt_coord = entry_data.get("neovolt_coordinator")
+                if not neovolt_coord:
+                    force_charge_state["active"] = False
+                    _LOGGER.error("Force charge: Neovolt coordinator not available")
+                    return
+
+                if force_discharge_state["active"]:
+                    _LOGGER.info("Canceling active discharge mode to enable charge mode")
+                    if force_discharge_state.get("cancel_expiry_timer"):
+                        force_discharge_state["cancel_expiry_timer"]()
+                        force_discharge_state["cancel_expiry_timer"] = None
+                    force_discharge_state["active"] = False
+                    force_discharge_state["expires_at"] = None
+
+                power_w = call.data.get("power_w", 0)
+                charge_result = await neovolt_coord.force_charge(duration, power_w=power_w)
+
+                if charge_result:
+                    force_charge_state["active"] = True
+                    force_charge_state["source"] = source
+                    force_charge_state["duration"] = duration
+                    force_charge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
+                    _LOGGER.info("Neovolt FORCE CHARGE ACTIVE for %d minutes", duration)
+
+                    async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
+                        "active": True,
+                        "expires_at": force_charge_state["expires_at"].isoformat(),
+                        "duration": duration,
+                    })
+
+                    if force_charge_state.get("cancel_expiry_timer"):
+                        force_charge_state["cancel_expiry_timer"]()
+
+                    async def auto_restore_charge_neovolt(_now):
+                        if _command_generation[0] != _restore_gen:
+                            return
+                        if force_charge_state["active"]:
+                            _LOGGER.info("Neovolt force charge expired, auto-restoring")
+                            await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
+
+                    force_charge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
+                        hass, auto_restore_charge_neovolt, force_charge_state["expires_at"]
+                    )
+                    await persist_force_mode_state()
+                else:
+                    force_charge_state["active"] = False
+                    _LOGGER.error("Neovolt force charge failed")
+                return
+            except Exception as e:
+                force_charge_state["active"] = False
+                _LOGGER.error(f"Error in Neovolt force charge: {e}", exc_info=True)
+                hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "Neovolt entity write error"))
+                return
+
         # Check if this is a Sungrow system
         is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
         if is_sungrow:
@@ -21167,6 +21329,41 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error in SAJ H2 restore normal: {e}", exc_info=True)
                 return
 
+        is_neovolt_local = bool(entry.data.get(CONF_NEOVOLT_CONFIG_ENTRY_ID))
+        if is_neovolt_local:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                neovolt_coord = entry_data.get("neovolt_coordinator")
+                if neovolt_coord:
+                    await neovolt_coord.restore_normal()
+
+                force_charge_state["active"] = False
+                force_discharge_state["active"] = False
+                force_charge_state["expires_at"] = None
+                force_discharge_state["expires_at"] = None
+
+                _LOGGER.info("Neovolt NORMAL OPERATION RESTORED")
+
+                if not suppress_notification:
+                    try:
+                        from .automations.actions import _send_expo_push
+                        await _send_expo_push(hass, "Battery", "Normal operation restored")
+                    except Exception as notify_err:
+                        _LOGGER.debug(f"Could not send success notification: {notify_err}")
+
+                async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
+                    "active": False, "expires_at": None, "duration": 0,
+                })
+                async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
+                    "active": False, "expires_at": None, "duration": 0,
+                })
+
+                await persist_force_mode_state()
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error in Neovolt restore normal: {e}", exc_info=True)
+                return
+
         # Check if this is a Sungrow system
         is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
         if is_sungrow:
@@ -21516,6 +21713,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "Strict lock mode pending hardware testing."
             ),
         },
+        "neovolt":  {
+            "supported": True,
+            "warning": (
+                "Neovolt Hold SoC raises the discharge cutoff to current SOC. "
+                "Solar may still charge the battery."
+            ),
+        },
     }
 
     async def handle_hold_battery_soc(call: ServiceCall) -> None:
@@ -21553,6 +21757,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ("goodwe_coordinator", "goodwe"),
             ("alphaess_coordinator", "alphaess"),
             ("saj_h2_coordinator", "saj_h2"),
+            ("neovolt_coordinator", "neovolt"),
         ):
             coord = entry_data.get(coord_key)
             if coord:
@@ -21844,6 +22049,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error setting SAJ H2 self-consumption: {e}", exc_info=True)
                 return
 
+        # Check if this is a Neovolt system
+        is_neovolt_sc = bool(entry.data.get(CONF_NEOVOLT_CONFIG_ENTRY_ID))
+        if is_neovolt_sc:
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                neovolt_coord = entry_data.get("neovolt_coordinator")
+                if not neovolt_coord:
+                    _LOGGER.error("Self-consumption: Neovolt coordinator not available")
+                    return
+                success = await neovolt_coord.restore_normal()
+                if success:
+                    _LOGGER.info("Neovolt self-consumption mode restored (Normal dispatch)")
+                else:
+                    _LOGGER.error("Failed to set Neovolt self-consumption mode")
+                return
+            except Exception as e:
+                _LOGGER.error(f"Error setting Neovolt self-consumption: {e}", exc_info=True)
+                return
+
         # Check if this is a Solax system
         is_solax_sc = bool(
             entry.data.get(CONF_SOLAX_CONFIG_ENTRY_ID)
@@ -21919,6 +22143,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         is_alphaess = bool(entry.data.get(CONF_ALPHAESS_MODBUS_HOST))
         is_esy_sunhome_auto = bool(entry.data.get(CONF_ESY_CONFIG_ENTRY_ID))
         is_saj_h2_auto = bool(entry.data.get(CONF_SAJ_CONFIG_ENTRY_ID))
+        is_neovolt_auto = bool(entry.data.get(CONF_NEOVOLT_CONFIG_ENTRY_ID))
         is_solax_auto = bool(
             entry.data.get(CONF_SOLAX_CONFIG_ENTRY_ID)
             or entry.data.get(CONF_SOLAX_ENTITY_PREFIX)
@@ -21931,6 +22156,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             or is_alphaess
             or is_esy_sunhome_auto
             or is_saj_h2_auto
+            or is_neovolt_auto
             or is_solax_auto
         ):
             _LOGGER.debug("Non-Tesla system — autonomous mode is implicit, skipping")
@@ -22098,6 +22324,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         elif bool(entry.data.get(CONF_SAJ_CONFIG_ENTRY_ID)):
             # SAJ H2: no backup reserve register — no-op
             _LOGGER.debug("SAJ H2 does not support backup reserve (no-op)")
+        elif bool(entry.data.get(CONF_NEOVOLT_CONFIG_ENTRY_ID)):
+            # Neovolt via HACS integration entities
+            try:
+                entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                neovolt_coord = entry_data.get("neovolt_coordinator")
+                if not neovolt_coord:
+                    _LOGGER.error("Neovolt coordinator not available for set_backup_reserve")
+                    return
+
+                success = await neovolt_coord.set_backup_reserve(percent)
+                if success:
+                    _LOGGER.info(f"Neovolt backup reserve set to {percent}%")
+                else:
+                    _LOGGER.error("Failed to set Neovolt backup reserve")
+
+            except Exception as e:
+                _LOGGER.error(f"Error setting Neovolt backup reserve: {e}", exc_info=True)
         elif bool(
             entry.data.get(CONF_SOLAX_CONFIG_ENTRY_ID)
             or entry.data.get(CONF_SOLAX_ENTITY_PREFIX)
@@ -24439,7 +24682,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     _kw_coord = sungrow_coordinator
                 else:
                     for _key in ("foxess_coordinator", "goodwe_coordinator",
-                                 "alphaess_coordinator", "solax_coordinator"):
+                                 "alphaess_coordinator", "solax_coordinator",
+                                 "saj_h2_coordinator", "neovolt_coordinator"):
                         _c = entry_data.get(_key)
                         if _c and _c.data:
                             _kw_coord = _c
@@ -24820,6 +25064,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             elif is_saj_h2:
                 battery_system = "saj_h2"
                 energy_coordinator = saj_h2_coordinator
+            elif is_neovolt:
+                battery_system = "neovolt"
+                energy_coordinator = neovolt_coordinator
             else:
                 battery_system = "tesla"
                 energy_coordinator = tesla_coordinator
@@ -25765,7 +26012,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # (prevents total_increasing sensors from going backwards after reload)
     for coord_key in ("tesla_coordinator", "sigenergy_coordinator", "sungrow_coordinator",
                       "foxess_coordinator", "goodwe_coordinator", "alphaess_coordinator",
-                      "solax_coordinator", "saj_h2_coordinator"):
+                      "solax_coordinator", "saj_h2_coordinator", "neovolt_coordinator"):
         coord = entry_data.get(coord_key)
         if coord and hasattr(coord, "_energy_acc"):
             try:

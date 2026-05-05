@@ -5097,6 +5097,101 @@ class SajH2EnergyCoordinator(DataUpdateCoordinator):
         await self._controller.disconnect()
 
 
+class NeovoltEnergyCoordinator(DataUpdateCoordinator):
+    """Bridge coordinator for Neovolt / Bytewatt via the Neovolt Modbus integration."""
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        neovolt_entry_id: str,
+        entry_id: str = "",
+        max_charge_kw: float = 5.0,
+        max_discharge_kw: float = 5.0,
+        min_soc_pct: float = 10.0,
+    ) -> None:
+        from .inverters.neovolt import NeovoltBatteryController
+
+        self._entry_id = entry_id
+        self._controller = NeovoltBatteryController(
+            hass,
+            neovolt_entry_id=neovolt_entry_id,
+            max_charge_kw=max_charge_kw,
+            max_discharge_kw=max_discharge_kw,
+            min_soc_pct=min_soc_pct,
+        )
+        self._energy_acc = EnergyAccumulator(hass, "neovolt")
+
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_neovolt_energy",
+            update_interval=timedelta(seconds=30),
+        )
+
+    def set_min_soc_pct(self, min_soc_pct: float) -> None:
+        """Propagate min_soc updates from the optimizer backup reserve setting."""
+        self._controller.set_min_soc_pct(min_soc_pct)
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Return Neovolt data assembled from HA entity states."""
+        if not self._energy_acc._last_update:
+            await self._energy_acc.async_restore()
+
+        if not self._controller._entity_map:
+            self._controller._discover_entities()
+
+        try:
+            status = self._controller.get_status()
+        except Exception as exc:
+            if self.data:
+                _LOGGER.warning("Neovolt entity read failed, returning stale data: %s", exc)
+                return self.data
+            raise UpdateFailed(f"Neovolt entity read failed: {exc}") from exc
+
+        solar_kw = status.get("solar_power", 0.0) or 0.0
+        grid_kw = status.get("grid_power", 0.0) or 0.0
+        battery_kw = status.get("battery_power", 0.0) or 0.0
+        load_kw = status.get("load_power", 0.0) or 0.0
+        soc = status.get("battery_level", 0.0) or 0.0
+
+        buy, sell = _get_current_prices(self.hass, self._entry_id)
+        self._energy_acc.update(max(0.0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
+
+        return {
+            "solar_power": solar_kw,
+            "grid_power": grid_kw,
+            "battery_power": battery_kw,
+            "load_power": load_kw,
+            "battery_level": soc,
+            "battery_capacity_kwh": status.get("battery_capacity_kwh"),
+            "battery_soh": status.get("battery_soh"),
+            "battery_max_charge_power_w": status.get("battery_max_charge_power_w"),
+            "battery_max_discharge_power_w": status.get("battery_max_discharge_power_w"),
+            "energy_summary": self._energy_acc.as_dict(),
+        }
+
+    async def force_charge(self, duration_minutes: int, power_w: int) -> bool:
+        return await self._controller.force_charge(duration_minutes, power_w)
+
+    async def force_discharge(self, duration_minutes: int, power_w: int) -> bool:
+        return await self._controller.force_discharge(duration_minutes, power_w)
+
+    async def restore_normal(self) -> bool:
+        return await self._controller.restore_normal()
+
+    async def set_backup_reserve(self, percent: int) -> bool:
+        return await self._controller.set_backup_reserve(percent)
+
+    async def set_backup_mode(self) -> bool:
+        return await self._controller.set_idle()
+
+    async def restore_work_mode_from_idle(self) -> bool:
+        return await self._controller.restore_normal()
+
+    async def async_shutdown(self) -> None:
+        await self._controller.disconnect()
+
+
 class ESYSunhomeEnergyCoordinator(DataUpdateCoordinator):
     """Bridge coordinator for ESY Sunhome via the upstream esy_sunhome integration.
 

@@ -133,6 +133,7 @@ BATTERY_SYSTEM_ALPHAESS = "alphaess"
 BATTERY_SYSTEM_ESY_SUNHOME = "esy_sunhome"
 BATTERY_SYSTEM_SOLAX = "solax"
 BATTERY_SYSTEM_SAJ_H2 = "saj_h2"
+BATTERY_SYSTEM_NEOVOLT = "neovolt"
 
 BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_TESLA: "Tesla Powerwall — Fleet API or Teslemetry",
@@ -144,6 +145,7 @@ BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_ESY_SUNHOME: "ESY Sunhome — via esy_sunhome companion integration",
     BATTERY_SYSTEM_SOLAX: "Solax Hybrid — via Solax Modbus integration",
     BATTERY_SYSTEM_SAJ_H2: "SAJ H2/HS2 — via SAJ H2 Modbus integration",
+    BATTERY_SYSTEM_NEOVOLT: "Neovolt/Bytewatt — via Neovolt Modbus integration",
 }
 
 # Sungrow SH-series Battery System Configuration (Modbus TCP)
@@ -418,6 +420,14 @@ DEFAULT_SAJ_BATTERY_CAPACITY_KWH = 10.0
 # discharge slot 7 at 100 % of this rated power.
 CONF_SAJ_INVERTER_RATED_KW = "saj_inverter_rated_kw"
 DEFAULT_SAJ_INVERTER_RATED_KW = 10.0
+
+# Neovolt / Bytewatt battery system — bridges via pvandenh/NeovoltBattery_ModbusPlugin
+# Install the neovolt integration from HACS first; PowerSync reads/writes its entities.
+CONF_NEOVOLT_CONFIG_ENTRY_ID = "neovolt_config_entry_id"
+CONF_NEOVOLT_MAX_CHARGE_KW = "neovolt_max_charge_kw"
+CONF_NEOVOLT_MAX_DISCHARGE_KW = "neovolt_max_discharge_kw"
+DEFAULT_NEOVOLT_MAX_CHARGE_KW = 5.0
+DEFAULT_NEOVOLT_MAX_DISCHARGE_KW = 5.0
 
 # Demand charge configuration
 CONF_DEMAND_CHARGE_ENABLED = "demand_charge_enabled"
@@ -1493,6 +1503,8 @@ OPTIMIZATION_PROVIDER_NATIVE_NAMES = {
     BATTERY_SYSTEM_ALPHAESS: "AlphaESS",
     BATTERY_SYSTEM_ESY_SUNHOME: "ESY Sunhome",
     BATTERY_SYSTEM_SOLAX: "Solax",
+    BATTERY_SYSTEM_SAJ_H2: "SAJ H2",
+    BATTERY_SYSTEM_NEOVOLT: "Neovolt",
 }
 
 OPTIMIZATION_PROVIDERS = {
@@ -1537,6 +1549,8 @@ BATTERY_CAPACITY_DEFAULTS = {
     BATTERY_SYSTEM_ALPHAESS: 10000,   # Varies (SMILE5 ~ 5.7 kWh, Storion ~ 30 kWh), default 10 kWh
     BATTERY_SYSTEM_ESY_SUNHOME: 10000,  # HM6 varies; default 10 kWh
     BATTERY_SYSTEM_SOLAX: 11600,      # T-BAT-SYS-HV 11.6 kWh typical
+    BATTERY_SYSTEM_SAJ_H2: 10000,     # Varies, default 10 kWh
+    BATTERY_SYSTEM_NEOVOLT: 20100,    # Bytewatt pack is commonly 20.1 kWh
 }
 
 # Max charge/discharge power defaults by system (W)
@@ -1549,6 +1563,8 @@ BATTERY_POWER_DEFAULTS = {
     BATTERY_SYSTEM_ALPHAESS: 5000,    # Varies by model (SMILE5 = 5 kW, Storion-T30 larger)
     BATTERY_SYSTEM_ESY_SUNHOME: 5000,  # HM6; rate is firmware-decided, using 5 kW default
     BATTERY_SYSTEM_SOLAX: 5000,        # Varies by model (X1-Hybrid G4: 3.7 kW, X3-Hybrid: 6 kW)
+    BATTERY_SYSTEM_SAJ_H2: 5000,       # Varies by model
+    BATTERY_SYSTEM_NEOVOLT: 5000,      # Configurable in the upstream Neovolt integration
 }
 
 # Optimization service

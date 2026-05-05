@@ -14,7 +14,7 @@
 
 </div>
 
-> **Disclaimer:** This is an unofficial integration and is not affiliated with or endorsed by Tesla, Sigenergy, Sungrow, FoxESS, GoodWe, AlphaESS, ESY Sunhome, Solax, SAJ, Amber Electric, Localvolts, Flow Power, GloBird, Octopus Energy, EPEX/ENTSO-E, or AEMO. Use at your own risk.
+> **Disclaimer:** This is an unofficial integration and is not affiliated with or endorsed by Tesla, Sigenergy, Sungrow, FoxESS, GoodWe, AlphaESS, ESY Sunhome, Solax, SAJ, Neovolt, Bytewatt, Amber Electric, Localvolts, Flow Power, GloBird, Octopus Energy, EPEX/ENTSO-E, or AEMO. Use at your own risk.
 
 > [!WARNING]
 > **The built-in optimizer is actively under development.** You should expect occasional bugs and schedules that don't behave as expected — particularly on unusual tariffs, battery configurations, or edge cases. If you see something odd, please report it on [Discord](https://discord.gg/eaWDWxEWE3) or open a [GitHub issue](https://github.com/bolagnaise/PowerSync/issues) with your tariff details and the action plan it generated.
@@ -36,6 +36,7 @@
 | **AlphaESS** (SMILE5, SMILE-Hi5/Hi10, SMILE-B3, SMILE-T10, SMILE-G3, Storion-T30) | Modbus TCP + optional Cloud API | Force charge/discharge, dispatch SOC targeting, DC solar curtailment |
 | **ESY Sunhome** (HM series) | Via [ESY Sunhome](https://github.com/branko-lazarevic/esysunhome) companion integration (HACS) | LP optimizer, AEMO spike export, Saving Sessions (mode-only control) |
 | **SAJ H2 / HS2** | Via [SAJ H2 Modbus](https://github.com/stanus74/home-assistant-saj-h2-modbus) companion integration (HACS) | LP optimizer, force charge/discharge, AEMO spike export (no backup reserve write) |
+| **Neovolt / Bytewatt** | Via [Neovolt Modbus](https://github.com/pvandenh/NeovoltBattery_ModbusPlugin) companion integration (HACS) | LP optimizer, force charge/discharge, backup reserve |
 
 ### AC-Coupled Inverter Curtailment
 
