@@ -9717,6 +9717,8 @@ class EVVehicleCommandView(HomeAssistantView):
             _LOGGER.debug(f"BLE vehicle {ble_prefix}: cannot determine plug state")
             return True  # Default True to not block commands
 
+        negative_binary_evidence = None
+
         # Check binary_sensor.*_charger (Tesla Fleet)
         charger_entity = await self._get_tesla_ev_entity(r"binary_sensor\..*_charger$", vehicle_vin)
         if charger_entity:
@@ -9724,7 +9726,9 @@ class EVVehicleCommandView(HomeAssistantView):
             if state:
                 is_plugged = state.state.lower() == "on"
                 _LOGGER.debug(f"Vehicle plugged in from {charger_entity}: {state.state} (plugged={is_plugged})")
-                return is_plugged
+                if is_plugged:
+                    return True
+                negative_binary_evidence = charger_entity
 
         # Check binary_sensor.*_charge_cable (Teslemetry)
         cable_entity = await self._get_tesla_ev_entity(r"binary_sensor\..*_charge_cable$", vehicle_vin)
@@ -9733,7 +9737,9 @@ class EVVehicleCommandView(HomeAssistantView):
             if state:
                 is_plugged = state.state.lower() == "on"
                 _LOGGER.debug(f"Vehicle plugged in from {cable_entity}: {state.state} (plugged={is_plugged})")
-                return is_plugged
+                if is_plugged:
+                    return True
+                negative_binary_evidence = cable_entity
 
         # Some Tesla integrations expose plugged-in-but-idle via charging state
         # only. Keep this in sync with the loadpoint status card so "Stopped"
@@ -9763,6 +9769,31 @@ class EVVehicleCommandView(HomeAssistantView):
                         state.state,
                     )
                     return False
+
+        # In Fleet+BLE setups, loadpoint status may merge one BLE bridge into the
+        # Fleet vehicle. If there is exactly one fresh BLE plug cache saying the
+        # car is plugged in, treat it as authoritative over stale Fleet binaries.
+        ble_cache = self._hass.data.get(DOMAIN, {}).get("_ev_cache", {})
+        fresh_ble_plug_states = [
+            cached.get("is_plugged_in")
+            for key, cached in ble_cache.items()
+            if key.startswith("ev_ble_plug_cache_")
+            and cached.get("cached_at")
+            and (dt_util.utcnow() - cached["cached_at"]).total_seconds() < 7200
+        ]
+        if len(fresh_ble_plug_states) == 1 and fresh_ble_plug_states[0] is True:
+            _LOGGER.debug(
+                "Vehicle plugged in from single fresh BLE plug cache despite %s reporting unplugged",
+                negative_binary_evidence or "no Fleet plug binary",
+            )
+            return True
+
+        if negative_binary_evidence:
+            _LOGGER.debug(
+                "Vehicle unplugged from %s with no overriding charging-state or BLE evidence",
+                negative_binary_evidence,
+            )
+            return False
 
         _LOGGER.warning("Could not determine if vehicle is plugged in")
         return False
