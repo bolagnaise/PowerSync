@@ -403,6 +403,17 @@ def _stored_w_to_kw(value: Any, default_w: int) -> float:
     return amount / 1000.0 if amount > 100 else amount
 
 
+def _normalize_optional_entity(value: Any) -> str | None:
+    """Return a usable entity id, or None for unset optional entity fields."""
+    if not isinstance(value, str):
+        return None
+
+    entity_id = value.strip()
+    if not entity_id or entity_id.lower() == "none":
+        return None
+    return entity_id
+
+
 def _form_kwh_to_wh(value: Any, default_kwh: float) -> int:
     """Convert a config flow kWh field to Wh for persisted optimizer config."""
     try:
@@ -3840,6 +3851,31 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         final.update(section_data)
         return self.async_create_entry(title="", data=final)
 
+    def _has_weather_entities(self) -> bool:
+        """Return whether HA currently exposes any weather entities."""
+        try:
+            return bool(self.hass.states.async_all("weather"))
+        except Exception as err:
+            _LOGGER.debug("Unable to enumerate weather entities: %s", err)
+            return False
+
+    def _add_weather_entity_selector(self, schema_dict: dict[vol.Marker, Any]) -> None:
+        """Add the optional HA weather entity selector only when it can be used."""
+        current_weather_entity = _normalize_optional_entity(
+            self._get_option(CONF_WEATHER_ENTITY, None)
+        )
+        if not current_weather_entity and not self._has_weather_entities():
+            return
+
+        selector_key = (
+            vol.Optional(CONF_WEATHER_ENTITY, default=current_weather_entity)
+            if current_weather_entity
+            else vol.Optional(CONF_WEATHER_ENTITY)
+        )
+        schema_dict[selector_key] = EntitySelector(
+            EntitySelectorConfig(domain="weather")
+        )
+
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
@@ -6761,7 +6797,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_OPENWEATHERMAP_API_KEY: user_input.get(
                     CONF_OPENWEATHERMAP_API_KEY, ""
                 ),
-                CONF_WEATHER_ENTITY: user_input.get(CONF_WEATHER_ENTITY) or None,
+                CONF_WEATHER_ENTITY: _normalize_optional_entity(
+                    user_input.get(CONF_WEATHER_ENTITY)
+                ),
                 CONF_SOLCAST_ENABLED: user_input.get(CONF_SOLCAST_ENABLED, False),
                 CONF_SOLCAST_API_KEY: user_input.get(CONF_SOLCAST_API_KEY, ""),
                 CONF_SOLCAST_RESOURCE_ID: user_input.get(CONF_SOLCAST_RESOURCE_ID, ""),
@@ -6791,36 +6829,37 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             self._final_options = final_data
             return await self.async_step_ev_charging()
 
+        schema_dict: dict[vol.Marker, Any] = {
+            vol.Optional(
+                CONF_WEATHER_LOCATION,
+                default=self._get_option(CONF_WEATHER_LOCATION, ""),
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            vol.Optional(
+                CONF_OPENWEATHERMAP_API_KEY,
+                default=self._get_option(CONF_OPENWEATHERMAP_API_KEY, ""),
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
+        }
+        self._add_weather_entity_selector(schema_dict)
+        schema_dict.update(
+            {
+                vol.Optional(
+                    CONF_SOLCAST_ENABLED,
+                    default=self._get_option(CONF_SOLCAST_ENABLED, False),
+                ): BooleanSelector(),
+                vol.Optional(
+                    CONF_SOLCAST_API_KEY,
+                    default=self._get_option(CONF_SOLCAST_API_KEY, ""),
+                ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
+                vol.Optional(
+                    CONF_SOLCAST_RESOURCE_ID,
+                    default=self._get_option(CONF_SOLCAST_RESOURCE_ID, ""),
+                ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            }
+        )
+
         return self.async_show_form(
             step_id="weather_options",
-            data_schema=vol.Schema(
-                {
-                    vol.Optional(
-                        CONF_WEATHER_LOCATION,
-                        default=self._get_option(CONF_WEATHER_LOCATION, ""),
-                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-                    vol.Optional(
-                        CONF_OPENWEATHERMAP_API_KEY,
-                        default=self._get_option(CONF_OPENWEATHERMAP_API_KEY, ""),
-                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
-                    vol.Optional(
-                        CONF_WEATHER_ENTITY,
-                        default=self._get_option(CONF_WEATHER_ENTITY, None),
-                    ): EntitySelector(EntitySelectorConfig(domain="weather")),
-                    vol.Optional(
-                        CONF_SOLCAST_ENABLED,
-                        default=self._get_option(CONF_SOLCAST_ENABLED, False),
-                    ): BooleanSelector(),
-                    vol.Optional(
-                        CONF_SOLCAST_API_KEY,
-                        default=self._get_option(CONF_SOLCAST_API_KEY, ""),
-                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
-                    vol.Optional(
-                        CONF_SOLCAST_RESOURCE_ID,
-                        default=self._get_option(CONF_SOLCAST_RESOURCE_ID, ""),
-                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
-                }
-            ),
+            data_schema=vol.Schema(schema_dict),
         )
 
     async def async_step_inverter_brand(

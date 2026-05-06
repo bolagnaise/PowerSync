@@ -618,6 +618,7 @@
         "data": {
           "weather_location": "Weather location",
           "openweathermap_api_key": "OpenWeatherMap API key",
+          "weather_entity": "Home Assistant weather entity",
           "solcast_enabled": "Enable Solcast solar forecast",
           "solcast_api_key": "Solcast API key",
           "solcast_resource_id": "Solcast resource ID(s)"
@@ -625,6 +626,7 @@
         "data_description": {
           "weather_location": "Suburb, city, postcode, or lat,lon coordinates (e.g. 'Melbourne', '3000', '-37.81,144.96'). Leave blank to auto-detect from timezone.",
           "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny, cloudy, rain, snow, and storm triggers). Leave blank to disable.",
+          "weather_entity": "Optional. Used for temperature-aware load forecasting if Home Assistant has a weather entity. Leave blank when using OpenWeatherMap.",
           "solcast_enabled": "Enable solar production forecasting. If the Solcast HA integration is installed, PowerSync reads from its sensors automatically (no API calls needed).",
           "solcast_api_key": "Only needed if you do NOT have the Solcast HA integration. Get a free key from toolkit.solcast.com.au (10 calls/day on hobbyist tier).",
           "solcast_resource_id": "Only needed without the Solcast HA integration. For split arrays, enter comma-separated IDs (e.g. abc123,def456)."
@@ -1645,6 +1647,7 @@
         "data": {
           "weather_location": "Weather location",
           "openweathermap_api_key": "OpenWeatherMap API key",
+          "weather_entity": "Home Assistant weather entity",
           "solcast_enabled": "Enable Solcast solar forecast",
           "solcast_api_key": "Solcast API key",
           "solcast_resource_id": "Solcast resource ID(s)"
@@ -1652,6 +1655,7 @@
         "data_description": {
           "weather_location": "Suburb, city, postcode, or lat,lon coordinates (e.g. 'Melbourne', '3000', '-37.81,144.96'). Leave blank to auto-detect.",
           "openweathermap_api_key": "Free key from openweathermap.org for weather-based automations. Leave blank to disable.",
+          "weather_entity": "Optional. Used for temperature-aware load forecasting if Home Assistant has a weather entity. Leave blank when using OpenWeatherMap.",
           "solcast_enabled": "Enable solar forecasting. If the Solcast HA integration is installed, PowerSync reads from its sensors automatically.",
           "solcast_api_key": "Only needed without the Solcast HA integration. Get a free key from toolkit.solcast.com.au.",
           "solcast_resource_id": "Only needed without the Solcast HA integration. For split arrays, enter comma-separated IDs."
