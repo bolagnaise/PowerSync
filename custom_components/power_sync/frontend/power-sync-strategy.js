@@ -733,7 +733,7 @@ class PowerSyncLayout extends HTMLElement {
     this._customizing = false;
     this._dragItem = null;
     this._pointerDrag = null;
-    this._storageKey = 'power-sync-dashboard-layout-v1';
+    this._storageKey = 'power-sync-dashboard-layout-v2';
   }
 
   setConfig(config) {
@@ -789,25 +789,21 @@ class PowerSyncLayout extends HTMLElement {
     return `${index}:${parts.join(':')}`;
   }
 
-  _applySavedOrder() {
-    let saved;
+  _loadLayouts() {
     try {
-      saved = JSON.parse(localStorage.getItem(this._storageKey) || '[]');
+      const saved = JSON.parse(localStorage.getItem(this._storageKey) || '{}');
+      return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {};
     } catch (_) {
-      saved = [];
+      return {};
     }
-    if (!Array.isArray(saved) || saved.length === 0) return;
-    const rank = new Map(saved.map((key, index) => [key, index]));
-    this._items.sort((a, b) => {
-      const aRank = rank.has(a.dataset.key) ? rank.get(a.dataset.key) : Number.MAX_SAFE_INTEGER;
-      const bRank = rank.has(b.dataset.key) ? rank.get(b.dataset.key) : Number.MAX_SAFE_INTEGER;
-      return aRank - bRank || Number(a.dataset.defaultIndex) - Number(b.dataset.defaultIndex);
-    });
   }
 
   _saveOrder() {
     try {
-      localStorage.setItem(this._storageKey, JSON.stringify(this._items.map(item => item.dataset.key)));
+      const count = String(this._lanes.length || this._columnCount());
+      const layouts = this._loadLayouts();
+      layouts[count] = this._lanes.map((lane) => Array.from(lane.children).map(item => item.dataset.key));
+      localStorage.setItem(this._storageKey, JSON.stringify(layouts));
     } catch (_) {}
   }
 
@@ -823,28 +819,68 @@ class PowerSyncLayout extends HTMLElement {
   _resetOrder() {
     try { localStorage.removeItem(this._storageKey); } catch (_) {}
     this._items.sort((a, b) => Number(a.dataset.defaultIndex) - Number(b.dataset.defaultIndex));
-    this._saveOrder();
+    if (this._lanes.length) {
+      this._rebuildLanes(this._lanes.length);
+    }
     this._scheduleLayout();
   }
 
   _itemAtPoint(x, y) {
     return this._items.find(item => {
+      if (item === this._dragItem) return false;
       const rect = item.getBoundingClientRect();
+      return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    });
+  }
+
+  _laneAtPoint(x, y) {
+    return this._lanes.find(lane => {
+      const rect = lane.getBoundingClientRect();
       return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
     });
   }
 
   _moveDragItem(targetItem, clientY) {
     if (!this._dragItem || !targetItem || this._dragItem === targetItem) return;
-    const targetIndex = this._items.indexOf(targetItem);
-    const dragIndex = this._items.indexOf(this._dragItem);
-    if (targetIndex < 0 || dragIndex < 0) return;
     const rect = targetItem.getBoundingClientRect();
     const insertAfter = clientY > rect.top + rect.height / 2;
-    this._items.splice(dragIndex, 1);
-    const nextTargetIndex = this._items.indexOf(targetItem);
-    this._items.splice(nextTargetIndex + (insertAfter ? 1 : 0), 0, this._dragItem);
-    this._balanceLayout();
+    targetItem.parentElement?.insertBefore(this._dragItem, insertAfter ? targetItem.nextSibling : targetItem);
+  }
+
+  _moveDragItemToLane(lane) {
+    if (!this._dragItem || !lane) return;
+    lane.appendChild(this._dragItem);
+  }
+
+  _savedLayout(count) {
+    const layout = this._loadLayouts()[String(count)];
+    if (!Array.isArray(layout) || layout.length !== count) return null;
+    return layout.every(lane => Array.isArray(lane)) ? layout : null;
+  }
+
+  _applyLaneLayout(layout) {
+    const byKey = new Map(this._items.map(item => [item.dataset.key, item]));
+    const placed = new Set();
+    layout.forEach((keys, laneIndex) => {
+      const lane = this._lanes[laneIndex];
+      if (!lane) return;
+      keys.forEach((key) => {
+        const item = byKey.get(key);
+        if (!item || placed.has(item)) return;
+        lane.appendChild(item);
+        placed.add(item);
+      });
+    });
+
+    const heights = this._lanes.map(lane => lane.getBoundingClientRect().height || 0);
+    this._items
+      .filter(item => !placed.has(item))
+      .sort((a, b) => Number(a.dataset.defaultIndex) - Number(b.dataset.defaultIndex))
+      .forEach((item) => {
+        const laneIndex = heights.indexOf(Math.min(...heights));
+        this._lanes[laneIndex].appendChild(item);
+        heights[laneIndex] += item.getBoundingClientRect().height || item.scrollHeight || 180;
+      });
   }
 
   _balanceLayout() {
@@ -854,8 +890,18 @@ class PowerSyncLayout extends HTMLElement {
       this._rebuildLanes(count);
     }
 
+    const renderedItemCount = this._lanes.reduce((sum, lane) => sum + lane.children.length, 0);
+    if (this._customizing && renderedItemCount === this._items.length) return;
+
+    const savedLayout = this._savedLayout(count);
+    if (savedLayout) {
+      this._applyLaneLayout(savedLayout);
+      return;
+    }
+
     const heights = new Array(count).fill(0);
-    for (const item of this._items) {
+    const sortedItems = [...this._items].sort((a, b) => Number(a.dataset.defaultIndex) - Number(b.dataset.defaultIndex));
+    for (const item of sortedItems) {
       const laneIndex = heights.indexOf(Math.min(...heights));
       this._lanes[laneIndex].appendChild(item);
       heights[laneIndex] += item.getBoundingClientRect().height || item.scrollHeight || 180;
@@ -871,6 +917,18 @@ class PowerSyncLayout extends HTMLElement {
     for (let i = 0; i < count; i++) {
       const lane = document.createElement('div');
       lane.className = 'lane';
+      lane.addEventListener('dragover', (event) => {
+        if (!this._customizing || !this._dragItem) return;
+        event.preventDefault();
+        const target = this._itemAtPoint(event.clientX, event.clientY);
+        if (target) this._moveDragItem(target, event.clientY);
+        else this._moveDragItemToLane(lane);
+      });
+      lane.addEventListener('drop', (event) => {
+        if (!this._customizing || !this._dragItem) return;
+        event.preventDefault();
+        this._saveOrder();
+      });
       this._lanes.push(lane);
       grid.appendChild(lane);
     }
@@ -1035,7 +1093,9 @@ class PowerSyncLayout extends HTMLElement {
           item.classList.add('dragging');
         }
         event.preventDefault();
-        this._moveDragItem(this._itemAtPoint(event.clientX, event.clientY), event.clientY);
+        const target = this._itemAtPoint(event.clientX, event.clientY);
+        if (target) this._moveDragItem(target, event.clientY);
+        else this._moveDragItemToLane(this._laneAtPoint(event.clientX, event.clientY));
       });
       item.addEventListener('pointerup', () => {
         if (!this._pointerDrag || this._pointerDrag.item !== item) return;
@@ -1067,7 +1127,6 @@ class PowerSyncLayout extends HTMLElement {
       this._items.push(item);
     }
 
-    this._applySavedOrder();
     this._scheduleLayout();
     setTimeout(() => this._scheduleLayout(), 250);
     setTimeout(() => this._scheduleLayout(), 1000);

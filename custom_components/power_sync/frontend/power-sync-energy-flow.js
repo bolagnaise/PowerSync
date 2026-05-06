@@ -1251,6 +1251,7 @@ import {
       this._renderLang = DEFAULT_LANG;
       this._lastAppliedSceneFlowProfile = '';
       this._lastAppliedSceneFlowComponentProfile = '';
+      this._pendingFlowStates = null;
     }
 
     setConfig(config) {
@@ -1316,10 +1317,45 @@ import {
     _activatePath(id, cls, watt, minW = FLOW_MIN_W, reverse = false) {
       if (watt <= 0) return;
       if (watt < minW) return;
+      if (this._pendingFlowStates) {
+        const next = this._pendingFlowStates.get(id) || { classes: new Set(), reverse: false };
+        next.classes.add(cls);
+        next.reverse = next.reverse || !!reverse;
+        this._pendingFlowStates.set(id, next);
+        return;
+      }
+      this._setFlowLineState(id, cls ? [cls] : [], !!reverse);
+    }
+
+    _setFlowLineState(id, classes, reverse = false) {
       const el = this.shadowRoot.querySelector(`#${id}`);
       if (!el) return;
-      el.classList.add('active', cls);
-      el.classList.toggle('flow-reverse', !!reverse);
+      const desiredClasses = Array.from(new Set(classes.filter(Boolean))).sort();
+      const signature = desiredClasses.length
+        ? `${desiredClasses.join('|')}|${reverse ? 'reverse' : 'forward'}`
+        : '';
+      if ((el.dataset.flowState || '') === signature) return;
+
+      el.classList.remove('active', 'flow-solar', 'flow-green', 'flow-broken', 'flow-reverse');
+      if (desiredClasses.length) {
+        el.classList.add('active', ...desiredClasses);
+        el.classList.toggle('flow-reverse', !!reverse);
+      }
+      el.dataset.flowState = signature;
+    }
+
+    _beginFlowUpdate() {
+      this._pendingFlowStates = new Map();
+    }
+
+    _commitFlowUpdate() {
+      const desired = this._pendingFlowStates || new Map();
+      this.shadowRoot.querySelectorAll('.flow-line').forEach((line) => {
+        const id = line.id;
+        const state = desired.get(id);
+        this._setFlowLineState(id, state ? Array.from(state.classes) : [], !!state?.reverse);
+      });
+      this._pendingFlowStates = null;
     }
 
     _dominantFlowClass(solarW, batteryW, gridW, fallback) {
@@ -1800,12 +1836,12 @@ import {
           .flow-line.active {
             opacity: 1;
             stroke-dasharray: var(--flow-seg, 62) var(--flow-gap, 82);
-            animation: flowStream var(--flow-speed, 1.9s) linear infinite, flowPulse var(--flow-fade, 1.45s) ease-in-out infinite;
+            animation: flowStream var(--flow-speed, 1.9s) linear infinite;
             filter: drop-shadow(0 0 3px var(--flow-glow, rgba(125, 249, 255, 0.4)))
                     drop-shadow(0 0 12px var(--flow-glow, rgba(125, 249, 255, 0.4)));
           }
           .flow-line.active.flow-reverse {
-            animation: flowStreamReverse var(--flow-speed, 1.9s) linear infinite, flowPulse var(--flow-fade, 1.45s) ease-in-out infinite;
+            animation: flowStreamReverse var(--flow-speed, 1.9s) linear infinite;
           }
           .flow-line.active.flow-solar {
             stroke: #ffe066;
@@ -1842,11 +1878,6 @@ import {
           }
           @keyframes flowStreamReverse {
             to { stroke-dashoffset: 144; }
-          }
-          @keyframes flowPulse {
-            0%, 100% { opacity: 0.8; stroke-width: 2.1; }
-            45% { opacity: 1; stroke-width: 2.9; }
-            82% { opacity: 0.9; stroke-width: 2.4; }
           }
         </style>
         <ha-card>
@@ -2090,9 +2121,7 @@ import {
       this._toggleNode('#node-ev-bg', (ev1.power || 0) > 0 || ev1.switchOn || ev1.present);
       this._toggleNode('#node-ev2-bg', (ev2.power || 0) > 0 || ev2.switchOn || ev2.present);
 
-      this.shadowRoot.querySelectorAll('.flow-line').forEach((line) => {
-        line.classList.remove('active', 'flow-solar', 'flow-green', 'flow-broken', 'flow-reverse');
-      });
+      this._beginFlowUpdate();
 
       const solarPos = Math.max(0, solarPower);
       const loadPos = Math.max(0, loadPower);
@@ -2179,6 +2208,7 @@ import {
       const ev2Share = evDraw > 0 ? ev2Draw / evDraw : 0;
       this._activatePath('line-wallbox-ev', evCls, evTotal * ev1Share, 1);
       this._activatePath('line-wallbox-ev2', evCls, evTotal * ev2Share, 1);
+      this._commitFlowUpdate();
     }
 
     _render() {
