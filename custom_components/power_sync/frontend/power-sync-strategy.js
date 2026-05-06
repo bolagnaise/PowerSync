@@ -730,6 +730,10 @@ class PowerSyncLayout extends HTMLElement {
     this._built = false;
     this._layoutQueued = false;
     this._resizeObserver = null;
+    this._customizing = false;
+    this._dragItem = null;
+    this._pointerDrag = null;
+    this._storageKey = 'power-sync-dashboard-layout-v1';
   }
 
   setConfig(config) {
@@ -771,6 +775,76 @@ class PowerSyncLayout extends HTMLElement {
     const columns = this._config?.columns || [];
     const ordered = columns.length === 3 ? [columns[1], columns[0], columns[2]] : columns;
     return ordered.flatMap(column => column || []);
+  }
+
+  _cardKey(cardConfig, index) {
+    const parts = [
+      cardConfig.type,
+      cardConfig.title,
+      cardConfig.entity,
+      cardConfig.name,
+      cardConfig.card?.type,
+      cardConfig.cards?.map(card => card.title || card.entity || card.type).join('|'),
+    ].filter(Boolean);
+    return `${index}:${parts.join(':')}`;
+  }
+
+  _applySavedOrder() {
+    let saved;
+    try {
+      saved = JSON.parse(localStorage.getItem(this._storageKey) || '[]');
+    } catch (_) {
+      saved = [];
+    }
+    if (!Array.isArray(saved) || saved.length === 0) return;
+    const rank = new Map(saved.map((key, index) => [key, index]));
+    this._items.sort((a, b) => {
+      const aRank = rank.has(a.dataset.key) ? rank.get(a.dataset.key) : Number.MAX_SAFE_INTEGER;
+      const bRank = rank.has(b.dataset.key) ? rank.get(b.dataset.key) : Number.MAX_SAFE_INTEGER;
+      return aRank - bRank || Number(a.dataset.defaultIndex) - Number(b.dataset.defaultIndex);
+    });
+  }
+
+  _saveOrder() {
+    try {
+      localStorage.setItem(this._storageKey, JSON.stringify(this._items.map(item => item.dataset.key)));
+    } catch (_) {}
+  }
+
+  _setCustomizing(enabled) {
+    this._customizing = enabled;
+    this.shadowRoot.querySelector('.toolbar')?.classList.toggle('active', enabled);
+    for (const item of this._items) {
+      item.draggable = enabled;
+      item.classList.toggle('customizing', enabled);
+    }
+  }
+
+  _resetOrder() {
+    try { localStorage.removeItem(this._storageKey); } catch (_) {}
+    this._items.sort((a, b) => Number(a.dataset.defaultIndex) - Number(b.dataset.defaultIndex));
+    this._saveOrder();
+    this._scheduleLayout();
+  }
+
+  _itemAtPoint(x, y) {
+    return this._items.find(item => {
+      const rect = item.getBoundingClientRect();
+      return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    });
+  }
+
+  _moveDragItem(targetItem, clientY) {
+    if (!this._dragItem || !targetItem || this._dragItem === targetItem) return;
+    const targetIndex = this._items.indexOf(targetItem);
+    const dragIndex = this._items.indexOf(this._dragItem);
+    if (targetIndex < 0 || dragIndex < 0) return;
+    const rect = targetItem.getBoundingClientRect();
+    const insertAfter = clientY > rect.top + rect.height / 2;
+    this._items.splice(dragIndex, 1);
+    const nextTargetIndex = this._items.indexOf(targetItem);
+    this._items.splice(nextTargetIndex + (insertAfter ? 1 : 0), 0, this._dragItem);
+    this._balanceLayout();
   }
 
   _balanceLayout() {
@@ -835,6 +909,60 @@ class PowerSyncLayout extends HTMLElement {
       .item > * {
         min-width: 0;
       }
+      .toolbar {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+        width: 100%;
+        max-width: 1900px;
+        margin: 0 auto;
+        padding: var(--ps-dashboard-gap) var(--ps-dashboard-gap) 0;
+        box-sizing: border-box;
+      }
+      .toolbar button {
+        border: 1px solid var(--divider-color, rgba(255,255,255,0.16));
+        border-radius: 8px;
+        background: var(--ha-card-background, var(--card-background-color, #1c1c1c));
+        color: var(--primary-text-color, #fff);
+        font: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 1;
+        padding: 8px 10px;
+        cursor: pointer;
+      }
+      .toolbar.active .toggle {
+        border-color: var(--primary-color, #03a9f4);
+        color: var(--primary-color, #03a9f4);
+      }
+      .item {
+        position: relative;
+      }
+      .item.customizing {
+        cursor: grab;
+        outline: 1px dashed color-mix(in srgb, var(--primary-color, #03a9f4) 60%, transparent);
+        outline-offset: 3px;
+        border-radius: 10px;
+      }
+      .item.customizing::before {
+        content: 'Drag';
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        z-index: 5;
+        padding: 4px 7px;
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--primary-color, #03a9f4) 85%, black);
+        color: white;
+        font-size: 10px;
+        font-weight: 700;
+        pointer-events: none;
+      }
+      .item.dragging {
+        opacity: 0.55;
+        cursor: grabbing;
+        touch-action: none;
+      }
       @media (max-width: 760px) {
         .grid {
           padding: 6px;
@@ -842,6 +970,16 @@ class PowerSyncLayout extends HTMLElement {
       }
     `;
     root.appendChild(style);
+
+    const toolbar = document.createElement('div');
+    toolbar.className = 'toolbar';
+    toolbar.innerHTML = `
+      <button class="toggle" type="button">Customize layout</button>
+      <button class="reset" type="button">Reset layout</button>
+    `;
+    toolbar.querySelector('.toggle').addEventListener('click', () => this._setCustomizing(!this._customizing));
+    toolbar.querySelector('.reset').addEventListener('click', () => this._resetOrder());
+    root.appendChild(toolbar);
 
     const grid = document.createElement('div');
     grid.className = 'grid';
@@ -855,9 +993,63 @@ class PowerSyncLayout extends HTMLElement {
     let helpers;
     try { helpers = await window.loadCardHelpers(); } catch (_) {}
 
-    for (const cardConfig of this._flattenCards()) {
+    for (const [index, cardConfig] of this._flattenCards().entries()) {
       const item = document.createElement('div');
       item.className = 'item';
+      item.dataset.defaultIndex = String(index);
+      item.dataset.key = this._cardKey(cardConfig, index);
+      item.addEventListener('dragstart', (event) => {
+        if (!this._customizing) return;
+        this._dragItem = item;
+        item.classList.add('dragging');
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', item.dataset.key);
+      });
+      item.addEventListener('dragend', () => {
+        item.classList.remove('dragging');
+        this._dragItem = null;
+        this._saveOrder();
+      });
+      item.addEventListener('dragover', (event) => {
+        if (!this._customizing || !this._dragItem || this._dragItem === item) return;
+        event.preventDefault();
+        this._moveDragItem(item, event.clientY);
+      });
+      item.addEventListener('pointerdown', (event) => {
+        if (!this._customizing || event.button > 0) return;
+        this._pointerDrag = {
+          active: false,
+          item,
+          startX: event.clientX,
+          startY: event.clientY,
+        };
+        item.setPointerCapture?.(event.pointerId);
+      });
+      item.addEventListener('pointermove', (event) => {
+        if (!this._pointerDrag || this._pointerDrag.item !== item) return;
+        const distance = Math.hypot(event.clientX - this._pointerDrag.startX, event.clientY - this._pointerDrag.startY);
+        if (!this._pointerDrag.active && distance < 8) return;
+        if (!this._pointerDrag.active) {
+          this._pointerDrag.active = true;
+          this._dragItem = item;
+          item.classList.add('dragging');
+        }
+        event.preventDefault();
+        this._moveDragItem(this._itemAtPoint(event.clientX, event.clientY), event.clientY);
+      });
+      item.addEventListener('pointerup', () => {
+        if (!this._pointerDrag || this._pointerDrag.item !== item) return;
+        item.classList.remove('dragging');
+        this._pointerDrag = null;
+        this._dragItem = null;
+        this._saveOrder();
+      });
+      item.addEventListener('pointercancel', () => {
+        if (!this._pointerDrag || this._pointerDrag.item !== item) return;
+        item.classList.remove('dragging');
+        this._pointerDrag = null;
+        this._dragItem = null;
+      });
       let card;
       try {
         card = helpers
@@ -875,6 +1067,7 @@ class PowerSyncLayout extends HTMLElement {
       this._items.push(item);
     }
 
+    this._applySavedOrder();
     this._scheduleLayout();
     setTimeout(() => this._scheduleLayout(), 250);
     setTimeout(() => this._scheduleLayout(), 1000);
