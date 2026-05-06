@@ -1821,6 +1821,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._charge_holdoff = 0
 
             if effective_action == "charge":
+                if (
+                    self.battery_system == "sigenergy"
+                    and self._sigenergy_grid_charge_is_uneconomic()
+                ):
+                    effective_action = "self_consumption"
+                    _LOGGER.info(
+                        "Optimizer: Blocking Sigenergy grid charge during high "
+                        "import price — switching to self_consumption"
+                    )
+
+            if effective_action == "charge":
                 if hasattr(battery, "force_charge"):
                     charge_duration = self._config.interval_minutes + 5
                     # Near the demand window, shorten charge duration so the
@@ -2187,6 +2198,51 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         except Exception as e:
             _LOGGER.error("Failed to execute optimizer action: %s", e)
+
+    def _sigenergy_grid_charge_is_uneconomic(self) -> bool:
+        """Return True when a Sigenergy charge slot would buy peak-priced grid energy."""
+        import_prices = self._last_display_import_prices or self._last_import_prices
+        if not import_prices:
+            return False
+
+        current_import = import_prices[0]
+        if current_import is None or current_import <= 0.001:
+            return False
+
+        export_prices = self._last_display_export_prices or self._last_export_prices or []
+        future_imports = [
+            price for price in import_prices[1:] if price is not None and price > 0
+        ]
+        future_exports = [
+            price for price in export_prices[1:] if price is not None and price > 0
+        ]
+
+        if not future_imports and not future_exports:
+            return False
+
+        efficiency = getattr(getattr(self, "_optimizer", None), "efficiency", 0.9)
+        try:
+            efficiency = float(efficiency)
+        except (TypeError, ValueError):
+            efficiency = 0.9
+        efficiency = min(max(efficiency, 0.01), 1.0)
+
+        best_future_value = max(
+            max(future_imports, default=0.0),
+            max(future_exports, default=0.0),
+        ) * efficiency
+        min_margin = 0.02  # $/kWh buffer for round-trip losses and price noise.
+
+        if current_import + min_margin <= best_future_value:
+            return False
+
+        _LOGGER.debug(
+            "Sigenergy grid charge blocked: current import %.1fc/kWh, best "
+            "future value %.1fc/kWh after efficiency",
+            current_import * 100,
+            best_future_value * 100,
+        )
+        return True
 
     def _battery_export_allowed_slots(
         self,

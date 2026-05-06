@@ -25,6 +25,8 @@ _STUB_MODULE_NAMES = (
 
 @pytest.fixture()
 def sigenergy_module():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     saved_modules = {
         name: sys.modules.get(name, _SENTINEL)
         for name in _STUB_MODULE_NAMES
@@ -67,6 +69,8 @@ def sigenergy_module():
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = saved_modules[name]
+        loop.close()
+        asyncio.set_event_loop(None)
 
 
 def test_force_charge_applies_requested_charge_limit_before_mode(sigenergy_module):
@@ -117,5 +121,34 @@ def test_force_charge_does_not_enter_charge_mode_when_limit_write_fails(sigenerg
         (
             controller.REG_ESS_MAX_CHARGE_LIMIT,
             controller._from_unsigned32(1000),
+        ),
+    ]
+
+
+def test_force_discharge_uses_pv_first_mode(sigenergy_module):
+    controller = sigenergy_module.SigenergyController(host="127.0.0.1")
+    writes: list[tuple[int, list[int]]] = []
+
+    async def connect():
+        return True
+
+    async def write(address, values, slave_id=None):
+        writes.append((address, list(values)))
+        return True
+
+    controller.connect = connect
+    controller._write_holding_registers = write
+
+    assert asyncio.run(controller.force_discharge(power_kw=5.0))
+
+    assert writes == [
+        (controller.REG_REMOTE_EMS_ENABLE, [1]),
+        (
+            controller.REG_REMOTE_EMS_CONTROL_MODE,
+            [controller.REMOTE_EMS_MODE_DISCHARGE_PV],
+        ),
+        (
+            controller.REG_GRID_EXPORT_LIMIT,
+            controller._from_unsigned32(5000),
         ),
     ]

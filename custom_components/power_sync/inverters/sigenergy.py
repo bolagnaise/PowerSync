@@ -1095,17 +1095,17 @@ class SigenergyController(InverterController):
                 return False
             _LOGGER.info("Remote EMS enabled for force discharge")
 
-            # 2. Set control mode to discharge (ESS first — battery priority)
-            # DISCHARGE_PV (mode 5) limits to PV output, which is near-zero
-            # in the evening when exports are most valuable.
-            # DISCHARGE_ESS (mode 6) discharges directly from battery storage.
+            # 2. Set control mode to discharge (PV first).
+            # DISCHARGE_ESS (mode 6) can suppress solar generation while the
+            # battery exports. DISCHARGE_PV (mode 5) preserves active PV and
+            # lets the battery contribute behind it.
             mode_result = await self._write_holding_registers(
-                self.REG_REMOTE_EMS_CONTROL_MODE, [self.REMOTE_EMS_MODE_DISCHARGE_ESS]
+                self.REG_REMOTE_EMS_CONTROL_MODE, [self.REMOTE_EMS_MODE_DISCHARGE_PV]
             )
             if not mode_result:
                 _LOGGER.error("Failed to set Remote EMS control mode to discharge")
                 return False
-            _LOGGER.info("Remote EMS control mode set to DISCHARGE")
+            _LOGGER.info("Remote EMS control mode set to DISCHARGE_PV")
 
             # 3. Set grid export limit. The dynamic safety cap is bypassed because
             # path 5 of _get_effective_export_safety_cap_kw reads back

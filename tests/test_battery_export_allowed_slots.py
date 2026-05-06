@@ -468,6 +468,43 @@ def test_charge_below_reserve_bypasses_charge_hysteresis(opt_module):
     assert coordinator._last_executed_action == "charge"
 
 
+def test_sigenergy_charge_blocks_uneconomic_peak_grid_import(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.14)
+    coordinator.battery_system = "sigenergy"
+    coordinator._last_executed_action = "charge"
+    coordinator._last_display_import_prices = [0.45, 0.32, 0.20, 0.12]
+    coordinator._last_display_export_prices = [0.15, 0.15, 0.12, 0.08]
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="charge", power_w=11000)
+        )
+    )
+
+    assert battery.force_charge_calls == []
+    assert battery.self_consumption_calls == 1
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_sigenergy_charge_allows_cheap_grid_import(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.14)
+    coordinator.battery_system = "sigenergy"
+    coordinator._last_display_import_prices = [0.05, 0.45, 0.40, 0.30]
+    coordinator._last_display_export_prices = [0.05, 0.15, 0.15, 0.08]
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="charge", power_w=4200)
+        )
+    )
+
+    assert battery.force_charge_calls == [(10, 4200, False)]
+    assert battery.self_consumption_calls == 0
+    assert coordinator._last_executed_action == "charge"
+
+
 def test_tesla_export_uses_contiguous_export_window_duration(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
