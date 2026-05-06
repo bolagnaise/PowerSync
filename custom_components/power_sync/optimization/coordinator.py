@@ -4598,6 +4598,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             data["export_price_max"] = max(disp_export)
             data["export_prices"] = disp_export
 
+        if self._current_schedule and self._current_schedule.actions:
+            charge_kw = [
+                -round((action.battery_charge_w or 0.0) / 1000.0, 3)
+                for action in self._current_schedule.actions
+            ]
+            discharge_kw = [
+                round((action.battery_discharge_w or 0.0) / 1000.0, 3)
+                for action in self._current_schedule.actions
+            ]
+            net_kw = [
+                round(discharge_kw[i] + charge_kw[i], 3)
+                for i in range(len(charge_kw))
+            ]
+            data["battery_power_now_kw"] = net_kw[0] if net_kw else 0.0
+            data["battery_charge_peak_kw"] = abs(min(charge_kw)) if charge_kw else 0.0
+            data["battery_discharge_peak_kw"] = max(discharge_kw) if discharge_kw else 0.0
+            data["battery_schedule_available"] = True
+            data["battery_charge_forecast"] = charge_kw
+            data["battery_discharge_forecast"] = discharge_kw
+            data["battery_power_forecast"] = net_kw
+
         return data
 
     def get_api_data(self) -> dict[str, Any]:

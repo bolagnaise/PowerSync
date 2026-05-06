@@ -8,7 +8,7 @@ Based on https://github.com/Talie5in/amber2sigen
 import base64
 import logging
 from datetime import datetime, timedelta
-from typing import Optional, Callable, Awaitable
+from typing import Any, Optional, Callable, Awaitable
 
 import aiohttp
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -313,6 +313,8 @@ class SigenergyAPIClient:
         buy_prices: list[dict],
         sell_prices: list[dict],
         plan_name: str = "PowerSync",
+        payload_source: str = "unknown",
+        provider_label: str = "Amber",
     ) -> dict:
         """Set tariff pricing for a station.
 
@@ -321,6 +323,8 @@ class SigenergyAPIClient:
             buy_prices: List of {timeRange: "HH:MM-HH:MM", price: float} for buy rates
             sell_prices: List of {timeRange: "HH:MM-HH:MM", price: float} for sell rates
             plan_name: Name for the pricing plan
+            payload_source: Source used to build the upload schedule
+            provider_label: Electricity provider label for diagnostics
 
         Returns:
             dict with success status or error
@@ -387,6 +391,14 @@ class SigenergyAPIClient:
 
         try:
             session = await self._get_session()
+            _log_sigenergy_payload_summary(
+                station_id=station_id,
+                plan_name=f"{plan_name} 30-min",
+                provider_label=provider_label,
+                payload_source=payload_source,
+                buy_prices=buy_prices,
+                sell_prices=sell_prices,
+            )
             _LOGGER.info(f"Setting tariff for Sigenergy station {station_id}")
 
             async with session.post(url, headers=headers, json=payload, timeout=30) as response:
@@ -395,6 +407,14 @@ class SigenergyAPIClient:
                     return {"error": f"Failed to set tariff: {response.status}"}
 
                 result = await response.json()
+                response_code = result.get("code")
+                response_msg = result.get("msg", result.get("message", ""))
+                _LOGGER.info(
+                    "Sigenergy tariff API response: http=%s, code=%s, message=%s",
+                    response.status,
+                    response_code,
+                    response_msg or "<empty>",
+                )
 
                 # Check for success in response
                 if result.get("code") == 0 or result.get("success"):
@@ -425,6 +445,124 @@ class SigenergyAPIClient:
 
         station_count = len(stations.get("stations", []))
         return True, f"Connected successfully. Found {station_count} station(s)."
+
+
+def convert_tariff_rates_to_sigenergy(rates: dict[str, Any]) -> list[dict]:
+    """Convert canonical tariff rates to Sigenergy timeRange format.
+
+    Canonical rates use Tesla-style keys like ``PERIOD_20_30`` and dollar/kWh
+    values. Sigenergy expects ``HH:MM-HH:MM`` ranges and cent/kWh prices.
+    """
+    result: list[dict] = []
+
+    for period_key, rate in sorted(rates.items(), key=_period_sort_key):
+        parsed = _parse_period_key(period_key)
+        if parsed is None or rate is None:
+            continue
+
+        hour, minute = parsed
+        try:
+            price_cents = float(rate) * 100
+        except (TypeError, ValueError):
+            _LOGGER.debug("Skipping non-numeric tariff rate for %s: %r", period_key, rate)
+            continue
+
+        end_hour = hour
+        end_minute = minute + 30
+        if end_minute >= 60:
+            end_hour += 1
+            end_minute = 0
+        end_hour_str = "24" if end_hour == 24 else f"{end_hour:02d}"
+
+        result.append({
+            "timeRange": f"{hour:02d}:{minute:02d}-{end_hour_str}:{end_minute:02d}",
+            "price": round(price_cents, 2),
+        })
+
+    return result
+
+
+def _parse_period_key(period_key: str) -> tuple[int, int] | None:
+    parts = period_key.split("_")
+    if len(parts) != 3 or parts[0] != "PERIOD":
+        return None
+
+    try:
+        hour = int(parts[1])
+        minute = int(parts[2])
+    except ValueError:
+        return None
+
+    if hour not in range(24) or minute not in (0, 30):
+        return None
+
+    return hour, minute
+
+
+def _period_sort_key(item: tuple[str, Any]) -> tuple[int, int]:
+    parsed = _parse_period_key(item[0])
+    if parsed is None:
+        return (99, 99)
+    return parsed
+
+
+def _log_sigenergy_payload_summary(
+    *,
+    station_id: str,
+    plan_name: str,
+    provider_label: str,
+    payload_source: str,
+    buy_prices: list[dict],
+    sell_prices: list[dict],
+) -> None:
+    """Log enough payload detail to verify what Sigenergy accepted."""
+    buy_values = [slot.get("price") for slot in buy_prices if isinstance(slot.get("price"), (int, float))]
+    sell_values = [slot.get("price") for slot in sell_prices if isinstance(slot.get("price"), (int, float))]
+
+    current_slot = _current_sigenergy_slot(buy_prices)
+    peak_slot = max(
+        buy_prices,
+        key=lambda slot: slot.get("price", float("-inf")),
+        default=None,
+    )
+
+    def _slot_label(slot: dict | None) -> str:
+        if not slot:
+            return "<none>"
+        return f"{slot.get('timeRange')}={slot.get('price')}c"
+
+    _LOGGER.info(
+        "Sigenergy tariff payload: station=%s, provider=%s, plan=%s, source=%s, "
+        "periods buy=%d sell=%d, first=%s, current=%s, peak=%s, "
+        "buy_range=%s, sell_range=%s",
+        station_id,
+        provider_label,
+        plan_name,
+        payload_source,
+        len(buy_prices),
+        len(sell_prices),
+        _slot_label(buy_prices[0] if buy_prices else None),
+        _slot_label(current_slot),
+        _slot_label(peak_slot),
+        _price_range_label(buy_values),
+        _price_range_label(sell_values),
+    )
+
+
+def _price_range_label(values: list[float]) -> str:
+    if not values:
+        return "<empty>"
+    return f"{min(values):.1f}-{max(values):.1f}c"
+
+
+def _current_sigenergy_slot(prices: list[dict]) -> dict | None:
+    now = datetime.now()
+    current_start = f"{now.hour:02d}:{0 if now.minute < 30 else 30:02d}"
+    for slot in prices:
+        time_range = slot.get("timeRange", "")
+        if time_range.startswith(f"{current_start}-"):
+            return slot
+    return None
 
 
 def convert_amber_prices_to_sigenergy(

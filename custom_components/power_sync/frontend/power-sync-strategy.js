@@ -17,8 +17,7 @@
 
 // ─── PowerSyncChart Custom Element ──────────────────────────────
 // Self-contained SVG chart that reads data from HA entity attributes.
-// Replaces apexcharts-card data_generator usage (broken in apexcharts v2.2.0+).
-// Two modes: 'tou' (24h schedule) and 'forecast' (48h from entity arrays).
+// Native responsive chart card for history, forecast, and TOU schedule data.
 
 class PowerSyncChart extends HTMLElement {
   constructor() {
@@ -26,19 +25,50 @@ class PowerSyncChart extends HTMLElement {
     this.attachShadow({ mode: 'open' });
     this._config = null;
     this._hass = null;
+    this._resizeObserver = null;
+    this._renderQueued = false;
+    this._historyCache = new Map();
+    this._historyRequestKey = null;
   }
 
   setConfig(config) {
     this._config = config;
+    this._historyCache.clear();
+    this._historyRequestKey = null;
+    this._scheduleRender();
   }
 
   set hass(hass) {
     this._hass = hass;
-    this._render();
+    this._scheduleRender();
   }
 
   getCardSize() {
     return 4;
+  }
+
+  connectedCallback() {
+    if (!this._resizeObserver && 'ResizeObserver' in window) {
+      this._resizeObserver = new ResizeObserver(() => this._scheduleRender());
+      this._resizeObserver.observe(this);
+    }
+    this._scheduleRender();
+  }
+
+  disconnectedCallback() {
+    if (this._resizeObserver) {
+      this._resizeObserver.disconnect();
+      this._resizeObserver = null;
+    }
+  }
+
+  _scheduleRender() {
+    if (this._renderQueued) return;
+    this._renderQueued = true;
+    requestAnimationFrame(() => {
+      this._renderQueued = false;
+      this._render();
+    });
   }
 
   _render() {
@@ -47,22 +77,32 @@ class PowerSyncChart extends HTMLElement {
     const config = this._config;
     const hass = this._hass;
     const mode = config.mode || 'forecast';
+    if (mode === 'history') {
+      this._loadHistoryData(config, hass);
+    }
 
-    // Gather all series data
     let allSeries;
     if (mode === 'tou') {
       allSeries = this._getTouData(config, hass);
+    } else if (mode === 'history') {
+      allSeries = this._getHistoryData(config, hass);
     } else {
       allSeries = this._getForecastData(config, hass);
     }
 
-    // Compute chart dimensions
-    const W = 600, H = 220;
-    const pad = { top: 30, right: 20, bottom: 50, left: 55 };
+    const box = this.getBoundingClientRect();
+    const W = Math.max(320, Math.round(box.width || config.width || 640));
+    const compact = W < 520;
+    const H = Math.max(190, Math.round(config.height || (compact ? 220 : 250)));
+    const pad = {
+      top: 16,
+      right: compact ? 12 : 20,
+      bottom: compact ? 34 : 42,
+      left: compact ? 42 : 56,
+    };
     const chartW = W - pad.left - pad.right;
     const chartH = H - pad.top - pad.bottom;
 
-    // Compute x-axis range
     let xMin = Infinity, xMax = -Infinity;
     for (const s of allSeries) {
       for (const [t] of s.data) {
@@ -75,7 +115,6 @@ class PowerSyncChart extends HTMLElement {
       xMax = xMin + 3600000;
     }
 
-    // Compute y-axis range
     const yMultiplier = config.yMultiplier || 1;
     let rawMin = Infinity, rawMax = -Infinity;
     for (const s of allSeries) {
@@ -88,63 +127,49 @@ class PowerSyncChart extends HTMLElement {
     if (!isFinite(rawMin)) { rawMin = 0; rawMax = 1; }
     if (rawMin === rawMax) { rawMin -= 1; rawMax += 1; }
 
-    // Add 5% padding above max so lines don't touch the top edge
     const dataRange = rawMax - rawMin;
-    rawMax += dataRange * 0.05;
+    rawMin -= dataRange * 0.08;
+    rawMax += dataRange * 0.08;
+    if (config.zeroBaseline || rawMin < 0) {
+      rawMin = Math.min(rawMin, 0);
+      rawMax = Math.max(rawMax, 0);
+    }
 
-    // Apply explicit yMin/yMax if set
     if (config.yMin !== undefined) rawMin = config.yMin * yMultiplier;
     if (config.yMax !== undefined) rawMax = config.yMax * yMultiplier;
 
-    // Nice tick calculation
-    const yRange = rawMax - rawMin;
-    const tickTarget = 5;
-    const rawStep = yRange / tickTarget;
-    // Guard against zero/negative step (all data identical after padding)
-    const safeStep = rawStep > 0 ? rawStep : 1;
-    const mag = Math.pow(10, Math.floor(Math.log10(safeStep)));
-    const residual = safeStep / mag;
-    let niceStep;
-    if (residual <= 1.5) niceStep = 1 * mag;
-    else if (residual <= 3) niceStep = 2 * mag;
-    else if (residual <= 7) niceStep = 5 * mag;
-    else niceStep = 10 * mag;
-
+    const niceStep = this._niceStep((rawMax - rawMin) / (compact ? 4 : 5));
     const yMin = Math.floor(rawMin / niceStep) * niceStep;
     const yMax = Math.ceil(rawMax / niceStep) * niceStep;
     const ticks = [];
     for (let v = yMin; v <= yMax + niceStep * 0.01; v += niceStep) {
       ticks.push(Math.round(v * 1000) / 1000);
     }
-    // Safety: cap at 20 ticks to prevent runaway loops from floating point
     if (ticks.length > 20) ticks.length = 20;
 
-    // Coordinate transforms
     const xScale = (t) => pad.left + ((t - xMin) / (xMax - xMin)) * chartW;
     const yScale = (v) => pad.top + chartH - ((v - yMin) / (yMax - yMin)) * chartH;
 
-    // Build SVG content
     let svg = '';
 
-    // Grid lines
     for (const tick of ticks) {
       const y = yScale(tick);
-      svg += `<line x1="${pad.left}" y1="${y}" x2="${W - pad.right}" y2="${y}" stroke="var(--divider-color, #e0e0e0)" stroke-width="0.5" stroke-dasharray="4,3"/>`;
+      const isZero = Math.abs(tick) < 0.0001;
+      svg += `<line x1="${pad.left}" y1="${y}" x2="${W - pad.right}" y2="${y}" stroke="${isZero ? 'var(--primary-text-color, #333)' : 'var(--divider-color, #e0e0e0)'}" stroke-width="${isZero ? 0.9 : 0.45}" stroke-dasharray="${isZero ? '0' : '4,3'}" opacity="${isZero ? 0.35 : 0.65}"/>`;
       const unit = config.yUnit || '';
       const compactUnit = config.yUnitCompact || ['c', 'p', 'ct', 'c/kWh', 'p/kWh', 'ct/kWh'].includes(unit);
       const label = tick.toFixed(tick === Math.round(tick) ? 0 : 1)
         + (unit ? `${compactUnit ? '' : ' '}${unit}` : '');
-      svg += `<text x="${pad.left - 8}" y="${y + 4}" text-anchor="end" font-size="11" fill="var(--secondary-text-color, #888)">${label}</text>`;
+      svg += `<text x="${pad.left - 8}" y="${y + 4}" text-anchor="end" font-size="${compact ? 10 : 11}" fill="var(--secondary-text-color, #888)">${this._escSvg(label)}</text>`;
     }
 
-    // X-axis labels
     const spanHours = (xMax - xMin) / 3600000;
     let xTickInterval;
-    if (spanHours <= 6) xTickInterval = 1;
-    else if (spanHours <= 12) xTickInterval = 2;
-    else if (spanHours <= 24) xTickInterval = 3;
-    else if (spanHours <= 36) xTickInterval = 6;
-    else xTickInterval = 8;
+    if (spanHours <= 6) xTickInterval = compact ? 2 : 1;
+    else if (spanHours <= 12) xTickInterval = compact ? 3 : 2;
+    else if (spanHours <= 24) xTickInterval = compact ? 6 : 3;
+    else if (spanHours <= 36) xTickInterval = compact ? 8 : 6;
+    else xTickInterval = compact ? 12 : 8;
 
     const startDate = new Date(xMin);
     const firstHour = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate(), Math.ceil(startDate.getHours() / xTickInterval) * xTickInterval);
@@ -159,14 +184,12 @@ class PowerSyncChart extends HTMLElement {
       } else {
         label = String(d.getHours()).padStart(2, '0') + ':00';
       }
-      svg += `<line x1="${x}" y1="${pad.top}" x2="${x}" y2="${pad.top + chartH}" stroke="var(--divider-color, #e0e0e0)" stroke-width="0.3"/>`;
-      svg += `<text x="${x}" y="${H - pad.bottom + 18}" text-anchor="middle" font-size="10" fill="var(--secondary-text-color, #888)">${label}</text>`;
+      svg += `<line x1="${x}" y1="${pad.top}" x2="${x}" y2="${pad.top + chartH}" stroke="var(--divider-color, #e0e0e0)" stroke-width="0.3" opacity="0.55"/>`;
+      svg += `<text x="${x}" y="${H - pad.bottom + 19}" text-anchor="middle" font-size="${compact ? 9 : 10}" fill="var(--secondary-text-color, #888)">${this._escSvg(label)}</text>`;
     }
 
-    // Chart border
-    svg += `<rect x="${pad.left}" y="${pad.top}" width="${chartW}" height="${chartH}" fill="none" stroke="var(--divider-color, #e0e0e0)" stroke-width="0.5"/>`;
+    svg += `<rect x="${pad.left}" y="${pad.top}" width="${chartW}" height="${chartH}" fill="var(--card-background-color, transparent)" opacity="0.02" stroke="var(--divider-color, #e0e0e0)" stroke-width="0.5" rx="8"/>`;
 
-    // Series paths
     for (const series of allSeries) {
       if (series.data.length === 0) continue;
       const step = config.stepLine;
@@ -187,73 +210,155 @@ class PowerSyncChart extends HTMLElement {
         }
       }
 
-      // Fill area if requested
       if (series.fill) {
         const baseline = yScale(Math.max(0, yMin));
         const first = series.data[0];
         const last = series.data[series.data.length - 1];
         const fillD = pathD + `L${xScale(last[0])},${baseline}L${xScale(first[0])},${baseline}Z`;
-        svg += `<path d="${fillD}" fill="${series.color}" opacity="0.2"/>`;
+        svg += `<path d="${fillD}" fill="${series.color}" opacity="${series.fillOpacity ?? 0.16}"/>`;
       }
 
-      // Stroke
-      svg += `<path d="${pathD}" fill="none" stroke="${series.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+      svg += `<path d="${pathD}" fill="none" stroke="${series.color}" stroke-width="${series.strokeWidth || 2.25}" stroke-linejoin="round" stroke-linecap="round"/>`;
     }
 
-    // "Now" marker line for forecast mode
-    if (mode === 'forecast') {
+    if (mode === 'forecast' || mode === 'history') {
       const nowX = xScale(Date.now());
       if (nowX >= pad.left && nowX <= W - pad.right) {
         svg += `<line x1="${nowX}" y1="${pad.top}" x2="${nowX}" y2="${pad.top + chartH}" stroke="var(--primary-color, #03a9f4)" stroke-width="1" stroke-dasharray="4,2" opacity="0.6"/>`;
-        svg += `<text x="${nowX}" y="${pad.top - 4}" text-anchor="middle" font-size="9" fill="var(--primary-color, #03a9f4)">Now</text>`;
       }
     }
 
-    // Title
     const title = config.title || '';
-    svg += `<text x="${W / 2}" y="16" text-anchor="middle" font-size="13" font-weight="600" fill="var(--primary-text-color, #333)">${this._escSvg(title)}</text>`;
-
-    // Legend
-    const legendY = H - 8;
-    const legendItems = allSeries.map(s => ({ name: s.name, color: s.color }));
-    const legendTotalWidth = legendItems.length * 90;
-    let legendX = (W - legendTotalWidth) / 2;
-    for (const item of legendItems) {
-      svg += `<rect x="${legendX}" y="${legendY - 8}" width="12" height="3" rx="1.5" fill="${item.color}"/>`;
-      svg += `<text x="${legendX + 16}" y="${legendY - 4}" font-size="11" fill="var(--secondary-text-color, #888)">${this._escSvg(item.name)}</text>`;
-      legendX += 90;
-    }
+    const legend = allSeries.map((s) => this._legendItem(s, yMultiplier, config)).join('');
+    const empty = allSeries.every(s => s.data.length === 0);
 
     this.shadowRoot.innerHTML = `
       <style>
         :host {
           display: block;
+          min-width: 0;
         }
         .card {
           background: var(--ha-card-background, var(--card-background-color, white));
           border-radius: var(--ha-card-border-radius, 12px);
-          box-shadow: var(--ha-card-box-shadow, 0 2px 6px rgba(0,0,0,0.1));
-          padding: 12px;
+          box-shadow: var(--ha-card-box-shadow, none);
+          border: var(--ha-card-border-width, 1px) solid var(--ha-card-border-color, var(--divider-color, rgba(0,0,0,0.12)));
+          padding: 12px 12px 10px;
           overflow: hidden;
+          box-sizing: border-box;
+        }
+        .head {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 12px;
+          margin-bottom: 4px;
+        }
+        .title {
+          min-width: 0;
+          color: var(--primary-text-color, #333);
+          font-size: 14px;
+          font-weight: 600;
+          line-height: 1.25;
+        }
+        .legend {
+          display: flex;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+          gap: 6px 10px;
+          min-width: 120px;
+          max-width: 58%;
+        }
+        .legend-item {
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          min-width: 0;
+          color: var(--secondary-text-color, #888);
+          font-size: 11px;
+          line-height: 1.2;
+          white-space: nowrap;
+        }
+        .swatch {
+          width: 14px;
+          height: 3px;
+          border-radius: 999px;
+          flex: 0 0 auto;
+        }
+        .value {
+          color: var(--primary-text-color, #333);
+          font-weight: 600;
         }
         svg {
           width: 100%;
-          height: auto;
+          height: ${H}px;
+          display: block;
         }
         .no-data {
           text-align: center;
           color: var(--secondary-text-color, #888);
-          padding: 24px 0;
+          padding: 36px 0 40px;
           font-size: 14px;
+        }
+        @media (max-width: 520px) {
+          .head {
+            display: block;
+          }
+          .legend {
+            max-width: none;
+            justify-content: flex-start;
+            margin-top: 8px;
+          }
         }
       </style>
       <div class="card">
-        ${allSeries.every(s => s.data.length === 0)
+        <div class="head">
+          <div class="title">${this._escHtml(title)}</div>
+          <div class="legend">${legend}</div>
+        </div>
+        ${empty
           ? `<div class="no-data">${this._escHtml(title)}<br>No data available</div>`
           : `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">${svg}</svg>`
         }
       </div>
     `;
+  }
+
+  _legendItem(series, yMultiplier, config) {
+    const last = this._lastValue(series.data);
+    const value = last === null ? '' : this._formatValue(last * yMultiplier, config.yUnit, config.yUnitCompact);
+    return `
+      <span class="legend-item">
+        <span class="swatch" style="background:${series.color}"></span>
+        <span>${this._escHtml(series.name || '')}</span>
+        ${value ? `<span class="value">${this._escHtml(value)}</span>` : ''}
+      </span>
+    `;
+  }
+
+  _lastValue(data) {
+    for (let i = data.length - 1; i >= 0; i--) {
+      const value = Number(data[i][1]);
+      if (Number.isFinite(value)) return value;
+    }
+    return null;
+  }
+
+  _formatValue(value, unit, compactUnit) {
+    if (!Number.isFinite(value)) return '';
+    const decimals = Math.abs(value) >= 100 ? 0 : Math.abs(value) >= 10 ? 1 : 2;
+    const suffix = unit ? `${compactUnit ? '' : ' '}${unit}` : '';
+    return `${value.toFixed(decimals)}${suffix}`;
+  }
+
+  _niceStep(rawStep) {
+    const safeStep = rawStep > 0 ? rawStep : 1;
+    const mag = Math.pow(10, Math.floor(Math.log10(safeStep)));
+    const residual = safeStep / mag;
+    if (residual <= 1.5) return 1 * mag;
+    if (residual <= 3) return 2 * mag;
+    if (residual <= 7) return 5 * mag;
+    return 10 * mag;
   }
 
   _getTouData(config, hass) {
@@ -344,6 +449,67 @@ class PowerSyncChart extends HTMLElement {
     });
   }
 
+  _getHistoryData(config, hass) {
+    const spanHours = config.historyHours || 24;
+    const now = Date.now();
+    const start = now - spanHours * 3600000;
+    return (config.series || []).map(s => {
+      const stateObj = s.entity ? hass.states[s.entity] : null;
+      const cached = this._historyCache.get(s.entity) || [];
+      const data = cached.length
+        ? cached
+        : this._statePoint(stateObj, now);
+      return { name: s.name, color: s.color, fill: !!s.fill, strokeWidth: s.strokeWidth, data: data.filter(([t]) => t >= start && t <= now) };
+    });
+  }
+
+  _statePoint(stateObj, now) {
+    const value = Number(stateObj?.state);
+    if (!Number.isFinite(value)) return [];
+    const changed = Date.parse(stateObj?.last_changed || stateObj?.last_updated || '');
+    const t = Number.isFinite(changed) ? changed : now;
+    return [[Math.max(t, now - 3600000), value], [now, value]];
+  }
+
+  async _loadHistoryData(config, hass) {
+    if (!hass || typeof hass.callApi !== 'function') return;
+    const entities = (config.series || []).map(s => s.entity).filter(Boolean);
+    if (!entities.length) return;
+    const spanHours = config.historyHours || 24;
+    const end = new Date();
+    const start = new Date(end.getTime() - spanHours * 3600000);
+    const key = `${entities.join(',')}|${spanHours}|${Math.floor(end.getTime() / 300000)}`;
+    if (this._historyRequestKey === key) return;
+    this._historyRequestKey = key;
+
+    try {
+      const query = new URLSearchParams({
+        filter_entity_id: entities.join(','),
+        end_time: end.toISOString(),
+        no_attributes: '1',
+      });
+      const response = await hass.callApi('GET', `history/period/${start.toISOString()}?${query.toString()}`);
+      const next = new Map();
+      if (Array.isArray(response)) {
+        for (const series of response) {
+          if (!Array.isArray(series) || series.length === 0) continue;
+          const entityId = series[0]?.entity_id;
+          if (!entityId) continue;
+          const points = series
+            .map((p) => [Date.parse(p.last_changed || p.last_updated), Number(p.state)])
+            .filter(([t, v]) => Number.isFinite(t) && Number.isFinite(v));
+          next.set(entityId, points);
+        }
+      }
+      for (const entityId of entities) {
+        this._historyCache.set(entityId, next.get(entityId) || []);
+      }
+      this._scheduleRender();
+    } catch (err) {
+      // History is an enhancement; the chart still renders current state fallback.
+    }
+  }
+
   _escSvg(str) {
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
@@ -389,24 +555,66 @@ class PowerSyncLayout extends HTMLElement {
     style.textContent = `
       :host {
         display: block;
+        width: 100%;
+        --ps-dashboard-gap: clamp(8px, 1.2vw, 14px);
       }
       .grid {
         display: grid;
-        grid-template-columns: 1fr 1.2fr 1fr;
-        gap: 8px;
-        padding: 4px 8px;
+        grid-template-columns:
+          minmax(280px, 0.95fr)
+          minmax(380px, 1.25fr)
+          minmax(300px, 1fr);
+        gap: var(--ps-dashboard-gap);
+        padding: var(--ps-dashboard-gap);
         align-items: start;
+        box-sizing: border-box;
+        width: 100%;
+        max-width: 1680px;
+        margin: 0 auto;
       }
       .column {
         display: flex;
         flex-direction: column;
-        gap: 4px;
+        gap: var(--ps-dashboard-gap);
+        min-width: 0;
       }
-      @media (max-width: 1024px) {
-        .grid { grid-template-columns: 1fr 1fr; }
+      .column > * {
+        min-width: 0;
       }
-      @media (max-width: 600px) {
-        .grid { grid-template-columns: 1fr; }
+      @media (max-width: 1180px) and (orientation: landscape) {
+        .grid {
+          grid-template-columns: minmax(330px, 0.95fr) minmax(390px, 1.05fr);
+        }
+        .column:nth-child(2) {
+          order: -1;
+        }
+        .column:nth-child(3) {
+          grid-column: 1 / -1;
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          align-items: start;
+        }
+      }
+      @media (max-width: 900px) and (orientation: portrait) {
+        .grid {
+          grid-template-columns: 1fr;
+          padding: 8px;
+        }
+        .column:nth-child(2) {
+          order: -1;
+        }
+      }
+      @media (max-width: 760px) {
+        .grid {
+          grid-template-columns: 1fr;
+          padding: 6px;
+        }
+        .column:nth-child(2) {
+          order: -1;
+        }
+        .column:nth-child(3) {
+          display: flex;
+        }
       }
     `;
     root.appendChild(style);
@@ -461,7 +669,6 @@ class PowerSyncStrategy {
     // and let HA show "custom element not found" if truly missing.
     const requiredCards = [
       { element: 'button-card', name: 'button-card', hacs: 'button-card' },
-      { element: 'apexcharts-card', name: 'apexcharts-card', hacs: 'apexcharts-card', optional: true },
       { element: 'power-flow-card-plus', name: 'power-flow-card-plus', hacs: 'power-flow-card-plus', optional: true },
     ];
 
@@ -497,7 +704,6 @@ class PowerSyncStrategy {
 
     const missing = requiredCards.filter(c => !loaded[c.element] && !c.optional);
     // Use detected state for optional cards; always generate required cards
-    const hasApex = loaded['apexcharts-card'] || false;
     const hasButton = true;
     const hasFlowCard = true;
     // Built-in energy flow card is always available (power-sync-energy-flow.js)
@@ -660,8 +866,8 @@ class PowerSyncStrategy {
       center.push(_powerFlow(e));
     }
 
-    // --- Right Column: Price Chart (Amber/Octopus 24h) — requires apexcharts ---
-    if (hasApex && hasE('current_import_price')) {
+    // --- Right Column: Price Chart ---
+    if (hasE('current_import_price')) {
       right.push(_priceChart(e, hass));
     }
 
@@ -712,6 +918,11 @@ class PowerSyncStrategy {
       center.push(_lpPriceChart(e, hass));
     }
 
+    // --- Center Column: LP Battery Power Chart (48h) ---
+    if (hasE('lp_battery_power_forecast')) {
+      center.push(_lpBatteryPowerChart(e));
+    }
+
     // --- Right Column: LP Solar & Load Chart (48h) ---
     if (hasE('lp_solar_forecast')) {
       right.push(_lpSolarLoadChart(e));
@@ -741,7 +952,7 @@ class PowerSyncStrategy {
     }
 
     // --- Center Column: Combined Energy Chart ---
-    if (hasApex && hasE('solar_power')) {
+    if (hasE('solar_power')) {
       center.push(_combinedEnergyChart(e, hasE('home_load')));
     }
 
@@ -827,7 +1038,7 @@ class PowerSyncStrategy {
       left.push({
         type: 'markdown',
         content:
-          '**Recommended:** Install these optional HACS cards for additional charts:\n\n' +
+          '**Recommended:** Install these optional HACS cards for additional dashboard cards:\n\n' +
           optionalMissing.map(c => `- **${c.name}** — search "${c.hacs}" in HACS Frontend`).join('\n'),
       });
     }
@@ -886,13 +1097,6 @@ function _priceMeta(hass, entityId) {
     minorPriceUnit: attrs.minor_price_unit || `${_minorCurrencyUnit(currency)}/kWh`,
     minorUnit: _minorCurrencyUnit(currency),
   };
-}
-
-function _formatMajorPriceAsMinor(value, unit) {
-  if (value === null || value === undefined || Number.isNaN(Number(value))) return '';
-  const display = Number(value) * 100;
-  const decimals = Math.abs(display) >= 100 ? 0 : 1;
-  return `${display.toFixed(decimals)}${unit}`;
 }
 
 // ─── Section Builders ────────────────────────────────────────
@@ -1725,52 +1929,28 @@ function _powerFlow(e) {
 
 function _priceChart(e, hass) {
   const importMeta = _priceMeta(hass, e('current_import_price'));
-  const exportMeta = _priceMeta(hass, e('current_export_price'));
-  const importUnit = importMeta.minorPriceUnit;
-  const exportUnit = exportMeta.minorPriceUnit;
   return {
-    type: 'custom:apexcharts-card',
-    header: { show: true, title: 'Electricity Prices - 24 Hours', show_states: false },
-    graph_span: '24h',
-    span: { start: 'day' },
-    yaxis: [{
-      id: 'price',
-      min: '~0',
-      decimals: 2,
-    }],
+    type: 'custom:power-sync-chart',
+    title: 'Electricity Prices - 24 Hours',
+    mode: 'history',
+    historyHours: 24,
+    height: 230,
+    yUnit: importMeta.minorPriceUnit,
+    yUnitCompact: true,
+    yMultiplier: 100,
+    zeroBaseline: true,
     series: [
       {
         entity: e('current_import_price'),
         name: 'Import Price',
-        type: 'line',
         color: '#FF9800',
-        yaxis_id: 'price',
-        stroke_width: 2,
-        extend_to: 'now',
-        group_by: { func: 'avg', duration: '5min' },
       },
       {
         entity: e('current_export_price'),
         name: 'Export Price',
-        type: 'line',
         color: '#4CAF50',
-        yaxis_id: 'price',
-        stroke_width: 2,
-        extend_to: 'now',
-        group_by: { func: 'avg', duration: '5min' },
       },
     ],
-    apex_config: {
-      chart: { height: 160 },
-      stroke: { curve: 'smooth' },
-      legend: { show: true, position: 'bottom' },
-      tooltip: {
-        x: { format: 'HH:mm' },
-        y: {
-          formatter: `EVAL:function(value, opts) { const units = ${JSON.stringify([importUnit, exportUnit])}; return (${_formatMajorPriceAsMinor.toString()})(value, units[opts.seriesIndex] || ${JSON.stringify(importUnit)}); }`,
-        },
-      },
-    },
   };
 }
 
@@ -1835,6 +2015,21 @@ function _lpPriceChart(e, hass) {
     series: [
       { entity: e('lp_import_price_forecast'), attribute: 'price_values', name: 'Import', color: '#FF9800' },
       { entity: e('lp_export_price_forecast'), attribute: 'price_values', name: 'Export', color: '#4CAF50' },
+    ],
+  };
+}
+
+function _lpBatteryPowerChart(e) {
+  return {
+    type: 'custom:power-sync-chart',
+    title: 'LP Forecast - Battery Power (48h)',
+    mode: 'forecast',
+    intervalMinutes: 5,
+    stepLine: true,
+    yUnit: 'kW',
+    series: [
+      { entity: e('lp_battery_power_forecast'), attribute: 'charge_values_kw', name: 'Charge', color: '#2196F3', fill: true },
+      { entity: e('lp_battery_power_forecast'), attribute: 'discharge_values_kw', name: 'Discharge', color: '#4CAF50', fill: true },
     ],
   };
 }
@@ -2304,25 +2499,22 @@ No battery health data available yet.
 
 function _combinedEnergyChart(e, hasHome) {
   const series = [
-    { entity: e('solar_power'), name: 'Solar', type: 'line', color: '#FFD700', stroke_width: 2, extend_to: 'now', group_by: { func: 'avg', duration: '5min' } },
-    { entity: e('grid_power'), name: 'Grid', type: 'line', color: '#F44336', stroke_width: 2, extend_to: 'now', group_by: { func: 'avg', duration: '5min' } },
-    { entity: e('battery_power'), name: 'Battery', type: 'line', color: '#2196F3', stroke_width: 2, extend_to: 'now', group_by: { func: 'avg', duration: '5min' } },
+    { entity: e('solar_power'), name: 'Solar', color: '#FFD700', fill: true },
+    { entity: e('grid_power'), name: 'Grid', color: '#F44336' },
+    { entity: e('battery_power'), name: 'Battery', color: '#2196F3' },
   ];
   if (hasHome) {
-    series.push({ entity: e('home_load'), name: 'Home', type: 'line', color: '#9C27B0', stroke_width: 2, extend_to: 'now', group_by: { func: 'avg', duration: '5min' } });
+    series.push({ entity: e('home_load'), name: 'Home', color: '#9C27B0' });
   }
   return {
-    type: 'custom:apexcharts-card',
-    header: { show: true, title: 'Energy', show_states: true },
-    graph_span: '24h',
-    span: { start: 'day' },
-    yaxis: [{ id: 'y', decimals: 1 }],
+    type: 'custom:power-sync-chart',
+    title: 'Energy - 24 Hours',
+    mode: 'history',
+    historyHours: 24,
+    height: 250,
+    yUnit: 'kW',
+    zeroBaseline: true,
     series,
-    apex_config: {
-      chart: { height: 200 },
-      legend: { show: true, position: 'bottom' },
-      stroke: { curve: 'smooth' },
-    },
   };
 }
 

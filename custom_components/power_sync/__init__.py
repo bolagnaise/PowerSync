@@ -16272,8 +16272,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             from .sigenergy_api import (
                 SigenergyAPIClient,
                 convert_amber_prices_to_sigenergy,
+                convert_tariff_rates_to_sigenergy,
                 apply_spike_protection_sigenergy,
             )
+            from .tariff_converter import convert_amber_to_tesla_tariff
         except ImportError as e:
             _LOGGER.error(f"Failed to import sigenergy_api: {e}")
             return
@@ -16358,30 +16360,63 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "Export prices will default to 0. Check if your Amber account has feed-in tariff enabled."
                 )
 
-            buy_prices = convert_amber_prices_to_sigenergy(
-                general_prices, price_type="buy", forecast_type=forecast_type,
-                current_actual_interval=current_actual_interval, nem_region=nem_region,
-                timezone_name=timezone_name,
+            nem_timezones = {
+                "NSW1": "Australia/Sydney",
+                "VIC1": "Australia/Melbourne",
+                "QLD1": "Australia/Brisbane",
+                "SA1": "Australia/Adelaide",
+                "TAS1": "Australia/Hobart",
+            }
+            canonical_timezone = timezone_name or nem_timezones.get(nem_region)
+            canonical_tariff = convert_amber_to_tesla_tariff(
+                forecast_data,
+                tesla_energy_site_id="none",
+                forecast_type=forecast_type,
+                powerwall_timezone=canonical_timezone,
+                current_actual_interval=current_actual_interval,
+                demand_charge_enabled=demand_charge_enabled,
+                demand_charge_rate=demand_charge_rate,
+                demand_charge_start_time=demand_charge_start_time,
+                demand_charge_end_time=demand_charge_end_time,
+                demand_charge_apply_to=demand_charge_apply_to,
+                demand_charge_days=demand_charge_days,
+                demand_artificial_price_enabled=demand_artificial_price_enabled,
+                electricity_provider=provider_for_tz,
+                spike_protection_enabled=False,
+                export_boost_enabled=False,
+                currency=currency_for_entry(entry, hass),
             )
+
+            buy_prices = []
+            payload_source = "canonical_tariff"
+            if canonical_tariff:
+                canonical_buy_rates = (
+                    canonical_tariff.get("energy_charges", {})
+                    .get("Summer", {})
+                    .get("rates", {})
+                )
+                buy_prices = convert_tariff_rates_to_sigenergy(canonical_buy_rates)
+                _LOGGER.info(
+                    "Sigenergy tariff sync: using canonical tariff conversion "
+                    "(%d buy periods, timezone=%s)",
+                    len(buy_prices),
+                    canonical_timezone or "auto",
+                )
+
+            if not buy_prices:
+                payload_source = "raw_sigenergy_converter_fallback"
+                _LOGGER.warning(
+                    "Sigenergy tariff sync: canonical tariff conversion produced no "
+                    "buy prices; falling back to raw interval converter"
+                )
+                buy_prices = convert_amber_prices_to_sigenergy(
+                    general_prices, price_type="buy", forecast_type=forecast_type,
+                    current_actual_interval=current_actual_interval, nem_region=nem_region,
+                    timezone_name=timezone_name,
+                )
             if not buy_prices:
                 _LOGGER.warning("No buy prices converted for Sigenergy sync")
                 return
-
-            # Sigenergy's cloud/app tariff display can surface the sellPrice
-            # schedule as the visible tariff after save, which makes Amber feed-in
-            # rates look like a second, much lower import tariff upload. For this
-            # display-sync path, upload the import schedule into both payload
-            # branches so the Sig app shows the same LP/import tariff PowerSync is
-            # optimizing against. PowerSync's own export decisions still use the
-            # provider price feed directly; they do not depend on Sigenergy cloud
-            # sellPrice.
-            sell_prices = [dict(slot) for slot in buy_prices]
-            if feedin_prices:
-                _LOGGER.info(
-                    "Sigenergy tariff sync: mirroring buy/import schedule into "
-                    "sellPrice to avoid Amber feed-in rates overwriting the app "
-                    "tariff display"
-                )
 
             # Apply price modifications (same features as Tesla)
             # 1. Spike Protection - cap buy prices during extreme spikes
@@ -16396,6 +16431,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     buy_prices,
                     threshold_cents=100.0,
                     replacement_cents=50.0,
+                )
+
+            # Sigenergy's cloud/app tariff display can surface the sellPrice
+            # schedule as the visible tariff after save, which makes Amber feed-in
+            # rates look like a second, much lower import tariff upload. For this
+            # display-sync path, upload the final import schedule into both payload
+            # branches so the Sig app shows the same LP/import tariff PowerSync is
+            # optimizing against. PowerSync's own export decisions still use the
+            # provider price feed directly; they do not depend on Sigenergy cloud
+            # sellPrice.
+            sell_prices = [dict(slot) for slot in buy_prices]
+            if feedin_prices:
+                _LOGGER.info(
+                    "Sigenergy tariff sync: mirroring buy/import schedule into "
+                    "sellPrice to avoid Amber feed-in rates overwriting the app "
+                    "tariff display"
                 )
 
             # Debug: Log price ranges to diagnose buy/sell mismatch
@@ -16452,6 +16503,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     buy_prices=buy_prices,
                     sell_prices=sell_prices if sell_prices else buy_prices,
                     plan_name=f"PowerSync {provider_label}",
+                    payload_source=payload_source,
+                    provider_label=provider_label,
                 )
 
                 if result.get("success"):

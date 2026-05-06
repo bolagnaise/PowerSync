@@ -16,7 +16,7 @@ except (FileNotFoundError, json.JSONDecodeError):
     POWER_SYNC_VERSION = "0.0.0"
 
 # Dashboard JS version — bump this to cache-bust the strategy JS independently of the app version
-DASHBOARD_JS_VERSION = "13"
+DASHBOARD_JS_VERSION = "15"
 
 # User-Agent for API identification
 POWER_SYNC_USER_AGENT = f"PowerSync/{POWER_SYNC_VERSION} HomeAssistant"
@@ -1580,6 +1580,7 @@ SENSOR_TYPE_OPTIMIZATION_FORCE_CHARGE_WINDOWS = "optimization_force_charge_windo
 # LP forecast sensors (populated from built-in optimizer data each cycle)
 SENSOR_TYPE_LP_SOLAR_FORECAST = "lp_solar_forecast"
 SENSOR_TYPE_LP_LOAD_FORECAST = "lp_load_forecast"
+SENSOR_TYPE_LP_BATTERY_POWER_FORECAST = "lp_battery_power_forecast"
 SENSOR_TYPE_LP_IMPORT_PRICE_FORECAST = "lp_import_price_forecast"
 SENSOR_TYPE_LP_EXPORT_PRICE_FORECAST = "lp_export_price_forecast"
 SENSOR_TYPE_LOAD_FORECAST_TODAY_REMAINING = "load_forecast_today_remaining"
@@ -1683,6 +1684,7 @@ SENSOR_KEY_TO_FAMILY: dict[str, str] = {
     "optimization_savings": SENSOR_FAMILY_LP_OPTIMIZER,
     "lp_solar_forecast": SENSOR_FAMILY_LP_OPTIMIZER,
     "lp_load_forecast": SENSOR_FAMILY_LP_OPTIMIZER,
+    "lp_battery_power_forecast": SENSOR_FAMILY_LP_OPTIMIZER,
     "lp_import_price_forecast": SENSOR_FAMILY_LP_OPTIMIZER,
     "lp_export_price_forecast": SENSOR_FAMILY_LP_OPTIMIZER,
     "load_forecast_today_remaining": SENSOR_FAMILY_LP_OPTIMIZER,
