@@ -29,12 +29,17 @@ class PowerSyncChart extends HTMLElement {
     this._renderQueued = false;
     this._historyCache = new Map();
     this._historyRequestKey = null;
+    this._hiddenSeries = new Set();
   }
 
   setConfig(config) {
     this._config = config;
     this._historyCache.clear();
     this._historyRequestKey = null;
+    const validKeys = new Set((config.series || []).map((series, index) => this._seriesKey(series, index)));
+    for (const key of Array.from(this._hiddenSeries)) {
+      if (!validKeys.has(key)) this._hiddenSeries.delete(key);
+    }
     this._scheduleRender();
   }
 
@@ -97,6 +102,13 @@ class PowerSyncChart extends HTMLElement {
         data: series.data.map(([t, v]) => [t, v * configuredYMultiplier]),
       }));
     }
+    allSeries = allSeries.map((series, index) => ({
+      ...series,
+      _key: this._seriesKey(series, index),
+      hidden: this._hiddenSeries.has(this._seriesKey(series, index)),
+    }));
+    const visibleSeries = allSeries.filter((series) => !series.hidden);
+    const chartSeries = visibleSeries;
 
     const box = this.getBoundingClientRect();
     const W = Math.max(320, Math.round(box.width || config.width || 640));
@@ -112,10 +124,15 @@ class PowerSyncChart extends HTMLElement {
     const chartH = H - pad.top - pad.bottom;
 
     let xMin = Infinity, xMax = -Infinity;
-    for (const s of allSeries) {
+    const fixedWindow = mode === 'history' ? this._historyWindow(config) : null;
+    if (fixedWindow) {
+      xMin = fixedWindow.startMs;
+      xMax = fixedWindow.endMs;
+    }
+    for (const s of chartSeries) {
       for (const [t] of s.data) {
-        if (t < xMin) xMin = t;
-        if (t > xMax) xMax = t;
+        if (!fixedWindow && t < xMin) xMin = t;
+        if (!fixedWindow && t > xMax) xMax = t;
       }
     }
     if (!isFinite(xMin) || !isFinite(xMax) || xMin === xMax) {
@@ -125,7 +142,7 @@ class PowerSyncChart extends HTMLElement {
 
     const yMultiplier = 1;
     let rawMin = Infinity, rawMax = -Infinity;
-    for (const s of allSeries) {
+    for (const s of chartSeries) {
       for (const [, v] of s.data) {
         const scaled = v * yMultiplier;
         if (scaled < rawMin) rawMin = scaled;
@@ -198,7 +215,7 @@ class PowerSyncChart extends HTMLElement {
 
     svg += `<rect x="${pad.left}" y="${pad.top}" width="${chartW}" height="${chartH}" fill="var(--card-background-color, transparent)" opacity="0.02" stroke="var(--divider-color, #e0e0e0)" stroke-width="0.5" rx="8"/>`;
 
-    for (const series of allSeries) {
+    for (const series of chartSeries) {
       if (series.data.length === 0) continue;
       const step = config.stepLine;
       let pathD = '';
@@ -243,8 +260,8 @@ class PowerSyncChart extends HTMLElement {
 
     const title = config.title || '';
     const legend = allSeries.map((s) => this._legendItem(s, yMultiplier, config)).join('');
-    const empty = allSeries.every(s => s.data.length === 0);
-    const accent = allSeries.find(s => s.color)?.color || 'var(--primary-color, #03a9f4)';
+    const empty = chartSeries.length === 0 || chartSeries.every(s => s.data.length === 0);
+    const accent = (chartSeries.find(s => s.color) || allSeries.find(s => s.color))?.color || 'var(--primary-color, #03a9f4)';
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -302,12 +319,22 @@ class PowerSyncChart extends HTMLElement {
           gap: 5px;
           min-width: 0;
           color: var(--secondary-text-color, #888);
+          font: inherit;
           font-size: 11.5px;
           line-height: 1.2;
           white-space: nowrap;
           padding: 3px 6px;
           border-radius: 999px;
+          border: 0;
           background: color-mix(in srgb, var(--secondary-background-color, transparent) 65%, transparent);
+          cursor: pointer;
+          transition: opacity 120ms ease, background 120ms ease;
+        }
+        .legend-item:hover {
+          background: color-mix(in srgb, var(--secondary-background-color, transparent) 82%, var(--ps-chart-accent));
+        }
+        .legend-item.is-hidden {
+          opacity: 0.42;
         }
         .swatch {
           width: 14px;
@@ -419,9 +446,10 @@ class PowerSyncChart extends HTMLElement {
       </div>
     `;
 
+    this._attachLegendToggles(allSeries);
     if (!empty) {
       this._attachTooltip({
-        allSeries,
+        allSeries: chartSeries,
         chartW,
         config,
         pad,
@@ -508,6 +536,22 @@ class PowerSyncChart extends HTMLElement {
     svg.addEventListener('pointercancel', hide);
   }
 
+  _attachLegendToggles(allSeries) {
+    const buttons = this.shadowRoot.querySelectorAll('.legend-item[data-series-key]');
+    buttons.forEach((button) => {
+      button.addEventListener('click', () => {
+        const key = button.dataset.seriesKey;
+        if (!key) return;
+        if (this._hiddenSeries.has(key)) {
+          this._hiddenSeries.delete(key);
+        } else {
+          this._hiddenSeries.add(key);
+        }
+        this._scheduleRender();
+      });
+    });
+  }
+
   _formatTooltipTime(timestamp, spanHours) {
     const d = new Date(timestamp);
     const options = spanHours > 24
@@ -519,13 +563,18 @@ class PowerSyncChart extends HTMLElement {
   _legendItem(series, yMultiplier, config) {
     const last = this._lastValue(series.data);
     const value = last === null ? '' : this._formatValue(last * yMultiplier, config.yUnit, config.yUnitCompact);
+    const pressed = series.hidden ? 'false' : 'true';
     return `
-      <span class="legend-item">
+      <button class="legend-item${series.hidden ? ' is-hidden' : ''}" type="button" data-series-key="${this._escAttr(series._key)}" aria-pressed="${pressed}">
         <span class="swatch" style="background:${series.color}"></span>
         <span>${this._escHtml(series.name || '')}</span>
         ${value ? `<span class="value">${this._escHtml(value)}</span>` : ''}
-      </span>
+      </button>
     `;
+  }
+
+  _seriesKey(series, index) {
+    return String(series.entity || series.key || series.name || `series_${index}`);
   }
 
   _lastValue(data) {
@@ -642,16 +691,17 @@ class PowerSyncChart extends HTMLElement {
   }
 
   _getHistoryData(config, hass) {
-    const spanHours = config.historyHours || 24;
-    const now = Date.now();
-    const start = now - spanHours * 3600000;
+    const window = this._historyWindow(config);
+    const now = window.nowMs;
+    const start = window.startMs;
+    const end = window.endMs;
     return (config.series || []).map(s => {
       const stateObj = s.entity ? hass.states[s.entity] : null;
       const cached = this._historyCache.get(s.entity) || [];
       const data = cached.length
         ? cached
         : this._statePoint(stateObj, now);
-      return { name: s.name, color: s.color, fill: !!s.fill, strokeWidth: s.strokeWidth, data: data.filter(([t]) => t >= start && t <= now) };
+      return { name: s.name, color: s.color, fill: !!s.fill, strokeWidth: s.strokeWidth, data: data.filter(([t]) => t >= start && t <= end) };
     });
   }
 
@@ -667,10 +717,10 @@ class PowerSyncChart extends HTMLElement {
     if (!hass || typeof hass.callApi !== 'function') return;
     const entities = (config.series || []).map(s => s.entity).filter(Boolean);
     if (!entities.length) return;
-    const spanHours = config.historyHours || 24;
-    const end = new Date();
-    const start = new Date(end.getTime() - spanHours * 3600000);
-    const key = `${entities.join(',')}|${spanHours}|${Math.floor(end.getTime() / 300000)}`;
+    const window = this._historyWindow(config);
+    const start = new Date(window.startMs);
+    const end = new Date(window.queryEndMs);
+    const key = `${entities.join(',')}|${window.startMs}|${window.endMs}|${Math.floor(window.queryEndMs / 300000)}`;
     if (this._historyRequestKey === key) return;
     this._historyRequestKey = key;
 
@@ -702,11 +752,38 @@ class PowerSyncChart extends HTMLElement {
     }
   }
 
+  _historyWindow(config) {
+    const now = new Date();
+    const nowMs = now.getTime();
+    if (config.historyRange === 'today') {
+      const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 1);
+      return {
+        startMs: start.getTime(),
+        endMs: end.getTime(),
+        queryEndMs: Math.min(nowMs, end.getTime()),
+        nowMs,
+      };
+    }
+    const spanHours = config.historyHours || 24;
+    const startMs = nowMs - spanHours * 3600000;
+    return {
+      startMs,
+      endMs: nowMs,
+      queryEndMs: nowMs,
+      nowMs,
+    };
+  }
+
   _escSvg(str) {
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
   _escHtml(str) {
+    return this._escSvg(str);
+  }
+
+  _escAttr(str) {
     return this._escSvg(str);
   }
 }
@@ -2589,6 +2666,7 @@ function _priceChart(e, hass) {
     title: 'Electricity Prices - 24 Hours',
     mode: 'history',
     historyHours: 24,
+    historyRange: 'today',
     height: 255,
     yUnit: importMeta.minorPriceUnit,
     yUnitCompact: true,
@@ -3220,6 +3298,7 @@ function _combinedEnergyChart(e, hasHome) {
     title: 'Energy - 24 Hours',
     mode: 'history',
     historyHours: 24,
+    historyRange: 'today',
     height: 275,
     yUnit: 'kW',
     zeroBaseline: true,
