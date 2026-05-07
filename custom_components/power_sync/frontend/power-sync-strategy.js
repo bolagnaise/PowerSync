@@ -810,9 +810,12 @@ class PowerSyncLayout extends HTMLElement {
   _setCustomizing(enabled) {
     this._customizing = enabled;
     this.shadowRoot.querySelector('.toolbar')?.classList.toggle('active', enabled);
+    this.shadowRoot.querySelector('.toggle').textContent = enabled ? 'Done' : 'Customize layout';
     for (const item of this._items) {
       item.draggable = enabled;
       item.classList.toggle('customizing', enabled);
+      const dragSurface = item.querySelector('.drag-surface');
+      if (dragSurface) dragSurface.draggable = enabled;
     }
   }
 
@@ -850,6 +853,67 @@ class PowerSyncLayout extends HTMLElement {
   _moveDragItemToLane(lane) {
     if (!this._dragItem || !lane) return;
     lane.appendChild(this._dragItem);
+  }
+
+  _startNativeDrag(item, event) {
+    if (!this._customizing) {
+      event.preventDefault();
+      return;
+    }
+    this._dragItem = item;
+    item.classList.add('dragging');
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', item.dataset.key);
+    }
+  }
+
+  _endNativeDrag(item) {
+    item.classList.remove('dragging');
+    this._dragItem = null;
+    this._saveOrder();
+  }
+
+  _startPointerDrag(item, event, captureTarget = item) {
+    if (!this._customizing || event.button > 0) return;
+    event.preventDefault();
+    this._pointerDrag = {
+      active: false,
+      item,
+      startX: event.clientX,
+      startY: event.clientY,
+    };
+    captureTarget.setPointerCapture?.(event.pointerId);
+  }
+
+  _updatePointerDrag(item, event) {
+    if (!this._pointerDrag || this._pointerDrag.item !== item) return;
+    const distance = Math.hypot(event.clientX - this._pointerDrag.startX, event.clientY - this._pointerDrag.startY);
+    if (!this._pointerDrag.active && distance < 8) return;
+    if (!this._pointerDrag.active) {
+      this._pointerDrag.active = true;
+      this._dragItem = item;
+      item.classList.add('dragging');
+    }
+    event.preventDefault();
+    const target = this._itemAtPoint(event.clientX, event.clientY);
+    if (target) this._moveDragItem(target, event.clientY);
+    else this._moveDragItemToLane(this._laneAtPoint(event.clientX, event.clientY));
+  }
+
+  _finishPointerDrag(item) {
+    if (!this._pointerDrag || this._pointerDrag.item !== item) return;
+    item.classList.remove('dragging');
+    this._pointerDrag = null;
+    this._dragItem = null;
+    this._saveOrder();
+  }
+
+  _cancelPointerDrag(item) {
+    if (!this._pointerDrag || this._pointerDrag.item !== item) return;
+    item.classList.remove('dragging');
+    this._pointerDrag = null;
+    this._dragItem = null;
   }
 
   _savedLayout(count) {
@@ -998,28 +1062,42 @@ class PowerSyncLayout extends HTMLElement {
       }
       .item.customizing {
         cursor: grab;
+        touch-action: none;
+        user-select: none;
         outline: 1px dashed color-mix(in srgb, var(--primary-color, #03a9f4) 60%, transparent);
         outline-offset: 3px;
         border-radius: 10px;
       }
-      .item.customizing::before {
+      .drag-surface {
+        display: none;
+        position: absolute;
+        inset: 0;
+        z-index: 20;
+        cursor: grab;
+        touch-action: none;
+      }
+      .item.customizing .drag-surface {
+        display: block;
+      }
+      .drag-surface::after {
         content: 'Drag';
         position: absolute;
         top: 8px;
         right: 8px;
-        z-index: 5;
         padding: 4px 7px;
         border-radius: 999px;
         background: color-mix(in srgb, var(--primary-color, #03a9f4) 85%, black);
         color: white;
         font-size: 10px;
         font-weight: 700;
-        pointer-events: none;
       }
       .item.dragging {
         opacity: 0.55;
         cursor: grabbing;
         touch-action: none;
+      }
+      .item.dragging .drag-surface {
+        cursor: grabbing;
       }
       @media (max-width: 760px) {
         .grid {
@@ -1056,59 +1134,44 @@ class PowerSyncLayout extends HTMLElement {
       item.className = 'item';
       item.dataset.defaultIndex = String(index);
       item.dataset.key = this._cardKey(cardConfig, index);
-      item.addEventListener('dragstart', (event) => {
-        if (!this._customizing) return;
-        this._dragItem = item;
-        item.classList.add('dragging');
-        event.dataTransfer.effectAllowed = 'move';
-        event.dataTransfer.setData('text/plain', item.dataset.key);
-      });
-      item.addEventListener('dragend', () => {
-        item.classList.remove('dragging');
-        this._dragItem = null;
-        this._saveOrder();
-      });
+      item.addEventListener('dragstart', (event) => this._startNativeDrag(item, event));
+      item.addEventListener('dragend', () => this._endNativeDrag(item));
       item.addEventListener('dragover', (event) => {
         if (!this._customizing || !this._dragItem || this._dragItem === item) return;
         event.preventDefault();
         this._moveDragItem(item, event.clientY);
       });
-      item.addEventListener('pointerdown', (event) => {
-        if (!this._customizing || event.button > 0) return;
-        this._pointerDrag = {
-          active: false,
-          item,
-          startX: event.clientX,
-          startY: event.clientY,
-        };
-        item.setPointerCapture?.(event.pointerId);
+      item.addEventListener('pointerdown', (event) => this._startPointerDrag(item, event));
+      item.addEventListener('pointermove', (event) => this._updatePointerDrag(item, event));
+      item.addEventListener('pointerup', () => this._finishPointerDrag(item));
+      item.addEventListener('pointercancel', () => this._cancelPointerDrag(item));
+
+      const dragSurface = document.createElement('div');
+      dragSurface.className = 'drag-surface';
+      dragSurface.setAttribute('aria-hidden', 'true');
+      dragSurface.addEventListener('dragstart', (event) => {
+        event.stopPropagation();
+        this._startNativeDrag(item, event);
       });
-      item.addEventListener('pointermove', (event) => {
-        if (!this._pointerDrag || this._pointerDrag.item !== item) return;
-        const distance = Math.hypot(event.clientX - this._pointerDrag.startX, event.clientY - this._pointerDrag.startY);
-        if (!this._pointerDrag.active && distance < 8) return;
-        if (!this._pointerDrag.active) {
-          this._pointerDrag.active = true;
-          this._dragItem = item;
-          item.classList.add('dragging');
-        }
-        event.preventDefault();
-        const target = this._itemAtPoint(event.clientX, event.clientY);
-        if (target) this._moveDragItem(target, event.clientY);
-        else this._moveDragItemToLane(this._laneAtPoint(event.clientX, event.clientY));
+      dragSurface.addEventListener('dragend', (event) => {
+        event.stopPropagation();
+        this._endNativeDrag(item);
       });
-      item.addEventListener('pointerup', () => {
-        if (!this._pointerDrag || this._pointerDrag.item !== item) return;
-        item.classList.remove('dragging');
-        this._pointerDrag = null;
-        this._dragItem = null;
-        this._saveOrder();
+      dragSurface.addEventListener('pointerdown', (event) => {
+        event.stopPropagation();
+        this._startPointerDrag(item, event, dragSurface);
       });
-      item.addEventListener('pointercancel', () => {
-        if (!this._pointerDrag || this._pointerDrag.item !== item) return;
-        item.classList.remove('dragging');
-        this._pointerDrag = null;
-        this._dragItem = null;
+      dragSurface.addEventListener('pointermove', (event) => {
+        event.stopPropagation();
+        this._updatePointerDrag(item, event);
+      });
+      dragSurface.addEventListener('pointerup', (event) => {
+        event.stopPropagation();
+        this._finishPointerDrag(item);
+      });
+      dragSurface.addEventListener('pointercancel', (event) => {
+        event.stopPropagation();
+        this._cancelPointerDrag(item);
       });
       let card;
       try {
@@ -1124,6 +1187,7 @@ class PowerSyncLayout extends HTMLElement {
       if (this._hass) card.hass = this._hass;
       this._cards.push(card);
       item.appendChild(card);
+      item.appendChild(dragSurface);
       this._items.push(item);
     }
 
