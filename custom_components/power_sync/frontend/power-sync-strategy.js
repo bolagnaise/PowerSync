@@ -3300,6 +3300,11 @@ function _powerwallLocalControl(e, hasE) {
           type: 'entities',
           entities: [
             {
+              entity: findEntity('switch', 'on_grid') || 'switch.power_sync_on_grid',
+              name: 'On-Grid Mode',
+              icon: 'mdi:transmission-tower',
+            },
+            {
               entity: findEntity('switch', 'off_grid') || e('off_grid'),
               name: 'Off-Grid Mode',
               icon: 'mdi:transmission-tower-off',

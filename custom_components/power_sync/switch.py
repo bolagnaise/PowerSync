@@ -40,6 +40,7 @@ from .const import (
     SENSOR_FAMILY_BATTERY,
     SENSOR_FAMILY_CONTROLS,
     TESLA_SITE_INFO_CONTROL_MAX_AGE_SECONDS,
+    POWERWALL_LOCAL_POLL_INTERVAL,
 )
 
 # Providers that use TOU schedule syncing (Amber, Octopus, Flow Power)
@@ -155,7 +156,10 @@ async def async_setup_entry(
 
     # Off-grid switch — available when Powerwall is paired for local control
     if is_tesla and entry.data.get(CONF_POWERWALL_LOCAL_PAIRED):
-        entities.append(OffGridSwitch(hass=hass, entry=entry))
+        entities.extend([
+            OffGridSwitch(hass=hass, entry=entry),
+            OnGridSwitch(hass=hass, entry=entry),
+        ])
 
     # Away Mode and Profit Max switches — added later via deferred callbacks once
     # the OptimizationCoordinator is created (it's set up after platforms start).
@@ -1003,41 +1007,40 @@ class VppProgramSwitch(_TeslaSiteSwitchBase):
         )
 
 
-class OffGridSwitch(SwitchEntity):
-    """Switch to take the Powerwall off-grid (islanding) or reconnect.
-
-    ON  = off-grid (contactor open, running on battery)
-    OFF = on-grid  (contactor closed, normal operation)
-
-    State is read from the PowerwallLocalCoordinator's snapshot so it
-    reflects the actual gateway state, not just what we last commanded.
-    """
+class _PowerwallGridModeSwitch(SwitchEntity):
+    """Mutually-exclusive Powerwall grid connection mode switch."""
 
     _attr_has_entity_name = True
-    _attr_icon = "mdi:transmission-tower-off"
+    _PENDING_SECONDS = 120
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        *,
+        key: str,
+        name: str,
+        icon: str,
+        mode_is_off_grid: bool,
+    ) -> None:
         self.hass = hass
         self._entry = entry
-        self._attr_unique_id = f"{entry.entry_id}_off_grid"
-        self._attr_suggested_object_id = "power_sync_off_grid"
-        self._attr_name = "Off-Grid"
+        self._attr_unique_id = f"{entry.entry_id}_{key}"
+        self._attr_suggested_object_id = f"power_sync_{key}"
+        self._attr_name = name
+        self._attr_icon = icon
+        self._mode_is_off_grid = mode_is_off_grid
 
     @property
     def device_info(self):
         return family_device_info(self._entry.entry_id, SENSOR_FAMILY_BATTERY)
 
-    @property
-    def is_on(self) -> bool | None:
-        """True when the Powerwall is islanded (off-grid).
+    def _entry_data(self) -> dict[str, Any]:
+        return self.hass.data.setdefault(DOMAIN, {}).setdefault(self._entry.entry_id, {})
 
-        Checks the local coordinator snapshot first, falls back to the
-        cloud grid_status sensor if the local coordinator has no data
-        (common when the PW2 gateway isn't on the same LAN).
-        """
-        # Try local coordinator snapshot first
-        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
-        runtime = entry_data.get("powerwall_local") or {}
+    def _current_is_off_grid(self) -> bool | None:
+        """Return actual islanding state from local data, falling back to cloud."""
+        runtime = self._entry_data().get("powerwall_local") or {}
         coord = runtime.get("coordinator")
         if coord is not None:
             snap = coord.data
@@ -1051,24 +1054,123 @@ class OffGridSwitch(SwitchEntity):
 
         return None
 
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        """Go off-grid."""
-        _LOGGER.info("Off-grid switch: going off-grid")
+    def _pending_state(self) -> tuple[bool | None, datetime | None]:
+        pending = self._entry_data().get("powerwall_grid_mode_pending") or {}
+        is_off_grid = pending.get("is_off_grid")
+        expires_at = pending.get("expires_at")
+        if isinstance(is_off_grid, bool) and isinstance(expires_at, datetime):
+            return is_off_grid, expires_at
+        return None, None
+
+    def _set_pending_state(self, off_grid: bool) -> None:
+        self._entry_data()["powerwall_grid_mode_pending"] = {
+            "is_off_grid": off_grid,
+            "expires_at": datetime.now() + timedelta(seconds=self._PENDING_SECONDS),
+        }
+
+    def _clear_pending_state(self) -> None:
+        self._entry_data().pop("powerwall_grid_mode_pending", None)
+
+    def _effective_is_off_grid(self) -> bool | None:
+        """Return actual mode, with a short optimistic window after commands."""
+        actual = self._current_is_off_grid()
+        pending_is_off_grid, pending_expires_at = self._pending_state()
+        if pending_is_off_grid is None:
+            return actual
+
+        if actual is not None and actual == pending_is_off_grid:
+            self._clear_pending_state()
+            return actual
+
+        if pending_expires_at and datetime.now() < pending_expires_at:
+            return pending_is_off_grid
+
+        self._clear_pending_state()
+        return actual
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return True when this mode is active."""
+        is_off_grid = self._effective_is_off_grid()
+        if is_off_grid is None:
+            return None
+        return is_off_grid == self._mode_is_off_grid
+
+    async def _set_grid_mode(self, off_grid: bool) -> None:
+        service = "powerwall_go_off_grid" if off_grid else "powerwall_reconnect_grid"
+        mode = "off-grid" if off_grid else "on-grid"
+        _LOGGER.info("Powerwall grid mode switch: setting %s", mode)
         await self.hass.services.async_call(
             DOMAIN,
-            "powerwall_go_off_grid",
+            service,
             {},
             blocking=True,
         )
+        self._set_pending_state(off_grid)
         self.async_write_ha_state()
 
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Activate this grid mode."""
+        await self._set_grid_mode(self._mode_is_off_grid)
+
     async def async_turn_off(self, **kwargs: Any) -> None:
-        """Reconnect to grid."""
-        _LOGGER.info("Off-grid switch: reconnecting to grid")
-        await self.hass.services.async_call(
-            DOMAIN,
-            "powerwall_reconnect_grid",
-            {},
-            blocking=True,
+        """Activate the opposite grid mode."""
+        await self._set_grid_mode(not self._mode_is_off_grid)
+
+    async def async_added_to_hass(self) -> None:
+        """Keep the mutually-exclusive mode switches fresh during transitions."""
+        self.async_on_remove(
+            async_track_time_interval(
+                self.hass,
+                self._handle_state_tick,
+                timedelta(seconds=POWERWALL_LOCAL_POLL_INTERVAL),
+            )
         )
+
+    @callback
+    def _handle_state_tick(self, now: datetime) -> None:
         self.async_write_ha_state()
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return command-transition details."""
+        actual = self._current_is_off_grid()
+        pending_is_off_grid, pending_expires_at = self._pending_state()
+        attrs: dict[str, Any] = {}
+        if actual is not None:
+            attrs["actual_grid_mode"] = "off_grid" if actual else "on_grid"
+        if pending_is_off_grid is not None:
+            attrs["pending_grid_mode"] = (
+                "off_grid" if pending_is_off_grid else "on_grid"
+            )
+            if pending_expires_at is not None:
+                attrs["pending_expires_at"] = pending_expires_at.isoformat()
+        return attrs
+
+
+class OffGridSwitch(_PowerwallGridModeSwitch):
+    """Switch that is on while the Powerwall is intentionally islanded."""
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        super().__init__(
+            hass,
+            entry,
+            key="off_grid",
+            name="Off-Grid",
+            icon="mdi:transmission-tower-off",
+            mode_is_off_grid=True,
+        )
+
+
+class OnGridSwitch(_PowerwallGridModeSwitch):
+    """Switch that is on while the Powerwall is connected to grid."""
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        super().__init__(
+            hass,
+            entry,
+            key="on_grid",
+            name="On-Grid",
+            icon="mdi:transmission-tower",
+            mode_is_off_grid=False,
+        )
