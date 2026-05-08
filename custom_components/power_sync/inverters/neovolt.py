@@ -624,6 +624,25 @@ class NeovoltFleetBatteryController:
         """Force all batteries to charge via their Neovolt dispatch controls."""
         await self._stop_surplus_balance("force_charge")
         self._capture_restore_modes()
+
+        if self._surplus_balancer_enabled() and len(self._controllers) > 1:
+            statuses = [controller.get_status() for controller in self._controllers]
+            lowest_index, highest_index, delta = self._soc_balance(statuses)
+            if (
+                lowest_index is not None
+                and highest_index is not None
+                and lowest_index != highest_index
+                and delta > self._soc_balance_tolerance_pct
+            ):
+                return await self._force_charge_low_soc_stack(
+                    duration_minutes,
+                    power_w,
+                    statuses,
+                    lowest_index,
+                )
+
+        self._surplus_balance["soc_parked_index"] = None
+        self._surplus_balance["soc_parked_base_mode"] = None
         powers = self._split_power_w(power_w, "_max_charge_kw")
         results = [
             await controller.force_charge(duration_minutes, split_power)
@@ -651,6 +670,8 @@ class NeovoltFleetBatteryController:
             for controller, target in zip(self._controllers, targets)
         ]
         self._restore_modes = None
+        self._surplus_balance["soc_parked_index"] = None
+        self._surplus_balance["soc_parked_base_mode"] = None
         return all(results)
 
     async def set_backup_reserve(self, percent: int) -> bool:
@@ -774,6 +795,45 @@ class NeovoltFleetBatteryController:
             )
 
         return None
+
+    async def _force_charge_low_soc_stack(
+        self,
+        duration_minutes: int,
+        power_w: int | float,
+        statuses: list[dict[str, Any]],
+        lowest_index: int,
+    ) -> bool:
+        modes = [controller.get_dispatch_mode() for controller in self._controllers]
+        lowest_soc = float(statuses[lowest_index].get("battery_level", 0.0) or 0.0)
+        target_power_w = self._force_charge_target_power_w(lowest_index, power_w)
+        results: list[bool] = []
+
+        for index, controller in enumerate(self._controllers):
+            stack_soc = float(statuses[index].get("battery_level", 0.0) or 0.0)
+            if index == lowest_index or stack_soc <= lowest_soc + self._soc_balance_tolerance_pct:
+                results.append(await controller.force_charge(duration_minutes, target_power_w))
+                continue
+
+            if modes[index] in _SURPLUS_BALANCE_BASE_MODES:
+                results.append(True)
+            else:
+                results.append(await controller.set_no_battery_charge())
+            self._surplus_balance["soc_parked_index"] = index
+            self._surplus_balance["soc_parked_base_mode"] = (
+                self._stable_restore_mode(modes[index]) or _NORMAL_DISPATCH_MODE
+            )
+
+        updated_modes = [controller.get_dispatch_mode() for controller in self._controllers]
+        self._surplus_balance["active_index"] = None
+        self._surplus_balance["target_index"] = lowest_index
+        self._surplus_balance["last_power_w"] = target_power_w
+        self._set_surplus_status("force_charging_low_stack", statuses, updated_modes, lowest_index)
+        _LOGGER.info(
+            "Neovolt force charge balancing: charging stack %d at %.0fW while parking higher-SOC stacks",
+            lowest_index + 1,
+            target_power_w,
+        )
+        return all(results)
 
     async def _restore_soc_parked_stack(
         self,
@@ -991,6 +1051,12 @@ class NeovoltFleetBatteryController:
         stepped_w = int(target_w // _SURPLUS_BALANCE_POWER_STEP_W) * _SURPLUS_BALANCE_POWER_STEP_W
         return max(min(stepped_w, limit_w), min(_SURPLUS_BALANCE_MIN_W, limit_w))
 
+    def _force_charge_target_power_w(self, index: int, requested_w: int | float) -> float:
+        limit_w = max(0.0, float(self._controllers[index]._max_charge_kw) * 1000.0)
+        if not requested_w or requested_w <= 0:
+            return 0.0
+        return min(float(requested_w), limit_w)
+
     @staticmethod
     def _fleet_grid_w(statuses: list[dict[str, Any]]) -> float:
         return sum(float(status.get("grid_power", 0.0) or 0.0) * 1000.0 for status in statuses)
@@ -1029,10 +1095,14 @@ class NeovoltFleetBatteryController:
 
     def _capture_restore_modes(self) -> None:
         """Remember stable per-inverter dispatch modes before PowerSync takes over."""
-        modes = [
-            self._stable_restore_mode(controller.get_dispatch_mode())
-            for controller in self._controllers
-        ]
+        parked_index = self._surplus_balance.get("soc_parked_index")
+        parked_base_mode = self._surplus_balance.get("soc_parked_base_mode")
+        modes = []
+        for index, controller in enumerate(self._controllers):
+            if index == parked_index and parked_base_mode:
+                modes.append(parked_base_mode)
+            else:
+                modes.append(self._stable_restore_mode(controller.get_dispatch_mode()))
         if any(modes):
             self._restore_modes = modes
 
