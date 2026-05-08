@@ -292,6 +292,32 @@ def test_static_tou_provider_does_not_attach_dynamic_aemo_listener(opt_module):
     assert coordinator.price_coordinator.listener_added is False
 
 
+def test_schedule_polling_sleep_aligns_to_next_interval_boundary(opt_module, monkeypatch):
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator._config = opt_module.OptimizationConfig(interval_minutes=5)
+
+    monkeypatch.setattr(
+        opt_module.dt_util,
+        "now",
+        lambda *args, **kwargs: datetime(2026, 5, 8, 17, 29, 50, tzinfo=timezone.utc),
+    )
+    assert coordinator._seconds_until_next_interval() == 10
+
+    monkeypatch.setattr(
+        opt_module.dt_util,
+        "now",
+        lambda *args, **kwargs: datetime(2026, 5, 8, 17, 30, 0, tzinfo=timezone.utc),
+    )
+    assert coordinator._seconds_until_next_interval() == 300
+
+    monkeypatch.setattr(
+        opt_module.dt_util,
+        "now",
+        lambda *args, **kwargs: datetime(2026, 5, 8, 17, 32, 30, tzinfo=timezone.utc),
+    )
+    assert coordinator._seconds_until_next_interval() == 150
+
+
 def test_flow_power_aemo_price_source_is_provider_gated():
     tree = ast.parse((COMPONENT_ROOT / "__init__.py").read_text())
     assignments = [

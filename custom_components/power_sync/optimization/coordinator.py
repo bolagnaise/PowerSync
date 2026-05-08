@@ -1352,11 +1352,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _schedule_polling_loop(self) -> None:
         """Periodically re-optimize and execute current action.
 
-        Sleep-first structure: avoids the structural double where the loop
-        used to execute a heartbeat at the top AND execute again at the end
-        via _run_optimization. Now: sleep → re-optimize (which executes
-        internally). The FoxESS hardware timer is set to interval+5 min on
-        each execute, so it's always renewed before expiry.
+        Sleep-first structure: wait until the next wall-clock interval boundary
+        before re-optimizing. This keeps execution aligned with tariff changes
+        instead of drifting by however long the previous LP solve took.
         """
         while self._enabled:
             try:
@@ -1368,8 +1366,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     if battery:
                         await self._restore_pre_idle_backup_reserve(battery, "polling safety check")
 
-                # Wait for next interval
-                await asyncio.sleep(self._config.interval_minutes * 60)
+                # Wait for next wall-clock interval boundary. A fixed sleep
+                # from the previous solve can miss tariff flips by nearly a
+                # full interval when the solve finishes just before a boundary.
+                await asyncio.sleep(self._seconds_until_next_interval())
 
                 # Check again after sleep — disable() may have been called
                 if not self._enabled:
@@ -1383,6 +1383,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             except Exception as e:
                 _LOGGER.error("Error in schedule polling: %s", e)
                 await asyncio.sleep(60)
+
+    def _seconds_until_next_interval(self) -> float:
+        """Return seconds until the next optimizer interval boundary."""
+        interval = max(1, int(getattr(self._config, "interval_minutes", 5) or 5))
+        now = dt_util.now()
+        current_minute = now.replace(second=0, microsecond=0)
+        minutes_past_boundary = current_minute.minute % interval
+        if (
+            minutes_past_boundary == 0
+            and now.second == 0
+            and now.microsecond == 0
+        ):
+            next_boundary = current_minute + timedelta(minutes=interval)
+        else:
+            next_boundary = current_minute + timedelta(
+                minutes=interval - minutes_past_boundary
+            )
+        return max(1.0, (next_boundary - now).total_seconds())
 
     def _get_current_action(self) -> Any | None:
         """Get the current scheduled action based on time."""
