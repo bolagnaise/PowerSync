@@ -186,6 +186,27 @@ def test_aud_monetary_total_keeps_monetary_device_class_and_value():
     assert entity.extra_state_attributes["currency"] == "AUD"
 
 
+def test_neovolt_surplus_balancer_sensor_exposes_status_and_attributes():
+    sensor = _sensor_module()
+    desc = next(d for d in sensor.NEOVOLT_SENSORS if d.key == "neovolt_surplus_balancer")
+    payload = {
+        "status": "balancing_low_stack",
+        "soc_delta_percent": 32.8,
+        "lowest_soc_index": 0,
+        "highest_soc_index": 1,
+    }
+    entity = sensor.TeslaEnergySensor(
+        SimpleNamespace(data={"neovolt_surplus_balancer": payload}),
+        desc,
+        _entry("amber"),
+    )
+    entity.hass = _hass("AUD")
+
+    assert entity.native_value == "balancing_low_stack"
+    assert entity.extra_state_attributes["soc_delta_percent"] == 32.8
+    assert entity.extra_state_attributes["lowest_soc_index"] == 0
+
+
 def test_eur_price_forecast_uses_major_rate_and_ct_minor_attributes():
     sensor = _sensor_module()
     desc = next(d for d in sensor.LP_FORECAST_SENSORS if d.key == "lp_import_price_forecast")

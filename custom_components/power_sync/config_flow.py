@@ -106,8 +106,13 @@ from .const import (
     CONF_NEOVOLT_CONFIG_ENTRY_IDS,
     CONF_NEOVOLT_MAX_CHARGE_KW,
     CONF_NEOVOLT_MAX_DISCHARGE_KW,
+    CONF_NEOVOLT_SURPLUS_BALANCER_MODE,
+    CONF_NEOVOLT_SOC_BALANCE_TOLERANCE,
     DEFAULT_NEOVOLT_MAX_CHARGE_KW,
     DEFAULT_NEOVOLT_MAX_DISCHARGE_KW,
+    DEFAULT_NEOVOLT_SURPLUS_BALANCER_MODE,
+    DEFAULT_NEOVOLT_SOC_BALANCE_TOLERANCE,
+    NEOVOLT_SURPLUS_BALANCER_MODES,
     # AlphaESS battery system configuration
     CONF_ALPHAESS_MODBUS_HOST,
     CONF_ALPHAESS_MODBUS_PORT,
@@ -2567,6 +2572,14 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_NEOVOLT_MAX_DISCHARGE_KW,
                 DEFAULT_NEOVOLT_MAX_DISCHARGE_KW,
             )
+            surplus_balancer_mode = user_input.get(
+                CONF_NEOVOLT_SURPLUS_BALANCER_MODE,
+                DEFAULT_NEOVOLT_SURPLUS_BALANCER_MODE,
+            )
+            soc_balance_tolerance = user_input.get(
+                CONF_NEOVOLT_SOC_BALANCE_TOLERANCE,
+                DEFAULT_NEOVOLT_SOC_BALANCE_TOLERANCE,
+            )
 
             try:
                 ctrl = NeovoltFleetBatteryController(
@@ -2574,6 +2587,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     neovolt_entry_ids=selected_entry_ids,
                     max_charge_kw=float(max_charge_kw),
                     max_discharge_kw=float(max_discharge_kw),
+                    surplus_balancer_mode=str(surplus_balancer_mode),
+                    soc_balance_tolerance_pct=float(soc_balance_tolerance),
                 )
                 await ctrl.connect()
                 self._neovolt_data = {
@@ -2581,6 +2596,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_NEOVOLT_CONFIG_ENTRY_IDS: selected_entry_ids,
                     CONF_NEOVOLT_MAX_CHARGE_KW: float(max_charge_kw),
                     CONF_NEOVOLT_MAX_DISCHARGE_KW: float(max_discharge_kw),
+                    CONF_NEOVOLT_SURPLUS_BALANCER_MODE: str(surplus_balancer_mode),
+                    CONF_NEOVOLT_SOC_BALANCE_TOLERANCE: float(soc_balance_tolerance),
                 }
                 return self._create_final_entry()
             except ValueError as exc:
@@ -2637,6 +2654,34 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 step=0.1,
                 mode=NumberSelectorMode.BOX,
                 unit_of_measurement="kW",
+            )
+        )
+        schema_fields[
+            vol.Required(
+                CONF_NEOVOLT_SURPLUS_BALANCER_MODE,
+                default=DEFAULT_NEOVOLT_SURPLUS_BALANCER_MODE,
+            )
+        ] = SelectSelector(
+            SelectSelectorConfig(
+                options=[
+                    SelectOptionDict(value=mode, label=mode.title())
+                    for mode in NEOVOLT_SURPLUS_BALANCER_MODES
+                ],
+                mode=SelectSelectorMode.DROPDOWN,
+            )
+        )
+        schema_fields[
+            vol.Required(
+                CONF_NEOVOLT_SOC_BALANCE_TOLERANCE,
+                default=DEFAULT_NEOVOLT_SOC_BALANCE_TOLERANCE,
+            )
+        ] = NumberSelector(
+            NumberSelectorConfig(
+                min=1,
+                max=30,
+                step=1,
+                mode=NumberSelectorMode.BOX,
+                unit_of_measurement="%",
             )
         )
 
@@ -5000,12 +5045,22 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_NEOVOLT_MAX_DISCHARGE_KW,
                 DEFAULT_NEOVOLT_MAX_DISCHARGE_KW,
             )
+            surplus_balancer_mode = user_input.get(
+                CONF_NEOVOLT_SURPLUS_BALANCER_MODE,
+                DEFAULT_NEOVOLT_SURPLUS_BALANCER_MODE,
+            )
+            soc_balance_tolerance = user_input.get(
+                CONF_NEOVOLT_SOC_BALANCE_TOLERANCE,
+                DEFAULT_NEOVOLT_SOC_BALANCE_TOLERANCE,
+            )
             try:
                 ctrl = NeovoltFleetBatteryController(
                     self.hass,
                     neovolt_entry_ids=selected_entry_ids,
                     max_charge_kw=float(max_charge_kw),
                     max_discharge_kw=float(max_discharge_kw),
+                    surplus_balancer_mode=str(surplus_balancer_mode),
+                    soc_balance_tolerance_pct=float(soc_balance_tolerance),
                 )
                 await ctrl.connect()
                 new_data = dict(self.config_entry.data)
@@ -5013,6 +5068,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 new_data[CONF_NEOVOLT_CONFIG_ENTRY_IDS] = selected_entry_ids
                 new_data[CONF_NEOVOLT_MAX_CHARGE_KW] = float(max_charge_kw)
                 new_data[CONF_NEOVOLT_MAX_DISCHARGE_KW] = float(max_discharge_kw)
+                new_data[CONF_NEOVOLT_SURPLUS_BALANCER_MODE] = str(surplus_balancer_mode)
+                new_data[CONF_NEOVOLT_SOC_BALANCE_TOLERANCE] = float(soc_balance_tolerance)
                 self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
                 return self.async_create_entry(title="", data=dict(self.config_entry.options))
             except ValueError as exc:
@@ -5049,6 +5106,20 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             self.config_entry.data.get(
                 CONF_NEOVOLT_MAX_DISCHARGE_KW,
                 DEFAULT_NEOVOLT_MAX_DISCHARGE_KW,
+            ),
+        )
+        current_surplus_balancer_mode = self._get_option(
+            CONF_NEOVOLT_SURPLUS_BALANCER_MODE,
+            self.config_entry.data.get(
+                CONF_NEOVOLT_SURPLUS_BALANCER_MODE,
+                DEFAULT_NEOVOLT_SURPLUS_BALANCER_MODE,
+            ),
+        )
+        current_soc_balance_tolerance = self._get_option(
+            CONF_NEOVOLT_SOC_BALANCE_TOLERANCE,
+            self.config_entry.data.get(
+                CONF_NEOVOLT_SOC_BALANCE_TOLERANCE,
+                DEFAULT_NEOVOLT_SOC_BALANCE_TOLERANCE,
             ),
         )
 
@@ -5090,6 +5161,30 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         step=0.1,
                         mode=NumberSelectorMode.BOX,
                         unit_of_measurement="kW",
+                    )
+                ),
+                vol.Required(
+                    CONF_NEOVOLT_SURPLUS_BALANCER_MODE,
+                    default=current_surplus_balancer_mode,
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=mode, label=mode.title())
+                            for mode in NEOVOLT_SURPLUS_BALANCER_MODES
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    CONF_NEOVOLT_SOC_BALANCE_TOLERANCE,
+                    default=current_soc_balance_tolerance,
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=1,
+                        max=30,
+                        step=1,
+                        mode=NumberSelectorMode.BOX,
+                        unit_of_measurement="%",
                     )
                 ),
             }),

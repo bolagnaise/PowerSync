@@ -469,13 +469,17 @@
           "neovolt_config_entry_id": "Neovolt integration",
           "neovolt_config_entry_ids": "Neovolt integrations",
           "neovolt_max_charge_kw": "Maximum charge power",
-          "neovolt_max_discharge_kw": "Maximum discharge power"
+          "neovolt_max_discharge_kw": "Maximum discharge power",
+          "neovolt_surplus_balancer_mode": "Independent stack surplus balancing",
+          "neovolt_soc_balance_tolerance": "SOC balance tolerance"
         },
         "data_description": {
           "neovolt_config_entry_id": "The Neovolt integration entry to read combined sensors and send dispatch commands through.",
           "neovolt_config_entry_ids": "Select every Neovolt inverter entry PowerSync should read and control.",
           "neovolt_max_charge_kw": "Maximum charge power in kW. Used by the LP optimizer and dispatch command limits.",
-          "neovolt_max_discharge_kw": "Maximum discharge power in kW. Used by the LP optimizer and dispatch command limits."
+          "neovolt_max_discharge_kw": "Maximum discharge power in kW. Used by the LP optimizer and dispatch command limits.",
+          "neovolt_surplus_balancer_mode": "Auto is conservative and only acts on multi-inverter Neovolt systems. Disable this if your batteries already have a parallel/BMS coordinator.",
+          "neovolt_soc_balance_tolerance": "PowerSync will not force-charge a higher-SOC parked stack while another stack is behind by more than this percentage."
         },
         "submit": "Connect"
       },
@@ -997,13 +1001,17 @@
           "neovolt_config_entry_id": "Neovolt integration",
           "neovolt_config_entry_ids": "Neovolt integrations",
           "neovolt_max_charge_kw": "Maximum charge power",
-          "neovolt_max_discharge_kw": "Maximum discharge power"
+          "neovolt_max_discharge_kw": "Maximum discharge power",
+          "neovolt_surplus_balancer_mode": "Independent stack surplus balancing",
+          "neovolt_soc_balance_tolerance": "SOC balance tolerance"
         },
         "data_description": {
           "neovolt_config_entry_id": "The Neovolt integration entry to read sensors and send dispatch commands through.",
           "neovolt_config_entry_ids": "Select every Neovolt inverter entry PowerSync should read and control.",
           "neovolt_max_charge_kw": "Maximum charge power in kW.",
-          "neovolt_max_discharge_kw": "Maximum discharge power in kW."
+          "neovolt_max_discharge_kw": "Maximum discharge power in kW.",
+          "neovolt_surplus_balancer_mode": "Auto is conservative and only acts on multi-inverter Neovolt systems. Disable this if your batteries already have a parallel/BMS coordinator.",
+          "neovolt_soc_balance_tolerance": "PowerSync will not force-charge a higher-SOC parked stack while another stack is behind by more than this percentage."
         },
         "submit": "Save"
       },

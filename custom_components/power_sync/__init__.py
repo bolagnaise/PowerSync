@@ -361,8 +361,12 @@ from .const import (
     CONF_NEOVOLT_CONFIG_ENTRY_IDS,
     CONF_NEOVOLT_MAX_CHARGE_KW,
     CONF_NEOVOLT_MAX_DISCHARGE_KW,
+    CONF_NEOVOLT_SURPLUS_BALANCER_MODE,
+    CONF_NEOVOLT_SOC_BALANCE_TOLERANCE,
     DEFAULT_NEOVOLT_MAX_CHARGE_KW,
     DEFAULT_NEOVOLT_MAX_DISCHARGE_KW,
+    DEFAULT_NEOVOLT_SURPLUS_BALANCER_MODE,
+    DEFAULT_NEOVOLT_SOC_BALANCE_TOLERANCE,
     # Battery system selection
     CONF_BATTERY_SYSTEM,
     BATTERY_SYSTEM_SUNGROW,
@@ -14512,6 +14516,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             CONF_NEOVOLT_MAX_DISCHARGE_KW,
             entry.data.get(CONF_NEOVOLT_MAX_DISCHARGE_KW, DEFAULT_NEOVOLT_MAX_DISCHARGE_KW),
         )
+        neovolt_surplus_balancer_mode = entry.options.get(
+            CONF_NEOVOLT_SURPLUS_BALANCER_MODE,
+            entry.data.get(
+                CONF_NEOVOLT_SURPLUS_BALANCER_MODE,
+                DEFAULT_NEOVOLT_SURPLUS_BALANCER_MODE,
+            ),
+        )
+        neovolt_soc_balance_tolerance = entry.options.get(
+            CONF_NEOVOLT_SOC_BALANCE_TOLERANCE,
+            entry.data.get(
+                CONF_NEOVOLT_SOC_BALANCE_TOLERANCE,
+                DEFAULT_NEOVOLT_SOC_BALANCE_TOLERANCE,
+            ),
+        )
         neovolt_reserve_pct = entry.options.get(
             CONF_OPTIMIZATION_BACKUP_RESERVE,
             entry.data.get(CONF_OPTIMIZATION_BACKUP_RESERVE, DEFAULT_OPTIMIZATION_BACKUP_RESERVE),
@@ -14525,6 +14543,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             max_charge_kw=float(neovolt_max_charge_kw),
             max_discharge_kw=float(neovolt_max_discharge_kw),
             min_soc_pct=float(neovolt_reserve_pct or 10.0),
+            surplus_balancer_mode=str(neovolt_surplus_balancer_mode),
+            soc_balance_tolerance_pct=float(neovolt_soc_balance_tolerance),
         )
     else:
         # Get initial Tesla API token and provider

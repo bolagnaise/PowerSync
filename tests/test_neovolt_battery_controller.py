@@ -524,7 +524,7 @@ def test_fleet_surplus_balancer_charges_anti_fighting_stack_from_export():
     entry_1_states = _combined_states_for(
         1,
         battery_power="-4600",
-        battery_soc="23",
+        battery_soc="62",
         battery_capacity="20.1",
         house_load="900",
         pv_power="6000",
@@ -533,7 +533,7 @@ def test_fleet_surplus_balancer_charges_anti_fighting_stack_from_export():
     entry_2_states = _combined_states_for(
         2,
         battery_power="0",
-        battery_soc="62",
+        battery_soc="23",
         battery_capacity="30.2",
         house_load="0",
         pv_power="0",
@@ -559,6 +559,8 @@ def test_fleet_surplus_balancer_charges_anti_fighting_stack_from_export():
 
     assert balancer["status"] == "charging"
     assert balancer["active_index"] == 1
+    assert balancer["lowest_soc_index"] == 1
+    assert balancer["soc_delta_percent"] == 39.0
     assert balancer["base_mode"] == "No Battery Charge"
     assert balancer["last_power_w"] == 800.0
     assert hass.services.calls == [
@@ -573,6 +575,46 @@ def test_fleet_surplus_balancer_blocks_start_when_other_stack_is_discharging():
     entry_1_states = _combined_states_for(
         1,
         battery_power="600",
+        battery_soc="62",
+        battery_capacity="20.1",
+        house_load="900",
+        pv_power="6000",
+        grid_power="-800",
+    ) + _control_states_for(1, mode="Normal")
+    entry_2_states = _combined_states_for(
+        2,
+        battery_power="0",
+        battery_soc="23",
+        battery_capacity="30.2",
+        house_load="0",
+        pv_power="0",
+        grid_power="0",
+    ) + _control_states_for(2, mode="No Battery Charge")
+    hass = _FakeHass(
+        entry_1_states + entry_2_states,
+        {
+            "neovolt-1": [state.entity_id for state in entry_1_states],
+            "neovolt-2": [state.entity_id for state in entry_2_states],
+        },
+    )
+    controller = NeovoltFleetBatteryController(
+        hass,
+        ["neovolt-1", "neovolt-2"],
+        max_charge_kw=5.0,
+        max_discharge_kw=5.0,
+    )
+    assert asyncio.run(controller.connect())
+
+    balancer = asyncio.run(controller.balance_solar_surplus(controller.get_status()))
+
+    assert balancer["status"] == "blocked_source_discharging"
+    assert hass.services.calls == []
+
+
+def test_fleet_surplus_balancer_does_not_charge_higher_soc_parked_stack():
+    entry_1_states = _combined_states_for(
+        1,
+        battery_power="-4600",
         battery_soc="23",
         battery_capacity="20.1",
         house_load="900",
@@ -605,15 +647,18 @@ def test_fleet_surplus_balancer_blocks_start_when_other_stack_is_discharging():
 
     balancer = asyncio.run(controller.balance_solar_surplus(controller.get_status()))
 
-    assert balancer["status"] == "blocked_source_discharging"
+    assert balancer["status"] == "balancing_low_stack"
+    assert balancer["lowest_soc_index"] == 0
+    assert balancer["highest_soc_index"] == 1
+    assert balancer["soc_delta_percent"] == 39.0
     assert hass.services.calls == []
 
 
-def test_fleet_surplus_balancer_restores_base_mode_and_dispatch_settings_on_import():
+def test_fleet_surplus_balancer_disabled_mode_reports_without_writes():
     entry_1_states = _combined_states_for(
         1,
         battery_power="-4600",
-        battery_soc="23",
+        battery_soc="62",
         battery_capacity="20.1",
         house_load="900",
         pv_power="6000",
@@ -622,7 +667,50 @@ def test_fleet_surplus_balancer_restores_base_mode_and_dispatch_settings_on_impo
     entry_2_states = _combined_states_for(
         2,
         battery_power="0",
+        battery_soc="23",
+        battery_capacity="30.2",
+        house_load="0",
+        pv_power="0",
+        grid_power="0",
+    ) + _control_states_for(2, mode="No Battery Charge")
+    hass = _FakeHass(
+        entry_1_states + entry_2_states,
+        {
+            "neovolt-1": [state.entity_id for state in entry_1_states],
+            "neovolt-2": [state.entity_id for state in entry_2_states],
+        },
+    )
+    controller = NeovoltFleetBatteryController(
+        hass,
+        ["neovolt-1", "neovolt-2"],
+        max_charge_kw=5.0,
+        max_discharge_kw=5.0,
+        surplus_balancer_mode="disabled",
+    )
+    assert asyncio.run(controller.connect())
+
+    balancer = asyncio.run(controller.balance_solar_surplus(controller.get_status()))
+
+    assert balancer["status"] == "disabled"
+    assert balancer["enabled"] is False
+    assert balancer["soc_delta_percent"] == 39.0
+    assert hass.services.calls == []
+
+
+def test_fleet_surplus_balancer_restores_base_mode_and_dispatch_settings_on_import():
+    entry_1_states = _combined_states_for(
+        1,
+        battery_power="-4600",
         battery_soc="62",
+        battery_capacity="20.1",
+        house_load="900",
+        pv_power="6000",
+        grid_power="-800",
+    ) + _control_states_for(1, mode="Normal")
+    entry_2_states = _combined_states_for(
+        2,
+        battery_power="0",
+        battery_soc="23",
         battery_capacity="30.2",
         house_load="0",
         pv_power="0",
@@ -666,7 +754,7 @@ def test_fleet_surplus_balancer_stops_when_other_stack_starts_discharging():
     entry_1_states = _combined_states_for(
         1,
         battery_power="-4600",
-        battery_soc="23",
+        battery_soc="62",
         battery_capacity="20.1",
         house_load="900",
         pv_power="6000",
@@ -675,7 +763,7 @@ def test_fleet_surplus_balancer_stops_when_other_stack_starts_discharging():
     entry_2_states = _combined_states_for(
         2,
         battery_power="0",
-        battery_soc="62",
+        battery_soc="23",
         battery_capacity="30.2",
         house_load="0",
         pv_power="0",

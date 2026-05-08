@@ -5121,6 +5121,8 @@ class NeovoltEnergyCoordinator(DataUpdateCoordinator):
         max_charge_kw: float = 5.0,
         max_discharge_kw: float = 5.0,
         min_soc_pct: float = 10.0,
+        surplus_balancer_mode: str = "auto",
+        soc_balance_tolerance_pct: float = 5.0,
     ) -> None:
         from .inverters.neovolt import NeovoltFleetBatteryController
 
@@ -5136,6 +5138,8 @@ class NeovoltEnergyCoordinator(DataUpdateCoordinator):
             max_charge_kw=max_charge_kw,
             max_discharge_kw=max_discharge_kw,
             min_soc_pct=min_soc_pct,
+            surplus_balancer_mode=surplus_balancer_mode,
+            soc_balance_tolerance_pct=soc_balance_tolerance_pct,
         )
         self._energy_acc = EnergyAccumulator(hass, "neovolt")
 

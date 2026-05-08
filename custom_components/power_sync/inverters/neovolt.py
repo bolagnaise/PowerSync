@@ -102,6 +102,14 @@ _SURPLUS_BALANCE_DURATION_MINUTES = 2
 _SURPLUS_BALANCE_POWER_STEP_W = 100.0
 _SURPLUS_BALANCE_ADJUST_THRESHOLD_W = 200.0
 _SURPLUS_BALANCE_MAX_SOURCE_DISCHARGE_W = 250.0
+_SURPLUS_BALANCER_AUTO = "auto"
+_SURPLUS_BALANCER_ENABLED = "enabled"
+_SURPLUS_BALANCER_DISABLED = "disabled"
+_SURPLUS_BALANCER_MODES = {
+    _SURPLUS_BALANCER_AUTO,
+    _SURPLUS_BALANCER_ENABLED,
+    _SURPLUS_BALANCER_DISABLED,
+}
 
 
 class NeovoltBatteryController:
@@ -444,6 +452,8 @@ class NeovoltFleetBatteryController:
         max_charge_kw: float = 5.0,
         max_discharge_kw: float = 5.0,
         min_soc_pct: float = 10.0,
+        surplus_balancer_mode: str = _SURPLUS_BALANCER_AUTO,
+        soc_balance_tolerance_pct: float = 5.0,
     ) -> None:
         if not neovolt_entry_ids:
             raise ValueError("neovolt_missing_entries")
@@ -459,13 +469,24 @@ class NeovoltFleetBatteryController:
             for entry_id in neovolt_entry_ids
         ]
         self._restore_modes: list[str | None] | None = None
+        self._surplus_balancer_mode = (
+            surplus_balancer_mode
+            if surplus_balancer_mode in _SURPLUS_BALANCER_MODES
+            else _SURPLUS_BALANCER_AUTO
+        )
+        self._soc_balance_tolerance_pct = max(0.0, float(soc_balance_tolerance_pct))
         self._surplus_balance: dict[str, Any] = {
             "active_index": None,
+            "target_index": None,
             "base_mode": None,
             "settings": None,
             "last_power_w": 0.0,
             "last_command_ts": 0.0,
             "status": "idle",
+            "mode": self._surplus_balancer_mode,
+            "enabled": False,
+            "controller_count": len(self._controllers),
+            "soc_tolerance_percent": self._soc_balance_tolerance_pct,
         }
 
     def set_min_soc_pct(self, min_soc_pct: float) -> None:
@@ -522,9 +543,6 @@ class NeovoltFleetBatteryController:
         This is AC-side balancing, not PV routing. It only acts on multi-host
         setups where one stack is already parked in an anti-fighting mode.
         """
-        if len(self._controllers) < 2:
-            return self._set_surplus_status("disabled_single_inverter")
-
         statuses = status.get("controller_statuses") if status else None
         if not statuses:
             statuses = [controller.get_status() for controller in self._controllers]
@@ -532,31 +550,40 @@ class NeovoltFleetBatteryController:
         active_index = self._surplus_balance.get("active_index")
         modes = [controller.get_dispatch_mode() for controller in self._controllers]
 
+        if len(self._controllers) < 2:
+            return self._set_surplus_status("disabled_single_inverter", statuses, modes)
+
+        if not self._surplus_balancer_enabled():
+            if active_index is not None:
+                return await self._stop_surplus_balance("disabled", statuses, modes)
+            return self._set_surplus_status("disabled", statuses, modes)
+
         if active_index is not None:
             if active_index >= len(self._controllers) or modes[active_index] != "Force Charge":
                 self._surplus_balance.update(
                     {
                         "active_index": None,
+                        "target_index": None,
                         "base_mode": None,
                         "settings": None,
                         "last_power_w": 0.0,
                         "last_command_ts": 0.0,
                     }
                 )
-                return self._set_surplus_status("external_mode_change")
+                return self._set_surplus_status("external_mode_change", statuses, modes)
 
-            return await self._maintain_surplus_balance(active_index, statuses)
+            return await self._maintain_surplus_balance(active_index, statuses, modes)
 
-        target_index = self._select_surplus_balance_target(statuses, modes)
+        target_index, target_status = self._select_surplus_balance_target(statuses, modes)
         if target_index is None:
-            return self._set_surplus_status("idle")
+            return self._set_surplus_status(target_status, statuses, modes)
 
         grid_w = self._fleet_grid_w(statuses)
         export_w = max(0.0, -grid_w)
         if export_w < _SURPLUS_BALANCE_START_EXPORT_W:
-            return self._set_surplus_status("waiting_for_export")
+            return self._set_surplus_status("waiting_for_export", statuses, modes, target_index)
         if self._other_stacks_discharging_w(statuses, target_index) > _SURPLUS_BALANCE_MAX_SOURCE_DISCHARGE_W:
-            return self._set_surplus_status("blocked_source_discharging")
+            return self._set_surplus_status("blocked_source_discharging", statuses, modes, target_index)
 
         return await self._start_surplus_balance(target_index, statuses, export_w, modes[target_index])
 
@@ -621,7 +648,8 @@ class NeovoltFleetBatteryController:
         self,
         statuses: list[dict[str, Any]],
         modes: list[str | None],
-    ) -> int | None:
+    ) -> tuple[int | None, str]:
+        lowest_index, _highest_index, _delta = self._soc_balance(statuses)
         candidates: list[tuple[float, int]] = []
         for index, (status, mode) in enumerate(zip(statuses, modes)):
             if mode not in _SURPLUS_BALANCE_BASE_MODES:
@@ -634,9 +662,21 @@ class NeovoltFleetBatteryController:
             candidates.append((float(status.get("battery_level", 100.0) or 100.0), index))
 
         if not candidates:
-            return None
+            return None, "idle"
+
+        if lowest_index is not None:
+            lowest_soc = float(statuses[lowest_index].get("battery_level", 100.0) or 100.0)
+            balanced_candidates = [
+                (soc, index)
+                for soc, index in candidates
+                if soc <= lowest_soc + self._soc_balance_tolerance_pct
+            ]
+            if not balanced_candidates:
+                return None, "balancing_low_stack"
+            candidates = balanced_candidates
+
         candidates.sort()
-        return candidates[0][1]
+        return candidates[0][1], "idle"
 
     async def _start_surplus_balance(
         self,
@@ -659,6 +699,7 @@ class NeovoltFleetBatteryController:
         self._surplus_balance.update(
             {
                 "active_index": index,
+                "target_index": index,
                 "base_mode": mode,
                 "settings": settings,
                 "last_power_w": target_w,
@@ -671,12 +712,14 @@ class NeovoltFleetBatteryController:
             target_w,
             export_w,
         )
-        return self._set_surplus_status("charging")
+        modes = [controller.get_dispatch_mode() for controller in self._controllers]
+        return self._set_surplus_status("charging", statuses, modes, index)
 
     async def _maintain_surplus_balance(
         self,
         index: int,
         statuses: list[dict[str, Any]],
+        modes: list[str | None],
     ) -> dict[str, Any]:
         grid_w = self._fleet_grid_w(statuses)
         target_status = statuses[index]
@@ -686,17 +729,20 @@ class NeovoltFleetBatteryController:
         )
 
         if grid_w > _SURPLUS_BALANCE_STOP_IMPORT_W:
-            return await self._stop_surplus_balance("stopped_importing")
+            return await self._stop_surplus_balance("stopped_importing", statuses, modes)
 
         if self._other_stacks_discharging_w(statuses, index) > _SURPLUS_BALANCE_MAX_SOURCE_DISCHARGE_W:
-            return await self._stop_surplus_balance("stopped_source_discharging")
+            return await self._stop_surplus_balance("stopped_source_discharging", statuses, modes)
 
         if float(target_status.get("battery_level", 100.0) or 100.0) >= 99.0:
-            return await self._stop_surplus_balance("stopped_target_full")
+            return await self._stop_surplus_balance("stopped_target_full", statuses, modes)
+
+        if self._target_ahead_of_lowest(statuses, index):
+            return await self._stop_surplus_balance("stopped_target_ahead", statuses, modes)
 
         headroom_w = max(0.0, -grid_w) + active_charge_w
         if headroom_w < (_SURPLUS_BALANCE_MIN_W * 0.5):
-            return await self._stop_surplus_balance("stopped_no_surplus")
+            return await self._stop_surplus_balance("stopped_no_surplus", statuses, modes)
 
         target_w = self._surplus_target_power_w(index, headroom_w)
         last_power_w = float(self._surplus_balance.get("last_power_w") or 0.0)
@@ -707,16 +753,21 @@ class NeovoltFleetBatteryController:
                 _SURPLUS_BALANCE_DURATION_MINUTES,
                 target_w,
             ):
-                return await self._stop_surplus_balance("stopped_command_failed")
+                return await self._stop_surplus_balance("stopped_command_failed", statuses, modes)
             self._surplus_balance["last_power_w"] = target_w
             self._surplus_balance["last_command_ts"] = time.monotonic()
 
-        return self._set_surplus_status("charging")
+        return self._set_surplus_status("charging", statuses, modes, index)
 
-    async def _stop_surplus_balance(self, reason: str) -> dict[str, Any]:
+    async def _stop_surplus_balance(
+        self,
+        reason: str,
+        statuses: list[dict[str, Any]] | None = None,
+        modes: list[str | None] | None = None,
+    ) -> dict[str, Any]:
         index = self._surplus_balance.get("active_index")
         if index is None:
-            return self._set_surplus_status(reason)
+            return self._set_surplus_status(reason, statuses, modes)
 
         controller = self._controllers[index]
         base_mode = self._surplus_balance.get("base_mode") or _NORMAL_DISPATCH_MODE
@@ -729,6 +780,7 @@ class NeovoltFleetBatteryController:
             self._surplus_balance.update(
                 {
                     "active_index": None,
+                    "target_index": None,
                     "base_mode": None,
                     "settings": None,
                     "last_power_w": 0.0,
@@ -736,11 +788,84 @@ class NeovoltFleetBatteryController:
                 }
             )
         _LOGGER.info("Neovolt surplus balancer stopped stack %d: %s", index + 1, reason)
-        return self._set_surplus_status(reason)
+        return self._set_surplus_status(reason, statuses, modes)
 
-    def _set_surplus_status(self, status: str) -> dict[str, Any]:
+    def _set_surplus_status(
+        self,
+        status: str,
+        statuses: list[dict[str, Any]] | None = None,
+        modes: list[str | None] | None = None,
+        target_index: int | None = None,
+    ) -> dict[str, Any]:
         self._surplus_balance["status"] = status
+        self._surplus_balance["mode"] = self._surplus_balancer_mode
+        self._surplus_balance["enabled"] = self._surplus_balancer_enabled()
+        self._surplus_balance["controller_count"] = len(self._controllers)
+        self._surplus_balance["soc_tolerance_percent"] = self._soc_balance_tolerance_pct
+        if target_index is not None:
+            self._surplus_balance["target_index"] = target_index
+        if statuses is not None:
+            self._update_surplus_diagnostics(statuses, modes)
         return dict(self._surplus_balance)
+
+    def _surplus_balancer_enabled(self) -> bool:
+        if self._surplus_balancer_mode == _SURPLUS_BALANCER_DISABLED:
+            return False
+        if self._surplus_balancer_mode == _SURPLUS_BALANCER_ENABLED:
+            return len(self._controllers) > 1
+        return len(self._controllers) > 1
+
+    def _update_surplus_diagnostics(
+        self,
+        statuses: list[dict[str, Any]],
+        modes: list[str | None] | None = None,
+    ) -> None:
+        lowest_index, highest_index, delta = self._soc_balance(statuses)
+        self._surplus_balance.update(
+            {
+                "lowest_soc_index": lowest_index,
+                "highest_soc_index": highest_index,
+                "soc_delta_percent": round(delta, 2),
+                "stack_modes": list(modes) if modes is not None else None,
+                "stack_soc": [
+                    round(float(status.get("battery_level", 0.0) or 0.0), 2)
+                    for status in statuses
+                ],
+                "stack_battery_power_w": [
+                    round(float(status.get("battery_power", 0.0) or 0.0) * 1000.0, 1)
+                    for status in statuses
+                ],
+                "stack_grid_power_w": [
+                    round(float(status.get("grid_power", 0.0) or 0.0) * 1000.0, 1)
+                    for status in statuses
+                ],
+            }
+        )
+
+    def _target_ahead_of_lowest(
+        self,
+        statuses: list[dict[str, Any]],
+        target_index: int,
+    ) -> bool:
+        lowest_index, _highest_index, _delta = self._soc_balance(statuses)
+        if lowest_index is None or lowest_index == target_index:
+            return False
+        target_soc = float(statuses[target_index].get("battery_level", 100.0) or 100.0)
+        lowest_soc = float(statuses[lowest_index].get("battery_level", 100.0) or 100.0)
+        return target_soc > lowest_soc + self._soc_balance_tolerance_pct
+
+    @staticmethod
+    def _soc_balance(statuses: list[dict[str, Any]]) -> tuple[int | None, int | None, float]:
+        indexed_soc = [
+            (index, float(status.get("battery_level", 0.0) or 0.0))
+            for index, status in enumerate(statuses)
+            if status.get("battery_level") is not None
+        ]
+        if not indexed_soc:
+            return None, None, 0.0
+        lowest_index, lowest_soc = min(indexed_soc, key=lambda item: item[1])
+        highest_index, highest_soc = max(indexed_soc, key=lambda item: item[1])
+        return lowest_index, highest_index, max(0.0, highest_soc - lowest_soc)
 
     def _surplus_target_power_w(self, index: int, available_w: float) -> float:
         limit_w = max(0.0, float(self._controllers[index]._max_charge_kw) * 1000.0)

@@ -111,6 +111,7 @@ from .const import (
     SENSOR_TYPE_OPTIMIZATION_STATUS,
     SENSOR_TYPE_OPTIMIZATION_NEXT_ACTION,
     SENSOR_TYPE_OPTIMIZATION_FORCE_CHARGE_WINDOWS,
+    SENSOR_TYPE_NEOVOLT_SURPLUS_BALANCER,
     SENSOR_TYPE_LP_SOLAR_FORECAST,
     SENSOR_TYPE_LP_LOAD_FORECAST,
     SENSOR_TYPE_LP_BATTERY_POWER_FORECAST,
@@ -890,6 +891,16 @@ SIGENERGY_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
     ),
 )
 
+NEOVOLT_SENSORS: tuple[PowerSyncSensorEntityDescription, ...] = (
+    PowerSyncSensorEntityDescription(
+        key=SENSOR_TYPE_NEOVOLT_SURPLUS_BALANCER,
+        name="NeoVolt Surplus Balancer",
+        icon="mdi:battery-sync",
+        value_fn=lambda data: (data.get("neovolt_surplus_balancer") or {}).get("status") if data else None,
+        attr_fn=lambda data: dict(data.get("neovolt_surplus_balancer") or {}) if data else {},
+    ),
+)
+
 # Shared sensors exposing BMS/inverter-reported power ceilings. Coordinators
 # populate the same battery_max_* fields even when the brand-specific source
 # differs (for example AlphaESS BMS registers vs FoxESS nominal inverter power).
@@ -1441,6 +1452,17 @@ async def async_setup_entry(
                 )
             )
         _LOGGER.info("Sigenergy PV sensors added (DC and AC-coupled)")
+
+    if is_neovolt and energy_coordinator:
+        for description in NEOVOLT_SENSORS:
+            entities.append(
+                TeslaEnergySensor(
+                    coordinator=energy_coordinator,
+                    description=description,
+                    entry=entry,
+                )
+            )
+        _LOGGER.info("NeoVolt surplus balancer diagnostic sensor added")
 
     # Add power ceiling sensors for brands that publish battery_max_* fields.
     if (is_alphaess or is_foxess) and energy_coordinator:
