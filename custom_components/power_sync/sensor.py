@@ -26,6 +26,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers import device_registry as dr
 from homeassistant.util import dt as dt_util
 from datetime import timedelta
 
@@ -183,6 +184,7 @@ from .const import (
     SENSOR_FAMILY_AEMO,
     SENSOR_FAMILY_EV_CHARGING,
     SENSOR_FAMILY_OCTOPUS,
+    TESLA_INTEGRATIONS,
 )
 from .coordinator import (
     AmberPriceCoordinator,
@@ -203,6 +205,23 @@ from .currency import (
 from . import get_current_price_from_tariff_schedule
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _has_tesla_ev_device(hass: HomeAssistant) -> bool:
+    """Return true when a Tesla/Teslemetry vehicle device is registered."""
+    try:
+        device_registry = dr.async_get(hass)
+    except Exception:
+        return False
+
+    for device in device_registry.devices.values():
+        for domain, identifier in device.identifiers:
+            if domain not in TESLA_INTEGRATIONS:
+                continue
+            identifier_text = str(identifier)
+            if len(identifier_text) == 17 and not identifier_text.isdigit():
+                return True
+    return False
 
 
 @dataclass
@@ -1488,7 +1507,10 @@ async def async_setup_entry(
             )
         _LOGGER.info("ESY Sunhome-specific sensors added (inverter temp, battery status, SOH)")
 
-    # Add EV sensors if EV charging is configured (Tesla, OCPP, or Zaptec)
+    # Add EV sensors if EV charging is configured or Tesla vehicle telemetry is
+    # available. The HA energy-flow dashboard depends on these sensors for
+    # passive/self-scheduled Tesla charging, even when PowerSync is not
+    # controlling the charge.
     ev_enabled = entry.options.get(
         CONF_EV_CHARGING_ENABLED,
         entry.data.get(CONF_EV_CHARGING_ENABLED, False),
@@ -1500,7 +1522,13 @@ async def async_setup_entry(
     zaptec_standalone = entry.options.get(
         "zaptec_standalone_enabled", entry.data.get("zaptec_standalone_enabled", False)
     )
-    has_ev = ev_enabled or ocpp_enabled or bool(zaptec_entity) or zaptec_standalone
+    has_ev = (
+        ev_enabled
+        or ocpp_enabled
+        or bool(zaptec_entity)
+        or zaptec_standalone
+        or _has_tesla_ev_device(hass)
+    )
     if has_ev:
         for description in EV_SENSORS:
             entities.append(

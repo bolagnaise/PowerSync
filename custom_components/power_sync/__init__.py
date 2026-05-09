@@ -24576,6 +24576,37 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN][entry.entry_id]["session_manager"] = session_manager
     _LOGGER.info("📊 EV charging session manager initialized")
 
+    # Track Tesla charging sessions that start outside PowerSync, such as a
+    # vehicle's own schedule. Without this, live telemetry appears in the app
+    # but charge history stays empty because no PowerSync-owned session exists.
+    if hass.data[DOMAIN][entry.entry_id].get("tesla_coordinator"):
+        from homeassistant.helpers.event import async_track_time_interval as _track_observed_tesla_interval
+        from .automations.observed_tesla_sessions import ObservedTeslaSessionTracker
+
+        observed_tesla_tracker = ObservedTeslaSessionTracker(
+            hass,
+            entry,
+            session_manager,
+            _get_ev_vehicles_status,
+        )
+        hass.data[DOMAIN][entry.entry_id]["observed_tesla_session_tracker"] = observed_tesla_tracker
+
+        async def _poll_observed_tesla_sessions(now=None):
+            try:
+                await observed_tesla_tracker.poll(now)
+            except Exception as err:
+                _LOGGER.debug("Observed Tesla session poll failed: %s", err)
+
+        await _poll_observed_tesla_sessions()
+        hass.data[DOMAIN][entry.entry_id]["observed_tesla_session_cancel"] = (
+            _track_observed_tesla_interval(
+                hass,
+                _poll_observed_tesla_sessions,
+                timedelta(seconds=30),
+            )
+        )
+        _LOGGER.info("📊 Observed Tesla charging session tracker started (30s poll)")
+
     # Initialize charging planner for smart scheduling
     from .automations.ev_charging_planner import (
         ChargingPlanner,
@@ -26773,6 +26804,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ev_boost_cancel()
         entry_data["ev_boost_cancel"] = None
         _LOGGER.debug("Cancelled EV boost timer")
+
+    if observed_tesla_cancel := entry_data.get("observed_tesla_session_cancel"):
+        observed_tesla_cancel()
+        _LOGGER.debug("Cancelled observed Tesla session polling")
 
     # Flush active EV charging sessions so they're not lost
     if session_manager := entry_data.get("session_manager"):
