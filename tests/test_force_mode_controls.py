@@ -196,7 +196,7 @@ def test_foxess_force_charge_accepts_optimizer_min_timeout():
     assert "min_timeout_seconds=min_timeout_seconds" in method_source
 
 
-def test_goodwe_entity_mode_prefers_battery_ems_modes_with_legacy_fallbacks():
+def test_goodwe_entity_mode_prefers_solar_first_charge_and_export_discharge_modes():
     source = COORDINATOR_PATH.read_text()
     tree = ast.parse(source)
 
@@ -216,7 +216,7 @@ def test_goodwe_entity_mode_prefers_battery_ems_modes_with_legacy_fallbacks():
     assert attempts_source is not None
 
     assert '"charge_battery", power_w, fallback_option="buy_power"' in charge_source
-    assert '"discharge_battery", power_w, fallback_option="sell_power"' in discharge_source
+    assert '"sell_power", power_w, fallback_option="discharge_battery"' in discharge_source
     assert '"options"' in attempts_source
     assert "fallback_option" in ems_source
 
