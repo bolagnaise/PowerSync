@@ -19177,6 +19177,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "saved_backup_reserve": None,
         "saved_export_rule": None,
         "expires_at": None,
+        "duration": None,
+        "power_w": 0,
         "cancel_expiry_timer": None,
     }
 
@@ -19187,6 +19189,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "saved_operation_mode": None,
         "saved_backup_reserve": None,
         "expires_at": None,
+        "duration": None,
+        "power_w": 0,
         "cancel_expiry_timer": None,
         "cancel_hardware_refresh_timer": None,
     }
@@ -19283,6 +19287,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.data.get("initial_custom_tariff"),
         )
 
+    def _coerce_force_power_w(value: Any) -> int:
+        """Normalize service/store force-power values to a non-negative watt value."""
+        try:
+            power_w = int(float(value))
+        except (TypeError, ValueError):
+            return 0
+        return max(0, power_w)
+
     # Helper function to persist force mode state to storage
     async def persist_force_mode_state() -> None:
         """Persist current force charge/discharge state to storage."""
@@ -19294,6 +19306,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             state_to_save = {
                 "mode": "charge",
                 "expires_at": force_charge_state["expires_at"].isoformat() if force_charge_state["expires_at"] else None,
+                "duration": force_charge_state.get("duration"),
+                "power_w": _coerce_force_power_w(force_charge_state.get("power_w", 0)),
                 "source": force_charge_state.get("source", "user"),
                 "saved_tariff": _select_restorable_tesla_tariff(force_charge_state["saved_tariff"]),
                 "saved_operation_mode": force_charge_state["saved_operation_mode"],
@@ -19303,6 +19317,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             state_to_save = {
                 "mode": "discharge",
                 "expires_at": force_discharge_state["expires_at"].isoformat() if force_discharge_state["expires_at"] else None,
+                "duration": force_discharge_state.get("duration"),
+                "power_w": _coerce_force_power_w(force_discharge_state.get("power_w", 0)),
                 "source": force_discharge_state.get("source", "user"),
                 "saved_tariff": _select_restorable_tesla_tariff(force_discharge_state["saved_tariff"]),
                 "saved_operation_mode": force_discharge_state["saved_operation_mode"],
@@ -19339,6 +19355,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             now = dt_util.utcnow()
             persisted_source = persisted_force_state.get("source", "user")
+            persisted_power_w = _coerce_force_power_w(
+                persisted_force_state.get("power_w", 0)
+            )
 
             if persisted_source == "optimizer":
                 # Optimizer-owned force modes are schedule decisions, not user
@@ -19357,6 +19376,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 state = force_charge_state if mode == "charge" else force_discharge_state
                 state["active"] = True
                 state["expires_at"] = expires_at
+                state["duration"] = persisted_force_state.get("duration")
+                state["power_w"] = persisted_power_w
                 state["source"] = persisted_source
                 state["saved_tariff"] = saved_tariff
                 state["saved_operation_mode"] = persisted_force_state.get("saved_operation_mode")
@@ -19409,6 +19430,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 state = force_charge_state if mode == "charge" else force_discharge_state
                 state["active"] = True
                 state["expires_at"] = expires_at
+                state["duration"] = persisted_force_state.get("duration")
+                state["power_w"] = persisted_power_w
                 state["source"] = persisted_force_state.get("source", "user")
                 state["saved_tariff"] = saved_tariff
                 state["saved_operation_mode"] = persisted_force_state.get("saved_operation_mode")
@@ -19437,6 +19460,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_charge_state["active"] = True
                     force_charge_state["expires_at"] = expires_at
                     force_charge_state["duration"] = persisted_force_state.get("duration", int(remaining_minutes))
+                    force_charge_state["power_w"] = persisted_power_w
                     force_charge_state["source"] = persisted_force_state.get("source", "user")
                     force_charge_state["saved_tariff"] = _select_restorable_tesla_tariff(
                         persisted_force_state.get("saved_tariff"),
@@ -19449,14 +19473,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     # Re-issue the charge command to the inverter
                     try:
                         remaining_min = int(remaining_minutes)
+                        service_data = {"duration": remaining_min}
+                        if persisted_power_w > 0:
+                            service_data["power_w"] = persisted_power_w
                         await hass.services.async_call(
                             DOMAIN, SERVICE_FORCE_CHARGE,
-                            {"duration": remaining_min},
+                            service_data,
                             blocking=True,
                         )
                         _LOGGER.info(
-                            "🔋 Re-issued force charge command after restart (%d min)",
+                            "🔋 Re-issued force charge command after restart (%d min, %dW)",
                             remaining_min,
+                            persisted_power_w,
                         )
                     except Exception as e:
                         _LOGGER.error("Failed to re-issue force charge after restart: %s", e)
@@ -19488,6 +19516,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_discharge_state["active"] = True
                     force_discharge_state["expires_at"] = expires_at
                     force_discharge_state["duration"] = persisted_force_state.get("duration", int(remaining_minutes))
+                    force_discharge_state["power_w"] = persisted_power_w
                     force_discharge_state["source"] = persisted_force_state.get("source", "user")
                     force_discharge_state["saved_tariff"] = _select_restorable_tesla_tariff(
                         persisted_force_state.get("saved_tariff"),
@@ -19503,14 +19532,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     # the state flag alone doesn't resume hardware discharge.
                     try:
                         remaining_min = int(remaining_minutes)
+                        service_data = {"duration": remaining_min}
+                        if persisted_power_w > 0:
+                            service_data["power_w"] = persisted_power_w
                         await hass.services.async_call(
                             DOMAIN, SERVICE_FORCE_DISCHARGE,
-                            {"duration": remaining_min},
+                            service_data,
                             blocking=True,
                         )
                         _LOGGER.info(
-                            "🔋 Re-issued force discharge command after restart (%d min)",
+                            "🔋 Re-issued force discharge command after restart (%d min, %dW)",
                             remaining_min,
+                            persisted_power_w,
                         )
                     except Exception as e:
                         _LOGGER.error("Failed to re-issue force discharge after restart: %s", e)
@@ -19559,6 +19592,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raw_duration = call.data.get("duration", DEFAULT_DISCHARGE_DURATION)
         _LOGGER.debug(f"Force discharge raw duration from call.data: {raw_duration!r} (type: {type(raw_duration).__name__})")
         source = call.data.get("source", "user")
+        command_power_w = _coerce_force_power_w(call.data.get("power_w", 0))
 
         # Convert to int if string (from HA service selector or button-card)
         try:
@@ -19588,7 +19622,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # actions shouldn't show as manual countdowns.
         if source == "optimizer" or (extend_hardware and force_discharge_state.get("active")):
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-            power_w = call.data.get("power_w", 0)
+            power_w = command_power_w
             foxess_coord = entry_data.get("foxess_coordinator")
             if foxess_coord:
                 min_timeout = duration * 60 if source == "optimizer" else 600
@@ -19718,6 +19752,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         force_discharge_state["active"] = True
         force_discharge_state["source"] = source
         force_discharge_state["duration"] = duration
+        force_discharge_state["power_w"] = command_power_w
 
         # Check if this is a Sigenergy system
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
@@ -20666,6 +20701,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raw_duration = call.data.get("duration", DEFAULT_DISCHARGE_DURATION)
         _LOGGER.debug(f"Force charge raw duration from call.data: {raw_duration!r} (type: {type(raw_duration).__name__})")
         source = call.data.get("source", "user")
+        command_power_w = _coerce_force_power_w(call.data.get("power_w", 0))
 
         # Convert to int if string (from HA service selector or button-card)
         try:
@@ -20692,7 +20728,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # See force_discharge for the full rationale.
         if source == "optimizer" or (extend_hardware and force_charge_state.get("active")):
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-            power_w = call.data.get("power_w", 0)
+            power_w = command_power_w
             foxess_coord = entry_data.get("foxess_coordinator")
             if foxess_coord:
                 min_timeout = duration * 60 if source == "optimizer" else 600
@@ -20835,6 +20871,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         force_charge_state["active"] = True
         force_charge_state["source"] = source
         force_charge_state["duration"] = duration
+        force_charge_state["power_w"] = command_power_w
 
         # Check if this is a Sigenergy system
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))

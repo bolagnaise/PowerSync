@@ -88,6 +88,42 @@ def test_force_mode_persistence_uses_setup_store_reference():
     assert "await store.async_load()" in function_source
 
 
+def test_force_mode_persistence_keeps_requested_power_setpoint():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    persist = _find_function(tree, "persist_force_mode_state")
+    restore = _find_function(tree, "restore_force_mode_from_persistence")
+    persist_source = ast.get_source_segment(source, persist)
+    restore_source = ast.get_source_segment(source, restore)
+
+    assert persist_source is not None
+    assert restore_source is not None
+    assert '"duration": force_discharge_state.get("duration")' in persist_source
+    assert '"power_w": _coerce_force_power_w(force_discharge_state.get("power_w", 0))' in persist_source
+    assert '"duration": force_charge_state.get("duration")' in persist_source
+    assert '"power_w": _coerce_force_power_w(force_charge_state.get("power_w", 0))' in persist_source
+    assert "persisted_power_w = _coerce_force_power_w" in restore_source
+    assert 'service_data["power_w"] = persisted_power_w' in restore_source
+    assert "SERVICE_FORCE_DISCHARGE" in restore_source
+    assert "SERVICE_FORCE_CHARGE" in restore_source
+
+
+def test_force_handlers_capture_power_before_persisting_restart_state():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    discharge = _find_function(tree, "handle_force_discharge")
+    charge = _find_function(tree, "handle_force_charge")
+    discharge_source = ast.get_source_segment(source, discharge)
+    charge_source = ast.get_source_segment(source, charge)
+
+    assert discharge_source is not None
+    assert charge_source is not None
+    assert 'command_power_w = _coerce_force_power_w(call.data.get("power_w", 0))' in discharge_source
+    assert 'force_discharge_state["power_w"] = command_power_w' in discharge_source
+    assert 'command_power_w = _coerce_force_power_w(call.data.get("power_w", 0))' in charge_source
+    assert 'force_charge_state["power_w"] = command_power_w' in charge_source
+
+
 def test_force_tariff_filter_matches_names_and_codes():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
