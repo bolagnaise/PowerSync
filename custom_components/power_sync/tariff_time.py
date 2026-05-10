@@ -27,6 +27,22 @@ def _time_minutes(period: Mapping[str, Any], prefix: str, fallback_hour: int) ->
     return min(24 * 60, max(0, hour * 60 + minute))
 
 
+def _period_duration_minutes(period: Mapping[str, Any]) -> int:
+    """Return one-day duration for a TOU period, allowing midnight wrap."""
+    start_minute = _time_minutes(period, "from", 0)
+    end_minute = _time_minutes(period, "to", 24)
+
+    if start_minute == 0 and end_minute == 0:
+        return 24 * 60
+    if end_minute == 0 and start_minute > 0:
+        end_minute = 24 * 60
+    if start_minute < end_minute:
+        return end_minute - start_minute
+    if start_minute == end_minute:
+        return 24 * 60
+    return (24 * 60 - start_minute) + end_minute
+
+
 def tou_period_matches(period: Mapping[str, Any], when: datetime) -> bool:
     """Return true if a Tesla tariff period matches the given local datetime."""
     today = tesla_day_of_week(when)
@@ -88,10 +104,34 @@ def find_matching_tou_period(
     tou_periods: Mapping[str, Any],
     when: datetime,
     default: str = "OFF_PEAK",
+    buy_rates: Mapping[str, float] | None = None,
+    sell_rates: Mapping[str, float] | None = None,
 ) -> str:
     """Find the current TOU period name for a local datetime."""
-    for period_name in sorted(tou_periods.keys(), key=tariff_period_priority):
-        for period in period_entries(tou_periods[period_name]):
+    matches: list[tuple[str, Mapping[str, Any]]] = []
+    for period_name, period_data in tou_periods.items():
+        for period in period_entries(period_data):
             if tou_period_matches(period, when):
-                return period_name
-    return default
+                matches.append((period_name, period))
+
+    if not matches:
+        return default
+
+    if buy_rates is None and sell_rates is None:
+        return sorted((name for name, _period in matches), key=tariff_period_priority)[0]
+
+    def _rate(rates: Mapping[str, float] | None, name: str, fallback: float) -> float:
+        if rates is None:
+            return fallback
+        value = rates.get(name)
+        return float(value) if isinstance(value, (int, float)) else fallback
+
+    return min(
+        matches,
+        key=lambda match: (
+            _period_duration_minutes(match[1]),
+            -_rate(sell_rates, match[0], 0.0),
+            _rate(buy_rates, match[0], 0.0),
+            match[0],
+        ),
+    )[0]

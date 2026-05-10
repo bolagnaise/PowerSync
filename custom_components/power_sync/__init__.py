@@ -3052,7 +3052,13 @@ def _calculate_cost_from_tariff(tariff_schedule: dict, time_series: list) -> dic
                 season_tou = seasons.get(entry_season, {}).get("tou_periods", tou_periods)
 
                 # Match to TOU period
-                matched_period = _match_tou_period(season_tou, hour, tesla_dow)
+                matched_period = _match_tou_period(
+                    season_tou,
+                    hour,
+                    tesla_dow,
+                    buy_rates=buy_rates,
+                    sell_rates=sell_rates,
+                )
 
                 buy_rate = buy_rates.get(matched_period, buy_rates.get("ALL", buy_rates.get("OFF_PEAK", 0)))
                 sell_rate = sell_rates.get(matched_period, sell_rates.get("ALL", 0))
@@ -3110,7 +3116,14 @@ def _find_season_for_month(seasons: dict, month: int) -> str:
     return "All Year" if "All Year" in seasons else next(iter(seasons.keys()), "All Year")
 
 
-def _match_tou_period(tou_periods: dict, hour: int, tesla_dow: int) -> str:
+def _match_tou_period(
+    tou_periods: dict,
+    hour: int,
+    tesla_dow: int,
+    *,
+    buy_rates: dict | None = None,
+    sell_rates: dict | None = None,
+) -> str:
     """Match an hour and day-of-week to a TOU period name.
 
     Supports custom period names like PEAK_1, PEAK_2, OFF_PEAK_AUTO.
@@ -3121,7 +3134,13 @@ def _match_tou_period(tou_periods: dict, hour: int, tesla_dow: int) -> str:
 
     # 2024-01-07 was a Sunday, matching Tesla day 0.
     when = datetime(2024, 1, 7, hour) + timedelta(days=tesla_dow % 7)
-    return find_matching_tou_period(tou_periods, when, default="OFF_PEAK")
+    return find_matching_tou_period(
+        tou_periods,
+        when,
+        default="OFF_PEAK",
+        buy_rates=buy_rates,
+        sell_rates=sell_rates,
+    )
 
 
 def _weighted_avg_rates(tou_periods: dict, buy_rates: dict, sell_rates: dict) -> tuple[float, float]:
@@ -7335,7 +7354,6 @@ class TariffPriceView(HomeAssistantView):
 
             # TOU periods are inside seasons[current_season]["tou_periods"]
             tou_periods = seasons.get(current_season, {}).get("tou_periods", {})
-            current_period = find_matching_tou_period(tou_periods, now, default="OFF_PEAK")
 
             # Buy rates: energy_charges[current_season]["rates"][period]
             energy_charges = saved_tariff.get("energy_charges", {})
@@ -7350,6 +7368,13 @@ class TariffPriceView(HomeAssistantView):
             sell_energy = sell_tariff.get("energy_charges", {})
             sell_season = sell_energy.get(current_season, {})
             sell_rates = sell_season.get("rates", sell_season)
+            current_period = find_matching_tou_period(
+                tou_periods,
+                now,
+                default="OFF_PEAK",
+                buy_rates=buy_rates if isinstance(buy_rates, dict) else None,
+                sell_rates=sell_rates if isinstance(sell_rates, dict) else None,
+            )
             sell_rate = 0.0
             if isinstance(sell_rates, dict):
                 sell_rate = sell_rates.get(current_period, sell_rates.get("ALL", 0.0))
@@ -7474,8 +7499,6 @@ async def fetch_tesla_tariff_schedule(hass: HomeAssistant, entry: ConfigEntry) -
 
         tou_periods = seasons.get(current_season, {}).get("tou_periods", {})
         from .tariff_time import find_matching_tou_period
-        current_period = find_matching_tou_period(tou_periods, now, default="ALL")
-        _LOGGER.info(f"Tesla TOU period: {current_period}")
 
         # Get energy charges for current season
         # tariff_content format: energy_charges.Summer.ON_PEAK = 0.48 (no 'rates' key)
@@ -7496,6 +7519,14 @@ async def fetch_tesla_tariff_schedule(hass: HomeAssistant, entry: ConfigEntry) -
             sell_rates = sell_season_charges.get("rates", {})
         else:
             sell_rates = {k: v for k, v in sell_season_charges.items() if isinstance(v, (int, float))}
+        current_period = find_matching_tou_period(
+            tou_periods,
+            now,
+            default="ALL",
+            buy_rates=buy_rates,
+            sell_rates=sell_rates,
+        )
+        _LOGGER.info(f"Tesla TOU period: {current_period}")
 
         # Get current prices
         current_buy_price = buy_rates.get(current_period, buy_rates.get("ALL", 0))
@@ -7612,9 +7643,6 @@ def convert_custom_tariff_to_schedule(
 
         # Get TOU periods for current season
         tou_periods = seasons.get(current_season, {}).get("tou_periods", {})
-        current_period = find_matching_tou_period(tou_periods, now, default="OFF_PEAK")
-
-        _LOGGER.debug(f"Custom tariff - Current TOU period: {current_period}")
 
         # Get energy charges
         energy_charges = custom_tariff.get("energy_charges", {})
@@ -7642,6 +7670,15 @@ def convert_custom_tariff_to_schedule(
         for period, rate in sell_season_charges.items():
             if isinstance(rate, (int, float)):
                 sell_rates[period] = rate
+        current_period = find_matching_tou_period(
+            tou_periods,
+            now,
+            default="OFF_PEAK",
+            buy_rates=buy_rates,
+            sell_rates=sell_rates,
+        )
+
+        _LOGGER.debug(f"Custom tariff - Current TOU period: {current_period}")
 
         # Get current prices
         current_buy_price = buy_rates.get(current_period, buy_rates.get("ALL", buy_rates.get("OFF_PEAK", 0)))
@@ -7719,7 +7756,13 @@ def get_current_price_from_tariff_schedule(tariff_schedule: dict) -> tuple[float
                 tariff_schedule.get("current_period", "UNKNOWN")
             )
 
-        current_period = find_matching_tou_period(tou_periods, now, default="OFF_PEAK")
+        current_period = find_matching_tou_period(
+            tou_periods,
+            now,
+            default="OFF_PEAK",
+            buy_rates=buy_rates,
+            sell_rates=sell_rates,
+        )
 
         # Get prices for current period (rates are in $/kWh, convert to cents)
         # Note: buy_rates may already be in cents if from custom tariff, or $/kWh if from Tesla

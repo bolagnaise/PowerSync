@@ -208,6 +208,36 @@ def _fresh_tariff_schedule() -> dict:
     }
 
 
+def _nested_free_tariff_schedule() -> dict:
+    return {
+        "plan_name": "FOUR4FREE",
+        "tou_periods": {
+            "PARTIAL_PEAK": {
+                "periods": [
+                    {
+                        "fromDayOfWeek": 0,
+                        "toDayOfWeek": 6,
+                        "fromHour": 0,
+                        "toHour": 24,
+                    }
+                ]
+            },
+            "WINDOW_2": {
+                "periods": [
+                    {
+                        "fromDayOfWeek": 0,
+                        "toDayOfWeek": 6,
+                        "fromHour": 10,
+                        "toHour": 14,
+                    }
+                ]
+            },
+        },
+        "buy_rates": {"PARTIAL_PEAK": 0.31, "WINDOW_2": 0.0},
+        "sell_rates": {"PARTIAL_PEAK": 0.0, "WINDOW_2": 0.0},
+    }
+
+
 def _coordinator_with_static_tou_provider(opt_coordinator):
     coordinator = object.__new__(opt_coordinator.OptimizationCoordinator)
     coordinator.hass = SimpleNamespace(data={"power_sync": {"entry-1": {}}})
@@ -267,6 +297,29 @@ def test_static_tou_provider_refreshes_stale_constructor_tariff(opt_module):
     assert coordinator._last_display_import_prices == [0.51] * 12
     assert coordinator._last_display_export_prices == [0.10] * 12
     assert coordinator._tariff_schedule is fresh_tariff
+
+
+def test_static_tou_provider_matches_nested_tesla_periods(opt_module, monkeypatch):
+    """Tesla tariff fetch can store periods as {"periods": [...]} mappings.
+
+    The optimizer must match that same shape as the tariff sensor, otherwise
+    free import windows fall back to the shoulder rate and stop showing charge.
+    The free period name is arbitrary because Tesla behavior is rate-based.
+    """
+    coordinator = _coordinator_with_static_tou_provider(opt_module)
+    coordinator._tariff_schedule = _nested_free_tariff_schedule()
+    monkeypatch.setattr(
+        opt_module.dt_util,
+        "now",
+        lambda *args, **kwargs: datetime(2026, 5, 10, 11, 5, tzinfo=timezone.utc),
+    )
+
+    import_prices, export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    assert import_prices == [1e-6] * 12
+    assert export_prices == [0.0] * 12
+    assert coordinator._last_display_import_prices == [0.0] * 12
+    assert coordinator._last_display_export_prices == [0.0] * 12
 
 
 def test_static_tou_provider_returns_none_when_tariff_missing(opt_module):

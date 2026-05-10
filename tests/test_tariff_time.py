@@ -103,3 +103,59 @@ def test_matching_uses_local_datetime_timezone():
     when = datetime(2026, 5, 1, 16, 0, tzinfo=melbourne)
 
     assert find_matching_tou_period(periods, when) == "PEAK"
+
+
+def test_rate_aware_matching_prefers_specific_window_not_name():
+    periods = {
+        "PEAK": {
+            "periods": [{
+                "fromDayOfWeek": 0,
+                "toDayOfWeek": 6,
+                "fromHour": 0,
+                "toHour": 24,
+            }]
+        },
+        "OFF_PEAK": {
+            "periods": [{
+                "fromDayOfWeek": 0,
+                "toDayOfWeek": 6,
+                "fromHour": 18,
+                "toHour": 21,
+            }]
+        },
+    }
+
+    assert find_matching_tou_period(
+        periods,
+        datetime(2026, 5, 1, 19, 0),
+        buy_rates={"PEAK": 0.31, "OFF_PEAK": 0.51},
+        sell_rates={"PEAK": 0.0, "OFF_PEAK": 0.0},
+    ) == "OFF_PEAK"
+
+
+def test_rate_aware_matching_handles_nested_free_import_override():
+    periods = {
+        "PARTIAL_PEAK": {
+            "periods": [{
+                "fromDayOfWeek": 0,
+                "toDayOfWeek": 6,
+                "fromHour": 0,
+                "toHour": 24,
+            }]
+        },
+        "WINDOW_2": {
+            "periods": [{
+                "fromDayOfWeek": 0,
+                "toDayOfWeek": 6,
+                "fromHour": 10,
+                "toHour": 14,
+            }]
+        },
+    }
+
+    assert find_matching_tou_period(
+        periods,
+        datetime(2026, 5, 1, 11, 0),
+        buy_rates={"PARTIAL_PEAK": 0.31, "WINDOW_2": 0.0},
+        sell_rates={"PARTIAL_PEAK": 0.0, "WINDOW_2": 0.0},
+    ) == "WINDOW_2"

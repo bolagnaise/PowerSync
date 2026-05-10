@@ -23,6 +23,7 @@ from .schedule_reader import OptimizationSchedule
 from .executor import ScheduleExecutor, ExecutionStatus, BatteryAction
 from .load_estimator import LoadEstimator, SolcastForecaster
 from .ev_coordinator import EVCoordinator, EVConfig, EVChargingMode
+from ..tariff_time import find_matching_tou_period, period_entries
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -3716,8 +3717,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Log TOU period windows for debugging day-of-week matching
         dow_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
         for pname in tou_periods:
-            plist = tou_periods[pname] if isinstance(tou_periods[pname], list) else []
-            for pw in plist:
+            for pw in period_entries(tou_periods[pname]):
                 fd, td = pw.get("fromDayOfWeek", 0), pw.get("toDayOfWeek", 6)
                 fh, th = pw.get("fromHour", 0), pw.get("toHour", 24)
                 _LOGGER.debug(
@@ -3728,55 +3728,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         for t in range(n_steps):
             ts = now + timedelta(minutes=t * interval)
-            hour = ts.hour
-            dow = ts.weekday()
-            # Tesla format: 0=Sunday, Python: 0=Monday
-            tesla_dow = (dow + 1) % 7
 
-            # Find ALL matching periods for this hour, then pick the one
-            # with the highest sell rate. This handles overlapping periods
-            # correctly regardless of naming conventions.
-            candidates = []
-            for period_name in tou_periods.keys():
-                periods_list = tou_periods[period_name]
-                if not isinstance(periods_list, list):
-                    continue
-                for period in periods_list:
-                    from_dow = period.get("fromDayOfWeek", 0)
-                    to_dow = period.get("toDayOfWeek", 6)
-                    from_hour = period.get("fromHour", 0)
-                    to_hour = period.get("toHour", 24)
-
-                    # Day-of-week check
-                    if from_dow <= to_dow:
-                        if not (from_dow <= tesla_dow <= to_dow):
-                            continue
-                    else:
-                        if not (tesla_dow >= from_dow or tesla_dow <= to_dow):
-                            continue
-
-                    # Hour check (handles overnight periods)
-                    if from_hour <= to_hour:
-                        if from_hour <= hour < to_hour:
-                            candidates.append(period_name)
-                            break
-                    else:
-                        if hour >= from_hour or hour < to_hour:
-                            candidates.append(period_name)
-                            break
-
-            if candidates:
-                # Pick the candidate with the highest sell rate (best for user).
-                # On tie, prefer the one with the highest buy rate (most specific).
-                matched_period = max(
-                    candidates,
-                    key=lambda p: (sell_rates.get(p, 0), buy_rates.get(p, 0)),
-                )
-            else:
-                matched_period = None
-
-            if not matched_period:
-                matched_period = "OFF_PEAK"
+            matched_period = find_matching_tou_period(
+                tou_periods,
+                ts,
+                default="OFF_PEAK",
+                buy_rates=buy_rates,
+                sell_rates=sell_rates,
+            )
 
             # buy_rates values are in $/kWh (e.g. 0.48 for 48c)
             # When the matched period isn't in buy_rates (e.g. GloBird gaps at 14-17, 21-24),
