@@ -107,6 +107,7 @@ from .const import (
     CONF_NEOVOLT_MAX_CHARGE_KW,
     CONF_NEOVOLT_MAX_DISCHARGE_KW,
     CONF_NEOVOLT_BATTERY_CAPACITIES_KWH,
+    CONF_NEOVOLT_BATTERY_CAPACITIES_KWH_RAW,
     CONF_NEOVOLT_SURPLUS_BALANCER_MODE,
     CONF_NEOVOLT_SOC_BALANCE_TOLERANCE,
     DEFAULT_NEOVOLT_MAX_CHARGE_KW,
@@ -439,6 +440,21 @@ def _parse_neovolt_capacities_kwh(raw_value: Any, stack_count: int) -> list[floa
     elif stack_count > 1 and len(capacities) == 1:
         capacities = capacities * stack_count
     return capacities
+
+
+def _normalize_neovolt_capacities_text(raw_value: Any) -> str:
+    """Normalize the user's Neovolt capacity text without changing its meaning."""
+    if raw_value in (None, "", []):
+        return ""
+    if isinstance(raw_value, (list, tuple)):
+        raw_parts = [str(part).strip() for part in raw_value if str(part).strip()]
+    else:
+        raw_parts = [
+            part.strip()
+            for part in str(raw_value).replace(";", ",").split(",")
+            if part.strip()
+        ]
+    return ", ".join(raw_parts)
 
 
 def _format_neovolt_capacities_kwh(raw_value: Any) -> str:
@@ -2630,8 +2646,11 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
 
             try:
+                battery_capacities_text = _normalize_neovolt_capacities_text(
+                    user_input.get(CONF_NEOVOLT_BATTERY_CAPACITIES_KWH)
+                )
                 battery_capacities_kwh = _parse_neovolt_capacities_kwh(
-                    user_input.get(CONF_NEOVOLT_BATTERY_CAPACITIES_KWH),
+                    battery_capacities_text,
                     len(selected_entry_ids),
                 )
                 ctrl = NeovoltFleetBatteryController(
@@ -2650,6 +2669,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_NEOVOLT_MAX_CHARGE_KW: float(max_charge_kw),
                     CONF_NEOVOLT_MAX_DISCHARGE_KW: float(max_discharge_kw),
                     CONF_NEOVOLT_BATTERY_CAPACITIES_KWH: battery_capacities_kwh,
+                    CONF_NEOVOLT_BATTERY_CAPACITIES_KWH_RAW: battery_capacities_text,
                     CONF_NEOVOLT_SURPLUS_BALANCER_MODE: str(surplus_balancer_mode),
                     CONF_NEOVOLT_SOC_BALANCE_TOLERANCE: float(soc_balance_tolerance),
                 }
@@ -5116,8 +5136,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 DEFAULT_NEOVOLT_SOC_BALANCE_TOLERANCE,
             )
             try:
+                battery_capacities_text = _normalize_neovolt_capacities_text(
+                    user_input.get(CONF_NEOVOLT_BATTERY_CAPACITIES_KWH)
+                )
                 battery_capacities_kwh = _parse_neovolt_capacities_kwh(
-                    user_input.get(CONF_NEOVOLT_BATTERY_CAPACITIES_KWH),
+                    battery_capacities_text,
                     len(selected_entry_ids),
                 )
                 ctrl = NeovoltFleetBatteryController(
@@ -5136,6 +5159,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 new_data[CONF_NEOVOLT_MAX_CHARGE_KW] = float(max_charge_kw)
                 new_data[CONF_NEOVOLT_MAX_DISCHARGE_KW] = float(max_discharge_kw)
                 new_data[CONF_NEOVOLT_BATTERY_CAPACITIES_KWH] = battery_capacities_kwh
+                if battery_capacities_text:
+                    new_data[CONF_NEOVOLT_BATTERY_CAPACITIES_KWH_RAW] = (
+                        battery_capacities_text
+                    )
+                else:
+                    new_data.pop(CONF_NEOVOLT_BATTERY_CAPACITIES_KWH_RAW, None)
                 new_data[CONF_NEOVOLT_SURPLUS_BALANCER_MODE] = str(surplus_balancer_mode)
                 new_data[CONF_NEOVOLT_SOC_BALANCE_TOLERANCE] = float(soc_balance_tolerance)
                 self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
@@ -5194,8 +5223,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         )
         current_battery_capacities = _format_neovolt_capacities_kwh(
             self._get_option(
-                CONF_NEOVOLT_BATTERY_CAPACITIES_KWH,
-                self.config_entry.data.get(CONF_NEOVOLT_BATTERY_CAPACITIES_KWH, []),
+                CONF_NEOVOLT_BATTERY_CAPACITIES_KWH_RAW,
+                self.config_entry.data.get(
+                    CONF_NEOVOLT_BATTERY_CAPACITIES_KWH_RAW,
+                    self.config_entry.data.get(CONF_NEOVOLT_BATTERY_CAPACITIES_KWH, []),
+                ),
             )
         )
 

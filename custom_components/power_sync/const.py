@@ -428,6 +428,7 @@ CONF_NEOVOLT_CONFIG_ENTRY_IDS = "neovolt_config_entry_ids"
 CONF_NEOVOLT_MAX_CHARGE_KW = "neovolt_max_charge_kw"
 CONF_NEOVOLT_MAX_DISCHARGE_KW = "neovolt_max_discharge_kw"
 CONF_NEOVOLT_BATTERY_CAPACITIES_KWH = "neovolt_battery_capacities_kwh"
+CONF_NEOVOLT_BATTERY_CAPACITIES_KWH_RAW = "neovolt_battery_capacities_kwh_raw"
 CONF_NEOVOLT_SURPLUS_BALANCER_MODE = "neovolt_surplus_balancer_mode"
 CONF_NEOVOLT_SOC_BALANCE_TOLERANCE = "neovolt_soc_balance_tolerance"
 DEFAULT_NEOVOLT_MAX_CHARGE_KW = 5.0

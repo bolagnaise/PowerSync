@@ -499,7 +499,7 @@
           "neovolt_max_charge_kw": "Maximum charge power in kW. Used by the LP optimizer and dispatch command limits.",
           "neovolt_max_discharge_kw": "Maximum discharge power in kW. Used by the LP optimizer and dispatch command limits.",
           "neovolt_battery_capacities_kwh": "Optional comma-separated usable battery capacities in kWh. With multiple Neovolt integrations, values follow the selected integration order. With one integration, multiple values are summed. Example: 20.1, 30.2. Leave blank to use Neovolt's capacity sensors.",
-          "neovolt_surplus_balancer_mode": "Auto is conservative and only acts on multi-inverter Neovolt systems. Disable this if your batteries already have a parallel/BMS coordinator.",
+          "neovolt_surplus_balancer_mode": "Auto is conservative and only acts when multiple Neovolt integrations are selected so PowerSync can command each inverter independently. With one selected integration, the balancer status will show disabled. Disable this if your batteries already have a parallel/BMS coordinator.",
           "neovolt_soc_balance_tolerance": "PowerSync will not force-charge a higher-SOC parked stack while another stack is behind by more than this percentage."
         },
         "submit": "Connect"
@@ -1034,7 +1034,7 @@
           "neovolt_max_charge_kw": "Maximum charge power in kW.",
           "neovolt_max_discharge_kw": "Maximum discharge power in kW.",
           "neovolt_battery_capacities_kwh": "Optional comma-separated usable battery capacities in kWh. With multiple Neovolt integrations, values follow the selected integration order. With one integration, multiple values are summed. Example: 20.1, 30.2. Leave blank to use Neovolt's capacity sensors.",
-          "neovolt_surplus_balancer_mode": "Auto is conservative and only acts on multi-inverter Neovolt systems. Disable this if your batteries already have a parallel/BMS coordinator.",
+          "neovolt_surplus_balancer_mode": "Auto is conservative and only acts when multiple Neovolt integrations are selected so PowerSync can command each inverter independently. With one selected integration, the balancer status will show disabled. Disable this if your batteries already have a parallel/BMS coordinator.",
           "neovolt_soc_balance_tolerance": "PowerSync will not force-charge a higher-SOC parked stack while another stack is behind by more than this percentage."
         },
         "submit": "Save"

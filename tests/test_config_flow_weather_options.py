@@ -94,6 +94,51 @@ def test_neovolt_capacity_parser_accepts_comma_separated_stack_values():
     assert parse("20.1", 2) == [20.1, 20.1]
 
 
+def test_neovolt_capacity_text_preserves_user_stack_values_for_display():
+    function = _top_level_function("_normalize_neovolt_capacities_text")
+    module = ast.Module(body=[function], type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace = {"Any": object}
+    exec(compile(module, str(CONFIG_FLOW_PATH), "exec"), namespace)
+
+    normalize = namespace["_normalize_neovolt_capacities_text"]
+
+    assert normalize("20.1, 30.2") == "20.1, 30.2"
+    assert normalize("20.1 kWh; 30.2 kWh") == "20.1 kWh, 30.2 kWh"
+    assert normalize([20.1, 30.2]) == "20.1, 30.2"
+    assert normalize("") == ""
+
+
+def test_neovolt_options_flow_prefers_preserved_capacity_text():
+    source = CONFIG_FLOW_PATH.read_text()
+    method = _options_flow_method("async_step_neovolt_connection")
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    assert "CONF_NEOVOLT_BATTERY_CAPACITIES_KWH_RAW" in method_source
+    assert "_normalize_neovolt_capacities_text" in method_source
+    assert (
+        "new_data[CONF_NEOVOLT_BATTERY_CAPACITIES_KWH_RAW]"
+        in method_source
+    )
+
+
+def test_neovolt_surplus_balancer_help_explains_disabled_single_entry_status():
+    for path in (STRINGS_PATH, TRANSLATIONS_PATH):
+        data = json.loads(path.read_text())
+        for section, step_name in (
+            ("config", "neovolt_battery"),
+            ("options", "neovolt_connection"),
+        ):
+            description = data[section]["step"][step_name]["data_description"][
+                "neovolt_surplus_balancer_mode"
+            ]
+
+            assert "multiple Neovolt integrations" in description
+            assert "one selected integration" in description
+            assert "disabled" in description
+
+
 def test_weather_entity_selector_is_conditional_and_has_blank_state():
     method = _options_flow_method("_add_weather_entity_selector")
 
