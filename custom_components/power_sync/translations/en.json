@@ -479,7 +479,7 @@
           "neovolt_config_entry_ids": "Select every Neovolt inverter entry PowerSync should read and control.",
           "neovolt_max_charge_kw": "Maximum charge power in kW. Used by the LP optimizer and dispatch command limits.",
           "neovolt_max_discharge_kw": "Maximum discharge power in kW. Used by the LP optimizer and dispatch command limits.",
-          "neovolt_battery_capacities_kwh": "Optional comma-separated usable battery capacities in kWh, in the same order as the selected Neovolt integrations. Example: 20.1, 30.2.",
+          "neovolt_battery_capacities_kwh": "Optional comma-separated usable battery capacities in kWh. With multiple Neovolt integrations, values follow the selected integration order. With one integration, multiple values are summed. Example: 20.1, 30.2. Leave blank to use Neovolt's capacity sensors.",
           "neovolt_surplus_balancer_mode": "Auto is conservative and only acts on multi-inverter Neovolt systems. Disable this if your batteries already have a parallel/BMS coordinator.",
           "neovolt_soc_balance_tolerance": "PowerSync will not force-charge a higher-SOC parked stack while another stack is behind by more than this percentage."
         },
@@ -800,7 +800,7 @@
       "saj_connect_failed": "Failed to validate SAJ H2 entities. Check the selected integration entry and try again.",
       "neovolt_missing_entities": "Could not find the required Neovolt entities in the selected Neovolt integration entry. Make sure the integration is installed, the system is online, and its entities have been created in Home Assistant.",
       "neovolt_connect_failed": "Failed to validate Neovolt entities. Check the selected integration entry and try again.",
-      "neovolt_capacity_invalid": "Enter one positive battery capacity for each selected Neovolt integration, separated by commas."
+      "neovolt_capacity_invalid": "Enter positive battery capacities in kWh, separated by commas."
     },
     "abort": {
       "already_configured": "PowerSync is already configured. To change settings, use the Configure button on the integration card.",
@@ -1014,7 +1014,7 @@
           "neovolt_config_entry_ids": "Select every Neovolt inverter entry PowerSync should read and control.",
           "neovolt_max_charge_kw": "Maximum charge power in kW.",
           "neovolt_max_discharge_kw": "Maximum discharge power in kW.",
-          "neovolt_battery_capacities_kwh": "Optional comma-separated usable battery capacities in kWh, in the same order as the selected Neovolt integrations. Example: 20.1, 30.2.",
+          "neovolt_battery_capacities_kwh": "Optional comma-separated usable battery capacities in kWh. With multiple Neovolt integrations, values follow the selected integration order. With one integration, multiple values are summed. Example: 20.1, 30.2. Leave blank to use Neovolt's capacity sensors.",
           "neovolt_surplus_balancer_mode": "Auto is conservative and only acts on multi-inverter Neovolt systems. Disable this if your batteries already have a parallel/BMS coordinator.",
           "neovolt_soc_balance_tolerance": "PowerSync will not force-charge a higher-SOC parked stack while another stack is behind by more than this percentage."
         },

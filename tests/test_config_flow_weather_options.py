@@ -79,6 +79,21 @@ def test_optional_entity_normalizer_treats_none_as_unset():
     assert normalize(" weather.forecast_home ") == "weather.forecast_home"
 
 
+def test_neovolt_capacity_parser_accepts_comma_separated_stack_values():
+    function = _top_level_function("_parse_neovolt_capacities_kwh")
+    module = ast.Module(body=[function], type_ignores=[])
+    ast.fix_missing_locations(module)
+    namespace = {"Any": object}
+    exec(compile(module, str(CONFIG_FLOW_PATH), "exec"), namespace)
+
+    parse = namespace["_parse_neovolt_capacities_kwh"]
+
+    assert parse("20.1, 30.2", 2) == [20.1, 30.2]
+    assert parse("20.1 kWh, 30.2 kWh", 2) == [20.1, 30.2]
+    assert parse("20.1, 30.2", 1) == [50.3]
+    assert parse("20.1", 2) == [20.1, 20.1]
+
+
 def test_weather_entity_selector_is_conditional_and_has_blank_state():
     method = _options_flow_method("_add_weather_entity_selector")
 

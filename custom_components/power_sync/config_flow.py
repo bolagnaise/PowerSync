@@ -425,16 +425,19 @@ def _parse_neovolt_capacities_kwh(raw_value: Any, stack_count: int) -> list[floa
 
     capacities: list[float] = []
     for raw_part in raw_parts:
+        raw_capacity = str(raw_part).strip().lower().removesuffix("kwh").strip()
         try:
-            capacity = float(raw_part)
+            capacity = float(raw_capacity)
         except (TypeError, ValueError) as exc:
             raise ValueError("capacity_invalid") from exc
         if capacity <= 0:
             raise ValueError("capacity_must_be_positive")
         capacities.append(capacity)
 
-    if capacities and len(capacities) != stack_count:
-        raise ValueError("capacity_count_mismatch")
+    if stack_count <= 1 and len(capacities) > 1:
+        capacities = [sum(capacities)]
+    elif stack_count > 1 and len(capacities) == 1:
+        capacities = capacities * stack_count
     return capacities
 
 
