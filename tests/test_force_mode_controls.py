@@ -151,6 +151,31 @@ def test_aemo_vpp_tariff_price_view_uses_tariff_schedule_path():
     assert dynamic_assignments == ['dynamic_providers = ("amber", "flow_power")']
 
 
+def test_powerwall_settings_view_rejects_neovolt_systems():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    method = _find_class_method(tree, "PowerwallSettingsView", "get")
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    assert "is_neovolt_pw = bool(_get_neovolt_entry_ids(entry.data, self._hass))" in method_source
+    assert 'if is_neovolt_pw:' in method_source
+    assert '"reason": "neovolt_not_supported"' in method_source
+    assert '"battery_system": BATTERY_SYSTEM_NEOVOLT' in method_source
+
+
+def test_neovolt_force_discharge_hardware_extension_preserves_restore_modes():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "handle_force_discharge")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    assert 'neovolt_coord = entry_data.get("neovolt_coordinator")' in function_source
+    assert "await neovolt_coord.force_discharge(" in function_source
+    assert "preserve_restore_modes=True" in function_source
+
+
 def test_tesla_tariff_fetch_rejects_force_tariffs():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)

@@ -226,7 +226,13 @@ class NeovoltBatteryController:
         )
         return True
 
-    async def force_discharge(self, duration_minutes: int, power_w: int | float) -> bool:
+    async def force_discharge(
+        self,
+        duration_minutes: int,
+        power_w: int | float,
+        *,
+        preserve_restore_modes: bool = False,
+    ) -> bool:
         """Force battery to discharge via Neovolt dispatch controls."""
         await self._ensure_connected()
         power_kw = self._watts_to_kw(power_w, self._max_discharge_kw)
@@ -687,10 +693,17 @@ class NeovoltFleetBatteryController:
         ]
         return all(results)
 
-    async def force_discharge(self, duration_minutes: int, power_w: int | float) -> bool:
+    async def force_discharge(
+        self,
+        duration_minutes: int,
+        power_w: int | float,
+        *,
+        preserve_restore_modes: bool = False,
+    ) -> bool:
         """Force all batteries to discharge via their Neovolt dispatch controls."""
         await self._stop_surplus_balance("force_discharge")
-        self._capture_restore_modes()
+        if not preserve_restore_modes:
+            self._capture_restore_modes()
         statuses = [controller.get_status() for controller in self._controllers]
         powers = self._split_power_w(power_w, "_max_discharge_kw", statuses)
         results = [
@@ -1193,6 +1206,15 @@ class NeovoltFleetBatteryController:
             max(0.0, float(getattr(controller, limit_attr, 0.0)))
             for controller in self._controllers
         ]
+        limit_w = [limit_kw * 1000.0 for limit_kw in limits_kw]
+        total_limit_w = sum(limit_w)
+        if (
+            limit_attr == "_max_discharge_kw"
+            and total_limit_w > 0
+            and float(power_w) >= total_limit_w
+        ):
+            return limit_w
+
         capacities = self._status_capacities(statuses or [])
         capacity_split = self._capacity_limited_power_split_w(
             float(power_w),

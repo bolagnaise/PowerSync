@@ -532,6 +532,92 @@ def test_fleet_force_charge_capacity_split_respects_larger_stack_limit():
     )
 
 
+def test_fleet_force_discharge_max_request_writes_each_inverter_max():
+    entry_1_states = _combined_states_for(
+        1,
+        battery_power="0",
+        battery_soc="50",
+        battery_capacity="20.1",
+    ) + _control_states_for(1)
+    entry_2_states = _combined_states_for(
+        2,
+        battery_power="0",
+        battery_soc="50",
+        battery_capacity="30.2",
+    ) + _control_states_for(2)
+    hass = _FakeHass(
+        entry_1_states + entry_2_states,
+        {
+            "neovolt-1": [state.entity_id for state in entry_1_states],
+            "neovolt-2": [state.entity_id for state in entry_2_states],
+        },
+    )
+    controller = NeovoltFleetBatteryController(
+        hass,
+        ["neovolt-1", "neovolt-2"],
+        max_charge_kw=5.0,
+        max_discharge_kw=5.0,
+    )
+    assert asyncio.run(controller.connect())
+
+    assert asyncio.run(controller.force_discharge(duration_minutes=30, power_w=10000))
+
+    assert hass.services.calls == [
+        ("number", "set_value", {"entity_id": "number.neovolt_1_dispatch_power", "value": 5.0}),
+        ("number", "set_value", {"entity_id": "number.neovolt_1_dispatch_duration", "value": 30}),
+        ("number", "set_value", {"entity_id": "number.neovolt_1_dispatch_discharge_cutoff_soc", "value": 10}),
+        ("select", "select_option", {"entity_id": "select.neovolt_1_dispatch_mode", "option": "Force Discharge"}),
+        ("number", "set_value", {"entity_id": "number.neovolt_2_dispatch_power", "value": 5.0}),
+        ("number", "set_value", {"entity_id": "number.neovolt_2_dispatch_duration", "value": 30}),
+        ("number", "set_value", {"entity_id": "number.neovolt_2_dispatch_discharge_cutoff_soc", "value": 10}),
+        ("select", "select_option", {"entity_id": "select.neovolt_2_dispatch_mode", "option": "Force Discharge"}),
+    ]
+
+
+def test_fleet_force_discharge_refresh_preserves_restore_modes():
+    entry_1_states = _combined_states_for(
+        1,
+        battery_power="0",
+        battery_soc="50",
+        battery_capacity="20.1",
+    ) + _control_states_for(1, mode="Normal")
+    entry_2_states = _combined_states_for(
+        2,
+        battery_power="0",
+        battery_soc="50",
+        battery_capacity="30.2",
+    ) + _control_states_for(2, mode="Normal")
+    hass = _FakeHass(
+        entry_1_states + entry_2_states,
+        {
+            "neovolt-1": [state.entity_id for state in entry_1_states],
+            "neovolt-2": [state.entity_id for state in entry_2_states],
+        },
+    )
+    controller = NeovoltFleetBatteryController(
+        hass,
+        ["neovolt-1", "neovolt-2"],
+        max_charge_kw=5.0,
+        max_discharge_kw=5.0,
+    )
+    assert asyncio.run(controller.connect())
+
+    assert asyncio.run(controller.force_discharge(duration_minutes=30, power_w=10000))
+    assert controller._restore_modes == ["Normal", "Normal"]
+
+    hass.states._states["select.neovolt_1_dispatch_mode"].state = "Force Discharge"
+    hass.states._states["select.neovolt_2_dispatch_mode"].state = "Force Discharge"
+    assert asyncio.run(
+        controller.force_discharge(
+            duration_minutes=29,
+            power_w=10000,
+            preserve_restore_modes=True,
+        )
+    )
+
+    assert controller._restore_modes == ["Normal", "Normal"]
+
+
 def test_fleet_uses_configured_capacity_over_sensor_capacity():
     entry_1_states = _combined_states_for(
         1,

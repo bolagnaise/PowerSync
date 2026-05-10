@@ -3780,10 +3780,11 @@ class PowerwallSettingsView(HomeAssistantView):
                 status=503
             )
 
-        # Check if this is a Sigenergy, Sungrow, FoxESS, GoodWe, or AlphaESS setup - Powerwall settings not applicable
+        # Check if this is a non-Tesla setup - Powerwall settings may not apply.
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
         is_sungrow = bool(entry.data.get(CONF_SUNGROW_HOST))
         is_foxess = bool(entry.data.get(CONF_FOXESS_HOST) or entry.data.get(CONF_FOXESS_SERIAL_PORT))
+        is_neovolt_pw = bool(_get_neovolt_entry_ids(entry.data, self._hass))
         is_alphaess_pw = bool(entry.data.get(CONF_ALPHAESS_MODBUS_HOST))
         if is_alphaess_pw:
             entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
@@ -3834,6 +3835,17 @@ class PowerwallSettingsView(HomeAssistantView):
                     "success": False,
                     "error": "Powerwall settings are not available for FoxESS battery systems",
                     "reason": "foxess_not_supported"
+                },
+                status=200
+            )
+        if is_neovolt_pw:
+            _LOGGER.info("Powerwall settings not available for Neovolt battery systems")
+            return web.json_response(
+                {
+                    "success": False,
+                    "error": "Powerwall settings are not available for Neovolt battery systems",
+                    "reason": "neovolt_not_supported",
+                    "battery_system": BATTERY_SYSTEM_NEOVOLT,
                 },
                 status=200
             )
@@ -19643,6 +19655,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if esy_coord:
                 await esy_coord.force_discharge(duration, power_w=power_w)
                 _LOGGER.debug(f"ESY Sunhome force discharge hardware extended ({duration}min)")
+                return
+            neovolt_coord = entry_data.get("neovolt_coordinator")
+            if neovolt_coord:
+                await neovolt_coord.force_discharge(
+                    duration,
+                    power_w=power_w,
+                    preserve_restore_modes=True,
+                )
+                _LOGGER.debug(f"Neovolt force discharge hardware refreshed ({duration}min, {power_w}W)")
                 return
             _LOGGER.debug(
                 "_extend_hardware: no direct coordinator found for source=%s, falling through to full handler",
