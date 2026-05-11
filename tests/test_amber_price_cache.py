@@ -118,6 +118,34 @@ class _FakeStates:
         ]
 
 
+class _FakeResponse:
+    def __init__(self, status: int, text: str = "", payload=None, headers=None) -> None:
+        self.status = status
+        self._text = text
+        self._payload = payload if payload is not None else {}
+        self.headers = headers or {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def text(self):
+        return self._text
+
+    async def json(self):
+        return self._payload
+
+
+class _FakeSession:
+    def __init__(self, response: _FakeResponse) -> None:
+        self.response = response
+
+    def get(self, *args, **kwargs):
+        return self.response
+
+
 def _current_price():
     return [
         {
@@ -293,6 +321,44 @@ def test_octopus_integration_reads_public_current_rate_entities_when_internal_da
     current = result["current"]
     assert next(p for p in current if p["channelType"] == "general")["perKwh"] == 24.5
     assert next(p for p in current if p["channelType"] == "feedIn")["perKwh"] == -4.1
+
+
+def test_fetch_with_retry_raises_reauth_for_direct_token_401():
+    session = _FakeSession(_FakeResponse(401, '{"error":"token expired (401)"}'))
+
+    try:
+        asyncio.run(
+            coordinator._fetch_with_retry(
+                session,
+                "https://example.test",
+                {},
+                max_retries=1,
+            )
+        )
+    except coordinator.ConfigEntryAuthFailed as err:
+        assert "token expired" in str(err)
+    else:
+        raise AssertionError("Expected ConfigEntryAuthFailed")
+
+
+def test_fetch_with_retry_treats_fleet_token_401_as_update_failure():
+    session = _FakeSession(_FakeResponse(401, '{"error":"token expired (401)"}'))
+
+    try:
+        asyncio.run(
+            coordinator._fetch_with_retry(
+                session,
+                "https://example.test",
+                {},
+                max_retries=1,
+                raise_auth_failed=False,
+            )
+        )
+    except coordinator.UpdateFailed as err:
+        assert "Authentication failed: 401" in str(err)
+        assert "token expired" in str(err)
+    else:
+        raise AssertionError("Expected UpdateFailed")
 
 
 def test_tesla_lifetime_totals_clamp_prevents_recorder_decrease():

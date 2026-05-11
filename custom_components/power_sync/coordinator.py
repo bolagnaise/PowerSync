@@ -653,6 +653,7 @@ async def _fetch_with_retry(
     headers: dict,
     max_retries: int = 3,
     timeout_seconds: int = 60,
+    raise_auth_failed: bool = True,
     **kwargs
 ) -> dict[str, Any]:
     """Fetch data with exponential backoff retry logic.
@@ -666,6 +667,8 @@ async def _fetch_with_retry(
         headers: Request headers
         max_retries: Maximum number of retry attempts (default: 3)
         timeout_seconds: Request timeout in seconds (default: 60)
+        raise_auth_failed: Whether 401 responses should raise
+            ConfigEntryAuthFailed instead of UpdateFailed
         **kwargs: Additional arguments to pass to session.get()
 
     Returns:
@@ -721,15 +724,22 @@ async def _fetch_with_retry(
                     last_error = UpdateFailed(f"Server error: {response.status}")
                     continue
 
-                # 401 → token expired/revoked. Raise ConfigEntryAuthFailed so
-                # HA triggers the reauth flow and prompts the user to re-enter
-                # their token (PowerSync, Teslemetry, etc.)
+                # 401 → token expired/revoked. Direct token providers should
+                # trigger HA reauth. Fleet API tokens are owned/refreshed by
+                # the separate tesla_fleet integration, so callers can treat
+                # them as transient stale-token failures instead.
                 if response.status == 401:
+                    if raise_auth_failed:
+                        _LOGGER.warning(
+                            "Authentication failed (401) — triggering reauth: %s",
+                            error_text[:200],
+                        )
+                        raise ConfigEntryAuthFailed(f"Token rejected by upstream: {error_text[:200]}")
                     _LOGGER.warning(
-                        "Authentication failed (401) — triggering reauth: %s",
+                        "Authentication failed (401) — token may be refreshing upstream: %s",
                         error_text[:200],
                     )
-                    raise ConfigEntryAuthFailed(f"Token rejected by upstream: {error_text[:200]}")
+                    raise UpdateFailed(f"Authentication failed: 401 - {error_text[:200]}")
 
                 # Other 4xx client errors — don't retry
                 raise UpdateFailed(f"Client error {response.status}: {error_text}")
@@ -1768,6 +1778,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 headers,
                 max_retries=3,  # More retries for reliability
                 timeout_seconds=60,  # Longer timeout
+                raise_auth_failed=self.api_provider != TESLA_PROVIDER_FLEET_API,
             )
 
             # Tesla returns {"response": null} occasionally during transient failures
@@ -2076,6 +2087,7 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                 headers,
                 max_retries=3,
                 timeout_seconds=60,
+                raise_auth_failed=self.api_provider != TESLA_PROVIDER_FLEET_API,
             )
 
             site_info = data.get("response", {})
