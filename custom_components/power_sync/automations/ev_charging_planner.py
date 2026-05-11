@@ -5269,7 +5269,61 @@ def _resolve_dynamic_loadpoint_id(
     return vehicle_vin
 
 
+def _resolve_ocpp_charger_id(
+    hass: "HomeAssistant",
+    configured_id: Optional[str] = None,
+) -> str:
+    """Resolve the OCPP charger prefix used by HACS OCPP switch entities."""
+    configured = str(configured_id or "ocpp_charger")
+    states = getattr(hass, "states", None)
+    if states and states.get(f"switch.{configured}_charge_control"):
+        return configured
+
+    detected: set[str] = set()
+
+    try:
+        from homeassistant.helpers import entity_registry as er
+        from .ocpp_status import extract_hacs_ocpp_prefix
+
+        entity_reg = er.async_get(hass)
+        for entity in getattr(entity_reg, "entities", {}).values():
+            if getattr(entity, "platform", None) != "ocpp":
+                continue
+            prefix = extract_hacs_ocpp_prefix(getattr(entity, "entity_id", ""))
+            if prefix:
+                detected.add(prefix)
+    except Exception:
+        pass
+
+    if states:
+        try:
+            for entity_id in states.async_entity_ids("switch"):
+                if not entity_id.endswith("_charge_control"):
+                    continue
+                prefix = entity_id.split(".", 1)[1][: -len("_charge_control")]
+                if (
+                    states.get(f"sensor.{prefix}_status_connector")
+                    or states.get(f"sensor.{prefix}_status")
+                ):
+                    detected.add(prefix)
+        except Exception:
+            pass
+
+    if len(detected) == 1:
+        resolved = next(iter(detected))
+        if resolved != configured:
+            _LOGGER.debug(
+                "OCPP charger id resolved from %s to detected HACS prefix %s",
+                configured,
+                resolved,
+            )
+        return resolved
+
+    return configured
+
+
 def _with_configured_charger_entities(
+    hass: "HomeAssistant",
     params: dict,
     opts: Mapping[str, Any],
     charger_type: str,
@@ -5295,7 +5349,10 @@ def _with_configured_charger_entities(
             "",
         )
     elif charger_type == "ocpp":
-        params["ocpp_charger_id"] = params.get("ocpp_charger_id") or opts.get("ocpp_charger_id", "ocpp_charger")
+        params["ocpp_charger_id"] = _resolve_ocpp_charger_id(
+            hass,
+            params.get("ocpp_charger_id") or opts.get("ocpp_charger_id"),
+        )
     return params
 
 
@@ -5332,7 +5389,7 @@ def _build_dynamic_charging_params(
         params["no_grid_import"] = True
     if allow_ownership_takeover:
         params["allow_ownership_takeover"] = True
-    params = _with_configured_charger_entities(params, opts, charger_type)
+    params = _with_configured_charger_entities(hass, params, opts, charger_type)
     loadpoint_id = _resolve_dynamic_loadpoint_id(
         charger_type,
         vehicle_vin,
@@ -5372,7 +5429,7 @@ def _build_dynamic_stop_params(
         params["stop_untracked"] = True
     if reason:
         params["stop_reason"] = reason
-    params = _with_configured_charger_entities(params, opts, charger_type)
+    params = _with_configured_charger_entities(hass, params, opts, charger_type)
     loadpoint_id = _resolve_dynamic_loadpoint_id(
         charger_type,
         vehicle_vin,
@@ -6308,7 +6365,10 @@ class PriceLevelChargingExecutor:
                 # initiated sessions share an identifier with the OCPP poll's
                 # session tracker — prevents double-counted sessions when both
                 # see the same charging cycle.
-                ocpp_charger_id = opts.get("ocpp_charger_id", "ocpp_charger")
+                ocpp_charger_id = _resolve_ocpp_charger_id(
+                    self.hass,
+                    opts.get("ocpp_charger_id"),
+                )
                 pseudo_vin = f"ocpp_{ocpp_charger_id}"
                 results[pseudo_vin] = decision
 

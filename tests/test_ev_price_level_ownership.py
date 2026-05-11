@@ -79,6 +79,7 @@ class _FakeHass:
         self,
         enabled: bool = True,
         price_settings: dict | None = None,
+        states: dict[str, str] | None = None,
     ) -> None:
         settings = {"enabled": enabled}
         if price_settings:
@@ -95,6 +96,7 @@ class _FakeHass:
         }
         self.entity_registry = SimpleNamespace(entities={})
         self.device_registry = SimpleNamespace(devices={})
+        self.states = _FakeStates(states)
 
 
 class _FakeStates:
@@ -373,6 +375,40 @@ def test_scheduled_ocpp_start_uses_ocpp_loadpoint_id(fake_actions):
     assert params["charger_type"] == "ocpp"
     assert params["ocpp_charger_id"] == "evse_1"
     assert params["allow_ownership_takeover"] is True
+
+
+def test_price_level_ocpp_start_uses_detected_hacs_prefix(monkeypatch, fake_actions):
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+
+    async def wants_charge(self, current_price_cents):
+        return True, "Opportunity", "price_level_opportunity"
+
+    class OcppEntry(_FakeConfigEntry):
+        options = {"ocpp_enabled": True}
+
+    monkeypatch.setattr(ev_planner, "discover_all_tesla_vehicles", _no_vehicles)
+    monkeypatch.setattr(
+        ev_planner.PriceLevelChargingExecutor,
+        "get_charging_decision",
+        wants_charge,
+    )
+
+    hass = _FakeHass(
+        states={
+            "switch.charger_charge_control": "off",
+            "sensor.charger_status_connector": "Finishing",
+        }
+    )
+    executor = ev_planner.PriceLevelChargingExecutor(hass, OcppEntry())
+    results = asyncio.run(executor.evaluate_all_vehicles(10))
+
+    assert "ocpp_charger" in results
+    fake_actions._action_start_ev_charging_dynamic.assert_awaited_once()
+    _hass, _entry, params = fake_actions._action_start_ev_charging_dynamic.await_args.args
+    assert params["vehicle_id"] == "ocpp_charger"
+    assert params["vehicle_vin"] == "ocpp_charger"
+    assert params["charger_type"] == "ocpp"
+    assert params["ocpp_charger_id"] == "charger"
 
 
 def test_auto_schedule_start_allows_solar_surplus_takeover(monkeypatch, fake_actions):
