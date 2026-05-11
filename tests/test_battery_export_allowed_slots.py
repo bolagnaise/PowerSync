@@ -896,6 +896,37 @@ def test_export_duration_clips_at_next_non_export_boundary(opt_module):
     assert coordinator._last_executed_action == "export"
 
 
+def test_foxess_export_at_reserve_lets_hardware_min_soc_enforce_floor(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.20)
+    coordinator.battery_system = "foxess"
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="export", power_w=4200)
+        )
+    )
+
+    assert battery.force_discharge_calls == [(10, 5000, False)]
+    assert battery.self_consumption_calls == 0
+    assert coordinator._last_executed_action == "export"
+
+
+def test_tesla_export_near_reserve_switches_to_self_consumption(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.24)
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="export", power_w=4200)
+        )
+    )
+
+    assert battery.force_discharge_calls == []
+    assert battery.self_consumption_calls == 1
+    assert coordinator._last_executed_action == "self_consumption"
+
+
 def test_tesla_force_extension_reuploads_when_tariff_window_missing(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
