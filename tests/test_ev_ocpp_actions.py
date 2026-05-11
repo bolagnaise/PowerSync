@@ -225,6 +225,28 @@ def test_ocpp_amps_falls_back_to_hacs_number_entity():
     ]
 
 
+def test_ocpp_amps_rejects_hacs_number_entity_capped_below_evse_minimum():
+    entity_id = "number.evse_1_maximum_current"
+    hass = _Hass(
+        [
+            _State(entity_id, "5", {"min": 0, "max": 5}),
+        ],
+        {
+            entity_id: SimpleNamespace(entity_id=entity_id, platform="ocpp"),
+        },
+    )
+
+    assert asyncio.run(actions._set_ocpp_charging_amps(hass, "evse_1", 7)) is False
+    assert hass.services.calls == []
+
+
+def test_ocpp_effective_minimum_amps_is_six():
+    assert actions._effective_min_charge_amps({
+        "charger_type": "ocpp",
+        "min_charge_amps": 5,
+    }) == 6
+
+
 def test_ocpp_vehicle_start_succeeds_when_only_switch_control_exists():
     hass = _Hass([_State("switch.evse_1_charge_control", "off")])
 

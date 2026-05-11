@@ -74,6 +74,7 @@ PRE_CHARGE_WAKE_ENTITY_KEYS = (
     "ev_wake_entity",
     "wake_entity",
 )
+OCPP_MIN_CHARGE_AMPS = 6
 PRE_CHARGE_WAKE_DURATION_KEYS = (
     "pre_charge_wake_duration_seconds",
     "pre_charge_wake_wait_seconds",
@@ -3791,6 +3792,11 @@ def _effective_min_charge_amps(params: dict) -> int:
         # Tesla charge-current entities clamp to at least 5A. Solar surplus may
         # be configured lower, but hysteresis must use the hardware floor.
         return max(configured_min, 5)
+    if charger_type == "ocpp":
+        # OCPP AC charging follows the EVSE/J1772 6A floor. Some HACS OCPP
+        # entities expose a stale or capability range below that; do not let
+        # dynamic control chase invalid 0-5A targets.
+        return max(configured_min, OCPP_MIN_CHARGE_AMPS)
     return configured_min
 
 
@@ -3819,11 +3825,19 @@ async def _set_ocpp_charging_amps(hass: HomeAssistant, charger_id: int, amps: in
     current_entity = _find_ocpp_current_limit_entity(hass, charger_id)
     if current_entity:
         try:
-            target_amps = int(amps)
+            target_amps = max(OCPP_MIN_CHARGE_AMPS, int(amps))
             entity_state = hass.states.get(current_entity)
             if entity_state:
                 entity_min = entity_state.attributes.get("min")
                 entity_max = entity_state.attributes.get("max")
+                if entity_max is not None and int(entity_max) < OCPP_MIN_CHARGE_AMPS:
+                    _LOGGER.warning(
+                        "OCPP charger %s current-limit entity %s reports max=%sA below the 6A EVSE minimum; treating current limiting as unsupported",
+                        charger_id,
+                        current_entity,
+                        entity_max,
+                    )
+                    return False
                 if entity_min is not None:
                     target_amps = max(int(entity_min), target_amps)
                 if entity_max is not None:
