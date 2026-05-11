@@ -31,6 +31,23 @@ COST_STORE_VERSION = 1
 COST_STORE_SAVE_DELAY = 300  # Coalesce writes — flush at most every 5 minutes
 
 
+def _hhmm_to_minutes(value: Any, default: str = "17:15") -> int:
+    """Return minutes after midnight for a HH:MM value, falling back safely."""
+    candidate = value if isinstance(value, str) else default
+    try:
+        hour_raw, minute_raw = candidate.strip().split(":", 1)
+        hour = int(hour_raw)
+        minute = int(minute_raw)
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return hour * 60 + minute
+    except (AttributeError, TypeError, ValueError):
+        pass
+
+    if candidate != default:
+        return _hhmm_to_minutes(default, default)
+    return 17 * 60 + 15
+
+
 @dataclass
 class ProviderPriceConfig:
     """Configuration for price modifications from electricity provider settings."""
@@ -1269,34 +1286,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             else:
                 self._optimizer.suppress_reserve_warning = False
 
-            # Pre-window SOC floor: in profit_max mode, force the battery to be
-            # filled before the next high-value export window (today's Flow
-            # Power Happy Hour). Without this, the LP's 48 h horizon places
+            # Pre-window SOC floor: in profit_max mode, force the battery to
+            # be filled by the configured target time before the next
+            # high-value export window (today's Flow Power Happy Hour).
+            # Without this, the LP's 48 h horizon places
             # the planned grid-charge slots at the globally cheapest PEA
             # periods, which often misses today's HH and leaves the user
             # at ~80% SOC at 17:30.
-            #
-            # Safety buffer: pull the deadline 15 min earlier so charging
-            # completes with slack instead of racing the HH start. The LP
-            # otherwise plans charge to end at the exact HH boundary, which
-            # leaves no headroom for Modbus/UDP write latency, BMS current
-            # taper above ~90% SOC, AEMO predispatch jitter, or a dropped
-            # control packet — any of which can leave SOC below target at
-            # window start. Cost: typically ~$0.02/day from using slightly
-            # more expensive earlier slots; aligned with profit_max's
-            # existing trade of economic-optimal for reliable export.
-            _SAFETY_BUFFER_SLOTS = 3  # 15 min @ 5-min intervals
-            _hh_slot = (
-                self._next_export_window_slot()
+            _target_slot = (
+                self._next_profit_max_target_slot()
                 if self._config.allow_grid_charge
                 else None
             )
-            if _hh_slot is not None and _hh_slot > _SAFETY_BUFFER_SLOTS:
-                self._optimizer.pre_window_slot = (
-                    _hh_slot - _SAFETY_BUFFER_SLOTS
-                )
-            else:
-                self._optimizer.pre_window_slot = _hh_slot
+            self._optimizer.pre_window_slot = _target_slot
             self._optimizer.pre_window_soc_target = (
                 1.0 if self._optimizer.pre_window_slot is not None else 0.0
             )
@@ -2682,22 +2684,27 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return result
 
-    def _next_export_window_slot(self) -> int | None:
-        """Slot index of the next high-value export window in the LP horizon.
+    def _next_profit_max_target_slot(self) -> int | None:
+        """Slot index of the next Profit Max full-SOC target in the LP horizon.
 
         Used to enforce a pre-window SOC floor when profit_max mode is on.
         Returns None when the floor should not be applied (profit_max off,
-        unsupported provider, or no upcoming window in horizon).
+        unsupported provider, or no upcoming target in horizon).
 
-        Currently only Flow Power (Happy Hour 17:30-19:30) is supported; other
-        tariffs with deterministic high-export windows can be added here.
+        Currently only Flow Power is supported. The default target is 17:15,
+        preserving the original 15-minute safety buffer before Happy Hour.
         """
         if not self._entry:
             return None
         if not self._config.profit_max_enabled:
             return None
 
-        from ..const import CONF_ELECTRICITY_PROVIDER, CONF_FLOW_POWER_STATE
+        from ..const import (
+            CONF_ELECTRICITY_PROVIDER,
+            CONF_FLOW_POWER_STATE,
+            CONF_PROFIT_MAX_TARGET_TIME,
+            DEFAULT_PROFIT_MAX_TARGET_TIME,
+        )
         provider = self._entry.options.get(
             CONF_ELECTRICITY_PROVIDER,
             self._entry.data.get(CONF_ELECTRICITY_PROVIDER, ""),
@@ -2712,6 +2719,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return None
 
         happy_start_min = 17 * 60 + 30  # 17:30
+        target_min = _hhmm_to_minutes(
+            self._entry.options.get(
+                CONF_PROFIT_MAX_TARGET_TIME,
+                self._entry.data.get(
+                    CONF_PROFIT_MAX_TARGET_TIME,
+                    DEFAULT_PROFIT_MAX_TARGET_TIME,
+                ),
+            ),
+            DEFAULT_PROFIT_MAX_TARGET_TIME,
+        )
+        if target_min >= happy_start_min:
+            target_min = _hhmm_to_minutes(DEFAULT_PROFIT_MAX_TARGET_TIME)
         interval = self._config.interval_minutes
         n_steps = int(self._config.horizon_hours * 60) // interval
         raw_now = dt_util.now()
@@ -2722,10 +2741,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for t in range(n_steps):
             slot = now + timedelta(minutes=t * interval)
             slot_min = slot.hour * 60 + slot.minute
-            if slot_min == happy_start_min:
-                # Skip t=0: HH starts right now, no pre-window slots to charge in.
-                # The next HH match will be tomorrow (288 slots ahead) which the
-                # loop continues to find.
+            if slot_min == target_min:
+                # Skip t=0: the target is now, so there are no pre-window slots
+                # to charge in. The next matching target will be tomorrow.
                 if t == 0:
                     continue
                 return t
@@ -5079,6 +5097,22 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if "profit_max_enabled" in settings:
             self.set_profit_max_mode(bool(settings["profit_max_enabled"]))
             response["changes"].append(f"profit_max_enabled: {settings['profit_max_enabled']}")
+
+        if "profit_max_target_time" in settings and self._entry:
+            from ..const import CONF_PROFIT_MAX_TARGET_TIME
+            target_time = str(settings["profit_max_target_time"])
+            new_data = dict(self._entry.data)
+            new_options = dict(self._entry.options)
+            new_data[CONF_PROFIT_MAX_TARGET_TIME] = target_time
+            new_options[CONF_PROFIT_MAX_TARGET_TIME] = target_time
+            from ..const import DOMAIN as _SKIP_DOM
+            self.hass.data.get(_SKIP_DOM, {}).get(self.entry_id, {})["_skip_reload"] = True
+            self.hass.config_entries.async_update_entry(
+                self._entry,
+                data=new_data,
+                options=new_options,
+            )
+            response["changes"].append(f"profit_max_target_time: {target_time}")
 
         # Handle EV integration toggle
         if "ev_integration" in settings:

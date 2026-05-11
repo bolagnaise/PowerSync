@@ -114,6 +114,8 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_OPTIMIZATION_ALLOW_GRID_CHARGE = "allow_grid_charge"
     const_module.CONF_OPTIMIZATION_MAX_CHARGE_W = "max_charge_w"
     const_module.CONF_OPTIMIZATION_MAX_DISCHARGE_W = "max_discharge_w"
+    const_module.CONF_PROFIT_MAX_TARGET_TIME = "profit_max_target_time"
+    const_module.DEFAULT_PROFIT_MAX_TARGET_TIME = "17:15"
     const_module.FLOW_POWER_EXPORT_RATES = {"NSW1": 0.45}
     const_module.CONF_EXPORT_BOOST_ENABLED = "export_boost_enabled"
     const_module.CONF_EXPORT_PRICE_OFFSET = "export_price_offset"
@@ -488,6 +490,41 @@ def test_flow_power_profit_max_allows_only_happy_hour(opt_module):
 
     assert _true_indexes(slots) == list(range(108, 132))
     assert coordinator._profit_max_terminal_weight() == 0.3
+
+
+def test_flow_power_profit_max_uses_default_full_soc_target(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "flow_power",
+        profit_max=True,
+        flow_power_state="NSW1",
+    )
+
+    assert coordinator._next_profit_max_target_slot() == 105
+
+
+def test_flow_power_profit_max_uses_configured_full_soc_target(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "flow_power",
+        profit_max=True,
+        flow_power_state="NSW1",
+        profit_max_target_time="16:00",
+    )
+
+    assert coordinator._next_profit_max_target_slot() == 90
+
+
+def test_flow_power_profit_max_rejects_target_after_happy_hour_start(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "flow_power",
+        profit_max=True,
+        flow_power_state="NSW1",
+        profit_max_target_time="18:00",
+    )
+
+    assert coordinator._next_profit_max_target_slot() == 105
 
 
 def test_flow_power_blocks_battery_charge_during_happy_hour(opt_module):

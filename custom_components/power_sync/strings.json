@@ -331,7 +331,8 @@
           "optimization_battery_capacity_wh": "Battery capacity",
           "optimization_max_charge_w": "Maximum charge power",
           "optimization_max_discharge_w": "Maximum discharge power",
-          "optimization_allow_grid_charge": "Allow grid charging"
+          "optimization_allow_grid_charge": "Allow grid charging",
+          "profit_max_target_time": "Profit Max full by time"
         },
         "data_description": {
           "optimization_enabled": "Turn the LP optimizer on or off without changing the saved Smart Optimization settings.",
@@ -339,7 +340,8 @@
           "optimization_battery_capacity_wh": "Total usable battery capacity in kWh. This should match the battery specs shown in the mobile app.",
           "optimization_max_charge_w": "Maximum grid charge power in kW that the LP optimizer may request.",
           "optimization_max_discharge_w": "Maximum discharge/export power in kW that the LP optimizer may request.",
-          "optimization_allow_grid_charge": "When disabled, Smart Optimization can still charge from solar surplus but will not plan forced battery charging from grid import."
+          "optimization_allow_grid_charge": "When disabled, Smart Optimization can still charge from solar surplus but will not plan forced battery charging from grid import.",
+          "profit_max_target_time": "HH:MM time for Profit Max to target 100% SOC before the export window. Default 17:15."
         },
         "submit": "Next"
       },
@@ -1049,7 +1051,8 @@
           "optimization_battery_capacity_wh": "Battery capacity",
           "optimization_max_charge_w": "Maximum charge power",
           "optimization_max_discharge_w": "Maximum discharge power",
-          "optimization_allow_grid_charge": "Allow grid charging"
+          "optimization_allow_grid_charge": "Allow grid charging",
+          "profit_max_target_time": "Profit Max full by time"
         },
         "data_description": {
           "optimization_provider": "Smart Optimization uses an LP solver to minimise costs. Native mode uses your battery's built-in TOU scheduler.",
@@ -1058,7 +1061,8 @@
           "optimization_battery_capacity_wh": "Total usable battery capacity in kWh. This should match the battery specs shown in the mobile app.",
           "optimization_max_charge_w": "Maximum grid charge power in kW that the LP optimizer may request.",
           "optimization_max_discharge_w": "Maximum discharge/export power in kW that the LP optimizer may request.",
-          "optimization_allow_grid_charge": "When disabled, Smart Optimization can still charge from solar surplus but will not plan forced battery charging from grid import."
+          "optimization_allow_grid_charge": "When disabled, Smart Optimization can still charge from solar surplus but will not plan forced battery charging from grid import.",
+          "profit_max_target_time": "HH:MM time for Profit Max to target 100% SOC before the export window. Default 17:15."
         },
         "submit": "Save"
       },

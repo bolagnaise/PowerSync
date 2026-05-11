@@ -1585,6 +1585,7 @@ CONF_OPTIMIZATION_WEATHER_INTEGRATION = "optimization_weather_integration"
 CONF_AWAY_ENABLED_AT = "away_enabled_at"    # ISO timestamp when away mode was turned on
 CONF_AWAY_DISABLED_AT = "away_disabled_at"  # ISO timestamp when away mode was turned off
 CONF_PROFIT_MAX_ENABLED = "profit_max_enabled"  # Whether profit maximisation mode is on
+CONF_PROFIT_MAX_TARGET_TIME = "profit_max_target_time"  # HH:MM time to be full by in profit maximisation mode
 
 # Optimization cost function (only cost minimization — self-consumption is the battery's native mode)
 COST_FUNCTION_COST = "cost"
@@ -1594,6 +1595,7 @@ DEFAULT_OPTIMIZATION_INTERVAL = 30     # Re-optimize every 30 minutes
 DEFAULT_OPTIMIZATION_HORIZON = 48      # 48-hour forecast horizon
 DEFAULT_OPTIMIZATION_BACKUP_RESERVE = 0.20  # 20% minimum SOC
 
+DEFAULT_PROFIT_MAX_TARGET_TIME = "17:15"  # 15 min before Flow Power Happy Hour
 # Battery capacity defaults by system (Wh)
 BATTERY_CAPACITY_DEFAULTS = {
     BATTERY_SYSTEM_TESLA: 13500,     # Powerwall 2: 13.5 kWh

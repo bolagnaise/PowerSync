@@ -493,7 +493,9 @@ from .const import (
     CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
     CONF_OPTIMIZATION_MAX_CHARGE_W,
     CONF_OPTIMIZATION_MAX_DISCHARGE_W,
+    CONF_PROFIT_MAX_TARGET_TIME,
     DEFAULT_OPTIMIZATION_BACKUP_RESERVE,
+    DEFAULT_PROFIT_MAX_TARGET_TIME,
     BATTERY_CAPACITY_DEFAULTS,
     BATTERY_POWER_DEFAULTS,
 )
@@ -26697,6 +26699,17 @@ class OptimizationSettingsView(HomeAssistantView):
                         if config_entry
                         else True
                     ),
+                    "profit_max_target_time": (
+                        config_entry.options.get(
+                            CONF_PROFIT_MAX_TARGET_TIME,
+                            config_entry.data.get(
+                                CONF_PROFIT_MAX_TARGET_TIME,
+                                DEFAULT_PROFIT_MAX_TARGET_TIME,
+                            ),
+                        )
+                        if config_entry
+                        else DEFAULT_PROFIT_MAX_TARGET_TIME
+                    ),
                     "backup_reserve": round(backup_reserve * 100),
                     "hardware_backup_reserve": round(hardware_reserve),
                     "battery_specs_source": "manual"
@@ -26741,6 +26754,17 @@ class OptimizationSettingsView(HomeAssistantView):
 
             # Find the config entry and optimization coordinator
             opt_coordinator = None
+                "profit_max_target_time": (
+                    config_entry.options.get(
+                        CONF_PROFIT_MAX_TARGET_TIME,
+                        config_entry.data.get(
+                            CONF_PROFIT_MAX_TARGET_TIME,
+                            DEFAULT_PROFIT_MAX_TARGET_TIME,
+                        ),
+                    )
+                    if config_entry
+                    else DEFAULT_PROFIT_MAX_TARGET_TIME
+                ),
             config_entry = None
             entry_id = None
 
@@ -26798,6 +26822,11 @@ class OptimizationSettingsView(HomeAssistantView):
                 changes.append(f"Set profit maximisation mode to {settings['profit_max_enabled']}")
 
             if "allow_grid_charge" in settings:
+            if "profit_max_target_time" in settings:
+                new_data[CONF_PROFIT_MAX_TARGET_TIME] = str(settings["profit_max_target_time"])
+                new_options[CONF_PROFIT_MAX_TARGET_TIME] = str(settings["profit_max_target_time"])
+                changes.append(f"Set Profit Max full by time to {settings['profit_max_target_time']}")
+
                 new_options[CONF_OPTIMIZATION_ALLOW_GRID_CHARGE] = bool(settings["allow_grid_charge"])
                 changes.append(f"Set grid charging to {settings['allow_grid_charge']}")
 
