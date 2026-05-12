@@ -143,13 +143,25 @@ class _SessionManager:
 
 
 class _OcppCentralSystem:
-    def __init__(self, accepted: bool) -> None:
+    def __init__(self, accepted: bool, state_accepted: bool = True) -> None:
         self.accepted = accepted
-        self.calls: list[tuple[str, float]] = []
+        self.state_accepted = state_accepted
+        self.calls: list[tuple[str, float, int]] = []
+        self.state_calls: list[tuple[str, str, bool, int]] = []
 
-    async def set_max_charge_rate_amps(self, charger_id: str, amps: float):
-        self.calls.append((charger_id, amps))
+    async def set_max_charge_rate_amps(self, charger_id: str, amps: float, connector_id: int = 0):
+        self.calls.append((charger_id, amps, connector_id))
         return self.accepted
+
+    async def set_charger_state(
+        self,
+        charger_id: str,
+        service_name: str,
+        state: bool = True,
+        connector_id: int = 1,
+    ):
+        self.state_calls.append((charger_id, service_name, state, connector_id))
+        return self.state_accepted
 
 
 def _zaptec_entry(installation_id: str = ""):
@@ -295,7 +307,22 @@ def test_ocpp_amps_uses_hacs_api_when_available():
 
     assert asyncio.run(actions._set_ocpp_charging_amps(hass, "evse_1", 16)) is True
 
-    assert central.calls == [("evse_1", 16.0)]
+    assert central.calls == [("evse_1", 16.0, 0)]
+    assert hass.services.calls == []
+
+
+def test_ocpp_amps_uses_hacs_api_connector_id_for_multi_connector_prefix():
+    central = _OcppCentralSystem(accepted=True)
+    hass = _Hass([
+        _State("number.evse_1_connector_2_maximum_current", "16", {"min": 6, "max": 32}),
+    ])
+    hass.data["ocpp"] = {"ocpp-entry": central}
+
+    assert asyncio.run(
+        actions._set_ocpp_charging_amps(hass, "evse_1_connector_2", 16)
+    ) is True
+
+    assert central.calls == [("evse_1", 16.0, 2)]
     assert hass.services.calls == []
 
 
@@ -308,7 +335,7 @@ def test_ocpp_amps_reports_hacs_api_rejection_without_optimistic_number_fallback
 
     assert asyncio.run(actions._set_ocpp_charging_amps(hass, "evse_1", 16)) is False
 
-    assert central.calls == [("evse_1", 16.0)]
+    assert central.calls == [("evse_1", 16.0, 0)]
     assert hass.services.calls == []
 
 
@@ -334,7 +361,7 @@ def test_ocpp_effective_minimum_amps_is_six():
     }) == 6
 
 
-def test_ocpp_vehicle_start_succeeds_when_only_switch_control_exists():
+def test_ocpp_managed_start_fails_when_only_switch_control_exists():
     hass = _Hass([_State("switch.evse_1_charge_control", "off")])
 
     result = asyncio.run(
@@ -347,10 +374,30 @@ def test_ocpp_vehicle_start_succeeds_when_only_switch_control_exists():
         )
     )
 
-    assert result is True
-    assert hass.services.calls == [
-        ("switch", "turn_on", {"entity_id": "switch.evse_1_charge_control"})
-    ]
+    assert result is False
+    assert hass.services.calls == []
+
+
+def test_ocpp_direct_start_uses_hacs_api_result():
+    central = _OcppCentralSystem(accepted=True, state_accepted=True)
+    hass = _Hass([_State("switch.evse_1_charge_control", "off")])
+    hass.data["ocpp"] = {"ocpp-entry": central}
+
+    assert asyncio.run(actions._start_ocpp_charging(hass, "evse_1")) is True
+
+    assert central.state_calls == [("evse_1", "service_charge_start", True, 1)]
+    assert hass.services.calls == []
+
+
+def test_ocpp_direct_start_reports_hacs_rejection():
+    central = _OcppCentralSystem(accepted=True, state_accepted=False)
+    hass = _Hass([_State("switch.evse_1_charge_control", "off")])
+    hass.data["ocpp"] = {"ocpp-entry": central}
+
+    assert asyncio.run(actions._start_ocpp_charging(hass, "evse_1")) is False
+
+    assert central.state_calls == [("evse_1", "service_charge_start", True, 1)]
+    assert hass.services.calls == []
 
 
 def test_ocpp_start_skips_duplicate_remote_start_when_switch_already_on():
@@ -392,15 +439,12 @@ def test_ocpp_current_limit_rejection_is_cached_for_session(monkeypatch):
     hass = _Hass([_State("switch.evse_1_charge_control", "off")])
     params = {"charger_type": "ocpp", "ocpp_charger_id": "evse_1"}
 
-    assert asyncio.run(actions._set_vehicle_amps(hass, _Entry(), "ocpp_evse_1", 7, params)) is True
+    assert asyncio.run(actions._set_vehicle_amps(hass, _Entry(), "ocpp_evse_1", 7, params)) is False
     assert params["_ocpp_current_limit_unsupported"] is True
-    assert asyncio.run(actions._set_vehicle_amps(hass, _Entry(), "ocpp_evse_1", 5, params)) is True
+    assert asyncio.run(actions._set_vehicle_amps(hass, _Entry(), "ocpp_evse_1", 5, params)) is False
 
     assert calls == [("evse_1", 7)]
-    assert hass.services.calls == [
-        ("switch", "turn_on", {"entity_id": "switch.evse_1_charge_control"}),
-        ("switch", "turn_on", {"entity_id": "switch.evse_1_charge_control"}),
-    ]
+    assert hass.services.calls == []
 
 
 def test_ocpp_loadpoint_id_does_not_double_prefix():
@@ -516,11 +560,13 @@ def test_ocpp_pre_charge_wake_blocks_when_connector_available():
 
 
 def test_ocpp_set_vehicle_amps_runs_pre_charge_wake_before_start():
+    central = _OcppCentralSystem(accepted=True, state_accepted=True)
     hass = _Hass([
         _State("switch.evse_1_charge_control", "off"),
         _State("sensor.evse_1_status_connector", "Preparing"),
         _State("switch.byd_aircon", "off"),
     ])
+    hass.data["ocpp"] = {"ocpp-entry": central}
 
     result = asyncio.run(
         actions._set_vehicle_amps(
@@ -538,10 +584,11 @@ def test_ocpp_set_vehicle_amps_runs_pre_charge_wake_before_start():
     )
 
     assert result is True
+    assert central.calls == [("evse_1", 16.0, 0)]
+    assert central.state_calls == [("evse_1", "service_charge_start", True, 1)]
     assert hass.services.calls == [
         ("switch", "turn_on", {"entity_id": "switch.byd_aircon"}),
         ("switch", "turn_off", {"entity_id": "switch.byd_aircon"}),
-        ("switch", "turn_on", {"entity_id": "switch.evse_1_charge_control"}),
     ]
 
 
@@ -642,7 +689,9 @@ def test_explicit_untracked_dynamic_stop_controls_ocpp_charger():
 
 
 def test_dynamic_start_claims_business_owner_mode():
+    central = _OcppCentralSystem(accepted=True, state_accepted=True)
     hass = _Hass([_State("switch.evse_1_charge_control", "off")])
+    hass.data["ocpp"] = {"ocpp-entry": central}
     actions._dynamic_ev_state.clear()
 
     result = asyncio.run(
@@ -662,6 +711,8 @@ def test_dynamic_start_claims_business_owner_mode():
     )
 
     assert result is True
+    assert central.calls == [("evse_1", 16.0, 0)]
+    assert central.state_calls == [("evse_1", "service_charge_start", True, 1)]
     state = actions._dynamic_ev_state["entry-1"]["ocpp_evse_1"]
     assert state["params"]["dynamic_mode"] == "battery_target"
     assert state["params"]["owner_mode"] == "price_level_recovery"
@@ -1048,7 +1099,9 @@ def test_dynamic_start_is_blocked_by_legacy_foreign_state():
 
 
 def test_dynamic_start_takes_over_legacy_solar_surplus_when_allowed():
+    central = _OcppCentralSystem(accepted=True, state_accepted=True)
     hass = _Hass([_State("switch.evse_1_charge_control", "off")])
+    hass.data["ocpp"] = {"ocpp-entry": central}
     cancelled = []
     actions._dynamic_ev_state.clear()
     actions._dynamic_ev_state["entry-1"] = {
@@ -1082,6 +1135,11 @@ def test_dynamic_start_takes_over_legacy_solar_surplus_when_allowed():
     )
 
     assert result is True
+    assert central.calls == [("evse_1", 16.0, 0)]
+    assert central.state_calls == [
+        ("evse_1", "service_charge_stop", False, 1),
+        ("evse_1", "service_charge_start", True, 1),
+    ]
     assert cancelled == [True]
     state = actions._dynamic_ev_state["entry-1"]["ocpp_evse_1"]
     assert state["params"]["dynamic_mode"] == "battery_target"

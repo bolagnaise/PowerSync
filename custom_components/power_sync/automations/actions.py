@@ -2033,6 +2033,55 @@ def _ocpp_charger_ready_for_wake(
     return True, None
 
 
+def _ocpp_charger_base_and_connector(charger_id: str) -> tuple[str, int | None]:
+    """Return HACS OCPP base charge-point id and optional connector id."""
+    from .ocpp_status import split_hacs_ocpp_connector_prefix
+
+    return split_hacs_ocpp_connector_prefix(str(charger_id))
+
+
+async def _call_hacs_ocpp_charger_state(
+    hass: HomeAssistant,
+    charger_id: str,
+    service_name: str,
+    state: bool,
+) -> Optional[bool]:
+    """Call HACS OCPP CentralSystem directly when available.
+
+    The HA switch service path is optimistic from PowerSync's perspective: it
+    does not return the charge point's RemoteStart/RemoteStop result. The
+    CentralSystem API does, so prefer it when present.
+    """
+    base_id, connector_id = _ocpp_charger_base_and_connector(charger_id)
+    target_connector = connector_id or 1
+    found_api = False
+
+    for central_system in (hass.data.get("ocpp") or {}).values():
+        if not hasattr(central_system, "set_charger_state"):
+            continue
+        found_api = True
+        try:
+            success = await central_system.set_charger_state(
+                base_id,
+                service_name,
+                state,
+                connector_id=target_connector,
+            )
+            if success:
+                return True
+        except Exception as err:
+            _LOGGER.error(
+                "OCPP charger %s %s failed through HACS OCPP API: %s",
+                charger_id,
+                service_name,
+                err,
+            )
+
+    if found_api:
+        return False
+    return None
+
+
 async def _start_ocpp_charging(hass: HomeAssistant, charger_id: str) -> bool:
     """Start charging on an OCPP charger via its HA switch entity.
 
@@ -2060,6 +2109,19 @@ async def _start_ocpp_charging(hass: HomeAssistant, charger_id: str) -> bool:
             entity_id,
         )
         return True
+
+    direct_result = await _call_hacs_ocpp_charger_state(
+        hass,
+        str(charger_id),
+        "service_charge_start",
+        True,
+    )
+    if direct_result is True:
+        _LOGGER.info("OCPP charger %s: start charging via HACS OCPP API", charger_id)
+        return True
+    if direct_result is False:
+        _LOGGER.warning("OCPP charger %s rejected remote start", charger_id)
+        return False
 
     try:
         if needs_reset:
@@ -2091,6 +2153,19 @@ async def _stop_ocpp_charging(hass: HomeAssistant, charger_id: str) -> bool:
     if not state:
         _LOGGER.error("OCPP stop: entity %s not found", entity_id)
         return False
+    direct_result = await _call_hacs_ocpp_charger_state(
+        hass,
+        str(charger_id),
+        "service_charge_stop",
+        False,
+    )
+    if direct_result is True:
+        _LOGGER.info("OCPP charger %s: stop charging via HACS OCPP API", charger_id)
+        return True
+    if direct_result is False:
+        _LOGGER.warning("OCPP charger %s rejected remote stop", charger_id)
+        return False
+
     try:
         await hass.services.async_call("switch", "turn_off", {"entity_id": entity_id}, blocking=True)
         _LOGGER.info("OCPP charger %s: stop charging via %s", charger_id, entity_id)
@@ -3692,14 +3767,21 @@ async def _set_vehicle_amps(
         amps_ok = True
         if params.get("_ocpp_current_limit_unsupported"):
             _LOGGER.debug(
-                "OCPP charger %s: skipping current limit update to %sA after previous rejection",
+                "OCPP charger %s: blocking managed start to %sA after previous current-limit rejection",
                 ocpp_charger_id,
                 amps,
             )
+            return False
         else:
             amps_ok = await _set_ocpp_charging_amps(hass, ocpp_charger_id, amps)
             if not amps_ok:
                 params["_ocpp_current_limit_unsupported"] = True
+                _LOGGER.warning(
+                    "OCPP charger %s: current limit update to %sA failed; refusing managed start",
+                    ocpp_charger_id,
+                    amps,
+                )
+                return False
         if _has_pre_charge_wake(params):
             ready, block_reason = _ocpp_charger_ready_for_wake(hass, str(ocpp_charger_id))
             if not ready:
@@ -3810,6 +3892,7 @@ async def _set_ocpp_charging_amps(hass: HomeAssistant, charger_id: int, amps: in
     from ..const import DOMAIN
 
     charger_id = str(charger_id)
+    base_id, connector_id = _ocpp_charger_base_and_connector(charger_id)
     server_found = False
     hacs_server_found = False
 
@@ -3818,7 +3901,14 @@ async def _set_ocpp_charging_amps(hass: HomeAssistant, charger_id: int, amps: in
             continue
         hacs_server_found = True
         try:
-            success = await central_system.set_max_charge_rate_amps(charger_id, float(amps))
+            kwargs = {}
+            if connector_id is not None:
+                kwargs["connector_id"] = connector_id
+            success = await central_system.set_max_charge_rate_amps(
+                base_id,
+                float(amps),
+                **kwargs,
+            )
             if success:
                 _LOGGER.info("Set OCPP charger %s to %dA via HACS OCPP API", charger_id, amps)
                 return True
@@ -5094,27 +5184,47 @@ async def _action_start_ev_charging_dynamic_locked(
     # For battery_target mode, start EV charging immediately
     # For solar_surplus mode, we wait for sufficient surplus before starting
     if dynamic_mode == "battery_target":
-        start_success = await _action_start_ev_charging(hass, config_entry, params, context)
-        if not start_success:
-            _LOGGER.info("Dynamic EV: Could not start EV charging (vehicle may be disconnected)")
-            record_ev_command(
-                hass,
-                config_entry,
-                vehicle_id,
-                command=f"start_{owner_mode}",
-                success=False,
-                reason="physical start failed",
+        if charger_type in ("ocpp", "generic", "zaptec") or _is_ha_native_charger_type(charger_type):
+            start_success = await _set_vehicle_amps(
+                hass, config_entry, vehicle_id, start_amps, params
             )
-            return False
+            if not start_success:
+                _LOGGER.info(
+                    "Dynamic EV: Could not set charger to %sA and start %s charging",
+                    start_amps,
+                    charger_type,
+                )
+                record_ev_command(
+                    hass,
+                    config_entry,
+                    vehicle_id,
+                    command=f"start_{owner_mode}",
+                    success=False,
+                    reason="current limit or physical start failed",
+                )
+                return False
+        else:
+            start_success = await _action_start_ev_charging(hass, config_entry, params, context)
+            if not start_success:
+                _LOGGER.info("Dynamic EV: Could not start EV charging (vehicle may be disconnected)")
+                record_ev_command(
+                    hass,
+                    config_entry,
+                    vehicle_id,
+                    command=f"start_{owner_mode}",
+                    success=False,
+                    reason="physical start failed",
+                )
+                return False
 
-        # Set initial amps through the charger abstraction so OCPP and generic
-        # chargers do not fall back to the Tesla-only amperage path.
-        amps_success = await _set_vehicle_amps(
-            hass, config_entry, vehicle_id, start_amps, params
-        )
-        if not amps_success:
-            # This is expected - Tesla reports lower max amps until charging actually starts
-            _LOGGER.debug(f"Dynamic EV: Could not set initial amps to {start_amps}A (will adjust once charging starts)")
+            # Set initial amps through the charger abstraction so OCPP and generic
+            # chargers do not fall back to the Tesla-only amperage path.
+            amps_success = await _set_vehicle_amps(
+                hass, config_entry, vehicle_id, start_amps, params
+            )
+            if not amps_success:
+                # This is expected - Tesla reports lower max amps until charging actually starts
+                _LOGGER.debug(f"Dynamic EV: Could not set initial amps to {start_amps}A (will adjust once charging starts)")
 
     # Create the periodic update callback for this vehicle
     async def periodic_update(now) -> None:

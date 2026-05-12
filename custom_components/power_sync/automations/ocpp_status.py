@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 
@@ -21,6 +22,36 @@ OCPP_SESSION_ACTIVE_STATES = {
     "suspendedevse",
 }
 OCPP_IDLE_STATES = {"available", "unavailable", "unknown", "faulted", "offline", ""}
+OCPP_STATUS_SUFFIXES = (
+    "_status_connector",
+    "_status",
+    "_availability",
+    "_charge_control",
+)
+OCPP_POWER_SUFFIXES = (
+    "_current_power",
+    "_power_active_import",
+    "_power_offered",
+)
+OCPP_ENERGY_SUFFIXES = (
+    "_energy_meter",
+    "_energy_active_import_register",
+    "_energy_active_import_interval",
+    "_energy_session",
+)
+OCPP_CURRENT_LIMIT_SUFFIXES = (
+    "_maximum_current",
+    "_max_current",
+    "_current_limit",
+    "_charging_current",
+    "_charge_current",
+)
+OCPP_ENTITY_SUFFIXES = (
+    *OCPP_STATUS_SUFFIXES,
+    *OCPP_POWER_SUFFIXES,
+    *OCPP_ENERGY_SUFFIXES,
+    *OCPP_CURRENT_LIMIT_SUFFIXES,
+)
 
 
 def normalize_ocpp_status(status: Optional[str]) -> str:
@@ -35,17 +66,42 @@ def extract_hacs_ocpp_prefix(entity_id: str) -> Optional[str]:
     if "." not in entity_id:
         return None
     object_id = entity_id.lower().split(".", 1)[1]
-    for suffix in (
-        "_status_connector",
-        "_status",
-        "_availability",
-        "_current_power",
-        "_energy_meter",
-        "_charge_control",
-    ):
+    for suffix in OCPP_ENTITY_SUFFIXES:
         if object_id.endswith(suffix):
             return object_id[: -len(suffix)]
     return None
+
+
+def split_hacs_ocpp_connector_prefix(prefix: str) -> tuple[str, int | None]:
+    """Return the base charge-point id and optional connector id from a HACS prefix."""
+    match = re.match(r"^(.+)_connector_(\d+)$", str(prefix))
+    if not match:
+        return str(prefix), None
+    return match.group(1), int(match.group(2))
+
+
+def is_hacs_ocpp_status_entity(entity_id: str) -> bool:
+    """Return True for HACS OCPP connector/station status entities."""
+    if "." not in entity_id:
+        return False
+    object_id = entity_id.lower().split(".", 1)[1]
+    return object_id.endswith("_status_connector") or object_id.endswith("_status")
+
+
+def is_hacs_ocpp_power_entity(entity_id: str) -> bool:
+    """Return True for HACS OCPP power measurand entities."""
+    if "." not in entity_id:
+        return False
+    object_id = entity_id.lower().split(".", 1)[1]
+    return any(object_id.endswith(suffix) for suffix in OCPP_POWER_SUFFIXES)
+
+
+def is_hacs_ocpp_energy_entity(entity_id: str) -> bool:
+    """Return True for HACS OCPP energy measurand entities."""
+    if "." not in entity_id:
+        return False
+    object_id = entity_id.lower().split(".", 1)[1]
+    return any(object_id.endswith(suffix) for suffix in OCPP_ENERGY_SUFFIXES)
 
 
 def is_ocpp_charging(status: Optional[str], power_w: float = 0.0) -> bool:

@@ -11950,7 +11950,7 @@ class OCPPChargersView(HomeAssistantView):
         # the matched suffix — e.g. switch.evse001_charge_control → prefix "evse001",
         # not "evse001_charge" (which rsplit("_",1) would incorrectly produce).
         suffix_pattern = re.compile(
-            r"^(sensor|switch|number)\.(\w+?)_(status_connector|status|availability|charge_control|current_power|energy_meter)$",
+            r"^(sensor|switch|number)\.(\w+?)_(status_connector|status|availability|charge_control|current_power|power_active_import|power_offered|energy_meter|energy_active_import_register|energy_active_import_interval|energy_session|maximum_current)$",
             re.IGNORECASE,
         )
         charger_ids = set()
@@ -11982,13 +11982,36 @@ class OCPPChargersView(HomeAssistantView):
             # often stays "unknown" while the connector sensor is reliably updated,
             # so fall back to it when the primary status is unknown/unavailable.
             status_connector_entity = f"sensor.{cid}_status_connector"
-            power_entity = f"sensor.{cid}_current_power"
-            energy_entity = f"sensor.{cid}_energy_meter"
+            power_suffixes = (
+                "_current_power",
+                "_power_active_import",
+                "_power_offered",
+            )
+            energy_suffixes = (
+                "_energy_meter",
+                "_energy_active_import_register",
+                "_energy_active_import_interval",
+                "_energy_session",
+            )
 
             status_state = self._hass.states.get(status_entity)
             status_connector_state = self._hass.states.get(status_connector_entity)
-            power_state = self._hass.states.get(power_entity)
-            energy_state = self._hass.states.get(energy_entity)
+            power_state = next(
+                (
+                    self._hass.states.get(f"sensor.{cid}{suffix}")
+                    for suffix in power_suffixes
+                    if self._hass.states.get(f"sensor.{cid}{suffix}") is not None
+                ),
+                None,
+            )
+            energy_state = next(
+                (
+                    self._hass.states.get(f"sensor.{cid}{suffix}")
+                    for suffix in energy_suffixes
+                    if self._hass.states.get(f"sensor.{cid}{suffix}") is not None
+                ),
+                None,
+            )
 
             effective_status = None
             if status_state and status_state.state not in ("unavailable", "unknown"):
@@ -12002,7 +12025,8 @@ class OCPPChargersView(HomeAssistantView):
 
             if power_state and power_state.state not in ("unavailable", "unknown"):
                 try:
-                    power_kw = float(power_state.state) / 1000  # W to kW
+                    raw_power = float(power_state.state)
+                    power_kw = raw_power / 1000 if raw_power > 100 else raw_power
                 except (ValueError, TypeError):
                     pass
 
@@ -12495,6 +12519,8 @@ class EVWidgetDataView(HomeAssistantView):
                 from homeassistant.helpers import entity_registry as er
                 from .automations.ocpp_status import (
                     extract_hacs_ocpp_prefix,
+                    is_hacs_ocpp_power_entity,
+                    is_hacs_ocpp_status_entity,
                     is_ocpp_charging,
                     is_ocpp_vehicle_present,
                     normalize_ocpp_status,
@@ -12516,11 +12542,12 @@ class EVWidgetDataView(HomeAssistantView):
                     if prefix not in ocpp_chargers_found:
                         ocpp_chargers_found[prefix] = {"name": prefix, "status": None, "power_kw": 0, "connected": False, "charging": False}
                     charger = ocpp_chargers_found[prefix]
-                    if eid.endswith("_status") or eid.endswith("_status_connector"):
-                        charger["status"] = normalize_ocpp_status(state.state)
-                        charger["connected"] = is_ocpp_vehicle_present(state.state)
-                        charger["charging"] = is_ocpp_charging(state.state)
-                    elif eid.endswith("_current_power"):
+                    if is_hacs_ocpp_status_entity(eid):
+                        if eid.endswith("_status_connector") or charger["status"] is None:
+                            charger["status"] = normalize_ocpp_status(state.state)
+                            charger["connected"] = is_ocpp_vehicle_present(state.state)
+                            charger["charging"] = is_ocpp_charging(state.state)
+                    elif is_hacs_ocpp_power_entity(eid):
                         try:
                             pwr = float(state.state)
                             charger["power_kw"] = pwr / 1000 if pwr > 100 else pwr  # W or kW
@@ -12987,6 +13014,8 @@ class EVLoadpointStatusView(HomeAssistantView):
                 from homeassistant.helpers import entity_registry as er_local
                 from .automations.ocpp_status import (
                     extract_hacs_ocpp_prefix,
+                    is_hacs_ocpp_power_entity,
+                    is_hacs_ocpp_status_entity,
                     is_ocpp_charging,
                     is_ocpp_vehicle_present,
                     normalize_ocpp_status,
@@ -13010,11 +13039,12 @@ class EVLoadpointStatusView(HomeAssistantView):
                         "connected": False,
                         "charging": False,
                     })
-                    if entity_id.endswith("_status") or entity_id.endswith("_status_connector"):
-                        charger["status"] = normalize_ocpp_status(state.state)
-                        charger["connected"] = is_ocpp_vehicle_present(state.state)
-                        charger["charging"] = is_ocpp_charging(state.state)
-                    elif entity_id.endswith("_current_power"):
+                    if is_hacs_ocpp_status_entity(entity_id):
+                        if entity_id.endswith("_status_connector") or charger["status"] is None:
+                            charger["status"] = normalize_ocpp_status(state.state)
+                            charger["connected"] = is_ocpp_vehicle_present(state.state)
+                            charger["charging"] = is_ocpp_charging(state.state)
+                    elif is_hacs_ocpp_power_entity(entity_id):
                         try:
                             raw_power = float(state.state)
                         except (TypeError, ValueError):
@@ -24897,6 +24927,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 from homeassistant.helpers import entity_registry as _er
                 from .automations.ev_charging_session import get_session_manager
                 from .automations.ocpp_status import (
+                    extract_hacs_ocpp_prefix,
+                    is_hacs_ocpp_power_entity,
+                    is_hacs_ocpp_status_entity,
                     is_ocpp_charging,
                     should_end_ocpp_session,
                 )
@@ -24906,13 +24939,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     return
 
                 entity_reg = _er.async_get(hass)
-                charger_ids = set()
+                charger_entities = {}
                 for reg_entry in entity_reg.entities.values():
                     if reg_entry.platform != "ocpp":
                         continue
                     m = _OCPP_SUFFIXES.match(reg_entry.entity_id)
-                    if m:
-                        charger_ids.add(m.group(2))
+                    prefix = m.group(2) if m else extract_hacs_ocpp_prefix(reg_entry.entity_id)
+                    if not prefix:
+                        continue
+                    entity_id = reg_entry.entity_id.lower()
+                    entity_map = charger_entities.setdefault(prefix, {})
+                    if is_hacs_ocpp_status_entity(entity_id):
+                        if entity_id.endswith("_status_connector") or "status" not in entity_map:
+                            entity_map["status"] = reg_entry.entity_id
+                    elif is_hacs_ocpp_power_entity(entity_id):
+                        entity_map["power"] = reg_entry.entity_id
 
                 ed = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 state_map: dict = ed.setdefault("ocpp_session_state", {})
@@ -24931,16 +24972,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     import_price = ed["tariff_schedule"].get("buy_price", 30.0)
                     export_price = ed["tariff_schedule"].get("sell_price", 8.0)
 
-                for cid in charger_ids:
+                for cid, entity_map in charger_entities.items():
                     vid = f"ocpp_{cid}"
-                    status_state = hass.states.get(f"sensor.{cid}_status_connector")
+                    status_state = hass.states.get(entity_map.get("status", ""))
                     if status_state is None or status_state.state in ("unavailable", "unknown"):
                         # Skip chargers we can't read — don't end sessions on
                         # transient unavailability (network blip etc).
                         continue
                     status_lower = status_state.state.lower()
 
-                    power_state = hass.states.get(f"sensor.{cid}_current_power")
+                    power_state = hass.states.get(entity_map.get("power", ""))
                     power_w = 0.0
                     if power_state is not None and power_state.state not in ("unavailable", "unknown"):
                         try:

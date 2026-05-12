@@ -1039,7 +1039,11 @@ class AutomationEngine:
 
     async def _async_get_ocpp_state(self) -> Dict[str, Any]:
         """Get OCPP charger state from OCPP integration entities."""
-        import re
+        from .ocpp_status import (
+            is_hacs_ocpp_energy_entity,
+            is_hacs_ocpp_status_entity,
+            normalize_ocpp_status,
+        )
 
         ocpp_state = {
             "status": "",
@@ -1056,15 +1060,17 @@ class AutomationEngine:
             if state_value in ("unavailable", "unknown"):
                 continue
 
-            # OCPP status sensor — match both sensor.*_status and sensor.*_status_connector
-            # (lbbrhzn/ocpp uses _status_connector as the more reliably updated entity)
-            if re.match(r"sensor\.\w*(ocpp|evse|charger).*(status_connector|_status)$", entity_id, re.IGNORECASE):
-                ocpp_state["status"] = state_value.lower()
-                ocpp_state["is_connected"] = state_value.lower() not in ("unavailable", "disconnected", "")
+            # OCPP status sensor — match both sensor.*_status and sensor.*_status_connector.
+            # lbbrhzn/ocpp uses _status_connector as the more reliably updated entity.
+            if is_hacs_ocpp_status_entity(entity_id):
+                normalized = normalize_ocpp_status(state_value)
+                if entity_id.lower().endswith("_status_connector") or not ocpp_state["status"]:
+                    ocpp_state["status"] = normalized
+                    ocpp_state["is_connected"] = normalized not in ("available", "unavailable", "disconnected", "")
                 _LOGGER.debug(f"OCPP status from {entity_id}: {state_value}")
 
             # OCPP energy sensor
-            elif re.match(r"sensor\.\w*(ocpp|evse).*energy", entity_id, re.IGNORECASE):
+            elif is_hacs_ocpp_energy_entity(entity_id):
                 try:
                     ocpp_state["energy_kwh"] = float(state_value)
                 except (ValueError, TypeError):
