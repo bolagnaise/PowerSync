@@ -32,10 +32,17 @@ COST_STORE_SAVE_DELAY = 300  # Coalesce writes — flush at most every 5 minutes
 
 
 def _hhmm_to_minutes(value: Any, default: str = "17:15") -> int:
-    """Return minutes after midnight for a HH:MM value, falling back safely."""
+    """Return minutes after midnight for a HH:MM or HHMM value."""
     candidate = value if isinstance(value, str) else default
+    compact = candidate.strip()
+    if compact.isdigit() and len(compact) in (3, 4):
+        hour = int(compact[:-2])
+        minute = int(compact[-2:])
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return hour * 60 + minute
+
     try:
-        hour_raw, minute_raw = candidate.strip().split(":", 1)
+        hour_raw, minute_raw = compact.split(":", 1)
         hour = int(hour_raw)
         minute = int(minute_raw)
         if 0 <= hour <= 23 and 0 <= minute <= 59:

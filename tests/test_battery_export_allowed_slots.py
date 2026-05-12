@@ -517,6 +517,18 @@ def test_flow_power_profit_max_uses_configured_full_soc_target(opt_module):
     assert coordinator._next_profit_max_target_slot() == 90
 
 
+def test_flow_power_profit_max_accepts_compact_full_soc_target(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "flow_power",
+        profit_max=True,
+        flow_power_state="NSW1",
+        profit_max_target_time="1615",
+    )
+
+    assert coordinator._next_profit_max_target_slot() == 93
+
+
 def test_profit_max_uses_default_soc_target(opt_module):
     coordinator = _coordinator(
         opt_module,
