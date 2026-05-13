@@ -796,9 +796,23 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
     # Check Teslemetry Bluetooth sensors
     tbt_prefix = _resolve_teslemetry_bt_prefix(hass)
     if tbt_prefix:
+        tbt_is_charging = False
+        tbt_location = hass.states.get(
+            TESLEMETRY_BT_DEVICE_TRACKER_LOCATION.format(prefix=tbt_prefix)
+        )
+        if not (tbt_location and tbt_location.state == "not_home"):
+            tbt_charging_state = hass.states.get(
+                TESLEMETRY_BT_SENSOR_CHARGING_STATE.format(prefix=tbt_prefix)
+            )
+            tbt_is_charging = (
+                tbt_charging_state
+                and tbt_charging_state.state not in ("unknown", "unavailable")
+                and tbt_charging_state.state.lower() == "charging"
+            )
+
         tbt_power_entity = TESLEMETRY_BT_SENSOR_CHARGER_POWER.format(prefix=tbt_prefix)
         tbt_state = hass.states.get(tbt_power_entity)
-        if tbt_state and tbt_state.state not in ("unknown", "unavailable"):
+        if tbt_is_charging and tbt_state and tbt_state.state not in ("unknown", "unavailable"):
             val = _kw_from_power_state(tbt_state)
             if val > 0:
                 ev_power_kw = max(ev_power_kw, val)
@@ -912,6 +926,10 @@ def _get_ev_vehicles_status(hass, entry) -> list:
         ev_power_kw = 0.0
         ev_soc = None
         is_connected = False
+        is_charging = False
+        hard_disconnected = False
+        away_from_home = False
+        measured_power_kw = 0.0
 
         for entity in entity_registry.entities.values():
             if entity.device_id != device.id:
@@ -920,17 +938,41 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             state = hass.states.get(entity.entity_id)
             if not state or state.state in ("unknown", "unavailable"):
                 continue
+            domain = getattr(entity, "domain", entity.entity_id.split(".", 1)[0])
+
+            # Away vehicles cannot be contributing to home EV power.
+            if domain == "device_tracker" and "_location" in eid:
+                if state.state == "not_home":
+                    away_from_home = True
+                continue
+
+            if domain == "binary_sensor" and "located_at_home" in eid:
+                if state.state == "off":
+                    away_from_home = True
+                continue
 
             # Check charging_state sensor for connected status
-            if entity.domain == "sensor" and "charging_state" in eid:
+            if (
+                domain == "sensor"
+                and re.search(r"_(?:charging_state|charging)(?:_\d+)?$", eid)
+                and "limit" not in eid
+                and "rate" not in eid
+                and "power" not in eid
+            ):
                 plugged = charging_state_plugged_status(state.state)
                 if plugged is True:
                     is_connected = True
+                    if state.state.lower() == "charging":
+                        is_charging = True
+                elif plugged is False:
+                    hard_disconnected = True
 
             # Check charge_cable / charge_flap binary sensors
-            if entity.domain == "binary_sensor" and ("charge_cable" in eid or "charge_flap" in eid):
+            if domain == "binary_sensor" and ("charge_cable" in eid or "charge_flap" in eid):
                 if state.state == "on":
                     is_connected = True
+                elif state.state == "off":
+                    hard_disconnected = True
 
             if not entity.entity_id.startswith("sensor."):
                 continue
@@ -938,7 +980,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             if "charger_power" in eid or "charging_power" in eid or "charge_power" in eid:
                 val = _kw_from_power_state(state)
                 if val > 0:
-                    ev_power_kw = max(ev_power_kw, val)
+                    measured_power_kw = max(measured_power_kw, val)
 
             if ev_soc is None and "battery" in eid and "range" not in eid and "heater" not in eid:
                 try:
@@ -948,8 +990,12 @@ def _get_ev_vehicles_status(hass, entry) -> list:
                 except (ValueError, TypeError):
                     pass
 
-        # If charging, must be connected
-        if ev_power_kw > 0.05:
+        if away_from_home or hard_disconnected:
+            is_connected = False
+            is_charging = False
+            ev_power_kw = 0.0
+        elif is_charging:
+            ev_power_kw = measured_power_kw
             is_connected = True
 
         vehicles.append({
@@ -958,7 +1004,7 @@ def _get_ev_vehicles_status(hass, entry) -> list:
             "ev_power_kw": ev_power_kw,
             "ev_soc": ev_soc,
             "is_connected": is_connected,
-            "is_charging": ev_power_kw > 0.05,
+            "is_charging": is_charging and ev_power_kw > 0.05,
         })
 
     # Supplement BLE-only vehicles. The BLE switch entity exists even when a
