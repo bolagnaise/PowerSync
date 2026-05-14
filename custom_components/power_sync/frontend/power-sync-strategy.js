@@ -844,6 +844,188 @@ if (!customElements.get('power-sync-chart')) {
   customElements.define('power-sync-chart', PowerSyncChart);
 }
 
+// ─── PowerSyncForecastSummary Custom Element ─────────────────────
+// Compact metric summary for LP forecast entities. Built-in HA entity cards
+// truncate long forecast names and price units too aggressively in a stack.
+
+class PowerSyncForecastSummary extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this._config = null;
+    this._hass = null;
+  }
+
+  setConfig(config) {
+    this._config = config;
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._render();
+  }
+
+  getCardSize() {
+    return 1;
+  }
+
+  _render() {
+    if (!this._config || !this._hass) return;
+
+    const items = Array.isArray(this._config.items) ? this._config.items : [];
+    this.shadowRoot.innerHTML = `
+      <style>
+        ha-card {
+          padding: 14px;
+          overflow: hidden;
+        }
+        .grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(158px, 1fr));
+          gap: 12px;
+        }
+        .metric {
+          min-width: 0;
+          padding: 12px 14px;
+          border-radius: 10px;
+          background: rgba(127, 127, 127, 0.08);
+          border: 1px solid var(--divider-color);
+        }
+        .header {
+          display: grid;
+          grid-template-columns: 22px minmax(0, 1fr);
+          gap: 8px;
+          align-items: center;
+          min-width: 0;
+          color: var(--secondary-text-color);
+        }
+        ha-icon {
+          width: 20px;
+          height: 20px;
+          color: var(--primary-color);
+        }
+        .name {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          font-size: 13px;
+          font-weight: 700;
+          line-height: 1.2;
+          letter-spacing: 0;
+        }
+        .reading {
+          display: flex;
+          flex-wrap: wrap;
+          align-items: baseline;
+          gap: 7px;
+          min-width: 0;
+          margin-top: 10px;
+          color: var(--primary-text-color);
+        }
+        .value {
+          flex: 0 1 auto;
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          font-size: 30px;
+          font-weight: 500;
+          line-height: 1;
+          letter-spacing: 0;
+        }
+        .unit {
+          flex: 0 0 auto;
+          color: var(--secondary-text-color);
+          font-size: 13px;
+          font-weight: 700;
+          line-height: 1.1;
+          white-space: nowrap;
+          letter-spacing: 0;
+        }
+        @media (max-width: 640px) {
+          ha-card {
+            padding: 12px;
+          }
+          .grid {
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 10px;
+          }
+          .metric {
+            padding: 11px 12px;
+          }
+          .value {
+            font-size: 26px;
+          }
+          .unit {
+            font-size: 12px;
+          }
+        }
+      </style>
+      <ha-card>
+        <div class="grid">
+          ${items.map((item) => this._renderMetric(item)).join('')}
+        </div>
+      </ha-card>
+    `;
+  }
+
+  _renderMetric(item) {
+    const stateObj = this._hass.states[item.entity];
+    const reading = this._formatReading(item, stateObj);
+    return `
+      <div class="metric">
+        <div class="header">
+          <ha-icon icon="${this._escAttr(item.icon || 'mdi:chart-line')}"></ha-icon>
+          <div class="name">${this._escHtml(item.name || stateObj?.attributes?.friendly_name || item.entity)}</div>
+        </div>
+        <div class="reading">
+          <span class="value">${this._escHtml(reading.value)}</span>
+          <span class="unit">${this._escHtml(reading.unit)}</span>
+        </div>
+      </div>
+    `;
+  }
+
+  _formatReading(item, stateObj) {
+    if (!stateObj || ['unknown', 'unavailable'].includes(stateObj.state)) {
+      return { value: '--', unit: item.unit || '' };
+    }
+
+    const raw = Number(stateObj.state);
+    if (!Number.isFinite(raw)) {
+      return { value: stateObj.state, unit: stateObj.attributes?.unit_of_measurement || item.unit || '' };
+    }
+
+    if (item.price) {
+      const meta = _priceMeta(this._hass, item.entity);
+      const value = raw * 100;
+      const decimals = Math.abs(value) >= 10 ? 1 : 2;
+      return { value: value.toFixed(decimals), unit: meta.minorPriceUnit };
+    }
+
+    const decimals = Number.isInteger(item.decimals)
+      ? item.decimals
+      : (Math.abs(raw) >= 100 ? 0 : 1);
+    return {
+      value: raw.toFixed(decimals),
+      unit: stateObj.attributes?.unit_of_measurement || item.unit || '',
+    };
+  }
+
+  _escHtml(value) {
+    return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  _escAttr(value) {
+    return this._escHtml(value);
+  }
+}
+
+if (!customElements.get('power-sync-forecast-summary')) {
+  customElements.define('power-sync-forecast-summary', PowerSyncForecastSummary);
+}
+
 // ─── PowerSyncLayout Custom Element ─────────────────────────────
 // Viewport-fitting grid layout: 3 columns, fills available height.
 // Chart cards flex to fill remaining space; control cards stay natural size.
@@ -2765,17 +2947,17 @@ function _touSchedule(e, hass) {
 }
 
 function _lpForecastSummary(e, has) {
-  const cards = [
-    { type: 'entity', entity: e('lp_solar_forecast'), name: 'Solar Forecast', icon: 'mdi:solar-power-variant' },
-    { type: 'entity', entity: e('lp_load_forecast'), name: 'Load Forecast', icon: 'mdi:home-lightning-bolt' },
+  const items = [
+    { entity: e('lp_solar_forecast'), name: 'Solar Forecast', icon: 'mdi:solar-power-variant' },
+    { entity: e('lp_load_forecast'), name: 'Load Forecast', icon: 'mdi:home-lightning-bolt' },
   ];
   if (has(e('lp_import_price_forecast'))) {
-    cards.push({ type: 'entity', entity: e('lp_import_price_forecast'), name: 'Import Price Avg', icon: 'mdi:cash-clock' });
+    items.push({ entity: e('lp_import_price_forecast'), name: 'Import Price Avg', icon: 'mdi:cash-clock', price: true });
   }
   if (has(e('lp_export_price_forecast'))) {
-    cards.push({ type: 'entity', entity: e('lp_export_price_forecast'), name: 'Export Price Avg', icon: 'mdi:cash-clock' });
+    items.push({ entity: e('lp_export_price_forecast'), name: 'Export Price Avg', icon: 'mdi:cash-clock', price: true });
   }
-  return { type: 'horizontal-stack', cards };
+  return { type: 'custom:power-sync-forecast-summary', items };
 }
 
 function _lpSolarLoadChart(e) {
