@@ -558,6 +558,20 @@ def _default_optimizer_specs_for(battery_system: str) -> tuple[int, int, int]:
     return capacity_wh, power_w, power_w
 
 
+def _optimization_provider_options_for_battery(
+    battery_system: str | None,
+) -> dict[str, str]:
+    """Return native and Smart Optimization labels for a battery system."""
+    native_name = OPTIMIZATION_PROVIDER_NATIVE_NAMES.get(
+        battery_system or BATTERY_SYSTEM_TESLA,
+        "Battery",
+    )
+    return {
+        OPT_PROVIDER_NATIVE: f"{native_name} built-in optimization",
+        OPT_PROVIDER_POWERSYNC: "Smart Optimization (Built-in LP)",
+    }
+
+
 async def validate_amber_token(hass: HomeAssistant, api_token: str) -> dict[str, Any]:
     """Validate the Amber API token."""
     session = async_get_clientsession(hass)
@@ -1794,8 +1808,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_BATTERY_SYSTEM, BATTERY_SYSTEM_TESLA
             )
 
-            # All battery systems can choose between native optimization and Smart Optimization
-            return await self.async_step_optimization_provider()
+            # Keep setup and post-setup optimization pages aligned.
+            return await self.async_step_ml_options()
 
         return self.async_show_form(
             step_id="battery_system",
@@ -1839,11 +1853,9 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._selected_battery_system, "Battery"
         )
 
-        # Build dynamic provider options with battery-specific naming
-        providers = {
-            OPT_PROVIDER_NATIVE: f"{native_name} built-in optimization",
-            OPT_PROVIDER_POWERSYNC: "Smart Optimization (Built-in LP)",
-        }
+        providers = _optimization_provider_options_for_battery(
+            self._selected_battery_system
+        )
 
         return self.async_show_form(
             step_id="optimization_provider",
@@ -1881,48 +1893,69 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         default_discharge_kw = default_discharge_w / 1000
 
         if user_input is not None:
-            self._ml_options = {
-                CONF_OPTIMIZATION_ENABLED: bool(
-                    user_input.get(CONF_OPTIMIZATION_ENABLED, True)
-                ),
-                CONF_OPTIMIZATION_COST_FUNCTION: COST_FUNCTION_COST,
-                CONF_OPTIMIZATION_BACKUP_RESERVE: user_input.get(
-                    CONF_OPTIMIZATION_BACKUP_RESERVE,
-                    int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
-                )
-                / 100.0,
-                CONF_OPTIMIZATION_BATTERY_CAPACITY_WH: _form_kwh_to_wh(
-                    user_input.get(CONF_OPTIMIZATION_BATTERY_CAPACITY_WH),
-                    default_capacity_kwh,
-                ),
-                CONF_OPTIMIZATION_MAX_CHARGE_W: _form_kw_to_w(
-                    user_input.get(CONF_OPTIMIZATION_MAX_CHARGE_W),
-                    default_charge_kw,
-                ),
-                CONF_OPTIMIZATION_MAX_DISCHARGE_W: _form_kw_to_w(
-                    user_input.get(CONF_OPTIMIZATION_MAX_DISCHARGE_W),
-                    default_discharge_kw,
-                ),
-                CONF_OPTIMIZATION_ALLOW_GRID_CHARGE: user_input.get(
-                    CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
-                    True,
-                ),
-                CONF_PROFIT_MAX_TARGET_TIME: user_input.get(
-                    CONF_PROFIT_MAX_TARGET_TIME,
-                    DEFAULT_PROFIT_MAX_TARGET_TIME,
-                ),
-                CONF_PROFIT_MAX_TARGET_SOC: _form_percent_to_ratio(
-                    user_input.get(CONF_PROFIT_MAX_TARGET_SOC),
-                    DEFAULT_PROFIT_MAX_TARGET_SOC,
-                ),
-            }
+            optimization_provider = user_input.get(
+                CONF_OPTIMIZATION_PROVIDER,
+                OPT_PROVIDER_POWERSYNC,
+            )
+            self._optimization_provider = optimization_provider
+            self._ml_options = {}
+            if optimization_provider == OPT_PROVIDER_POWERSYNC:
+                self._ml_options = {
+                    CONF_OPTIMIZATION_ENABLED: bool(
+                        user_input.get(CONF_OPTIMIZATION_ENABLED, True)
+                    ),
+                    CONF_OPTIMIZATION_COST_FUNCTION: COST_FUNCTION_COST,
+                    CONF_OPTIMIZATION_BACKUP_RESERVE: user_input.get(
+                        CONF_OPTIMIZATION_BACKUP_RESERVE,
+                        int(DEFAULT_OPTIMIZATION_BACKUP_RESERVE * 100),
+                    )
+                    / 100.0,
+                    CONF_OPTIMIZATION_BATTERY_CAPACITY_WH: _form_kwh_to_wh(
+                        user_input.get(CONF_OPTIMIZATION_BATTERY_CAPACITY_WH),
+                        default_capacity_kwh,
+                    ),
+                    CONF_OPTIMIZATION_MAX_CHARGE_W: _form_kw_to_w(
+                        user_input.get(CONF_OPTIMIZATION_MAX_CHARGE_W),
+                        default_charge_kw,
+                    ),
+                    CONF_OPTIMIZATION_MAX_DISCHARGE_W: _form_kw_to_w(
+                        user_input.get(CONF_OPTIMIZATION_MAX_DISCHARGE_W),
+                        default_discharge_kw,
+                    ),
+                    CONF_OPTIMIZATION_ALLOW_GRID_CHARGE: user_input.get(
+                        CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
+                        True,
+                    ),
+                    CONF_PROFIT_MAX_TARGET_TIME: user_input.get(
+                        CONF_PROFIT_MAX_TARGET_TIME,
+                        DEFAULT_PROFIT_MAX_TARGET_TIME,
+                    ),
+                    CONF_PROFIT_MAX_TARGET_SOC: _form_percent_to_ratio(
+                        user_input.get(CONF_PROFIT_MAX_TARGET_SOC),
+                        DEFAULT_PROFIT_MAX_TARGET_SOC,
+                    ),
+                }
             # Proceed to battery connection setup
             return await self._route_to_battery_setup()
+
+        opt_providers = _optimization_provider_options_for_battery(battery_system)
 
         return self.async_show_form(
             step_id="ml_options",
             data_schema=vol.Schema(
                 {
+                    vol.Required(
+                        CONF_OPTIMIZATION_PROVIDER,
+                        default=OPT_PROVIDER_POWERSYNC,
+                    ): SelectSelector(
+                        SelectSelectorConfig(
+                            options=[
+                                SelectOptionDict(value=k, label=v)
+                                for k, v in opt_providers.items()
+                            ],
+                            mode=SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
                     vol.Required(
                         CONF_OPTIMIZATION_ENABLED,
                         default=True,
@@ -1934,7 +1967,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         NumberSelectorConfig(
                             min=0,
                             max=100,
-                            step=5,
+                            step=1,
                             unit_of_measurement="%",
                             mode=NumberSelectorMode.SLIDER,
                         )
@@ -5806,21 +5839,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             DEFAULT_PROFIT_MAX_TARGET_SOC,
         )
 
-        # Build native label based on battery system
-        native_labels = {
-            BATTERY_SYSTEM_TESLA: "Tesla Powerwall built-in optimization",
-            BATTERY_SYSTEM_SIGENERGY: "Sigenergy built-in optimization",
-            BATTERY_SYSTEM_SUNGROW: "Sungrow built-in optimization",
-            BATTERY_SYSTEM_FOXESS: "FoxESS built-in optimization",
-            BATTERY_SYSTEM_GOODWE: "GoodWe built-in optimization",
-            BATTERY_SYSTEM_NEOVOLT: "Neovolt built-in optimization",
-        }
-        native_label = native_labels.get(battery_system, "Built-in optimization")
-
-        opt_providers = {
-            OPT_PROVIDER_NATIVE: native_label,
-            OPT_PROVIDER_POWERSYNC: "Smart Optimization (Built-in LP)",
-        }
+        opt_providers = _optimization_provider_options_for_battery(battery_system)
 
         return self.async_show_form(
             step_id="optimization",

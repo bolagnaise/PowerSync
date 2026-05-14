@@ -12,6 +12,68 @@ CONFIG_FLOW_PATH = ROOT / "custom_components" / "power_sync" / "config_flow.py"
 STRINGS_PATH = ROOT / "custom_components" / "power_sync" / "strings.json"
 TRANSLATIONS_PATH = ROOT / "custom_components" / "power_sync" / "translations" / "en.json"
 
+CONFIG_OPTION_TEXT_STEP_PAIRS = (
+    ("provider_selection", "pricing"),
+    ("ml_options", "optimization"),
+    ("sungrow", "sungrow_connection"),
+    ("sungrow_secondary", "sungrow_connection"),
+    ("sungrow", "init_sungrow"),
+    ("sungrow_secondary", "init_sungrow"),
+    ("foxess_connection", "init_foxess"),
+    ("foxess_tcp", "foxess_connection_options"),
+    ("foxess_serial", "foxess_connection_options"),
+    ("foxess_tcp", "init_foxess"),
+    ("foxess_serial", "init_foxess"),
+    ("goodwe_connection", "goodwe_connection_options"),
+    ("goodwe_connection", "init_goodwe"),
+    ("esy_sunhome", "esy_sunhome_connection"),
+    ("saj_h2_battery", "saj_h2_connection"),
+    ("fronius_reserva_battery", "fronius_reserva_connection"),
+    ("neovolt_battery", "neovolt_connection"),
+    ("sigenergy_credentials", "sigenergy_connection"),
+    ("sigenergy_station", "sigenergy_connection"),
+    ("sigenergy_modbus", "sigenergy_connection"),
+    ("sigenergy_dc_curtailment", "sigenergy_connection"),
+    ("sigenergy_credentials", "init_sigenergy"),
+    ("sigenergy_station", "init_sigenergy"),
+    ("sigenergy_modbus", "init_sigenergy"),
+    ("sigenergy_dc_curtailment", "init_sigenergy"),
+    ("tesla_provider", "tesla_connection"),
+    ("site_selection", "tesla_connection"),
+    ("tesla_ev_teslemetry_token", "options_tesla_ev_token"),
+    ("teslemetry", "teslemetry_token"),
+    ("powersync", "powersync_token"),
+    ("weather_setup", "weather_options"),
+    ("demand_charges", "demand_charge_options"),
+    ("curtailment_setup", "curtailment_options"),
+    ("sigenergy_dc_curtailment", "curtailment_options"),
+    ("weather_setup", "curtailment_options"),
+    ("inverter_brand_setup", "inverter_brand"),
+    ("inverter_config_setup", "inverter_config"),
+    ("solax_battery", "solax_battery_options"),
+    ("flow_power_setup", "flow_power_options"),
+    ("flow_power_tariff", "flow_power_options"),
+    ("flow_power_portal", "flow_power_options"),
+    ("flow_power_portal_login", "flow_power_portal_reauth"),
+    ("flow_power_portal_mfa", "flow_power_portal_mfa_options"),
+    ("amber", "flow_power_amber_token"),
+    ("localvolts", "localvolts_options"),
+    ("epex", "epex_options"),
+    ("octopus", "octopus_options"),
+    ("octopus_saving_sessions", "octopus_saving_sessions_options"),
+    ("custom_tariff", "custom_tariff_options"),
+    ("tariff_period", "tariff_period_options"),
+    ("nz_retailer", "nz_options"),
+    ("nz_rates", "nz_options"),
+    ("aemo_config", "globird_options"),
+    ("amber_site_selection", "amber_options"),
+    ("site_selection", "amber_options"),
+    ("amber_settings", "amber_options"),
+    ("curtailment_setup", "amber_options"),
+    ("inverter_brand_setup", "amber_options"),
+    ("inverter_config_setup", "amber_options"),
+)
+
 
 def _module_tree() -> ast.Module:
     return ast.parse(CONFIG_FLOW_PATH.read_text())
@@ -229,8 +291,56 @@ def test_initial_smart_optimization_configuration_exposes_enabled_toggle():
     method_source = ast.get_source_segment(source, method)
 
     assert method_source is not None
+    assert "CONF_OPTIMIZATION_PROVIDER" in method_source
+    assert "self._optimization_provider = optimization_provider" in method_source
     assert "CONF_OPTIMIZATION_ENABLED" in method_source
     assert "user_input.get(CONF_OPTIMIZATION_ENABLED, True)" in method_source
+
+
+def test_initial_setup_routes_to_combined_optimization_options_page():
+    source = CONFIG_FLOW_PATH.read_text()
+    method = _config_flow_method("async_step_battery_system")
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    assert "return await self.async_step_ml_options()" in method_source
+    assert "return await self.async_step_optimization_provider()" not in method_source
+
+
+def test_smart_optimization_setup_and_options_text_match():
+    for path in (STRINGS_PATH, TRANSLATIONS_PATH):
+        data = json.loads(path.read_text())
+        config_step = data["config"]["step"]["ml_options"]
+        options_step = data["options"]["step"]["optimization"]
+
+        assert config_step["title"] == options_step["title"]
+        assert config_step["description"] == options_step["description"]
+        assert config_step["data"] == options_step["data"]
+        assert config_step["data_description"] == options_step["data_description"]
+
+
+def test_config_and_options_flow_shared_text_matches():
+    for path in (STRINGS_PATH, TRANSLATIONS_PATH):
+        data = json.loads(path.read_text())
+        config_steps = data["config"]["step"]
+        option_steps = data["options"]["step"]
+
+        for config_step_name, option_step_name in CONFIG_OPTION_TEXT_STEP_PAIRS:
+            if config_step_name not in config_steps or option_step_name not in option_steps:
+                continue
+            config_step = config_steps[config_step_name]
+            option_step = option_steps[option_step_name]
+
+            for section in ("data", "data_description"):
+                config_values = config_step.get(section, {})
+                option_values = option_step.get(section, {})
+                shared_keys = set(config_values) & set(option_values)
+
+                for key in shared_keys:
+                    assert option_values[key] == config_values[key], (
+                        f"{path.name}: {config_step_name}->{option_step_name} "
+                        f"{section}.{key}"
+                    )
 
 
 def test_optimization_enabled_toggle_is_translated_in_config_and_options():

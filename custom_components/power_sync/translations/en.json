@@ -87,6 +87,17 @@
         },
         "submit": "Connect"
       },
+      "amber_site_selection": {
+        "title": "Select your Amber site",
+        "description": "Your Amber account has multiple sites. Select the NMI associated with this location.",
+        "data": {
+          "amber_site_id": "Amber site"
+        },
+        "data_description": {
+          "amber_site_id": "Choose the NMI at this address. Closed sites will not receive price updates."
+        },
+        "submit": "Continue"
+      },
       "localvolts": {
         "title": "Localvolts API credentials",
         "description": "Connect your Localvolts account for real-time 5-minute NEM wholesale pricing.",
@@ -309,6 +320,7 @@
         "title": "Smart Optimization settings",
         "description": "Configure PowerSync's Smart Optimization limits. The minimum discharge level is the optimizer's floor, not your battery's hardware backup reserve for grid outages.",
         "data": {
+          "optimization_provider": "Optimization mode",
           "optimization_enabled": "Enable Smart Optimization",
           "optimization_backup_reserve": "Minimum discharge level",
           "optimization_battery_capacity_wh": "Battery capacity",
@@ -319,6 +331,7 @@
           "profit_max_target_soc": "Profit Max target SOC"
         },
         "data_description": {
+          "optimization_provider": "Smart Optimization uses an LP solver to minimise costs. Native mode uses your battery's built-in TOU scheduler.",
           "optimization_enabled": "Turn the LP optimizer on or off without changing the saved Smart Optimization settings.",
           "optimization_backup_reserve": "The optimizer will never discharge below this percentage. Default 20% is a good starting point. Your battery's hardware backup reserve (set in the Tesla/Sigenergy app) is separate.",
           "optimization_battery_capacity_wh": "Total usable battery capacity in kWh. This should match the battery specs shown in the mobile app.",
@@ -635,7 +648,7 @@
           "amber_site_id": "Amber site",
           "auto_sync_enabled": "Sync TOU schedule automatically",
           "amber_forecast_type": "Amber price forecast",
-          "battery_curtailment_enabled": "Stop export at negative feed-in prices"
+          "battery_curtailment_enabled": "Enable battery export curtailment"
         },
         "data_description": {
           "tesla_energy_site_id": "The Powerwall or Solar site that PowerSync will control. If you have multiple Tesla sites, choose the one at this address.",
@@ -643,7 +656,7 @@
           "amber_site_id": "If you have multiple Amber NMIs, select the one associated with this Powerwall.",
           "auto_sync_enabled": "When enabled, PowerSync uploads a new TOU tariff schedule to your battery every 5 minutes based on current Amber prices.",
           "amber_forecast_type": "Predicted is balanced. Low assumes cheaper prices (more aggressive charging). High assumes expensive prices (more conservative).",
-          "battery_curtailment_enabled": "Prevents your battery from exporting when feed-in prices go negative, so you never pay to export. Can be fine-tuned in options later."
+          "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. This is the main toggle -- must be enabled for any curtailment to work."
         },
         "submit": "Finish"
       },
@@ -887,7 +900,7 @@
           "electricity_provider": "Electricity provider"
         },
         "data_description": {
-          "electricity_provider": "Changing provider will clear your current pricing configuration and start fresh."
+          "electricity_provider": "If your retailer is not listed, choose Other / Custom TOU to enter rates manually."
         },
         "submit": "Next"
       },
@@ -901,9 +914,9 @@
           "update_teslemetry_token": "New API token (leave blank to keep current)"
         },
         "data_description": {
-          "tesla_api_provider": "Controls how PowerSync reads and writes your Powerwall TOU schedule.",
-          "tesla_ev_api_provider": "Only needed for vehicle commands. Choose None if you only have a Powerwall.",
-          "powerwall_local_ip": "Optional. Provides direct LAN access for live local polling and fast gateway writes. Pairing handles authentication via RSA signing — no password required. Leave blank to disable local LAN access and use cloud-only mode.",
+          "tesla_api_provider": "Controls how PowerSync reads and writes your Powerwall TOU schedule. PowerSync.cc is free and handles OAuth for you.",
+          "tesla_ev_api_provider": "Only needed if you want PowerSync to send commands to a Tesla vehicle (e.g. start/stop charging). Choose None if you only have a Powerwall or use BLE.",
+          "powerwall_local_ip": "Optional. Provides direct LAN access for live local polling and fast gateway writes — pairing handles authentication via RSA signing, no password required.",
           "update_teslemetry_token": "Paste a new token to rotate it. Leave blank to keep your existing token."
         },
         "submit": "Save"
@@ -915,25 +928,25 @@
           "sigenergy_modbus_host": "Inverter IP address",
           "sigenergy_modbus_port": "Modbus port",
           "sigenergy_modbus_slave_id": "Modbus slave ID",
-          "sigenergy_dc_curtailment_enabled": "Enable DC curtailment",
-          "sigenergy_export_limit_kw": "Export limit",
-          "sigenergy_username": "Cloud API email",
-          "sigenergy_password": "Cloud API password",
+          "sigenergy_dc_curtailment_enabled": "Enable DC solar curtailment",
+          "sigenergy_export_limit_kw": "Grid export limit (kW)",
+          "sigenergy_username": "Email address",
+          "sigenergy_password": "Password",
           "sigenergy_pass_enc": "Pre-encoded password (advanced)",
-          "sigenergy_device_id": "Device ID",
+          "sigenergy_device_id": "Device ID (optional)",
           "sigenergy_station_id": "Station ID"
         },
         "data_description": {
-          "sigenergy_modbus_host": "Local IP address of your Sigenergy inverter or gateway.",
-          "sigenergy_modbus_port": "Default Modbus TCP port is 502. Only change if customised on the inverter.",
-          "sigenergy_modbus_slave_id": "Default is 247. Only change if you have multiple devices on the same bus.",
-          "sigenergy_dc_curtailment_enabled": "Reduce DC solar output when export prices go negative. Requires Modbus write access.",
-          "sigenergy_export_limit_kw": "Maximum export power in kW. Leave blank for no limit.",
-          "sigenergy_username": "Your Sigenergy Cloud account email.",
+          "sigenergy_modbus_host": "Local IP address of your Sigenergy inverter or gateway (e.g. 192.168.1.100).",
+          "sigenergy_modbus_port": "Default Modbus TCP port is 502. Only change if customised.",
+          "sigenergy_modbus_slave_id": "Default is 247. PowerSync auto-detects the correct registers.",
+          "sigenergy_dc_curtailment_enabled": "Reduce DC solar output when export prices go negative. Requires Modbus write access to the Sigenergy system.",
+          "sigenergy_export_limit_kw": "Your DNSP grid export limit in kW. Leave blank to auto-detect from inverter registers. Prevents PowerSync from ever exceeding your grid connection allowance.",
+          "sigenergy_username": "Your Sigenergy Cloud account email address.",
           "sigenergy_password": "Plain-text password (recommended). Encoded automatically.",
-          "sigenergy_pass_enc": "Pre-encoded password from the Sigenergy API. Use only if you know what this is.",
-          "sigenergy_device_id": "13-digit device ID. Leave blank if your account does not require one.",
-          "sigenergy_station_id": "Your Sigenergy station ID."
+          "sigenergy_pass_enc": "Pre-encoded password from the Sigenergy API. Leave blank unless you know what this is.",
+          "sigenergy_device_id": "13-digit device ID. Only needed if authentication fails without it. Find it in browser dev tools > Network tab > 'token' request > userDeviceId.",
+          "sigenergy_station_id": "To find your Station ID, ask SigenAI 'Tell me my StationID' in the Sigenergy app."
         },
         "submit": "Save"
       },
@@ -941,21 +954,21 @@
         "title": "Sungrow Modbus connection",
         "description": "Update your Sungrow inverter Modbus settings. Changes take effect immediately.",
         "data": {
-          "sungrow_host": "Primary inverter IP",
+          "sungrow_host": "Inverter IP address",
           "sungrow_port": "Modbus port",
           "sungrow_slave_id": "Modbus slave ID",
           "sungrow_host_2": "Secondary inverter IP",
-          "sungrow_port_2": "Secondary Modbus port",
-          "sungrow_slave_id_2": "Secondary slave ID",
+          "sungrow_port_2": "Modbus port",
+          "sungrow_slave_id_2": "Modbus slave ID",
           "sungrow_grid_inverter_soc_cap": "Grid inverter SOC cap",
           "sungrow_battery_capacity_1": "Primary battery capacity",
           "sungrow_battery_capacity_2": "Secondary battery capacity"
         },
         "data_description": {
           "sungrow_host": "Local IP of your Sungrow inverter or WiNet-S dongle (e.g. 192.168.1.100).",
-          "sungrow_port": "Default Modbus TCP port is 502.",
-          "sungrow_slave_id": "Default is 1. Only change if customised on the inverter.",
-          "sungrow_host_2": "Leave blank if you only have one inverter.",
+          "sungrow_port": "Default Modbus TCP port is 502. Only change if customised on the inverter.",
+          "sungrow_slave_id": "Default is 1. Only change if you have multiple devices on the same bus.",
+          "sungrow_host_2": "Local IP of your second Sungrow inverter or WiNet-S dongle. Leave blank to skip.",
           "sungrow_grid_inverter_soc_cap": "Maximum SOC percentage for grid-connected inverter in dual setups. Default 100 (disabled).",
           "sungrow_battery_capacity_1": "Battery capacity in kWh for the primary inverter. Used for weighted SOC calculation in dual setups.",
           "sungrow_battery_capacity_2": "Battery capacity in kWh for the secondary inverter."
@@ -970,13 +983,13 @@
           "foxess_port": "Modbus port",
           "foxess_slave_id": "Modbus slave ID",
           "foxess_serial_port": "Serial port path",
-          "foxess_serial_baudrate": "Serial baud rate"
+          "foxess_serial_baudrate": "Baud rate"
         },
         "data_description": {
-          "foxess_host": "Local IP of your FoxESS inverter. H3 Smart shows as 'espressif' on your network.",
+          "foxess_host": "Local IP of your FoxESS inverter. H3 Smart may appear as 'espressif' on your network.",
           "foxess_port": "Default Modbus TCP port is 502.",
           "foxess_slave_id": "Default is 247 for FoxESS.",
-          "foxess_serial_port": "e.g. /dev/ttyUSB0 for a USB-to-RS485 adapter. Only used for serial connections.",
+          "foxess_serial_port": "e.g. /dev/ttyUSB0 for a USB-to-RS485 adapter.",
           "foxess_serial_baudrate": "Default 9600. Only change if the inverter is configured differently."
         },
         "submit": "Save"
@@ -986,7 +999,7 @@
         "description": "Update your GoodWe inverter connection settings. Changes take effect immediately.",
         "data": {
           "goodwe_host": "Inverter IP address",
-          "goodwe_protocol": "Connection protocol",
+          "goodwe_protocol": "Protocol",
           "goodwe_port": "Port",
           "goodwe_ems_entity_prefix": "GoodWe entity mode prefix"
         },
@@ -1005,7 +1018,7 @@
           "esy_config_entry_id": "ESY Sunhome integration"
         },
         "data_description": {
-          "esy_config_entry_id": "The ESY Sunhome integration entry to read sensors and send mode commands through."
+          "esy_config_entry_id": "The ESY Sunhome integration entry to read sensors and send mode commands through. Install it via HACS if it does not appear here."
         },
         "submit": "Save"
       },
@@ -1019,8 +1032,8 @@
         },
         "data_description": {
           "saj_config_entry_id": "The saj_h2_modbus integration entry to read sensors and send passive charge/discharge commands through.",
-          "saj_battery_capacity_kwh": "Usable battery capacity in kWh.",
-          "saj_inverter_rated_kw": "Inverter AC rated power in kW (e.g. HS2-10K-T2-5 → 10). Used to convert LP-requested watts into the SAJ register encoding."
+          "saj_battery_capacity_kwh": "Usable battery capacity in kWh. Used by the LP optimizer.",
+          "saj_inverter_rated_kw": "Inverter AC rated power in kW. Read off the model number — e.g. HS2-10K-T2-5 → 10. Used to convert the LP's requested watts into the SAJ register encoding (% × 10 of rated)."
         },
         "submit": "Save"
       },
@@ -1034,10 +1047,10 @@
           "fronius_reserva_max_discharge_kw": "Maximum discharge power"
         },
         "data_description": {
-          "fronius_reserva_config_entry_id": "The fronius_modbus integration entry PowerSync should bridge through.",
-          "fronius_reserva_battery_capacity_kwh": "Usable battery capacity in kWh.",
-          "fronius_reserva_max_charge_kw": "Maximum grid charge power in kW.",
-          "fronius_reserva_max_discharge_kw": "Maximum grid discharge/export power in kW."
+          "fronius_reserva_config_entry_id": "The fronius_modbus integration entry to read sensors and send Reserva storage-control commands through.",
+          "fronius_reserva_battery_capacity_kwh": "Usable battery capacity in kWh. Used by the LP optimizer.",
+          "fronius_reserva_max_charge_kw": "Maximum grid charge power in kW. Used by dispatch commands and the LP optimizer.",
+          "fronius_reserva_max_discharge_kw": "Maximum grid discharge/export power in kW. Used by dispatch commands and the LP optimizer."
         },
         "submit": "Save"
       },
@@ -1054,10 +1067,10 @@
           "neovolt_soc_balance_tolerance": "SOC balance tolerance"
         },
         "data_description": {
-          "neovolt_config_entry_id": "The Neovolt integration entry to read sensors and send dispatch commands through.",
+          "neovolt_config_entry_id": "The Neovolt integration entry to read combined sensors and send dispatch commands through.",
           "neovolt_config_entry_ids": "Select every Neovolt inverter entry PowerSync should read and control.",
-          "neovolt_max_charge_kw": "Maximum charge power in kW.",
-          "neovolt_max_discharge_kw": "Maximum discharge power in kW.",
+          "neovolt_max_charge_kw": "Maximum charge power in kW. Used by the LP optimizer and dispatch command limits.",
+          "neovolt_max_discharge_kw": "Maximum discharge power in kW. Used by the LP optimizer and dispatch command limits.",
           "neovolt_battery_capacities_kwh": "Optional comma-separated usable battery capacities in kWh. With multiple Neovolt integrations, values follow the selected integration order. With one integration, multiple values are summed. Example: 20.1, 30.2. Leave blank to use Neovolt's capacity sensors.",
           "neovolt_surplus_balancer_mode": "Auto is conservative and only acts when multiple Neovolt integrations are selected so PowerSync can command each inverter independently. With one selected integration, the balancer status will show disabled. Disable this if your batteries already have a parallel/BMS coordinator.",
           "neovolt_soc_balance_tolerance": "PowerSync will not force-charge a higher-SOC parked stack while another stack is behind by more than this percentage."
@@ -1098,7 +1111,7 @@
           "tesla_ev_teslemetry_token": "Teslemetry API token"
         },
         "data_description": {
-          "tesla_ev_teslemetry_token": "This token is only used for vehicle commands. Your Powerwall uses a separate connection."
+          "tesla_ev_teslemetry_token": "Get a token from [{teslemetry_url}]({teslemetry_url}). This is only used for vehicle commands -- your Powerwall uses a separate connection."
         },
         "submit": "Save"
       },
@@ -1114,23 +1127,23 @@
           "sigenergy_modbus_slave_id": "Modbus slave ID",
           "sigenergy_dc_curtailment_enabled": "Enable DC solar curtailment",
           "sigenergy_export_limit_kw": "Grid export limit (kW)",
-          "sigenergy_username": "Cloud API email",
+          "sigenergy_username": "Email address",
           "sigenergy_password": "Password",
           "sigenergy_pass_enc": "Pre-encoded password (advanced)",
           "sigenergy_device_id": "Device ID (optional)",
           "sigenergy_station_id": "Station ID"
         },
         "data_description": {
-          "sigenergy_modbus_host": "Local IP address of your Sigenergy inverter (e.g. 192.168.1.100).",
-          "sigenergy_modbus_port": "Default Modbus TCP port is 502.",
+          "sigenergy_modbus_host": "Local IP address of your Sigenergy inverter or gateway (e.g. 192.168.1.100).",
+          "sigenergy_modbus_port": "Default Modbus TCP port is 502. Only change if customised.",
           "sigenergy_modbus_slave_id": "Default is 247. PowerSync auto-detects the correct registers.",
-          "sigenergy_dc_curtailment_enabled": "Reduce DC solar output when export prices go negative. Requires Modbus write access.",
-          "sigenergy_export_limit_kw": "Your DNSP grid export limit in kW. Leave blank to auto-detect from inverter registers.",
+          "sigenergy_dc_curtailment_enabled": "Reduce DC solar output when export prices go negative. Requires Modbus write access to the Sigenergy system.",
+          "sigenergy_export_limit_kw": "Your DNSP grid export limit in kW. Leave blank to auto-detect from inverter registers. Prevents PowerSync from ever exceeding your grid connection allowance.",
           "sigenergy_username": "Your Sigenergy Cloud account email address.",
-          "sigenergy_password": "Your Sigenergy account password (leave blank to keep existing).",
-          "sigenergy_pass_enc": "Pre-encoded password -- leave blank unless you know what this is.",
-          "sigenergy_device_id": "Optional -- leave blank unless authentication fails without it.",
-          "sigenergy_station_id": "Your Sigenergy station ID (numeric)."
+          "sigenergy_password": "Plain-text password (recommended). Encoded automatically.",
+          "sigenergy_pass_enc": "Pre-encoded password from the Sigenergy API. Leave blank unless you know what this is.",
+          "sigenergy_device_id": "13-digit device ID. Only needed if authentication fails without it. Find it in browser dev tools > Network tab > 'token' request > userDeviceId.",
+          "sigenergy_station_id": "To find your Station ID, ask SigenAI 'Tell me my StationID' in the Sigenergy app."
         },
         "submit": "Save"
       },
@@ -1141,12 +1154,12 @@
           "electricity_provider": "Electricity provider",
           "optimization_provider": "Optimization mode",
           "optimization_backup_reserve": "Minimum discharge level (%)",
-          "sungrow_host": "Primary inverter IP",
+          "sungrow_host": "Inverter IP address",
           "sungrow_port": "Modbus port",
           "sungrow_slave_id": "Modbus slave ID",
-          "sungrow_host_2": "Secondary inverter IP (optional)",
-          "sungrow_port_2": "Secondary Modbus port",
-          "sungrow_slave_id_2": "Secondary slave ID",
+          "sungrow_host_2": "Secondary inverter IP",
+          "sungrow_port_2": "Modbus port",
+          "sungrow_slave_id_2": "Modbus slave ID",
           "sungrow_grid_inverter_soc_cap": "Grid inverter max SOC (%)",
           "sungrow_battery_capacity_1": "Primary battery capacity (kWh)",
           "sungrow_battery_capacity_2": "Secondary battery capacity (kWh)"
@@ -1155,9 +1168,9 @@
           "optimization_provider": "Choose between Sungrow's built-in scheduling or Smart Optimization (LP solver).",
           "optimization_backup_reserve": "The optimizer will not discharge below this level. Separate from your battery's hardware backup reserve.",
           "sungrow_host": "Local IP of your Sungrow inverter or WiNet-S dongle (e.g. 192.168.1.100).",
-          "sungrow_port": "Default Modbus TCP port is 502.",
-          "sungrow_slave_id": "Default is 1. Only change if customised.",
-          "sungrow_host_2": "IP of a second Sungrow inverter. Leave blank if not applicable.",
+          "sungrow_port": "Default Modbus TCP port is 502. Only change if customised on the inverter.",
+          "sungrow_slave_id": "Default is 1. Only change if you have multiple devices on the same bus.",
+          "sungrow_host_2": "Local IP of your second Sungrow inverter or WiNet-S dongle. Leave blank to skip.",
           "sungrow_port_2": "Default Modbus TCP port is 502.",
           "sungrow_slave_id_2": "Default is 1. Only change if customised.",
           "sungrow_grid_inverter_soc_cap": "Maximum charge level for the grid-forming inverter. Set below 100% to reserve headroom for off-grid buffering (dual inverter setups only).",
@@ -1183,12 +1196,12 @@
         "data_description": {
           "optimization_provider": "Choose between FoxESS built-in scheduling or Smart Optimization (LP solver).",
           "optimization_backup_reserve": "The optimizer will not discharge below this level. Separate from your battery's hardware backup reserve.",
-          "foxess_connection_type": "Modbus TCP (LAN) or RS485 Serial.",
+          "foxess_connection_type": "Modbus TCP connects over LAN/WiFi. RS485 Serial provides full register access via a direct serial adapter.",
           "foxess_host": "Local IP of your FoxESS inverter. H3 Smart may appear as 'espressif' on your network.",
           "foxess_port": "Default Modbus TCP port is 502.",
           "foxess_slave_id": "Default is 247 for FoxESS.",
-          "foxess_serial_port": "e.g. /dev/ttyUSB0 -- only for RS485 serial connections.",
-          "foxess_serial_baudrate": "Default 9600 -- only for RS485 serial connections."
+          "foxess_serial_port": "e.g. /dev/ttyUSB0 for a USB-to-RS485 adapter.",
+          "foxess_serial_baudrate": "Default 9600. Only change if the inverter is configured differently."
         },
         "submit": "Save"
       },
@@ -1218,10 +1231,10 @@
         "title": "Teslemetry API token",
         "description": "Enter your Teslemetry API token from teslemetry.com. Changes take effect immediately.",
         "data": {
-          "teslemetry_api_token": "Teslemetry API token"
+          "teslemetry_api_token": "API token"
         },
         "data_description": {
-          "teslemetry_api_token": "Paste the full token string from your Teslemetry dashboard."
+          "teslemetry_api_token": "Get a token from teslemetry.com. Paste the full token string."
         },
         "submit": "Save"
       },
@@ -1232,7 +1245,7 @@
           "teslemetry_api_token": "PowerSync token"
         },
         "data_description": {
-          "teslemetry_api_token": "Token starting with psync_ from the PowerSync sign-in page."
+          "teslemetry_api_token": "Open {auth_url} in a browser, sign in with Tesla, and copy the psync_ token. Your Tesla credentials are never shared with PowerSync."
         },
         "submit": "Save"
       },
@@ -1241,9 +1254,9 @@
         "description": "Configure TOU sync, export boost, spike protection, and curtailment. Changes apply after the next sync cycle.",
         "data": {
           "update_amber_token": "Update Amber API token",
-          "auto_sync_enabled": "Enable automatic TOU sync",
-          "amber_forecast_type": "Amber forecast type",
-          "battery_curtailment_enabled": "Stop export at negative prices",
+          "auto_sync_enabled": "Sync TOU schedule automatically",
+          "amber_forecast_type": "Amber price forecast",
+          "battery_curtailment_enabled": "Enable battery export curtailment",
           "spike_protection_enabled": "Enable spike protection",
           "forecast_discrepancy_alert": "Enable forecast discrepancy alert",
           "forecast_discrepancy_threshold": "Discrepancy threshold",
@@ -1258,29 +1271,29 @@
           "chip_mode_start": "Chip mode start (HH:MM)",
           "chip_mode_end": "Chip mode end (HH:MM)",
           "chip_mode_threshold": "Price threshold",
-          "ac_inverter_curtailment_enabled": "Enable AC inverter curtailment",
+          "ac_inverter_curtailment_enabled": "Enable AC-coupled inverter shutdown",
           "inverter_brand": "Inverter brand",
           "inverter_model": "Inverter model",
-          "inverter_host": "Inverter IP address",
-          "inverter_port": "Modbus port",
+          "inverter_host": "IP address / hostname",
+          "inverter_port": "Port",
           "inverter_slave_id": "Modbus slave ID"
         },
         "data_description": {
           "update_amber_token": "Paste a new Amber API token to rotate it. Leave blank to keep your current token.",
-          "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery based on current Amber prices.",
-          "amber_forecast_type": "Predicted = balanced. Low = assumes cheaper prices (aggressive charging). High = assumes expensive prices (conservative).",
-          "battery_curtailment_enabled": "Stop battery exports and DC solar when feed-in prices go negative.",
-          "spike_protection_enabled": "Artificially inflate buy prices during Amber price spikes to prevent grid charging.",
-          "ac_inverter_curtailment_enabled": "Shut down AC-coupled solar inverter when feed-in price is negative. Use if solar bypasses your battery.",
-          "forecast_discrepancy_alert": "Send a notification when predicted and conservative forecasts diverge significantly.",
+          "auto_sync_enabled": "When enabled, PowerSync uploads a new TOU tariff schedule to your battery every 5 minutes based on current Amber prices.",
+          "amber_forecast_type": "Predicted is balanced. Low assumes cheaper prices (more aggressive charging). High assumes expensive prices (more conservative).",
+          "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. This is the main toggle -- must be enabled for any curtailment to work.",
+          "spike_protection_enabled": "When Amber detects a price spike, artificially inflate buy prices to prevent your battery from charging from grid.",
+          "ac_inverter_curtailment_enabled": "Shut down AC-coupled solar inverter (Fronius, Sungrow, GoodWe, Enphase) when feed-in price is negative. Use if solar bypasses your battery and exports directly.",
+          "forecast_discrepancy_alert": "Send a mobile notification when predicted and conservative forecasts diverge significantly. Indicates the forecast may be unreliable.",
           "forecast_discrepancy_threshold": "Average price difference that triggers the alert. Default 10 in the selected price unit.",
-          "force_tariff_mode_toggle": "After uploading a new tariff, briefly toggle operation mode to force recalculation. Tesla only, ~5 second interruption.",
-          "export_boost_enabled": "Artificially increase sell prices during configured hours to encourage battery export.",
-          "export_price_offset": "Amount added to the actual Amber export price. Example: Amber 18c + Offset 5c = 23c.",
+          "force_tariff_mode_toggle": "After uploading a new tariff, briefly toggle operation mode to force immediate recalculation. Tesla only, causes a ~5 second interruption.",
+          "export_boost_enabled": "Artificially increase sell prices during configured hours to encourage battery export during high-value periods.",
+          "export_price_offset": "Amount added to the actual Amber export price. Example: Amber 18c + Offset 5c = battery sees 23c.",
           "export_min_price": "Floor price after offset. Example: Amber 12c + Offset 5c = 17c, bumped to Floor 20c.",
-          "export_boost_threshold": "Only boost when actual Amber price is at or above this value. Use 0 to always boost.",
-          "chip_mode_enabled": "Suppress exports during configured hours unless price exceeds threshold.",
-          "chip_mode_threshold": "Allow exports only when price is at or above this value."
+          "export_boost_threshold": "Only apply boost when the actual Amber price (before boost) is at or above this value. Use 0 to always boost.",
+          "chip_mode_enabled": "Suppress exports during configured hours unless price exceeds threshold. The inverse of export boost.",
+          "chip_mode_threshold": "Allow exports only when the price is at or above this value during chip mode hours."
         },
         "submit": "Save"
       },
@@ -1293,7 +1306,7 @@
           "flow_power_base_rate": "Base rate",
           "pea_enabled": "Enable PEA pricing (recommended)",
           "auto_sync_enabled": "Enable automatic TOU sync",
-          "connect_portal": "Re-authenticate Flow Power portal"
+          "connect_portal": "Connect Flow Power portal account"
         },
         "data_description": {
           "flow_power_price_source": "AEMO Direct fetches wholesale prices from NEMWeb (no API key). Amber API uses your Amber Electric account.",
@@ -1311,7 +1324,7 @@
         },
         "data_description": {
           "flowpower_email": "The email address you use to log in to the Flow Power portal.",
-          "flowpower_password": "Your Flow Power portal password."
+          "flowpower_password": "Your Flow Power portal password. Stored securely in Home Assistant."
         },
         "submit": "Connect"
       },
@@ -1322,7 +1335,7 @@
           "mfa_code": "SMS code"
         },
         "data_description": {
-          "mfa_code": "6-digit code from the SMS sent to your Flow Power registered phone."
+          "mfa_code": "6-digit code from the SMS sent to your Flow Power registered phone. Codes expire after 5 minutes."
         },
         "submit": "Connect"
       },
@@ -1330,10 +1343,10 @@
         "title": "Amber API token",
         "description": "Enter your Amber Electric API token. Get one from {amber_url}.",
         "data": {
-          "amber_api_token": "Amber API token"
+          "amber_api_token": "API token"
         },
         "data_description": {
-          "amber_api_token": "Found in the Amber app under Profile > Developer > API key."
+          "amber_api_token": "Found in the Amber app under Profile > Developer > API key. Or visit [{amber_url}]({amber_url})."
         },
         "submit": "Connect"
       },
@@ -1373,15 +1386,15 @@
         "title": "Globird / AEMO settings",
         "description": "Configure your tariff source and optional AEMO spike export. Changes apply after the next sync cycle.\n\n{tariff_hint}",
         "data": {
-          "aemo_spike_enabled": "Enable AEMO spike export",
-          "aemo_region": "AEMO NEM region",
+          "aemo_spike_enabled": "Enable spike detection",
+          "aemo_region": "NEM region",
           "aemo_spike_threshold": "Spike threshold",
           "configure_custom_tariff": "Configure custom tariff"
         },
         "data_description": {
-          "aemo_spike_enabled": "Enable if your plan includes payments for exporting during AEMO price spikes.",
-          "aemo_region": "Your NEM region. Check your electricity bill if unsure.",
-          "aemo_spike_threshold": "Battery exports when the AEMO wholesale price exceeds this value. Default 3,000 in the selected market price unit.",
+          "aemo_spike_enabled": "Required for Globird and AEMO VPP plans that include spike export payments. Disable if your plan does not pay for spike exports.",
+          "aemo_region": "Your NEM region determines which AEMO price feed is monitored. Check your electricity bill if unsure.",
+          "aemo_spike_threshold": "Battery exports when the AEMO wholesale price exceeds this value. Default 3,000 in the selected market price unit matches most Globird and VPP plans. Only change if your plan specifies a different threshold.",
           "configure_custom_tariff": "Recommended: TOU rates are needed for accurate price sensors, optimization, and EV charging."
         },
         "submit": "Save"
@@ -1397,9 +1410,9 @@
           "battery_curtailment_enabled": "Stop export at negative prices"
         },
         "data_description": {
-          "localvolts_api_key": "Your Localvolts API key. Keep it secret -- treat it like a password.",
-          "localvolts_partner_id": "Your Localvolts Partner ID.",
-          "localvolts_nmi": "Your 10-digit National Meter Identifier. Use * for all authorized NMIs.",
+          "localvolts_api_key": "Contact Localvolts support to request your API key. Keep it secret -- treat it like a password.",
+          "localvolts_partner_id": "Your Localvolts Partner ID, provided alongside the API key.",
+          "localvolts_nmi": "Your 10-digit National Meter Identifier (on your electricity bill). Enter * to authorize all NMIs on the account.",
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery based on current prices.",
           "battery_curtailment_enabled": "Stop battery from exporting when prices are negative to avoid paying to export."
         },
@@ -1410,17 +1423,17 @@
         "description": "Update your EPEX pricing settings. Changes apply after the next sync cycle.",
         "data": {
           "epex_region": "Bidding zone",
-          "epex_surcharge": "Surcharge (ct/kWh)",
-          "epex_tax_percent": "Tax (%)",
-          "epex_export_rate": "Fixed export rate (ct/kWh)",
+          "epex_surcharge": "Surcharge",
+          "epex_tax_percent": "Tax",
+          "epex_export_rate": "Fixed export rate",
           "auto_sync_enabled": "Enable automatic TOU sync",
           "battery_curtailment_enabled": "Stop export at negative prices"
         },
         "data_description": {
-          "epex_region": "Your EPEX bidding zone. Most users need just their country code.",
-          "epex_surcharge": "Fixed network fees and levies added to wholesale price before tax.",
-          "epex_tax_percent": "VAT percentage. Example: 21 for Belgium, 19 for Germany.",
-          "epex_export_rate": "Fixed feed-in tariff in ct/kWh. Set to 0 to use wholesale price.",
+          "epex_region": "Your EPEX electricity market bidding zone. Most users need just their country code (DE, AT, BE, NL, FR, etc.).",
+          "epex_surcharge": "Fixed network fees, levies, and other charges in ct/kWh. Added to the wholesale price before tax.",
+          "epex_tax_percent": "VAT percentage applied on top of the total price. Example: 21 for Belgium, 19 for Germany.",
+          "epex_export_rate": "Fixed feed-in tariff in ct/kWh. Set to 0 to use the wholesale price for export valuation.",
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery.",
           "battery_curtailment_enabled": "Stop battery from exporting when prices go negative."
         },
@@ -1436,8 +1449,8 @@
           "battery_curtailment_enabled": "Stop export at negative prices"
         },
         "data_description": {
-          "octopus_product": "Agile = half-hourly dynamic. Go/Intelligent Go = cheap overnight. Flux/Intelligent Flux = solar+battery optimised. Tracker = daily wholesale.",
-          "octopus_region": "Your Grid Supply Point region (single letter A-P). Check your Octopus bill.",
+          "octopus_product": "Agile = half-hourly dynamic. Go/Intelligent Go = cheap overnight EV rates. Flux/Intelligent Flux = solar+battery optimised. Tracker = daily wholesale.",
+          "octopus_region": "Your Grid Supply Point region (single letter A-P). Check your Octopus bill or account dashboard.",
           "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery based on current prices.",
           "battery_curtailment_enabled": "Stop battery from exporting when prices go negative."
         },
@@ -1456,11 +1469,11 @@
         },
         "data_description": {
           "octopus_saving_sessions_enabled": "Enable automatic battery export during Octopus Saving Sessions.",
-          "octopus_saving_sessions_source": "Direct uses Octopus GraphQL API (requires API key). Entity reads from Bottlecap Dave's integration.",
-          "octopus_api_key": "Your Octopus API key from the developer dashboard.",
+          "octopus_saving_sessions_source": "Direct uses the Octopus GraphQL API (requires API key). Entity reads from Bottlecap Dave's Octopus integration.",
+          "octopus_api_key": "Your Octopus API key from the developer dashboard (not the same as your public tariff API key).",
           "octopus_account_number": "Your Octopus account number (e.g. A-12345678).",
-          "octopus_saving_sessions_entity": "Entity ID of the Bottlecap Dave saving sessions event entity.",
-          "octopus_saving_sessions_auto_join": "Automatically join available sessions. Only works in direct mode."
+          "octopus_saving_sessions_entity": "Entity ID of the Bottlecap Dave saving sessions event entity (e.g. event.octopus_energy_saving_sessions).",
+          "octopus_saving_sessions_auto_join": "Automatically join available saving sessions. Only works in direct mode."
         },
         "submit": "Save"
       },
@@ -1478,8 +1491,8 @@
           "nz_daily_supply": "Daily supply charge"
         },
         "data_description": {
-          "nz_retailer": "Select your NZ retailer. Rates will update to match the selected plan.",
-          "nz_distribution_zone": "Your local distribution network zone.",
+          "nz_retailer": "Your NZ electricity retailer. Rates are pre-filled from the selected plan.",
+          "nz_distribution_zone": "Your local network distribution zone. Check your electricity bill if unsure.",
           "nz_peak_rate": "Weekday peak rate (typically 7-9am and 5-9pm).",
           "nz_shoulder_rate": "Weekday daytime and weekend daytime rate.",
           "nz_offpeak_rate": "Overnight rate (typically 9pm-7am).",
@@ -1500,10 +1513,10 @@
           "fit_rate": "Default feed-in tariff"
         },
         "data_description": {
-          "plan_name": "Optional label for this tariff plan.",
-          "tariff_type": "Flat rate uses a single price all day. Time of Use lets you add multiple periods.",
+          "plan_name": "Optional label for this tariff plan. Shown in the integration card.",
+          "tariff_type": "Flat rate uses a single price all day. Time of Use lets you add multiple periods with different rates.",
           "flat_rate": "Only used for flat rate tariff type.",
-          "offpeak_rate": "Rate for hours not covered by any defined period.",
+          "offpeak_rate": "Rate for hours not covered by any period you define.",
           "fit_rate": "Default export rate for off-peak hours."
         },
         "submit": "Save"
@@ -1535,15 +1548,15 @@
         "description": "Configure automatic curtailment during negative feed-in prices. Changes take effect immediately.",
         "data": {
           "battery_curtailment_enabled": "Enable battery export curtailment",
-          "ac_inverter_curtailment_enabled": "Enable AC inverter shutdown",
-          "sigenergy_dc_curtailment_enabled": "Enable DC curtailment (Sigenergy)",
-          "openweathermap_api_key": "OpenWeatherMap API key (optional)"
+          "ac_inverter_curtailment_enabled": "Enable AC-coupled inverter shutdown",
+          "sigenergy_dc_curtailment_enabled": "Enable DC solar curtailment",
+          "openweathermap_api_key": "OpenWeatherMap API key"
         },
         "data_description": {
-          "battery_curtailment_enabled": "Stop battery from exporting when feed-in price is negative. This is the main toggle -- must be enabled for any curtailment to work.",
-          "ac_inverter_curtailment_enabled": "Shut down AC-coupled solar inverter when feed-in price is negative. Use if solar bypasses your battery. Requires inverter configuration.",
-          "sigenergy_dc_curtailment_enabled": "Limit DC solar production via Sigenergy Modbus when feed-in price is negative. Only for Sigenergy systems with DC-coupled solar.",
-          "openweathermap_api_key": "Free key from openweathermap.org for weather-based automations. Leave blank to disable."
+          "battery_curtailment_enabled": "Stop battery from exporting to grid when feed-in price is negative. This is the main toggle -- must be enabled for any curtailment to work.",
+          "ac_inverter_curtailment_enabled": "Shut down AC-coupled solar inverter (Fronius, Sungrow, GoodWe, Enphase) when feed-in price is negative. Use if solar bypasses your battery and exports directly.",
+          "sigenergy_dc_curtailment_enabled": "Reduce DC solar output when export prices go negative. Requires Modbus write access to the Sigenergy system.",
+          "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny, cloudy, rain, snow, and storm triggers). Leave blank to disable."
         },
         "submit": "Save"
       },
@@ -1564,10 +1577,10 @@
           "monthly_supply_charge": "Monthly supply charge ($)"
         },
         "data_description": {
-          "demand_charge_enabled": "Track your peak grid draw during demand periods and calculate monthly capacity fees.",
-          "demand_charge_rate": "Your network demand charge rate per kW of peak demand. Check your bill.",
-          "demand_charge_start_time": "Start of the demand charge measurement period (24-hour format).",
-          "demand_charge_end_time": "End of the demand charge measurement period (24-hour format).",
+          "demand_charge_enabled": "Track your peak grid draw during demand charge periods and calculate monthly capacity fees.",
+          "demand_charge_rate": "Your network demand charge rate in dollars per kW of peak demand. Check your bill for this value.",
+          "demand_charge_start_time": "Start time of the demand charge measurement period (24-hour format).",
+          "demand_charge_end_time": "End time of the demand charge measurement period (24-hour format).",
           "demand_charge_days": "Which days demand charges apply (weekdays, all days, etc.).",
           "demand_charge_billing_day": "Day of month when the billing cycle resets (1-28).",
           "demand_charge_apply_to": "Whether demand charges apply to grid imports, exports, or both.",
@@ -1712,10 +1725,10 @@
           "enphase_password": "Your Enlighten account password.",
           "enphase_serial": "Leave blank to auto-detect from IQ Gateway.",
           "enphase_normal_profile": "Full name of your normal grid profile. Example: 'AS/NZS 4777.2:2020 Australia A'.",
-          "enphase_zero_export_profile": "Full name of a zero-export grid profile if available.",
+          "enphase_zero_export_profile": "Full name of a zero-export grid profile if available (for fallback curtailment).",
           "enphase_is_installer": "Enable if using an installer Enlighten account. Required for grid profile switching.",
-          "inverter_restore_soc": "Restore inverter when battery drops below this %. Default: 98%.",
-          "fronius_load_following": "Enable if you do NOT have a 0W export limit. Uses calculated power limits. Leave off if you have a 0W export profile (most users)."
+          "inverter_restore_soc": "Restore inverter when battery drops below this %. Ensures battery stays topped up before evening peak. Default: 98%.",
+          "fronius_load_following": "Enable if you do NOT have a 0W export limit. Uses calculated power limits based on home load. Leave off if you have a 0W export profile (most users)."
         },
         "submit": "Save"
       },
@@ -1731,12 +1744,12 @@
           "solcast_resource_id": "Solcast resource ID(s)"
         },
         "data_description": {
-          "weather_location": "Suburb, city, postcode, or lat,lon coordinates (e.g. 'Melbourne', '3000', '-37.81,144.96'). Leave blank to auto-detect.",
-          "openweathermap_api_key": "Free key from openweathermap.org for weather-based automations. Leave blank to disable.",
+          "weather_location": "Suburb, city, postcode, or lat,lon coordinates (e.g. 'Melbourne', '3000', '-37.81,144.96'). Leave blank to auto-detect from timezone.",
+          "openweathermap_api_key": "Free API key from openweathermap.org for weather-based automations (sunny, cloudy, rain, snow, and storm triggers). Leave blank to disable.",
           "weather_entity": "Optional. Used for temperature-aware load forecasting if Home Assistant has a weather entity. Leave blank when using OpenWeatherMap.",
-          "solcast_enabled": "Enable solar forecasting. If the Solcast HA integration is installed, PowerSync reads from its sensors automatically.",
-          "solcast_api_key": "Only needed without the Solcast HA integration. Get a free key from toolkit.solcast.com.au.",
-          "solcast_resource_id": "Only needed without the Solcast HA integration. For split arrays, enter comma-separated IDs."
+          "solcast_enabled": "Enable solar production forecasting. If the Solcast HA integration is installed, PowerSync reads from its sensors automatically (no API calls needed).",
+          "solcast_api_key": "Only needed if you do NOT have the Solcast HA integration. Get a free key from toolkit.solcast.com.au (10 calls/day on hobbyist tier).",
+          "solcast_resource_id": "Only needed without the Solcast HA integration. For split arrays, enter comma-separated IDs (e.g. abc123,def456)."
         },
         "submit": "Save"
       },
@@ -1752,11 +1765,11 @@
           "solax_entity_prefix": "Entity prefix override"
         },
         "data_description": {
-          "solax_config_entry_id": "The solax_modbus integration entry PowerSync should bridge through.",
-          "solax_battery_capacity_kwh": "Usable battery capacity in kWh.",
-          "solax_battery_nominal_v": "Nominal battery voltage in V (51.2 for LFP, 102.4 for HV packs).",
-          "solax_max_charge_current_a": "Maximum charge current (A).",
-          "solax_max_discharge_current_a": "Maximum discharge current (A).",
+          "solax_config_entry_id": "The solax_modbus integration entry to read sensors and send charge/discharge commands through.",
+          "solax_battery_capacity_kwh": "Usable battery capacity in kWh. Used by the LP optimizer.",
+          "solax_battery_nominal_v": "Nominal battery voltage in V (51.2 for LFP T-BAT, 102.4 for high-voltage packs).",
+          "solax_max_charge_current_a": "Maximum charge current your battery supports (A).",
+          "solax_max_discharge_current_a": "Maximum discharge current your battery supports (A).",
           "solax_entity_prefix": "Optional. Use when Solax Modbus creates more than one naming group. For entities like select.solax_modbus_charger_use_mode, enter solax_modbus."
         },
         "submit": "Save"
