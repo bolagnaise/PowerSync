@@ -5126,6 +5126,7 @@ class InverterStatusView(HomeAssistantView):
                 "error": "Inverter not configured (no host)"
             })
 
+        controller = None
         try:
             controller = get_inverter_controller(
                 brand=inverter_brand,
@@ -5154,7 +5155,6 @@ class InverterStatusView(HomeAssistantView):
 
             # Get status from controller
             state = await controller.get_status()
-            await controller.disconnect()
 
             # Convert state to dict
             state_dict = state.to_dict()
@@ -5237,6 +5237,12 @@ class InverterStatusView(HomeAssistantView):
                 "host": inverter_host,
                 "error_message": description
             })
+        finally:
+            if controller:
+                try:
+                    await controller.disconnect()
+                except Exception as err:
+                    _LOGGER.debug("Error disconnecting inverter status controller: %s", err)
 
 
 class SigenergyTariffView(HomeAssistantView):
