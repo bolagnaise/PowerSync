@@ -282,6 +282,8 @@ def test_optimization_options_exposes_enabled_toggle():
     assert method_source is not None
     assert "CONF_OPTIMIZATION_ENABLED" in method_source
     assert "new_options[CONF_OPTIMIZATION_ENABLED] = optimization_enabled" in method_source
+    assert "CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED" in method_source
+    assert "new_options[CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED] = spread_export_enabled" in method_source
     assert "optimization_provider != OPT_PROVIDER_POWERSYNC" in method_source
 
 
@@ -295,6 +297,8 @@ def test_initial_smart_optimization_configuration_exposes_enabled_toggle():
     assert "self._optimization_provider = optimization_provider" in method_source
     assert "CONF_OPTIMIZATION_ENABLED" in method_source
     assert "user_input.get(CONF_OPTIMIZATION_ENABLED, True)" in method_source
+    assert "CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED" in method_source
+    assert "user_input.get(CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED" in method_source
 
 
 def test_initial_setup_routes_to_combined_optimization_options_page():
@@ -388,6 +392,8 @@ def test_optimization_enabled_toggle_is_translated_in_config_and_options():
 
             assert step["data"]["optimization_enabled"] == "Enable Smart Optimization"
             assert "LP optimizer" in step["data_description"]["optimization_enabled"]
+            assert step["data"]["optimization_spread_export_enabled"] == "Spread export across window"
+            assert "spreads planned battery export" in step["data_description"]["optimization_spread_export_enabled"]
 
 
 def test_globird_tariff_guidance_is_translated():

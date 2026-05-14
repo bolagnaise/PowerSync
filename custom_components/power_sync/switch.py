@@ -27,9 +27,12 @@ from .const import (
     CONF_MONITORING_MODE,
     CONF_OPTIMIZATION_ENABLED,
     CONF_OPTIMIZATION_PROVIDER,
+    CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
     CONF_POWERWALL_LOCAL_PAIRED,
+    CONF_TESLA_ENERGY_SITE_ID,
     BATTERY_SYSTEM_TESLA,
     OPT_PROVIDER_POWERSYNC,
+    TARGET_EXPORT_POWER_BATTERY_SYSTEMS,
     SWITCH_TYPE_AUTO_SYNC,
     SWITCH_TYPE_AUTO_UPDATE,
     SWITCH_TYPE_FORCE_DISCHARGE,
@@ -37,6 +40,7 @@ from .const import (
     SWITCH_TYPE_MONITORING_MODE,
     SWITCH_TYPE_AWAY_MODE,
     SWITCH_TYPE_PROFIT_MAX_MODE,
+    SWITCH_TYPE_OPTIMIZATION_SPREAD_EXPORT,
     SWITCH_TYPE_OPTIMIZATION_ENABLED,
     DEFAULT_DISCHARGE_DURATION,
     ATTR_LAST_SYNC,
@@ -116,7 +120,6 @@ async def async_setup_entry(
 ) -> None:
     """Set up PowerSync switch entities."""
     # Detect Tesla by checking if tesla_energy_site_id is configured
-    from .const import CONF_TESLA_ENERGY_SITE_ID
     tesla_site_id = entry.options.get(
         CONF_TESLA_ENERGY_SITE_ID,
         entry.data.get(CONF_TESLA_ENERGY_SITE_ID, "")
@@ -250,6 +253,14 @@ async def async_setup_entry(
         async_add_entities([ProfitMaxModeSwitch(hass=hass, entry=entry, coordinator=coordinator)])
 
     hass.data[DOMAIN][entry.entry_id]["switch_add_profit_max"] = _add_profit_max_switch
+
+    if battery_system in TARGET_EXPORT_POWER_BATTERY_SYSTEMS:
+        def _add_spread_export_switch(coordinator: Any) -> None:
+            async_add_entities([
+                SpreadExportSwitch(hass=hass, entry=entry, coordinator=coordinator)
+            ])
+
+        hass.data[DOMAIN][entry.entry_id]["switch_add_spread_export"] = _add_spread_export_switch
 
     async_add_entities(entities)
 
@@ -1067,6 +1078,65 @@ class ProfitMaxModeSwitch(SwitchEntity):
         """Disable profit maximisation mode."""
         self._attr_is_on = False
         self._coordinator.set_profit_max_mode(False)
+        self.async_write_ha_state()
+
+
+class SpreadExportSwitch(SwitchEntity):
+    """Switch to spread optimizer export across the full eligible window."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, coordinator: Any) -> None:
+        """Initialize the switch."""
+        self.hass = hass
+        self._entry = entry
+        self._coordinator = coordinator
+        self._attr_unique_id = f"{entry.entry_id}_{SWITCH_TYPE_OPTIMIZATION_SPREAD_EXPORT}"
+        self._attr_suggested_object_id = f"power_sync_{SWITCH_TYPE_OPTIMIZATION_SPREAD_EXPORT}"
+        self._attr_name = "Spread Export Across Window"
+        self._attr_icon = "mdi:timeline-clock-outline"
+        enabled = entry.options.get(
+            CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
+            entry.data.get(CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED, False),
+        )
+        self._attr_is_on = bool(enabled)
+
+    async def async_added_to_hass(self) -> None:
+        """Register for optimizer setting changes made outside this switch."""
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                f"{DOMAIN}_{self._entry.entry_id}_spread_export",
+                self._handle_spread_export_update,
+            )
+        )
+
+    @callback
+    def _handle_spread_export_update(self, enabled: bool) -> None:
+        """Update the HA switch state after API-driven changes."""
+        self._attr_is_on = bool(enabled)
+        self.async_write_ha_state()
+
+    @property
+    def device_info(self):
+        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_LP_OPTIMIZER)
+
+    @property
+    def is_on(self) -> bool:
+        """Return True if spread export mode is active."""
+        return self._coordinator.spread_export_enabled
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Enable spread export mode."""
+        self._attr_is_on = True
+        self._coordinator.set_spread_export_enabled(True)
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Disable spread export mode."""
+        self._attr_is_on = False
+        self._coordinator.set_spread_export_enabled(False)
         self.async_write_ha_state()
 
 

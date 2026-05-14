@@ -347,6 +347,7 @@ from .const import (
     CONF_OPTIMIZATION_BACKUP_RESERVE,
     CONF_OPTIMIZATION_BATTERY_CAPACITY_WH,
     CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
+    CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
     CONF_OPTIMIZATION_MAX_CHARGE_W,
     CONF_OPTIMIZATION_MAX_DISCHARGE_W,
     CONF_PROFIT_MAX_TARGET_TIME,
@@ -1911,6 +1912,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._optimization_provider = optimization_provider
             self._ml_options = {}
             if optimization_provider == OPT_PROVIDER_POWERSYNC:
+                spread_export_enabled = user_input.get(CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED, False)
                 self._ml_options = {
                     CONF_OPTIMIZATION_ENABLED: bool(
                         user_input.get(CONF_OPTIMIZATION_ENABLED, True)
@@ -1937,6 +1939,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
                         True,
                     ),
+                    CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED: spread_export_enabled,
                     CONF_PROFIT_MAX_TARGET_TIME: user_input.get(
                         CONF_PROFIT_MAX_TARGET_TIME,
                         DEFAULT_PROFIT_MAX_TARGET_TIME,
@@ -2022,6 +2025,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(
                         CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
                         default=True,
+                    ): BooleanSelector(),
+                    vol.Required(
+                        CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
+                        default=False,
                     ): BooleanSelector(),
                     vol.Required(
                         CONF_PROFIT_MAX_TARGET_TIME,
@@ -5868,6 +5875,11 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 new_options[CONF_OPTIMIZATION_MAX_DISCHARGE_W] = discharge_w
                 new_data[CONF_OPTIMIZATION_ALLOW_GRID_CHARGE] = allow_grid_charge
                 new_options[CONF_OPTIMIZATION_ALLOW_GRID_CHARGE] = allow_grid_charge
+                spread_export_enabled = bool(
+                    user_input.get(CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED, False)
+                )
+                new_data[CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED] = spread_export_enabled
+                new_options[CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED] = spread_export_enabled
                 new_data[CONF_PROFIT_MAX_TARGET_TIME] = profit_max_target_time
                 new_options[CONF_PROFIT_MAX_TARGET_TIME] = profit_max_target_time
                 new_data[CONF_PROFIT_MAX_TARGET_SOC] = profit_max_target_soc
@@ -5933,6 +5945,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         current_allow_grid_charge = self._get_option(
             CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
             self.config_entry.data.get(CONF_OPTIMIZATION_ALLOW_GRID_CHARGE, True),
+        )
+        current_spread_export_enabled = self._get_option(
+            CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
+            self.config_entry.data.get(CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED, False),
         )
         current_profit_max_target_time = self._get_option(
             CONF_PROFIT_MAX_TARGET_TIME,
@@ -6005,6 +6021,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     vol.Required(
                         CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
                         default=bool(current_allow_grid_charge),
+                    ): BooleanSelector(),
+                    vol.Required(
+                        CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
+                        default=bool(current_spread_export_enabled),
                     ): BooleanSelector(),
                     vol.Required(
                         CONF_PROFIT_MAX_TARGET_TIME,

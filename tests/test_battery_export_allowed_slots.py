@@ -6,6 +6,7 @@ import asyncio
 import importlib
 import sys
 import types
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -112,6 +113,7 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_OPTIMIZATION_BACKUP_RESERVE = "optimization_backup_reserve"
     const_module.CONF_OPTIMIZATION_BATTERY_CAPACITY_WH = "battery_capacity_wh"
     const_module.CONF_OPTIMIZATION_ALLOW_GRID_CHARGE = "allow_grid_charge"
+    const_module.CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED = "optimization_spread_export_enabled"
     const_module.CONF_OPTIMIZATION_MAX_CHARGE_W = "max_charge_w"
     const_module.CONF_OPTIMIZATION_MAX_DISCHARGE_W = "max_discharge_w"
     const_module.CONF_PROFIT_MAX_TARGET_TIME = "profit_max_target_time"
@@ -129,6 +131,10 @@ def _install_power_sync_stubs() -> None:
     const_module.DEFAULT_EXPORT_BOOST_END = "21:00"
     const_module.DEFAULT_EXPORT_BOOST_THRESHOLD = 0.0
     const_module.DISCHARGE_DURATIONS = [5, 10, 15, 30, 45, 60, 75, 90, 105, 120, 150, 180, 210, 240]
+    const_module.TARGET_EXPORT_POWER_BATTERY_SYSTEMS = {
+        "goodwe", "sigenergy", "sungrow", "foxess",
+        "alphaess", "solax", "fronius_reserva", "neovolt",
+    }
     sys.modules["power_sync.const"] = const_module
 
     battery_module = types.ModuleType("power_sync.optimization.battery_optimizer")
@@ -137,7 +143,25 @@ def _install_power_sync_stubs() -> None:
     sys.modules["power_sync.optimization.battery_optimizer"] = battery_module
 
     schedule_module = types.ModuleType("power_sync.optimization.schedule_reader")
-    schedule_module.OptimizationSchedule = type("OptimizationSchedule", (), {})
+
+    @dataclass
+    class _ScheduleAction:
+        timestamp: datetime
+        action: str
+        power_w: float
+        soc: float | None = None
+        battery_charge_w: float = 0.0
+        battery_discharge_w: float = 0.0
+
+    @dataclass
+    class _OptimizationSchedule:
+        actions: list
+        predicted_cost: float
+        predicted_savings: float
+        last_updated: datetime | None = None
+
+    schedule_module.ScheduleAction = _ScheduleAction
+    schedule_module.OptimizationSchedule = _OptimizationSchedule
     sys.modules["power_sync.optimization.schedule_reader"] = schedule_module
 
     executor_module = types.ModuleType("power_sync.optimization.executor")
@@ -958,6 +982,116 @@ def test_tesla_export_uses_contiguous_export_window_duration(opt_module):
     assert coordinator._last_executed_action == "export"
 
 
+def test_spread_export_schedule_flattens_planned_energy_across_allowed_window(opt_module):
+    coordinator = _coordinator(opt_module, "octopus")
+    coordinator.battery_system = "goodwe"
+    coordinator._config.spread_export_enabled = True
+    coordinator._config.max_discharge_w = 5000
+    start = datetime(2026, 5, 3, 9, 0, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start + idx * timedelta(minutes=5),
+            action="export" if idx < 2 else "self_consumption",
+            power_w=5000 if idx < 2 else 0,
+            battery_discharge_w=5000 if idx < 2 else 0,
+        )
+        for idx in range(6)
+    ]
+    schedule = opt_module.OptimizationSchedule(
+        actions=actions,
+        predicted_cost=0,
+        predicted_savings=0,
+        last_updated=start,
+    )
+
+    spread = coordinator._spread_export_schedule(schedule, [True] * 6)
+
+    assert {action.action for action in spread.actions} == {"export"}
+    assert [action.power_w for action in spread.actions] == [1666.7] * 6
+    original_wh = sum(action.battery_discharge_w for action in actions) * (5 / 60)
+    spread_wh = sum(action.battery_discharge_w for action in spread.actions) * (5 / 60)
+    assert spread_wh == pytest.approx(original_wh, abs=0.1)
+
+
+def test_profit_max_spread_uses_flow_power_export_window(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "flow_power",
+        profit_max=True,
+        flow_power_state="NSW1",
+    )
+    coordinator.battery_system = "sigenergy"
+    coordinator._config.spread_export_enabled = True
+    coordinator._config.max_discharge_w = 5000
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start + idx * timedelta(minutes=5),
+            action="self_consumption",
+            power_w=0,
+        )
+        for idx in range(150)
+    ]
+    actions[108].action = "export"
+    actions[108].power_w = 5000
+    actions[108].battery_discharge_w = 5000
+    actions[109].action = "export"
+    actions[109].power_w = 5000
+    actions[109].battery_discharge_w = 5000
+    schedule = opt_module.OptimizationSchedule(actions, 0, 0, start)
+
+    allowed = coordinator._battery_export_allowed_slots(150, [0.0] * 150)
+    spread = coordinator._spread_export_schedule(schedule, allowed)
+
+    export_window = spread.actions[108:132]
+    assert all(action.action == "export" for action in export_window)
+    assert all(action.power_w == pytest.approx(416.7, abs=0.1) for action in export_window)
+    assert spread.actions[107].action == "self_consumption"
+    assert spread.actions[132].action == "self_consumption"
+
+
+def test_supported_battery_spread_export_uses_action_power(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator.battery_system = "goodwe"
+    coordinator._config.spread_export_enabled = True
+    start = datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc)
+    actions = [
+        SimpleNamespace(
+            action="export",
+            power_w=2100,
+            timestamp=start + idx * timedelta(minutes=5),
+        )
+        for idx in range(4)
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[0]))
+
+    assert battery.force_discharge_calls == [(20, 2100, False)]
+
+
+def test_unsupported_battery_spread_export_keeps_max_discharge(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator.battery_system = "tesla"
+    coordinator._config.spread_export_enabled = True
+    start = datetime(2026, 5, 3, 18, 30, tzinfo=timezone.utc)
+    actions = [
+        SimpleNamespace(action="export", power_w=2100, timestamp=start),
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=0,
+            timestamp=start + timedelta(minutes=5),
+        ),
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[0]))
+
+    assert battery.force_discharge_calls == [(5, 5000, False)]
+
+
 def test_export_duration_clips_at_next_non_export_boundary(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
@@ -1051,6 +1185,44 @@ def test_tesla_force_extension_reuploads_when_tariff_window_missing(opt_module):
 
     assert battery.force_discharge_calls == [(20, 5000, True)]
     assert force_state["expires_at"] == datetime(2026, 5, 3, 8, 50, tzinfo=timezone.utc)
+
+
+def test_spread_export_force_extension_reuploads_target_power(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator.battery_system = "goodwe"
+    coordinator._config.spread_export_enabled = True
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    actions = [
+        SimpleNamespace(
+            action="export",
+            power_w=1800,
+            timestamp=start + idx * timedelta(minutes=5),
+        )
+        for idx in range(4)
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+    force_state = {
+        "active": True,
+        "expires_at": start + timedelta(minutes=5),
+        "source": "optimizer",
+    }
+    coordinator.hass.data = {
+        "power_sync": {
+            "entry-1": {
+                "force_discharge_state": force_state,
+            }
+        }
+    }
+    coordinator._force_state_getter = lambda: {
+        "active": True,
+        "type": "discharge",
+        "source": "optimizer",
+    }
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[0]))
+
+    assert battery.force_discharge_calls == [(20, 1800, True)]
 
 
 def test_tesla_force_extension_skips_reupload_when_tariff_window_covers_expiry(opt_module):

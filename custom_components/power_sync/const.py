@@ -1086,6 +1086,7 @@ SWITCH_TYPE_FORCE_CHARGE = "force_charge"
 SWITCH_TYPE_MONITORING_MODE = "monitoring_mode"
 SWITCH_TYPE_AWAY_MODE = "away_mode"
 SWITCH_TYPE_PROFIT_MAX_MODE = "profit_max_mode"
+SWITCH_TYPE_OPTIMIZATION_SPREAD_EXPORT = "optimization_spread_export"
 SWITCH_TYPE_OPTIMIZATION_ENABLED = "optimization_enabled"
 SWITCH_TYPE_AUTO_UPDATE = "auto_update"
 
@@ -1610,12 +1611,24 @@ CONF_OPTIMIZATION_BATTERY_CAPACITY_WH = "optimization_battery_capacity_wh"
 CONF_OPTIMIZATION_MAX_CHARGE_W = "optimization_max_charge_w"
 CONF_OPTIMIZATION_MAX_DISCHARGE_W = "optimization_max_discharge_w"
 CONF_OPTIMIZATION_ALLOW_GRID_CHARGE = "optimization_allow_grid_charge"
+CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED = "optimization_spread_export_enabled"
 CONF_OPTIMIZATION_WEATHER_INTEGRATION = "optimization_weather_integration"
 CONF_AWAY_ENABLED_AT = "away_enabled_at"    # ISO timestamp when away mode was turned on
 CONF_AWAY_DISABLED_AT = "away_disabled_at"  # ISO timestamp when away mode was turned off
 CONF_PROFIT_MAX_ENABLED = "profit_max_enabled"  # Whether profit maximisation mode is on
 CONF_PROFIT_MAX_TARGET_TIME = "profit_max_target_time"  # HH:MM time to be full by in profit maximisation mode
 CONF_PROFIT_MAX_TARGET_SOC = "profit_max_target_soc"  # Target SOC before the profit maximisation export window
+
+TARGET_EXPORT_POWER_BATTERY_SYSTEMS = {
+    BATTERY_SYSTEM_GOODWE,
+    BATTERY_SYSTEM_SIGENERGY,
+    BATTERY_SYSTEM_SUNGROW,
+    BATTERY_SYSTEM_FOXESS,
+    BATTERY_SYSTEM_ALPHAESS,
+    BATTERY_SYSTEM_SOLAX,
+    BATTERY_SYSTEM_FRONIUS_RESERVA,
+    BATTERY_SYSTEM_NEOVOLT,
+}
 
 # Optimization cost function (only cost minimization — self-consumption is the battery's native mode)
 COST_FUNCTION_COST = "cost"

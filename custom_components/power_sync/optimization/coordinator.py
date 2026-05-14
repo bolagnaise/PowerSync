@@ -19,7 +19,7 @@ from homeassistant.util import dt as dt_util
 from homeassistant.exceptions import ConfigEntryNotReady
 
 from .battery_optimizer import BatteryOptimizer, OptimizerResult
-from .schedule_reader import OptimizationSchedule
+from .schedule_reader import OptimizationSchedule, ScheduleAction
 from .executor import ScheduleExecutor, ExecutionStatus, BatteryAction
 from .load_estimator import LoadEstimator, SolcastForecaster
 from .ev_coordinator import EVCoordinator, EVConfig, EVChargingMode
@@ -84,6 +84,7 @@ class OptimizationConfig:
     cost_function: str = "cost"
     profit_max_enabled: bool = False
     profit_max_target_soc: float = 1.0
+    spread_export_enabled: bool = False
 
 
 # Update interval for the coordinator
@@ -340,6 +341,45 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Return whether profit maximisation mode is active."""
         return self._config.profit_max_enabled
 
+    @property
+    def spread_export_enabled(self) -> bool:
+        """Return whether export spreading is active."""
+        return self._config.spread_export_enabled
+
+    def _supports_target_export_power(self) -> bool:
+        """Return True when the selected battery can honor a target export power."""
+        try:
+            from ..const import TARGET_EXPORT_POWER_BATTERY_SYSTEMS
+            return self.battery_system in TARGET_EXPORT_POWER_BATTERY_SYSTEMS
+        except Exception:
+            return False
+
+    def set_spread_export_enabled(self, enabled: bool) -> None:
+        """Enable or disable spread-export mode."""
+        self._config.spread_export_enabled = bool(enabled)
+        if self._load_estimator:
+            self._load_estimator.invalidate_cache()
+        _LOGGER.info(
+            "Spread Export Across Window %s",
+            "ENABLED" if enabled else "DISABLED",
+        )
+        if self.hass and self.entry_id:
+            from homeassistant.helpers.dispatcher import async_dispatcher_send
+
+            from ..const import DOMAIN
+
+            async_dispatcher_send(
+                self.hass,
+                f"{DOMAIN}_{self.entry_id}_spread_export",
+                bool(enabled),
+            )
+        if self._entry:
+            from ..const import CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED, DOMAIN
+            new_options = dict(self._entry.options)
+            new_options[CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED] = bool(enabled)
+            self.hass.data.setdefault(DOMAIN, {}).setdefault(self.entry_id, {})["_skip_reload"] = True
+            self.hass.config_entries.async_update_entry(self._entry, options=new_options)
+
     def set_profit_max_mode(self, enabled: bool) -> None:
         """Enable or disable profit maximisation mode."""
         self._config.profit_max_enabled = enabled
@@ -595,6 +635,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._entry:
             from ..const import (
                 CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
+                CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
                 CONF_PROFIT_MAX_ENABLED,
                 CONF_PROFIT_MAX_TARGET_SOC,
                 DEFAULT_PROFIT_MAX_TARGET_SOC,
@@ -606,6 +647,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._config.allow_grid_charge = bool(allow_grid_charge)
             if not self._config.allow_grid_charge:
                 _LOGGER.info("Smart Optimization grid charging: DISABLED")
+            self._config.spread_export_enabled = bool(
+                self._entry.options.get(
+                    CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
+                    self._entry.data.get(CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED, False),
+                )
+            )
+            if self._config.spread_export_enabled:
+                _LOGGER.info("Spread Export Across Window: ENABLED")
 
             profit_max = self._entry.options.get(
                 CONF_PROFIT_MAX_ENABLED,
@@ -1360,6 +1409,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             self._last_optimizer_result = result
             self._current_schedule = result.schedule
+            if self._should_spread_export_schedule():
+                self._current_schedule = self._spread_export_schedule(
+                    self._current_schedule,
+                    battery_export_allowed,
+                )
+                result.schedule = self._current_schedule
             self._last_update_time = dt_util.now()
 
             # Apply off-grid curtailment overlay if enabled — converts
@@ -1548,6 +1603,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return int(max(1, requested))
 
+    def _export_command_power_w(self, action: Any) -> float:
+        """Return the hardware export command power for an optimizer action."""
+        if self._should_spread_export_schedule():
+            try:
+                requested_w = float(getattr(action, "power_w", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                requested_w = 0.0
+            if requested_w > 0:
+                return min(float(self._config.max_discharge_w), requested_w)
+        return float(self._config.max_discharge_w)
+
     async def _execute_optimizer_action(self, action: Any) -> None:
         """Execute an optimizer action on the battery."""
         if not self._executor or not self._executor.battery_controller:
@@ -1683,13 +1749,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     _extend_hardware=True,
                                 )
                             else:
-                                # Match normal EXPORT execution below: the LP's
-                                # interval power can be only the predicted
-                                # surplus, which is too low to cover sudden
-                                # home-load spikes during export bonus windows.
                                 await battery.force_discharge(
                                     duration_minutes=extend_mins,
-                                    power_w=self._config.max_discharge_w,
+                                    power_w=self._export_command_power_w(action),
                                     _extend_hardware=True,
                                 )
                             _LOGGER.debug(
@@ -1934,14 +1996,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         _LOGGER.info("Optimizer: Charging at %.0fW", action.power_w)
             elif effective_action in ("discharge", "export"):
                 if hasattr(battery, "force_discharge"):
-                    # Use max discharge power, not the LP's interval power.
-                    # The LP's power_w is the predicted export for one interval
-                    # (e.g. 370W surplus). For Modbus-controlled batteries
-                    # (Sigenergy/Sungrow/FoxESS), force_discharge sets the
-                    # grid export limit register — using the LP's small value
-                    # would cap the inverter at that low power. Max discharge
-                    # lets the inverter export at full rate.
-                    discharge_power = self._config.max_discharge_w
+                    discharge_power = self._export_command_power_w(action)
                     discharge_duration = self._force_duration_for_action_window(
                         action,
                         {"discharge", "export"},
@@ -2248,6 +2303,79 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 n,
             )
         return allowed
+
+    def _should_spread_export_schedule(self) -> bool:
+        """Return True when optimizer export actions should be flattened."""
+        return (
+            self._config.spread_export_enabled
+            and self._supports_target_export_power()
+        )
+
+    def _spread_export_schedule(
+        self,
+        schedule: OptimizationSchedule,
+        allowed_slots: bool | list[bool],
+    ) -> OptimizationSchedule:
+        """Spread planned export energy across each contiguous allowed window."""
+        actions = list(schedule.actions or [])
+        if not actions:
+            return schedule
+
+        n = len(actions)
+        if isinstance(allowed_slots, bool):
+            allowed = [allowed_slots] * n
+        else:
+            allowed = [bool(v) for v in allowed_slots[:n]]
+            if len(allowed) < n:
+                allowed.extend([False] * (n - len(allowed)))
+
+        interval_hours = max(1, int(self._config.interval_minutes or 5)) / 60.0
+        new_actions: list[ScheduleAction] = list(actions)
+        idx = 0
+        while idx < n:
+            if not allowed[idx]:
+                idx += 1
+                continue
+
+            start = idx
+            while idx < n and allowed[idx]:
+                idx += 1
+            end = idx
+            window_actions = actions[start:end]
+            export_wh = sum(
+                max(0.0, float(getattr(action, "battery_discharge_w", 0.0) or 0.0))
+                * interval_hours
+                for action in window_actions
+                if getattr(action, "action", None) in ("export", "discharge")
+            )
+            if export_wh <= 0:
+                continue
+
+            target_w = min(
+                float(self._config.max_discharge_w),
+                export_wh / (len(window_actions) * interval_hours),
+            )
+            target_w = round(max(0.0, target_w), 1)
+            if target_w <= 0:
+                continue
+
+            for pos in range(start, end):
+                original = actions[pos]
+                new_actions[pos] = ScheduleAction(
+                    timestamp=original.timestamp,
+                    action="export",
+                    power_w=target_w,
+                    soc=original.soc,
+                    battery_charge_w=0.0,
+                    battery_discharge_w=target_w,
+                )
+
+        return OptimizationSchedule(
+            actions=new_actions,
+            predicted_cost=schedule.predicted_cost,
+            predicted_savings=schedule.predicted_savings,
+            last_updated=schedule.last_updated,
+        )
 
     def _battery_charge_blocked_slots(self, n: int) -> list[bool]:
         """Return per-slot blocks where the LP must not charge the battery."""
@@ -4818,6 +4946,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "engine": "built-in",
             "status_message": status_message,
             "cost_function": self._cost_function.value,
+            "spread_export_enabled": self._config.spread_export_enabled,
             "status": "active" if self._enabled and optimizer_available else "disabled",
             "optimization_status": "active" if optimizer_available else "not_available",
             "current_action": current_action,
@@ -4836,6 +4965,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "max_charge_w": self._config.max_charge_w,
                 "max_discharge_w": self._config.max_discharge_w,
                 "allow_grid_charge": self._config.allow_grid_charge,
+                "spread_export_enabled": self._config.spread_export_enabled,
                 "battery_specs_source": self._battery_specs_source,
                 "backup_reserve": self._config.backup_reserve,
                 "hardware_backup_reserve": (self._startup_backup_reserve if self._startup_backup_reserve is not None else 0) / 100,
@@ -4844,6 +4974,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             },
             "features": {
                 "ev_integration": self._ev_integration_enabled or len(self._ev_configs) > 0,
+                "spread_export": self._should_spread_export_schedule(),
                 "vpp_enabled": False,
                 "built_in_optimizer": True,
             },
@@ -5151,6 +5282,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if "profit_max_enabled" in settings:
             self.set_profit_max_mode(bool(settings["profit_max_enabled"]))
             response["changes"].append(f"profit_max_enabled: {settings['profit_max_enabled']}")
+
+        if "spread_export_enabled" in settings:
+            self.set_spread_export_enabled(bool(settings["spread_export_enabled"]))
+            response["changes"].append(f"spread_export_enabled: {settings['spread_export_enabled']}")
 
         if "profit_max_target_time" in settings and self._entry:
             from ..const import CONF_PROFIT_MAX_TARGET_TIME
