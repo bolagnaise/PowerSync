@@ -1139,6 +1139,70 @@ def _get_ev_vehicles_status(hass, entry) -> list:
     return list(coalesce_vehicle_observations(vehicles))
 
 
+async def _read_sigenergy_charger_state_for_entry(entry):
+    """Read configured Sigenergy EVAC/EVDC charger state, if enabled."""
+    from .const import (
+        CONF_SIGENERGY_CHARGER_ENABLED,
+        CONF_SIGENERGY_CHARGER_HOST,
+        CONF_SIGENERGY_CHARGER_PORT,
+        CONF_SIGENERGY_CHARGER_SLAVE_ID,
+        CONF_SIGENERGY_CHARGER_TYPE,
+        CONF_SIGENERGY_MODBUS_HOST,
+        DEFAULT_SIGENERGY_CHARGER_PORT,
+        DEFAULT_SIGENERGY_CHARGER_SLAVE_ID,
+        SIGENERGY_CHARGER_EVAC,
+    )
+    from .sigenergy_charger import SigenergyEVChargerController
+
+    opts = {**entry.data, **entry.options}
+    if not opts.get(CONF_SIGENERGY_CHARGER_ENABLED):
+        return None
+
+    host = (
+        opts.get(CONF_SIGENERGY_CHARGER_HOST)
+        or opts.get(CONF_SIGENERGY_MODBUS_HOST)
+        or ""
+    )
+    host = str(host).strip()
+    if not host:
+        return None
+
+    controller = SigenergyEVChargerController(
+        host=host,
+        port=opts.get(CONF_SIGENERGY_CHARGER_PORT, DEFAULT_SIGENERGY_CHARGER_PORT),
+        slave_id=opts.get(
+            CONF_SIGENERGY_CHARGER_SLAVE_ID,
+            DEFAULT_SIGENERGY_CHARGER_SLAVE_ID,
+        ),
+        charger_type=opts.get(CONF_SIGENERGY_CHARGER_TYPE, SIGENERGY_CHARGER_EVAC),
+    )
+    try:
+        return await controller.read_state()
+    except Exception as err:
+        _LOGGER.debug("Sigenergy charger state read failed: %s", err)
+        return None
+    finally:
+        await controller.disconnect()
+
+
+def _configured_sigenergy_charger_state(entry):
+    """Return an offline placeholder for a configured Sigenergy charger."""
+    from .const import (
+        CONF_SIGENERGY_CHARGER_ENABLED,
+        CONF_SIGENERGY_CHARGER_TYPE,
+        SIGENERGY_CHARGER_EVAC,
+    )
+    from .sigenergy_charger import SigenergyChargerState
+
+    opts = {**entry.data, **entry.options}
+    if not opts.get(CONF_SIGENERGY_CHARGER_ENABLED):
+        return None
+    return SigenergyChargerState(
+        charger_type=opts.get(CONF_SIGENERGY_CHARGER_TYPE, SIGENERGY_CHARGER_EVAC),
+        status="unavailable",
+    )
+
+
 class SensitiveDataFilter(logging.Filter):
     """
     Logging filter that obfuscates sensitive data like API keys and tokens.
@@ -9766,6 +9830,29 @@ class EVVehiclesView(HomeAssistantView):
                 )
                 break  # Only one generic charger entry
 
+            for entry in entries:
+                configured_state = _configured_sigenergy_charger_state(entry)
+                if not configured_state:
+                    continue
+
+                from .sigenergy_charger import sigenergy_charger_state_to_vehicle
+
+                state = await _read_sigenergy_charger_state_for_entry(entry)
+                vehicles.append(
+                    sigenergy_charger_state_to_vehicle(
+                        state or configured_state,
+                        updated_at=dt_util.now().isoformat(),
+                        online=state is not None,
+                    )
+                )
+                _LOGGER.debug(
+                    "EV Sigenergy charger: type=%s, online=%s, state=%s",
+                    (state or configured_state).charger_type,
+                    state is not None,
+                    (state or configured_state).status,
+                )
+                break  # Only one Sigenergy charger entry
+
             if not vehicles:
                 message = "No vehicles found"
                 if ev_provider == EV_PROVIDER_FLEET_API:
@@ -9900,7 +9987,7 @@ class EVVehicleCommandView(HomeAssistantView):
         returning them as-is for robustness.
         """
         # Accept pseudo-VINs for non-Tesla chargers directly
-        if vehicle_id in ("generic_ev", "zaptec_standalone") or (
+        if vehicle_id in ("generic_ev", "zaptec_standalone", "sigenergy_charger") or (
             vehicle_id and vehicle_id.startswith("ocpp_")
         ) or (
             vehicle_id and vehicle_id.startswith("byd_")
@@ -12622,6 +12709,18 @@ class EVWidgetDataView(HomeAssistantView):
                         "surplus_kw": round(surplus_kw, 2),
                     })
 
+            configured_sigenergy_state = _configured_sigenergy_charger_state(self._config_entry)
+            if configured_sigenergy_state:
+                from .sigenergy_charger import sigenergy_charger_state_to_widget
+
+                sigenergy_state = await _read_sigenergy_charger_state_for_entry(self._config_entry)
+                widget_data.append(
+                    sigenergy_charger_state_to_widget(
+                        sigenergy_state or configured_sigenergy_state,
+                        surplus_kw=surplus_kw,
+                    )
+                )
+
             # Check OCPP chargers — built-in server
             ocpp_server = entry_data.get("ocpp_server")
             if ocpp_server:
@@ -13124,6 +13223,17 @@ class EVLoadpointStatusView(HomeAssistantView):
                         amps_value=amps_state.state if amps_state else None,
                         status_state=status_state.state if status_state else None,
                         soc_value=soc_state.state if soc_state else None,
+                    )
+                )
+
+            configured_sigenergy_state = _configured_sigenergy_charger_state(self._config_entry)
+            if configured_sigenergy_state:
+                from .sigenergy_charger import sigenergy_charger_state_to_loadpoint_observation
+
+                sigenergy_state = await _read_sigenergy_charger_state_for_entry(self._config_entry)
+                observed_vehicles.append(
+                    sigenergy_charger_state_to_loadpoint_observation(
+                        sigenergy_state or configured_sigenergy_state
                     )
                 )
 

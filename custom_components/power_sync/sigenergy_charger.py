@@ -40,6 +40,93 @@ class SigenergyChargerState:
     vehicle_soc: float | None = None
 
 
+def sigenergy_charger_display_name(charger_type: str | None) -> str:
+    """Return the user-facing charger name."""
+    normalized = str(charger_type or SIGENERGY_CHARGER_EVAC).lower()
+    if normalized == SIGENERGY_CHARGER_EVDC:
+        return "Sigenergy EVDC"
+    return "Sigenergy EVAC"
+
+
+def sigenergy_charger_charging_state(state: SigenergyChargerState) -> str:
+    """Map normalized Modbus state to the app's EV charging-state labels."""
+    if state.is_charging:
+        return "Charging"
+    if state.is_connected:
+        return "Stopped"
+    if state.status in ("fault", "alarm", "unavailable"):
+        return state.status.capitalize()
+    return "Disconnected"
+
+
+def sigenergy_charger_state_to_vehicle(
+    state: SigenergyChargerState,
+    *,
+    updated_at: str,
+    online: bool = True,
+) -> dict:
+    """Convert Sigenergy charger telemetry to the mobile app vehicle shape."""
+    return {
+        "id": "sigenergy_charger",
+        "vehicle_id": "sigenergy_charger",
+        "vin": None,
+        "display_name": sigenergy_charger_display_name(state.charger_type),
+        "model": state.charger_type.upper(),
+        "battery_level": int(state.vehicle_soc) if state.vehicle_soc is not None else None,
+        "charging_state": sigenergy_charger_charging_state(state),
+        "charge_limit_soc": None,
+        "is_plugged_in": state.is_connected,
+        "charger_power": state.power_kw if state.power_kw is not None else 0.0,
+        "is_online": online,
+        "data_updated_at": updated_at,
+        "source": "sigenergy_charger",
+        "brand": "sigenergy",
+    }
+
+
+def sigenergy_charger_state_to_loadpoint_observation(state: SigenergyChargerState) -> dict:
+    """Convert Sigenergy charger telemetry to a normalized loadpoint observation."""
+    power_kw = state.power_kw or 0.0
+    return {
+        "charger_id": "sigenergy_charger",
+        "vehicle_id": "sigenergy_charger",
+        "vehicle_name": sigenergy_charger_display_name(state.charger_type),
+        "charger_type": "sigenergy",
+        "ev_power_kw": power_kw,
+        "ev_soc": int(state.vehicle_soc) if state.vehicle_soc is not None else None,
+        "is_connected": state.is_connected,
+        "is_charging": state.is_charging or power_kw > 0.05,
+        "current_amps": int(state.current_a or 0),
+        "target_amps": int(state.current_a or 0),
+        "blocking_reason": None if state.is_charging else state.status,
+        "include_idle": True,
+    }
+
+
+def sigenergy_charger_state_to_widget(
+    state: SigenergyChargerState,
+    *,
+    surplus_kw: float = 0.0,
+) -> dict:
+    """Convert Sigenergy charger telemetry to the EV dashboard widget shape."""
+    power_kw = state.power_kw or 0.0
+    source = "idle"
+    if state.is_charging or power_kw > 0.05:
+        source = "solar" if surplus_kw >= power_kw * 0.8 else "grid"
+
+    return {
+        "vehicle_name": sigenergy_charger_display_name(state.charger_type),
+        "is_charging": state.is_charging or power_kw > 0.05,
+        "is_connected": state.is_connected,
+        "current_soc": int(state.vehicle_soc or 0),
+        "target_soc": 80,
+        "current_power_kw": round(power_kw, 2),
+        "source": source,
+        "eta_minutes": None,
+        "surplus_kw": round(surplus_kw, 2),
+    }
+
+
 class SigenergyEVChargerController:
     """Control Sigenergy EVAC/EVDC chargers through the local Modbus protocol."""
 
