@@ -3511,11 +3511,6 @@ def _calendar_entry_from_energy_summary(coordinator: Any) -> dict[str, Any]:
     }
 
 
-def _calendar_time_series_from_energy_summary(coordinator: Any) -> list[dict[str, Any]]:
-    """Build a mobile-compatible one-point history from coordinator totals."""
-    return [_calendar_entry_from_energy_summary(coordinator)]
-
-
 _CALENDAR_STATISTIC_FIELDS = {
     "solar_generation": "daily_solar_energy",
     "battery_discharge": "daily_battery_discharge",
@@ -3524,6 +3519,95 @@ _CALENDAR_STATISTIC_FIELDS = {
     "grid_export": "daily_grid_export",
     "home_consumption": "daily_load",
 }
+
+
+def _calendar_entry_has_energy(entry: dict[str, Any] | None) -> bool:
+    """Return True when a calendar entry contains at least one energy value."""
+    if not entry:
+        return False
+    return any((entry.get(field) or 0) > 0 for field in _CALENDAR_STATISTIC_FIELDS)
+
+
+def _calendar_energy_state_wh(state: Any) -> float:
+    """Convert a Home Assistant energy sensor state to Wh."""
+    if state is None:
+        return 0
+    raw_value = getattr(state, "state", None)
+    if raw_value in (None, "", "unknown", "unavailable"):
+        return 0
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return 0
+    if value <= 0:
+        return 0
+
+    unit = str(
+        getattr(state, "attributes", {}).get("unit_of_measurement", "")
+    ).lower()
+    if unit in ("wh", "watt-hour", "watt-hours"):
+        return value
+    return value * 1000
+
+
+def _calendar_entry_from_energy_sensor_states(
+    hass: HomeAssistant,
+    preferred_entry_id: str | None,
+) -> dict[str, Any] | None:
+    """Build today's calendar entry from live PowerSync daily energy sensors."""
+    entity_ids = _find_calendar_statistic_entity_ids(hass, preferred_entry_id)
+    if not entity_ids:
+        return None
+
+    entry = {
+        "timestamp": dt_util.now().isoformat(),
+        "solar_generation": 0,
+        "battery_discharge": 0,
+        "battery_charge": 0,
+        "grid_import": 0,
+        "grid_export": 0,
+        "home_consumption": 0,
+    }
+    for field, entity_id in entity_ids.items():
+        entry[field] = _calendar_energy_state_wh(hass.states.get(entity_id))
+
+    return entry if _calendar_entry_has_energy(entry) else None
+
+
+def _merge_calendar_energy_entries(
+    primary: dict[str, Any],
+    fallback: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Fill missing/zero energy fields in primary from fallback."""
+    if not fallback:
+        return primary
+    merged = dict(primary)
+    for field in _CALENDAR_STATISTIC_FIELDS:
+        if (merged.get(field) or 0) <= 0 and (fallback.get(field) or 0) > 0:
+            merged[field] = fallback[field]
+    return merged
+
+
+def _calendar_current_entry(
+    hass: HomeAssistant | None,
+    coordinator: Any,
+    preferred_entry_id: str | None = None,
+) -> dict[str, Any]:
+    """Build a current-day calendar entry using all live non-Tesla sources."""
+    entry = _calendar_entry_from_energy_summary(coordinator)
+    if hass is None:
+        return entry
+    state_entry = _calendar_entry_from_energy_sensor_states(hass, preferred_entry_id)
+    return _merge_calendar_energy_entries(entry, state_entry)
+
+
+def _calendar_time_series_from_energy_summary(
+    coordinator: Any,
+    hass: HomeAssistant | None = None,
+    entry_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Build a mobile-compatible one-point history from live daily totals."""
+    return [_calendar_current_entry(hass, coordinator, entry_id)]
 
 
 def _calendar_period_range(period: str, end_date: str | None) -> tuple[datetime, datetime] | None:
@@ -3678,8 +3762,10 @@ async def _calendar_time_series_from_statistics(
 
     rows = [time_series[key] for key in sorted(time_series)]
     if includes_today:
-        current_entry = _calendar_entry_from_energy_summary(coordinator)
-        if any(current_entry.get(field, 0) for field in _CALENDAR_STATISTIC_FIELDS):
+        current_entry = _calendar_current_entry(
+            hass, coordinator, preferred_entry_id
+        )
+        if _calendar_entry_has_energy(current_entry):
             rows.append(current_entry)
 
     return rows
@@ -3709,7 +3795,13 @@ async def _calendar_result_from_energy_summary(
             and range_result[0].date() <= now.date()
             and range_result[1] >= now
         )
-        time_series = _calendar_time_series_from_energy_summary(coordinator) if includes_today else []
+        time_series = (
+            _calendar_time_series_from_energy_summary(
+                coordinator, hass, entry_id
+            )
+            if includes_today
+            else []
+        )
     result = {
         "success": True,
         "period": period,
