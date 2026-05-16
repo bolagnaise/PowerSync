@@ -276,7 +276,7 @@ class BatteryControllerWrapper:
         try:
             await self.hass.services.async_call(
                 "power_sync", "set_backup_reserve",
-                {"percent": percent},
+                {"percent": percent, "source": "optimizer"},
                 blocking=True,
             )
             return True

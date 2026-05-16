@@ -272,6 +272,20 @@ def test_optimizer_force_modes_are_not_reissued_after_restart():
     assert "SERVICE_FORCE_CHARGE" not in optimizer_branch
 
 
+def test_optimizer_backup_reserve_writes_do_not_persist_as_user_reserve():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "handle_set_backup_reserve")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    assert 'reserve_source = call.data.get("source")' in function_source
+    assert 'optimizer_write = reserve_source == "optimizer" or optimizer_is_idle' in function_source
+    assert "if not optimizer_write:" in function_source
+    persistence_branch = function_source.split("if not optimizer_write:", 1)[1]
+    assert '"_user_backup_reserve": percent' in persistence_branch
+
+
 def test_foxess_force_charge_accepts_optimizer_min_timeout():
     source = COORDINATOR_PATH.read_text()
     tree = ast.parse(source)

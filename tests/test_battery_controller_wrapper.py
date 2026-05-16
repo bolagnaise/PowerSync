@@ -66,6 +66,14 @@ class _States:
         return SimpleNamespace(state=value)
 
 
+class _Services:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def async_call(self, domain, service, data, blocking=False):
+        self.calls.append((domain, service, data, blocking))
+
+
 def test_tesla_status_reads_current_ha_entities_before_cache():
     module, restore = _load_controller_module()
     try:
@@ -91,6 +99,27 @@ def test_tesla_status_reads_current_ha_entities_before_cache():
 
         assert asyncio.run(controller.get_tesla_operation_mode()) == "autonomous"
         assert asyncio.run(controller.get_backup_reserve()) == 0
+    finally:
+        restore()
+
+
+def test_optimizer_backup_reserve_write_marks_source():
+    module, restore = _load_controller_module()
+    try:
+        services = _Services()
+        hass = SimpleNamespace(services=services)
+        controller = module.BatteryControllerWrapper(hass, "tesla")
+
+        assert asyncio.run(controller.set_backup_reserve(52))
+
+        assert services.calls == [
+            (
+                "power_sync",
+                "set_backup_reserve",
+                {"percent": 52, "source": "optimizer"},
+                True,
+            )
+        ]
     finally:
         restore()
 

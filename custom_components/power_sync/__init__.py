@@ -24180,16 +24180,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Persist the user's chosen backup reserve so the optimizer knows
         # the correct restore value (survives HA restarts and IDLE cycles).
-        # Skip when the optimizer is in IDLE — IDLE temporarily elevates
-        # backup_reserve to hold SOC and must not overwrite the real value.
+        # Skip optimizer-originated writes — LP actions may temporarily adjust
+        # backup_reserve to hold or align SOC and must not overwrite the real value.
         try:
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
             opt_coord = entry_data.get("optimization_coordinator")
+            reserve_source = call.data.get("source")
             optimizer_is_idle = (
                 opt_coord is not None
                 and getattr(opt_coord, "_idle_reserve_adjustment", False)
             )
-            if not optimizer_is_idle:
+            optimizer_write = reserve_source == "optimizer" or optimizer_is_idle
+            if not optimizer_write:
                 if opt_coord:
                     opt_coord._startup_backup_reserve = percent
                 new_opts = {**entry.options, "_user_backup_reserve": percent}
@@ -24198,7 +24200,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.info("Persisted user backup reserve: %d%%", percent)
             else:
                 _LOGGER.debug(
-                    "Skipping backup reserve persistence (optimizer IDLE — temporary hold at %d%%)",
+                    "Skipping backup reserve persistence (source=%s, idle_adjustment=%s, percent=%d%%)",
+                    reserve_source or "unknown",
+                    optimizer_is_idle,
                     percent,
                 )
         except Exception as e:
