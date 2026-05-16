@@ -225,6 +225,9 @@ from .const import (
     CONF_SOLCAST_ENABLED,
     CONF_SOLCAST_API_KEY,
     CONF_SOLCAST_RESOURCE_ID,
+    CONF_SOLCAST_ESTIMATE_TYPE,
+    DEFAULT_SOLCAST_ESTIMATE_TYPE,
+    SOLCAST_ESTIMATE_TYPES,
     AMBER_API_BASE_URL,
     # Flow Power configuration
     CONF_ELECTRICITY_PROVIDER,
@@ -8747,6 +8750,7 @@ _SOLCAST_SETTINGS_KEYS = (
     CONF_SOLCAST_ENABLED,
     CONF_SOLCAST_API_KEY,
     CONF_SOLCAST_RESOURCE_ID,
+    CONF_SOLCAST_ESTIMATE_TYPE,
 )
 
 _SOLCAST_EXTERNAL_SENSOR_PATTERNS = (
@@ -8834,6 +8838,9 @@ class WeatherSolcastSettingsView(HomeAssistantView):
             "solcast_source": solcast_source,
             "solcast_api_key": opts.get(CONF_SOLCAST_API_KEY, ""),
             "solcast_resource_id": opts.get(CONF_SOLCAST_RESOURCE_ID, ""),
+            "solcast_estimate_type": opts.get(
+                CONF_SOLCAST_ESTIMATE_TYPE, DEFAULT_SOLCAST_ESTIMATE_TYPE
+            ),
             "solcast_active": solcast_active,
             "solcast_error": solcast_init_error,
         })
@@ -8868,6 +8875,12 @@ class WeatherSolcastSettingsView(HomeAssistantView):
             if "solcast_resource_id" in data:
                 new_options[CONF_SOLCAST_RESOURCE_ID] = (data["solcast_resource_id"] or "").strip()
                 new_data.pop(CONF_SOLCAST_RESOURCE_ID, None)
+            if "solcast_estimate_type" in data:
+                estimate_type = data["solcast_estimate_type"] or DEFAULT_SOLCAST_ESTIMATE_TYPE
+                if estimate_type not in SOLCAST_ESTIMATE_TYPES:
+                    estimate_type = DEFAULT_SOLCAST_ESTIMATE_TYPE
+                new_options[CONF_SOLCAST_ESTIMATE_TYPE] = estimate_type
+                new_data.pop(CONF_SOLCAST_ESTIMATE_TYPE, None)
 
             # Determine whether any solcast-related setting changed OR whether the
             # coordinator is missing despite valid config. Either case requires a
@@ -14397,6 +14410,26 @@ async def _ensure_lovelace_resource(hass: HomeAssistant) -> None:
         _LOGGER.warning("Could not auto-register Lovelace resource", exc_info=True)
 
 
+def _is_empty_lovelace_dashboard_config(config: Any) -> bool:
+    """Return True for empty Lovelace configs that are safe to initialize."""
+    if not isinstance(config, dict):
+        return True
+
+    if "strategy" in config:
+        return False
+
+    views = config.get("views")
+    if not views:
+        return True
+    if not isinstance(views, list):
+        return False
+
+    return all(
+        isinstance(view, dict) and not view.get("cards") and not view.get("strategy")
+        for view in views
+    )
+
+
 async def _ensure_powersync_dashboard(hass: HomeAssistant) -> None:
     """Auto-create the PowerSync dashboard if it doesn't exist."""
     try:
@@ -14413,7 +14446,8 @@ async def _ensure_powersync_dashboard(hass: HomeAssistant) -> None:
             _LOGGER.debug("Lovelace data not available, skipping dashboard auto-creation")
             return
 
-        # Check if dashboard already exists — if so, ensure it uses the strategy
+        # Check if dashboard already exists. Preserve user-managed Lovelace
+        # layouts; only initialize empty legacy shells that have no cards.
         if "power-sync" in lovelace_data.dashboards:
             existing = lovelace_data.dashboards["power-sync"]
             try:
@@ -14421,12 +14455,17 @@ async def _ensure_powersync_dashboard(hass: HomeAssistant) -> None:
                 if config and isinstance(config, dict) and "strategy" in config:
                     _LOGGER.debug("PowerSync dashboard already uses strategy")
                     return
-                # Dashboard exists but uses old YAML config — update to strategy
-                _LOGGER.info("Migrating PowerSync dashboard to strategy mode")
-                await existing.async_save({
-                    "strategy": {"type": "custom:power-sync-strategy"}
-                })
-                _LOGGER.info("PowerSync dashboard migrated to strategy successfully")
+                if _is_empty_lovelace_dashboard_config(config):
+                    _LOGGER.info("Initializing empty PowerSync dashboard with strategy mode")
+                    await existing.async_save({
+                        "strategy": {"type": "custom:power-sync-strategy"}
+                    })
+                    _LOGGER.info("PowerSync dashboard initialized with strategy successfully")
+                else:
+                    _LOGGER.info(
+                        "PowerSync dashboard already has a custom Lovelace layout; "
+                        "leaving it unchanged"
+                    )
             except Exception:
                 _LOGGER.debug("Could not check/migrate existing dashboard", exc_info=True)
             return
@@ -15720,6 +15759,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         CONF_SOLCAST_RESOURCE_ID,
         entry.data.get(CONF_SOLCAST_RESOURCE_ID, "")
     ) or "").strip()
+    solcast_estimate_type = entry.options.get(
+        CONF_SOLCAST_ESTIMATE_TYPE,
+        entry.data.get(CONF_SOLCAST_ESTIMATE_TYPE, DEFAULT_SOLCAST_ESTIMATE_TYPE)
+    )
 
     solcast_init_error: str | None = None
     if solcast_integration_installed:
@@ -15734,6 +15777,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             hass,
             api_key=solcast_api_key,
             resource_id=solcast_resource_id,
+            estimate_type=solcast_estimate_type,
         )
         try:
             await solcast_coordinator.async_config_entry_first_refresh()
@@ -18938,6 +18982,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             await handle_goodwe_curtailment()
             return
 
+        if token_getter is None:
+            _LOGGER.debug(
+                "Solar curtailment skipped - no Tesla API token getter available for this battery system"
+            )
+            return
+
         # Find an available price coordinator (Amber, AEMO, or Octopus)
         _price_coord = amber_coordinator or localvolts_coordinator or aemo_sensor_coordinator or octopus_coordinator
         if not _price_coord:
@@ -19282,6 +19332,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             feedin_price = websocket_data.get('feedIn', {}).get('perKwh') if websocket_data else None
             import_price = websocket_data.get('general', {}).get('perKwh') if websocket_data else None
             await handle_goodwe_curtailment(feedin_price=feedin_price, import_price=import_price)
+            return
+
+        if token_getter is None:
+            _LOGGER.debug(
+                "Solar curtailment skipped - no Tesla API token getter available for this battery system"
+            )
             return
 
         _LOGGER.info("=== Starting solar curtailment check (WebSocket event-driven) ===")

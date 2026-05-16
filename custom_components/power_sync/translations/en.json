@@ -671,7 +671,8 @@
           "weather_entity": "Home Assistant weather entity",
           "solcast_enabled": "Enable Solcast solar forecast",
           "solcast_api_key": "Solcast API key",
-          "solcast_resource_id": "Solcast resource ID(s)"
+          "solcast_resource_id": "Solcast resource ID(s)",
+          "solcast_estimate_type": "Solcast estimate"
         },
         "data_description": {
           "weather_location": "Suburb, city, postcode, or lat,lon coordinates (e.g. 'Melbourne', '3000', '-37.81,144.96'). Leave blank to auto-detect from timezone.",
@@ -679,7 +680,8 @@
           "weather_entity": "Optional. Used for temperature-aware load forecasting if Home Assistant has a weather entity. Leave blank when using OpenWeatherMap.",
           "solcast_enabled": "Enable solar production forecasting. If the Solcast HA integration is installed, PowerSync reads from its sensors automatically (no API calls needed).",
           "solcast_api_key": "Only needed if you do NOT have the Solcast HA integration. Get a free key from toolkit.solcast.com.au (10 calls/day on hobbyist tier).",
-          "solcast_resource_id": "Only needed without the Solcast HA integration. For split arrays, enter comma-separated IDs (e.g. abc123,def456)."
+          "solcast_resource_id": "Only needed without the Solcast HA integration. For split arrays, enter comma-separated IDs (e.g. abc123,def456).",
+          "solcast_estimate_type": "Choose which Solcast production estimate PowerSync uses for sensors and optimisation."
         },
         "submit": "Next"
       },
@@ -1747,7 +1749,8 @@
           "weather_entity": "Home Assistant weather entity",
           "solcast_enabled": "Enable Solcast solar forecast",
           "solcast_api_key": "Solcast API key",
-          "solcast_resource_id": "Solcast resource ID(s)"
+          "solcast_resource_id": "Solcast resource ID(s)",
+          "solcast_estimate_type": "Solcast estimate"
         },
         "data_description": {
           "weather_location": "Suburb, city, postcode, or lat,lon coordinates (e.g. 'Melbourne', '3000', '-37.81,144.96'). Leave blank to auto-detect from timezone.",
@@ -1755,7 +1758,8 @@
           "weather_entity": "Optional. Used for temperature-aware load forecasting if Home Assistant has a weather entity. Leave blank when using OpenWeatherMap.",
           "solcast_enabled": "Enable solar production forecasting. If the Solcast HA integration is installed, PowerSync reads from its sensors automatically (no API calls needed).",
           "solcast_api_key": "Only needed if you do NOT have the Solcast HA integration. Get a free key from toolkit.solcast.com.au (10 calls/day on hobbyist tier).",
-          "solcast_resource_id": "Only needed without the Solcast HA integration. For split arrays, enter comma-separated IDs (e.g. abc123,def456)."
+          "solcast_resource_id": "Only needed without the Solcast HA integration. For split arrays, enter comma-separated IDs (e.g. abc123,def456).",
+          "solcast_estimate_type": "Choose which Solcast production estimate PowerSync uses for sensors and optimisation."
         },
         "submit": "Save"
       },

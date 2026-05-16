@@ -282,6 +282,30 @@ def test_solar_surplus_parallel_reserve_allows_excess_above_battery_rate():
     assert surplus_kw == 2.0
 
 
+def test_observed_wall_connector_power_does_not_probe_vehicle_sensor(monkeypatch):
+    async def fail_tesla_entity_lookup(*args, **kwargs):
+        raise AssertionError("Tesla vehicle power lookup should not run")
+
+    monkeypatch.setattr(actions, "_get_tesla_ev_entity", fail_tesla_entity_lookup)
+
+    hass = _Hass([
+        _State("sensor.tesla_wall_connector_power", "2.2", {"unit_of_measurement": "kW"}),
+        _State("sensor.tesla_wall_connector_phase_a_current", "9.1", {"unit_of_measurement": "A"}),
+        _State("sensor.tesla_wall_connector_energy", "12.3", {"unit_of_measurement": "kWh"}),
+    ])
+
+    power_kw = asyncio.run(
+        actions._get_observed_ev_power_kw(
+            hass,
+            "LRW3F7FS1NC484342",
+            {"charger_type": "tesla"},
+            allow_wall_connector_fallback=True,
+        )
+    )
+
+    assert power_kw == 2.2
+
+
 def test_observed_wall_connector_power_is_counted_for_solar_surplus_stop(monkeypatch):
     async def not_unplugged(*args, **kwargs):
         return False

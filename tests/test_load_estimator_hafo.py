@@ -31,8 +31,12 @@ def _load_estimator_module(monkeypatch):
     optimization_module = types.ModuleType("power_sync.optimization")
     optimization_module.__path__ = [str(COMPONENT_ROOT / "optimization")]
     const_module = types.ModuleType("power_sync.const")
+    const_module.DEFAULT_SOLCAST_ESTIMATE_TYPE = "estimate"
     const_module.HAFO_DOMAIN = "hafo"
     const_module.HAFO_LOAD_SENSOR_PREFIX = "sensor.hafo_"
+    const_module.SOLCAST_ESTIMATE = "estimate"
+    const_module.SOLCAST_ESTIMATE10 = "estimate10"
+    const_module.SOLCAST_ESTIMATE90 = "estimate90"
 
     monkeypatch.setitem(sys.modules, "homeassistant", ha_root)
     monkeypatch.setitem(sys.modules, "homeassistant.core", ha_core)

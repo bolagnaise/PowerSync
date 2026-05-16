@@ -677,9 +677,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _LOGGER.info("Restored profit maximisation mode: ENABLED")
 
         # Initialize solar forecaster
+        from ..const import CONF_SOLCAST_ESTIMATE_TYPE, DEFAULT_SOLCAST_ESTIMATE_TYPE
+        solcast_estimate_type = DEFAULT_SOLCAST_ESTIMATE_TYPE
+        if self._entry:
+            solcast_estimate_type = self._entry.options.get(
+                CONF_SOLCAST_ESTIMATE_TYPE,
+                self._entry.data.get(
+                    CONF_SOLCAST_ESTIMATE_TYPE, DEFAULT_SOLCAST_ESTIMATE_TYPE
+                ),
+            )
         self._solar_forecaster = SolcastForecaster(
             self.hass,
             interval_minutes=self._config.interval_minutes,
+            estimate_type=solcast_estimate_type,
         )
 
         # Initialize executor (for battery control)
@@ -2218,6 +2228,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     reserve_pct,
                                 )
                                 reapply_backup_reserve = True
+                        if self.battery_system == "goodwe" and self.energy_coordinator:
+                            coord_data = getattr(self.energy_coordinator, "data", None) or {}
+                            try:
+                                grid_kw = float(coord_data.get("grid_power", 0) or 0)
+                                battery_kw = float(coord_data.get("battery_power", 0) or 0)
+                            except (TypeError, ValueError):
+                                grid_kw = 0.0
+                                battery_kw = 0.0
+                            if grid_kw < -0.5 and battery_kw > 0.5:
+                                _LOGGER.info(
+                                    "Optimizer: GoodWe is exporting %.2fkW to grid while "
+                                    "discharging battery %.2fkW in self_consumption — "
+                                    "reapplying self-consumption mode",
+                                    abs(grid_kw),
+                                    battery_kw,
+                                )
+                                apply_self_consumption = True
                         if not apply_self_consumption and not reapply_backup_reserve:
                             _LOGGER.debug(
                                 "Optimizer: Already in self-consumption mode — "

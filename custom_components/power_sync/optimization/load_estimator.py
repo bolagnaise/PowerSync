@@ -19,9 +19,22 @@ from typing import Any
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
-from ..const import HAFO_DOMAIN, HAFO_LOAD_SENSOR_PREFIX
+from ..const import (
+    DEFAULT_SOLCAST_ESTIMATE_TYPE,
+    HAFO_DOMAIN,
+    HAFO_LOAD_SENSOR_PREFIX,
+    SOLCAST_ESTIMATE,
+    SOLCAST_ESTIMATE10,
+    SOLCAST_ESTIMATE90,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+_SOLCAST_ESTIMATE_FIELDS = {
+    SOLCAST_ESTIMATE: ("pv_estimate", "pv_estimate50"),
+    SOLCAST_ESTIMATE10: ("pv_estimate10", "pv_estimate", "pv_estimate50"),
+    SOLCAST_ESTIMATE90: ("pv_estimate90", "pv_estimate", "pv_estimate50"),
+}
 
 
 class HAFOForecaster:
@@ -1008,6 +1021,7 @@ class SolcastForecaster:
         hass: HomeAssistant,
         solcast_entity: str | None = None,
         interval_minutes: int = 5,
+        estimate_type: str = DEFAULT_SOLCAST_ESTIMATE_TYPE,
     ):
         """
         Initialize Solcast forecaster.
@@ -1016,10 +1030,27 @@ class SolcastForecaster:
             hass: Home Assistant instance
             solcast_entity: Solcast sensor entity ID
             interval_minutes: Forecast interval in minutes
+            estimate_type: Solcast estimate to use: estimate, estimate10, or estimate90
         """
         self.hass = hass
         self.solcast_entity = solcast_entity
         self.interval_minutes = interval_minutes
+        self.estimate_type = (
+            estimate_type
+            if estimate_type in _SOLCAST_ESTIMATE_FIELDS
+            else DEFAULT_SOLCAST_ESTIMATE_TYPE
+        )
+
+    def _get_pv_estimate(self, period: dict[str, Any]) -> float:
+        """Return the configured Solcast estimate value for a forecast period."""
+        for field in _SOLCAST_ESTIMATE_FIELDS[self.estimate_type]:
+            value = period.get(field)
+            if value is not None:
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+        return 0.0
 
     def _find_solcast_state(self, patterns: list[str]):
         """Find the first usable Solcast forecast sensor from common entity ids."""
@@ -1223,7 +1254,7 @@ class SolcastForecaster:
                         if period_end.tzinfo is None
                         else period_end.astimezone(start_time.tzinfo)
                     )
-                pv_kw = item.get("pv_estimate", 0) or 0
+                pv_kw = self._get_pv_estimate(item)
                 forecast_periods.append((period_start, period_end, pv_kw * 1000))
             except (ValueError, TypeError):
                 continue
@@ -1255,10 +1286,11 @@ class SolcastForecaster:
         total_kwh = sum(result) * (self.interval_minutes / 60) / 1000
         _LOGGER.info(
             "Solcast sensor forecast: %d periods from %d entries, "
-            "peak=%.1fW, total=%.1fkWh (48h)",
+            "peak=%.1fW, total=%.1fkWh (48h), estimate_type=%s",
             len(result), len(forecast_periods),
             max(result) if result else 0,
             total_kwh,
+            self.estimate_type,
         )
 
         return result
@@ -1465,7 +1497,7 @@ class SolcastForecaster:
                         if end.tzinfo is None
                         else end.astimezone(start_time.tzinfo)
                     )
-                pv_kw = item.get("pv_estimate", 0) or item.get("pv_estimate50", 0) or 0
+                pv_kw = self._get_pv_estimate(item)
                 forecast_periods.append((start, end, pv_kw * 1000))
             except (KeyError, ValueError, TypeError) as e:
                 _LOGGER.debug(f"Error parsing Solcast forecast item: {e}")

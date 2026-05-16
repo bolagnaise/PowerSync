@@ -16,7 +16,7 @@ except (FileNotFoundError, json.JSONDecodeError):
     POWER_SYNC_VERSION = "0.0.0"
 
 # Dashboard JS version — bump this to cache-bust the strategy JS independently of the app version
-DASHBOARD_JS_VERSION = "31"
+DASHBOARD_JS_VERSION = "32"
 
 # User-Agent for API identification
 POWER_SYNC_USER_AGENT = f"PowerSync/{POWER_SYNC_VERSION} HomeAssistant"
@@ -38,6 +38,16 @@ CONF_BATTERY_CURTAILMENT_ENABLED = "battery_curtailment_enabled"
 CONF_OPENWEATHERMAP_API_KEY = "openweathermap_api_key"
 CONF_WEATHER_LOCATION = "weather_location"
 CONF_WEATHER_ENTITY = "weather_entity"
+CONF_SOLCAST_ESTIMATE_TYPE = "solcast_estimate_type"
+SOLCAST_ESTIMATE = "estimate"
+SOLCAST_ESTIMATE10 = "estimate10"
+SOLCAST_ESTIMATE90 = "estimate90"
+DEFAULT_SOLCAST_ESTIMATE_TYPE = SOLCAST_ESTIMATE
+SOLCAST_ESTIMATE_TYPES = {
+    SOLCAST_ESTIMATE: "Estimate",
+    SOLCAST_ESTIMATE10: "Estimate10 (conservative)",
+    SOLCAST_ESTIMATE90: "Estimate90 (optimistic)",
+}
 
 # EV Charging configuration
 CONF_EV_CHARGING_ENABLED = "ev_charging_enabled"

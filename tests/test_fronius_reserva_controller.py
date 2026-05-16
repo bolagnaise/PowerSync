@@ -170,6 +170,26 @@ def test_force_charge_sets_manual_grid_charge_mode_then_power():
     ]
 
 
+def test_force_charge_attempts_power_write_when_entity_stays_unavailable(monkeypatch):
+    import power_sync.inverters.fronius_reserva as fronius_reserva
+
+    monkeypatch.setattr(fronius_reserva, "_OPTION_WAIT_SECONDS", -1)
+
+    states = _reserva_states()
+    for state in states:
+        if state.entity_id == "number.reserva_grid_charge_power_2":
+            state.state = "unavailable"
+    hass = _FakeHass(states)
+    controller = _controller(hass)
+
+    assert asyncio.run(controller.force_charge(duration_minutes=30, power_w=4200))
+    assert hass.services.calls[-1] == (
+        "number",
+        "set_value",
+        {"entity_id": "number.reserva_grid_charge_power_2", "value": 4200},
+    )
+
+
 def test_force_discharge_sets_manual_export_mode_then_power():
     hass = _FakeHass(_reserva_states())
     controller = _controller(hass)

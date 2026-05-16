@@ -101,7 +101,7 @@ _MODE_PV_AND_DISCHARGE_LIMIT = "PV Charge and Discharge Limit"
 _MODE_BLOCK_CHARGING = "Block Charging"
 _MODE_BLOCK_DISCHARGING = "Block Discharging"
 
-_OPTION_WAIT_SECONDS = 8.0
+_OPTION_WAIT_SECONDS = 12.0
 _OPTION_WAIT_STEP_SECONDS = 0.5
 
 
@@ -401,11 +401,11 @@ class FroniusReservaBatteryController:
                 return True
             await asyncio.sleep(_OPTION_WAIT_STEP_SECONDS)
             elapsed += _OPTION_WAIT_STEP_SECONDS
-        _LOGGER.error(
-            "Fronius Reserva: entity %s did not become available after mode switch",
+        _LOGGER.warning(
+            "Fronius Reserva: entity %s is still unavailable after mode switch; attempting write anyway",
             self._entity_map.get(key, key),
         )
-        return False
+        return True
 
     async def _set_select(self, key: str, option: str) -> None:
         entity_id = self._entity_map[key]

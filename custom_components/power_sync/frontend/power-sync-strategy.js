@@ -1090,7 +1090,7 @@ class PowerSyncLayout extends HTMLElement {
     return ordered.flatMap(column => column || []);
   }
 
-  _cardKey(cardConfig, index) {
+  _cardKeyParts(cardConfig) {
     const parts = [
       cardConfig.type,
       cardConfig.title,
@@ -1099,7 +1099,16 @@ class PowerSyncLayout extends HTMLElement {
       cardConfig.card?.type,
       cardConfig.cards?.map(card => card.title || card.entity || card.type).join('|'),
     ].filter(Boolean);
-    return `${index}:${parts.join(':')}`;
+    return parts;
+  }
+
+  _legacyCardKey(cardConfig, index) {
+    return `${index}:${this._cardKeyParts(cardConfig).join(':')}`;
+  }
+
+  _cardKey(cardConfig, occurrence) {
+    const base = this._cardKeyParts(cardConfig).join(':') || 'card';
+    return occurrence > 0 ? `${base}#${occurrence}` : base;
   }
 
   _loadLayouts() {
@@ -1313,28 +1322,62 @@ class PowerSyncLayout extends HTMLElement {
   }
 
   _savedLayout(count) {
-    const layout = this._loadLayouts()[String(count)];
+    const layoutKey = String(count);
+    const layout = this._loadLayouts()[layoutKey];
     if (!Array.isArray(layout) || layout.length !== count) return null;
     if (!layout.every(lane => Array.isArray(lane))) return null;
 
     const currentKeys = new Set(this._items.map(item => item.dataset.key));
-    const savedKeys = layout.flat();
-    const savedKeySet = new Set(savedKeys);
-    const stale = (
-      savedKeys.length !== currentKeys.size ||
-      savedKeySet.size !== savedKeys.length ||
-      savedKeys.some(key => !currentKeys.has(key)) ||
-      this._items.some(item => !savedKeySet.has(item.dataset.key))
-    );
-    if (!stale) return layout;
+    const legacyToCurrent = new Map(this._items
+      .map(item => [item.dataset.legacyKey, item.dataset.key])
+      .filter(([legacyKey]) => legacyKey));
+    const normalized = Array.from({ length: count }, () => []);
+    const placed = new Set();
+    let changed = false;
+
+    layout.forEach((lane, laneIndex) => {
+      lane.forEach((savedKey) => {
+        let key = savedKey;
+        if (!currentKeys.has(key)) {
+          const migratedKey = legacyToCurrent.get(savedKey);
+          if (!migratedKey) {
+            changed = true;
+            return;
+          }
+          key = migratedKey;
+          changed = true;
+        }
+        if (placed.has(key)) {
+          changed = true;
+          return;
+        }
+        normalized[laneIndex].push(key);
+        placed.add(key);
+      });
+    });
+
+    const missingItems = this._items
+      .filter(item => !placed.has(item.dataset.key))
+      .sort((a, b) => Number(a.dataset.defaultIndex) - Number(b.dataset.defaultIndex));
+    if (missingItems.length > 0) changed = true;
+    for (const item of missingItems) {
+      const laneIndex = normalized
+        .map((lane, index) => ({ index, length: lane.length }))
+        .sort((a, b) => a.length - b.length || a.index - b.index)[0].index;
+      normalized[laneIndex].push(item.dataset.key);
+      placed.add(item.dataset.key);
+    }
+
+    if (placed.size === currentKeys.size && !changed) return normalized;
+    if (placed.size === 0) return null;
 
     try {
       const layouts = this._loadLayouts();
-      delete layouts[String(count)];
+      layouts[layoutKey] = normalized;
       localStorage.setItem(this._storageKey, JSON.stringify(layouts));
     } catch (_) {}
     this._appliedLayoutSignature = '';
-    return null;
+    return normalized;
   }
 
   _layoutSignature(layout) {
@@ -1561,11 +1604,17 @@ class PowerSyncLayout extends HTMLElement {
     let helpers;
     try { helpers = await window.loadCardHelpers(); } catch (_) {}
 
+    const keyOccurrences = new Map();
     for (const [index, cardConfig] of this._flattenCards().entries()) {
+      const baseKey = this._cardKeyParts(cardConfig).join(':') || 'card';
+      const occurrence = keyOccurrences.get(baseKey) || 0;
+      keyOccurrences.set(baseKey, occurrence + 1);
+
       const item = document.createElement('div');
       item.className = 'item';
       item.dataset.defaultIndex = String(index);
-      item.dataset.key = this._cardKey(cardConfig, index);
+      item.dataset.key = this._cardKey(cardConfig, occurrence);
+      item.dataset.legacyKey = this._legacyCardKey(cardConfig, index);
       item.addEventListener('dragstart', (event) => event.preventDefault());
       item.addEventListener('pointerdown', (event) => this._startPointerDrag(item, event));
       item.addEventListener('pointermove', (event) => this._updatePointerDrag(item, event));

@@ -308,6 +308,9 @@ from .const import (
     CONF_SOLCAST_ENABLED,
     CONF_SOLCAST_API_KEY,
     CONF_SOLCAST_RESOURCE_ID,
+    CONF_SOLCAST_ESTIMATE_TYPE,
+    DEFAULT_SOLCAST_ESTIMATE_TYPE,
+    SOLCAST_ESTIMATE_TYPES,
     # Octopus Energy UK configuration
     CONF_OCTOPUS_PRODUCT,
     CONF_OCTOPUS_REGION,
@@ -7740,12 +7743,16 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_SOLCAST_RESOURCE_ID: (
                     user_input.get(CONF_SOLCAST_RESOURCE_ID) or ""
                 ).strip(),
+                CONF_SOLCAST_ESTIMATE_TYPE: user_input.get(
+                    CONF_SOLCAST_ESTIMATE_TYPE, DEFAULT_SOLCAST_ESTIMATE_TYPE
+                ),
             }
             self._remove_legacy_data_keys(
                 (
                     CONF_SOLCAST_ENABLED,
                     CONF_SOLCAST_API_KEY,
                     CONF_SOLCAST_RESOURCE_ID,
+                    CONF_SOLCAST_ESTIMATE_TYPE,
                 )
             )
 
@@ -7798,6 +7805,20 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_SOLCAST_RESOURCE_ID,
                     default=self._get_option(CONF_SOLCAST_RESOURCE_ID, ""),
                 ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+                vol.Optional(
+                    CONF_SOLCAST_ESTIMATE_TYPE,
+                    default=self._get_option(
+                        CONF_SOLCAST_ESTIMATE_TYPE, DEFAULT_SOLCAST_ESTIMATE_TYPE
+                    ),
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=value, label=label)
+                            for value, label in SOLCAST_ESTIMATE_TYPES.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
             }
         )
 

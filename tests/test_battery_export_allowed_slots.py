@@ -833,6 +833,29 @@ def test_self_consumption_does_not_reapply_goodwe_reserve_when_mode_matches(opt_
     assert coordinator._last_executed_action == "self_consumption"
 
 
+def test_self_consumption_reapplies_goodwe_when_battery_is_exporting_to_grid(opt_module):
+    battery = _FakeBattery(hardware_mode="self_consumption", backup_reserve=20)
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
+    coordinator.battery_system = "goodwe"
+    coordinator._config.backup_reserve = 0.45
+    coordinator.energy_coordinator = SimpleNamespace(
+        data={
+            "grid_power": -5.09,
+            "battery_power": 3.48,
+        }
+    )
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert battery.self_consumption_calls == 1
+    assert battery.backup_reserve_calls == []
+    assert coordinator._last_executed_action == "self_consumption"
+
+
 def test_idle_at_reserve_floor_is_not_overridden_to_self_consumption(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.20)

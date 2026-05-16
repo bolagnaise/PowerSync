@@ -1,4 +1,4 @@
-"""Regression tests for dashboard HACS dependency detection."""
+"""Regression tests for the generated Home Assistant dashboard."""
 
 from __future__ import annotations
 
@@ -11,6 +11,12 @@ STRATEGY_PATH = (
     / "power_sync"
     / "frontend"
     / "power-sync-strategy.js"
+)
+INIT_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "custom_components"
+    / "power_sync"
+    / "__init__.py"
 )
 
 
@@ -34,3 +40,26 @@ def test_optimizer_windows_use_combined_visual_card():
     assert "Planned Battery Windows" in source
     assert "ps-window-row" in source
     assert "Future Force Charge" not in source
+
+
+def test_dashboard_setup_preserves_user_managed_lovelace_layout():
+    """Reloads must not overwrite a dashboard the user has edited manually."""
+    source = INIT_PATH.read_text()
+
+    assert "def _is_empty_lovelace_dashboard_config" in source
+    assert "Initializing empty PowerSync dashboard with strategy mode" in source
+    assert "already has a custom Lovelace layout; " in source
+    assert "leaving it unchanged" in source
+    assert "Migrating PowerSync dashboard to strategy mode" not in source
+
+
+def test_dashboard_layout_storage_reconciles_card_changes():
+    """Saved tile order should survive card additions/removals where possible."""
+    source = STRATEGY_PATH.read_text()
+
+    assert "_legacyCardKey(cardConfig, index)" in source
+    assert "_cardKey(cardConfig, occurrence)" in source
+    assert "legacyToCurrent" in source
+    assert "missingItems" in source
+    assert "layouts[layoutKey] = normalized" in source
+    assert "return `${index}:${parts.join(':')}`" not in source

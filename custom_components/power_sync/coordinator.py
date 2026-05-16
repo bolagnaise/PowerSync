@@ -37,12 +37,22 @@ from .const import (
     TESLA_PROVIDER_FLEET_API,
     TESLA_PROVIDER_POWERSYNC,
     POWER_SYNC_USER_AGENT,
+    DEFAULT_SOLCAST_ESTIMATE_TYPE,
+    SOLCAST_ESTIMATE,
+    SOLCAST_ESTIMATE10,
+    SOLCAST_ESTIMATE90,
     DEFAULT_TWAP_WINDOW_DAYS,
     MIN_TWAP_SAMPLES,
     FLOW_POWER_MARKET_AVG,
     CONF_FLEET_API_BASE_URL,
     TESLA_SITE_INFO_CACHE_TTL_SECONDS,
 )
+
+_SOLCAST_ESTIMATE_FIELDS = {
+    SOLCAST_ESTIMATE: ("pv_estimate", "pv_estimate50"),
+    SOLCAST_ESTIMATE10: ("pv_estimate10", "pv_estimate", "pv_estimate50"),
+    SOLCAST_ESTIMATE90: ("pv_estimate90", "pv_estimate", "pv_estimate50"),
+}
 
 
 ENERGY_ACC_STORE_VERSION = 1
@@ -6122,6 +6132,7 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
         api_key: str,
         resource_id: str,
         capacity_kw: float | None = None,
+        estimate_type: str = DEFAULT_SOLCAST_ESTIMATE_TYPE,
     ) -> None:
         """Initialize the coordinator.
 
@@ -6130,8 +6141,14 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             api_key: Solcast API key
             resource_id: Rooftop site resource ID(s) - comma-separated for split arrays
             capacity_kw: System capacity in kW (optional, for validation)
+            estimate_type: Solcast estimate to use: estimate, estimate10, or estimate90
         """
         self._api_key = api_key
+        self._estimate_type = (
+            estimate_type
+            if estimate_type in _SOLCAST_ESTIMATE_FIELDS
+            else DEFAULT_SOLCAST_ESTIMATE_TYPE
+        )
         # Support comma-separated resource IDs for split arrays
         self._resource_ids = [rid.strip() for rid in resource_id.split(",") if rid.strip()]
         self._capacity_kw = capacity_kw
@@ -6165,7 +6182,8 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
         _LOGGER.info(
             f"Solcast coordinator: {n_resources} resource(s), "
             f"{calls_per_update} API call(s)/update, "
-            f"update interval: {update_hours}h ({safe_updates} updates/day)"
+            f"update interval: {update_hours}h ({safe_updates} updates/day), "
+            f"estimate_type={self._estimate_type}"
         )
 
         super().__init__(
@@ -6174,6 +6192,17 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             name=f"{DOMAIN}_solcast_forecast",
             update_interval=self._update_interval,
         )
+
+    def _get_pv_estimate(self, period: dict[str, Any]) -> float:
+        """Return the configured Solcast estimate value for a forecast period."""
+        for field in _SOLCAST_ESTIMATE_FIELDS[self._estimate_type]:
+            value = period.get(field)
+            if value is not None:
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    continue
+        return 0.0
 
     def _find_solcast_sensor(self, patterns: list[str]) -> Any | None:
         """Find a Solcast sensor by trying multiple possible entity ID patterns."""
@@ -6275,9 +6304,9 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
 
                 for period in detailed_forecast:
                     try:
-                        # Parse period end time and pv_estimate
+                        # Parse period end time and the configured estimate field.
                         period_end_str = period.get("period_end", "")
-                        pv_estimate = period.get("pv_estimate", 0) or 0
+                        pv_estimate = self._get_pv_estimate(period)
 
                         if period_end_str:
                             period_end = datetime.fromisoformat(period_end_str.replace("Z", "+00:00"))
@@ -6316,10 +6345,75 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             if tomorrow_detailed and isinstance(tomorrow_detailed, list):
                 full_forecasts.extend(tomorrow_detailed)
 
+            if full_forecasts:
+                selected_today = 0.0
+                selected_remaining = 0.0
+                selected_tomorrow = 0.0
+                selected_today_peak = 0.0
+                selected_tomorrow_peak = 0.0
+                selected_current: float | None = None
+                has_today_period = False
+                has_tomorrow_period = False
+                now = dt_util.now()
+                today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+                today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+                tomorrow_end = today_end + timedelta(days=1)
+                period_hours = 0.5
+
+                for period in full_forecasts:
+                    if not isinstance(period, dict):
+                        continue
+                    period_end_str = period.get("period_end") or period.get("period")
+                    period_start_str = period.get("period_start")
+                    if not period_end_str and not period_start_str:
+                        continue
+                    try:
+                        if period_end_str:
+                            period_end = (
+                                period_end_str
+                                if isinstance(period_end_str, datetime)
+                                else datetime.fromisoformat(period_end_str.replace("Z", "+00:00"))
+                            )
+                        else:
+                            period_start = (
+                                period_start_str
+                                if isinstance(period_start_str, datetime)
+                                else datetime.fromisoformat(period_start_str.replace("Z", "+00:00"))
+                            )
+                            period_end = period_start + timedelta(minutes=30)
+                        period_local = dt_util.as_local(period_end)
+                        pv_estimate = self._get_pv_estimate(period)
+
+                        if selected_current is None and period_local >= now:
+                            selected_current = pv_estimate
+                        if today_start <= period_local <= today_end:
+                            has_today_period = True
+                            selected_today += pv_estimate * period_hours
+                            selected_today_peak = max(selected_today_peak, pv_estimate)
+                            if period_local >= now:
+                                selected_remaining += pv_estimate * period_hours
+                        elif today_end < period_local <= tomorrow_end:
+                            has_tomorrow_period = True
+                            selected_tomorrow += pv_estimate * period_hours
+                            selected_tomorrow_peak = max(selected_tomorrow_peak, pv_estimate)
+                    except (ValueError, TypeError, KeyError):
+                        continue
+
+                if has_today_period:
+                    today_forecast = selected_today
+                    remaining = selected_remaining
+                    today_peak = selected_today_peak
+                if has_tomorrow_period:
+                    tomorrow_forecast = selected_tomorrow
+                    tomorrow_peak = selected_tomorrow_peak
+                if selected_current is not None:
+                    current_estimate = selected_current
+
             _LOGGER.info(
                 f"Solcast (from HA integration): Today={today_forecast:.1f}kWh, "
                 f"remaining={remaining:.1f}kWh, Tomorrow={tomorrow_forecast:.1f}kWh, "
-                f"hourly_points={len(hourly_forecast)}, raw_periods={len(full_forecasts)}"
+                f"hourly_points={len(hourly_forecast)}, raw_periods={len(full_forecasts)}, "
+                f"estimate_type={self._estimate_type}"
             )
 
             return {
@@ -6333,6 +6427,7 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                 "current_estimate_kw": round(current_estimate, 2) if current_estimate else None,
                 "hourly_forecast": hourly_forecast,  # For chart overlay
                 "forecasts": full_forecasts if full_forecasts else None,  # Raw periods for optimizer
+                "estimate_type": self._estimate_type,
                 "forecast_periods": len(full_forecasts) if full_forecasts else len(hourly_forecast),
                 "last_update": dt_util.utcnow(),
                 "source": "solcast_integration",
@@ -6500,6 +6595,7 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                 "today_peak_kw": data.get("today_peak_kw"),
                 "tomorrow_peak_kw": data.get("tomorrow_peak_kw"),
                 "source": data.get("source"),
+                "estimate_type": data.get("estimate_type", self._estimate_type),
                 "forecasts": data.get("forecasts"),
                 # Also persist the in-memory full-day forecast cache so that
                 # restarting mid-day doesn't reset it and force the coordinator
@@ -6524,6 +6620,12 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
         try:
             cache = await self._forecast_store.async_load()
             if not cache:
+                return
+            cached_estimate_type = cache.get("estimate_type")
+            if (
+                cached_estimate_type != self._estimate_type
+                and (cached_estimate_type is not None or self._estimate_type != DEFAULT_SOLCAST_ESTIMATE_TYPE)
+            ):
                 return
             cached_date = cache.get("_daily_forecast_date")
             if cached_date != dt_util.now().strftime("%Y-%m-%d"):
@@ -6553,6 +6655,12 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
         try:
             cache = await self._forecast_store.async_load()
             if cache and cache.get("date") == dt_util.now().strftime("%Y-%m-%d"):
+                cached_estimate_type = cache.get("estimate_type")
+                if (
+                    cached_estimate_type != self._estimate_type
+                    and (cached_estimate_type is not None or self._estimate_type != DEFAULT_SOLCAST_ESTIMATE_TYPE)
+                ):
+                    return None
                 forecasts = cache.get("forecasts")
                 n_periods = len(forecasts) if forecasts else 0
                 _LOGGER.info(
@@ -6570,6 +6678,7 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                     "tomorrow_peak_kw": cache.get("tomorrow_peak_kw"),
                     "current_estimate_kw": None,
                     "forecasts": forecasts,
+                    "estimate_type": cache.get("estimate_type", self._estimate_type),
                     "forecast_periods": n_periods,
                     "last_update": dt_util.utcnow(),
                     "source": f"{cache.get('source', 'cache')}_restored",
@@ -6870,7 +6979,7 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             if estimated_actuals:
                 for actual in estimated_actuals:
                     period_end_str = actual.get("period_end", "")
-                    pv_estimate = actual.get("pv_estimate", 0) or 0
+                    pv_estimate = self._get_pv_estimate(actual)
 
                     try:
                         period_end = datetime.fromisoformat(period_end_str.replace("Z", "+00:00"))
@@ -6886,7 +6995,7 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
             # Sum up future production from forecasts
             for forecast in forecasts:
                 period_end_str = forecast.get("period_end", "")
-                pv_estimate = forecast.get("pv_estimate", 0) or 0
+                pv_estimate = self._get_pv_estimate(forecast)
 
                 try:
                     period_end = datetime.fromisoformat(period_end_str.replace("Z", "+00:00"))
@@ -6970,6 +7079,7 @@ class SolcastForecastCoordinator(DataUpdateCoordinator):
                 "current_estimate_kw": round(current_estimate, 2) if current_estimate else None,
                 "forecast_periods": len(forecasts),
                 "forecasts": forecasts,  # Raw forecast periods for optimizer
+                "estimate_type": self._estimate_type,
                 "last_update": dt_util.utcnow(),
                 "source": "api",
             }

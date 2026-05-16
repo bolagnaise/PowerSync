@@ -360,6 +360,18 @@ async def _get_observed_ev_power_kw(
 
     charger_type = params.get("charger_type", "tesla")
     if charger_type == "tesla" and vehicle_id != DEFAULT_VEHICLE_ID:
+        if allow_wall_connector_fallback:
+            wall_power_kw = 0.0
+            for state in hass.states.async_all("sensor"):
+                entity_id = state.entity_id.lower()
+                if "wall_connector" not in entity_id or "power" not in entity_id:
+                    continue
+                if any(token in entity_id for token in ("voltage", "current", "energy", "frequency")):
+                    continue
+                wall_power_kw = max(wall_power_kw, _kw_from_power_state(state))
+            if wall_power_kw > 0.05:
+                return wall_power_kw
+
         try:
             entity = await _get_tesla_ev_entity(
                 hass,
@@ -372,18 +384,6 @@ async def _get_observed_ev_power_kw(
                     return power_kw
         except Exception as err:
             _LOGGER.debug("Solar surplus EV: could not read Tesla EV power entity: %s", err)
-
-        if allow_wall_connector_fallback:
-            wall_power_kw = 0.0
-            for state in hass.states.async_all("sensor"):
-                entity_id = state.entity_id.lower()
-                if "wall_connector" not in entity_id or "power" not in entity_id:
-                    continue
-                if any(token in entity_id for token in ("voltage", "current", "energy", "frequency")):
-                    continue
-                wall_power_kw = max(wall_power_kw, _kw_from_power_state(state))
-            if wall_power_kw > 0.05:
-                return wall_power_kw
 
     return 0.0
 

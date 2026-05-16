@@ -10,6 +10,9 @@ ROOT = Path(__file__).resolve().parent.parent
 COMPONENT_ROOT = ROOT / "custom_components" / "power_sync"
 INIT_PATH = COMPONENT_ROOT / "__init__.py"
 CONFIG_FLOW_PATH = COMPONENT_ROOT / "config_flow.py"
+COORDINATOR_PATH = COMPONENT_ROOT / "coordinator.py"
+OPTIMIZATION_COORDINATOR_PATH = COMPONENT_ROOT / "optimization" / "coordinator.py"
+LOAD_ESTIMATOR_PATH = COMPONENT_ROOT / "optimization" / "load_estimator.py"
 
 
 def _module_tree(path: Path) -> ast.Module:
@@ -94,6 +97,7 @@ def test_mobile_solcast_post_removes_stale_legacy_data_keys():
     assert "new_data.pop(CONF_SOLCAST_ENABLED, None)" in method_source
     assert "new_data.pop(CONF_SOLCAST_API_KEY, None)" in method_source
     assert "new_data.pop(CONF_SOLCAST_RESOURCE_ID, None)" in method_source
+    assert "new_data.pop(CONF_SOLCAST_ESTIMATE_TYPE, None)" in method_source
     assert "new_effective = {**new_data, **new_options}" in method_source
     assert "_solcast_builtin_configured(new_effective)" in method_source
     assert "update_kwargs[\"data\"] = new_data" in method_source
@@ -111,6 +115,7 @@ def test_mobile_solcast_get_prefers_external_integration_over_builtin_credential
 
     assert external_check < builtin_check
     assert 'solcast_source = "integration"' in method_source
+    assert '"solcast_estimate_type": opts.get(' in method_source
 
 
 def test_setup_skips_builtin_solcast_when_external_integration_has_data():
@@ -130,4 +135,19 @@ def test_options_flow_solcast_save_removes_stale_legacy_data_keys():
     assert "CONF_SOLCAST_ENABLED" in method_source
     assert "CONF_SOLCAST_API_KEY" in method_source
     assert "CONF_SOLCAST_RESOURCE_ID" in method_source
+    assert "CONF_SOLCAST_ESTIMATE_TYPE" in method_source
+    assert "SOLCAST_ESTIMATE_TYPES.items()" in method_source
     assert ".strip()" in method_source
+
+
+def test_solcast_estimate_type_is_used_by_forecast_readers():
+    coordinator_source = COORDINATOR_PATH.read_text()
+    load_estimator_source = LOAD_ESTIMATOR_PATH.read_text()
+    optimization_source = OPTIMIZATION_COORDINATOR_PATH.read_text()
+
+    assert "estimate_type: str = DEFAULT_SOLCAST_ESTIMATE_TYPE" in coordinator_source
+    assert 'SOLCAST_ESTIMATE10: ("pv_estimate10", "pv_estimate", "pv_estimate50")' in coordinator_source
+    assert "pv_estimate = self._get_pv_estimate(forecast)" in coordinator_source
+    assert "estimate_type: str = DEFAULT_SOLCAST_ESTIMATE_TYPE" in load_estimator_source
+    assert "pv_kw = self._get_pv_estimate(item)" in load_estimator_source
+    assert "estimate_type=solcast_estimate_type" in optimization_source
