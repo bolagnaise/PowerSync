@@ -23,6 +23,9 @@ reconcile_pack_remaining_with_aggregate = (
 assign_pack_roles_from_battery_blocks = (
     bms_health.assign_pack_roles_from_battery_blocks
 )
+known_expansion_dins_from_gateway_config = (
+    bms_health.known_expansion_dins_from_gateway_config
+)
 
 
 def test_reconciles_serial_less_near_empty_expansion_from_aggregate_remaining():
@@ -147,6 +150,87 @@ def test_assigns_pw3_leader_expansions_and_tail_follower_from_battery_blocks():
     assert packs[3]["serialNumber"] == "TG1253090007N5"
     assert packs[3]["physicalDin"] == "1707000-30-L--TG1253090007N5"
     assert packs[1]["serialNumber"] == "TG1252140009TS"
+
+
+def test_assigns_pw3_interleaved_config_expansion_before_followers():
+    packs = [
+        {"serialNumber": "TG124304001STC", "bmsSerialNumber": "TG124304001STC", "isFollower": False},
+        {"serialNumber": "TG125214001188", "bmsSerialNumber": "TG125214001188", "isFollower": False},
+        {"serialNumber": None, "bmsSerialNumber": None, "isFollower": False},
+        {"serialNumber": None, "bmsSerialNumber": None, "isFollower": False},
+    ]
+    battery_blocks = [
+        {"din": "1707000-30-K--TG1243040015ND"},
+        {"din": "1707000-30-L--TG1251520030PH"},
+        {"din": "1707000-30-L--TG125152001WC8"},
+    ]
+    gateway_config = {
+        "battery_blocks": [
+            {
+                "vin": "1707000-30-K--TG1243040015ND",
+                "battery_expansions": [
+                    {"din": "1807000-20-B--TG125214001188"},
+                ],
+            },
+            {"vin": "1707000-30-L--TG1251520030PH"},
+            {"vin": "1707000-30-L--TG125152001WC8"},
+        ]
+    }
+    components = [{"partNumber": "1707000-30-K", "serialNumber": "TG1243040015ND"}]
+
+    is_pw3 = assign_pack_roles_from_battery_blocks(
+        packs,
+        battery_blocks,
+        "1707000-30-K--TG1243040015ND",
+        components,
+        known_expansion_dins_from_gateway_config(gateway_config),
+    )
+
+    assert is_pw3 is True
+    assert [pack["role"] for pack in packs] == [
+        "leader",
+        "expansion",
+        "follower",
+        "follower",
+    ]
+    assert packs[1]["physicalDin"] == "1807000-20-B--TG125214001188"
+    assert packs[1]["serialNumber"] == "TG125214001188"
+    assert packs[2]["physicalDin"] == "1707000-30-L--TG1251520030PH"
+    assert packs[3]["physicalDin"] == "1707000-30-L--TG125152001WC8"
+
+
+def test_assigns_pw3_known_expansion_tail_slot_not_as_follower():
+    packs = [
+        {"serialNumber": "TG124304001STC", "bmsSerialNumber": "TG124304001STC", "isFollower": False},
+        {"serialNumber": None, "bmsSerialNumber": None, "isFollower": False},
+        {"serialNumber": None, "bmsSerialNumber": None, "isFollower": False},
+        {"serialNumber": "TG125214001188", "bmsSerialNumber": "TG125214001188", "isFollower": False},
+    ]
+    battery_blocks = [
+        {"din": "1707000-30-K--TG1243040015ND"},
+        {"din": "1707000-30-L--TG1251520030PH"},
+        {"din": "1707000-30-L--TG125152001WC8"},
+    ]
+    components = [{"partNumber": "1707000-30-K", "serialNumber": "TG1243040015ND"}]
+
+    is_pw3 = assign_pack_roles_from_battery_blocks(
+        packs,
+        battery_blocks,
+        "1707000-30-K--TG1243040015ND",
+        components,
+        ["1807000-20-B--TG125214001188"],
+    )
+
+    assert is_pw3 is True
+    assert [pack["role"] for pack in packs] == [
+        "leader",
+        "follower",
+        "follower",
+        "expansion",
+    ]
+    assert packs[3]["physicalDin"] == "1807000-20-B--TG125214001188"
+    assert packs[1]["physicalDin"] == "1707000-30-L--TG1251520030PH"
+    assert packs[2]["physicalDin"] == "1707000-30-L--TG125152001WC8"
 
 
 def test_keeps_four_pw2_packs_as_plain_powerwalls():

@@ -4667,6 +4667,7 @@ class BatteryHealthView(HomeAssistantView):
         from .powerwall_local.bms_health import (
             assign_pack_roles_from_battery_blocks,
             has_pw3_stack,
+            known_expansion_dins_from_gateway_config,
             reconcile_pack_remaining_with_aggregate,
             serial_from_din,
         )
@@ -4792,6 +4793,23 @@ class BatteryHealthView(HomeAssistantView):
                 _LOGGER.warning("fleet_api_bms: failed to extract text from response envelope")
                 return None
 
+        gateway_config = None
+        try:
+            runtime = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+            local_runtime = runtime.get("powerwall_local") or {}
+            local_coordinator = local_runtime.get("coordinator")
+            local_snapshot = getattr(local_coordinator, "data", None)
+            raw_snapshot = getattr(local_snapshot, "raw", None)
+            if isinstance(raw_snapshot, dict) and isinstance(raw_snapshot.get("config"), dict):
+                gateway_config = raw_snapshot["config"]
+            else:
+                local_client = local_runtime.get("client") or getattr(local_coordinator, "client", None)
+                local_transport = getattr(local_client, "_transport", None)
+                if local_transport is not None:
+                    gateway_config = await local_transport.read_config(din)
+        except Exception as err:
+            _LOGGER.debug("fleet_api_bms: config.json read for expansion mapping failed: %s", err)
+
         # Primary source: control.systemStatus aggregate (matches cloud worker).
         # This is authoritative for the whole site — never override with partial per-pack sums.
         status = ((data.get("control") or {}).get("systemStatus") or {})
@@ -4889,6 +4907,7 @@ class BatteryHealthView(HomeAssistantView):
             battery_blocks,
             din,
             all_comps,
+            known_expansion_dins_from_gateway_config(gateway_config),
         )
 
         # Ghost expansion pack filter. Phantom packs (registered slots not physically

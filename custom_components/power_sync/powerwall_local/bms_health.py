@@ -29,8 +29,73 @@ def _block_din(block: dict[str, Any]) -> str | None:
     return din if isinstance(din, str) and din else None
 
 
+def known_expansion_dins_from_gateway_config(config: dict[str, Any] | None) -> list[str]:
+    """Return configured battery expansion DIN/VIN values from config.json."""
+    blocks = (config or {}).get("battery_blocks") or []
+    if not isinstance(blocks, list):
+        return []
+
+    dins: list[str] = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        expansions = block.get("battery_expansions") or []
+        if not isinstance(expansions, list):
+            continue
+        for expansion in expansions:
+            if not isinstance(expansion, dict):
+                continue
+            din = expansion.get("din") or expansion.get("vin")
+            if isinstance(din, str) and din:
+                dins.append(din)
+    return dins
+
+
 def _is_pw3_din(din: Any) -> bool:
     return isinstance(din, str) and din.startswith("1707000-30-")
+
+
+def _expansion_dins_by_serial(known_expansion_dins: list[str] | None) -> dict[str, str]:
+    by_serial: dict[str, str] = {}
+    for din in known_expansion_dins or []:
+        serial = serial_from_din(din)
+        if serial:
+            by_serial[serial] = din
+    return by_serial
+
+
+def _pack_bms_serial(pack: dict[str, Any]) -> str | None:
+    serial = pack.get("bmsSerialNumber") or pack.get("bms_serial_number") or pack.get("serialNumber")
+    return serial if isinstance(serial, str) and serial else None
+
+
+def _choose_follower_indices(
+    packs: list[dict[str, Any]],
+    follower_slots_to_assign: int,
+    known_expansion_by_serial: dict[str, str],
+) -> set[int]:
+    if follower_slots_to_assign <= 0:
+        return set()
+
+    candidates = [
+        idx
+        for idx, pack in enumerate(packs)
+        if idx > 0
+        and not pack.get("isFollower")
+        and (
+            not (serial := _pack_bms_serial(pack))
+            or serial not in known_expansion_by_serial
+        )
+    ]
+    no_serial_candidates = [
+        idx for idx in candidates if not _pack_bms_serial(packs[idx])
+    ]
+    pool = (
+        no_serial_candidates
+        if len(no_serial_candidates) >= follower_slots_to_assign
+        else candidates
+    )
+    return set(pool[-follower_slots_to_assign:])
 
 
 def has_pw3_stack(
@@ -55,6 +120,7 @@ def assign_pack_roles_from_battery_blocks(
     battery_blocks: list[dict[str, Any]],
     leader_din: Any = None,
     components: list[dict[str, Any]] | None = None,
+    known_expansion_dins: list[str] | None = None,
 ) -> bool:
     """Normalise per-pack roles and physical serials from Tesla batteryBlocks.
 
@@ -89,19 +155,18 @@ def assign_pack_roles_from_battery_blocks(
     follower_dins = [din for din in base_dins if din != leader_physical_din]
     explicit_follower_count = sum(1 for pack in packs if pack.get("isFollower"))
     follower_slots_to_assign = max(0, len(follower_dins) - explicit_follower_count)
-    tail_follower_indices: set[int] = set()
-    if follower_slots_to_assign:
-        candidates = [
-            idx for idx, pack in enumerate(packs)
-            if idx > 0 and not pack.get("isFollower")
-        ]
-        tail_follower_indices = set(candidates[-follower_slots_to_assign:])
+    known_expansion_by_serial = _expansion_dins_by_serial(known_expansion_dins)
+    follower_indices = _choose_follower_indices(
+        packs,
+        follower_slots_to_assign,
+        known_expansion_by_serial,
+    )
 
     follower_seq = 0
     for idx, pack in enumerate(packs):
         if idx == 0:
             role = "leader"
-        elif pack.get("isFollower") or idx in tail_follower_indices:
+        elif pack.get("isFollower") or idx in follower_indices:
             role = "follower"
         else:
             role = "expansion"
@@ -118,7 +183,9 @@ def assign_pack_roles_from_battery_blocks(
             pack["physicalDin"] = physical_din
             pack["serialNumber"] = serial_from_din(physical_din) or pack.get("serialNumber")
         else:
-            pack["physicalDin"] = None
+            expansion_din = known_expansion_by_serial.get(_pack_bms_serial(pack) or "")
+            pack["physicalDin"] = expansion_din
+            pack["serialNumber"] = serial_from_din(expansion_din) or pack.get("serialNumber")
 
     return True
 
