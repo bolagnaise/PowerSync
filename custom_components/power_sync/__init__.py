@@ -20167,6 +20167,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.debug(f"Force discharge raw duration from call.data: {raw_duration!r} (type: {type(raw_duration).__name__})")
         source = call.data.get("source", "user")
         command_power_w = _coerce_force_power_w(call.data.get("power_w", 0))
+        raw_tariff_duration = call.data.get("_tariff_duration")
 
         # Convert to int if string (from HA service selector or button-card)
         try:
@@ -20185,6 +20186,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         elif duration not in DISCHARGE_DURATIONS:
             _LOGGER.warning(f"Duration {duration} not in allowed values {DISCHARGE_DURATIONS}, using default {DEFAULT_DISCHARGE_DURATION}")
             duration = DEFAULT_DISCHARGE_DURATION
+
+        tariff_duration = duration
+        if source == "optimizer" and raw_tariff_duration is not None:
+            try:
+                parsed_tariff_duration = int(raw_tariff_duration)
+            except (ValueError, TypeError):
+                _LOGGER.warning(
+                    "Optimizer force discharge tariff duration %r invalid; using %d",
+                    raw_tariff_duration,
+                    duration,
+                )
+            else:
+                if duration <= parsed_tariff_duration <= 1440:
+                    tariff_duration = parsed_tariff_duration
+                else:
+                    _LOGGER.warning(
+                        "Optimizer force discharge tariff duration %s out of range; using %d",
+                        parsed_tariff_duration,
+                        duration,
+                    )
 
         extend_hardware = call.data.get("_extend_hardware", False)
 
@@ -21071,7 +21092,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             _LOGGER.warning("Could not switch operation mode for site %s: %s", site_id, response.status)
 
             # Step 4: Create and upload discharge tariff to all gateways
-            discharge_tariff, actual_expiry = _create_discharge_tariff(duration)
+            discharge_tariff, actual_expiry = _create_discharge_tariff(tariff_duration)
             all_success = True
             for site_id, current_token, provider in site_configs:
                 success = await send_tariff_to_tesla(
@@ -21100,9 +21121,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 force_discharge_state["hardware_expires_at"] = actual_expiry.astimezone(dt_util.UTC)
                 _LOGGER.info(
                     "FORCE DISCHARGE ACTIVE%s: Tariff uploaded to %d gateway(s), "
-                    "expires in %dmin (tariff window to %s)",
+                    "expires in %dmin (tariff %dmin window to %s)",
                     " (optimizer)" if source == "optimizer" else "",
-                    len(site_configs), duration, actual_expiry.strftime('%H:%M'),
+                    len(site_configs),
+                    duration,
+                    tariff_duration,
+                    actual_expiry.strftime('%H:%M'),
                 )
 
                 # Dispatch event for switch entity

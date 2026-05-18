@@ -728,8 +728,16 @@ class _FakeBattery:
     async def force_charge(self, duration_minutes=60, power_w=5000, _extend_hardware=False):
         self.force_charge_calls.append((duration_minutes, power_w, _extend_hardware))
 
-    async def force_discharge(self, duration_minutes=60, power_w=5000, _extend_hardware=False):
-        self.force_discharge_calls.append((duration_minutes, power_w, _extend_hardware))
+    async def force_discharge(
+        self,
+        duration_minutes=60,
+        power_w=5000,
+        _extend_hardware=False,
+        _tariff_duration=None,
+    ):
+        self.force_discharge_calls.append(
+            (duration_minutes, power_w, _extend_hardware, _tariff_duration)
+        )
 
 
 class _FakeEnergyCoordinator:
@@ -1063,7 +1071,7 @@ def test_tesla_export_uses_contiguous_export_window_duration(opt_module):
 
     asyncio.run(coordinator._execute_optimizer_action(actions[0]))
 
-    assert battery.force_discharge_calls == [(40, 5000, False)]
+    assert battery.force_discharge_calls == [(40, 5000, False, None)]
     assert coordinator._last_executed_action == "export"
 
 
@@ -1086,7 +1094,7 @@ def test_export_command_power_respects_grid_export_cap(opt_module):
 
     asyncio.run(coordinator._execute_optimizer_action(actions[0]))
 
-    assert battery.force_discharge_calls == [(15, 5000, False)]
+    assert battery.force_discharge_calls == [(15, 5000, False, None)]
 
 
 def test_grid_export_cap_resolves_from_sigenergy_config(opt_module):
@@ -1192,7 +1200,7 @@ def test_supported_battery_spread_export_uses_action_power(opt_module):
 
     asyncio.run(coordinator._execute_optimizer_action(actions[0]))
 
-    assert battery.force_discharge_calls == [(20, 2100, False)]
+    assert battery.force_discharge_calls == [(20, 2100, False, None)]
 
 
 def test_unsupported_battery_spread_export_keeps_max_discharge(opt_module):
@@ -1213,7 +1221,49 @@ def test_unsupported_battery_spread_export_keeps_max_discharge(opt_module):
 
     asyncio.run(coordinator._execute_optimizer_action(actions[0]))
 
-    assert battery.force_discharge_calls == [(5, 5000, False)]
+    assert battery.force_discharge_calls == [(5, 5000, False, None)]
+
+
+def test_tesla_export_near_tariff_boundary_extends_tariff_window(opt_module):
+    boundary_now = datetime(2026, 5, 3, 8, 25, tzinfo=timezone.utc)
+    opt_module.dt_util.now = lambda *args, **kwargs: boundary_now
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: boundary_now
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    actions = [
+        SimpleNamespace(action="export", power_w=4200, timestamp=boundary_now),
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=0,
+            timestamp=boundary_now + timedelta(minutes=5),
+        ),
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[0]))
+
+    assert battery.force_discharge_calls == [(5, 5000, False, 10)]
+
+
+def test_tesla_export_away_from_tariff_boundary_uses_software_duration_only(opt_module):
+    stable_now = datetime(2026, 5, 3, 8, 20, tzinfo=timezone.utc)
+    opt_module.dt_util.now = lambda *args, **kwargs: stable_now
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: stable_now
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    actions = [
+        SimpleNamespace(action="export", power_w=4200, timestamp=stable_now),
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=0,
+            timestamp=stable_now + timedelta(minutes=5),
+        ),
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[0]))
+
+    assert battery.force_discharge_calls == [(5, 5000, False, None)]
 
 
 def test_export_duration_clips_at_next_non_export_boundary(opt_module):
@@ -1237,7 +1287,7 @@ def test_export_duration_clips_at_next_non_export_boundary(opt_module):
 
     asyncio.run(coordinator._execute_optimizer_action(actions[0]))
 
-    assert battery.force_discharge_calls == [(5, 5000, False)]
+    assert battery.force_discharge_calls == [(5, 5000, False, None)]
     assert coordinator._last_executed_action == "export"
 
 
@@ -1307,7 +1357,7 @@ def test_tesla_force_extension_reuploads_when_tariff_window_missing(opt_module):
 
     asyncio.run(coordinator._execute_optimizer_action(actions[0]))
 
-    assert battery.force_discharge_calls == [(20, 5000, True)]
+    assert battery.force_discharge_calls == [(20, 5000, True, None)]
     assert force_state["expires_at"] == datetime(2026, 5, 3, 8, 50, tzinfo=timezone.utc)
 
 
@@ -1346,7 +1396,47 @@ def test_spread_export_force_extension_reuploads_target_power(opt_module):
 
     asyncio.run(coordinator._execute_optimizer_action(actions[0]))
 
-    assert battery.force_discharge_calls == [(20, 1800, True)]
+    assert battery.force_discharge_calls == [(20, 1800, True, None)]
+
+
+def test_tesla_force_extension_near_tariff_boundary_extends_tariff_window(opt_module):
+    boundary_now = datetime(2026, 5, 3, 8, 25, tzinfo=timezone.utc)
+    opt_module.dt_util.now = lambda *args, **kwargs: boundary_now
+    opt_module.dt_util.utcnow = lambda *args, **kwargs: boundary_now
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    actions = [
+        SimpleNamespace(action="export", power_w=4200, timestamp=boundary_now),
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=0,
+            timestamp=boundary_now + timedelta(minutes=5),
+        ),
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+    force_state = {
+        "active": True,
+        "expires_at": boundary_now,
+        "source": "optimizer",
+        "hardware_expires_at": boundary_now + timedelta(minutes=5),
+    }
+    coordinator.hass.data = {
+        "power_sync": {
+            "entry-1": {
+                "force_discharge_state": force_state,
+            }
+        }
+    }
+    coordinator._force_state_getter = lambda: {
+        "active": True,
+        "type": "discharge",
+        "source": "optimizer",
+    }
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[0]))
+
+    assert battery.force_discharge_calls == [(5, 5000, True, 10)]
+    assert force_state["expires_at"] == boundary_now + timedelta(minutes=5)
 
 
 def test_tesla_force_extension_skips_reupload_when_tariff_window_covers_expiry(opt_module):

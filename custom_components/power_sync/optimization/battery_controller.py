@@ -69,7 +69,13 @@ class BatteryControllerWrapper:
             _LOGGER.error(f"Force charge failed: {e}", exc_info=True)
             return False
 
-    async def force_discharge(self, duration_minutes: int = 60, power_w: float = 5000, _extend_hardware: bool = False) -> bool:
+    async def force_discharge(
+        self,
+        duration_minutes: int = 60,
+        power_w: float = 5000,
+        _extend_hardware: bool = False,
+        _tariff_duration: int | None = None,
+    ) -> bool:
         """
         Command battery to discharge.
 
@@ -89,6 +95,8 @@ class BatteryControllerWrapper:
             service_data = {"duration": duration_minutes, "power_w": power_w, "source": "optimizer"}
             if _extend_hardware:
                 service_data["_extend_hardware"] = True
+            if _tariff_duration is not None:
+                service_data["_tariff_duration"] = _tariff_duration
             await self.hass.services.async_call(
                 "power_sync", "force_discharge",
                 service_data,

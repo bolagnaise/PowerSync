@@ -1712,6 +1712,41 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         return int(max(1, requested))
 
+    def _tesla_tariff_duration_for_force_window(
+        self,
+        force_duration_minutes: int,
+    ) -> int | None:
+        """Return a longer Tesla tariff duration near 30-min TOU boundaries."""
+        if self.battery_system != "tesla":
+            return None
+
+        try:
+            force_duration = int(force_duration_minutes)
+        except (TypeError, ValueError):
+            return None
+        if force_duration <= 0:
+            return None
+
+        interval = max(1, int(getattr(self._config, "interval_minutes", 5) or 5))
+        now = dt_util.now()
+        minute = 30 if now.minute < 30 else 60
+        next_boundary = now.replace(
+            minute=0,
+            second=0,
+            microsecond=0,
+        ) + timedelta(minutes=minute)
+        force_expiry = now + timedelta(minutes=force_duration)
+
+        seconds_from_boundary = abs((force_expiry - next_boundary).total_seconds())
+        if seconds_from_boundary > 60:
+            return None
+
+        target_expiry = next_boundary + timedelta(minutes=interval)
+        tariff_duration = int((target_expiry - now).total_seconds() // 60)
+        if target_expiry > now + timedelta(minutes=tariff_duration):
+            tariff_duration += 1
+        return max(force_duration, tariff_duration)
+
     def _export_command_power_w(self, action: Any) -> float:
         """Return the hardware export command power for an optimizer action."""
         command_w = float(self._config.max_discharge_w)
@@ -1816,6 +1851,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         allow_boundary_overrun=False,
                         minimum_minutes=self._config.interval_minutes + 5,
                     )
+                    tariff_mins = (
+                        self._tesla_tariff_duration_for_force_window(extend_mins)
+                        if force_type == "discharge"
+                        else None
+                    )
                     new_expiry = dt_util.utcnow() + timedelta(minutes=extend_mins)
                     _ext_state["expires_at"] = new_expiry
 
@@ -1865,6 +1905,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     duration_minutes=extend_mins,
                                     power_w=self._export_command_power_w(action),
                                     _extend_hardware=True,
+                                    _tariff_duration=tariff_mins,
                                 )
                             _LOGGER.debug(
                                 "Optimizer: re-issued %s command for hardware timer extension (%dmin)",
@@ -2115,9 +2156,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         allow_boundary_overrun=False,
                         minimum_minutes=self._config.interval_minutes + 5,
                     )
+                    tariff_duration = self._tesla_tariff_duration_for_force_window(
+                        discharge_duration
+                    )
                     await battery.force_discharge(
                         duration_minutes=discharge_duration,
                         power_w=discharge_power,
+                        _tariff_duration=tariff_duration,
                     )
                     _LOGGER.info(
                         "Optimizer: Discharging/exporting at %.0fW for %dmin",
