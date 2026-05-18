@@ -186,6 +186,42 @@ def test_aud_monetary_total_keeps_monetary_device_class_and_value():
     assert entity.extra_state_attributes["currency"] == "AUD"
 
 
+def test_sungrow_solar_sensor_adds_configured_ac_inverter_output():
+    sensor = _sensor_module()
+    desc = next(d for d in sensor.ENERGY_SENSORS if d.key == "solar_power")
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={
+            "battery_system": sensor.BATTERY_SYSTEM_SUNGROW,
+            "ac_inverter_curtailment_enabled": True,
+            "inverter_brand": "sungrow",
+        },
+        options={},
+    )
+    entity = sensor.TeslaEnergySensor(
+        SimpleNamespace(data={"solar_power": 4.2}),
+        desc,
+        entry,
+    )
+    entity.hass = SimpleNamespace(
+        config=SimpleNamespace(currency="AUD"),
+        data={
+            sensor.DOMAIN: {
+                "entry-1": {
+                    "inverter_attributes": {
+                        "power_output_w": 5100,
+                    },
+                },
+            },
+        },
+    )
+
+    assert round(entity.native_value, 3) == 9.3
+    assert entity.extra_state_attributes["battery_inverter_solar_power_kw"] == 4.2
+    assert entity.extra_state_attributes["ac_inverter_solar_power_kw"] == 5.1
+    assert entity.extra_state_attributes["total_solar_power_kw"] == 9.3
+
+
 def test_neovolt_surplus_balancer_sensor_exposes_status_and_attributes():
     sensor = _sensor_module()
     desc = next(d for d in sensor.NEOVOLT_SENSORS if d.key == "neovolt_surplus_balancer")

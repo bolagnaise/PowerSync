@@ -83,6 +83,22 @@ MODEL_MAP = {
     "sg170rs": "sg10rs",   # Normalized SG17RS
     "sg20rs": "sg10rs",
     "sg200rs": "sg10rs",   # Normalized SG20RS
+    # SG RT three-phase string inverters use the same modern SG register layout
+    # for telemetry and power limiting as the SG RS family.
+    "sg5rt": "sg10rs",
+    "sg50rt": "sg10rs",
+    "sg6rt": "sg10rs",
+    "sg60rt": "sg10rs",
+    "sg8rt": "sg10rs",
+    "sg80rt": "sg10rs",
+    "sg10rt": "sg10rs",
+    "sg100rt": "sg10rs",
+    "sg12rt": "sg10rs",
+    "sg120rt": "sg10rs",
+    "sg15rt": "sg10rs",
+    "sg150rt": "sg10rs",
+    "sg20rt": "sg10rs",
+    "sg200rt": "sg10rs",
     # Smaller residential models - SAME register layout as sg10rs
     "sg5rs": "sg10rs",
     "sg50rs": "sg10rs",    # Normalized SG5.0RS

@@ -1423,7 +1423,7 @@ ALPHAESS_MODELS = {
     "storion-t30": "Storion-T30 (Three Phase)",
 }
 
-# Sungrow SG series (string inverters) - single phase residential
+# Sungrow SG series (string inverters) - residential PV-only inverters.
 SUNGROW_SG_MODELS = {
     "sg2.5rs": "SG2.5RS",
     "sg3.0rs": "SG3.0RS",
@@ -1438,6 +1438,13 @@ SUNGROW_SG_MODELS = {
     "sg15rs": "SG15RS",
     "sg17rs": "SG17RS",
     "sg20rs": "SG20RS",
+    "sg5.0rt": "SG5.0RT",
+    "sg6.0rt": "SG6.0RT",
+    "sg8.0rt": "SG8.0RT",
+    "sg10rt": "SG10RT",
+    "sg12rt": "SG12RT",
+    "sg15rt": "SG15RT",
+    "sg20rt": "SG20RT",
 }
 
 # Sungrow SH series (hybrid inverters with battery)

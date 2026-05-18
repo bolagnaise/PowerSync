@@ -131,6 +131,7 @@ from .const import (
     SENSOR_TYPE_PV_AC_POWER,
     CONF_EV_CHARGING_ENABLED,
     CONF_BATTERY_SYSTEM,
+    BATTERY_SYSTEM_SUNGROW,
     BATTERY_MODE_STATE_NORMAL,
     BATTERY_MODE_STATE_FORCE_CHARGE,
     BATTERY_MODE_STATE_FORCE_DISCHARGE,
@@ -226,6 +227,36 @@ def _has_tesla_ev_device(hass: HomeAssistant) -> bool:
             if len(identifier_text) == 17 and not identifier_text.isdigit():
                 return True
     return False
+
+
+def _sungrow_ac_inverter_power_kw(entry: ConfigEntry, hass: HomeAssistant) -> float:
+    """Return separately configured Sungrow SG inverter output in kW."""
+    if entry.data.get(CONF_BATTERY_SYSTEM) != BATTERY_SYSTEM_SUNGROW:
+        return 0.0
+    if not entry.options.get(
+        CONF_AC_INVERTER_CURTAILMENT_ENABLED,
+        entry.data.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False),
+    ):
+        return 0.0
+    if (
+        entry.options.get(CONF_INVERTER_BRAND, entry.data.get(CONF_INVERTER_BRAND))
+        != "sungrow"
+    ):
+        return 0.0
+
+    attrs = (
+        hass.data.get(DOMAIN, {})
+        .get(entry.entry_id, {})
+        .get("inverter_attributes")
+        or {}
+    )
+    power_w = attrs.get("power_output_w")
+    if power_w is None:
+        power_w = attrs.get("dc_power")
+    try:
+        return max(0.0, float(power_w or 0) / 1000.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 @dataclass
@@ -2255,7 +2286,13 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEntity)
                 if local_v is not None:
                     return local_v
         if self.entity_description.value_fn:
-            return self.entity_description.value_fn(self.coordinator.data)
+            value = self.entity_description.value_fn(self.coordinator.data)
+            if (
+                self.entity_description.key == SENSOR_TYPE_SOLAR_POWER
+                and value is not None
+            ):
+                value += _sungrow_ac_inverter_power_kw(self._entry, self.hass)
+            return value
         return None
 
     async def async_added_to_hass(self) -> None:
@@ -2282,6 +2319,23 @@ class TeslaEnergySensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEntity)
             attrs = self.entity_description.attr_fn(self.coordinator.data)
         else:
             attrs = {}
+        if self.entity_description.key == SENSOR_TYPE_SOLAR_POWER:
+            battery_solar_kw = (
+                self.coordinator.data.get("solar_power")
+                if self.coordinator.data
+                else None
+            )
+            ac_solar_kw = _sungrow_ac_inverter_power_kw(self._entry, self.hass)
+            if ac_solar_kw > 0:
+                attrs.update(
+                    {
+                        "battery_inverter_solar_power_kw": battery_solar_kw,
+                        "ac_inverter_solar_power_kw": round(ac_solar_kw, 3),
+                        "total_solar_power_kw": round(
+                            float(battery_solar_kw or 0) + ac_solar_kw, 3
+                        ),
+                    }
+                )
         return _entity_currency_attrs(self, attrs)
 
 

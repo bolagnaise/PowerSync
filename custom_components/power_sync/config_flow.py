@@ -7660,7 +7660,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     self.hass.config_entries.async_update_entry(
                         self.config_entry, data=new_data
                     )
-                ac_enabled = user_input.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False)
+                ac_enabled = user_input.get(
+                    CONF_AC_INVERTER_CURTAILMENT_ENABLED, False
+                )
                 self._curtailment_options[CONF_AC_INVERTER_CURTAILMENT_ENABLED] = ac_enabled
                 if ac_enabled:
                     return await self.async_step_inverter_brand()
@@ -7677,7 +7679,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     self.config_entry, data=new_data
                 )
                 # Check if AC inverter curtailment needs configuration
-                ac_enabled = user_input.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False)
+                ac_enabled = user_input.get(
+                    CONF_AC_INVERTER_CURTAILMENT_ENABLED, False
+                )
                 self._curtailment_options[CONF_AC_INVERTER_CURTAILMENT_ENABLED] = (
                     ac_enabled
                 )
@@ -7685,11 +7689,22 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     return await self.async_step_inverter_brand()
                 return await self.async_step_weather_options()
             elif is_sungrow:
-                # Sungrow doesn't have separate curtailment config - go straight to weather
+                # Sungrow battery systems can still have a separate SG-series
+                # solar-only inverter that needs its own AC inverter polling path.
+                ac_enabled = user_input.get(
+                    CONF_AC_INVERTER_CURTAILMENT_ENABLED, False
+                )
+                self._curtailment_options[CONF_AC_INVERTER_CURTAILMENT_ENABLED] = (
+                    ac_enabled
+                )
+                if ac_enabled:
+                    return await self.async_step_inverter_brand()
                 return await self.async_step_weather_options()
             else:
                 # Tesla - check if AC inverter curtailment needs configuration
-                ac_enabled = user_input.get(CONF_AC_INVERTER_CURTAILMENT_ENABLED, False)
+                ac_enabled = user_input.get(
+                    CONF_AC_INVERTER_CURTAILMENT_ENABLED, False
+                )
                 self._curtailment_options[CONF_AC_INVERTER_CURTAILMENT_ENABLED] = (
                     ac_enabled
                 )
@@ -7729,8 +7744,16 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 )
             ] = BooleanSelector()
         elif is_sungrow:
-            # Sungrow doesn't need additional curtailment options - battery controls built-in
-            pass
+            # Separate SG-series PV inverters are not part of the SH battery
+            # Modbus coordinator, so expose the AC inverter path for them.
+            schema_dict[
+                vol.Optional(
+                    CONF_AC_INVERTER_CURTAILMENT_ENABLED,
+                    default=self._get_option(
+                        CONF_AC_INVERTER_CURTAILMENT_ENABLED, False
+                    ),
+                )
+            ] = BooleanSelector()
         else:
             # Tesla AC inverter curtailment option
             schema_dict[

@@ -419,6 +419,32 @@ def test_sungrow_dual_setup_is_not_used_at_runtime():
     assert "sungrow_coordinator_2" not in runtime_source
 
 
+def test_sungrow_curtailment_options_expose_ac_inverter_path():
+    source = CONFIG_FLOW_PATH.read_text()
+    method = _options_flow_method("async_step_curtailment_options")
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    sungrow_branch = method_source[
+        method_source.index("elif is_sungrow:") : method_source.index(
+            "else:\n                # Tesla"
+        )
+    ]
+
+    assert "CONF_AC_INVERTER_CURTAILMENT_ENABLED" in sungrow_branch
+    assert "return await self.async_step_inverter_brand()" in sungrow_branch
+
+
+def test_sungrow_ac_inverter_models_include_three_phase_sg_rt():
+    const_source = (ROOT / "custom_components" / "power_sync" / "const.py").read_text()
+    inverter_source = (
+        ROOT / "custom_components" / "power_sync" / "inverters" / "sungrow.py"
+    ).read_text()
+
+    assert '"sg10rt": "SG10RT"' in const_source
+    assert '"sg10rt": "sg10rs"' in inverter_source
+
+
 def test_smart_optimization_setup_and_options_text_match():
     for path in (STRINGS_PATH, TRANSLATIONS_PATH):
         data = json.loads(path.read_text())
