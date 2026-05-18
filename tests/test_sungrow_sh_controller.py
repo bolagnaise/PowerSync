@@ -194,6 +194,34 @@ def test_force_charge_writes_requested_power_to_forced_power_register():
     ]
 
 
+def test_setup_battery_data_reads_only_core_battery_block():
+    async def run_read():
+        controller = SungrowSHController("192.0.2.10")
+        calls: list[tuple[int, int]] = []
+
+        async def connect() -> bool:
+            return True
+
+        async def read_input_register(address: int, count: int = 1):
+            calls.append((address, count))
+            return [5751, 59, 3398, 297, 980, 208, 298]
+
+        controller.connect = connect
+        controller._read_input_register = read_input_register
+        data = await controller.get_setup_battery_data()
+        return data, calls, controller
+
+    data, calls, controller = asyncio.run(run_read())
+
+    assert calls == [(controller.REG_BATTERY_VOLTAGE, 7)]
+    assert data["battery_voltage"] == 575.1
+    assert data["battery_soc"] == 29.7
+    assert data["battery_soh"] == 98.0
+    assert data["battery_current"] == 5.9
+    assert data["battery_power"] == 3398
+    assert data["battery_temp"] == 20.8
+
+
 class _FakeSungrowController:
     def __init__(self):
         self.charge_rate_limits: list[float] = []

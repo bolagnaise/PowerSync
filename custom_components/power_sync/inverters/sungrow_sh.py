@@ -1186,6 +1186,38 @@ class SungrowSHController(InverterController):
 
         return data
 
+    async def get_setup_battery_data(self) -> dict:
+        """Read the minimal battery block needed to validate setup.
+
+        Some Sungrow/WiNet firmware responds to the core battery block but
+        closes or times out on optional power/energy registers. The config flow
+        should accept the integration once SOC/SOH are readable and leave richer
+        optional reads to the runtime coordinator.
+        """
+        data = {}
+
+        try:
+            if not await self.connect():
+                return data
+
+            battery_regs = await self._read_input_register(self.REG_BATTERY_VOLTAGE, 7)
+            if battery_regs and len(battery_regs) >= 7:
+                voltage = round(battery_regs[0] * 0.1, 1)
+                data["battery_voltage"] = voltage
+                if voltage > 0:
+                    self._battery_voltage = voltage
+                data["battery_current"] = round(self._to_signed16(battery_regs[1]) * 0.1, 1)
+                data["battery_power"] = self._to_signed16(battery_regs[2])
+                data["battery_soc"] = round(battery_regs[3] * 0.1, 1)
+                data["battery_soh"] = round(battery_regs[4] * 0.1, 1)
+                data["battery_temp"] = round(self._to_signed16(battery_regs[5]) * 0.1, 1)
+                data["daily_battery_discharge"] = round(battery_regs[6] * 0.1, 2)
+
+        except Exception as e:
+            _LOGGER.error(f"Error reading Sungrow setup battery data: {e}")
+
+        return data
+
     async def __aenter__(self):
         """Async context manager entry."""
         await self.connect()

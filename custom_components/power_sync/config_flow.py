@@ -889,9 +889,12 @@ async def test_sungrow_connection(
 
     try:
         controller = SungrowSHController(host=host, port=port, slave_id=slave_id)
+        controller.TIMEOUT_SECONDS = 3.0
         async with controller:
-            # Try to read battery SOC as a connection test
-            data = await controller.get_battery_data()
+            # The setup test only needs a core battery block read. Some
+            # Sungrow/WiNet firmware times out on optional load/export
+            # registers, which should not block creating the entry.
+            data = await controller.get_setup_battery_data()
             if data and "battery_soc" in data:
                 soc = data.get("battery_soc", 0)
                 soh = data.get("battery_soh", 0)
