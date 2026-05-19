@@ -7,7 +7,7 @@ Reference: https://github.com/Artic0din/sungrow-sg5-price-curtailment
 """
 import asyncio
 import logging
-from typing import Optional
+from typing import ClassVar, Optional
 
 from pymodbus.client import AsyncModbusTcpClient
 from pymodbus.exceptions import ModbusException
@@ -151,6 +151,8 @@ class SungrowController(InverterController):
     TIMEOUT_SECONDS = 3.0
     CONNECT_TIMEOUT_SECONDS = 2.0
 
+    _endpoint_request_locks: ClassVar[dict[tuple[str, int, int], asyncio.Lock]] = {}
+
     def __init__(
         self,
         host: str,
@@ -169,6 +171,11 @@ class SungrowController(InverterController):
         super().__init__(host, int(port), int(slave_id), model)
         self._client: Optional[AsyncModbusTcpClient] = None
         self._lock = asyncio.Lock()
+        self._request_lock = self._get_endpoint_request_lock(
+            self.host,
+            self.port,
+            self.slave_id,
+        )
 
         # Select register map based on model
         model_key = (model or "").lower().replace(".", "").replace("-", "").replace(" ", "")
@@ -178,6 +185,16 @@ class SungrowController(InverterController):
         # Parse rated capacity from model name for load-following
         self._rated_capacity_w = self._parse_capacity_from_model(model)
         _LOGGER.info(f"Sungrow controller using register map '{map_name}' for model '{model}' (capacity: {self._rated_capacity_w}W)")
+
+    @classmethod
+    def _get_endpoint_request_lock(cls, host: str, port: int, slave_id: int) -> asyncio.Lock:
+        """Return a shared request lock for one Modbus endpoint."""
+        key = (host, int(port), int(slave_id))
+        lock = cls._endpoint_request_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            cls._endpoint_request_locks[key] = lock
+        return lock
 
     def _parse_capacity_from_model(self, model: Optional[str]) -> int:
         """Parse rated capacity in watts from model name.
@@ -260,12 +277,13 @@ class SungrowController(InverterController):
 
     async def disconnect(self) -> None:
         """Disconnect from the Sungrow inverter."""
-        async with self._lock:
-            if self._client:
-                self._client.close()
-                self._client = None
-            self._connected = False
-            _LOGGER.debug(f"Disconnected from Sungrow inverter at {self.host}")
+        async with self._request_lock:
+            async with self._lock:
+                if self._client:
+                    self._client.close()
+                    self._client = None
+                self._connected = False
+                _LOGGER.debug(f"Disconnected from Sungrow inverter at {self.host}")
 
     async def _write_register(self, address: int, value: int) -> bool:
         """Write a value to a Modbus register.
@@ -277,30 +295,31 @@ class SungrowController(InverterController):
         Returns:
             True if write successful, False otherwise
         """
-        if not self._client or not self._client.connected:
-            if not await self.connect():
+        async with self._request_lock:
+            if not self._client or not self._client.connected:
+                if not await self.connect():
+                    return False
+
+            try:
+                result = await self._client.write_register(
+                    address=address,
+                    value=value,
+                    **{_SLAVE_PARAM: self.slave_id},
+                )
+
+                if result.isError():
+                    _LOGGER.error(f"Modbus write error at register {address}: {result}")
+                    return False
+
+                _LOGGER.debug(f"Successfully wrote {value} to register {address}")
+                return True
+
+            except ModbusException as e:
+                _LOGGER.error(f"Modbus exception writing to register {address}: {e}")
                 return False
-
-        try:
-            result = await self._client.write_register(
-                address=address,
-                value=value,
-                **{_SLAVE_PARAM: self.slave_id},
-            )
-
-            if result.isError():
-                _LOGGER.error(f"Modbus write error at register {address}: {result}")
+            except Exception as e:
+                _LOGGER.error(f"Error writing to register {address}: {e}")
                 return False
-
-            _LOGGER.debug(f"Successfully wrote {value} to register {address}")
-            return True
-
-        except ModbusException as e:
-            _LOGGER.error(f"Modbus exception writing to register {address}: {e}")
-            return False
-        except Exception as e:
-            _LOGGER.error(f"Error writing to register {address}: {e}")
-            return False
 
     async def _read_register(self, address: int, count: int = 1) -> Optional[list]:
         """Read values from Modbus holding registers (for control/config values).
@@ -312,29 +331,30 @@ class SungrowController(InverterController):
         Returns:
             List of register values or None on error
         """
-        if not self._client or not self._client.connected:
-            if not await self.connect():
+        async with self._request_lock:
+            if not self._client or not self._client.connected:
+                if not await self.connect():
+                    return None
+
+            try:
+                result = await self._client.read_holding_registers(
+                    address=address,
+                    count=count,
+                    **{_SLAVE_PARAM: self.slave_id},
+                )
+
+                if result.isError():
+                    _LOGGER.debug(f"Modbus holding read error at register {address}: {result}")
+                    return None
+
+                return result.registers
+
+            except ModbusException as e:
+                _LOGGER.debug(f"Modbus exception reading holding register {address}: {e}")
                 return None
-
-        try:
-            result = await self._client.read_holding_registers(
-                address=address,
-                count=count,
-                **{_SLAVE_PARAM: self.slave_id},
-            )
-
-            if result.isError():
-                _LOGGER.debug(f"Modbus holding read error at register {address}: {result}")
+            except Exception as e:
+                _LOGGER.debug(f"Error reading holding register {address}: {e}")
                 return None
-
-            return result.registers
-
-        except ModbusException as e:
-            _LOGGER.debug(f"Modbus exception reading holding register {address}: {e}")
-            return None
-        except Exception as e:
-            _LOGGER.debug(f"Error reading holding register {address}: {e}")
-            return None
 
     async def _read_input_register(self, address: int, count: int = 1) -> Optional[list]:
         """Read values from Modbus input registers (for status/measurement values).
@@ -349,29 +369,30 @@ class SungrowController(InverterController):
         Returns:
             List of register values or None on error
         """
-        if not self._client or not self._client.connected:
-            if not await self.connect():
+        async with self._request_lock:
+            if not self._client or not self._client.connected:
+                if not await self.connect():
+                    return None
+
+            try:
+                result = await self._client.read_input_registers(
+                    address=address,
+                    count=count,
+                    **{_SLAVE_PARAM: self.slave_id},
+                )
+
+                if result.isError():
+                    _LOGGER.debug(f"Modbus input read error at register {address}: {result}")
+                    return None
+
+                return result.registers
+
+            except ModbusException as e:
+                _LOGGER.debug(f"Modbus exception reading input register {address}: {e}")
                 return None
-
-        try:
-            result = await self._client.read_input_registers(
-                address=address,
-                count=count,
-                **{_SLAVE_PARAM: self.slave_id},
-            )
-
-            if result.isError():
-                _LOGGER.debug(f"Modbus input read error at register {address}: {result}")
+            except Exception as e:
+                _LOGGER.debug(f"Error reading input register {address}: {e}")
                 return None
-
-            return result.registers
-
-        except ModbusException as e:
-            _LOGGER.debug(f"Modbus exception reading input register {address}: {e}")
-            return None
-        except Exception as e:
-            _LOGGER.debug(f"Error reading input register {address}: {e}")
-            return None
 
     def _to_signed16(self, value: int) -> int:
         """Convert unsigned 16-bit to signed."""
