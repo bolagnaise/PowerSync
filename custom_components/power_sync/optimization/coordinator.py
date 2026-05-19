@@ -1905,13 +1905,24 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
 
                 lp_matches_force = _action_matches_force(action)
+                force_window_action = action
 
-                if not lp_matches_force and self._current_schedule and self._current_schedule.actions:
+                if (
+                    not lp_matches_force
+                    and getattr(action, "action", None) != "idle"
+                    and self._current_schedule
+                    and self._current_schedule.actions
+                ):
                     for _i, _a in enumerate(self._current_schedule.actions):
                         if _a.timestamp == action.timestamp:
                             _lookahead = self._current_schedule.actions[_i + 1:_i + 5]
-                            if any(_action_matches_force(_la) for _la in _lookahead):
+                            matching_lookahead = next(
+                                (_la for _la in _lookahead if _action_matches_force(_la)),
+                                None,
+                            )
+                            if matching_lookahead is not None:
                                 lp_matches_force = True
+                                force_window_action = matching_lookahead
                                 _LOGGER.info(
                                     "Optimizer: LP shuffled action[t=0] to %s but still "
                                     "plans %s within next ~20 min — keeping force %s "
@@ -1939,7 +1950,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         else {"discharge", "export"}
                     )
                     extend_mins = self._force_duration_for_action_window(
-                        action,
+                        force_window_action,
                         matching_actions,
                         allow_boundary_overrun=False,
                         minimum_minutes=self._config.interval_minutes + 5,
@@ -1982,6 +1993,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     # shorter than the extended optimizer-owned force state.
                     if battery and hasattr(battery, "force_charge") and should_refresh_hardware:
                         try:
+                            force_power_w = (
+                                force_window_action.power_w
+                                if force_type == "charge"
+                                else self._export_command_power_w(force_window_action)
+                            )
                             # For Modbus-backed systems, _extend_hardware
                             # re-issues the inverter countdown. For Tesla, the
                             # service falls through to the full tariff uploader
@@ -1989,13 +2005,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             if force_type == "charge":
                                 await battery.force_charge(
                                     duration_minutes=extend_mins,
-                                    power_w=action.power_w,
+                                    power_w=force_power_w,
                                     _extend_hardware=True,
                                 )
                             else:
                                 await battery.force_discharge(
                                     duration_minutes=extend_mins,
-                                    power_w=self._export_command_power_w(action),
+                                    power_w=force_power_w,
                                     _extend_hardware=True,
                                     _tariff_duration=tariff_mins,
                                 )
@@ -2007,7 +2023,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 self._set_optimizer_force_state(
                                     force_type,
                                     extend_mins,
-                                    action.power_w if force_type == "charge" else self._export_command_power_w(action),
+                                    force_power_w,
                                 )
                         except Exception as ext_err:
                             _LOGGER.warning("Optimizer: failed to re-issue %s for extension: %s", force_type, ext_err)

@@ -1025,6 +1025,89 @@ def test_optimizer_owned_force_charge_survives_short_lp_slot_shuffle(opt_module)
     assert coordinator._last_executed_action == "charge"
 
 
+def test_optimizer_owned_force_charge_uses_lookahead_power_when_refreshing_shuffle(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
+    coordinator.battery_system = "foxess"
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    initial_action = SimpleNamespace(
+        action="charge",
+        power_w=23500,
+        timestamp=start,
+    )
+    coordinator._current_schedule = SimpleNamespace(actions=[initial_action])
+
+    asyncio.run(coordinator._execute_optimizer_action(initial_action))
+
+    shuffled_actions = [
+        SimpleNamespace(
+            action="self_consumption",
+            power_w=0,
+            timestamp=start,
+        ),
+        SimpleNamespace(
+            action="charge",
+            power_w=23500,
+            timestamp=start + timedelta(minutes=5),
+        ),
+        SimpleNamespace(
+            action="charge",
+            power_w=23500,
+            timestamp=start + timedelta(minutes=10),
+        ),
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=shuffled_actions)
+    coordinator._optimizer_force_state["hardware_expires_at"] = start
+
+    asyncio.run(coordinator._execute_optimizer_action(shuffled_actions[0]))
+
+    assert battery.force_charge_calls == [
+        (5, 23500, False),
+        (10, 23500, True),
+    ]
+    assert battery.self_consumption_calls == 0
+    assert battery.restore_normal_calls == 0
+    assert coordinator._optimizer_force_state["active"] is True
+    assert coordinator._last_executed_action == "charge"
+
+
+def test_optimizer_owned_force_charge_does_not_override_idle_with_lookahead_charge(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
+    coordinator.battery_system = "foxess"
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    initial_action = SimpleNamespace(
+        action="charge",
+        power_w=23500,
+        timestamp=start,
+    )
+    coordinator._current_schedule = SimpleNamespace(actions=[initial_action])
+
+    asyncio.run(coordinator._execute_optimizer_action(initial_action))
+
+    shuffled_actions = [
+        SimpleNamespace(
+            action="idle",
+            power_w=0,
+            timestamp=start,
+        ),
+        SimpleNamespace(
+            action="charge",
+            power_w=23500,
+            timestamp=start + timedelta(minutes=5),
+        ),
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=shuffled_actions)
+    coordinator._optimizer_force_state["hardware_expires_at"] = start
+
+    asyncio.run(coordinator._execute_optimizer_action(shuffled_actions[0]))
+
+    assert battery.force_charge_calls == [(5, 23500, False)]
+    assert battery.restore_normal_calls == 1
+    assert coordinator._optimizer_force_state["active"] is False
+    assert coordinator._last_executed_action == "idle"
+
+
 def test_optimizer_owned_force_charge_clears_when_lp_really_stops_charging(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
