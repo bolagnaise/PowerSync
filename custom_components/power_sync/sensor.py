@@ -163,6 +163,7 @@ from .const import (
     CONF_FLOW_POWER_STATE,
     CONF_PEA_ENABLED,
     CONF_FLOW_POWER_BASE_RATE,
+    CONF_FLOW_POWER_EXPORT_RATE,
     CONF_PEA_CUSTOM_VALUE,
     FLOW_POWER_MARKET_AVG,
     FLOW_POWER_BENCHMARK,
@@ -4026,14 +4027,24 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEnti
 
     def _calculate_export_price(self) -> float:
         """Calculate Flow Power export price in $/kWh."""
-        state = self._get_config_value(CONF_FLOW_POWER_STATE, "QLD1")
-
         if self._is_happy_hour():
             # Happy Hour rate
-            return FLOW_POWER_EXPORT_RATES.get(state, 0.0)
+            return self._get_export_rate()
         else:
             # Outside Happy Hour - no export credit
             return 0.0
+
+    def _get_export_rate(self) -> float:
+        """Return configured Flow Power Happy Hour export rate in $/kWh."""
+        configured_rate = self._get_config_value(CONF_FLOW_POWER_EXPORT_RATE)
+        if configured_rate not in (None, ""):
+            try:
+                return max(0.0, float(configured_rate) / 100)
+            except (ValueError, TypeError):
+                pass
+
+        state = self._get_config_value(CONF_FLOW_POWER_STATE, "QLD1")
+        return FLOW_POWER_EXPORT_RATES.get(state, 0.0)
 
     @property
     def native_value(self) -> float | None:
@@ -4106,7 +4117,7 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, SensorEnti
         else:
             # Export price attributes
             attributes["is_happy_hour"] = self._is_happy_hour()
-            attributes["happy_hour_rate"] = FLOW_POWER_EXPORT_RATES.get(state, 0.0)
+            attributes["happy_hour_rate"] = self._get_export_rate()
 
         return _entity_currency_attrs(self, attributes)
 

@@ -1370,7 +1370,8 @@ FLOW_POWER_HAPPY_HOUR_PERIODS = [
 
 def apply_flow_power_export(
     tariff: dict[str, Any],
-    state: str
+    state: str,
+    export_rate: float | None = None,
 ) -> dict[str, Any]:
     """
     Apply Flow Power export rates to a tariff structure.
@@ -1382,6 +1383,7 @@ def apply_flow_power_export(
     Args:
         tariff: Tesla tariff structure (from convert_amber_to_tesla_tariff)
         state: NEM region code (NSW1, VIC1, QLD1, SA1)
+        export_rate: Optional Happy Hour export rate in $/kWh
 
     Returns:
         Modified tariff with Flow Power export rates applied
@@ -1391,7 +1393,8 @@ def apply_flow_power_export(
         return tariff
 
     # Get the happy hour export rate for this state
-    export_rate = FLOW_POWER_EXPORT_RATES.get(state, 0.0)  # Default to 0c for unknown regions
+    if export_rate is None:
+        export_rate = FLOW_POWER_EXPORT_RATES.get(state, 0.0)  # Default to 0c for unknown regions
 
     _LOGGER.info(
         "Applying Flow Power export rates for %s: %.0fc during Happy Hour, 0c otherwise",

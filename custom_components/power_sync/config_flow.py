@@ -186,8 +186,10 @@ from .const import (
     # Flow Power PEA configuration
     CONF_PEA_ENABLED,
     CONF_FLOW_POWER_BASE_RATE,
+    CONF_FLOW_POWER_EXPORT_RATE,
     CONF_PEA_CUSTOM_VALUE,
     FLOW_POWER_DEFAULT_BASE_RATE,
+    FLOW_POWER_EXPORT_RATES,
     # Export price boost configuration
     CONF_EXPORT_BOOST_ENABLED,
     CONF_EXPORT_PRICE_OFFSET,
@@ -8622,6 +8624,19 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_FLOW_POWER_BASE_RATE,
                 default=self._get_option(
                     CONF_FLOW_POWER_BASE_RATE, FLOW_POWER_DEFAULT_BASE_RATE
+                ),
+            ): NumberSelector(NumberSelectorConfig(
+                min=0.0, max=100.0, step=0.01, unit_of_measurement=self._selector_unit(),
+                mode=NumberSelectorMode.BOX,
+            )),
+            vol.Required(
+                CONF_FLOW_POWER_EXPORT_RATE,
+                default=self._get_option(
+                    CONF_FLOW_POWER_EXPORT_RATE,
+                    FLOW_POWER_EXPORT_RATES.get(
+                        self._get_option(CONF_FLOW_POWER_STATE, "NSW1"), 0.0
+                    )
+                    * 100,
                 ),
             ): NumberSelector(NumberSelectorConfig(
                 min=0.0, max=100.0, step=0.01, unit_of_measurement=self._selector_unit(),

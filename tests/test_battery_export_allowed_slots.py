@@ -109,6 +109,7 @@ def _install_power_sync_stubs() -> None:
     const_module.CONF_ELECTRICITY_PROVIDER = "electricity_provider"
     const_module.CONF_MONITORING_MODE = "monitoring_mode"
     const_module.CONF_FLOW_POWER_STATE = "flow_power_state"
+    const_module.CONF_FLOW_POWER_EXPORT_RATE = "flow_power_export_rate"
     const_module.CONF_HARDWARE_BACKUP_RESERVE = "hardware_backup_reserve"
     const_module.CONF_OPTIMIZATION_BACKUP_RESERVE = "optimization_backup_reserve"
     const_module.CONF_OPTIMIZATION_BATTERY_CAPACITY_WH = "battery_capacity_wh"
@@ -1552,6 +1553,36 @@ def test_profit_max_spread_uses_flow_power_export_window(opt_module):
     assert all(action.power_w == pytest.approx(416.7, abs=0.1) for action in export_window)
     assert spread.actions[107].action == "self_consumption"
     assert spread.actions[132].action == "self_consumption"
+
+
+def test_flow_power_export_override_replaces_happy_hour_rate(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "flow_power",
+        flow_power_state="NSW1",
+        flow_power_export_rate=50,
+    )
+    original_now = opt_module.dt_util.now
+    try:
+        opt_module.dt_util.now = lambda *args, **kwargs: datetime(
+            2026, 5, 3, 17, 30, tzinfo=timezone.utc
+        )
+
+        assert coordinator._apply_flow_power_export([0.0, 0.0]) == [0.5, 0.5]
+    finally:
+        opt_module.dt_util.now = original_now
+
+
+def test_flow_power_zero_export_override_disables_profit_window(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "flow_power",
+        profit_max=True,
+        flow_power_state="NSW1",
+        flow_power_export_rate=0,
+    )
+
+    assert coordinator._flow_power_export_window_slots(4) == [False] * 4
 
 
 def test_supported_battery_spread_export_uses_action_power(opt_module):

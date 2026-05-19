@@ -256,6 +256,7 @@ from .const import (
     # Flow Power PEA configuration
     CONF_PEA_ENABLED,
     CONF_FLOW_POWER_BASE_RATE,
+    CONF_FLOW_POWER_EXPORT_RATE,
     CONF_PEA_CUSTOM_VALUE,
     FLOW_POWER_DEFAULT_BASE_RATE,
     # Flow Power v2 tariff configuration
@@ -7134,6 +7135,10 @@ class ProviderConfigView(HomeAssistantView):
                         CONF_FLOW_POWER_BASE_RATE,
                         entry.data.get(CONF_FLOW_POWER_BASE_RATE, FLOW_POWER_DEFAULT_BASE_RATE)
                     ),
+                    "flow_power_export_rate": entry.options.get(
+                        CONF_FLOW_POWER_EXPORT_RATE,
+                        entry.data.get(CONF_FLOW_POWER_EXPORT_RATE, None)
+                    ),
                     "pea_custom_value": entry.options.get(
                         CONF_PEA_CUSTOM_VALUE,
                         entry.data.get(CONF_PEA_CUSTOM_VALUE, None)
@@ -7349,6 +7354,7 @@ class ProviderConfigView(HomeAssistantView):
                 "network_include_gst": CONF_NETWORK_INCLUDE_GST,
                 "pea_enabled": CONF_PEA_ENABLED,
                 "flow_power_base_rate": CONF_FLOW_POWER_BASE_RATE,
+                "flow_power_export_rate": CONF_FLOW_POWER_EXPORT_RATE,
                 "pea_custom_value": CONF_PEA_CUSTOM_VALUE,
                 "demand_charge_enabled": CONF_DEMAND_CHARGE_ENABLED,
                 "demand_charge_rate": CONF_DEMAND_CHARGE_RATE,
@@ -17112,6 +17118,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         from .tariff_converter import apply_flow_power_pea, get_wholesale_lookup, apply_flow_power_export
 
+        def _configured_flow_power_export_rate() -> float | None:
+            configured_rate = entry.options.get(
+                CONF_FLOW_POWER_EXPORT_RATE,
+                entry.data.get(CONF_FLOW_POWER_EXPORT_RATE),
+            )
+            if configured_rate in (None, ""):
+                return None
+            try:
+                return max(0.0, float(configured_rate) / 100)
+            except (ValueError, TypeError):
+                return None
+
         pea_enabled = entry.options.get(CONF_PEA_ENABLED, True)
         if pea_enabled:
             base_rate = entry.options.get(CONF_FLOW_POWER_BASE_RATE, FLOW_POWER_DEFAULT_BASE_RATE)
@@ -17158,7 +17176,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         flow_power_state = entry.options.get(CONF_FLOW_POWER_STATE, entry.data.get(CONF_FLOW_POWER_STATE, ""))
         if flow_power_state:
             from .tariff_converter import apply_flow_power_export
-            tariff = apply_flow_power_export(tariff, flow_power_state)
+            tariff = apply_flow_power_export(
+                tariff, flow_power_state, _configured_flow_power_export_rate()
+            )
 
         return tariff
 
@@ -18270,8 +18290,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         if electricity_provider == "flow_power" and flow_power_state:
             from .tariff_converter import apply_flow_power_export
-            _LOGGER.info("Applying Flow Power export rates for state: %s", flow_power_state)
-            tariff = apply_flow_power_export(tariff, flow_power_state)
+            configured_rate = entry.options.get(
+                CONF_FLOW_POWER_EXPORT_RATE,
+                entry.data.get(CONF_FLOW_POWER_EXPORT_RATE),
+            )
+            export_rate = None
+            if configured_rate not in (None, ""):
+                try:
+                    export_rate = max(0.0, float(configured_rate) / 100)
+                except (ValueError, TypeError):
+                    export_rate = None
+            _LOGGER.info(
+                "Applying Flow Power export rates for state: %s%s",
+                flow_power_state,
+                f" (override {export_rate * 100:.2f}c)" if export_rate is not None else "",
+            )
+            tariff = apply_flow_power_export(tariff, flow_power_state, export_rate)
 
         # Apply export price boost for Amber users (if enabled)
         if electricity_provider == "amber":

@@ -900,6 +900,7 @@ FLOW_POWER_HAPPY_HOUR_PERIODS = [
 # V2 formula: PEA = GST*Spot + Tariff - GST*TWAP - AvgDailyTariff - BPEA
 CONF_PEA_ENABLED = "pea_enabled"
 CONF_FLOW_POWER_BASE_RATE = "flow_power_base_rate"
+CONF_FLOW_POWER_EXPORT_RATE = "flow_power_export_rate"
 CONF_PEA_CUSTOM_VALUE = "pea_custom_value"
 
 # Flow Power v2 tariff configuration (optional — enables corrected formula)

@@ -2929,13 +2929,30 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not self._entry:
             return [False] * n
 
-        from ..const import CONF_FLOW_POWER_STATE, FLOW_POWER_EXPORT_RATES
+        from ..const import (
+            CONF_FLOW_POWER_EXPORT_RATE,
+            CONF_FLOW_POWER_STATE,
+            FLOW_POWER_EXPORT_RATES,
+        )
 
         state = self._entry.options.get(
             CONF_FLOW_POWER_STATE,
             self._entry.data.get(CONF_FLOW_POWER_STATE, ""),
         )
-        if FLOW_POWER_EXPORT_RATES.get(state, 0.0) <= 0:
+        configured_rate = self._entry.options.get(
+            CONF_FLOW_POWER_EXPORT_RATE,
+            self._entry.data.get(CONF_FLOW_POWER_EXPORT_RATE),
+        )
+        try:
+            happy_rate = (
+                float(configured_rate) / 100
+                if configured_rate not in (None, "")
+                else FLOW_POWER_EXPORT_RATES.get(state, 0.0)
+            )
+        except (ValueError, TypeError):
+            happy_rate = FLOW_POWER_EXPORT_RATES.get(state, 0.0)
+
+        if happy_rate <= 0:
             return [False] * n
 
         return self._time_window_slots(n, "17:30", "19:30")
@@ -3428,6 +3445,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         from ..const import (
             CONF_ELECTRICITY_PROVIDER,
+            CONF_FLOW_POWER_EXPORT_RATE,
             CONF_FLOW_POWER_STATE,
             FLOW_POWER_EXPORT_RATES,
         )
@@ -3446,7 +3464,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not state:
             return export_prices
 
-        happy_rate = FLOW_POWER_EXPORT_RATES.get(state, 0.0)
+        configured_rate = self._entry.options.get(
+            CONF_FLOW_POWER_EXPORT_RATE,
+            self._entry.data.get(CONF_FLOW_POWER_EXPORT_RATE),
+        )
+        try:
+            happy_rate = (
+                float(configured_rate) / 100
+                if configured_rate not in (None, "")
+                else FLOW_POWER_EXPORT_RATES.get(state, 0.0)
+            )
+        except (ValueError, TypeError):
+            happy_rate = FLOW_POWER_EXPORT_RATES.get(state, 0.0)
         happy_start = 17 * 60 + 30  # 17:30
         happy_end = 19 * 60 + 30    # 19:30
         interval = self._config.interval_minutes

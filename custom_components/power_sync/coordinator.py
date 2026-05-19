@@ -304,6 +304,23 @@ class EnergyAccumulator:
         }
 
 
+def _flow_power_export_rate_dollars(config_entry: Any, state: str) -> float:
+    """Return configured Flow Power Happy Hour export rate in $/kWh."""
+    from .const import CONF_FLOW_POWER_EXPORT_RATE, FLOW_POWER_EXPORT_RATES
+
+    configured_rate = config_entry.options.get(
+        CONF_FLOW_POWER_EXPORT_RATE,
+        config_entry.data.get(CONF_FLOW_POWER_EXPORT_RATE),
+    )
+    if configured_rate not in (None, ""):
+        try:
+            return max(0.0, float(configured_rate) / 100)
+        except (ValueError, TypeError):
+            pass
+
+    return FLOW_POWER_EXPORT_RATES.get(state, 0.0)
+
+
 def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | None, float | None]:
     """Get current buy/sell prices in $/kWh for cost tracking.
 
@@ -357,7 +374,6 @@ def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | Non
                         FLOW_POWER_DEFAULT_BASE_RATE,
                         FLOW_POWER_MARKET_AVG,
                         FLOW_POWER_BENCHMARK,
-                        FLOW_POWER_EXPORT_RATES,
                         FLOW_POWER_HAPPY_HOUR_PERIODS,
                     )
                     provider = config_entry.options.get(
@@ -393,7 +409,7 @@ def _get_current_prices(hass: HomeAssistant, entry_id: str) -> tuple[float | Non
                         now_local = dt_util.now()
                         period_key = f"PERIOD_{now_local.hour:02d}_{(now_local.minute // 30) * 30:02d}"
                         sell_dollar_fp = (
-                            FLOW_POWER_EXPORT_RATES.get(fp_state, 0.0)
+                            _flow_power_export_rate_dollars(config_entry, fp_state)
                             if period_key in FLOW_POWER_HAPPY_HOUR_PERIODS
                             else 0.0
                         )
