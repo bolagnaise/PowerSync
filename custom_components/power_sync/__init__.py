@@ -5624,6 +5624,152 @@ class SungrowSettingsView(HomeAssistantView):
                 status=500
             )
 
+
+class SungrowDiagnosticsView(HomeAssistantView):
+    """HTTP view to inspect raw Sungrow SH Modbus telemetry registers."""
+
+    url = "/api/power_sync/sungrow_diagnostics"
+    name = "api:power_sync:sungrow_diagnostics"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant):
+        """Initialize the view."""
+        self._hass = hass
+
+    async def get(self, request: web.Request) -> web.Response:
+        """Handle GET request for raw Sungrow register diagnostics."""
+        entry = None
+        for config_entry in self._hass.config_entries.async_entries(DOMAIN):
+            entry = config_entry
+            break
+
+        if not entry:
+            return web.json_response(
+                {"success": False, "error": "PowerSync not configured"},
+                status=503,
+            )
+
+        if not entry.data.get(CONF_SUNGROW_HOST):
+            return web.json_response(
+                {
+                    "success": False,
+                    "error": "Not a Sungrow battery system",
+                    "reason": "not_sungrow",
+                },
+                status=200,
+            )
+
+        entry_data = self._hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+        sungrow_coordinator = entry_data.get("sungrow_coordinator")
+        if not sungrow_coordinator or not getattr(sungrow_coordinator, "_controller", None):
+            return web.json_response(
+                {"success": False, "error": "Sungrow coordinator not available"},
+                status=503,
+            )
+
+        controller = sungrow_coordinator._controller
+
+        async def read_input(name: str, address: int, count: int = 1) -> dict:
+            regs = await controller._read_input_register(address, count)
+            return {"name": name, "address": address, "function": 4, "count": count, "registers": regs}
+
+        async def read_holding(name: str, address: int, count: int = 1) -> dict:
+            regs = await controller._read_register(address, count)
+            return {"name": name, "address": address, "function": 3, "count": count, "registers": regs}
+
+        try:
+            async with sungrow_coordinator._modbus_lock:
+                raw_reads = [
+                    await read_input("load_power", controller.REG_LOAD_POWER, 2),
+                    await read_input("export_power", controller.REG_EXPORT_POWER, 2),
+                    await read_input("total_active_power", controller.REG_TOTAL_ACTIVE_POWER, 2),
+                    await read_input("battery_block", controller.REG_BATTERY_VOLTAGE, 7),
+                    await read_input("battery_power_s32", controller.REG_BATTERY_POWER_S32, 2),
+                    await read_input("meter_active_power", controller.REG_METER_ACTIVE_POWER, 2),
+                    await read_input("battery_current_precise", controller.REG_BATTERY_CURRENT_PRECISE, 1),
+                    await read_input("pv_dc_power", controller.REG_TOTAL_DC_POWER, 2),
+                    await read_holding("ems_mode", controller.REG_EMS_MODE, 1),
+                    await read_holding("charge_command", controller.REG_CHARGE_CMD, 1),
+                    await read_holding("forced_power", controller.REG_CHARGE_DISCHARGE_POWER, 1),
+                    await read_holding("max_charge_power", controller.REG_MAX_CHARGE_POWER, 1),
+                    await read_holding("max_discharge_power", controller.REG_MAX_DISCHARGE_POWER, 1),
+                    await read_holding("export_limit_setting", controller.REG_EXPORT_LIMIT_SETTING, 1),
+                    await read_holding("export_limit_enabled", controller.REG_EXPORT_LIMIT_ENABLED, 1),
+                ]
+
+            by_name = {item["name"]: item for item in raw_reads}
+
+            def regs_for(name: str) -> list | None:
+                regs = by_name.get(name, {}).get("registers")
+                return regs if isinstance(regs, list) else None
+
+            def decode_power(name: str) -> int | None:
+                regs = regs_for(name)
+                if regs and len(regs) >= 2:
+                    return controller._read_power_s32_with_fallback(regs, name)
+                return None
+
+            def decode_signed32(name: str) -> int | None:
+                regs = regs_for(name)
+                if regs and len(regs) >= 2:
+                    return controller._to_signed32(regs[0], regs[1])
+                return None
+
+            def decode_unsigned32(name: str) -> int | None:
+                regs = regs_for(name)
+                if regs and len(regs) >= 2:
+                    return controller._to_unsigned32(regs[0], regs[1])
+                return None
+
+            decoded: dict[str, Any] = {
+                "load_power_w": decode_power("load_power"),
+                "export_power_w": decode_power("export_power"),
+                "total_active_power_w": decode_power("total_active_power"),
+                "battery_power_s32_w": decode_signed32("battery_power_s32"),
+                "meter_active_power_w": decode_signed32("meter_active_power"),
+                "pv_dc_power_w": decode_unsigned32("pv_dc_power"),
+            }
+
+            battery_block = regs_for("battery_block")
+            if battery_block and len(battery_block) >= 7:
+                decoded.update(
+                    {
+                        "battery_voltage_v": battery_block[0] / 10,
+                        "battery_current_a": controller._to_signed16(battery_block[1]) / 10,
+                        "battery_power_s16_w": controller._to_signed16(battery_block[2]),
+                        "battery_soc_percent": battery_block[3] / 10,
+                        "battery_soh_percent": battery_block[4] / 10,
+                        "battery_temperature_c": controller._to_signed16(battery_block[5]) / 10,
+                        "daily_battery_discharge_kwh": battery_block[6] / 10,
+                    }
+                )
+
+            current = sungrow_coordinator.data or {}
+            return web.json_response(
+                {
+                    "success": True,
+                    "coordinator": {
+                        "solar_power_kw": current.get("solar_power"),
+                        "grid_power_kw": current.get("grid_power"),
+                        "battery_power_kw": current.get("battery_power"),
+                        "load_power_kw": current.get("load_power"),
+                        "battery_soc": current.get("battery_level"),
+                        "ems_mode": current.get("ems_mode"),
+                        "ems_mode_name": current.get("ems_mode_name"),
+                        "charge_cmd": current.get("charge_cmd"),
+                    },
+                    "decoded": decoded,
+                    "raw": raw_reads,
+                }
+            )
+
+        except Exception as e:
+            _LOGGER.error("Error fetching Sungrow diagnostics: %s", e, exc_info=True)
+            return web.json_response(
+                {"success": False, "error": str(e)},
+                status=500,
+            )
+
     async def post(self, request: web.Request) -> web.Response:
         """Handle POST request to update Sungrow settings."""
         _LOGGER.info("⚙️ Sungrow settings POST request")
@@ -25505,6 +25651,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register HTTP endpoint for Sungrow settings (for mobile app Controls)
     hass.http.register_view(SungrowSettingsView(hass))
     _LOGGER.info("⚙️ Sungrow settings HTTP endpoint registered at /api/power_sync/sungrow_settings")
+    hass.http.register_view(SungrowDiagnosticsView(hass))
+    _LOGGER.info("Sungrow diagnostics HTTP endpoint registered at /api/power_sync/sungrow_diagnostics")
 
     # Register HTTP endpoint for FoxESS settings (for mobile app Controls)
     hass.http.register_view(FoxESSSettingsView(hass))
