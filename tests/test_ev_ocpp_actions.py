@@ -286,6 +286,51 @@ def test_solar_surplus_parallel_reserve_allows_excess_above_battery_rate():
     assert surplus_kw == 2.0
 
 
+def test_solar_surplus_curtailed_full_battery_keeps_active_ev_headroom():
+    surplus_kw = actions._calculate_solar_surplus(
+        {
+            "battery_soc": 100,
+            "grid_power": 50,
+            "battery_power": -2350,
+            "solar_power": 0,
+            "load_power": 0,
+            "is_curtailed": True,
+        },
+        current_ev_power_kw=3.31,
+        config={
+            "surplus_calculation": "grid_based",
+            "household_buffer_kw": 1.5,
+            "allow_parallel_charging": True,
+            "max_battery_charge_rate_kw": 3.0,
+            "min_battery_soc": 20,
+        },
+    )
+
+    assert surplus_kw == 5.61
+
+
+def test_solar_surplus_full_battery_topoff_does_not_reserve_battery_charge_rate():
+    surplus_kw = actions._calculate_solar_surplus(
+        {
+            "battery_soc": 100,
+            "grid_power": 50,
+            "battery_power": -2350,
+            "solar_power": 0,
+            "load_power": 0,
+        },
+        current_ev_power_kw=3.31,
+        config={
+            "surplus_calculation": "grid_based",
+            "household_buffer_kw": 1.5,
+            "allow_parallel_charging": True,
+            "max_battery_charge_rate_kw": 3.0,
+            "min_battery_soc": 20,
+        },
+    )
+
+    assert surplus_kw == 4.11
+
+
 def test_observed_wall_connector_power_does_not_probe_vehicle_sensor(monkeypatch):
     async def fail_tesla_entity_lookup(*args, **kwargs):
         raise AssertionError("Tesla vehicle power lookup should not run")
@@ -1527,6 +1572,43 @@ def test_solar_surplus_parallel_reserve_prevents_ramp_while_battery_charging(mon
     state = actions._dynamic_ev_state["entry-1"][vehicle_id]
     assert state["current_amps"] == 7
     assert state["low_surplus_start"] is not None
+
+
+def test_solar_surplus_full_battery_curtailment_ramps_from_visible_headroom(monkeypatch):
+    hass = _Hass([])
+    vehicle_id = "VIN123"
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=7)
+    state["params"].update(
+        {
+            "household_buffer_kw": 1.5,
+            "allow_parallel_charging": True,
+            "max_battery_charge_rate_kw": 3.0,
+            "min_battery_soc": 20,
+            "pause_below_soc": 10,
+        }
+    )
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+    set_amps_calls = _install_solar_surplus_runtime_stubs(
+        monkeypatch,
+        {
+            "battery_soc": 100,
+            "grid_power": 50,
+            "battery_power": -2350,
+            "solar_power": 0,
+            "load_power": 0,
+            "is_curtailed": True,
+        },
+    )
+
+    asyncio.run(
+        actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id)
+    )
+
+    state = actions._dynamic_ev_state["entry-1"][vehicle_id]
+    assert state["current_amps"] == 17
+    assert state.get("low_surplus_start") is None
+    assert set_amps_calls == [17]
 
 
 def test_solar_surplus_strict_below_floor_can_start_with_battery_charging(monkeypatch):

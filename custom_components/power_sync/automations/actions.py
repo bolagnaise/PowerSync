@@ -3228,6 +3228,8 @@ async def _action_set_ev_charging_amps(
 # Global storage for dynamic EV charging state per config entry
 # Structure: { entry_id: { vehicle_id: { state... }, ... }, ... }
 _dynamic_ev_state: Dict[str, Dict[str, Dict[str, Any]]] = {}
+_BATTERY_FULL_RESERVE_BYPASS_SOC = 99.0
+_ACTIVE_EV_POWER_EPSILON_KW = 0.05
 
 # Lock to prevent duplicate dynamic EV charging sessions from concurrent triggers
 _start_dynamic_lock = asyncio.Lock()
@@ -3580,6 +3582,9 @@ def _parallel_battery_reserve_kw(
     except (TypeError, ValueError):
         battery_soc = None
 
+    if battery_soc is not None and battery_soc >= _BATTERY_FULL_RESERVE_BYPASS_SOC:
+        return 0.0
+
     min_soc = get_solar_surplus_min_battery_soc(config)
     battery_below_min = battery_soc is not None and battery_soc < min_soc
     battery_currently_charging = battery_charge_kw > 0.05
@@ -3589,6 +3594,25 @@ def _parallel_battery_reserve_kw(
     if method == "direct":
         return max(0.0, max_charge_kw - battery_charge_kw)
     return max_charge_kw
+
+
+def _curtailed_full_battery_active_ev(
+    live_status: dict,
+    current_ev_power_kw: float,
+) -> bool:
+    """Return true when zero-export curtailment is hiding active EV headroom."""
+    battery_soc = live_status.get("battery_soc")
+    try:
+        battery_soc = float(battery_soc) if battery_soc is not None else None
+    except (TypeError, ValueError):
+        battery_soc = None
+
+    return (
+        bool(live_status.get("is_curtailed"))
+        and battery_soc is not None
+        and battery_soc >= _BATTERY_FULL_RESERVE_BYPASS_SOC
+        and current_ev_power_kw > _ACTIVE_EV_POWER_EPSILON_KW
+    )
 
 
 def _calculate_solar_surplus(live_status: dict, current_ev_power_kw: float, config: dict) -> float:
@@ -3615,6 +3639,8 @@ def _calculate_solar_surplus(live_status: dict, current_ev_power_kw: float, conf
     battery_kw = (live_status.get("battery_power") or 0) / 1000  # Positive = discharge, Negative = charge
     load_kw = (live_status.get("load_power") or 0) / 1000
     buffer_kw = config.get("household_buffer_kw", 0.5)
+    if _curtailed_full_battery_active_ev(live_status, current_ev_power_kw):
+        buffer_kw = 0.0
 
     method = config.get("surplus_calculation", "grid_based")
 
