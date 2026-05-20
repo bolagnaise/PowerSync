@@ -158,7 +158,11 @@ class SungrowSHController(InverterController):
         super().__init__(host, int(port), int(slave_id), model)
         self._client: Optional[AsyncModbusTcpClient] = None
         self._lock = asyncio.Lock()
-        self._request_lock = asyncio.Lock()
+        self._request_lock = self._get_endpoint_request_lock(
+            self.host,
+            self.port,
+            self.slave_id,
+        )
         self._last_connect_at: float = 0.0
         self._last_request_finished_at: float = 0.0
         self._battery_voltage: float = self.BATTERY_VOLTAGE_FALLBACK
@@ -197,12 +201,13 @@ class SungrowSHController(InverterController):
 
     async def disconnect(self) -> None:
         """Disconnect from the Sungrow SH inverter."""
-        async with self._lock:
-            if self._client:
-                self._client.close()
-                self._client = None
-            self._connected = False
-            _LOGGER.debug(f"Disconnected from Sungrow SH inverter at {self.host}")
+        async with self._request_lock:
+            async with self._lock:
+                if self._client:
+                    self._client.close()
+                    self._client = None
+                self._connected = False
+                _LOGGER.debug(f"Disconnected from Sungrow SH inverter at {self.host}")
 
     async def _wait_for_request_slot(self) -> None:
         """Pace Modbus requests for WiNet-S/S2 stability.

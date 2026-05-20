@@ -7,7 +7,7 @@ Reference: https://github.com/Artic0din/sungrow-sg5-price-curtailment
 """
 import asyncio
 import logging
-from typing import ClassVar, Optional
+from typing import Optional
 
 from pymodbus.client import AsyncModbusTcpClient
 from pymodbus.exceptions import ModbusException
@@ -151,8 +151,6 @@ class SungrowController(InverterController):
     TIMEOUT_SECONDS = 3.0
     CONNECT_TIMEOUT_SECONDS = 2.0
 
-    _endpoint_request_locks: ClassVar[dict[tuple[str, int, int], asyncio.Lock]] = {}
-
     def __init__(
         self,
         host: str,
@@ -185,16 +183,6 @@ class SungrowController(InverterController):
         # Parse rated capacity from model name for load-following
         self._rated_capacity_w = self._parse_capacity_from_model(model)
         _LOGGER.info(f"Sungrow controller using register map '{map_name}' for model '{model}' (capacity: {self._rated_capacity_w}W)")
-
-    @classmethod
-    def _get_endpoint_request_lock(cls, host: str, port: int, slave_id: int) -> asyncio.Lock:
-        """Return a shared request lock for one Modbus endpoint."""
-        key = (host, int(port), int(slave_id))
-        lock = cls._endpoint_request_locks.get(key)
-        if lock is None:
-            lock = asyncio.Lock()
-            cls._endpoint_request_locks[key] = lock
-        return lock
 
     def _parse_capacity_from_model(self, model: Optional[str]) -> int:
         """Parse rated capacity in watts from model name.

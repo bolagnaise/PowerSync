@@ -3,10 +3,11 @@
 All inverter implementations must inherit from InverterController
 and implement the required methods.
 """
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import ClassVar, Optional
 import logging
 
 _LOGGER = logging.getLogger(__name__)
@@ -53,6 +54,8 @@ class InverterController(ABC):
     and implement the required methods.
     """
 
+    _endpoint_request_locks: ClassVar[dict[tuple[str, int, int], asyncio.Lock]] = {}
+
     def __init__(
         self,
         host: str,
@@ -74,6 +77,16 @@ class InverterController(ABC):
         self.model = model
         self._connected = False
         self._last_state: Optional[InverterState] = None
+
+    @classmethod
+    def _get_endpoint_request_lock(cls, host: str, port: int, slave_id: int) -> asyncio.Lock:
+        """Return a shared request lock for one Modbus endpoint."""
+        key = (host, int(port), int(slave_id))
+        lock = cls._endpoint_request_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            cls._endpoint_request_locks[key] = lock
+        return lock
 
     @property
     def is_connected(self) -> bool:
