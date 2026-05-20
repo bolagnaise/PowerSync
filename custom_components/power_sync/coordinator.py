@@ -68,6 +68,23 @@ LIFETIME_TOTAL_KEYS = (
 )
 
 
+def _configured_ac_inverter_power_kw(hass: HomeAssistant, entry_id: str) -> float:
+    """Return the latest separately configured AC inverter output in kW."""
+    attrs = (
+        hass.data.get(DOMAIN, {})
+        .get(entry_id, {})
+        .get("inverter_attributes")
+        or {}
+    )
+    power_w = attrs.get("power_output_w")
+    if power_w is None:
+        power_w = attrs.get("dc_power")
+    try:
+        return max(0.0, float(power_w or 0) / 1000.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 class EnergyAccumulator:
     """Accumulates daily energy totals from instantaneous power readings.
 
@@ -4058,6 +4075,12 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 # Fallback: estimate solar from energy balance
                 solar_kw = max(0, load_kw - grid_kw - battery_kw)
 
+            ac_inverter_kw = _configured_ac_inverter_power_kw(self.hass, self._entry_id)
+            if ac_inverter_kw > 0:
+                combined_load_kw = max(0.0, solar_kw + ac_inverter_kw + grid_kw + battery_kw)
+                if combined_load_kw > load_kw:
+                    load_kw = combined_load_kw
+
             # Accumulate daily energy from power readings (with cost tracking)
             buy, sell = _get_current_prices(self.hass, self._entry_id)
             self._energy_acc.update(max(0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
@@ -4095,6 +4118,7 @@ class SungrowEnergyCoordinator(DataUpdateCoordinator):
                 "export_limit_w": data.get("export_limit_w"),
                 "export_limit_enabled": data.get("export_limit_enabled"),
                 "meter_power": meter_power_w,
+                "ac_inverter_solar_power": ac_inverter_kw,
                 # Aliases for the mobile force-mode picker's Max chip.
                 # The *_rate_limit_kw values already reflect BMS-reported
                 # current × voltage, so reuse them rather than duplicate.

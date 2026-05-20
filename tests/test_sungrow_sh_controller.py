@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import importlib
 import importlib.util
 from pathlib import Path
@@ -68,6 +69,8 @@ def _install_homeassistant_stubs() -> None:
     ha_aiohttp_client.async_get_clientsession = lambda hass: None
     ha_dispatcher.async_dispatcher_send = lambda *args, **kwargs: None
     ha_storage.Store = type("Store", (), {})
+    ha_dt.utcnow = lambda: datetime(2026, 5, 20, 0, 0, 0)
+    ha_dt.now = lambda: datetime(2026, 5, 20, 10, 0, 0)
 
     sys.modules["homeassistant"] = ha_root
     sys.modules["homeassistant.core"] = ha_core
@@ -378,11 +381,88 @@ class _FakeSungrowController:
         return True
 
 
+class _FakeEnergyAccumulator:
+    _last_update = True
+
+    def __init__(self):
+        self.updates: list[tuple[float, float, float, float, object, object]] = []
+        self.solar_kwh = 0
+        self.grid_import_kwh = 0
+        self.grid_export_kwh = 0
+        self.battery_charge_kwh = 0
+        self.battery_discharge_kwh = 0
+        self.load_kwh = 0
+
+    async def async_restore(self) -> None:
+        return None
+
+    def update(self, solar_kw, grid_kw, battery_kw, load_kw, buy, sell) -> None:
+        self.updates.append((solar_kw, grid_kw, battery_kw, load_kw, buy, sell))
+
+    def as_dict(self) -> dict:
+        return {
+            "pv_today_kwh": 0,
+            "grid_import_today_kwh": 0,
+            "grid_export_today_kwh": 0,
+            "charge_today_kwh": 0,
+            "discharge_today_kwh": 0,
+            "load_today_kwh": 0,
+            "import_cost_today": 0,
+            "export_earnings_today": 0,
+        }
+
+
 def _new_sungrow_coordinator(SungrowEnergyCoordinator, fake_controller):
     coordinator = SungrowEnergyCoordinator.__new__(SungrowEnergyCoordinator)
     coordinator._controller = fake_controller
     coordinator._modbus_lock = asyncio.Lock()
+    coordinator._total_import_baseline = None
+    coordinator._total_export_baseline = None
+    coordinator._baseline_date = None
     return coordinator
+
+
+def test_sungrow_coordinator_includes_ac_inverter_power_in_home_load():
+    SungrowEnergyCoordinator, restore = _load_sungrow_energy_coordinator()
+
+    class FakeController:
+        async def get_battery_data(self):
+            return {
+                "battery_soc": 27.2,
+                "battery_power": -5699,
+                "meter_power": 9,
+                "load_power": 0,
+                "pv_power": 4550,
+                "battery_soh": 98.0,
+            }
+
+    async def run_update():
+        coordinator = _new_sungrow_coordinator(SungrowEnergyCoordinator, FakeController())
+        coordinator.hass = types.SimpleNamespace(
+            data={
+                "power_sync": {
+                    "entry-1": {
+                        "inverter_attributes": {
+                            "power_output_w": 3119,
+                        },
+                    },
+                },
+            }
+        )
+        coordinator._entry_id = "entry-1"
+        coordinator._energy_acc = _FakeEnergyAccumulator()
+        data = await coordinator._async_update_data()
+        return data, coordinator._energy_acc
+
+    try:
+        data, energy_acc = asyncio.run(run_update())
+    finally:
+        restore()
+
+    assert data["solar_power"] == 4.55
+    assert data["ac_inverter_solar_power"] == 3.119
+    assert round(data["load_power"], 3) == 1.979
+    assert round(energy_acc.updates[-1][3], 3) == 1.979
 
 
 def test_sungrow_coordinator_passes_requested_discharge_power_to_controller():
