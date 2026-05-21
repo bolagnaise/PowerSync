@@ -6,8 +6,9 @@ Uses the plant-level PV power limit and active power percentage registers.
 Reference: https://github.com/TypQxQ/Sigenergy-Local-Modbus
 """
 import asyncio
+from contextlib import asynccontextmanager
 import logging
-from typing import Optional
+from typing import AsyncIterator, ClassVar, Optional
 
 from pymodbus.client import AsyncModbusTcpClient
 from pymodbus.exceptions import ModbusException
@@ -119,6 +120,7 @@ class SigenergyController(InverterController):
     DEFAULT_SLAVE_ID = 247  # Plant address - will auto-switch to 1 for inverter registers
     DEFAULT_INVERTER_SLAVE_ID = 1  # Default inverter address
     TIMEOUT_SECONDS = 10.0
+    _MODBUS_LOCKS: ClassVar[dict[tuple[str, int], asyncio.Lock]] = {}
 
     def __init__(
         self,
@@ -148,45 +150,80 @@ class SigenergyController(InverterController):
         # Use user-configured slave_id for inverter registers instead of hardcoded default
         # This allows users with AC Chargers to specify slave 2 and have it work correctly
         self._inverter_slave_id = slave_id if slave_id != self.DEFAULT_SLAVE_ID else self.DEFAULT_INVERTER_SLAVE_ID
+        self._modbus_transaction_depth = 0
+        self._modbus_transaction_owner = None
+
+    @property
+    def _modbus_lock(self) -> asyncio.Lock:
+        """Shared lock for all Sigenergy Modbus clients talking to one host."""
+        key = (self.host, int(self.port))
+        lock = self._MODBUS_LOCKS.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._MODBUS_LOCKS[key] = lock
+        return lock
+
+    @asynccontextmanager
+    async def _modbus_transaction(self) -> AsyncIterator[None]:
+        """Serialize multi-step Modbus transactions across controller instances."""
+        task = asyncio.current_task()
+        if self._modbus_transaction_owner is task:
+            self._modbus_transaction_depth += 1
+            try:
+                yield
+            finally:
+                self._modbus_transaction_depth -= 1
+            return
+
+        async with self._modbus_lock:
+            self._modbus_transaction_owner = task
+            self._modbus_transaction_depth = 1
+            try:
+                yield
+            finally:
+                self._modbus_transaction_depth = 0
+                self._modbus_transaction_owner = None
 
     async def connect(self) -> bool:
         """Connect to the Sigenergy system via Modbus TCP."""
-        async with self._lock:
-            try:
-                if self._client and self._client.connected:
-                    return True
+        async with self._modbus_transaction():
+            async with self._lock:
+                try:
+                    if self._client and self._client.connected:
+                        return True
 
-                self._client = AsyncModbusTcpClient(
-                    host=self.host,
-                    port=self.port,
-                    timeout=self.TIMEOUT_SECONDS,
-                )
-
-                connected = await self._client.connect()
-                if connected:
-                    self._connected = True
-                    _LOGGER.info(
-                        f"Connected to Sigenergy system at {self.host}:{self.port} "
-                        f"(plant slave={self.slave_id}, inverter slave={self._inverter_slave_id})"
+                    self._client = AsyncModbusTcpClient(
+                        host=self.host,
+                        port=self.port,
+                        timeout=self.TIMEOUT_SECONDS,
                     )
-                else:
-                    _LOGGER.error(f"Failed to connect to Sigenergy at {self.host}:{self.port}")
 
-                return connected
+                    connected = await self._client.connect()
+                    if connected:
+                        self._connected = True
+                        _LOGGER.info(
+                            f"Connected to Sigenergy system at {self.host}:{self.port} "
+                            f"(plant slave={self.slave_id}, inverter slave={self._inverter_slave_id})"
+                        )
+                    else:
+                        _LOGGER.error(f"Failed to connect to Sigenergy at {self.host}:{self.port}")
 
-            except Exception as e:
-                _LOGGER.error(f"Error connecting to Sigenergy: {e}")
-                self._connected = False
-                return False
+                    return connected
+
+                except Exception as e:
+                    _LOGGER.error(f"Error connecting to Sigenergy: {e}")
+                    self._connected = False
+                    return False
 
     async def disconnect(self) -> None:
         """Disconnect from the Sigenergy system."""
-        async with self._lock:
-            if self._client:
-                self._client.close()
-                self._client = None
-            self._connected = False
-            _LOGGER.debug(f"Disconnected from Sigenergy at {self.host}")
+        async with self._modbus_transaction():
+            async with self._lock:
+                if self._client:
+                    self._client.close()
+                    self._client = None
+                self._connected = False
+                _LOGGER.debug(f"Disconnected from Sigenergy at {self.host}")
 
     async def _write_holding_registers(self, address: int, values: list[int], slave_id: Optional[int] = None) -> bool:
         """Write values to holding registers.
@@ -199,31 +236,41 @@ class SigenergyController(InverterController):
         Returns:
             True if write successful
         """
-        if not self._client or not self._client.connected:
-            if not await self.connect():
-                return False
+        async with self._modbus_transaction():
+            effective_slave = slave_id if slave_id is not None else self.DEFAULT_SLAVE_ID
+            last_error: Exception | None = None
 
-        effective_slave = slave_id if slave_id is not None else self.DEFAULT_SLAVE_ID
+            for attempt in range(2):
+                if not self._client or not self._client.connected:
+                    if not await self.connect():
+                        return False
 
-        try:
-            result = await self._client.write_registers(
-                address=address,
-                values=values,
-                **{_SLAVE_PARAM: effective_slave},
-            )
+                try:
+                    result = await self._client.write_registers(
+                        address=address,
+                        values=values,
+                        **{_SLAVE_PARAM: effective_slave},
+                    )
 
-            if result.isError():
-                _LOGGER.error(f"Modbus write error at register {address}: {result}")
-                return False
+                    if result.isError():
+                        _LOGGER.error(f"Modbus write error at register {address}: {result}")
+                        return False
 
-            _LOGGER.debug(f"Successfully wrote {values} to register {address}")
-            return True
+                    _LOGGER.debug(f"Successfully wrote {values} to register {address}")
+                    return True
 
-        except ModbusException as e:
-            _LOGGER.error(f"Modbus exception writing to register {address}: {e}")
-            return False
-        except Exception as e:
-            _LOGGER.error(f"Error writing to register {address}: {e}")
+                except Exception as e:
+                    last_error = e
+                    if attempt == 0:
+                        _LOGGER.debug(
+                            "Sigenergy write to register %s failed (%s), reconnecting once",
+                            address,
+                            e,
+                        )
+                        await self.disconnect()
+                        continue
+
+            _LOGGER.error(f"Error writing to register {address}: {last_error}")
             return False
 
     async def _read_holding_registers(self, address: int, count: int = 1, slave_id: Optional[int] = None) -> Optional[list]:
@@ -237,31 +284,32 @@ class SigenergyController(InverterController):
         Returns:
             List of register values or None on error
         """
-        if not self._client or not self._client.connected:
-            if not await self.connect():
+        async with self._modbus_transaction():
+            if not self._client or not self._client.connected:
+                if not await self.connect():
+                    return None
+
+            effective_slave = slave_id if slave_id is not None else self.DEFAULT_SLAVE_ID
+
+            try:
+                result = await self._client.read_holding_registers(
+                    address=address,
+                    count=count,
+                    **{_SLAVE_PARAM: effective_slave},
+                )
+
+                if result.isError():
+                    _LOGGER.debug(f"Modbus read error at holding register {address}: {result}")
+                    return None
+
+                return result.registers
+
+            except ModbusException as e:
+                _LOGGER.debug(f"Modbus exception reading holding register {address}: {e}")
                 return None
-
-        effective_slave = slave_id if slave_id is not None else self.DEFAULT_SLAVE_ID
-
-        try:
-            result = await self._client.read_holding_registers(
-                address=address,
-                count=count,
-                **{_SLAVE_PARAM: effective_slave},
-            )
-
-            if result.isError():
-                _LOGGER.debug(f"Modbus read error at holding register {address}: {result}")
+            except Exception as e:
+                _LOGGER.debug(f"Error reading holding register {address}: {e}")
                 return None
-
-            return result.registers
-
-        except ModbusException as e:
-            _LOGGER.debug(f"Modbus exception reading holding register {address}: {e}")
-            return None
-        except Exception as e:
-            _LOGGER.debug(f"Error reading holding register {address}: {e}")
-            return None
 
     async def _read_input_registers(self, address: int, count: int = 1, slave_id: Optional[int] = None) -> Optional[list]:
         """Read values from input registers.
@@ -274,31 +322,32 @@ class SigenergyController(InverterController):
         Returns:
             List of register values or None on error
         """
-        if not self._client or not self._client.connected:
-            if not await self.connect():
+        async with self._modbus_transaction():
+            if not self._client or not self._client.connected:
+                if not await self.connect():
+                    return None
+
+            effective_slave = slave_id if slave_id is not None else self.slave_id
+
+            try:
+                result = await self._client.read_input_registers(
+                    address=address,
+                    count=count,
+                    **{_SLAVE_PARAM: effective_slave},
+                )
+
+                if result.isError():
+                    _LOGGER.debug(f"Modbus read error at input register {address} [slave={effective_slave}]: {result}")
+                    return None
+
+                return result.registers
+
+            except ModbusException as e:
+                _LOGGER.debug(f"Modbus exception reading input register {address} [slave={effective_slave}]: {e}")
                 return None
-
-        effective_slave = slave_id if slave_id is not None else self.slave_id
-
-        try:
-            result = await self._client.read_input_registers(
-                address=address,
-                count=count,
-                **{_SLAVE_PARAM: effective_slave},
-            )
-
-            if result.isError():
-                _LOGGER.debug(f"Modbus read error at input register {address} [slave={effective_slave}]: {result}")
+            except Exception as e:
+                _LOGGER.debug(f"Error reading input register {address} [slave={effective_slave}]: {e}")
                 return None
-
-            return result.registers
-
-        except ModbusException as e:
-            _LOGGER.debug(f"Modbus exception reading input register {address} [slave={effective_slave}]: {e}")
-            return None
-        except Exception as e:
-            _LOGGER.debug(f"Error reading input register {address} [slave={effective_slave}]: {e}")
-            return None
 
     def _to_signed32(self, high: int, low: int) -> int:
         """Convert two unsigned 16-bit registers to signed 32-bit."""
@@ -785,6 +834,8 @@ class SigenergyController(InverterController):
         Returns:
             True if successful
         """
+        transaction = self._modbus_transaction()
+        await transaction.__aenter__()
         try:
             if not await self.connect():
                 return False
@@ -803,6 +854,8 @@ class SigenergyController(InverterController):
         except Exception as e:
             _LOGGER.error(f"Error setting PV power limit: {e}")
             return False
+        finally:
+            await transaction.__aexit__(None, None, None)
 
     async def set_export_limit(self, limit_kw: float) -> bool:
         """Set a specific grid export limit, clamped to the safety cap.
@@ -813,6 +866,8 @@ class SigenergyController(InverterController):
         Returns:
             True if successful
         """
+        transaction = self._modbus_transaction()
+        await transaction.__aenter__()
         try:
             if not await self.connect():
                 return False
@@ -838,6 +893,8 @@ class SigenergyController(InverterController):
         except Exception as e:
             _LOGGER.error(f"Error setting export limit: {e}")
             return False
+        finally:
+            await transaction.__aexit__(None, None, None)
 
     async def restore_export_limit(self) -> bool:
         """Restore the export limit to the safety cap (or unlimited if no cap).
@@ -848,6 +905,8 @@ class SigenergyController(InverterController):
         Returns:
             True if successful
         """
+        transaction = self._modbus_transaction()
+        await transaction.__aenter__()
         try:
             if not await self.connect():
                 return False
@@ -875,6 +934,8 @@ class SigenergyController(InverterController):
         except Exception as e:
             _LOGGER.error(f"Error restoring export limit: {e}")
             return False
+        finally:
+            await transaction.__aexit__(None, None, None)
 
     async def set_charge_rate_limit(self, limit_kw: float) -> bool:
         """Set the maximum battery charge rate.
@@ -885,6 +946,8 @@ class SigenergyController(InverterController):
         Returns:
             True if successful
         """
+        transaction = self._modbus_transaction()
+        await transaction.__aenter__()
         try:
             if not await self.connect():
                 return False
@@ -902,6 +965,8 @@ class SigenergyController(InverterController):
         except Exception as e:
             _LOGGER.error(f"Error setting charge rate limit: {e}")
             return False
+        finally:
+            await transaction.__aexit__(None, None, None)
 
     async def set_discharge_rate_limit(self, limit_kw: float) -> bool:
         """Set the maximum battery discharge rate.
@@ -943,6 +1008,8 @@ class SigenergyController(InverterController):
         Returns:
             True if successful
         """
+        transaction = self._modbus_transaction()
+        await transaction.__aenter__()
         try:
             if not await self.connect():
                 return False
@@ -967,6 +1034,8 @@ class SigenergyController(InverterController):
         except Exception as e:
             _LOGGER.error(f"Error setting self-consumption mode: {e}")
             return False
+        finally:
+            await transaction.__aexit__(None, None, None)
 
     async def set_standby_mode(self) -> bool:
         """Set Remote EMS to STANDBY mode for IDLE hold.
@@ -978,6 +1047,8 @@ class SigenergyController(InverterController):
         Returns:
             True if successful
         """
+        transaction = self._modbus_transaction()
+        await transaction.__aenter__()
         try:
             if not await self.connect():
                 return False
@@ -1000,6 +1071,8 @@ class SigenergyController(InverterController):
         except Exception as e:
             _LOGGER.error(f"Error setting standby mode: {e}")
             return False
+        finally:
+            await transaction.__aexit__(None, None, None)
 
     async def restore_from_standby(self) -> bool:
         """Restore from STANDBY to self-consumption mode."""
@@ -1019,6 +1092,8 @@ class SigenergyController(InverterController):
         Returns:
             True if all commands successful
         """
+        transaction = self._modbus_transaction()
+        await transaction.__aenter__()
         try:
             if not await self.connect():
                 return False
@@ -1069,6 +1144,8 @@ class SigenergyController(InverterController):
         except Exception as e:
             _LOGGER.error(f"Error in Sigenergy force charge: {e}")
             return False
+        finally:
+            await transaction.__aexit__(None, None, None)
 
     async def force_discharge(self, power_kw: float = 10.0) -> bool:
         """Force battery to discharge to grid/load.
@@ -1084,6 +1161,8 @@ class SigenergyController(InverterController):
         Returns:
             True if all commands successful
         """
+        transaction = self._modbus_transaction()
+        await transaction.__aenter__()
         try:
             if not await self.connect():
                 return False
@@ -1138,6 +1217,8 @@ class SigenergyController(InverterController):
         except Exception as e:
             _LOGGER.error(f"Error in Sigenergy force discharge: {e}")
             return False
+        finally:
+            await transaction.__aexit__(None, None, None)
 
     async def _restore_ess_max_limits_to_rated(self) -> None:
         """Restore ESS max charge/discharge limits to rated values.
@@ -1178,6 +1259,8 @@ class SigenergyController(InverterController):
         Returns:
             True if successful
         """
+        transaction = self._modbus_transaction()
+        await transaction.__aenter__()
         try:
             if not await self.connect():
                 return False
@@ -1213,6 +1296,8 @@ class SigenergyController(InverterController):
         except Exception as e:
             _LOGGER.error(f"Error restoring Sigenergy normal operation: {e}")
             return False
+        finally:
+            await transaction.__aexit__(None, None, None)
 
     async def get_backup_reserve(self) -> Optional[int]:
         """Get the current backup reserve (backup SOC) percentage.

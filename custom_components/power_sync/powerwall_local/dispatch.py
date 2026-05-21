@@ -19,7 +19,7 @@ from typing import Any, Awaitable, Callable
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from ..const import CONF_POWERWALL_LOCAL_PAIRED, DOMAIN
+from ..const import CONF_POWERWALL_LOCAL_IP, CONF_POWERWALL_LOCAL_PAIRED, DOMAIN
 from .exceptions import (
     PowerwallAuthError,
     PowerwallLocalError,
@@ -50,16 +50,21 @@ def is_local_preferred(entry: ConfigEntry) -> bool:
     return entry.data.get(CONF_POWERWALL_LOCAL_PAIRED) is True
 
 
+def has_local_gateway_ip(entry: ConfigEntry) -> bool:
+    """True when the entry has a non-empty gateway LAN address configured."""
+    return bool(str(entry.data.get(CONF_POWERWALL_LOCAL_IP) or "").strip())
+
+
 def get_local_transport(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> TEDAPIv1rTransport | None:
     """Return the live signed transport for a paired entry, or None.
 
-    None means: not paired, transport not yet built (coordinator still
-    starting up), or PW2 (no signed transport). Callers should treat
-    None as "fall through to cloud".
+    None means: not paired, no gateway LAN IP, transport not yet built
+    (coordinator still starting up), or PW2 (no signed transport). Callers
+    should treat None as "fall through to cloud".
     """
-    if not is_local_preferred(entry):
+    if not is_local_preferred(entry) or not has_local_gateway_ip(entry):
         return None
     bucket = (
         hass.data.get(DOMAIN, {})
@@ -71,6 +76,9 @@ def get_local_transport(
         return None
     transport = getattr(client, "_transport", None)
     if not isinstance(transport, TEDAPIv1rTransport):
+        return None
+    client_local_enabled = getattr(client, "local_access_enabled", True)
+    if client_local_enabled is False:
         return None
     return transport
 

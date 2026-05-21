@@ -54,6 +54,7 @@ sys.modules["power_sync.powerwall_local"] = _pwl
 # transport.py, however, imports `aiohttp` and `cryptography` and large protobufs.
 # Stub the parts dispatch.py needs (the exception classes + transport class).
 _const_mod = types.ModuleType("power_sync.const")
+_const_mod.CONF_POWERWALL_LOCAL_IP = "powerwall_local_ip"
 _const_mod.CONF_POWERWALL_LOCAL_PAIRED = "powerwall_local_paired"
 _const_mod.DOMAIN = "power_sync"
 sys.modules["power_sync.const"] = _const_mod
@@ -93,7 +94,9 @@ def _hass_with_transport(transport):
 
 
 def _paired():
-    return _FakeConfigEntry(data={"powerwall_local_paired": True})
+    return _FakeConfigEntry(
+        data={"powerwall_local_paired": True, "powerwall_local_ip": "192.168.1.50"}
+    )
 
 
 def _unpaired():
@@ -116,6 +119,42 @@ async def _test_unpaired_skips_local():
 
 def test_unpaired_skips_local():
     asyncio.run(_test_unpaired_skips_local())
+
+
+async def _test_paired_without_gateway_ip_skips_local():
+    local = AsyncMock(return_value=True)
+    cloud = AsyncMock(return_value="cloud-ok")
+    hass = _hass_with_transport(TEDAPIv1rTransport())
+    entry = _FakeConfigEntry(data={"powerwall_local_paired": True})
+    result = await dispatch_powerwall_write(
+        hass, entry, local_call=local, cloud_call=cloud, label="t"
+    )
+    assert result == "cloud-ok"
+    assert local.await_count == 0
+    assert cloud.await_count == 1
+
+
+def test_paired_without_gateway_ip_skips_local():
+    asyncio.run(_test_paired_without_gateway_ip_skips_local())
+
+
+async def _test_paired_blank_gateway_ip_skips_local():
+    local = AsyncMock(return_value=True)
+    cloud = AsyncMock(return_value="cloud-ok")
+    hass = _hass_with_transport(TEDAPIv1rTransport())
+    entry = _FakeConfigEntry(
+        data={"powerwall_local_paired": True, "powerwall_local_ip": "   "}
+    )
+    result = await dispatch_powerwall_write(
+        hass, entry, local_call=local, cloud_call=cloud, label="t"
+    )
+    assert result == "cloud-ok"
+    assert local.await_count == 0
+    assert cloud.await_count == 1
+
+
+def test_paired_blank_gateway_ip_skips_local():
+    asyncio.run(_test_paired_blank_gateway_ip_skips_local())
 
 
 async def _test_paired_local_success_skips_cloud():
@@ -196,6 +235,26 @@ async def _test_paired_no_transport_short_circuits_to_cloud():
 
 def test_paired_no_transport_short_circuits_to_cloud():
     asyncio.run(_test_paired_no_transport_short_circuits_to_cloud())
+
+
+async def _test_paired_cloud_only_client_short_circuits_to_cloud():
+    transport = TEDAPIv1rTransport()
+    client = MagicMock(_transport=transport)
+    client.local_access_enabled = False
+    hass = MagicMock()
+    hass.data = {"power_sync": {"abc": {"powerwall_local": {"client": client}}}}
+    local = AsyncMock(return_value=True)
+    cloud = AsyncMock(return_value="cloud-ok")
+    result = await dispatch_powerwall_write(
+        hass, _paired(), local_call=local, cloud_call=cloud, label="t",
+    )
+    assert result == "cloud-ok"
+    assert local.await_count == 0
+    assert cloud.await_count == 1
+
+
+def test_paired_cloud_only_client_short_circuits_to_cloud():
+    asyncio.run(_test_paired_cloud_only_client_short_circuits_to_cloud())
 
 
 def test_is_local_preferred():

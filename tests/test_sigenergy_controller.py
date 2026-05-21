@@ -152,3 +152,93 @@ def test_force_discharge_uses_pv_first_mode(sigenergy_module):
             controller._from_unsigned32(5000),
         ),
     ]
+
+
+def test_force_charge_holds_shared_host_lock_until_all_writes_finish(sigenergy_module):
+    async def run_test():
+        first = sigenergy_module.SigenergyController(host="192.0.2.44")
+        second = sigenergy_module.SigenergyController(host="192.0.2.44")
+        events: list[tuple[str, int | bool | None]] = []
+        pending_disconnect: asyncio.Task | None = None
+
+        async def connect():
+            return True
+
+        class FakeClient:
+            def close(self):
+                events.append(("disconnect", None))
+
+        second._client = FakeClient()
+        second._connected = True
+
+        async def write(address, values, slave_id=None):
+            nonlocal pending_disconnect
+            events.append(("write", address))
+            if address == first.REG_ESS_MAX_CHARGE_LIMIT:
+                pending_disconnect = asyncio.create_task(second.disconnect())
+                await asyncio.sleep(0)
+                events.append(("disconnect_done_early", pending_disconnect.done()))
+            return True
+
+        first.connect = connect
+        first._write_holding_registers = write
+
+        assert await first.force_charge(power_kw=1.0)
+        assert pending_disconnect is not None
+        await pending_disconnect
+        return events
+
+    events = asyncio.run(run_test())
+
+    assert ("disconnect_done_early", False) in events
+    write_indexes = [
+        index for index, event in enumerate(events)
+        if event[0] == "write"
+    ]
+    disconnect_index = events.index(("disconnect", None))
+    assert disconnect_index > max(write_indexes)
+
+
+def test_write_holding_registers_reconnects_once_after_not_connected(sigenergy_module):
+    async def run_test():
+        controller = sigenergy_module.SigenergyController(host="192.0.2.55")
+        connects = 0
+
+        class SuccessResult:
+            def isError(self):
+                return False
+
+        class FakeClient:
+            connected = True
+            calls = 0
+
+            async def write_registers(self, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    self.connected = False
+                    raise RuntimeError("Cancel send, because not connected!")
+                return SuccessResult()
+
+            def close(self):
+                self.connected = False
+
+        client = FakeClient()
+        controller._client = client
+
+        async def connect():
+            nonlocal connects
+            connects += 1
+            client.connected = True
+            controller._client = client
+            return True
+
+        controller.connect = connect
+
+        success = await controller._write_holding_registers(40029, [1])
+        return success, client.calls, connects
+
+    success, calls, connects = asyncio.run(run_test())
+
+    assert success is True
+    assert calls == 2
+    assert connects == 1

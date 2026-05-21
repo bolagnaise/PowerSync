@@ -355,6 +355,23 @@ def test_observed_wall_connector_power_does_not_probe_vehicle_sensor(monkeypatch
     assert power_kw == 2.2
 
 
+def test_optional_tesla_power_probe_does_not_warn_when_sensor_missing(caplog):
+    caplog.set_level("WARNING")
+    hass = _Hass([])
+
+    power_kw = asyncio.run(
+        actions._get_observed_ev_power_kw(
+            hass,
+            "LRW3F7FS1NC484342",
+            {"charger_type": "tesla"},
+        )
+    )
+
+    assert power_kw == 0.0
+    assert "No Tesla EV devices found" not in caplog.text
+    assert "No entity matching pattern" not in caplog.text
+
+
 def test_observed_wall_connector_power_is_counted_for_solar_surplus_stop(monkeypatch):
     async def not_unplugged(*args, **kwargs):
         return False

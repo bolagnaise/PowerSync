@@ -95,6 +95,7 @@ _ps_const.CONF_MONITORING_MODE = "monitoring_mode"
 _ps_const.CONF_OPTIMIZATION_ENABLED = "optimization_enabled"
 _ps_const.CONF_OPTIMIZATION_PROVIDER = "optimization_provider"
 _ps_const.CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED = "optimization_spread_export_enabled"
+_ps_const.CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED = "optimization_spread_import_enabled"
 _ps_const.CONF_POWERWALL_LOCAL_PAIRED = "powerwall_local_paired"
 _ps_const.CONF_TESLA_ENERGY_SITE_ID = "tesla_energy_site_id"
 _ps_const.BATTERY_SYSTEM_TESLA = "tesla"
@@ -102,6 +103,9 @@ _ps_const.OPT_PROVIDER_POWERSYNC = "powersync"
 _ps_const.TARGET_EXPORT_POWER_BATTERY_SYSTEMS = {
     "goodwe", "sigenergy", "sungrow", "foxess",
     "alphaess", "solax", "fronius_reserva", "neovolt",
+}
+_ps_const.TARGET_CHARGE_POWER_BATTERY_SYSTEMS = {
+    "sigenergy", "foxess", "alphaess", "solax", "fronius_reserva", "neovolt",
 }
 _ps_const.SWITCH_TYPE_AUTO_SYNC = "auto_sync"
 _ps_const.SWITCH_TYPE_AUTO_UPDATE = "auto_update"
@@ -111,6 +115,7 @@ _ps_const.SWITCH_TYPE_MONITORING_MODE = "monitoring_mode"
 _ps_const.SWITCH_TYPE_AWAY_MODE = "away_mode"
 _ps_const.SWITCH_TYPE_PROFIT_MAX_MODE = "profit_max_mode"
 _ps_const.SWITCH_TYPE_OPTIMIZATION_SPREAD_EXPORT = "optimization_spread_export"
+_ps_const.SWITCH_TYPE_OPTIMIZATION_SPREAD_IMPORT = "optimization_spread_import"
 _ps_const.SWITCH_TYPE_OPTIMIZATION_ENABLED = "optimization_enabled"
 _ps_const.DEFAULT_DISCHARGE_DURATION = 60
 _ps_const.ATTR_LAST_SYNC = "last_sync"

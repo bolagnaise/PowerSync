@@ -321,10 +321,18 @@ def test_optimization_options_exposes_enabled_toggle():
     assert method_source is not None
     assert "CONF_OPTIMIZATION_ENABLED" in method_source
     assert "new_options[CONF_OPTIMIZATION_ENABLED] = optimization_enabled" in method_source
+    assert "CONF_MONITORING_MODE" in method_source
+    assert "new_options[CONF_MONITORING_MODE] = monitoring_mode" in method_source
     assert "CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED" in method_source
     assert "new_options[CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED] = spread_export_enabled" in method_source
     assert "CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED" in method_source
     assert "new_options[CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED] = spread_import_enabled" in method_source
+    assert "CONF_PROFIT_MAX_ENABLED" in method_source
+    assert "new_options[CONF_PROFIT_MAX_ENABLED] = profit_max_enabled" in method_source
+    assert (
+        method_source.index("CONF_PROFIT_MAX_ENABLED")
+        < method_source.index("CONF_PROFIT_MAX_TARGET_TIME")
+    )
     assert "optimization_provider != OPT_PROVIDER_POWERSYNC" in method_source
 
 
@@ -354,10 +362,18 @@ def test_initial_smart_optimization_configuration_exposes_enabled_toggle():
     assert "self._optimization_provider = optimization_provider" in method_source
     assert "CONF_OPTIMIZATION_ENABLED" in method_source
     assert "user_input.get(CONF_OPTIMIZATION_ENABLED, True)" in method_source
+    assert "CONF_MONITORING_MODE" in method_source
+    assert "user_input.get(CONF_MONITORING_MODE, False)" in method_source
     assert "CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED" in method_source
     assert "user_input.get(CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED" in method_source
     assert "CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED" in method_source
     assert "user_input.get(CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED" in method_source
+    assert "CONF_PROFIT_MAX_ENABLED" in method_source
+    assert "user_input.get(CONF_PROFIT_MAX_ENABLED, False)" in method_source
+    assert (
+        method_source.index("CONF_PROFIT_MAX_ENABLED")
+        < method_source.index("CONF_PROFIT_MAX_TARGET_TIME")
+    )
 
 
 def test_initial_setup_routes_to_combined_optimization_options_page():
@@ -706,10 +722,16 @@ def test_optimization_enabled_toggle_is_translated_in_config_and_options():
 
             assert step["data"]["optimization_enabled"] == "Enable Smart Optimization"
             assert "LP optimizer" in step["data_description"]["optimization_enabled"]
+            assert step["data"]["monitoring_mode"] == "Monitoring mode"
+            assert "Block battery and inverter control commands" in step["data_description"]["monitoring_mode"]
             assert step["data"]["optimization_spread_export_enabled"] == "Spread export across window"
             assert "spreads planned battery export" in step["data_description"]["optimization_spread_export_enabled"]
             assert step["data"]["optimization_spread_import_enabled"] == "Spread import across window"
             assert "spreads planned grid charging" in step["data_description"]["optimization_spread_import_enabled"]
+            assert step["data"]["profit_max_enabled"] == "Enable Profit Max"
+            assert "profitable export opportunities" in step["data_description"]["profit_max_enabled"]
+            keys = list(step["data"])
+            assert keys.index("profit_max_enabled") < keys.index("profit_max_target_time")
 
 
 def test_globird_tariff_guidance_is_translated():

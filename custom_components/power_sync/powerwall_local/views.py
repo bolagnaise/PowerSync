@@ -61,6 +61,24 @@ _LOGGER = logging.getLogger(__name__)
 _RUNTIME_KEY = "powerwall_local"
 
 
+def _has_gateway_ip(entry: ConfigEntry) -> bool:
+    """True when a real gateway LAN address is configured for local TEDAPI."""
+    return bool(str(entry.data.get(CONF_POWERWALL_LOCAL_IP) or "").strip())
+
+
+def _desired_gateway_host(entry: ConfigEntry) -> str:
+    """Configured gateway host, or loopback for cloud-only signing."""
+    return str(entry.data.get(CONF_POWERWALL_LOCAL_IP) or "").strip() or "127.0.0.1"
+
+
+def _client_matches_entry(entry: ConfigEntry, client: PowerwallLocalClient) -> bool:
+    """True when a cached client matches the current gateway settings."""
+    return (
+        client.host == _desired_gateway_host(entry)
+        and client.local_access_enabled == _has_gateway_ip(entry)
+    )
+
+
 def _get_entry(hass: HomeAssistant) -> ConfigEntry | None:
     """Return the first PowerSync config entry (we only support one)."""
     for entry in hass.config_entries.async_entries(DOMAIN):
@@ -109,10 +127,10 @@ async def _build_client(
     ``device_command`` with a signed routable_message and only need the
     gateway's DIN + the paired RSA key. To keep off-grid working for
     users who paired without setting a gateway IP, fall back to a
-    loopback host for transport construction. LAN calls will fail fast
-    (connect refused) while the cloud signing path stays usable.
+    loopback host for transport construction. LAN calls are gated elsewhere
+    while the cloud signing path stays usable.
     """
-    host = entry.data.get(CONF_POWERWALL_LOCAL_IP)
+    host = str(entry.data.get(CONF_POWERWALL_LOCAL_IP) or "").strip()
     version_str = entry.data.get(CONF_POWERWALL_LOCAL_VERSION, "pw3")
     private_key_pem = entry.data.get(CONF_POWERWALL_LOCAL_PRIVATE_KEY)
     din = entry.data.get(CONF_POWERWALL_LOCAL_DIN)
@@ -133,6 +151,7 @@ async def _build_client(
             "unavailable until a gateway IP is set."
         )
         host = "127.0.0.1"
+    local_access_enabled = _has_gateway_ip(entry)
 
     try:
         version = PowerwallVersion(version_str)
@@ -162,7 +181,34 @@ async def _build_client(
         fleet_api_base=fleet_base,
         fleet_api_token=fleet_token,
         energy_site_id=fleet_site_id,
+        local_access_enabled=local_access_enabled,
     )
+
+
+async def ensure_client(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> PowerwallLocalClient | None:
+    """Build or return the paired Powerwall client.
+
+    This exists even for cloud-only signed commands when the user has not
+    configured a LAN gateway IP. Local polling and local writes are gated
+    separately by ``ensure_coordinator`` and dispatch.py.
+    """
+    if not entry.data.get(CONF_POWERWALL_LOCAL_PAIRED):
+        return None
+
+    runtime = _runtime(hass, entry)
+    existing = runtime.get("client")
+    if isinstance(existing, PowerwallLocalClient) and _client_matches_entry(
+        entry, existing
+    ):
+        return existing
+
+    client = await _build_client(hass, entry)
+    if client is None:
+        return None
+    runtime["client"] = client
+    return client
 
 
 async def ensure_coordinator(
@@ -177,9 +223,29 @@ async def ensure_coordinator(
         return None
 
     runtime = _runtime(hass, entry)
+    if not _has_gateway_ip(entry):
+        existing = runtime.get("coordinator")
+        if existing is not None:
+            try:
+                existing.update_interval = None
+            except Exception:
+                pass
+            runtime["coordinator"] = None
+        await ensure_client(hass, entry)
+        return None
+
     existing = runtime.get("coordinator")
     if existing is not None:
-        return existing
+        client = getattr(existing, "client", None)
+        if isinstance(client, PowerwallLocalClient) and _client_matches_entry(
+            entry, client
+        ):
+            return existing
+        try:
+            existing.update_interval = None
+        except Exception:
+            pass
+        runtime["coordinator"] = None
 
     # Warm up the shared insecure SSL context off the event loop before we
     # construct the client — otherwise transport.__init__ hits
@@ -189,11 +255,10 @@ async def ensure_coordinator(
     from .transport import get_insecure_ssl_context
     await get_insecure_ssl_context(hass)
 
-    client = await _build_client(hass, entry)
+    client = await ensure_client(hass, entry)
     if client is None:
         return None
 
-    runtime["client"] = client
     coordinator = PowerwallLocalCoordinator(hass, client, entry=entry)
     runtime["coordinator"] = coordinator
     try:
@@ -523,7 +588,10 @@ class PowerwallOffGridView(HomeAssistantView):
             )
 
         coordinator = await ensure_coordinator(self._hass, entry)
-        if coordinator is None or coordinator.client is None:
+        client = coordinator.client if coordinator is not None else await ensure_client(
+            self._hass, entry
+        )
+        if client is None:
             return web.json_response(
                 {"success": False, "error": "Powerwall local client unavailable"},
                 status=503,
@@ -536,7 +604,7 @@ class PowerwallOffGridView(HomeAssistantView):
                     DEFAULT_POWERWALL_OFF_GRID_MIN_SOC,
                 )
             )
-            snap = coordinator.data
+            snap = coordinator.data if coordinator is not None else None
             if snap is not None and snap.soc is not None and snap.soc < min_soc:
                 return web.json_response(
                     {
@@ -547,7 +615,7 @@ class PowerwallOffGridView(HomeAssistantView):
                     status=409,
                 )
             try:
-                ok = await coordinator.client.go_off_grid()
+                ok = await client.go_off_grid()
             except PowerwallLocalError as err:
                 _LOGGER.exception("Go off-grid failed")
                 return web.json_response(
@@ -555,17 +623,24 @@ class PowerwallOffGridView(HomeAssistantView):
                 )
         else:
             try:
-                ok = await coordinator.client.reconnect_grid()
+                ok = await client.reconnect_grid()
             except PowerwallLocalError as err:
                 _LOGGER.exception("Reconnect grid failed")
                 return web.json_response(
                     {"success": False, "error": "Reconnect command failed"}, status=502
                 )
 
-        # Refresh coordinator to pick up new state from cloud
-        await coordinator.async_request_refresh()
+        # Refresh local snapshot only when local polling is available.
+        if coordinator is not None:
+            await coordinator.async_request_refresh()
         return web.json_response(
-            {"success": ok, "action": action, "snapshot": coordinator.snapshot_as_api()}
+            {
+                "success": ok,
+                "action": action,
+                "snapshot": coordinator.snapshot_as_api()
+                if coordinator is not None
+                else {"available": False},
+            }
         )
 
 

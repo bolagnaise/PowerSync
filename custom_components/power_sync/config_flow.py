@@ -347,6 +347,7 @@ from .const import (
     BATTERY_MODE_TOU_SYNC,
     BATTERY_MODE_SMART_OPT,
     BATTERY_MANAGEMENT_MODES,
+    CONF_MONITORING_MODE,
     CONF_OPTIMIZATION_ENABLED,
     CONF_OPTIMIZATION_COST_FUNCTION,
     CONF_OPTIMIZATION_BACKUP_RESERVE,
@@ -355,6 +356,7 @@ from .const import (
     CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED,
     CONF_OPTIMIZATION_MAX_CHARGE_W,
     CONF_OPTIMIZATION_MAX_DISCHARGE_W,
+    CONF_PROFIT_MAX_ENABLED,
     CONF_PROFIT_MAX_TARGET_TIME,
     CONF_PROFIT_MAX_TARGET_SOC,
     CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
@@ -1576,7 +1578,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         # Include optimization provider selection
         data[CONF_OPTIMIZATION_PROVIDER] = self._optimization_provider
-        if self._optimization_provider == OPT_PROVIDER_POWERSYNC and self._ml_options:
+        if self._ml_options:
             data.update(self._ml_options)
 
         # Tesla EV API provider (chosen during async_step_tesla_provider).
@@ -2037,11 +2039,15 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 OPT_PROVIDER_POWERSYNC,
             )
             self._optimization_provider = optimization_provider
-            self._ml_options = {}
+            self._ml_options = {
+                CONF_MONITORING_MODE: bool(
+                    user_input.get(CONF_MONITORING_MODE, False)
+                )
+            }
             if optimization_provider == OPT_PROVIDER_POWERSYNC:
                 spread_export_enabled = user_input.get(CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED, False)
                 spread_import_enabled = user_input.get(CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED, False)
-                self._ml_options = {
+                self._ml_options.update({
                     CONF_OPTIMIZATION_ENABLED: bool(
                         user_input.get(CONF_OPTIMIZATION_ENABLED, True)
                     ),
@@ -2069,6 +2075,9 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ),
                     CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED: spread_export_enabled,
                     CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED: spread_import_enabled,
+                    CONF_PROFIT_MAX_ENABLED: bool(
+                        user_input.get(CONF_PROFIT_MAX_ENABLED, False)
+                    ),
                     CONF_PROFIT_MAX_TARGET_TIME: user_input.get(
                         CONF_PROFIT_MAX_TARGET_TIME,
                         DEFAULT_PROFIT_MAX_TARGET_TIME,
@@ -2077,7 +2086,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         user_input.get(CONF_PROFIT_MAX_TARGET_SOC),
                         DEFAULT_PROFIT_MAX_TARGET_SOC,
                     ),
-                }
+                })
             # Proceed to battery connection setup
             return await self._route_to_battery_setup()
 
@@ -2102,6 +2111,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required(
                         CONF_OPTIMIZATION_ENABLED,
                         default=True,
+                    ): BooleanSelector(),
+                    vol.Required(
+                        CONF_MONITORING_MODE,
+                        default=False,
                     ): BooleanSelector(),
                     vol.Required(
                         CONF_OPTIMIZATION_BACKUP_RESERVE,
@@ -2161,6 +2174,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     ): BooleanSelector(),
                     vol.Required(
                         CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
+                        default=False,
+                    ): BooleanSelector(),
+                    vol.Required(
+                        CONF_PROFIT_MAX_ENABLED,
                         default=False,
                     ): BooleanSelector(),
                     vol.Required(
@@ -5957,6 +5974,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             new_options = dict(self.config_entry.options)
             new_data[CONF_OPTIMIZATION_PROVIDER] = optimization_provider
             new_options[CONF_OPTIMIZATION_ENABLED] = optimization_enabled
+            monitoring_mode = bool(user_input.get(CONF_MONITORING_MODE, False))
+            new_data[CONF_MONITORING_MODE] = monitoring_mode
+            new_options[CONF_MONITORING_MODE] = monitoring_mode
             if battery_system == BATTERY_SYSTEM_NEOVOLT:
                 surplus_balancer_mode = user_input.get(
                     CONF_NEOVOLT_SURPLUS_BALANCER_MODE,
@@ -6004,6 +6024,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     CONF_OPTIMIZATION_ALLOW_GRID_CHARGE,
                     True,
                 )
+                profit_max_enabled = bool(
+                    user_input.get(CONF_PROFIT_MAX_ENABLED, False)
+                )
                 profit_max_target_time = user_input.get(
                     CONF_PROFIT_MAX_TARGET_TIME,
                     DEFAULT_PROFIT_MAX_TARGET_TIME,
@@ -6034,6 +6057,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 new_options[CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED] = spread_export_enabled
                 new_data[CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED] = spread_import_enabled
                 new_options[CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED] = spread_import_enabled
+                new_data[CONF_PROFIT_MAX_ENABLED] = profit_max_enabled
+                new_options[CONF_PROFIT_MAX_ENABLED] = profit_max_enabled
                 new_data[CONF_PROFIT_MAX_TARGET_TIME] = profit_max_target_time
                 new_options[CONF_PROFIT_MAX_TARGET_TIME] = profit_max_target_time
                 new_data[CONF_PROFIT_MAX_TARGET_SOC] = profit_max_target_soc
@@ -6052,6 +6077,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         current_optimization_enabled = self.config_entry.options.get(
             CONF_OPTIMIZATION_ENABLED,
             current_opt_provider == OPT_PROVIDER_POWERSYNC,
+        )
+        current_monitoring_mode = self._get_option(
+            CONF_MONITORING_MODE,
+            self.config_entry.data.get(CONF_MONITORING_MODE, False),
         )
         current_surplus_balancer_mode = self._get_option(
             CONF_NEOVOLT_SURPLUS_BALANCER_MODE,
@@ -6112,6 +6141,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
             self.config_entry.data.get(CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED, False),
         )
+        current_profit_max_enabled = self._get_option(
+            CONF_PROFIT_MAX_ENABLED,
+            self.config_entry.data.get(CONF_PROFIT_MAX_ENABLED, False),
+        )
         current_profit_max_target_time = self._get_option(
             CONF_PROFIT_MAX_TARGET_TIME,
             self.config_entry.data.get(
@@ -6145,6 +6178,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             vol.Required(
                 CONF_OPTIMIZATION_ENABLED,
                 default=bool(current_optimization_enabled),
+            ): BooleanSelector(),
+            vol.Required(
+                CONF_MONITORING_MODE,
+                default=bool(current_monitoring_mode),
             ): BooleanSelector(),
         }
         if battery_system == BATTERY_SYSTEM_NEOVOLT:
@@ -6205,6 +6242,10 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 vol.Required(
                     CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED,
                     default=bool(current_spread_import_enabled),
+                ): BooleanSelector(),
+                vol.Required(
+                    CONF_PROFIT_MAX_ENABLED,
+                    default=bool(current_profit_max_enabled),
                 ): BooleanSelector(),
                 vol.Required(
                     CONF_PROFIT_MAX_TARGET_TIME,

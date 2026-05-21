@@ -79,6 +79,7 @@ class PowerwallLocalClient:
         fleet_api_token: str | None = None,
         energy_site_id: int | str | None = None,
         signaling: TeslaSignalingClient | None = None,
+        local_access_enabled: bool = True,
     ) -> None:
         if not private_key_pem:
             raise PowerwallLocalError(
@@ -96,6 +97,7 @@ class PowerwallLocalClient:
         self._fleet_api_token = fleet_api_token
         self._energy_site_id = energy_site_id
         self._signaling = signaling
+        self._local_access_enabled = local_access_enabled
 
         # Saved pre-curtailment state so we can restore the user's actual
         # operation mode + backup reserve when curtailment ends.
@@ -114,6 +116,11 @@ class PowerwallLocalClient:
     @property
     def host(self) -> str:
         return self._host
+
+    @property
+    def local_access_enabled(self) -> bool:
+        """Whether LAN TEDAPI calls should be attempted for this client."""
+        return self._local_access_enabled
 
     @property
     def signaling(self) -> TeslaSignalingClient | None:

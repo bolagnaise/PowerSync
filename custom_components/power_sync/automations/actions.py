@@ -171,7 +171,9 @@ def _is_sigenergy(config_entry: ConfigEntry) -> bool:
 async def _get_tesla_ev_entity(
     hass: HomeAssistant,
     entity_pattern: str,
-    vehicle_vin: Optional[str] = None
+    vehicle_vin: Optional[str] = None,
+    *,
+    warn_on_missing: bool = True,
 ) -> Optional[str]:
     """
     Find a Tesla EV entity by pattern.
@@ -180,6 +182,8 @@ async def _get_tesla_ev_entity(
         hass: Home Assistant instance
         entity_pattern: Pattern to match (e.g., "button.*charge_start", "number.*charge_limit")
         vehicle_vin: Optional VIN to filter by specific vehicle
+        warn_on_missing: Log missing entities as warnings for required command
+            paths; use debug for optional telemetry probes.
 
     Returns:
         Entity ID if found, None otherwise
@@ -251,11 +255,12 @@ async def _get_tesla_ev_entity(
                 break
 
     if not tesla_devices:
-        _LOGGER.warning(f"No Tesla EV devices found. Looking for domains {TESLA_EV_INTEGRATIONS}, found domains: {sorted(all_domains_found)}")
+        log_missing = _LOGGER.warning if warn_on_missing else _LOGGER.debug
+        log_missing(f"No Tesla EV devices found. Looking for domains {TESLA_EV_INTEGRATIONS}, found domains: {sorted(all_domains_found)}")
         if all_tesla_domain_devices:
-            _LOGGER.warning(f"Found {len(all_tesla_domain_devices)} Tesla domain devices but none matched VIN format or had EV entities:")
+            log_missing(f"Found {len(all_tesla_domain_devices)} Tesla domain devices but none matched VIN format or had EV entities:")
             for device, domain, id_str in all_tesla_domain_devices[:5]:
-                _LOGGER.warning(f"  - {device.name}: domain={domain}, id={id_str}")
+                log_missing(f"  - {device.name}: domain={domain}, id={id_str}")
         return None
 
     # Use first vehicle if no specific VIN provided
@@ -272,7 +277,8 @@ async def _get_tesla_ev_entity(
                 _LOGGER.debug(f"Found matching entity: {entity.entity_id}")
                 return entity.entity_id
 
-    _LOGGER.warning(f"No entity matching pattern '{entity_pattern}' found for Tesla EV")
+    log_missing = _LOGGER.warning if warn_on_missing else _LOGGER.debug
+    log_missing(f"No entity matching pattern '{entity_pattern}' found for Tesla EV")
     if device_entities:
         _LOGGER.debug(f"Available entities for device: {device_entities[:20]}")  # Log first 20
     return None
@@ -377,6 +383,7 @@ async def _get_observed_ev_power_kw(
                 hass,
                 r"sensor\..*(charger_power|charging_power|charge_power)$",
                 vehicle_id,
+                warn_on_missing=False,
             )
             if entity:
                 power_kw = _kw_from_power_state(hass.states.get(entity))

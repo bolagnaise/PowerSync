@@ -24,7 +24,7 @@ from ..const import (
     DEFAULT_POWERWALL_OFF_GRID_MIN_SOC,
     DOMAIN,
 )
-from .views import _get_entry, ensure_coordinator
+from .views import _get_entry, ensure_client, ensure_coordinator
 
 if TYPE_CHECKING:
     pass
@@ -53,7 +53,10 @@ async def _handle_go_off_grid(hass: HomeAssistant, call: ServiceCall) -> None:
         raise HomeAssistantError("Powerwall not paired for local control")
 
     coordinator = await ensure_coordinator(hass, entry)
-    if coordinator is None or coordinator.client is None:
+    client = (
+        coordinator.client if coordinator is not None else await ensure_client(hass, entry)
+    )
+    if client is None:
         raise HomeAssistantError("Powerwall local client unavailable")
 
     bypass = bool(call.data.get("bypass_soc_check"))
@@ -64,15 +67,16 @@ async def _handle_go_off_grid(hass: HomeAssistant, call: ServiceCall) -> None:
                 DEFAULT_POWERWALL_OFF_GRID_MIN_SOC,
             )
         )
-        snap = coordinator.data
+        snap = coordinator.data if coordinator is not None else None
         if snap is not None and snap.soc is not None and snap.soc < min_soc:
             raise HomeAssistantError(
                 f"Refusing off-grid: SOC {snap.soc:.0f}% < floor {min_soc}%"
             )
 
     mode_override = call.data.get("mode")
-    ok = await coordinator.client.go_off_grid(mode_override=mode_override)
-    await coordinator.async_request_refresh()
+    ok = await client.go_off_grid(mode_override=mode_override)
+    if coordinator is not None:
+        await coordinator.async_request_refresh()
     if not ok:
         raise HomeAssistantError(
             "Gateway rejected islanding command — check logs for details"
@@ -86,10 +90,14 @@ async def _handle_reconnect_grid(hass: HomeAssistant, call: ServiceCall) -> None
     if not entry.data.get(CONF_POWERWALL_LOCAL_PAIRED):
         raise HomeAssistantError("Powerwall not paired for local control")
     coordinator = await ensure_coordinator(hass, entry)
-    if coordinator is None or coordinator.client is None:
+    client = (
+        coordinator.client if coordinator is not None else await ensure_client(hass, entry)
+    )
+    if client is None:
         raise HomeAssistantError("Powerwall local client unavailable")
-    ok = await coordinator.client.reconnect_grid()
-    await coordinator.async_request_refresh()
+    ok = await client.reconnect_grid()
+    if coordinator is not None:
+        await coordinator.async_request_refresh()
     if not ok:
         raise HomeAssistantError("Gateway rejected reconnect command")
 
