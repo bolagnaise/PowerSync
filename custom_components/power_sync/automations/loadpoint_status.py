@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -330,6 +331,78 @@ def _loadpoint_status(
     return "idle"
 
 
+def _coerce_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
+
+
+def _timer_snapshot(
+    *,
+    phase: str,
+    started_at: datetime,
+    duration_minutes: Any,
+    label: str,
+    reason: str,
+) -> dict[str, Any]:
+    duration_seconds = max(0, int(_float_value(duration_minutes, 0) * 60))
+    now = (
+        datetime.now(timezone.utc)
+        if started_at.tzinfo is not None
+        else datetime.now()
+    )
+    elapsed_seconds = max(0, int((now - started_at).total_seconds()))
+    return {
+        "phase": phase,
+        "label": label,
+        "reason": reason,
+        "started_at": started_at.isoformat(),
+        "duration_seconds": duration_seconds,
+        "elapsed_seconds": elapsed_seconds,
+        "remaining_seconds": max(0, duration_seconds - elapsed_seconds),
+    }
+
+
+def _solar_surplus_delay_timer(state: Mapping[str, Any]) -> dict[str, Any] | None:
+    params = state.get("params") or {}
+    mode = str(params.get("dynamic_mode") or state.get("mode") or "").lower()
+    owner_mode = str(params.get("owner_mode") or "").lower()
+    if "solar_surplus" not in mode and "solar_surplus" not in owner_mode:
+        return None
+
+    current_amps = _int_value(state.get("current_amps"), 0)
+    low_surplus_start = _coerce_datetime(state.get("low_surplus_start"))
+    if low_surplus_start is not None and current_amps > 0:
+        return _timer_snapshot(
+            phase="stop",
+            started_at=low_surplus_start,
+            duration_minutes=params.get("stop_delay_minutes", 5),
+            label="Stop delay",
+            reason="Waiting before stopping because surplus is below the charging minimum",
+        )
+
+    high_surplus_start = _coerce_datetime(state.get("high_surplus_start"))
+    if (
+        high_surplus_start is not None
+        and current_amps <= 0
+        and not bool(state.get("charging_started"))
+    ):
+        return _timer_snapshot(
+            phase="start",
+            started_at=high_surplus_start,
+            duration_minutes=params.get("sustained_surplus_minutes", 2),
+            label="Start delay",
+            reason="Waiting for sustained surplus before starting",
+        )
+
+    return None
+
+
 def _find_observation(
     vehicle_id: str,
     vehicle_name: str,
@@ -526,6 +599,7 @@ def _dynamic_loadpoint(
         "soc": soc,
         "target_soc": _optional_int(params.get("target_soc")),
         "allocated_surplus_kw": round(allocated_surplus_kw, 2),
+        "delay_timer": _solar_surplus_delay_timer(state),
         "blocking_reason": blocking_reason,
         "session_id": session_id,
         "last_command": (ownership or {}).get("last_command"),

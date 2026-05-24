@@ -3729,13 +3729,16 @@ class InverterStatusSensor(SensorEntity):
                 self._cached_state = "curtailed"
                 self._offline_count = 0  # Reset backoff on successful poll
             else:
-                # Check if curtailment logic has set state to "curtailed" (e.g., Fronius simple mode)
-                # In simple mode, inverter uses soft export limit but doesn't report power_limit_enabled
-                # So we trust the cached state from curtailment logic if it says "curtailed"
+                # Fronius simple mode uses a soft export limit that does not
+                # always show up in inverter status registers, so keep the
+                # curtailment command state only for that mode.
                 entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
                 cached_curtail_state = entry_data.get("inverter_last_state")
-                if cached_curtail_state == "curtailed" and not fronius_load_following:
-                    # Fronius simple mode: trust curtailment logic, not register values
+                if (
+                    inverter_brand == "fronius"
+                    and cached_curtail_state == "curtailed"
+                    and not fronius_load_following
+                ):
                     _LOGGER.debug(
                         "Fronius simple mode: inverter not reporting curtailed but "
                         "curtailment logic says curtailed - keeping curtailed state"

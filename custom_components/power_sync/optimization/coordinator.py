@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
@@ -4255,6 +4256,61 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         remaining = int((end_dt - effective_start).total_seconds() // 60)
         return max(0, remaining)
 
+    @classmethod
+    def _entry_slot_bounds(
+        cls,
+        e: dict,
+        current_window: datetime,
+        interval_minutes: int,
+        n_steps: int,
+    ) -> tuple[int, int] | None:
+        """Return optimizer slot bounds for a timestamped price entry."""
+        start_str = cls._get_entry_start_time(e)
+        end_str = cls._get_entry_end_time(e)
+        if not start_str or not end_str:
+            return None
+
+        try:
+            start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+            end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=current_window.tzinfo)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=current_window.tzinfo)
+        if current_window.tzinfo is not None:
+            start_dt = start_dt.astimezone(current_window.tzinfo)
+            end_dt = end_dt.astimezone(current_window.tzinfo)
+
+        interval_seconds = max(1, interval_minutes) * 60
+        start_offset = (start_dt - current_window).total_seconds()
+        end_offset = (end_dt - current_window).total_seconds()
+        start_idx = max(0, int(math.floor(start_offset / interval_seconds)))
+        end_idx = min(n_steps, int(math.ceil(end_offset / interval_seconds)))
+        if end_idx <= start_idx:
+            return None
+        return start_idx, end_idx
+
+    @staticmethod
+    def _fill_price_gaps(
+        values: list[float | None],
+        default: float | None = None,
+    ) -> list[float]:
+        """Fill timestamp gaps without shifting later price boundaries."""
+        first = next((value for value in values if value is not None), default)
+        if first is None:
+            return []
+
+        filled: list[float] = []
+        last = float(first)
+        for value in values:
+            if value is not None:
+                last = float(value)
+            filled.append(last)
+        return filled
+
     async def _get_price_forecast(self) -> tuple[list[float], list[float]] | None:
         """Get price forecasts for optimizer.
 
@@ -4470,22 +4526,34 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 err,
                             )
 
-                    import_prices = []
+                    import_slots: list[float | None] = [None] * n_steps
                     entry_positions = []  # start index for each general entry
                     entry_expands_general = []  # parallel: actual expand count per entry
+                    write_cursor = 0
+                    last_import_slot = 0
                     for e in general:
-                        entry_positions.append(len(import_prices))
                         dur = e.get("duration", 30)
-                        # Clip the first surviving entry to its remaining minutes
-                        # so a 30-min interval that's already 20 min in only
-                        # contributes its last 10 min to the LP horizon.
-                        effective_min = self._entry_remaining_minutes(
-                            e, current_window, dur,
+                        slot_bounds = self._entry_slot_bounds(
+                            e, current_window, interval, n_steps
                         )
-                        if effective_min <= 0:
-                            entry_expand = 0
+                        if slot_bounds is None:
+                            # Fallback for legacy/test data with no timestamps:
+                            # preserve the previous append-based behavior.
+                            effective_min = self._entry_remaining_minutes(
+                                e, current_window, dur,
+                            )
+                            entry_expand = (
+                                max(1, effective_min // interval)
+                                if effective_min > 0
+                                else 0
+                            )
+                            start_idx = write_cursor
+                            end_idx = min(n_steps, start_idx + entry_expand)
+                            write_cursor = end_idx
                         else:
-                            entry_expand = max(1, effective_min // interval)
+                            start_idx, end_idx = slot_bounds
+                            entry_expand = end_idx - start_idx
+                        entry_positions.append(start_idx)
                         entry_expands_general.append(entry_expand)
                         if entry_expand == 0:
                             continue
@@ -4523,18 +4591,36 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 price_dollar = max(0, fp_base_rate / 100)
                         else:
                             price_dollar = e.get("perKwh", 0) / 100
-                        import_prices.extend([price_dollar] * entry_expand)
+                        for pos in range(start_idx, end_idx):
+                            import_slots[pos] = price_dollar
+                        last_import_slot = max(last_import_slot, end_idx)
 
-                    export_prices = []
-                    display_export_raw: list[float] = []
+                    import_prices = self._fill_price_gaps(import_slots)
+
+                    export_slots: list[float | None] = [None] * n_steps
+                    display_export_slots: list[float | None] = [None] * n_steps
+                    export_write_cursor = 0
                     for e in feed_in:
                         dur = e.get("duration", 30)
-                        effective_min = self._entry_remaining_minutes(
-                            e, current_window, dur,
+                        slot_bounds = self._entry_slot_bounds(
+                            e, current_window, interval, n_steps
                         )
-                        if effective_min <= 0:
+                        if slot_bounds is None:
+                            effective_min = self._entry_remaining_minutes(
+                                e, current_window, dur,
+                            )
+                            entry_expand = (
+                                max(1, effective_min // interval)
+                                if effective_min > 0
+                                else 0
+                            )
+                            start_idx = export_write_cursor
+                            end_idx = min(n_steps, start_idx + entry_expand)
+                            export_write_cursor = end_idx
+                        else:
+                            start_idx, end_idx = slot_bounds
+                        if end_idx <= start_idx:
                             continue
-                        entry_expand = max(1, effective_min // interval)
                         # feedIn perKwh: negative = you get paid, positive = you pay to export.
                         # display_price keeps the signed value so the UI chart can show
                         # negative dips during oversupply (when you'd pay to export).
@@ -4542,11 +4628,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         # as profitable revenue.
                         display_price = -(e.get("perKwh", 0)) / 100
                         lp_price = max(0.0, display_price)
-                        export_prices.extend([lp_price] * entry_expand)
-                        display_export_raw.extend([display_price] * entry_expand)
+                        for pos in range(start_idx, end_idx):
+                            export_slots[pos] = lp_price
+                            display_export_slots[pos] = display_price
+
+                    export_prices = self._fill_price_gaps(export_slots)
+                    display_export_raw = self._fill_price_gaps(
+                        display_export_slots,
+                        export_prices[0] if export_prices else None,
+                    )
 
                     # Track actual forecast length before padding
-                    actual_price_intervals = len(import_prices)
+                    actual_price_intervals = last_import_slot
 
                     # Pad or trim to n_steps
                     if import_prices:

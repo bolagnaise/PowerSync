@@ -1527,9 +1527,7 @@ class PowerSyncLayout extends HTMLElement {
         position: relative;
       }
       .item.customizing {
-        cursor: grab;
-        touch-action: none;
-        user-select: none;
+        cursor: default;
         outline: 1px dashed color-mix(in srgb, var(--primary-color, #03a9f4) 60%, transparent);
         outline-offset: 3px;
         border-radius: 10px;
@@ -1537,25 +1535,28 @@ class PowerSyncLayout extends HTMLElement {
       .drag-surface {
         display: none;
         position: absolute;
-        inset: 0;
+        top: 8px;
+        right: 8px;
+        min-width: 44px;
+        min-height: 32px;
+        padding: 0 9px;
+        appearance: none;
+        border-radius: 999px;
+        border: 0;
+        background: color-mix(in srgb, var(--primary-color, #03a9f4) 85%, black);
+        color: white;
+        font: inherit;
+        font-size: 10px;
+        font-weight: 700;
+        line-height: 32px;
+        text-align: center;
         z-index: 20;
         cursor: grab;
         touch-action: none;
+        user-select: none;
       }
       .item.customizing .drag-surface {
         display: block;
-      }
-      .drag-surface::after {
-        content: 'Drag';
-        position: absolute;
-        top: 8px;
-        right: 8px;
-        padding: 4px 7px;
-        border-radius: 999px;
-        background: color-mix(in srgb, var(--primary-color, #03a9f4) 85%, black);
-        color: white;
-        font-size: 10px;
-        font-weight: 700;
       }
       .item.dragging {
         opacity: 0.55;
@@ -1616,15 +1617,17 @@ class PowerSyncLayout extends HTMLElement {
       item.dataset.key = this._cardKey(cardConfig, occurrence);
       item.dataset.legacyKey = this._legacyCardKey(cardConfig, index);
       item.addEventListener('dragstart', (event) => event.preventDefault());
-      item.addEventListener('pointerdown', (event) => this._startPointerDrag(item, event));
-      item.addEventListener('pointermove', (event) => this._updatePointerDrag(item, event));
-      item.addEventListener('pointerup', () => this._finishPointerDrag(item));
-      item.addEventListener('pointercancel', () => this._cancelPointerDrag(item));
 
-      const dragSurface = document.createElement('div');
+      const dragSurface = document.createElement('button');
       dragSurface.className = 'drag-surface';
-      dragSurface.setAttribute('aria-hidden', 'true');
+      dragSurface.type = 'button';
+      dragSurface.textContent = 'Drag';
+      dragSurface.setAttribute('aria-label', 'Drag dashboard card');
       dragSurface.addEventListener('dragstart', (event) => {
+        event.stopPropagation();
+        event.preventDefault();
+      });
+      dragSurface.addEventListener('click', (event) => {
         event.stopPropagation();
         event.preventDefault();
       });

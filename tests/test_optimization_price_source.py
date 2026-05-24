@@ -431,6 +431,77 @@ def test_flow_power_optimizer_uses_v2_pea_formula(opt_module, monkeypatch):
     assert coordinator._last_display_import_prices[0] == pytest.approx(0.525)
 
 
+def test_dynamic_price_forecast_preserves_boundaries_after_leading_gap(
+    opt_module,
+    monkeypatch,
+):
+    coordinator = object.__new__(opt_module.OptimizationCoordinator)
+    coordinator.hass = SimpleNamespace(data={"power_sync": {"entry-1": {}}})
+    coordinator.entry_id = "entry-1"
+    coordinator._entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={"electricity_provider": "octopus"},
+    )
+    coordinator._config = opt_module.OptimizationConfig(
+        horizon_hours=10,
+        interval_minutes=5,
+    )
+    coordinator._last_display_import_prices = None
+    coordinator._last_display_export_prices = None
+    coordinator._apply_export_boost = lambda export, import_prices=None: (export, [])
+    coordinator._apply_saving_session_prices = lambda imports, exports: (imports, exports)
+    coordinator._apply_chip_mode = lambda exports: exports
+    coordinator._apply_demand_charge_penalty = lambda imports: imports
+    coordinator._apply_confidence_decay = lambda imports, exports, **kwargs: (imports, exports)
+    monkeypatch.setattr(
+        opt_module.dt_util,
+        "now",
+        lambda *args, **kwargs: datetime(2026, 5, 23, 21, 5, tzinfo=timezone.utc),
+    )
+
+    def price_entry(start: str, end: str, price: float, channel: str) -> dict:
+        return {
+            "valid_from": start,
+            "valid_to": end,
+            "nemTime": end,
+            "duration": 30,
+            "perKwh": -price if channel == "feedIn" else price,
+            "channelType": channel,
+            "type": "ForecastInterval",
+        }
+
+    forecast = []
+    for start, end, import_price in (
+        ("2026-05-23T21:30:00+00:00", "2026-05-23T22:00:00+00:00", 6.9),
+        ("2026-05-24T04:30:00+00:00", "2026-05-24T05:00:00+00:00", 6.9),
+        ("2026-05-24T05:00:00+00:00", "2026-05-24T05:30:00+00:00", 6.9),
+        ("2026-05-24T05:30:00+00:00", "2026-05-24T06:00:00+00:00", 28.56),
+    ):
+        forecast.append(price_entry(start, end, import_price, "general"))
+        forecast.append(price_entry(start, end, 12.0, "feedIn"))
+    coordinator.price_coordinator = SimpleNamespace(
+        data={"current": [], "forecast": forecast}
+    )
+
+    import_prices, export_prices = asyncio.run(coordinator._get_price_forecast())
+
+    # There is no 21:05-21:30 current interval in this fixture. The optimizer
+    # must fill that leading gap without shifting the real 05:30 boundary to
+    # 05:55.
+    high_price_slot = int(
+        (
+            datetime(2026, 5, 24, 5, 30, tzinfo=timezone.utc)
+            - datetime(2026, 5, 23, 21, 5, tzinfo=timezone.utc)
+        ).total_seconds()
+        // (5 * 60)
+    )
+    assert coordinator._last_display_import_prices[high_price_slot - 1] == pytest.approx(0.069)
+    assert coordinator._last_display_import_prices[high_price_slot] == pytest.approx(0.2856)
+    assert import_prices[high_price_slot] == pytest.approx(0.2856)
+    assert export_prices[high_price_slot] == pytest.approx(0.12)
+
+
 def test_schedule_polling_sleep_aligns_to_next_interval_boundary(opt_module, monkeypatch):
     coordinator = object.__new__(opt_module.OptimizationCoordinator)
     coordinator._config = opt_module.OptimizationConfig(interval_minutes=5)

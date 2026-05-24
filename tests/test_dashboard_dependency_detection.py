@@ -63,3 +63,20 @@ def test_dashboard_layout_storage_reconciles_card_changes():
     assert "missingItems" in source
     assert "layouts[layoutKey] = normalized" in source
     assert "return `${index}:${parts.join(':')}`" not in source
+
+
+def test_dashboard_layout_drag_starts_from_handle_only():
+    """Mobile scroll gestures should not be captured by the whole card."""
+    source = STRATEGY_PATH.read_text()
+
+    assert "const dragSurface = document.createElement('button');" in source
+    assert "dragSurface.setAttribute('aria-label', 'Drag dashboard card')" in source
+    assert "item.addEventListener('pointerdown'" not in source
+    assert "item.addEventListener('pointermove'" not in source
+    assert ".item.customizing {\n        cursor: default;" in source
+    assert ".drag-surface {\n        display: none;" in source
+    drag_surface_css = source[
+        source.index(".drag-surface {"):source.index(".item.customizing .drag-surface")
+    ]
+    assert "touch-action: none;" in drag_surface_css
+    assert "appearance: none;" in drag_surface_css

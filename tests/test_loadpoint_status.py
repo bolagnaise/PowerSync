@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import types
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -172,6 +173,58 @@ def test_dynamic_state_reports_commanded_no_power_when_observed_power_is_zero():
     assert loadpoints[0]["status"] == "commanded_no_power"
     assert "Commanded 16A" in loadpoints[0]["blocking_reason"]
     assert loadpoints[0]["confidence"] == "observed"
+
+
+def test_solar_surplus_start_delay_timer_is_exposed():
+    started_at = datetime.now() - timedelta(seconds=45)
+
+    loadpoints = build_loadpoint_status(
+        {
+            "VIN123": {
+                "active": True,
+                "current_amps": 0,
+                "target_amps": 0,
+                "charging_started": False,
+                "high_surplus_start": started_at,
+                "params": {
+                    "dynamic_mode": "solar_surplus",
+                    "sustained_surplus_minutes": 3,
+                },
+            }
+        }
+    )
+
+    timer = loadpoints[0]["delay_timer"]
+    assert timer["phase"] == "start"
+    assert timer["label"] == "Start delay"
+    assert timer["duration_seconds"] == 180
+    assert 0 <= timer["remaining_seconds"] <= 180
+
+
+def test_solar_surplus_stop_delay_timer_is_exposed():
+    started_at = datetime.now() - timedelta(seconds=75)
+
+    loadpoints = build_loadpoint_status(
+        {
+            "VIN123": {
+                "active": True,
+                "current_amps": 8,
+                "target_amps": 8,
+                "charging_started": True,
+                "low_surplus_start": started_at,
+                "params": {
+                    "dynamic_mode": "solar_surplus",
+                    "stop_delay_minutes": 5,
+                },
+            }
+        }
+    )
+
+    timer = loadpoints[0]["delay_timer"]
+    assert timer["phase"] == "stop"
+    assert timer["label"] == "Stop delay"
+    assert timer["duration_seconds"] == 300
+    assert 0 <= timer["remaining_seconds"] <= 300
 
 
 def test_external_observed_charger_is_kept_without_dynamic_state():
