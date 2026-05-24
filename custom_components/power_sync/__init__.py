@@ -7594,6 +7594,12 @@ class ProviderConfigView(HomeAssistantView):
             entry_data = domain_data.get(entry.entry_id, {})
             entry_data["_skip_reload"] = True
             self._hass.config_entries.async_update_entry(entry, options=new_options)
+            if "monitoring_mode" in data:
+                async_dispatcher_send(
+                    self._hass,
+                    f"{DOMAIN}_{entry.entry_id}_monitoring_mode",
+                    bool(new_options.get(CONF_MONITORING_MODE, False)),
+                )
 
             _LOGGER.info("✅ Provider config updated successfully")
             return web.json_response({"success": True})

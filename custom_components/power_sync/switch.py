@@ -943,9 +943,15 @@ class MonitoringModeSwitch(SwitchEntity):
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_suggested_object_id = f"power_sync_{description.key}"
 
-        self._attr_is_on = entry.options.get(
-            CONF_MONITORING_MODE,
-            entry.data.get(CONF_MONITORING_MODE, False),
+        self._attr_is_on = self._current_value()
+
+    def _current_value(self) -> bool:
+        """Read the current config-entry option instead of a startup cache."""
+        return bool(
+            self._entry.options.get(
+                CONF_MONITORING_MODE,
+                self._entry.data.get(CONF_MONITORING_MODE, False),
+            )
         )
 
     @property
@@ -955,7 +961,23 @@ class MonitoringModeSwitch(SwitchEntity):
     @property
     def is_on(self) -> bool:
         """Return True if monitoring mode is active."""
-        return self._attr_is_on
+        return self._current_value()
+
+    async def async_added_to_hass(self) -> None:
+        """Refresh state when monitoring mode is changed through the API/app."""
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                f"{DOMAIN}_{self._entry.entry_id}_monitoring_mode",
+                self._handle_monitoring_mode_update,
+            )
+        )
+
+    @callback
+    def _handle_monitoring_mode_update(self, enabled: bool) -> None:
+        """Update the HA state machine after API-driven changes."""
+        self._attr_is_on = bool(enabled)
+        self.async_write_ha_state()
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Enable monitoring mode — all control commands will be logged but not executed."""

@@ -239,6 +239,32 @@ def test_force_switches_are_added_for_non_tesla_batteries():
     assert not any(isinstance(entity, switch.GridChargingSwitch) for entity in added)
 
 
+def test_monitoring_switch_reads_updated_config_entry_options():
+    hass = _Hass("SystemGridConnected")
+    entry = types.SimpleNamespace(
+        entry_id="entry-1",
+        data={"monitoring_mode": True},
+        options={"monitoring_mode": True},
+    )
+    monitoring_switch = switch.MonitoringModeSwitch(
+        hass,
+        entry,
+        _SwitchEntityDescription(
+            key="monitoring_mode",
+            name="Monitoring Mode",
+            icon="mdi:eye-outline",
+        ),
+    )
+
+    assert monitoring_switch.is_on is True
+
+    entry.options = {"monitoring_mode": False}
+    monitoring_switch._handle_monitoring_mode_update(False)
+
+    assert monitoring_switch.is_on is False
+    assert monitoring_switch.write_count == 1
+
+
 def test_force_discharge_switch_uses_selected_duration_and_force_power():
     hass = _Hass("SystemGridConnected")
     hass.states._states["number.power_sync_force_power_kw"] = _State("5.5")
