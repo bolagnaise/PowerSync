@@ -64,6 +64,8 @@ LP_FAR_PERIOD_MINUTES = 60
 LP_PRICE_SPLIT_THRESHOLD = 0.02
 LP_POWER_SPLIT_THRESHOLD_KW = ACTION_THRESHOLD_W / 1000.0
 
+_UNSET = object()
+
 
 @dataclass(frozen=True)
 class _LpPeriod:
@@ -111,6 +113,7 @@ class BatteryOptimizer:
         max_charge_w: float = 5000,
         max_discharge_w: float = 5000,
         max_grid_export_w: float | None = None,
+        max_battery_export_w: float | None = None,
         efficiency: float = DEFAULT_EFFICIENCY,
         backup_reserve: float = 0.20,
         hardware_reserve: float = 0.0,
@@ -122,6 +125,7 @@ class BatteryOptimizer:
         self.max_charge_w = max_charge_w
         self.max_discharge_w = max_discharge_w
         self.max_grid_export_w = max_grid_export_w
+        self.max_battery_export_w = max_battery_export_w
         self.efficiency = efficiency
         self.backup_reserve = backup_reserve
         self.hardware_reserve = hardware_reserve
@@ -161,6 +165,11 @@ class BatteryOptimizer:
         self.capacity_kwh = capacity_wh / 1000.0
         self.max_charge_kw = max_charge_w / 1000.0
         self.max_discharge_kw = max_discharge_w / 1000.0
+        self.max_battery_export_kw = (
+            max_battery_export_w / 1000.0
+            if max_battery_export_w is not None
+            else None
+        )
         self.dt_hours = interval_minutes / 60.0  # time step in hours
 
     def update_config(
@@ -169,6 +178,7 @@ class BatteryOptimizer:
         max_charge_w: float | None = None,
         max_discharge_w: float | None = None,
         max_grid_export_w: float | None = None,
+        max_battery_export_w: float | None | object = _UNSET,
         efficiency: float | None = None,
         backup_reserve: float | None = None,
     ) -> None:
@@ -184,6 +194,13 @@ class BatteryOptimizer:
             self.max_discharge_kw = max_discharge_w / 1000.0
         if max_grid_export_w is not None:
             self.max_grid_export_w = max_grid_export_w
+        if max_battery_export_w is not _UNSET:
+            self.max_battery_export_w = max_battery_export_w
+            self.max_battery_export_kw = (
+                max_battery_export_w / 1000.0
+                if max_battery_export_w is not None
+                else None
+            )
         if efficiency is not None:
             self.efficiency = efficiency
         if backup_reserve is not None:
@@ -974,7 +991,14 @@ class BatteryOptimizer:
                 and not p_block_charge[t]
             )
             if p_allow_export[t] and not suppress_generic_battery_export:
-                bounds.append((0, max_grid_export_kw))  # grid_export
+                export_limit_kw = max_grid_export_kw
+                if self.max_battery_export_kw is not None:
+                    solar_surplus_kw = max(0.0, p_solar[t] - p_load[t])
+                    export_limit_kw = min(
+                        export_limit_kw,
+                        solar_surplus_kw + self.max_battery_export_kw,
+                    )
+                bounds.append((0, export_limit_kw))  # grid_export
             else:
                 solar_surplus_kw = max(0.0, p_solar[t] - p_load[t])
                 bounds.append((0, min(max_grid_export_kw, solar_surplus_kw)))
@@ -1036,6 +1060,19 @@ class BatteryOptimizer:
                 net_load_kw = max(0.0, p_load[t] - p_solar[t])
                 max_self_consumption = net_load_kw
                 bounds.append((0, min(self.max_discharge_kw, max_self_consumption)))
+            elif self.max_battery_export_kw is not None:
+                # Target-export batteries receive a grid-export power command.
+                # The battery still has to cover local load before any surplus
+                # reaches the grid, so do not let the command cap masquerade as
+                # a total battery-discharge cap during export windows.
+                net_load_kw = max(0.0, p_load[t] - p_solar[t])
+                bounds.append((
+                    0,
+                    min(
+                        self.max_discharge_kw,
+                        net_load_kw + self.max_battery_export_kw,
+                    ),
+                ))
             else:
                 bounds.append((0, self.max_discharge_kw))  # battery_discharge
 
@@ -1302,6 +1339,11 @@ class BatteryOptimizer:
                 # Profitable to discharge; cap to home load when battery export
                 # is not explicitly permitted or export is below acquisition cost.
                 discharge_limit = self.max_discharge_kw
+                if forced_export_slot and self.max_battery_export_kw is not None:
+                    discharge_limit = min(
+                        discharge_limit,
+                        max(0.0, net_load) + self.max_battery_export_kw,
+                    )
                 if max_grid_export_kw is not None:
                     discharge_limit = min(
                         discharge_limit,
@@ -1386,6 +1428,9 @@ class BatteryOptimizer:
                 export_kw = -net_grid
                 if self.max_grid_export_w is not None:
                     export_kw = min(export_kw, max(0.0, self.max_grid_export_w / 1000.0))
+                if self.max_battery_export_kw is not None:
+                    solar_surplus_kw = max(0.0, solar[t] - load[t])
+                    export_kw = min(export_kw, solar_surplus_kw + self.max_battery_export_kw)
                 grid_export[t] = export_kw
 
             soc += (charge_kw * eff - discharge_kw / eff) * dt / cap

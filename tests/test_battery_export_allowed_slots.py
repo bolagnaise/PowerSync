@@ -1512,6 +1512,25 @@ def test_curtailed_sigenergy_zero_export_limit_is_not_planning_cap(opt_module):
     assert coordinator._resolve_max_grid_export_w() is None
 
 
+def test_target_export_sync_uses_physical_discharge_and_user_export_cap(opt_module):
+    coordinator = _coordinator(opt_module, "globird")
+    coordinator.battery_system = "goodwe"
+    coordinator._config.max_discharge_w = 1000
+    coordinator.energy_coordinator = SimpleNamespace(data={"rated_power_w": 16384})
+    updates = {}
+
+    class _Optimizer:
+        def update_config(self, **kwargs):
+            updates.update(kwargs)
+
+    coordinator._optimizer = _Optimizer()
+
+    coordinator._sync_optimizer_discharge_limits()
+
+    assert updates["max_discharge_w"] == 16384
+    assert updates["max_battery_export_w"] == 1000
+
+
 def test_spread_export_schedule_flattens_planned_energy_across_allowed_window(opt_module):
     coordinator = _coordinator(opt_module, "octopus")
     coordinator.battery_system = "goodwe"
@@ -1541,6 +1560,35 @@ def test_spread_export_schedule_flattens_planned_energy_across_allowed_window(op
     original_wh = sum(action.battery_discharge_w for action in actions) * (5 / 60)
     spread_wh = sum(action.battery_discharge_w for action in spread.actions) * (5 / 60)
     assert spread_wh == pytest.approx(original_wh, abs=0.1)
+
+
+def test_spread_export_schedule_uses_export_power_for_target_batteries(opt_module):
+    coordinator = _coordinator(opt_module, "octopus")
+    coordinator.battery_system = "goodwe"
+    coordinator._config.spread_export_enabled = True
+    coordinator._config.max_discharge_w = 5000
+    start = datetime(2026, 5, 3, 9, 0, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start + idx * timedelta(minutes=5),
+            action="export" if idx < 2 else "self_consumption",
+            power_w=600 if idx < 2 else 0,
+            battery_discharge_w=2000 if idx < 2 else 0,
+        )
+        for idx in range(4)
+    ]
+    schedule = opt_module.OptimizationSchedule(
+        actions=actions,
+        predicted_cost=0,
+        predicted_savings=0,
+        last_updated=start,
+    )
+
+    spread = coordinator._spread_export_schedule(schedule, [True] * 4)
+
+    assert [action.power_w for action in spread.actions] == [300.0] * 4
+    export_wh = sum(action.power_w for action in spread.actions) * (5 / 60)
+    assert export_wh == pytest.approx(600 * 2 * (5 / 60), abs=0.1)
 
 
 def test_spread_import_schedule_flattens_planned_energy_across_same_price_window(opt_module):

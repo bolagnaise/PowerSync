@@ -714,6 +714,57 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._optimizer:
             self._optimizer.max_grid_export_w = self._config.max_grid_export_w
 
+    def _resolve_physical_max_discharge_w(self) -> int | None:
+        """Return the battery/inverter physical discharge limit when available."""
+        data = getattr(self.energy_coordinator, "data", None)
+        if not isinstance(data, dict):
+            return None
+
+        for key in (
+            "battery_max_discharge_power_w",
+            "rated_power_w",
+            "max_discharge_power_w",
+        ):
+            try:
+                value = int(round(float(data.get(key))))
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+
+        for key in (
+            "battery_max_discharge_power",
+            "discharge_rate_limit_kw",
+            "max_discharge_power_kw",
+        ):
+            try:
+                value = float(data.get(key))
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return int(round(value * 1000))
+
+        return None
+
+    def _sync_optimizer_discharge_limits(self) -> None:
+        """Sync physical discharge and target-export caps into the LP model."""
+        if not self._optimizer:
+            return
+
+        physical_discharge_w = self._config.max_discharge_w
+        export_command_cap_w: int | None = None
+
+        if self._supports_target_export_power():
+            export_command_cap_w = self._config.max_discharge_w
+            detected_physical_w = self._resolve_physical_max_discharge_w()
+            if detected_physical_w and detected_physical_w > physical_discharge_w:
+                physical_discharge_w = detected_physical_w
+
+        self._optimizer.update_config(
+            max_discharge_w=physical_discharge_w,
+            max_battery_export_w=export_command_cap_w,
+        )
+
     def _configured_startup_backup_reserve(self) -> tuple[int | None, str]:
         """Return the persisted user reserve target used after temporary IDLE holds."""
         if not self._entry:
@@ -1809,6 +1860,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 len(import_prices),
             )
             self._sync_grid_export_cap_to_optimizer()
+            self._sync_optimizer_discharge_limits()
 
             # Run LP in executor thread to avoid blocking event loop
             result: OptimizerResult = await self.hass.async_add_executor_job(
@@ -3068,8 +3120,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 idx += 1
             end = idx
             window_actions = actions[start:end]
+            export_power_field = (
+                "power_w"
+                if self._supports_target_export_power()
+                else "battery_discharge_w"
+            )
             export_wh = sum(
-                max(0.0, float(getattr(action, "battery_discharge_w", 0.0) or 0.0))
+                max(0.0, float(getattr(action, export_power_field, 0.0) or 0.0))
                 * interval_hours
                 for action in window_actions
                 if getattr(action, "action", None) in ("export", "discharge")
