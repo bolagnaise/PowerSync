@@ -229,6 +229,15 @@ def _coordinator(opt_module, provider: str, profit_max: bool = False, **options)
     )
     coordinator._saving_session_coordinator = None
     coordinator._last_export_boost_allowed_slots = []
+    coordinator._last_price_timestamps = None
+    coordinator._last_zerohero_bonus_cap_kwh = None
+    coordinator._last_zerohero_bonus_prices = None
+    coordinator._actual_zerohero_import_kwh_today = 0.0
+    coordinator._actual_zerohero_export_kwh_today = 0.0
+    coordinator._actual_zerohero_bonus_export_kwh_today = 0.0
+    coordinator._actual_zerohero_base_export_earnings_today = 0.0
+    coordinator._actual_zerohero_bonus_export_earnings_today = 0.0
+    coordinator._actual_zerohero_credit_value_today = 0.0
     coordinator._optimizer = None
     coordinator.energy_coordinator = None
     return coordinator
@@ -543,6 +552,41 @@ def test_positive_export_prices_allowed_for_all_providers(
     )
 
     assert _true_indexes(slots) == [2, 3, 4]
+
+
+def test_zerohero_positive_base_fit_does_not_allow_export_outside_bonus_window(
+    opt_module,
+):
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        globird_plan="zerohero_current",
+    )
+    coordinator._last_zerohero_bonus_cap_kwh = 5.0
+    coordinator._last_price_timestamps = [
+        datetime(2026, 5, 3, 17, 30, tzinfo=timezone.utc) + timedelta(minutes=5 * idx)
+        for idx in range(48)
+    ]
+
+    slots = coordinator._battery_export_allowed_slots(48, [0.05] * 48)
+
+    assert _true_indexes(slots) == list(range(6, 42))
+
+
+def test_zerohero_blocks_battery_charge_during_no_import_window(opt_module):
+    coordinator = _coordinator(
+        opt_module,
+        "globird",
+        globird_plan="zerohero_current",
+    )
+    coordinator._last_price_timestamps = [
+        datetime(2026, 5, 3, 17, 30, tzinfo=timezone.utc) + timedelta(minutes=5 * idx)
+        for idx in range(48)
+    ]
+
+    slots = coordinator._battery_charge_blocked_slots(48)
+
+    assert _true_indexes(slots) == list(range(6, 42))
 
 
 def test_non_positive_export_prices_are_blocked(opt_module):

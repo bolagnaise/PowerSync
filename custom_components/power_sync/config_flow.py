@@ -191,6 +191,22 @@ from .const import (
     AEMO_SENSOR_5MIN_PATTERN,
     AEMO_SENSOR_30MIN_PATTERN,
     ELECTRICITY_PROVIDERS,
+    CONF_GLOBIRD_PLAN,
+    GLOBIRD_PLANS,
+    GLOBIRD_PLAN_NOT_ZEROHERO,
+    GLOBIRD_PLAN_ZEROHERO_CUSTOM,
+    CONF_GLOBIRD_ZEROHERO_START,
+    CONF_GLOBIRD_ZEROHERO_END,
+    CONF_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH,
+    CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
+    CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
+    CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+    DEFAULT_GLOBIRD_ZEROHERO_START,
+    DEFAULT_GLOBIRD_ZEROHERO_END,
+    DEFAULT_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH,
+    DEFAULT_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
+    DEFAULT_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
+    DEFAULT_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
     FLOW_POWER_STATES,
     FLOW_POWER_PRICE_SOURCES,
     # Flow Power PEA configuration
@@ -1227,6 +1243,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._solaredge_data: dict[str, Any] = {}  # SolarEdge curtailment configuration
         self._aemo_only_mode: bool = False  # True if using AEMO spike only (no Amber)
         self._aemo_data: dict[str, Any] = {}
+        self._globird_data: dict[str, Any] = {}
         self._flow_power_data: dict[str, Any] = {}
         self._octopus_data: dict[str, Any] = {}  # Octopus Energy UK configuration
         self._localvolts_data: dict[str, Any] = {}  # Localvolts configuration
@@ -1399,6 +1416,8 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # Globird/AEMO VPP: AEMO spike only mode (static tariff)
                 self._aemo_only_mode = True
                 self._amber_data = {}
+                if provider == "globird":
+                    return await self.async_step_globird_plan()
                 return await self.async_step_aemo_config()
             elif provider == "localvolts":
                 # Localvolts: Real-time wholesale pricing (Australia)
@@ -1600,6 +1619,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             **self._teslemetry_data,
             **self._site_data,
             **self._aemo_data,
+            **self._globird_data,
             **self._flow_power_data,
             **self._octopus_data,
             **self._localvolts_data,
@@ -4226,6 +4246,128 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             description_placeholders={
                 "auth_url": POWERSYNC_AUTH_START_URL,
             },
+        )
+
+    def _globird_plan_schema(self, current: dict[str, Any] | None = None) -> vol.Schema:
+        """Build the GloBird plan selector schema."""
+        current = current or {}
+        hour_options = [
+            SelectOptionDict(value=f"{h:02d}:00", label=f"{h:02d}:00")
+            for h in range(24)
+        ]
+        return vol.Schema(
+            {
+                vol.Required(
+                    CONF_GLOBIRD_PLAN,
+                    default=current.get(CONF_GLOBIRD_PLAN, GLOBIRD_PLAN_NOT_ZEROHERO),
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=[
+                            SelectOptionDict(value=k, label=v)
+                            for k, v in GLOBIRD_PLANS.items()
+                        ],
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(
+                    CONF_GLOBIRD_ZEROHERO_START,
+                    default=current.get(
+                        CONF_GLOBIRD_ZEROHERO_START,
+                        DEFAULT_GLOBIRD_ZEROHERO_START,
+                    ),
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=hour_options,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(
+                    CONF_GLOBIRD_ZEROHERO_END,
+                    default=current.get(
+                        CONF_GLOBIRD_ZEROHERO_END,
+                        DEFAULT_GLOBIRD_ZEROHERO_END,
+                    ),
+                ): SelectSelector(
+                    SelectSelectorConfig(
+                        options=hour_options,
+                        mode=SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Optional(
+                    CONF_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH,
+                    default=current.get(
+                        CONF_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH,
+                        DEFAULT_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH,
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=0.0, max=100.0, step=0.1, unit_of_measurement="kWh",
+                        mode=NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Optional(
+                    CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
+                    default=current.get(
+                        CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
+                        DEFAULT_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=0.0, max=100.0, step=0.1,
+                        unit_of_measurement=self._selector_unit(),
+                        mode=NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Optional(
+                    CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
+                    default=current.get(
+                        CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
+                        DEFAULT_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=0.0, max=10.0, step=0.01,
+                        unit_of_measurement=self._currency(),
+                        mode=NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Optional(
+                    CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+                    default=current.get(
+                        CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+                        DEFAULT_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+                    ),
+                ): NumberSelector(
+                    NumberSelectorConfig(
+                        min=0.0, max=5.0, step=0.001, unit_of_measurement="kW",
+                        mode=NumberSelectorMode.BOX,
+                    )
+                ),
+            }
+        )
+
+    async def async_step_globird_plan(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Select the exact GloBird plan before AEMO spike setup."""
+        if user_input is not None:
+            plan = user_input.get(CONF_GLOBIRD_PLAN, GLOBIRD_PLAN_NOT_ZEROHERO)
+            self._globird_data = {CONF_GLOBIRD_PLAN: plan}
+            if plan == GLOBIRD_PLAN_ZEROHERO_CUSTOM:
+                for key in (
+                    CONF_GLOBIRD_ZEROHERO_START,
+                    CONF_GLOBIRD_ZEROHERO_END,
+                    CONF_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH,
+                    CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
+                    CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
+                    CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+                ):
+                    self._globird_data[key] = user_input.get(key)
+            return await self.async_step_aemo_config()
+
+        return self.async_show_form(
+            step_id="globird_plan",
+            data_schema=self._globird_plan_schema(),
         )
 
     async def async_step_aemo_config(
@@ -9561,6 +9703,17 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 user_input.pop(CONF_AEMO_REGION, None)
                 user_input.pop(CONF_AEMO_SPIKE_THRESHOLD, None)
 
+            if user_input.get(CONF_GLOBIRD_PLAN) != GLOBIRD_PLAN_ZEROHERO_CUSTOM:
+                for key in (
+                    CONF_GLOBIRD_ZEROHERO_START,
+                    CONF_GLOBIRD_ZEROHERO_END,
+                    CONF_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH,
+                    CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
+                    CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
+                    CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+                ):
+                    user_input.pop(key, None)
+
             # Check if user wants to configure custom tariff
             configure_tariff = user_input.pop("configure_custom_tariff", False)
 
@@ -9581,7 +9734,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             == BATTERY_SYSTEM_TESLA
         )
 
-        schema_fields: dict[Any, Any] = {
+        current_globird_settings = dict(self.config_entry.data or {})
+        current_globird_settings.update(self.config_entry.options or {})
+        schema_fields: dict[Any, Any] = dict(
+            self._globird_plan_schema(current_globird_settings).schema
+        )
+        schema_fields.update({
             vol.Optional(
                 CONF_AEMO_SPIKE_ENABLED,
                 default=self._get_option(CONF_AEMO_SPIKE_ENABLED, False),
@@ -9603,7 +9761,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 min=0.0, max=20000.0, step=1.0, unit_of_measurement=self._selector_unit("market_rate"),
                 mode=NumberSelectorMode.BOX,
             )),
-        }
+        })
 
         # Tesla users get tariff from the Tesla API — no need for manual configuration
         if not is_tesla:
@@ -9612,7 +9770,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 "**Custom Tariff (recommended):** Non-Tesla systems, including "
                 "Sigenergy and FoxESS cloud, should configure the Globird/TOU rates "
                 "inside PowerSync. These rates are needed for accurate price sensors, "
-                "battery optimisation, and EV charging."
+                "battery optimisation, and EV charging. For ZeroHero, enter the base "
+                "feed-in tariff here; PowerSync models the capped Super Export bonus "
+                "separately from your TOU tariff."
             )
         else:
             tariff_hint = (
@@ -9620,7 +9780,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 "the tariff already stored on your Powerwall. Set the correct "
                 "Globird/TOU tariff in the Tesla app before saving these settings. "
                 "After changing the Tesla tariff, restart Home Assistant or reload "
-                "PowerSync so the scheduler refreshes its cached baseline."
+                "PowerSync so the scheduler refreshes its cached baseline. Select "
+                "your ZeroHero plan here so PowerSync can model the export cap and "
+                "no-import credit on top of the Tesla tariff."
             )
 
         return self.async_show_form(

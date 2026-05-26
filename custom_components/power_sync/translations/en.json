@@ -165,6 +165,29 @@
         },
         "submit": "Next"
       },
+      "globird_plan": {
+        "title": "GloBird plan",
+        "description": "Select your exact GloBird plan. ZeroHero's Super Export rate is capped and its daily credit is lost if imports exceed the evening threshold.",
+        "data": {
+          "globird_plan": "GloBird ZeroHero plan",
+          "globird_zerohero_start": "Custom Super Export start",
+          "globird_zerohero_end": "Custom Super Export end",
+          "globird_zerohero_export_cap_kwh": "Super Export cap",
+          "globird_zerohero_super_export_rate": "Custom Super Export rate",
+          "globird_zerohero_credit_amount": "Custom no-import credit",
+          "globird_zerohero_import_limit_kw": "No-import threshold"
+        },
+        "data_description": {
+          "globird_plan": "Choose the current ZeroHero plan (15 kWh from 18:00-21:00), the older legacy window, a custom ZeroHero setup, or Not on ZeroHero. PowerSync uses this to model ZeroHero export caps and no-import credits.",
+          "globird_zerohero_start": "Only used when GloBird plan is ZeroHero custom.",
+          "globird_zerohero_end": "Only used when GloBird plan is ZeroHero custom.",
+          "globird_zerohero_export_cap_kwh": "Only used when GloBird plan is ZeroHero custom. This is the daily kWh cap that receives the Super Export rate.",
+          "globird_zerohero_super_export_rate": "Only used when GloBird plan is ZeroHero custom. This is the total export rate, not an amount added to the base feed-in tariff.",
+          "globird_zerohero_credit_amount": "Only used when GloBird plan is ZeroHero custom.",
+          "globird_zerohero_import_limit_kw": "Only used when GloBird plan is ZeroHero custom. Current ZeroHero uses 0.03 kWh per hour, treated as a 0.03 kW average import threshold."
+        },
+        "submit": "Next"
+      },
       "epex": {
         "title": "EPEX day-ahead pricing",
         "description": "Configure European day-ahead pricing. Prices are sourced from ENTSO-E via the EPEX Predictor API (free, no account needed).",
@@ -1467,12 +1490,26 @@
         "title": "Globird / AEMO settings",
         "description": "Configure your tariff source and optional AEMO spike export. Changes apply after the next sync cycle.\n\n{tariff_hint}",
         "data": {
+          "globird_plan": "GloBird ZeroHero plan",
+          "globird_zerohero_start": "Custom Super Export start",
+          "globird_zerohero_end": "Custom Super Export end",
+          "globird_zerohero_export_cap_kwh": "Super Export cap",
+          "globird_zerohero_super_export_rate": "Custom Super Export rate",
+          "globird_zerohero_credit_amount": "Custom no-import credit",
+          "globird_zerohero_import_limit_kw": "No-import threshold",
           "aemo_spike_enabled": "Enable spike detection",
           "aemo_region": "NEM region",
           "aemo_spike_threshold": "Spike threshold",
           "configure_custom_tariff": "Configure custom tariff"
         },
         "data_description": {
+          "globird_plan": "Choose the current ZeroHero plan (15 kWh from 18:00-21:00), the older legacy window, a custom ZeroHero setup, or Not on ZeroHero. PowerSync uses this to model ZeroHero export caps and no-import credits.",
+          "globird_zerohero_start": "Only used when GloBird plan is ZeroHero custom.",
+          "globird_zerohero_end": "Only used when GloBird plan is ZeroHero custom.",
+          "globird_zerohero_export_cap_kwh": "Only used when GloBird plan is ZeroHero custom. This is the daily kWh cap that receives the Super Export rate.",
+          "globird_zerohero_super_export_rate": "Only used when GloBird plan is ZeroHero custom. This is the total export rate, not an amount added to the base feed-in tariff.",
+          "globird_zerohero_credit_amount": "Only used when GloBird plan is ZeroHero custom.",
+          "globird_zerohero_import_limit_kw": "Only used when GloBird plan is ZeroHero custom. Current ZeroHero uses 0.03 kWh per hour, treated as a 0.03 kW average import threshold.",
           "aemo_spike_enabled": "Required for Globird and AEMO VPP plans that include spike export payments. Disable if your plan does not pay for spike exports.",
           "aemo_region": "Your NEM region determines which AEMO price feed is monitored. Check your electricity bill if unsure.",
           "aemo_spike_threshold": "Battery exports when the AEMO wholesale price exceeds this value. Default 3,000 in the selected market price unit matches most Globird and VPP plans. Only change if your plan specifies a different threshold.",

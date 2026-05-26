@@ -563,6 +563,31 @@ ELECTRICITY_PROVIDERS = {
     "other": "Other / Custom TOU — enter your own rates manually",
 }
 
+# GloBird ZeroHero plan configuration
+CONF_GLOBIRD_PLAN = "globird_plan"
+GLOBIRD_PLAN_NOT_ZEROHERO = "not_zerohero"
+GLOBIRD_PLAN_ZEROHERO_CURRENT = "zerohero_current"
+GLOBIRD_PLAN_ZEROHERO_LEGACY = "zerohero_legacy"
+GLOBIRD_PLAN_ZEROHERO_CUSTOM = "zerohero_custom"
+GLOBIRD_PLANS = {
+    GLOBIRD_PLAN_NOT_ZEROHERO: "Not on ZeroHero",
+    GLOBIRD_PLAN_ZEROHERO_CURRENT: "ZeroHero current (15 kWh, 6pm-9pm)",
+    GLOBIRD_PLAN_ZEROHERO_LEGACY: "ZeroHero legacy (10 kWh, 6pm-8pm)",
+    GLOBIRD_PLAN_ZEROHERO_CUSTOM: "ZeroHero custom",
+}
+CONF_GLOBIRD_ZEROHERO_START = "globird_zerohero_start"
+CONF_GLOBIRD_ZEROHERO_END = "globird_zerohero_end"
+CONF_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH = "globird_zerohero_export_cap_kwh"
+CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE = "globird_zerohero_super_export_rate"
+CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT = "globird_zerohero_credit_amount"
+CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW = "globird_zerohero_import_limit_kw"
+DEFAULT_GLOBIRD_ZEROHERO_START = "18:00"
+DEFAULT_GLOBIRD_ZEROHERO_END = "21:00"
+DEFAULT_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH = 15.0
+DEFAULT_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE = 15.0
+DEFAULT_GLOBIRD_ZEROHERO_CREDIT_AMOUNT = 1.0
+DEFAULT_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW = 0.03
+
 # Localvolts configuration
 CONF_LOCALVOLTS_API_KEY = "localvolts_api_key"
 CONF_LOCALVOLTS_PARTNER_ID = "localvolts_partner_id"

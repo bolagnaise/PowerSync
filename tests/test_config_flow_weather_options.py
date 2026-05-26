@@ -65,6 +65,7 @@ CONFIG_OPTION_TEXT_STEP_PAIRS = (
     ("tariff_period", "tariff_period_options"),
     ("nz_retailer", "nz_options"),
     ("nz_rates", "nz_options"),
+    ("globird_plan", "globird_options"),
     ("aemo_config", "globird_options"),
     ("amber_site_selection", "amber_options"),
     ("site_selection", "amber_options"),
@@ -313,6 +314,38 @@ def test_globird_options_flow_warns_tesla_users_about_tariff_baseline():
     assert "Non-Tesla systems, including" in method_source
     assert "Sigenergy and FoxESS cloud" in method_source
     assert "inside PowerSync" in method_source
+    assert "feed-in tariff here" in method_source
+    assert "your ZeroHero plan here" in method_source
+
+
+def test_globird_initial_setup_routes_through_plan_selection():
+    source = CONFIG_FLOW_PATH.read_text()
+    provider_method = _config_flow_method("async_step_provider_selection")
+    provider_source = ast.get_source_segment(source, provider_method)
+    plan_method = _config_flow_method("async_step_globird_plan")
+    plan_source = ast.get_source_segment(source, plan_method)
+
+    assert provider_source is not None
+    assert 'provider == "globird"' in provider_source
+    assert "return await self.async_step_globird_plan()" in provider_source
+    assert plan_source is not None
+    assert "GLOBIRD_PLAN_NOT_ZEROHERO" in plan_source
+    assert "GLOBIRD_PLAN_ZEROHERO_CUSTOM" in plan_source
+    assert "CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW" in plan_source
+
+
+def test_globird_plan_strings_are_available_in_setup_and_options():
+    for path in (STRINGS_PATH, TRANSLATIONS_PATH):
+        data = json.loads(path.read_text())
+        config_step = data["config"]["step"]["globird_plan"]
+        options_step = data["options"]["step"]["globird_options"]
+
+        for step in (config_step, options_step):
+            assert step["data"]["globird_plan"] == "GloBird ZeroHero plan"
+            assert step["data"]["globird_zerohero_export_cap_kwh"] == "Super Export cap"
+            assert step["data"]["globird_zerohero_import_limit_kw"] == "No-import threshold"
+            assert "15 kWh" in step["data_description"]["globird_plan"]
+            assert "0.03 kW" in step["data_description"]["globird_zerohero_import_limit_kw"]
 
 
 def test_optimization_options_exposes_enabled_toggle():

@@ -266,6 +266,78 @@ def test_grid_export_cannot_come_from_grid_passthrough(battery_optimizer_module)
     assert max(result.grid_import_w) <= 1e-6
 
 
+def test_zerohero_bonus_cap_limits_intentional_battery_export(
+    battery_optimizer_module,
+):
+    if not battery_optimizer_module.SCIPY_AVAILABLE:
+        pytest.skip("ZeroHero bonus cap is enforced by the LP optimizer")
+
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=50000,
+        max_charge_w=10000,
+        max_discharge_w=10000,
+        backup_reserve=0.05,
+        interval_minutes=5,
+        horizon_hours=3,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.05] * 36,
+        export_prices=[0.0] * 36,
+        export_bonus_prices=[0.15] * 36,
+        export_bonus_cap_kwh=1.0,
+        solar_forecast=[0.0] * 36,
+        load_forecast=[0.0] * 36,
+        current_soc=0.90,
+        acquisition_cost_kwh=0.0,
+        allow_battery_export=[True] * 36,
+        block_battery_charge=[True] * 36,
+    )
+
+    exported_kwh = sum(w / 1000 * optimizer.dt_hours for w in result.grid_export_w)
+
+    assert result.feasible is True
+    assert exported_kwh <= 1.001
+    assert any(action.action == "export" for action in result.schedule.actions)
+
+
+def test_zerohero_solar_surplus_shares_bonus_bucket_before_battery_export(
+    battery_optimizer_module,
+):
+    if not battery_optimizer_module.SCIPY_AVAILABLE:
+        pytest.skip("ZeroHero bonus cap is enforced by the LP optimizer")
+
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=50000,
+        max_charge_w=10000,
+        max_discharge_w=10000,
+        backup_reserve=0.05,
+        interval_minutes=5,
+        horizon_hours=3,
+    )
+
+    result = optimizer.optimize(
+        import_prices=[0.05] * 36,
+        export_prices=[0.0] * 36,
+        export_bonus_prices=[0.15] * 36,
+        export_bonus_cap_kwh=1.0,
+        solar_forecast=[2.0] * 36,
+        load_forecast=[0.0] * 36,
+        current_soc=0.90,
+        acquisition_cost_kwh=0.0,
+        allow_battery_export=[True] * 36,
+        block_battery_charge=[True] * 36,
+    )
+
+    battery_export_kwh = sum(
+        max(0.0, w / 1000 - 2.0) * optimizer.dt_hours
+        for w in result.grid_export_w
+    )
+
+    assert result.feasible is True
+    assert battery_export_kwh <= 1.001
+
+
 def test_below_reserve_can_grid_charge_during_cheap_window(battery_optimizer_module):
     optimizer = battery_optimizer_module.BatteryOptimizer(
         capacity_wh=13500,
