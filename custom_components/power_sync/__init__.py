@@ -3591,6 +3591,13 @@ def _calendar_entry_with_detail_aliases(entry: dict[str, Any]) -> dict[str, Any]
         max(0, solar_wh - solar_to_home_wh - grid_export_wh),
     )
     grid_to_battery_wh = max(0, battery_charge_wh - solar_to_battery_wh)
+    available_solar_for_export_wh = max(0, solar_wh - solar_to_home_wh - solar_to_battery_wh)
+    solar_to_grid_wh = min(grid_export_wh, available_solar_for_export_wh)
+    available_battery_for_export_wh = max(0, battery_discharge_wh - battery_to_home_wh)
+    battery_to_grid_wh = min(
+        max(0, grid_export_wh - solar_to_grid_wh),
+        available_battery_for_export_wh,
+    )
 
     enriched.setdefault("solar_energy_exported", solar_wh)
     enriched.setdefault("battery_energy_exported", battery_discharge_wh)
@@ -3603,8 +3610,8 @@ def _calendar_entry_with_detail_aliases(entry: dict[str, Any]) -> dict[str, Any]
     enriched.setdefault("consumer_energy_imported_from_battery", battery_to_home_wh)
     enriched.setdefault("grid_energy_imported", grid_import_wh)
     enriched.setdefault("grid_energy_exported", grid_export_wh)
-    enriched.setdefault("grid_energy_exported_from_solar", grid_export_wh)
-    enriched.setdefault("grid_energy_exported_from_battery", 0)
+    enriched.setdefault("grid_energy_exported_from_solar", solar_to_grid_wh)
+    enriched.setdefault("grid_energy_exported_from_battery", battery_to_grid_wh)
     return enriched
 
 

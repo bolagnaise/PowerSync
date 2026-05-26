@@ -192,3 +192,28 @@ def test_current_calendar_entry_exposes_tesla_style_detail_aliases():
     assert entry["consumer_energy_imported_from_grid"] == 800
     assert entry["consumer_energy_imported_from_solar"] == 100
     assert entry["consumer_energy_imported_from_battery"] == 1200
+
+
+def test_current_calendar_entry_caps_solar_export_alias_to_solar_generation():
+    namespace = _calendar_namespace()
+    namespace["_find_calendar_statistic_entity_ids"] = lambda hass, entry_id: {}
+    hass = SimpleNamespace(states=_States({}))
+    coordinator = SimpleNamespace(
+        data={
+            "energy_summary": {
+                "pv_today_kwh": 10.27,
+                "discharge_today_kwh": 46.5,
+                "charge_today_kwh": 52.1,
+                "grid_import_today_kwh": 0,
+                "grid_export_today_kwh": 33.73,
+                "load_today_kwh": 0,
+            }
+        }
+    )
+
+    entry = namespace["_calendar_current_entry"](hass, coordinator, "entry-1")
+
+    assert entry["solar_generation"] == 10270
+    assert entry["grid_export"] == 33730
+    assert entry["grid_energy_exported_from_solar"] == 10270
+    assert entry["grid_energy_exported_from_battery"] == 23460
