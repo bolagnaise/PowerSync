@@ -406,6 +406,42 @@ def test_initial_setup_routes_to_combined_optimization_options_page():
     assert "return await self.async_step_optimization_provider()" not in method_source
 
 
+def test_initial_config_flow_does_not_use_options_flow_get_option_helper():
+    for node in _module_tree().body:
+        if isinstance(node, ast.ClassDef) and node.name == "PowerSyncConfigFlow":
+            get_option_calls = [
+                item.lineno
+                for item in ast.walk(node)
+                if (
+                    isinstance(item, ast.Call)
+                    and isinstance(item.func, ast.Attribute)
+                    and item.func.attr == "_get_option"
+                    and isinstance(item.func.value, ast.Name)
+                    and item.func.value.id == "self"
+                )
+            ]
+            assert get_option_calls == []
+            return
+
+    raise AssertionError("PowerSyncConfigFlow class not found")
+
+
+def test_solaredge_initial_flow_preserves_setup_defaults_locally():
+    source = CONFIG_FLOW_PATH.read_text()
+    method = _config_flow_method("async_step_solaredge")
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    assert "current_solaredge = user_input or self._solaredge_data" in method_source
+    assert "current_solaredge.get(" in method_source
+    assert "CONF_SOLAREDGE_HOST" in method_source
+    assert "CONF_SOLAREDGE_PORT" in method_source
+    assert "CONF_SOLAREDGE_SLAVE_ID" in method_source
+    assert "CONF_SOLAREDGE_RATED_POWER_W" in method_source
+    assert "CONF_SOLAREDGE_ENTITY_PREFIX" in method_source
+    assert "CONF_SOLAREDGE_DC_CURTAILMENT_ENABLED" in method_source
+
+
 def test_foxess_initial_flow_offers_cloud_only_backend():
     source = CONFIG_FLOW_PATH.read_text()
     method = _config_flow_method("async_step_foxess_connection")

@@ -2770,17 +2770,19 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     }
                     return self._create_final_entry()
 
+        current_solaredge = user_input or self._solaredge_data
+
         return self.async_show_form(
             step_id="solaredge",
             data_schema=vol.Schema(
                 {
                     vol.Optional(
                         CONF_SOLAREDGE_HOST,
-                        default=self._get_option(CONF_SOLAREDGE_HOST, ""),
+                        default=current_solaredge.get(CONF_SOLAREDGE_HOST, ""),
                     ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                     vol.Optional(
                         CONF_SOLAREDGE_PORT,
-                        default=self._get_option(
+                        default=current_solaredge.get(
                             CONF_SOLAREDGE_PORT, DEFAULT_SOLAREDGE_PORT
                         ),
                     ): NumberSelector(NumberSelectorConfig(
@@ -2788,7 +2790,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     )),
                     vol.Optional(
                         CONF_SOLAREDGE_SLAVE_ID,
-                        default=self._get_option(
+                        default=current_solaredge.get(
                             CONF_SOLAREDGE_SLAVE_ID, DEFAULT_SOLAREDGE_SLAVE_ID
                         ),
                     ): NumberSelector(NumberSelectorConfig(
@@ -2796,7 +2798,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     )),
                     vol.Required(
                         CONF_SOLAREDGE_RATED_POWER_W,
-                        default=self._get_option(
+                        default=current_solaredge.get(
                             CONF_SOLAREDGE_RATED_POWER_W,
                             DEFAULT_SOLAREDGE_RATED_POWER_W,
                         ),
@@ -2806,11 +2808,13 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     )),
                     vol.Optional(
                         CONF_SOLAREDGE_ENTITY_PREFIX,
-                        default=self._get_option(CONF_SOLAREDGE_ENTITY_PREFIX, ""),
+                        default=current_solaredge.get(
+                            CONF_SOLAREDGE_ENTITY_PREFIX, ""
+                        ),
                     ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
                     vol.Optional(
                         CONF_SOLAREDGE_DC_CURTAILMENT_ENABLED,
-                        default=self._get_option(
+                        default=current_solaredge.get(
                             CONF_SOLAREDGE_DC_CURTAILMENT_ENABLED, False
                         ),
                     ): BooleanSelector(),
