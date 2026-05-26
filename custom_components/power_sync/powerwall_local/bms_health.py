@@ -29,6 +29,26 @@ def _block_din(block: dict[str, Any]) -> str | None:
     return din if isinstance(din, str) and din else None
 
 
+def _battery_block_dins(battery_blocks: list[dict[str, Any]]) -> list[str]:
+    return [
+        din
+        for din in (_block_din(block) for block in battery_blocks)
+        if din
+    ]
+
+
+def _follower_dins_from_battery_blocks(
+    battery_blocks: list[dict[str, Any]],
+    leader_din: Any = None,
+) -> list[str]:
+    base_dins = _battery_block_dins(battery_blocks)
+    leader_physical_din = leader_din if isinstance(leader_din, str) and leader_din else None
+    if leader_physical_din not in base_dins:
+        leader_physical_din = None
+    leader_physical_din = leader_physical_din or (base_dins[0] if base_dins else None)
+    return [din for din in base_dins if din != leader_physical_din]
+
+
 def known_expansion_dins_from_gateway_config(config: dict[str, Any] | None) -> list[str]:
     """Return configured battery expansion DIN/VIN values from config.json."""
     blocks = (config or {}).get("battery_blocks") or []
@@ -67,6 +87,41 @@ def _expansion_dins_by_serial(known_expansion_dins: list[str] | None) -> dict[st
 def _pack_bms_serial(pack: dict[str, Any]) -> str | None:
     serial = pack.get("bmsSerialNumber") or pack.get("bms_serial_number") or pack.get("serialNumber")
     return serial if isinstance(serial, str) and serial else None
+
+
+def trim_excess_pw3_follower_placeholders(
+    packs: list[dict[str, Any]],
+    battery_blocks: list[dict[str, Any]],
+    leader_din: Any = None,
+) -> int:
+    """Drop null BMS follower placeholders beyond physical PW3 follower units.
+
+    Some PW3 stacks expose extra ``PW3BMS`` rows where the BMS capacity signal key
+    exists but the value is null. Only rows backed by non-leader ``batteryBlocks``
+    represent physical follower Powerwalls; extra rows are placeholders and must
+    not receive a share of the aggregate capacity.
+    """
+    if not packs:
+        return 0
+
+    base_dins = _battery_block_dins(battery_blocks)
+    if not base_dins:
+        return 0
+
+    follower_limit = len(_follower_dins_from_battery_blocks(battery_blocks, leader_din))
+    placeholder_indices = [
+        idx
+        for idx, pack in enumerate(packs)
+        if pack.get("isFollower")
+        and (_as_float(pack.get("nominalFullPackEnergyWh")) or 0) <= 0
+    ]
+    excess = len(placeholder_indices) - follower_limit
+    if excess <= 0:
+        return 0
+
+    for idx in reversed(placeholder_indices[follower_limit:]):
+        del packs[idx]
+    return excess
 
 
 def _choose_follower_indices(
@@ -132,8 +187,7 @@ def assign_pack_roles_from_battery_blocks(
     Returns True when PW3 semantics were applied.
     """
     components = components or []
-    base_dins = [_block_din(block) for block in battery_blocks]
-    base_dins = [din for din in base_dins if din]
+    base_dins = _battery_block_dins(battery_blocks)
     is_pw3_stack = has_pw3_stack(battery_blocks, components, leader_din)
 
     if not is_pw3_stack:
@@ -151,8 +205,10 @@ def assign_pack_roles_from_battery_blocks(
         return False
 
     leader_physical_din = leader_din if isinstance(leader_din, str) and leader_din else None
+    if leader_physical_din not in base_dins:
+        leader_physical_din = None
     leader_physical_din = leader_physical_din or (base_dins[0] if base_dins else None)
-    follower_dins = [din for din in base_dins if din != leader_physical_din]
+    follower_dins = _follower_dins_from_battery_blocks(battery_blocks, leader_physical_din)
     explicit_follower_count = sum(1 for pack in packs if pack.get("isFollower"))
     follower_slots_to_assign = max(0, len(follower_dins) - explicit_follower_count)
     known_expansion_by_serial = _expansion_dins_by_serial(known_expansion_dins)

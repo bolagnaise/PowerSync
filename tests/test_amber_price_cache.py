@@ -398,3 +398,19 @@ def test_tesla_lifetime_totals_coerces_persisted_values():
     })
 
     assert totals == {"lifetime_grid_export_kwh": 604.96}
+
+
+def test_stored_battery_health_capacity_uses_bms_current_capacity():
+    hass = _FakeHass(
+        data={
+            "power_sync": {
+                "entry-1": {
+                    "battery_health": {
+                        "current_capacity_wh": 43250.0,
+                    },
+                },
+            },
+        }
+    )
+
+    assert coordinator._stored_battery_health_capacity_kwh(hass, "entry-1") == 43.25

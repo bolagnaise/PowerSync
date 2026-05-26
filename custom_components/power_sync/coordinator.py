@@ -96,6 +96,22 @@ def _configured_ac_inverter_power_kw(hass: HomeAssistant, entry_id: str) -> floa
         return 0.0
 
 
+def _stored_battery_health_capacity_kwh(hass: HomeAssistant, entry_id: str) -> float | None:
+    """Return the latest BMS-scanned current Powerwall capacity in kWh."""
+    health = (
+        hass.data.get(DOMAIN, {})
+        .get(entry_id, {})
+        .get("battery_health")
+        or {}
+    )
+    capacity_wh = health.get("current_capacity_wh")
+    try:
+        capacity_kwh = float(capacity_wh) / 1000.0
+    except (TypeError, ValueError):
+        return None
+    return round(capacity_kwh, 2) if capacity_kwh > 0 else None
+
+
 class EnergyAccumulator:
     """Accumulates daily energy totals from instantaneous power readings.
 
@@ -1955,10 +1971,9 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
             nameplate_kw = round(nameplate_w / 1000.0, 2) if nameplate_w else None
 
             # Total pack energy (nameplate Wh) and energy_left (stored Wh) come
-            # from live_status, not site_info — that was the v2.12.236 bug that
-            # left these sensors stuck at "Unknown". site_info exposes
-            # nameplate_power but NOT pack capacity, so we fall back to
-            # battery_count × per-unit nameplate when live_status omits it.
+            # from live_status when Tesla supplies them. When live_status omits
+            # pack capacity, prefer the BMS-scanned Battery Health capacity over
+            # the static battery_count × per-unit nameplate fallback.
             total_pack_kwh: float | None = None
             tpe_w = live_status.get("total_pack_energy")
             if tpe_w is not None:
@@ -1966,10 +1981,14 @@ class TeslaEnergyCoordinator(DataUpdateCoordinator):
                     total_pack_kwh = round(float(tpe_w) / 1000.0, 2)
                 except (TypeError, ValueError):
                     total_pack_kwh = None
+            if total_pack_kwh is None:
+                total_pack_kwh = _stored_battery_health_capacity_kwh(
+                    self.hass,
+                    self._entry_id,
+                )
             if total_pack_kwh is None and self._site_info_cache:
-                # Fallback: derive from battery_count × per-unit nameplate.
-                # PW2 = 13.5 kWh, PW3 = 13.5 kWh; the battery_count field is
-                # reliably present even when total_pack_energy isn't.
+                # Last-resort fallback when no BMS scan has populated live
+                # capacity yet.
                 count = (
                     (self._site_info_cache.get("components") or {}).get("battery_count")
                     or self._site_info_cache.get("battery_count")

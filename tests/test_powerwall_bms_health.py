@@ -26,6 +26,9 @@ assign_pack_roles_from_battery_blocks = (
 known_expansion_dins_from_gateway_config = (
     bms_health.known_expansion_dins_from_gateway_config
 )
+trim_excess_pw3_follower_placeholders = (
+    bms_health.trim_excess_pw3_follower_placeholders
+)
 
 
 def test_reconciles_serial_less_near_empty_expansion_from_aggregate_remaining():
@@ -231,6 +234,94 @@ def test_assigns_pw3_known_expansion_tail_slot_not_as_follower():
     assert packs[3]["physicalDin"] == "1807000-20-B--TG125214001188"
     assert packs[1]["physicalDin"] == "1707000-30-L--TG1251520030PH"
     assert packs[2]["physicalDin"] == "1707000-30-L--TG125152001WC8"
+
+
+def test_trims_extra_null_bms_followers_to_physical_pw3_followers():
+    packs = [
+        {
+            "serialNumber": "TG125xxxxxxxNY",
+            "bmsSerialNumber": "TG125xxxxxxxNY",
+            "isFollower": False,
+            "nominalFullPackEnergyWh": 14470.0,
+            "nominalEnergyRemainingWh": 7000.0,
+        },
+        {
+            "serialNumber": None,
+            "bmsSerialNumber": None,
+            "isFollower": True,
+            "nominalFullPackEnergyWh": 0.0,
+            "nominalEnergyRemainingWh": 0.0,
+        },
+        {
+            "serialNumber": None,
+            "bmsSerialNumber": None,
+            "isFollower": True,
+            "nominalFullPackEnergyWh": 0.0,
+            "nominalEnergyRemainingWh": 0.0,
+        },
+        {
+            "serialNumber": None,
+            "bmsSerialNumber": None,
+            "isFollower": True,
+            "nominalFullPackEnergyWh": 0.0,
+            "nominalEnergyRemainingWh": 0.0,
+        },
+    ]
+    battery_blocks = [
+        {"din": "1707000-30-K--TG125xxxxxxxNY"},
+        {"din": "1707000-30-L--TG125xxxxxxx2P"},
+        {"din": "1707000-30-L--TG125xxxxxxx9Y"},
+    ]
+
+    dropped = trim_excess_pw3_follower_placeholders(
+        packs,
+        battery_blocks,
+        "TESLA-GATEWAY-DIN",
+    )
+
+    assert dropped == 1
+    assert len(packs) == 3
+
+    follower_indices = [
+        i for i, p in enumerate(packs)
+        if p.get("isFollower") and p.get("nominalFullPackEnergyWh") == 0
+    ]
+    inferred_full_wh = (
+        43250.0
+        - sum(p["nominalFullPackEnergyWh"] for p in packs if not p.get("isFollower"))
+    ) / len(follower_indices)
+
+    assert round(inferred_full_wh) == 14390
+
+
+def test_assigns_pw3_roles_when_pairing_din_is_gateway_not_powerwall():
+    packs = [
+        {
+            "serialNumber": "TG125xxxxxxxNY",
+            "bmsSerialNumber": "TG125xxxxxxxNY",
+            "isFollower": False,
+        },
+        {"serialNumber": None, "bmsSerialNumber": None, "isFollower": True},
+        {"serialNumber": None, "bmsSerialNumber": None, "isFollower": True},
+    ]
+    battery_blocks = [
+        {"din": "1707000-30-K--TG125xxxxxxxNY"},
+        {"din": "1707000-30-L--TG125xxxxxxx2P"},
+        {"din": "1707000-30-L--TG125xxxxxxx9Y"},
+    ]
+
+    is_pw3 = assign_pack_roles_from_battery_blocks(
+        packs,
+        battery_blocks,
+        "TESLA-GATEWAY-DIN",
+        [],
+    )
+
+    assert is_pw3 is True
+    assert [pack["role"] for pack in packs] == ["leader", "follower", "follower"]
+    assert packs[0]["physicalDin"] == "1707000-30-K--TG125xxxxxxxNY"
+    assert packs[1]["physicalDin"] == "1707000-30-L--TG125xxxxxxx2P"
+    assert packs[2]["physicalDin"] == "1707000-30-L--TG125xxxxxxx9Y"
 
 
 def test_keeps_four_pw2_packs_as_plain_powerwalls():

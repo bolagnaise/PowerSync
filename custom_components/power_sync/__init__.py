@@ -4816,6 +4816,7 @@ class BatteryHealthView(HomeAssistantView):
             known_expansion_dins_from_gateway_config,
             reconcile_pack_remaining_with_aggregate,
             serial_from_din,
+            trim_excess_pw3_follower_placeholders,
         )
 
         private_key_pem = entry.data.get(CONF_POWERWALL_LOCAL_PRIVATE_KEY)
@@ -5004,6 +5005,21 @@ class BatteryHealthView(HomeAssistantView):
                 "isExpansion": bool(is_pw3_stack and individual and not is_follower),
                 "isFollower": is_follower,
             })
+
+        if is_pw3_stack:
+            dropped_followers = trim_excess_pw3_follower_placeholders(
+                individual,
+                battery_blocks,
+                din,
+            )
+            if dropped_followers:
+                bms_module_count = max(0, bms_module_count - dropped_followers)
+                _LOGGER.warning(
+                    "fleet_api_bms: dropping %d excess PW3 follower placeholder(s); "
+                    "batteryBlocks report %d physical follower unit(s)",
+                    dropped_followers,
+                    max(0, len(battery_blocks) - 1),
+                )
 
         # Follower units report None BMS signals — their contribution is inferable from the
         # aggregate systemStatus total minus the sum of leader packs. The serial number comes
