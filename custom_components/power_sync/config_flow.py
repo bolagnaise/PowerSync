@@ -471,6 +471,120 @@ SUNGROW_LEGACY_DUAL_KEYS = (
 )
 
 
+def _build_globird_plan_schema(
+    current: dict[str, Any] | None = None,
+    *,
+    rate_unit: str,
+    currency_unit: str,
+) -> vol.Schema:
+    """Build the shared GloBird plan selector schema."""
+    current = current or {}
+    hour_options = [
+        SelectOptionDict(value=f"{h:02d}:00", label=f"{h:02d}:00")
+        for h in range(24)
+    ]
+    return vol.Schema(
+        {
+            vol.Required(
+                CONF_GLOBIRD_PLAN,
+                default=current.get(CONF_GLOBIRD_PLAN, GLOBIRD_PLAN_NOT_ZEROHERO),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=[
+                        SelectOptionDict(value=k, label=v)
+                        for k, v in GLOBIRD_PLANS.items()
+                    ],
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(
+                CONF_GLOBIRD_ZEROHERO_START,
+                default=current.get(
+                    CONF_GLOBIRD_ZEROHERO_START,
+                    DEFAULT_GLOBIRD_ZEROHERO_START,
+                ),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=hour_options,
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(
+                CONF_GLOBIRD_ZEROHERO_END,
+                default=current.get(
+                    CONF_GLOBIRD_ZEROHERO_END,
+                    DEFAULT_GLOBIRD_ZEROHERO_END,
+                ),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=hour_options,
+                    mode=SelectSelectorMode.DROPDOWN,
+                )
+            ),
+            vol.Optional(
+                CONF_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH,
+                default=current.get(
+                    CONF_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH,
+                    DEFAULT_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH,
+                ),
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0.0,
+                    max=100.0,
+                    step=0.1,
+                    unit_of_measurement="kWh",
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
+                default=current.get(
+                    CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
+                    DEFAULT_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
+                ),
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0.0,
+                    max=100.0,
+                    step=0.1,
+                    unit_of_measurement=rate_unit,
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
+                default=current.get(
+                    CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
+                    DEFAULT_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
+                ),
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0.0,
+                    max=10.0,
+                    step=0.01,
+                    unit_of_measurement=currency_unit,
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+                default=current.get(
+                    CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+                    DEFAULT_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+                ),
+            ): NumberSelector(
+                NumberSelectorConfig(
+                    min=0.0,
+                    max=5.0,
+                    step=0.001,
+                    unit_of_measurement="kW",
+                    mode=NumberSelectorMode.BOX,
+                )
+            ),
+        }
+    )
+
+
 def _normalize_neovolt_entry_ids(
     raw_entry_ids: Any,
     fallback_entry_id: str | None = None,
@@ -4250,100 +4364,10 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     def _globird_plan_schema(self, current: dict[str, Any] | None = None) -> vol.Schema:
         """Build the GloBird plan selector schema."""
-        current = current or {}
-        hour_options = [
-            SelectOptionDict(value=f"{h:02d}:00", label=f"{h:02d}:00")
-            for h in range(24)
-        ]
-        return vol.Schema(
-            {
-                vol.Required(
-                    CONF_GLOBIRD_PLAN,
-                    default=current.get(CONF_GLOBIRD_PLAN, GLOBIRD_PLAN_NOT_ZEROHERO),
-                ): SelectSelector(
-                    SelectSelectorConfig(
-                        options=[
-                            SelectOptionDict(value=k, label=v)
-                            for k, v in GLOBIRD_PLANS.items()
-                        ],
-                        mode=SelectSelectorMode.DROPDOWN,
-                    )
-                ),
-                vol.Optional(
-                    CONF_GLOBIRD_ZEROHERO_START,
-                    default=current.get(
-                        CONF_GLOBIRD_ZEROHERO_START,
-                        DEFAULT_GLOBIRD_ZEROHERO_START,
-                    ),
-                ): SelectSelector(
-                    SelectSelectorConfig(
-                        options=hour_options,
-                        mode=SelectSelectorMode.DROPDOWN,
-                    )
-                ),
-                vol.Optional(
-                    CONF_GLOBIRD_ZEROHERO_END,
-                    default=current.get(
-                        CONF_GLOBIRD_ZEROHERO_END,
-                        DEFAULT_GLOBIRD_ZEROHERO_END,
-                    ),
-                ): SelectSelector(
-                    SelectSelectorConfig(
-                        options=hour_options,
-                        mode=SelectSelectorMode.DROPDOWN,
-                    )
-                ),
-                vol.Optional(
-                    CONF_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH,
-                    default=current.get(
-                        CONF_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH,
-                        DEFAULT_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH,
-                    ),
-                ): NumberSelector(
-                    NumberSelectorConfig(
-                        min=0.0, max=100.0, step=0.1, unit_of_measurement="kWh",
-                        mode=NumberSelectorMode.BOX,
-                    )
-                ),
-                vol.Optional(
-                    CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
-                    default=current.get(
-                        CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
-                        DEFAULT_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
-                    ),
-                ): NumberSelector(
-                    NumberSelectorConfig(
-                        min=0.0, max=100.0, step=0.1,
-                        unit_of_measurement=self._selector_unit(),
-                        mode=NumberSelectorMode.BOX,
-                    )
-                ),
-                vol.Optional(
-                    CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
-                    default=current.get(
-                        CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
-                        DEFAULT_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
-                    ),
-                ): NumberSelector(
-                    NumberSelectorConfig(
-                        min=0.0, max=10.0, step=0.01,
-                        unit_of_measurement=self._currency(),
-                        mode=NumberSelectorMode.BOX,
-                    )
-                ),
-                vol.Optional(
-                    CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
-                    default=current.get(
-                        CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
-                        DEFAULT_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
-                    ),
-                ): NumberSelector(
-                    NumberSelectorConfig(
-                        min=0.0, max=5.0, step=0.001, unit_of_measurement="kW",
-                        mode=NumberSelectorMode.BOX,
-                    )
-                ),
-            }
+        return _build_globird_plan_schema(
+            current,
+            rate_unit=self._selector_unit(),
+            currency_unit=self._currency(),
         )
 
     async def async_step_globird_plan(
@@ -4965,6 +4989,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
     def _currency(self) -> str:
         """Return the configured currency."""
         return currency_for_provider(self._electricity_provider(), self.hass)
+
+    def _globird_plan_schema(self, current: dict[str, Any] | None = None) -> vol.Schema:
+        """Build the GloBird plan selector schema."""
+        return _build_globird_plan_schema(
+            current,
+            rate_unit=self._selector_unit(),
+            currency_unit=self._currency(),
+        )
 
     def _save_and_finish(self, section_data: dict[str, Any]) -> FlowResult:
         """Save a single section's data merged with existing options and finish."""

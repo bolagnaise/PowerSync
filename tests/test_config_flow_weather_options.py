@@ -334,6 +334,21 @@ def test_globird_initial_setup_routes_through_plan_selection():
     assert "CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW" in plan_source
 
 
+def test_globird_options_flow_has_plan_schema_helper():
+    source = CONFIG_FLOW_PATH.read_text()
+    helper = _options_flow_method("_globird_plan_schema")
+    helper_source = ast.get_source_segment(source, helper)
+    method = _options_flow_method("async_step_globird_options")
+    method_source = ast.get_source_segment(source, method)
+
+    assert helper_source is not None
+    assert "_build_globird_plan_schema" in helper_source
+    assert "rate_unit=self._selector_unit()" in helper_source
+    assert "currency_unit=self._currency()" in helper_source
+    assert method_source is not None
+    assert "self._globird_plan_schema(current_globird_settings).schema" in method_source
+
+
 def test_globird_plan_strings_are_available_in_setup_and_options():
     for path in (STRINGS_PATH, TRANSLATIONS_PATH):
         data = json.loads(path.read_text())
