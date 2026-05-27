@@ -2413,6 +2413,23 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             command_w = min(command_w, float(self._config.max_grid_export_w))
         return command_w
 
+    @staticmethod
+    def _force_command_power_changed(
+        previous_power_w: Any,
+        target_power_w: float,
+        *,
+        tolerance_w: float = 50.0,
+    ) -> bool:
+        """Return True when an active optimizer force command needs a power refresh."""
+        if previous_power_w is None:
+            return False
+        try:
+            previous = float(previous_power_w)
+            target = float(target_power_w)
+        except (TypeError, ValueError):
+            return False
+        return abs(previous - target) > tolerance_w
+
     async def _execute_optimizer_action(self, action: Any) -> None:
         """Execute an optimizer action on the battery."""
         if not self._executor or not self._executor.battery_controller:
@@ -2523,8 +2540,30 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         if force_type == "discharge"
                         else None
                     )
+                    force_power_w = (
+                        force_window_action.power_w
+                        if force_type == "charge"
+                        else self._export_command_power_w(force_window_action)
+                    )
                     new_expiry = dt_util.utcnow() + timedelta(minutes=extend_mins)
                     hardware_expiry = self._as_utc_datetime(_ext_state.get("hardware_expires_at"))
+                    supports_force_power_refresh = (
+                        (
+                            force_type == "charge"
+                            and self._supports_target_charge_power()
+                        )
+                        or (
+                            force_type == "discharge"
+                            and self._supports_target_export_power()
+                        )
+                    )
+                    hardware_power_changed = (
+                        supports_force_power_refresh
+                        and self._force_command_power_changed(
+                            _ext_state.get("power_w"),
+                            force_power_w,
+                        )
+                    )
                     if force_scope == "optimizer":
                         now = dt_util.utcnow()
                         refresh_window = timedelta(
@@ -2537,10 +2576,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         should_refresh_hardware = (
                             hardware_expiry is None
                             or hardware_expiry <= now + refresh_window
+                            or hardware_power_changed
                         )
                     else:
                         _ext_state["expires_at"] = new_expiry
-                        should_refresh_hardware = self.battery_system != "tesla"
+                        should_refresh_hardware = (
+                            self.battery_system != "tesla"
+                            or hardware_power_changed
+                        )
                     if self.battery_system == "tesla":
                         # Tesla force modes are implemented as uploaded TOU
                         # tariffs. The software timer can be extended cheaply,
@@ -2550,17 +2593,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         should_refresh_hardware = (
                             hardware_expiry is None
                             or new_expiry > hardware_expiry - timedelta(minutes=1)
+                            or hardware_power_changed
                         )
 
                     # Re-issue hardware writes when the hardware-side window is
-                    # shorter than the extended optimizer-owned force state.
+                    # shorter than the extended optimizer-owned force state, or
+                    # when the LP changes the target power inside the same mode.
                     if battery and hasattr(battery, "force_charge") and should_refresh_hardware:
                         try:
-                            force_power_w = (
-                                force_window_action.power_w
-                                if force_type == "charge"
-                                else self._export_command_power_w(force_window_action)
-                            )
                             # For Modbus-backed systems, _extend_hardware
                             # re-issues the inverter countdown. For Tesla, the
                             # service falls through to the full tariff uploader
@@ -2579,8 +2619,9 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     _tariff_duration=tariff_mins,
                                 )
                             _LOGGER.debug(
-                                "Optimizer: re-issued %s command for hardware timer extension (%dmin)",
-                                force_type, extend_mins,
+                                "Optimizer: re-issued %s command for hardware refresh "
+                                "(%dmin, %.0fW)",
+                                force_type, extend_mins, force_power_w,
                             )
                             if force_scope == "optimizer":
                                 self._set_optimizer_force_state(
@@ -2588,6 +2629,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                     extend_mins,
                                     force_power_w,
                                 )
+                            else:
+                                _ext_state["power_w"] = force_power_w
                         except Exception as ext_err:
                             _LOGGER.warning("Optimizer: failed to re-issue %s for extension: %s", force_type, ext_err)
 

@@ -2253,6 +2253,51 @@ def test_spread_export_force_extension_reuploads_target_power(opt_module):
     assert battery.force_discharge_calls == [(20, 1800, True, None)]
 
 
+def test_target_export_force_refreshes_when_optimizer_power_changes(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator.battery_system = "goodwe"
+    coordinator._config.max_discharge_w = 8000
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    actions = [
+        SimpleNamespace(
+            action="export",
+            power_w=8000,
+            timestamp=start + idx * timedelta(minutes=5),
+        )
+        for idx in range(3)
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+    coordinator._set_optimizer_force_state("discharge", 60, 2190)
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[0]))
+
+    assert battery.force_discharge_calls == [(15, 8000, True, None)]
+    assert coordinator._optimizer_force_state["power_w"] == 8000
+
+
+def test_non_target_export_force_ignores_power_change_when_window_is_valid(opt_module):
+    battery = _FakeBattery()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.80)
+    coordinator.battery_system = "tesla"
+    coordinator._config.max_discharge_w = 5000
+    start = datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc)
+    actions = [
+        SimpleNamespace(
+            action="export",
+            power_w=4200,
+            timestamp=start + idx * timedelta(minutes=5),
+        )
+        for idx in range(3)
+    ]
+    coordinator._current_schedule = SimpleNamespace(actions=actions)
+    coordinator._set_optimizer_force_state("discharge", 60, 2000)
+
+    asyncio.run(coordinator._execute_optimizer_action(actions[0]))
+
+    assert battery.force_discharge_calls == []
+
+
 def test_tesla_force_extension_near_tariff_boundary_extends_tariff_window(opt_module):
     boundary_now = datetime(2026, 5, 3, 8, 25, tzinfo=timezone.utc)
     opt_module.dt_util.now = lambda *args, **kwargs: boundary_now
