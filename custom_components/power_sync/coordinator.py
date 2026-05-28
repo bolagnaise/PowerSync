@@ -68,6 +68,7 @@ _SOLCAST_ESTIMATE_FIELDS = {
 
 ENERGY_ACC_STORE_VERSION = 1
 ENERGY_ACC_SAVE_DELAY = 300  # Flush at most every 5 minutes
+SOLAREDGE_DAILY_TOTALS_STORE_VERSION = 1
 LIFETIME_TOTALS_STORE_VERSION = 1
 LIFETIME_TOTAL_KEYS = (
     "lifetime_solar_kwh",
@@ -5902,6 +5903,15 @@ class SolarEdgeEnergyCoordinator(DataUpdateCoordinator):
             solaredge_entry_id=solaredge_entry_id,
         )
         self._energy_acc = EnergyAccumulator(hass, "solaredge")
+        self._daily_total_store = Store(
+            hass,
+            SOLAREDGE_DAILY_TOTALS_STORE_VERSION,
+            f"power_sync.solaredge_daily_totals.{entry_id or entity_prefix or 'default'}",
+        )
+        self._daily_total_baselines_restored = False
+        self._daily_total_baseline_date: str | None = None
+        self._daily_total_import_baseline: float | None = None
+        self._daily_total_export_baseline: float | None = None
         self._validated = False
 
         super().__init__(
@@ -5939,6 +5949,7 @@ class SolarEdgeEnergyCoordinator(DataUpdateCoordinator):
         buy, sell = _get_current_prices(self.hass, self._entry_id)
         self._energy_acc.update(max(0.0, solar_kw), grid_kw, battery_kw, load_kw, buy, sell)
         energy_summary = self._energy_acc.as_dict()
+        await self._apply_daily_total_deltas(status, energy_summary)
         for status_key, summary_key in (
             ("daily_solar_energy_kwh", "pv_today_kwh"),
             ("daily_grid_import_kwh", "grid_import_today_kwh"),
@@ -5981,6 +5992,102 @@ class SolarEdgeEnergyCoordinator(DataUpdateCoordinator):
         )
 
         return data
+
+    async def _restore_daily_total_baselines(self) -> None:
+        """Restore SolarEdge lifetime-counter baselines for the current day."""
+        if self._daily_total_baselines_restored:
+            return
+        self._daily_total_baselines_restored = True
+        try:
+            stored = await self._daily_total_store.async_load()
+        except Exception as exc:
+            _LOGGER.debug("Failed to restore SolarEdge daily total baselines: %s", exc)
+            return
+        if not isinstance(stored, dict):
+            return
+        today = dt_util.now().date().isoformat()
+        if stored.get("date") != today:
+            return
+        self._daily_total_baseline_date = today
+        self._daily_total_import_baseline = self._float_or_none(stored.get("import_baseline_kwh"))
+        self._daily_total_export_baseline = self._float_or_none(stored.get("export_baseline_kwh"))
+
+    async def _save_daily_total_baselines(self) -> None:
+        """Persist SolarEdge lifetime-counter baselines."""
+        try:
+            await self._daily_total_store.async_save(
+                {
+                    "date": self._daily_total_baseline_date,
+                    "import_baseline_kwh": self._daily_total_import_baseline,
+                    "export_baseline_kwh": self._daily_total_export_baseline,
+                }
+            )
+        except Exception as exc:
+            _LOGGER.debug("Failed to save SolarEdge daily total baselines: %s", exc)
+
+    async def _apply_daily_total_deltas(self, status: dict[str, Any], energy_summary: dict[str, Any]) -> None:
+        """Convert SolarEdge M1 lifetime counters into current-day deltas."""
+        await self._restore_daily_total_baselines()
+        today = dt_util.now().date().isoformat()
+        total_import = self._float_or_none(status.get("total_grid_import_kwh"))
+        total_export = self._float_or_none(status.get("total_grid_export_kwh"))
+        changed = False
+
+        if self._daily_total_baseline_date != today:
+            self._daily_total_baseline_date = today
+            self._daily_total_import_baseline = total_import
+            self._daily_total_export_baseline = total_export
+            changed = total_import is not None or total_export is not None
+            if changed:
+                _LOGGER.info(
+                    "SolarEdge daily import/export baseline reset: import=%.3f export=%.3f kWh",
+                    total_import or 0.0,
+                    total_export or 0.0,
+                )
+        else:
+            if self._daily_total_import_baseline is None and total_import is not None:
+                self._daily_total_import_baseline = total_import
+                changed = True
+            if self._daily_total_export_baseline is None and total_export is not None:
+                self._daily_total_export_baseline = total_export
+                changed = True
+
+        import_delta, import_changed = self._daily_total_delta(
+            total_import,
+            "_daily_total_import_baseline",
+        )
+        export_delta, export_changed = self._daily_total_delta(
+            total_export,
+            "_daily_total_export_baseline",
+        )
+        changed = changed or import_changed or export_changed
+
+        if import_delta is not None:
+            energy_summary["grid_import_today_kwh"] = import_delta
+        if export_delta is not None:
+            energy_summary["grid_export_today_kwh"] = export_delta
+        if changed:
+            await self._save_daily_total_baselines()
+
+    def _daily_total_delta(self, total: float | None, baseline_attr: str) -> tuple[float | None, bool]:
+        """Return daily delta from a lifetime total, resetting if the total rolls back."""
+        if total is None:
+            return (None, False)
+        baseline = getattr(self, baseline_attr)
+        if baseline is None:
+            setattr(self, baseline_attr, total)
+            return (0.0, True)
+        if total < baseline:
+            setattr(self, baseline_attr, total)
+            return (0.0, True)
+        return (round(total - baseline, 3), False)
+
+    @staticmethod
+    def _float_or_none(value: Any) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
 
     async def async_shutdown(self) -> None:
         await self._controller.disconnect()

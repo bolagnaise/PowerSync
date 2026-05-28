@@ -243,6 +243,11 @@ _ENERGY_READ_ENTITIES: dict[str, tuple[str, ...]] = {
     ),
 }
 
+_LIFETIME_ENERGY_TOTAL_ENTITIES: dict[str, tuple[str, ...]] = {
+    "daily_grid_import": ("m1_imported_kwh",),
+    "daily_grid_export": ("m1_exported_kwh",),
+}
+
 for _idx in range(1, 5):
     _ENERGY_READ_ENTITIES[f"pv{_idx}_power"] = (
         f"pv{_idx}_power",
@@ -641,6 +646,10 @@ class SolarEdgeEnergyController:
         load_kw = self._power_kw("load_power")
         if load_kw is None or load_kw <= 0:
             load_kw = max(0.0, solar_kw + grid_kw + battery_kw)
+        grid_import_kwh = self._energy_kwh("daily_grid_import")
+        grid_export_kwh = self._energy_kwh("daily_grid_export")
+        grid_import_is_total = self._is_lifetime_energy_total("daily_grid_import")
+        grid_export_is_total = self._is_lifetime_energy_total("daily_grid_export")
 
         status: dict[str, Any] = {
             "battery_level": self._read_float("battery_level"),
@@ -653,8 +662,10 @@ class SolarEdgeEnergyController:
             "backup_reserve": self._read_float("backup_reserve"),
             "min_soc": self._read_float("backup_reserve"),
             "daily_solar_energy_kwh": self._energy_kwh("daily_solar_energy"),
-            "daily_grid_import_kwh": self._energy_kwh("daily_grid_import"),
-            "daily_grid_export_kwh": self._energy_kwh("daily_grid_export"),
+            "daily_grid_import_kwh": None if grid_import_is_total else grid_import_kwh,
+            "daily_grid_export_kwh": None if grid_export_is_total else grid_export_kwh,
+            "total_grid_import_kwh": grid_import_kwh if grid_import_is_total else None,
+            "total_grid_export_kwh": grid_export_kwh if grid_export_is_total else None,
             "daily_battery_charge_kwh": self._energy_kwh("daily_battery_charge"),
             "daily_battery_discharge_kwh": self._energy_kwh("daily_battery_discharge"),
             "control_entities": dict(self._control_entity_map),
@@ -1090,6 +1101,15 @@ class SolarEdgeEnergyController:
         if unit == "mwh":
             return value * 1000.0
         return value
+
+    def _is_lifetime_energy_total(self, key: str) -> bool:
+        entity_id = (self._entity_map.get(key) or "").lower()
+        if not entity_id:
+            return False
+        return any(
+            entity_id.endswith(f"_{suffix}") or entity_id.endswith(suffix)
+            for suffix in _LIFETIME_ENERGY_TOTAL_ENTITIES.get(key, ())
+        )
 
     def _battery_power_kw(self) -> float:
         discharge_kw = self._power_kw("battery_discharge")
