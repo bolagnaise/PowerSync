@@ -18334,6 +18334,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.info("⏭️  TOU sync skipped - Force charge active")
             return
 
+        opt_coord = hass.data.get(DOMAIN, {}).get(entry.entry_id, {}).get("optimization_coordinator")
+        if opt_coord and hasattr(opt_coord, "get_active_force_state"):
+            opt_force_state = opt_coord.get_active_force_state()
+            if opt_force_state.get("active") and opt_force_state.get("source") == "optimizer":
+                expires_at = opt_force_state.get("expires_at")
+                if expires_at:
+                    remaining = (expires_at - dt_util.utcnow()).total_seconds() / 60
+                    _LOGGER.info(
+                        "⏭️  TOU sync skipped - Optimizer force %s active (%.1f min remaining)",
+                        opt_force_state.get("type", "mode"),
+                        remaining,
+                    )
+                else:
+                    _LOGGER.info(
+                        "⏭️  TOU sync skipped - Optimizer force %s active",
+                        opt_force_state.get("type", "mode"),
+                    )
+                return
+
         _LOGGER.info("=== Starting TOU sync ===")
 
         # Import tariff converter from existing code

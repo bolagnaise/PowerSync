@@ -2399,6 +2399,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         active.setdefault("scope", "optimizer")
         return active
 
+    def get_active_force_state(self) -> dict[str, Any]:
+        """Return the active force state, including optimizer-owned hardware force."""
+        return self._get_active_force_state()
+
     def _export_command_power_w(self, action: Any) -> float:
         """Return the hardware export command power for an optimizer action."""
         command_w = float(self._config.max_discharge_w)

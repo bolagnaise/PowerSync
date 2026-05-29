@@ -9,6 +9,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
 COORDINATOR_PATH = ROOT / "custom_components" / "power_sync" / "coordinator.py"
+OPTIMIZATION_COORDINATOR_PATH = (
+    ROOT / "custom_components" / "power_sync" / "optimization" / "coordinator.py"
+)
 SELECT_PATH = ROOT / "custom_components" / "power_sync" / "select.py"
 
 
@@ -479,7 +482,7 @@ def test_optimizer_restart_restore_is_hidden_from_force_getter():
 
 
 def test_optimizer_startup_ignores_stale_force_restore_window():
-    source = (ROOT / "custom_components" / "power_sync" / "optimization" / "coordinator.py").read_text()
+    source = OPTIMIZATION_COORDINATOR_PATH.read_text()
     tree = ast.parse(source)
     method = _find_class_method(tree, "OptimizationCoordinator", "_deferred_enable_restore")
     method_source = ast.get_source_segment(source, method)
@@ -492,7 +495,7 @@ def test_optimizer_startup_ignores_stale_force_restore_window():
 
 
 def test_optimizer_waits_for_restart_force_restore_before_solving():
-    source = (ROOT / "custom_components" / "power_sync" / "optimization" / "coordinator.py").read_text()
+    source = OPTIMIZATION_COORDINATOR_PATH.read_text()
     tree = ast.parse(source)
     run_method = _find_class_method(tree, "OptimizationCoordinator", "_run_optimization")
     wait_method = _find_class_method(tree, "OptimizationCoordinator", "_wait_for_restart_force_restore")
@@ -505,6 +508,33 @@ def test_optimizer_waits_for_restart_force_restore_before_solving():
     assert "optimizer_force_restart_restore_pending" in wait_source
     assert "await asyncio.sleep(1)" in wait_source
     assert "return True" in wait_source
+
+
+def test_tou_sync_skips_optimizer_owned_force_modes():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "_handle_sync_tou_internal")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    assert '"optimization_coordinator"' in function_source
+    assert "get_active_force_state" in function_source
+    assert 'opt_force_state.get("source") == "optimizer"' in function_source
+    assert "Optimizer force %s active" in function_source
+
+
+def test_optimization_coordinator_exposes_optimizer_force_state():
+    source = OPTIMIZATION_COORDINATOR_PATH.read_text()
+    tree = ast.parse(source)
+    method = _find_class_method(
+        tree,
+        "OptimizationCoordinator",
+        "get_active_force_state",
+    )
+    method_source = ast.get_source_segment(source, method)
+
+    assert method_source is not None
+    assert "return self._get_active_force_state()" in method_source
 
 
 def test_tesla_force_discharge_disables_grid_charging_before_tariff_upload():
