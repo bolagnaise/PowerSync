@@ -19,6 +19,9 @@ sys.modules.setdefault("power_sync", _ps)
 
 
 def _install_homeassistant_stubs() -> None:
+    ha_components = types.ModuleType("homeassistant.components")
+    ha_recorder = types.ModuleType("homeassistant.components.recorder")
+    ha_recorder_history = types.ModuleType("homeassistant.components.recorder.history")
     ha_root = types.ModuleType("homeassistant")
     ha_core = types.ModuleType("homeassistant.core")
     ha_exceptions = types.ModuleType("homeassistant.exceptions")
@@ -45,6 +48,20 @@ def _install_homeassistant_stubs() -> None:
         async def async_save(self, data):
             self.data = data
 
+    class FakeRecorder:
+        async def async_add_executor_job(self, func, *args):
+            return func(*args)
+
+    def get_significant_states(hass, start_time, end_time, entity_ids):
+        hass.recorder_calls.append(
+            {
+                "start_time": start_time,
+                "end_time": end_time,
+                "entity_ids": entity_ids,
+            }
+        )
+        return hass.recorder_history
+
     ha_core.HomeAssistant = type("HomeAssistant", (), {})
     ha_exceptions.ConfigEntryAuthFailed = type("ConfigEntryAuthFailed", (Exception,), {})
     ha_update_coordinator.DataUpdateCoordinator = DataUpdateCoordinator
@@ -54,8 +71,13 @@ def _install_homeassistant_stubs() -> None:
     ha_storage.Store = Store
     ha_dt.utcnow = lambda: datetime(2026, 5, 29, 1, 0, 0)
     ha_dt.now = lambda: datetime(2026, 5, 29, 12, 0, 0)
+    ha_recorder.get_instance = lambda hass: FakeRecorder()
+    ha_recorder_history.get_significant_states = get_significant_states
 
     sys.modules["homeassistant"] = ha_root
+    sys.modules["homeassistant.components"] = ha_components
+    sys.modules["homeassistant.components.recorder"] = ha_recorder
+    sys.modules["homeassistant.components.recorder.history"] = ha_recorder_history
     sys.modules["homeassistant.core"] = ha_core
     sys.modules["homeassistant.exceptions"] = ha_exceptions
     sys.modules["homeassistant.helpers"] = ha_helpers
@@ -113,9 +135,21 @@ class _FakeController:
         return self.statuses.pop(0)
 
 
+class _FakeHistoryState:
+    def __init__(
+        self,
+        state: str,
+        last_changed: datetime,
+        unit: str = "kWh",
+    ) -> None:
+        self.state = state
+        self.last_changed = last_changed
+        self.attributes = {"unit_of_measurement": unit}
+
+
 def _new_coordinator(statuses: list[dict]) -> SolarEdgeEnergyCoordinator:
     coordinator = SolarEdgeEnergyCoordinator.__new__(SolarEdgeEnergyCoordinator)
-    coordinator.hass = types.SimpleNamespace(data={})
+    coordinator.hass = types.SimpleNamespace(data={}, recorder_history={}, recorder_calls=[])
     coordinator.data = None
     coordinator._entry_id = "entry-1"
     coordinator._controller = _FakeController(statuses)
@@ -126,6 +160,7 @@ def _new_coordinator(statuses: list[dict]) -> SolarEdgeEnergyCoordinator:
     coordinator._daily_total_baseline_date = None
     coordinator._daily_total_import_baseline = None
     coordinator._daily_total_export_baseline = None
+    coordinator._daily_total_recorder_baselines_checked = False
     return coordinator
 
 
@@ -187,3 +222,80 @@ def test_solaredge_daily_total_baseline_restores_after_restart():
 
     assert data["energy_summary"]["grid_import_today_kwh"] == pytest.approx(10.0)
     assert data["energy_summary"]["grid_export_today_kwh"] == pytest.approx(5.5)
+
+
+def test_solaredge_daily_total_baseline_uses_recorder_midnight_state():
+    coordinator = _new_coordinator(
+        [
+            {
+                "solar_power": 0.0,
+                "grid_power": 0.0,
+                "battery_power": 0.0,
+                "load_power": 0.0,
+                "battery_level": 70,
+                "total_grid_import_kwh": 9625.716,
+                "total_grid_export_kwh": 150.25,
+                "total_grid_import_entity_id": "sensor.solaredge_m1_imported_kwh",
+                "total_grid_export_entity_id": "sensor.solaredge_m1_exported_kwh",
+            }
+        ]
+    )
+    coordinator.hass.recorder_history = {
+        "sensor.solaredge_m1_imported_kwh": [
+            _FakeHistoryState("9614.650", datetime(2026, 5, 28, 23, 59, 30)),
+            _FakeHistoryState("9614.700", datetime(2026, 5, 29, 0, 0, 30)),
+            _FakeHistoryState("9625.716", datetime(2026, 5, 29, 12, 0, 0)),
+        ],
+        "sensor.solaredge_m1_exported_kwh": [
+            _FakeHistoryState("150.000", datetime(2026, 5, 28, 23, 59, 30)),
+            _FakeHistoryState("150.250", datetime(2026, 5, 29, 12, 0, 0)),
+        ],
+    }
+
+    data = asyncio.run(coordinator._async_update_data())
+
+    assert data["energy_summary"]["grid_import_today_kwh"] == pytest.approx(11.066)
+    assert data["energy_summary"]["grid_export_today_kwh"] == pytest.approx(0.25)
+    assert coordinator._daily_total_store.data["import_baseline_kwh"] == pytest.approx(9614.65)
+    assert coordinator._daily_total_store.data["export_baseline_kwh"] == pytest.approx(150.0)
+    assert coordinator.hass.recorder_calls[0]["entity_ids"] == ["sensor.solaredge_m1_imported_kwh"]
+
+
+def test_solaredge_daily_total_recorder_corrects_existing_midday_baseline():
+    coordinator = _new_coordinator(
+        [
+            {
+                "solar_power": 0.0,
+                "grid_power": 0.0,
+                "battery_power": 0.0,
+                "load_power": 0.0,
+                "battery_level": 70,
+                "total_grid_import_kwh": 9625.716,
+                "total_grid_export_kwh": 150.25,
+                "total_grid_import_entity_id": "sensor.solaredge_m1_imported_kwh",
+                "total_grid_export_entity_id": "sensor.solaredge_m1_exported_kwh",
+            }
+        ]
+    )
+    coordinator._daily_total_store.data = {
+        "date": "2026-05-29",
+        "import_baseline_kwh": 9622.721,
+        "export_baseline_kwh": 150.25,
+    }
+    coordinator.hass.recorder_history = {
+        "sensor.solaredge_m1_imported_kwh": [
+            _FakeHistoryState("9614.650", datetime(2026, 5, 28, 23, 59, 30)),
+            _FakeHistoryState("9625.716", datetime(2026, 5, 29, 12, 0, 0)),
+        ],
+        "sensor.solaredge_m1_exported_kwh": [
+            _FakeHistoryState("150.000", datetime(2026, 5, 28, 23, 59, 30)),
+            _FakeHistoryState("150.250", datetime(2026, 5, 29, 12, 0, 0)),
+        ],
+    }
+
+    data = asyncio.run(coordinator._async_update_data())
+
+    assert data["energy_summary"]["grid_import_today_kwh"] == pytest.approx(11.066)
+    assert data["energy_summary"]["grid_export_today_kwh"] == pytest.approx(0.25)
+    assert coordinator._daily_total_store.data["import_baseline_kwh"] == pytest.approx(9614.65)
+    assert coordinator._daily_total_store.data["export_baseline_kwh"] == pytest.approx(150.0)

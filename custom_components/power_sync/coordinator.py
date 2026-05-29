@@ -5912,6 +5912,7 @@ class SolarEdgeEnergyCoordinator(DataUpdateCoordinator):
         self._daily_total_baseline_date: str | None = None
         self._daily_total_import_baseline: float | None = None
         self._daily_total_export_baseline: float | None = None
+        self._daily_total_recorder_baselines_checked = False
         self._validated = False
 
         super().__init__(
@@ -6042,8 +6043,20 @@ class SolarEdgeEnergyCoordinator(DataUpdateCoordinator):
 
         if self._daily_total_baseline_date != today:
             self._daily_total_baseline_date = today
-            self._daily_total_import_baseline = total_import
-            self._daily_total_export_baseline = total_export
+            self._daily_total_recorder_baselines_checked = False
+            self._daily_total_import_baseline = await self._recorder_daily_total_baseline(
+                status.get("total_grid_import_entity_id"),
+                total_import,
+            )
+            self._daily_total_export_baseline = await self._recorder_daily_total_baseline(
+                status.get("total_grid_export_entity_id"),
+                total_export,
+            )
+            if self._daily_total_import_baseline is None:
+                self._daily_total_import_baseline = total_import
+            if self._daily_total_export_baseline is None:
+                self._daily_total_export_baseline = total_export
+            self._daily_total_recorder_baselines_checked = True
             changed = total_import is not None or total_export is not None
             if changed:
                 _LOGGER.info(
@@ -6053,11 +6066,29 @@ class SolarEdgeEnergyCoordinator(DataUpdateCoordinator):
                 )
         else:
             if self._daily_total_import_baseline is None and total_import is not None:
-                self._daily_total_import_baseline = total_import
+                self._daily_total_import_baseline = await self._recorder_daily_total_baseline(
+                    status.get("total_grid_import_entity_id"),
+                    total_import,
+                )
+                if self._daily_total_import_baseline is None:
+                    self._daily_total_import_baseline = total_import
                 changed = True
             if self._daily_total_export_baseline is None and total_export is not None:
-                self._daily_total_export_baseline = total_export
+                self._daily_total_export_baseline = await self._recorder_daily_total_baseline(
+                    status.get("total_grid_export_entity_id"),
+                    total_export,
+                )
+                if self._daily_total_export_baseline is None:
+                    self._daily_total_export_baseline = total_export
                 changed = True
+
+        if not self._daily_total_recorder_baselines_checked:
+            changed = await self._improve_daily_total_baselines_from_recorder(
+                status,
+                total_import,
+                total_export,
+            ) or changed
+            self._daily_total_recorder_baselines_checked = True
 
         import_delta, import_changed = self._daily_total_delta(
             total_import,
@@ -6076,6 +6107,94 @@ class SolarEdgeEnergyCoordinator(DataUpdateCoordinator):
         if changed:
             await self._save_daily_total_baselines()
 
+    async def _improve_daily_total_baselines_from_recorder(
+        self,
+        status: dict[str, Any],
+        total_import: float | None,
+        total_export: float | None,
+    ) -> bool:
+        """Lower same-day baselines when recorder has a closer midnight value."""
+        changed = False
+        if self._daily_total_import_baseline is not None:
+            baseline = await self._recorder_daily_total_baseline(
+                status.get("total_grid_import_entity_id"),
+                total_import,
+            )
+            if baseline is not None and baseline < self._daily_total_import_baseline:
+                self._daily_total_import_baseline = baseline
+                changed = True
+        if self._daily_total_export_baseline is not None:
+            baseline = await self._recorder_daily_total_baseline(
+                status.get("total_grid_export_entity_id"),
+                total_export,
+            )
+            if baseline is not None and baseline < self._daily_total_export_baseline:
+                self._daily_total_export_baseline = baseline
+                changed = True
+        return changed
+
+    async def _recorder_daily_total_baseline(
+        self,
+        entity_id: Any,
+        current_total: float | None,
+    ) -> float | None:
+        """Return the lifetime counter value at local midnight from recorder history."""
+        if not entity_id or current_total is None:
+            return None
+        try:
+            from homeassistant.components.recorder import get_instance
+            from homeassistant.components.recorder.history import get_significant_states
+
+            recorder = get_instance(self.hass)
+            if recorder is None:
+                return None
+
+            now = dt_util.now()
+            day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            history_start = day_start - timedelta(days=1)
+            entity_id = str(entity_id)
+            history = await recorder.async_add_executor_job(
+                get_significant_states,
+                self.hass,
+                history_start,
+                now,
+                [entity_id],
+            )
+            states = sorted(
+                (history or {}).get(entity_id, []) or [],
+                key=lambda state: getattr(state, "last_changed", None) or getattr(state, "last_updated", None) or day_start,
+            )
+            if not states:
+                return None
+
+            last_before_midnight = None
+            first_after_midnight = None
+            for state in states:
+                state_time = getattr(state, "last_changed", None) or getattr(state, "last_updated", None)
+                value = self._history_energy_kwh(state)
+                if state_time is None or value is None:
+                    continue
+                if self._datetime_lte(state_time, day_start):
+                    last_before_midnight = value
+                elif first_after_midnight is None:
+                    first_after_midnight = value
+
+            baseline = last_before_midnight if last_before_midnight is not None else first_after_midnight
+            if baseline is None:
+                return None
+            if baseline > current_total:
+                return None
+            _LOGGER.debug(
+                "SolarEdge recorder baseline for %s: %.3f kWh (current %.3f kWh)",
+                entity_id,
+                baseline,
+                current_total,
+            )
+            return baseline
+        except Exception as exc:
+            _LOGGER.debug("Failed to derive SolarEdge daily baseline from recorder: %s", exc)
+            return None
+
     def _daily_total_delta(self, total: float | None, baseline_attr: str) -> tuple[float | None, bool]:
         """Return daily delta from a lifetime total, resetting if the total rolls back."""
         if total is None:
@@ -6088,6 +6207,35 @@ class SolarEdgeEnergyCoordinator(DataUpdateCoordinator):
             setattr(self, baseline_attr, total)
             return (0.0, True)
         return (round(total - baseline, 3), False)
+
+    @staticmethod
+    def _history_energy_kwh(state: Any) -> float | None:
+        state_value = getattr(state, "state", None)
+        if state_value in ("unavailable", "unknown", None, ""):
+            return None
+        try:
+            value = float(state_value)
+        except (TypeError, ValueError):
+            return None
+        unit = str((getattr(state, "attributes", {}) or {}).get("unit_of_measurement", "")).lower()
+        if unit == "wh":
+            return value / 1000.0
+        if unit == "mwh":
+            return value * 1000.0
+        return value
+
+    @staticmethod
+    def _datetime_lte(left: Any, right: Any) -> bool:
+        try:
+            return left <= right
+        except TypeError:
+            left_tz = getattr(left, "tzinfo", None)
+            right_tz = getattr(right, "tzinfo", None)
+            if left_tz is not None and right_tz is None:
+                right = right.replace(tzinfo=left_tz)
+            elif left_tz is None and right_tz is not None:
+                left = left.replace(tzinfo=right_tz)
+            return left <= right
 
     @staticmethod
     def _float_or_none(value: Any) -> float | None:

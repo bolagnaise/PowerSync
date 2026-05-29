@@ -4875,11 +4875,6 @@ async def _dynamic_ev_update_surplus(
                 f"grid import {grid_power_kw:.1f}kW exceeds "
                 f"{grid_import_tolerance_kw:.1f}kW tolerance below the {min_soc}% floor"
             )
-        elif raw_surplus_kw <= 0:
-            unsafe_reason = (
-                f"no surplus remains after reserving {max_battery_charge_kw}kW "
-                f"for the battery below the {min_soc}% floor"
-            )
         elif battery_charge_kw <= 0.05:
             unsafe_reason = (
                 f"battery is not charging below the {min_soc}% floor"
@@ -4924,21 +4919,15 @@ async def _dynamic_ev_update_surplus(
             state["paused_reason"] = None
             state["parallel_charging_mode"] = False
 
-    # Pause if battery drops below pause threshold (only in normal mode, not parallel)
+    # Pause if battery drops below pause threshold. In parallel mode, a plain
+    # loss of reserved surplus is handled by the stop-delay hysteresis below.
     if state.get("charging_started") and battery_soc < pause_soc:
-        # In parallel mode, pause once no EV surplus remains after battery reserve.
+        # In parallel mode, keep the session active long enough for the stop
+        # delay to absorb short cloud dips when only reserved surplus is gone.
         if state.get("parallel_charging_mode"):
             if raw_surplus_kw <= 0:
-                if not state.get("paused"):
-                    state["paused"] = True
-                    state["paused_reason"] = (
-                        f"Parallel charging paused - no surplus remains after "
-                        f"reserving {max_battery_charge_kw}kW for the battery"
-                    )
-                    _LOGGER.info(f"⚡ Solar surplus EV: {state['paused_reason']}")
-                    await _set_vehicle_amps(hass, config_entry, vehicle_id, 0, params)
-                    state["current_amps"] = 0
-                return
+                state["paused"] = False
+                state["paused_reason"] = None
         else:
             # Normal mode: pause below pause_soc threshold
             if not state.get("paused"):

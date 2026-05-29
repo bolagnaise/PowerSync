@@ -678,6 +678,10 @@ class SolarEdgeEnergyController:
             "control_available": self.control_available(),
             "missing_control_entities": self.missing_control_entities(),
         }
+        if grid_import_is_total:
+            status["total_grid_import_entity_id"] = self._entity_map.get("daily_grid_import")
+        if grid_export_is_total:
+            status["total_grid_export_entity_id"] = self._entity_map.get("daily_grid_export")
 
         for idx in range(1, 5):
             status[f"pv{idx}_power"] = self._power_kw(f"pv{idx}_power")
