@@ -309,3 +309,66 @@ def test_aggregate_ev_status_ignores_teslemetry_bt_power_when_not_charging():
     status = power_sync._get_ev_vehicle_status(hass, _Entry())
 
     assert status == {"ev_power_kw": 0.0, "ev_soc": 72}
+
+
+def test_aggregate_ev_status_uses_configured_generic_charger_soc():
+    power_sync = _power_sync_module()
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "generic_charger_enabled": True,
+            "generic_charger_soc_entity": "sensor.solaredge_ev_soc",
+        },
+    )
+    hass = _Hass([
+        _State("sensor.solaredge_ev_soc", "64"),
+    ])
+
+    status = power_sync._get_ev_vehicle_status(hass, entry)
+
+    assert status == {"ev_power_kw": 0.0, "ev_soc": 64}
+
+
+def test_aggregate_ev_status_uses_generic_charger_fallback_soc():
+    power_sync = _power_sync_module()
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "generic_charger_enabled": True,
+            "generic_charger_soc_entity": "sensor.primary_ev_soc",
+            "generic_charger_soc_entity_2": "sensor.fallback_ev_soc",
+        },
+    )
+    hass = _Hass([
+        _State("sensor.primary_ev_soc", "unknown"),
+        _State("sensor.fallback_ev_soc", "68"),
+    ])
+
+    status = power_sync._get_ev_vehicle_status(hass, entry)
+
+    assert status == {"ev_power_kw": 0.0, "ev_soc": 68}
+
+
+def test_aggregate_ev_status_prefers_configured_generic_soc_over_vehicle_fallback():
+    power_sync = _power_sync_module()
+    vin = "LRWYHCEK3PC907290"
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={},
+        options={
+            "generic_charger_enabled": True,
+            "generic_charger_soc_entity": "sensor.solaredge_ev_soc",
+        },
+    )
+    hass = _Hass([
+        _State("sensor.solaredge_ev_soc", "64"),
+        _State(f"sensor.{vin}_charging_state", "Stopped"),
+        _State(f"switch.{vin}_charge", "off"),
+        _State(f"sensor.{vin}_battery_level", "72", {"unit_of_measurement": "%"}),
+    ])
+
+    status = power_sync._get_ev_vehicle_status(hass, entry)
+
+    assert status == {"ev_power_kw": 0.0, "ev_soc": 64}

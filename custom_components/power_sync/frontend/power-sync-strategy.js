@@ -1026,6 +1026,847 @@ if (!customElements.get('power-sync-forecast-summary')) {
   customElements.define('power-sync-forecast-summary', PowerSyncForecastSummary);
 }
 
+// ─── PowerSyncOptimizationPlan Custom Element ───────────────────
+// API-backed Smart Optimization card that mirrors the mobile 24-hour view.
+
+class PowerSyncOptimizationPlan extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this._config = null;
+    this._hass = null;
+    this._data = null;
+    this._error = null;
+    this._loading = false;
+    this._lastFetch = 0;
+    this._renderQueued = false;
+    this._resizeObserver = null;
+  }
+
+  setConfig(config) {
+    this._config = config || {};
+    this._data = null;
+    this._error = null;
+    this._lastFetch = 0;
+    this._scheduleRender();
+    this._maybeLoadData(true);
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    this._maybeLoadData(false);
+    this._scheduleRender();
+  }
+
+  connectedCallback() {
+    if (!this._resizeObserver && 'ResizeObserver' in window) {
+      this._resizeObserver = new ResizeObserver(() => this._scheduleRender());
+      this._resizeObserver.observe(this);
+    }
+    this._maybeLoadData(true);
+    this._scheduleRender();
+  }
+
+  disconnectedCallback() {
+    if (this._resizeObserver) {
+      this._resizeObserver.disconnect();
+      this._resizeObserver = null;
+    }
+  }
+
+  getCardSize() {
+    return 6;
+  }
+
+  _maybeLoadData(force) {
+    if (!this._config || !this._hass || typeof this._hass.callApi !== 'function') return;
+    const now = Date.now();
+    if (this._loading) return;
+    if (!force && this._data && now - this._lastFetch < 60000) return;
+    this._loadData();
+  }
+
+  async _loadData() {
+    this._loading = true;
+    const path = this._config.optimizationPath || 'power_sync/optimization';
+    try {
+      const response = await this._hass.callApi('GET', path);
+      this._data = response || null;
+      this._error = null;
+      this._lastFetch = Date.now();
+    } catch (err) {
+      this._error = err?.message || 'Optimization API unavailable';
+    } finally {
+      this._loading = false;
+      this._scheduleRender();
+    }
+  }
+
+  _scheduleRender() {
+    if (this._renderQueued) return;
+    this._renderQueued = true;
+    requestAnimationFrame(() => {
+      this._renderQueued = false;
+      this._render();
+    });
+  }
+
+  _render() {
+    if (!this._config) return;
+
+    const model = this._buildModel();
+    const hasSchedule = model.points.length > 0;
+    const priceMeta = _priceMeta(this._hass, this._config.importPriceEntity);
+    const box = this.getBoundingClientRect();
+    const compact = (box.width || 640) < 560;
+    const actions = hasSchedule ? this._actionRangesFromApi() : this._fallbackActionRanges();
+
+    this.shadowRoot.innerHTML = `
+      <style>
+        ha-card {
+          padding: 16px;
+          overflow: hidden;
+        }
+        .header {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          gap: 12px;
+          margin-bottom: 12px;
+        }
+        .title {
+          margin: 0;
+          color: var(--primary-text-color);
+          font-size: 18px;
+          font-weight: 800;
+          line-height: 1.15;
+          letter-spacing: 0;
+        }
+        .subtitle {
+          margin-top: 4px;
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          font-weight: 600;
+          line-height: 1.3;
+        }
+        .refresh {
+          flex: 0 0 auto;
+          width: 34px;
+          height: 34px;
+          border: 1px solid var(--divider-color);
+          border-radius: 8px;
+          background: var(--ha-card-background, var(--card-background-color, #fff));
+          color: var(--primary-text-color);
+          cursor: pointer;
+          display: grid;
+          place-items: center;
+        }
+        .refresh ha-icon {
+          width: 19px;
+          height: 19px;
+        }
+        .chips {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          margin-bottom: 14px;
+        }
+        .chip {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          max-width: 100%;
+          padding: 7px 9px;
+          border-radius: 999px;
+          background: rgba(127, 127, 127, 0.09);
+          border: 1px solid var(--divider-color);
+          color: var(--primary-text-color);
+          font-size: 12px;
+          font-weight: 700;
+          line-height: 1.1;
+          min-width: 0;
+        }
+        .chip span {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .chip.warn {
+          color: var(--warning-color, #ff9800);
+          background: rgba(255, 152, 0, 0.11);
+          border-color: rgba(255, 152, 0, 0.35);
+        }
+        .notice {
+          margin: 0 0 14px;
+          padding: 10px 12px;
+          border-radius: 10px;
+          color: var(--secondary-text-color);
+          background: rgba(127, 127, 127, 0.08);
+          border: 1px solid var(--divider-color);
+          font-size: 12px;
+          line-height: 1.35;
+        }
+        .notice.warn {
+          color: var(--warning-color, #ff9800);
+          background: rgba(255, 152, 0, 0.10);
+          border-color: rgba(255, 152, 0, 0.30);
+        }
+        .section-title {
+          margin: 16px 0 8px;
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          font-weight: 800;
+          letter-spacing: 0;
+          text-transform: uppercase;
+        }
+        .chart-wrap {
+          position: relative;
+          border-radius: 12px;
+          border: 1px solid var(--divider-color);
+          background: rgba(127, 127, 127, 0.045);
+          overflow: hidden;
+        }
+        svg {
+          display: block;
+          width: 100%;
+          height: auto;
+        }
+        .legend {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+          margin: 10px 0 0;
+        }
+        .legend-item {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          color: var(--secondary-text-color);
+          font-size: 11px;
+          font-weight: 700;
+          line-height: 1.1;
+        }
+        .swatch {
+          width: 10px;
+          height: 10px;
+          border-radius: 999px;
+          flex: 0 0 auto;
+        }
+        .actions {
+          display: grid;
+          gap: 8px;
+        }
+        .action-row {
+          display: grid;
+          grid-template-columns: minmax(78px, auto) minmax(0, 1fr) minmax(82px, auto) auto;
+          gap: 10px;
+          align-items: center;
+          padding: 9px 10px;
+          border-radius: 10px;
+          border: 1px solid var(--divider-color);
+          background: var(--ha-card-background, var(--card-background-color, #fff));
+          min-width: 0;
+        }
+        .action-time {
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          font-weight: 800;
+          white-space: nowrap;
+        }
+        .action-main {
+          min-width: 0;
+        }
+        .action-label {
+          font-size: 14px;
+          font-weight: 800;
+          line-height: 1.2;
+          letter-spacing: 0;
+        }
+        .action-meta {
+          margin-top: 2px;
+          color: var(--secondary-text-color);
+          font-size: 11px;
+          font-weight: 600;
+          line-height: 1.2;
+        }
+        .soc {
+          color: var(--primary-text-color);
+          font-size: 15px;
+          font-weight: 800;
+          white-space: nowrap;
+        }
+        .price-stats {
+          min-width: 82px;
+          text-align: center;
+        }
+        .price-avg {
+          font-size: 15px;
+          font-weight: 900;
+          line-height: 1.1;
+          letter-spacing: 0;
+        }
+        .price-minmax {
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          gap: 4px;
+          margin-top: 3px;
+          color: var(--secondary-text-color);
+          font-size: 10px;
+          font-weight: 800;
+          line-height: 1.1;
+          white-space: nowrap;
+        }
+        .price-kind {
+          margin-top: 2px;
+          color: var(--secondary-text-color);
+          font-size: 9px;
+          font-weight: 700;
+          line-height: 1.1;
+          white-space: nowrap;
+        }
+        .empty {
+          padding: 11px 12px;
+          border-radius: 10px;
+          color: var(--secondary-text-color);
+          background: rgba(127, 127, 127, 0.08);
+          border: 1px solid var(--divider-color);
+          font-size: 13px;
+        }
+        @media (max-width: 560px) {
+          ha-card {
+            padding: 13px;
+          }
+          .header {
+            margin-bottom: 10px;
+          }
+          .title {
+            font-size: 17px;
+          }
+          .action-row {
+            grid-template-columns: minmax(0, 1fr) minmax(78px, auto) auto;
+          }
+          .action-time {
+            grid-column: 1 / -1;
+          }
+          .price-stats {
+            min-width: 78px;
+          }
+        }
+      </style>
+      <ha-card>
+        <div class="header">
+          <div>
+            <h2 class="title">24-Hour Optimizer Plan</h2>
+            <div class="subtitle">${this._escHtml(hasSchedule ? 'Now to next 24 hours from Smart Optimization' : 'Entity fallback while detailed schedule is unavailable')}</div>
+          </div>
+          <button class="refresh" type="button" title="Refresh optimizer plan" aria-label="Refresh optimizer plan">
+            <ha-icon icon="mdi:refresh"></ha-icon>
+          </button>
+        </div>
+        ${this._renderChips(model, priceMeta)}
+        ${this._renderNotice(hasSchedule)}
+        ${hasSchedule ? `
+          <div class="section-title">SOC and Battery Power</div>
+          <div class="chart-wrap">${this._renderPowerChart(model, compact)}</div>
+          ${this._renderLegend(model.powerSeries)}
+          ${model.priceSeries.length ? `
+            <div class="section-title">Electricity Price (${this._escHtml(priceMeta.minorPriceUnit)})</div>
+            <div class="chart-wrap">${this._renderPriceChart(model, compact, priceMeta)}</div>
+            ${this._renderLegend(model.priceSeries, false)}
+          ` : ''}
+        ` : ''}
+        <div class="section-title">24-Hour Action Plan</div>
+        ${this._renderActions(actions, model, priceMeta)}
+      </ha-card>
+    `;
+
+    this.shadowRoot.querySelector('.refresh')?.addEventListener('click', () => this._maybeLoadData(true));
+  }
+
+  _buildModel() {
+    const data = this._data || {};
+    const schedule = data.schedule || {};
+    const timestamps = Array.isArray(schedule.timestamps) ? schedule.timestamps : [];
+    const soc = Array.isArray(schedule.soc) ? schedule.soc : [];
+    const charge = Array.isArray(schedule.charge_w) ? schedule.charge_w : [];
+    const discharge = Array.isArray(schedule.discharge_w) ? schedule.discharge_w : [];
+    const detailed = Array.isArray(schedule.battery_consume_w) && Array.isArray(schedule.battery_export_w);
+    const consume = detailed ? schedule.battery_consume_w : [];
+    const exportPower = detailed ? schedule.battery_export_w : [];
+    const ev = Array.isArray(schedule.ev_charging_w) ? schedule.ev_charging_w : [];
+    const importPrice = Array.isArray(schedule.import_price) ? schedule.import_price : [];
+    const exportPrice = Array.isArray(schedule.export_price) ? schedule.export_price : [];
+    const intervalMinutes = this._intervalMinutes(timestamps);
+    const count = Math.min(
+      Math.round(24 * 60 / intervalMinutes),
+      timestamps.length,
+      soc.length,
+      charge.length,
+      discharge.length,
+    );
+    const points = [];
+    for (let i = 0; i < count; i++) {
+      points.push({
+        index: i,
+        timestamp: timestamps[i],
+        soc: this._percent(soc[i]),
+        chargeKw: this._kw(charge[i]),
+        dischargeKw: this._kw(discharge[i]),
+        consumeKw: detailed ? this._kw(consume[i]) : 0,
+        exportKw: detailed ? this._kw(exportPower[i]) : 0,
+        evKw: this._kw(ev[i]),
+        importPrice: this._minorPrice(importPrice[i]),
+        exportPrice: this._minorPrice(exportPrice[i]),
+      });
+    }
+
+    const hasEv = points.some(p => p.evKw > 0);
+    const hasPrices = points.some(p => Number.isFinite(p.importPrice)) || points.some(p => Number.isFinite(p.exportPrice));
+    const powerSeries = detailed
+      ? [
+          { key: 'chargeKw', label: 'Charge', color: '#4CAF50' },
+          { key: 'consumeKw', label: 'Powering Home', color: '#FF9800' },
+          { key: 'exportKw', label: 'Export', color: '#FFD54F' },
+        ]
+      : [
+          { key: 'chargeKw', label: 'Charge', color: '#4CAF50' },
+          { key: 'dischargeKw', label: 'Discharge', color: '#FF9800' },
+        ];
+    if (hasEv) {
+      powerSeries.push({ key: 'evKw', label: 'EV', color: '#7E57C2' });
+    }
+
+    return {
+      raw: data,
+      points,
+      intervalMinutes,
+      reservePercent: this._reservePercent(data?.config?.backup_reserve),
+      powerSeries,
+      priceSeries: hasPrices
+        ? [
+            { key: 'importPrice', label: 'Import', color: '#FF9800' },
+            { key: 'exportPrice', label: 'Export', color: '#4CAF50' },
+          ]
+        : [],
+      demandRanges: this._demandRanges(points, data?.demand_window),
+    };
+  }
+
+  _renderChips(model, priceMeta) {
+    const data = model.raw || {};
+    const chips = [];
+    const status = data.monitoring_mode ? 'Monitoring' : data.enabled === false ? 'Disabled' : data.status || 'Active';
+    chips.push(['Mode', this._title(status)]);
+    chips.push(['Now', this._actionLabel(data.current_action || 'idle')]);
+    if (data.next_action && data.next_action_time) {
+      chips.push(['Next', `${this._actionLabel(data.next_action)} ${this._formatTime(data.next_action_time)}`]);
+    }
+    if (data.last_optimization) {
+      chips.push(['Optimized', this._formatTime(data.last_optimization)]);
+    }
+    const breakdown = data.daily_cost_breakdown || {};
+    if (Number.isFinite(Number(breakdown.predicted_remaining))) {
+      chips.push(['Remaining', this._formatMoney(Number(breakdown.predicted_remaining), priceMeta.currency)]);
+    }
+    if (Number.isFinite(Number(data.predicted_savings))) {
+      chips.push(['Savings', this._formatMoney(Number(data.predicted_savings), priceMeta.currency)]);
+    }
+    const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+    if (warnings.length) {
+      chips.push(['Warnings', String(warnings.length), true]);
+    }
+    return `<div class="chips">${chips.map(([name, value, warn]) => `
+      <div class="chip${warn ? ' warn' : ''}"><span>${this._escHtml(name)}:</span><span>${this._escHtml(value)}</span></div>
+    `).join('')}</div>`;
+  }
+
+  _renderNotice(hasSchedule) {
+    const warnings = Array.isArray(this._data?.warnings) ? this._data.warnings : [];
+    if (warnings.length) {
+      const text = warnings.map(w => w?.message || w?.title).filter(Boolean).join(' ');
+      return `<div class="notice warn">${this._escHtml(text)}</div>`;
+    }
+    if (this._error) {
+      return `<div class="notice warn">${this._escHtml(this._error)}. Showing available entity data.</div>`;
+    }
+    if (!hasSchedule && this._loading) {
+      return '<div class="notice">Loading Smart Optimization schedule...</div>';
+    }
+    if (!hasSchedule) {
+      return '<div class="notice">Detailed optimizer schedule is not available yet. Showing planned force windows from Home Assistant entities.</div>';
+    }
+    return '';
+  }
+
+  _renderPowerChart(model, compact) {
+    const W = compact ? 520 : 720;
+    const H = compact ? 240 : 270;
+    const pad = { top: 18, right: 14, bottom: 34, left: compact ? 44 : 52 };
+    const chartW = W - pad.left - pad.right;
+    const chartH = H - pad.top - pad.bottom;
+    const powerMax = Math.max(4, this._niceCeil(Math.max(
+      ...model.points.flatMap(p => model.powerSeries.map(s => p[s.key] || 0)),
+    )));
+    const x = (i) => pad.left + (i / Math.max(1, model.points.length - 1)) * chartW;
+    const yPower = (value) => pad.top + chartH - (Math.max(0, value) / powerMax) * chartH;
+    const ySoc = (value) => pad.top + chartH - (Math.max(0, Math.min(100, value)) / 100) * chartH;
+    let svg = this._chartGrid(W, H, pad, model.points, compact, `${powerMax} kW`);
+
+    for (const range of model.demandRanges) {
+      const x1 = x(range.start);
+      const x2 = x(range.end);
+      svg += `<rect x="${x1}" y="${pad.top}" width="${Math.max(2, x2 - x1)}" height="${chartH}" fill="#FF6B6B" opacity="0.11"/>`;
+    }
+
+    if (Number.isFinite(model.reservePercent)) {
+      const ry = ySoc(model.reservePercent);
+      svg += `<rect x="${pad.left}" y="${ry}" width="${chartW}" height="${pad.top + chartH - ry}" fill="#F44336" opacity="0.06"/>`;
+      svg += `<line x1="${pad.left}" y1="${ry}" x2="${W - pad.right}" y2="${ry}" stroke="#F44336" stroke-width="1" stroke-dasharray="5,3" opacity="0.75"/>`;
+      svg += `<text x="${W - pad.right - 4}" y="${ry - 5}" text-anchor="end" font-size="${compact ? 9 : 10}" fill="#F44336">${this._escSvg(`Reserve ${Math.round(model.reservePercent)}%`)}</text>`;
+    }
+
+    for (const series of model.powerSeries) {
+      svg += `<path d="${this._stepPath(model.points, x, yPower, series.key)}" fill="none" stroke="${series.color}" stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round" opacity="0.9"/>`;
+    }
+    svg += `<path d="${this._linePath(model.points, x, ySoc, 'soc')}" fill="none" stroke="#42A5F5" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>`;
+
+    return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="24-hour optimizer SOC and power chart">${svg}</svg>`;
+  }
+
+  _renderPriceChart(model, compact, priceMeta) {
+    const W = compact ? 520 : 720;
+    const H = compact ? 165 : 185;
+    const pad = { top: 16, right: 14, bottom: 32, left: compact ? 48 : 58 };
+    const chartW = W - pad.left - pad.right;
+    const chartH = H - pad.top - pad.bottom;
+    const maxPrice = Math.max(10, this._niceCeil(Math.max(
+      ...model.points.flatMap(p => model.priceSeries.map(s => Number.isFinite(p[s.key]) ? p[s.key] : 0)),
+    )));
+    const x = (i) => pad.left + (i / Math.max(1, model.points.length - 1)) * chartW;
+    const y = (value) => pad.top + chartH - (Math.max(0, value) / maxPrice) * chartH;
+    let svg = this._chartGrid(W, H, pad, model.points, compact, `${maxPrice} ${priceMeta.minorUnit}`);
+
+    for (const range of model.demandRanges) {
+      const x1 = x(range.start);
+      const x2 = x(range.end);
+      svg += `<rect x="${x1}" y="${pad.top}" width="${Math.max(2, x2 - x1)}" height="${chartH}" fill="#FF6B6B" opacity="0.09"/>`;
+    }
+    for (const series of model.priceSeries) {
+      svg += `<path d="${this._stepPath(model.points, x, y, series.key)}" fill="none" stroke="${series.color}" stroke-width="2.05" stroke-linejoin="round" stroke-linecap="round"/>`;
+    }
+
+    return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="24-hour import and export price chart">${svg}</svg>`;
+  }
+
+  _chartGrid(W, H, pad, points, compact, maxLabel) {
+    const chartW = W - pad.left - pad.right;
+    const chartH = H - pad.top - pad.bottom;
+    let svg = `<rect x="${pad.left}" y="${pad.top}" width="${chartW}" height="${chartH}" fill="var(--card-background-color, transparent)" opacity="0.02" stroke="var(--divider-color, #e0e0e0)" stroke-width="0.6" rx="8"/>`;
+    for (let i = 0; i <= 4; i++) {
+      const y = pad.top + (chartH / 4) * i;
+      svg += `<line x1="${pad.left}" y1="${y}" x2="${W - pad.right}" y2="${y}" stroke="var(--divider-color, #e0e0e0)" stroke-width="0.4" stroke-dasharray="4,3" opacity="0.65"/>`;
+    }
+    svg += `<text x="${pad.left - 8}" y="${pad.top + 4}" text-anchor="end" font-size="${compact ? 9 : 10}" fill="var(--secondary-text-color, #888)">${this._escSvg(maxLabel)}</text>`;
+    const labelEvery = Math.max(1, Math.round((6 * 60) / this._intervalMinutes(points.map(p => p.timestamp))));
+    for (let i = 0; i < points.length; i += labelEvery) {
+      const x = pad.left + (i / Math.max(1, points.length - 1)) * chartW;
+      svg += `<line x1="${x}" y1="${pad.top}" x2="${x}" y2="${pad.top + chartH}" stroke="var(--divider-color, #e0e0e0)" stroke-width="0.35" opacity="0.55"/>`;
+      svg += `<text x="${x}" y="${H - pad.bottom + 21}" text-anchor="middle" font-size="${compact ? 9 : 10}" fill="var(--secondary-text-color, #888)">${this._escSvg(this._formatTime(points[i]?.timestamp))}</text>`;
+    }
+    return svg;
+  }
+
+  _renderLegend(series, includeSoc = true) {
+    return `<div class="legend">
+      ${includeSoc ? '<div class="legend-item"><span class="swatch" style="background:#42A5F5"></span><span>SOC</span></div>' : ''}
+      ${series.map(s => `<div class="legend-item"><span class="swatch" style="background:${s.color}"></span><span>${this._escHtml(s.label)}</span></div>`).join('')}
+    </div>`;
+  }
+
+  _renderActions(actions, model, priceMeta) {
+    if (!actions.length) {
+      return '<div class="empty">No optimizer actions scheduled in the next 24 hours.</div>';
+    }
+    return `<div class="actions">${actions.slice(0, 10).map(action => {
+      const info = this._actionInfo(action.action);
+      const priceStats = this._priceStatsForAction(action, model);
+      const power = Number(action.power_w || 0);
+      const meta = [
+        power > 0 ? this._formatPower(power) : '',
+        action.source === 'fallback' ? 'entity fallback' : '',
+      ].filter(Boolean).join(' - ');
+      const socValue = Number(action.soc);
+      const soc = Number.isFinite(socValue) ? `${Math.round(this._percent(socValue))}%` : '';
+      return `
+        <div class="action-row">
+          <div class="action-time">${this._escHtml(this._timeRange(action.timestamp, action.end_time))}</div>
+          <div class="action-main">
+            <div class="action-label" style="color:${info.color}">${this._escHtml(info.label)}</div>
+            ${meta ? `<div class="action-meta">${this._escHtml(meta)}</div>` : ''}
+          </div>
+          ${this._renderActionPriceStats(priceStats, action.action, priceMeta)}
+          <div class="soc">${this._escHtml(soc)}</div>
+        </div>
+      `;
+    }).join('')}${actions.length > 10 ? `<div class="empty">+${actions.length - 10} more actions</div>` : ''}</div>`;
+  }
+
+  _renderActionPriceStats(stats, action, priceMeta) {
+    if (!stats) return '<div class="price-stats"></div>';
+    const avgColor = this._priceAvgColor(stats.avg, action);
+    return `
+      <div class="price-stats">
+        <div class="price-avg" style="color:${avgColor}">${this._escHtml(this._formatMinorPrice(stats.avg, priceMeta.minorUnit))}</div>
+        <div class="price-minmax">
+          <span style="color:#4CAF50">${this._escHtml(this._formatMinorPrice(stats.min, priceMeta.minorUnit))}</span>
+          <span style="opacity:0.45">|</span>
+          <span style="color:#F44336">${this._escHtml(this._formatMinorPrice(stats.max, priceMeta.minorUnit))}</span>
+        </div>
+        <div class="price-kind">${this._escHtml(stats.kind)} avg min max</div>
+      </div>
+    `;
+  }
+
+  _priceStatsForAction(action, model) {
+    if (!action?.timestamp || !model?.points?.length) return null;
+    const start = Date.parse(action.timestamp);
+    const end = Date.parse(action.end_time || action.timestamp);
+    if (!Number.isFinite(start)) return null;
+    const safeEnd = Number.isFinite(end) && end > start
+      ? end
+      : start + (model.intervalMinutes || 5) * 60000;
+    const useExport = action.action === 'discharge' || action.action === 'export';
+    const key = useExport ? 'exportPrice' : 'importPrice';
+    const values = model.points
+      .filter(point => {
+        const ts = Date.parse(point.timestamp);
+        return Number.isFinite(ts) && ts >= start && ts < safeEnd;
+      })
+      .map(point => point[key])
+      .filter(value => Number.isFinite(value));
+    if (!values.length) return null;
+    return {
+      kind: useExport ? 'export' : 'import',
+      min: Math.min(...values),
+      max: Math.max(...values),
+      avg: values.reduce((sum, value) => sum + value, 0) / values.length,
+    };
+  }
+
+  _actionRangesFromApi() {
+    const actions = Array.isArray(this._data?.next_actions) ? this._data.next_actions : [];
+    return actions
+      .filter(action => action?.timestamp)
+      .map(action => ({ ...action }))
+      .slice(0, 24);
+  }
+
+  _fallbackActionRanges() {
+    const ranges = [];
+    const pushWindows = (entityId, fallbackAction) => {
+      const windows = this._hass?.states?.[entityId]?.attributes?.windows;
+      if (!Array.isArray(windows)) return;
+      for (const window of windows) {
+        if (!window?.start_time || !window?.end_time) continue;
+        ranges.push({
+          action: window.action || fallbackAction,
+          timestamp: window.start_time,
+          end_time: window.end_time,
+          power_w: window.power_w,
+          soc: window.soc,
+          source: 'fallback',
+        });
+      }
+    };
+    pushWindows(this._config.forceChargeEntity, 'charge');
+    pushWindows(this._config.forceDischargeEntity, 'discharge');
+    return ranges.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
+  }
+
+  _demandRanges(points, demandWindow) {
+    if (!demandWindow?.start_time || !demandWindow?.end_time || !points.length) return [];
+    const start = this._clockMinutes(demandWindow.start_time);
+    const end = this._clockMinutes(demandWindow.end_time);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return [];
+    const ranges = [];
+    for (let i = 0; i < points.length; i++) {
+      const current = this._timestampClockMinutes(points[i].timestamp);
+      const inWindow = end <= start ? current >= start || current < end : current >= start && current < end;
+      if (!inWindow) continue;
+      const last = ranges[ranges.length - 1];
+      if (last && last.end === i - 1) last.end = i;
+      else ranges.push({ start: i, end: i });
+    }
+    return ranges;
+  }
+
+  _linePath(points, xScale, yScale, key) {
+    return points.map((point, index) => {
+      const x = xScale(index);
+      const y = yScale(point[key]);
+      return `${index === 0 ? 'M' : 'L'}${x},${y}`;
+    }).join('');
+  }
+
+  _stepPath(points, xScale, yScale, key) {
+    let path = '';
+    for (let i = 0; i < points.length; i++) {
+      const x = xScale(i);
+      const y = yScale(Number.isFinite(points[i][key]) ? points[i][key] : 0);
+      if (i === 0) path += `M${x},${y}`;
+      else path += `H${x}V${y}`;
+    }
+    return path;
+  }
+
+  _intervalMinutes(timestamps) {
+    if (Array.isArray(timestamps) && timestamps.length > 1) {
+      const first = Date.parse(timestamps[0]);
+      const second = Date.parse(timestamps[1]);
+      const delta = (second - first) / 60000;
+      if (Number.isFinite(delta) && delta > 0) return delta;
+    }
+    if (Array.isArray(timestamps) && timestamps.length > 300) {
+      return (48 * 60) / timestamps.length;
+    }
+    return 5;
+  }
+
+  _percent(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 0;
+    return n <= 1 ? n * 100 : n;
+  }
+
+  _kw(value) {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? n / 1000 : 0;
+  }
+
+  _minorPrice(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n * 100 : NaN;
+  }
+
+  _reservePercent(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return NaN;
+    return n <= 1 ? n * 100 : n;
+  }
+
+  _niceCeil(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return 1;
+    if (n <= 4) return 4;
+    if (n <= 8) return 8;
+    if (n <= 12) return 12;
+    if (n <= 20) return 20;
+    if (n <= 40) return 40;
+    return Math.ceil(n / 20) * 20;
+  }
+
+  _actionInfo(action) {
+    const map = {
+      idle: { label: 'Idle', color: 'var(--secondary-text-color, #888)' },
+      charge: { label: 'Charging', color: '#4CAF50' },
+      discharge: { label: 'Discharging', color: '#FF9800' },
+      consume: { label: 'Powering Home', color: '#FF9800' },
+      export: { label: 'Exporting', color: '#FFD54F' },
+      self_consumption: { label: 'Self Consumption', color: '#42A5F5' },
+    };
+    return map[action] || map.idle;
+  }
+
+  _actionLabel(action) {
+    return this._actionInfo(action).label;
+  }
+
+  _formatPower(watts) {
+    const value = Number(watts || 0);
+    if (Math.abs(value) >= 1000) return `${(Math.abs(value) / 1000).toFixed(1)} kW`;
+    return `${Math.round(Math.abs(value))} W`;
+  }
+
+  _formatMinorPrice(value, minorUnit) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '--';
+    const decimals = Math.abs(n) >= 10 ? 1 : 2;
+    return `${n.toFixed(decimals)}${minorUnit || ''}`;
+  }
+
+  _priceAvgColor(value, action) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 'var(--secondary-text-color, #888)';
+    if (action === 'discharge' || action === 'export') {
+      if (n >= 20) return '#4CAF50';
+      if (n >= 10) return '#FBC02D';
+      if (n >= 0) return '#FF9800';
+      return '#F44336';
+    }
+    if (n <= 10) return '#4CAF50';
+    if (n <= 25) return '#FBC02D';
+    if (n <= 40) return '#FF9800';
+    return '#F44336';
+  }
+
+  _formatMoney(value, currency) {
+    try {
+      return new Intl.NumberFormat(undefined, { style: 'currency', currency: currency || 'AUD' }).format(value);
+    } catch (_) {
+      return `${currency || 'AUD'} ${value.toFixed(2)}`;
+    }
+  }
+
+  _formatTime(value) {
+    if (!value) return '--:--';
+    const text = String(value);
+    if (text.length >= 16 && text[10] === 'T') return text.substring(11, 16);
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '--:--';
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  _timeRange(start, end) {
+    const startText = this._formatTime(start);
+    const endText = this._formatTime(end);
+    return endText && endText !== '--:--' && endText !== startText ? `${startText} - ${endText}` : startText;
+  }
+
+  _clockMinutes(value) {
+    const [hours, minutes] = String(value || '').split(':').map(Number);
+    if (!Number.isFinite(hours)) return NaN;
+    return hours * 60 + (Number.isFinite(minutes) ? minutes : 0);
+  }
+
+  _timestampClockMinutes(value) {
+    const text = String(value || '');
+    if (text.length >= 16 && text[10] === 'T') {
+      return Number(text.substring(11, 13)) * 60 + Number(text.substring(14, 16));
+    }
+    const date = new Date(text);
+    if (Number.isNaN(date.getTime())) return 0;
+    return date.getHours() * 60 + date.getMinutes();
+  }
+
+  _title(value) {
+    return String(value || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  }
+
+  _escHtml(value) {
+    return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  _escSvg(value) {
+    return this._escHtml(value);
+  }
+}
+
+if (!customElements.get('power-sync-optimization-plan')) {
+  customElements.define('power-sync-optimization-plan', PowerSyncOptimizationPlan);
+}
+
 // ─── PowerSyncLayout Custom Element ─────────────────────────────
 // Viewport-fitting grid layout: 3 columns, fills available height.
 // Chart cards flex to fill remaining space; control cards stay natural size.
@@ -1906,11 +2747,8 @@ class PowerSyncStrategy {
 
     // --- Left Column: Optimizer Status (requires button-card) ---
     if (hasButton && hasE('optimization_status')) {
-      left.push(_optimizerStatus(
-        e,
-        hasE('optimization_force_charge_windows'),
-        hasE('optimization_force_discharge_windows'),
-      ));
+      left.push(_optimizerStatus(e));
+      center.push(_optimizationPlan(e));
     }
 
     // --- Center Column: Power Flow ---
@@ -2154,6 +2992,18 @@ function _priceMeta(hass, entityId) {
 }
 
 // ─── Section Builders ────────────────────────────────────────
+
+function _optimizationPlan(e) {
+  return {
+    type: 'custom:power-sync-optimization-plan',
+    optimizationPath: 'power_sync/optimization',
+    statusEntity: e('optimization_status'),
+    forceChargeEntity: e('optimization_force_charge_windows'),
+    forceDischargeEntity: e('optimization_force_discharge_windows'),
+    importPriceEntity: e('lp_import_price_forecast'),
+    exportPriceEntity: e('lp_export_price_forecast'),
+  };
+}
 
 function _svgArcGaugeCard({ entityId, label, unit, min, max, thresholds, multiplier = 1, decimals = 1 }) {
   // thresholds: { green, yellow, red } in display units (after multiplier).

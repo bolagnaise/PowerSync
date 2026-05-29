@@ -32,13 +32,22 @@ def test_button_card_resource_fallback_accepts_dashed_hacs_url():
 
 
 def test_optimizer_windows_use_combined_visual_card():
-    """Charge and discharge windows should render as one dashboard schedule card."""
+    """Optimizer schedule should use the native API-backed dashboard card."""
     source = STRATEGY_PATH.read_text()
 
+    assert "customElements.define('power-sync-optimization-plan'" in source
+    assert "custom:power-sync-optimization-plan" in source
+    assert "optimizationPath: 'power_sync/optimization'" in source
     assert "optimization_force_charge_windows" in source
     assert "optimization_force_discharge_windows" in source
-    assert "Planned Battery Windows" in source
-    assert "ps-window-row" in source
+    assert "lp_import_price_forecast" in source
+    assert "lp_export_price_forecast" in source
+    assert "24-Hour Action Plan" in source
+    assert "_actionRangesFromApi()" in source
+    assert "_fallbackActionRanges()" in source
+    assert "_priceStatsForAction(action, model)" in source
+    assert "price-kind" in source
+    assert "avg min max" in source
     assert "Future Force Charge" not in source
 
 

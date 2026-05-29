@@ -798,10 +798,11 @@ def _apply_wall_connector_observation(
 
 
 def _get_ev_vehicle_status(hass, entry) -> dict:
-    """Get EV charging status from Tesla vehicle sensors (Fleet API + BLE).
+    """Get EV charging status from configured EV sensors.
 
-    Checks both Teslemetry/Fleet API sensors (e.g. sensor.tessy_charger_power)
-    and Tesla BLE sensors (e.g. sensor.teslable_charge_power, charge_level).
+    Checks generic charger SoC plus Teslemetry/Fleet API sensors
+    (e.g. sensor.tessy_charger_power) and Tesla BLE sensors
+    (e.g. sensor.teslable_charge_power, charge_level).
 
     Returns:
         Dict with ev_power_kw (float) and ev_soc (int or None).
@@ -809,8 +810,17 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
     ev_power_kw = 0.0
     ev_soc = None
 
-    # Check Tesla BLE sensors (all configured prefixes)
     config = {**entry.data, **entry.options}
+    generic_ev_soc = None
+    from .const import CONF_GENERIC_CHARGER_ENABLED
+    from .automations.generic_charger_soc import resolve_generic_charger_soc
+
+    if config.get(CONF_GENERIC_CHARGER_ENABLED):
+        resolved_soc = resolve_generic_charger_soc(hass, config)
+        if resolved_soc is not None:
+            generic_ev_soc = int(resolved_soc)
+
+    # Check Tesla BLE sensors (all configured prefixes)
     for prefix in _resolve_ble_prefixes(hass, config):
         # Read SoC first so we can validate charging state
         ble_soc_entity = TESLA_BLE_SENSOR_CHARGE_LEVEL.format(prefix=prefix)
@@ -940,6 +950,9 @@ def _get_ev_vehicle_status(hass, entry) -> dict:
                         ev_soc = int(val)
                 except (ValueError, TypeError):
                     pass
+
+    if generic_ev_soc is not None:
+        ev_soc = generic_ev_soc
 
     return {"ev_power_kw": ev_power_kw, "ev_soc": ev_soc}
 
