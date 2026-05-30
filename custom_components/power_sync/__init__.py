@@ -3680,7 +3680,7 @@ _CALENDAR_ENERGY_SUMMARY_COORDINATORS = (
     ("esy_sunhome_coordinator", "ESY Sunhome"),
     ("solax_coordinator", "Solax"),
     ("saj_h2_coordinator", "SAJ H2"),
-    ("fronius_reserva_coordinator", "Fronius Reserva"),
+    ("fronius_reserva_coordinator", "Fronius GEN24 storage"),
     ("neovolt_coordinator", "Neovolt"),
     ("solaredge_coordinator", "SolarEdge"),
 )
@@ -7401,7 +7401,7 @@ class ConfigView(HomeAssistantView):
                     "modbus_enabled": bool(goodwe_host),
                 }
 
-            # Add Fronius Reserva bridge info if applicable
+            # Add Fronius GEN24 storage bridge info if applicable
             fronius_reserva_config = None
             if battery_system == "fronius_reserva":
                 fronius_reserva_config = {
@@ -16119,7 +16119,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             inverter_rated_kw=float(saj_inverter_rated_kw),
         )
     elif is_fronius_reserva:
-        _LOGGER.info("Running in Fronius Reserva mode — bridging via fronius_modbus integration")
+        _LOGGER.info("Running in Fronius GEN24 storage mode — bridging via fronius_modbus integration")
         fronius_capacity_kwh = entry.options.get(
             CONF_FRONIUS_RESERVA_BATTERY_CAPACITY_KWH,
             entry.data.get(
@@ -16323,9 +16323,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if fronius_reserva_coordinator:
         try:
             await fronius_reserva_coordinator.async_config_entry_first_refresh()
-            _LOGGER.info("Fronius Reserva coordinator initialized successfully")
+            _LOGGER.info("Fronius GEN24 storage coordinator initialized successfully")
         except Exception as e:
-            _LOGGER.warning("Fronius Reserva coordinator failed to initialize: %s", e)
+            _LOGGER.warning("Fronius GEN24 storage coordinator failed to initialize: %s", e)
             fronius_reserva_coordinator = None
     if neovolt_coordinator:
         try:
@@ -16942,7 +16942,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "esy_sunhome_coordinator": esy_sunhome_coordinator,  # For ESY Sunhome (bridges via esy_sunhome integration)
         "solax_coordinator": solax_coordinator,  # For Solax Hybrid (bridges via homeassistant-solax-modbus)
         "saj_h2_coordinator": saj_h2_coordinator,  # For SAJ H2 (bridges via saj_h2_modbus)
-        "fronius_reserva_coordinator": fronius_reserva_coordinator,  # For Fronius Reserva (bridges via fronius_modbus)
+        "fronius_reserva_coordinator": fronius_reserva_coordinator,  # For Fronius GEN24 storage (bridges via fronius_modbus)
         "neovolt_coordinator": neovolt_coordinator,  # For Neovolt / Bytewatt (bridges via Neovolt integration)
         "solaredge_coordinator": solaredge_coordinator,  # For SolarEdge Home battery telemetry
         "demand_charge_coordinator": demand_charge_coordinator,
@@ -16984,7 +16984,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "is_esy_sunhome": is_esy_sunhome,  # Track if ESY Sunhome battery system
         "is_solax": is_solax,  # Track if Solax battery system
         "is_saj_h2": is_saj_h2,  # Track if SAJ H2 battery system
-        "is_fronius_reserva": is_fronius_reserva,  # Track if Fronius Reserva battery system
+        "is_fronius_reserva": is_fronius_reserva,  # Track if Fronius GEN24 storage battery system
         "is_neovolt": is_neovolt,  # Track if Neovolt battery system
         "is_solaredge": is_solaredge,  # Track if SolarEdge battery/curtailment system
         "foxess_curtailment_state": "normal",  # Track FoxESS DC curtailment state
@@ -21567,7 +21567,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             fronius_coord = entry_data.get("fronius_reserva_coordinator")
             if fronius_coord:
                 await fronius_coord.force_discharge(duration, power_w=power_w)
-                _LOGGER.debug(f"Fronius Reserva force discharge hardware refreshed ({duration}min, {power_w}W)")
+                _LOGGER.debug(f"Fronius GEN24 storage force discharge hardware refreshed ({duration}min, {power_w}W)")
                 return
             neovolt_coord = entry_data.get("neovolt_coordinator")
             if neovolt_coord:
@@ -22041,7 +22041,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 fronius_coord = entry_data.get("fronius_reserva_coordinator")
                 if not fronius_coord:
                     force_discharge_state["active"] = False
-                    _LOGGER.error("Force discharge: Fronius Reserva coordinator not available")
+                    _LOGGER.error("Force discharge: Fronius GEN24 storage coordinator not available")
                     return
 
                 power_w = command_power_w
@@ -22052,7 +22052,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_discharge_state["source"] = source
                     force_discharge_state["duration"] = duration
                     force_discharge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
-                    _LOGGER.info("Fronius Reserva FORCE DISCHARGE ACTIVE for %d minutes", duration)
+                    _LOGGER.info("Fronius GEN24 storage FORCE DISCHARGE ACTIVE for %d minutes", duration)
 
                     async_dispatcher_send(hass, f"{DOMAIN}_force_discharge_state", {
                         "active": True,
@@ -22067,7 +22067,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         if _command_generation[0] != _restore_gen:
                             return
                         if force_discharge_state["active"]:
-                            _LOGGER.info("Fronius Reserva force discharge expired, auto-restoring")
+                            _LOGGER.info("Fronius GEN24 storage force discharge expired, auto-restoring")
                             await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
 
                     force_discharge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
@@ -22076,13 +22076,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await persist_force_mode_state()
                 else:
                     force_discharge_state["active"] = False
-                    _LOGGER.error("Fronius Reserva force discharge failed")
-                    hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "Fronius Reserva entity write error"))
+                    _LOGGER.error("Fronius GEN24 storage force discharge failed")
+                    hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "Fronius GEN24 storage entity write error"))
                 return
             except Exception as e:
                 force_discharge_state["active"] = False
-                _LOGGER.error(f"Error in Fronius Reserva force discharge: {e}", exc_info=True)
-                hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "Fronius Reserva entity write error"))
+                _LOGGER.error(f"Error in Fronius GEN24 storage force discharge: {e}", exc_info=True)
+                hass.async_create_task(_notify_api_error(hass, "Force Discharge Failed", "Fronius GEN24 storage entity write error"))
                 return
 
         is_neovolt_local = bool(_get_neovolt_entry_ids(entry.data, hass))
@@ -22835,7 +22835,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             fronius_coord = entry_data.get("fronius_reserva_coordinator")
             if fronius_coord:
                 await fronius_coord.force_charge(duration, power_w=power_w)
-                _LOGGER.debug(f"Fronius Reserva force charge hardware refreshed ({duration}min, {power_w}W)")
+                _LOGGER.debug(f"Fronius GEN24 storage force charge hardware refreshed ({duration}min, {power_w}W)")
                 return
             neovolt_coord = entry_data.get("neovolt_coordinator")
             if neovolt_coord:
@@ -23375,7 +23375,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 fronius_coord = entry_data.get("fronius_reserva_coordinator")
                 if not fronius_coord:
                     force_charge_state["active"] = False
-                    _LOGGER.error("Force charge: Fronius Reserva coordinator not available")
+                    _LOGGER.error("Force charge: Fronius GEN24 storage coordinator not available")
                     return
 
                 if force_discharge_state["active"]:
@@ -23394,7 +23394,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     force_charge_state["source"] = source
                     force_charge_state["duration"] = duration
                     force_charge_state["expires_at"] = dt_util.utcnow() + timedelta(minutes=duration)
-                    _LOGGER.info("Fronius Reserva FORCE CHARGE ACTIVE for %d minutes", duration)
+                    _LOGGER.info("Fronius GEN24 storage FORCE CHARGE ACTIVE for %d minutes", duration)
 
                     async_dispatcher_send(hass, f"{DOMAIN}_force_charge_state", {
                         "active": True,
@@ -23409,7 +23409,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         if _command_generation[0] != _restore_gen:
                             return
                         if force_charge_state["active"]:
-                            _LOGGER.info("Fronius Reserva force charge expired, auto-restoring")
+                            _LOGGER.info("Fronius GEN24 storage force charge expired, auto-restoring")
                             await hass.services.async_call(DOMAIN, SERVICE_RESTORE_NORMAL, {}, blocking=True)
 
                     force_charge_state["cancel_expiry_timer"] = async_track_point_in_utc_time(
@@ -23418,13 +23418,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     await persist_force_mode_state()
                 else:
                     force_charge_state["active"] = False
-                    _LOGGER.error("Fronius Reserva force charge failed")
-                    hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "Fronius Reserva entity write error"))
+                    _LOGGER.error("Fronius GEN24 storage force charge failed")
+                    hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "Fronius GEN24 storage entity write error"))
                 return
             except Exception as e:
                 force_charge_state["active"] = False
-                _LOGGER.error(f"Error in Fronius Reserva force charge: {e}", exc_info=True)
-                hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "Fronius Reserva entity write error"))
+                _LOGGER.error(f"Error in Fronius GEN24 storage force charge: {e}", exc_info=True)
+                hass.async_create_task(_notify_api_error(hass, "Force Charge Failed", "Fronius GEN24 storage entity write error"))
                 return
 
         is_neovolt_local = bool(_get_neovolt_entry_ids(entry.data, hass))
@@ -24488,7 +24488,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 force_charge_state["expires_at"] = None
                 force_discharge_state["expires_at"] = None
 
-                _LOGGER.info("Fronius Reserva NORMAL OPERATION RESTORED (Auto)")
+                _LOGGER.info("Fronius GEN24 storage NORMAL OPERATION RESTORED (Auto)")
 
                 if not suppress_notification:
                     try:
@@ -24507,7 +24507,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 await persist_force_mode_state()
                 return
             except Exception as e:
-                _LOGGER.error(f"Error in Fronius Reserva restore normal: {e}", exc_info=True)
+                _LOGGER.error(f"Error in Fronius GEN24 storage restore normal: {e}", exc_info=True)
                 return
 
         is_neovolt_local = bool(_get_neovolt_entry_ids(entry.data, hass))
@@ -25338,23 +25338,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.error(f"Error setting SAJ H2 self-consumption: {e}", exc_info=True)
                 return
 
-        # Check if this is a Fronius Reserva system
+        # Check if this is a Fronius GEN24 storage system
         is_fronius_reserva_sc = bool(entry.data.get(CONF_FRONIUS_RESERVA_CONFIG_ENTRY_ID))
         if is_fronius_reserva_sc:
             try:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 fronius_coord = entry_data.get("fronius_reserva_coordinator")
                 if not fronius_coord:
-                    _LOGGER.error("Self-consumption: Fronius Reserva coordinator not available")
+                    _LOGGER.error("Self-consumption: Fronius GEN24 storage coordinator not available")
                     return
                 success = await fronius_coord.restore_normal()
                 if success:
-                    _LOGGER.info("Fronius Reserva self-consumption mode restored (Auto)")
+                    _LOGGER.info("Fronius GEN24 storage self-consumption mode restored (Auto)")
                 else:
-                    _LOGGER.error("Failed to set Fronius Reserva self-consumption mode")
+                    _LOGGER.error("Failed to set Fronius GEN24 storage self-consumption mode")
                 return
             except Exception as e:
-                _LOGGER.error(f"Error setting Fronius Reserva self-consumption: {e}", exc_info=True)
+                _LOGGER.error(f"Error setting Fronius GEN24 storage self-consumption: {e}", exc_info=True)
                 return
 
         # Check if this is a Neovolt system
@@ -25675,22 +25675,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # SAJ H2: no backup reserve register — no-op
             _LOGGER.debug("SAJ H2 does not support backup reserve (no-op)")
         elif bool(entry.data.get(CONF_FRONIUS_RESERVA_CONFIG_ENTRY_ID)):
-            # Fronius Reserva via fronius_modbus entities
+            # Fronius GEN24 storage via fronius_modbus entities
             try:
                 entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
                 fronius_coord = entry_data.get("fronius_reserva_coordinator")
                 if not fronius_coord:
-                    _LOGGER.error("Fronius Reserva coordinator not available for set_backup_reserve")
+                    _LOGGER.error("Fronius GEN24 storage coordinator not available for set_backup_reserve")
                     return
 
                 success = await fronius_coord.set_backup_reserve(percent)
                 if success:
-                    _LOGGER.info(f"Fronius Reserva backup reserve set to {percent}%")
+                    _LOGGER.info(f"Fronius GEN24 storage backup reserve set to {percent}%")
                 else:
-                    _LOGGER.error("Failed to set Fronius Reserva backup reserve")
+                    _LOGGER.error("Failed to set Fronius GEN24 storage backup reserve")
 
             except Exception as e:
-                _LOGGER.error(f"Error setting Fronius Reserva backup reserve: {e}", exc_info=True)
+                _LOGGER.error(f"Error setting Fronius GEN24 storage backup reserve: {e}", exc_info=True)
         elif bool(_get_neovolt_entry_ids(entry.data, hass)):
             # Neovolt via HACS integration entities
             try:

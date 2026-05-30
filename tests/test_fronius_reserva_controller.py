@@ -1,4 +1,4 @@
-"""Regression tests for Fronius Reserva entity bridge controls."""
+"""Regression tests for Fronius GEN24 storage entity bridge controls."""
 
 from __future__ import annotations
 
@@ -118,6 +118,30 @@ def _reserva_states() -> list[_FakeState]:
     ]
 
 
+def _callifo_byd_states() -> list[_FakeState]:
+    return [
+        _FakeState("sensor.fronius_battery_storage_state_of_charge", "71"),
+        _FakeState("sensor.fronius_battery_storage_storage_charging_power", "0"),
+        _FakeState("sensor.fronius_battery_storage_storage_discharging_power", "1800"),
+        _FakeState("sensor.fronius_meter_200_power", "-400"),
+        _FakeState("sensor.fronius_inverter_pv_power", "4600"),
+        _FakeState("sensor.fronius_inverter_load", "3200"),
+        _FakeState("sensor.fronius_battery_storage_cell_temperature", "24.5"),
+        _FakeState("sensor.fronius_battery_storage_capacity", "10240"),
+        _FakeState("sensor.fronius_battery_storage_maximum_charge_rate", "6200"),
+        _FakeState("sensor.fronius_battery_storage_maximum_discharge_rate", "6400"),
+        _FakeState("sensor.fronius_battery_storage_soc_minimum", "15"),
+        _FakeState("sensor.fronius_battery_storage_core_storage_control_mode", "Auto"),
+        _FakeState("select.fronius_battery_storage_battery_api_mode", "Auto"),
+        _FakeState("select.fronius_battery_storage_storage_control_mode", "Auto"),
+        _FakeState("number.fronius_battery_storage_grid_charge_power", "0"),
+        _FakeState("number.fronius_battery_storage_grid_discharge_power", "0"),
+        _FakeState("number.fronius_battery_storage_pv_charge_limit", "0"),
+        _FakeState("number.fronius_battery_storage_discharge_limit", "0"),
+        _FakeState("number.fronius_battery_storage_soc_minimum", "15"),
+    ]
+
+
 def _controller(hass: _FakeHass) -> FroniusReservaBatteryController:
     return FroniusReservaBatteryController(
         hass,
@@ -144,6 +168,66 @@ def test_connect_discovers_reserva_entities_and_reads_status():
     assert status["solar_power"] == 3.2
     assert status["backup_reserve"] == 20.0
     assert status["battery_max_charge_power_w"] == 5000.0
+
+
+def test_connect_discovers_callifo_byd_entities_and_reads_status():
+    hass = _FakeHass(_callifo_byd_states())
+    controller = _controller(hass)
+
+    assert asyncio.run(controller.connect())
+    assert controller._entity_map["battery_level"] == "sensor.fronius_battery_storage_state_of_charge"
+    assert controller._entity_map["storage_control_mode"] == "select.fronius_battery_storage_storage_control_mode"
+    assert controller._entity_map["grid_charge_power"] == "number.fronius_battery_storage_grid_charge_power"
+    assert controller._entity_map["backup_reserve"] == "number.fronius_battery_storage_soc_minimum"
+
+    status = controller.get_status()
+    assert status["battery_level"] == 71.0
+    assert status["battery_power"] == 1.8
+    assert status["grid_power"] == -0.4
+    assert status["solar_power"] == 4.6
+    assert status["load_power"] == 3.2
+    assert status["battery_temperature"] == 24.5
+    assert status["battery_capacity_kwh"] == 10.24
+    assert status["battery_max_charge_power_w"] == 6200.0
+    assert status["battery_max_discharge_power_w"] == 6400.0
+    assert status["backup_reserve"] == 15.0
+
+
+def test_status_uses_configured_power_fallback_when_callifo_limits_missing():
+    states = [
+        state
+        for state in _callifo_byd_states()
+        if state.entity_id
+        not in (
+            "sensor.fronius_battery_storage_maximum_charge_rate",
+            "sensor.fronius_battery_storage_maximum_discharge_rate",
+        )
+    ]
+    hass = _FakeHass(states)
+    controller = _controller(hass)
+
+    assert asyncio.run(controller.connect())
+    status = controller.get_status()
+
+    assert status["battery_max_charge_power_w"] == 5000.0
+    assert status["battery_max_discharge_power_w"] == 5000.0
+
+
+def test_connect_reports_generic_storage_missing_entity_hint():
+    states = [
+        state
+        for state in _callifo_byd_states()
+        if state.entity_id != "select.fronius_battery_storage_storage_control_mode"
+    ]
+    hass = _FakeHass(states)
+    controller = _controller(hass)
+
+    try:
+        asyncio.run(controller.connect())
+    except ValueError as exc:
+        assert str(exc) == "fronius_reserva_missing_entities:select.storage_control_mode"
+    else:
+        raise AssertionError("Expected missing entity validation error")
 
 
 def test_force_charge_sets_manual_grid_charge_mode_then_power():
@@ -257,4 +341,28 @@ def test_restore_normal_sets_auto_storage_control():
             "select_option",
             {"entity_id": "select.reserva_storage_control_mode_2", "option": "Auto"},
         )
+    ]
+
+
+def test_force_charge_uses_callifo_byd_control_entities():
+    hass = _FakeHass(_callifo_byd_states())
+    controller = _controller(hass)
+
+    assert asyncio.run(controller.force_charge(duration_minutes=30, power_w=4200))
+    assert hass.services.calls == [
+        (
+            "select",
+            "select_option",
+            {"entity_id": "select.fronius_battery_storage_battery_api_mode", "option": "Manual"},
+        ),
+        (
+            "select",
+            "select_option",
+            {"entity_id": "select.fronius_battery_storage_storage_control_mode", "option": "Charge from Grid"},
+        ),
+        (
+            "number",
+            "set_value",
+            {"entity_id": "number.fronius_battery_storage_grid_charge_power", "value": 4200},
+        ),
     ]

@@ -1,4 +1,4 @@
-"""Fronius Reserva battery bridge via the fronius_modbus integration.
+"""Fronius GEN24 storage bridge via the fronius_modbus integration.
 
 PowerSync does not open a second Modbus connection here. It controls the
 entities exposed by the upstream `fronius_modbus` integration through Home
@@ -18,6 +18,9 @@ _LOGGER = logging.getLogger(__name__)
 
 _READ_ENTITIES: dict[str, tuple[str, ...]] = {
     "battery_level": (
+        "state_of_charge",
+        "soc",
+        "battery_storage_soc",
         "reserva_state_of_charge_2",
         "reserva_state_of_charge_3",
         "reserva_state_of_charge",
@@ -31,6 +34,8 @@ _READ_ENTITIES: dict[str, tuple[str, ...]] = {
         "reserva_storage_discharging_power",
     ),
     "grid_power": (
+        "meter_200_power",
+        "meter_power",
         "meter_1_power",
         "smart_meter_63a_1_meter_1_power",
         "smart_meter_power",
@@ -44,20 +49,41 @@ _READ_ENTITIES: dict[str, tuple[str, ...]] = {
         "load",
     ),
     "battery_temperature": (
+        "cell_temperature",
+        "storage_temperature",
         "reserva_temperature",
         "reserva_cell_temperature",
     ),
     "battery_capacity_wh": (
+        "capacity",
+        "whrtg",
+        "battery_storage_capacity",
         "reserva_capacity_2",
         "reserva_capacity",
         "reserva_designed_capacity",
         "reserva_maximum_capacity",
     ),
+    "battery_max_charge_power_w": (
+        "maximum_charge_rate",
+        "max_charge_rate",
+        "max_charge",
+        "maxcharte",
+        "battery_storage_maximum_charge_rate",
+    ),
+    "battery_max_discharge_power_w": (
+        "maximum_discharge_rate",
+        "max_discharge_rate",
+        "maxdischarte",
+        "battery_storage_maximum_discharge_rate",
+    ),
     "backup_reserve_sensor": (
-        "reserva_soc_minimum",
+        "soc_minimum",
         "battery_storage_soc_minimum",
+        "reserva_soc_minimum",
     ),
     "storage_control_mode_sensor": (
+        "core_storage_control_mode",
+        "storage_control_mode",
         "reserva_storage_control_mode_2",
         "reserva_storage_control_mode",
         "control_mode_2",
@@ -66,29 +92,38 @@ _READ_ENTITIES: dict[str, tuple[str, ...]] = {
 
 _WRITE_ENTITIES: dict[str, tuple[str, ...]] = {
     "battery_api_mode": (
+        "battery_api_mode",
         "reserva_battery_api_mode",
     ),
     "storage_control_mode": (
+        "storage_control_mode",
         "reserva_storage_control_mode_2",
         "reserva_storage_control_mode",
     ),
     "grid_charge_power": (
+        "grid_charge_power",
         "reserva_grid_charge_power_2",
         "reserva_grid_charge_power",
     ),
     "grid_discharge_power": (
+        "grid_discharge_power",
         "reserva_grid_discharge_power_2",
         "reserva_grid_discharge_power",
     ),
     "pv_charge_limit": (
+        "pv_charge_limit",
+        "charge_limit",
         "reserva_pv_charge_limit_2",
         "reserva_pv_charge_limit",
     ),
     "discharge_limit": (
+        "discharge_limit",
         "reserva_discharge_limit_2",
         "reserva_discharge_limit",
     ),
     "backup_reserve": (
+        "soc_minimum",
+        "battery_storage_soc_minimum",
         "reserva_soc_minimum",
     ),
 }
@@ -106,7 +141,7 @@ _OPTION_WAIT_STEP_SECONDS = 0.5
 
 
 class FroniusReservaBatteryController:
-    """Bridge controller for Fronius Reserva entities exposed by fronius_modbus."""
+    """Bridge controller for Fronius GEN24 storage entities exposed by fronius_modbus."""
 
     def __init__(
         self,
@@ -124,7 +159,7 @@ class FroniusReservaBatteryController:
         self._entity_map: dict[str, str] = {}
 
     async def connect(self) -> bool:
-        """Validate that the required Fronius Reserva entities exist."""
+        """Validate that the required Fronius GEN24 storage entities exist."""
         self._discover_entities()
         required = (
             "battery_level",
@@ -141,7 +176,7 @@ class FroniusReservaBatteryController:
             raise ValueError(f"fronius_reserva_missing_entities:{','.join(missing_ids)}")
 
         _LOGGER.info(
-            "Fronius Reserva entities validated via config entry %s — mapped: %s",
+            "Fronius GEN24 storage entities validated via config entry %s — mapped: %s",
             self._fronius_entry_id,
             {k: v for k, v in self._entity_map.items()},
         )
@@ -211,7 +246,7 @@ class FroniusReservaBatteryController:
         return f"{domain}.{suffixes[0]}"
 
     def get_status(self) -> dict[str, Any]:
-        """Read current Fronius Reserva state and return PowerSync-canonical fields."""
+        """Read current Fronius storage state and return PowerSync-canonical fields."""
         if not self._entity_map:
             self._discover_entities()
 
@@ -229,6 +264,8 @@ class FroniusReservaBatteryController:
 
         reserve = self._read_float("backup_reserve") or self._read_float("backup_reserve_sensor")
         capacity_wh = self._read_float("battery_capacity_wh")
+        max_charge_w = self._read_float("battery_max_charge_power_w") or self._max_charge_w
+        max_discharge_w = self._read_float("battery_max_discharge_power_w") or self._max_discharge_w
         mode = self._read_state("storage_control_mode") or self._read_state("storage_control_mode_sensor")
 
         return {
@@ -243,8 +280,8 @@ class FroniusReservaBatteryController:
                 if capacity_wh is not None and capacity_wh > 0
                 else self._battery_capacity_kwh
             ),
-            "battery_max_charge_power_w": self._max_charge_w,
-            "battery_max_discharge_power_w": self._max_discharge_w,
+            "battery_max_charge_power_w": max_charge_w,
+            "battery_max_discharge_power_w": max_discharge_w,
             "backup_reserve": reserve,
             "min_soc": reserve,
             "mode": mode,
@@ -261,11 +298,11 @@ class FroniusReservaBatteryController:
                 return False
             await self._set_number("grid_charge_power", target_w)
         except Exception:
-            _LOGGER.exception("Fronius Reserva force_charge failed")
+            _LOGGER.exception("Fronius GEN24 storage force_charge failed")
             await self.restore_normal()
             return False
         _LOGGER.info(
-            "Fronius Reserva force_charge: %.0f W for %d min",
+            "Fronius GEN24 storage force_charge: %.0f W for %d min",
             target_w,
             duration_minutes,
         )
@@ -282,11 +319,11 @@ class FroniusReservaBatteryController:
                 return False
             await self._set_number("grid_discharge_power", target_w)
         except Exception:
-            _LOGGER.exception("Fronius Reserva force_discharge failed")
+            _LOGGER.exception("Fronius GEN24 storage force_discharge failed")
             await self.restore_normal()
             return False
         _LOGGER.info(
-            "Fronius Reserva force_discharge: %.0f W for %d min",
+            "Fronius GEN24 storage force_discharge: %.0f W for %d min",
             target_w,
             duration_minutes,
         )
@@ -307,10 +344,10 @@ class FroniusReservaBatteryController:
             await self._set_number("pv_charge_limit", 0)
             await self._set_number("discharge_limit", 0)
         except Exception:
-            _LOGGER.exception("Fronius Reserva set_idle failed")
+            _LOGGER.exception("Fronius GEN24 storage set_idle failed")
             await self.restore_normal()
             return False
-        _LOGGER.info("Fronius Reserva idle: PV charge and discharge limits set to 0 W")
+        _LOGGER.info("Fronius GEN24 storage idle: PV charge and discharge limits set to 0 W")
         return True
 
     async def block_charging(self) -> bool:
@@ -328,25 +365,25 @@ class FroniusReservaBatteryController:
         return True
 
     async def restore_normal(self) -> bool:
-        """Restore Fronius Reserva to automatic storage control."""
+        """Restore Fronius GEN24 storage to automatic control."""
         await self._ensure_connected()
         await self._set_select("storage_control_mode", _MODE_AUTO)
-        _LOGGER.info("Fronius Reserva restored to Auto storage control")
+        _LOGGER.info("Fronius GEN24 storage restored to Auto storage control")
         return True
 
     async def set_backup_reserve(self, percent: int) -> bool:
-        """Set Reserva minimum SOC."""
+        """Set Fronius storage minimum SOC."""
         await self._ensure_connected()
         if not self._entity_map.get("backup_reserve"):
-            _LOGGER.warning("Fronius Reserva backup reserve entity not found")
+            _LOGGER.warning("Fronius GEN24 storage backup reserve entity not found")
             return False
         clamped = max(5, min(100, int(percent)))
         await self._set_number("backup_reserve", clamped)
-        _LOGGER.info("Fronius Reserva SoC minimum set to %d%%", clamped)
+        _LOGGER.info("Fronius GEN24 storage SoC minimum set to %d%%", clamped)
         return True
 
     async def get_backup_reserve(self) -> int | None:
-        """Read current Reserva minimum SOC."""
+        """Read current Fronius storage minimum SOC."""
         await self._ensure_connected()
         reserve = self._read_float("backup_reserve") or self._read_float("backup_reserve_sensor")
         return int(reserve) if reserve is not None else None
@@ -402,14 +439,14 @@ class FroniusReservaBatteryController:
             await asyncio.sleep(_OPTION_WAIT_STEP_SECONDS)
             elapsed += _OPTION_WAIT_STEP_SECONDS
         _LOGGER.warning(
-            "Fronius Reserva: entity %s is still unavailable after mode switch; attempting write anyway",
+            "Fronius GEN24 storage: entity %s is still unavailable after mode switch; attempting write anyway",
             self._entity_map.get(key, key),
         )
         return True
 
     async def _set_select(self, key: str, option: str) -> None:
         entity_id = self._entity_map[key]
-        _LOGGER.debug("Fronius Reserva: selecting %s = %s", entity_id, option)
+        _LOGGER.debug("Fronius GEN24 storage: selecting %s = %s", entity_id, option)
         await self.hass.services.async_call(
             "select",
             "select_option",
@@ -419,7 +456,7 @@ class FroniusReservaBatteryController:
 
     async def _set_number(self, key: str, value: int | float) -> None:
         entity_id = self._entity_map[key]
-        _LOGGER.debug("Fronius Reserva: setting %s = %s", entity_id, value)
+        _LOGGER.debug("Fronius GEN24 storage: setting %s = %s", entity_id, value)
         await self.hass.services.async_call(
             "number",
             "set_value",

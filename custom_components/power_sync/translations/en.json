@@ -517,8 +517,8 @@
         "submit": "Connect"
       },
       "fronius_reserva_battery": {
-        "title": "Fronius Reserva connection",
-        "description": "PowerSync bridges through the Fronius Modbus integration. Install it from HACS and configure your GEN24/Reserva system, then return here.",
+        "title": "Fronius GEN24 storage connection",
+        "description": "PowerSync bridges through the Fronius Modbus integration. Install it from HACS and configure your GEN24 BYD or Reserva storage system, then return here.",
         "data": {
           "fronius_reserva_config_entry_id": "Fronius Modbus integration",
           "fronius_reserva_battery_capacity_kwh": "Battery capacity",
@@ -526,7 +526,7 @@
           "fronius_reserva_max_discharge_kw": "Maximum discharge power"
         },
         "data_description": {
-          "fronius_reserva_config_entry_id": "The fronius_modbus integration entry to read sensors and send Reserva storage-control commands through.",
+          "fronius_reserva_config_entry_id": "The fronius_modbus integration entry to read sensors and send GEN24 storage-control commands through.",
           "fronius_reserva_battery_capacity_kwh": "Usable battery capacity in kWh. Used by the LP optimizer.",
           "fronius_reserva_max_charge_kw": "Maximum grid charge power in kW. Used by dispatch commands and the LP optimizer.",
           "fronius_reserva_max_discharge_kw": "Maximum grid discharge/export power in kW. Used by dispatch commands and the LP optimizer."
@@ -921,8 +921,8 @@
       "solax_connect_failed": "Failed to validate Solax entities. Check the selected integration entry and try again.",
       "saj_missing_entities": "Could not find the required SAJ H2 entities in the selected saj_h2_modbus integration entry. Make sure the integration is installed, the inverter is online, and its entities have been created in Home Assistant.",
       "saj_connect_failed": "Failed to validate SAJ H2 entities. Check the selected integration entry and try again.",
-      "fronius_reserva_missing_entities": "Could not find the required Fronius Reserva entities in the selected fronius_modbus integration entry. The first missing entity was: {first_missing}. Make sure the integration is installed, the system is online, and Reserva storage entities have been created in Home Assistant.",
-      "fronius_reserva_connect_failed": "Failed to validate Fronius Reserva entities. Check the selected integration entry and try again.",
+      "fronius_reserva_missing_entities": "Could not find the required Fronius GEN24 storage entities in the selected fronius_modbus integration entry. The first missing entity was: {first_missing}. Make sure the integration is installed, the system is online, and storage entities have been created in Home Assistant.",
+      "fronius_reserva_connect_failed": "Failed to validate Fronius GEN24 storage entities. Check the selected integration entry and try again.",
       "neovolt_missing_entities": "Could not find the required Neovolt entities in the selected Neovolt integration entry. Make sure the integration is installed, the system is online, and its entities have been created in Home Assistant.",
       "neovolt_connect_failed": "Failed to validate Neovolt entities. Check the selected integration entry and try again.",
       "neovolt_capacity_invalid": "Enter positive battery capacities in kWh, separated by commas.",
@@ -939,7 +939,7 @@
       "reauth_fleet_api_use_tesla_fleet": "PowerSync reads tokens from your Tesla Fleet integration. Go to Settings > Devices & Services > Tesla Fleet and re-authenticate there. PowerSync will pick up the new tokens automatically.",
       "esy_sunhome_not_installed": "The ESY Sunhome integration is not installed. Install it via HACS (search 'ESY Sunhome') and add a device before continuing.",
       "saj_h2_not_installed": "The SAJ H2 Modbus integration is not installed. Install it via HACS (search 'SAJ H2 Inverter Modbus') and add your inverter before continuing.",
-      "fronius_reserva_not_installed": "The Fronius Modbus integration is not installed. Install it via HACS and add your GEN24/Reserva system before continuing.",
+      "fronius_reserva_not_installed": "The Fronius Modbus integration is not installed. Install it via HACS and add your GEN24 BYD or Reserva storage system before continuing.",
       "neovolt_not_installed": "The Neovolt Modbus integration is not installed. Install it via HACS and add your Neovolt/Bytewatt system before continuing.",
       "solax_not_installed": "The Solax Modbus integration is not installed. Install it via HACS (search 'Solax Modbus') and add your inverter before continuing."
     }
@@ -958,7 +958,7 @@
           "goodwe_connection_options": "GoodWe connection",
           "esy_sunhome_connection": "ESY Sunhome connection",
           "saj_h2_connection": "SAJ H2 connection",
-          "fronius_reserva_connection": "Fronius Reserva connection",
+          "fronius_reserva_connection": "Fronius GEN24 storage connection",
           "neovolt_connection": "Neovolt connection",
           "optimization": "Optimization mode",
           "inverter": "AC inverter curtailment",
@@ -1130,7 +1130,7 @@
         "submit": "Save"
       },
       "fronius_reserva_connection": {
-        "title": "Fronius Reserva connection",
+        "title": "Fronius GEN24 storage connection",
         "description": "Update the Fronius Modbus integration entry and dispatch power limits PowerSync bridges through.",
         "data": {
           "fronius_reserva_config_entry_id": "Fronius Modbus integration",
@@ -1139,7 +1139,7 @@
           "fronius_reserva_max_discharge_kw": "Maximum discharge power"
         },
         "data_description": {
-          "fronius_reserva_config_entry_id": "The fronius_modbus integration entry to read sensors and send Reserva storage-control commands through.",
+          "fronius_reserva_config_entry_id": "The fronius_modbus integration entry to read sensors and send GEN24 storage-control commands through.",
           "fronius_reserva_battery_capacity_kwh": "Usable battery capacity in kWh. Used by the LP optimizer.",
           "fronius_reserva_max_charge_kw": "Maximum grid charge power in kW. Used by dispatch commands and the LP optimizer.",
           "fronius_reserva_max_discharge_kw": "Maximum grid discharge/export power in kW. Used by dispatch commands and the LP optimizer."

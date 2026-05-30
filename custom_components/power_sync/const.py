@@ -173,7 +173,7 @@ BATTERY_SYSTEMS = {
     BATTERY_SYSTEM_ESY_SUNHOME: "ESY Sunhome — via esy_sunhome companion integration",
     BATTERY_SYSTEM_SOLAX: "Solax Hybrid — via Solax Modbus integration",
     BATTERY_SYSTEM_SAJ_H2: "SAJ H2/HS2 — via SAJ H2 Modbus integration",
-    BATTERY_SYSTEM_FRONIUS_RESERVA: "Fronius Reserva — via Fronius Modbus integration",
+    BATTERY_SYSTEM_FRONIUS_RESERVA: "Fronius GEN24 storage (BYD/Reserva) — via Fronius Modbus integration",
     BATTERY_SYSTEM_NEOVOLT: "Neovolt/Bytewatt — via Neovolt Modbus integration",
     BATTERY_SYSTEM_SOLAREDGE: "SolarEdge Home Battery / inverter curtailment — HA entity bridge + Modbus TCP",
 }
@@ -456,7 +456,7 @@ DEFAULT_SAJ_BATTERY_CAPACITY_KWH = 10.0
 CONF_SAJ_INVERTER_RATED_KW = "saj_inverter_rated_kw"
 DEFAULT_SAJ_INVERTER_RATED_KW = 10.0
 
-# Fronius Reserva battery system — bridges via callifo/redpomodoro fronius_modbus
+# Fronius GEN24 storage battery system — bridges via callifo/redpomodoro fronius_modbus
 # Install fronius_modbus from HACS first; PowerSync reads/writes its entities.
 CONF_FRONIUS_RESERVA_CONFIG_ENTRY_ID = "fronius_reserva_config_entry_id"
 CONF_FRONIUS_RESERVA_BATTERY_CAPACITY_KWH = "fronius_reserva_battery_capacity_kwh"
@@ -1653,7 +1653,7 @@ OPTIMIZATION_PROVIDER_NATIVE_NAMES = {
     BATTERY_SYSTEM_ESY_SUNHOME: "ESY Sunhome",
     BATTERY_SYSTEM_SOLAX: "Solax",
     BATTERY_SYSTEM_SAJ_H2: "SAJ H2",
-    BATTERY_SYSTEM_FRONIUS_RESERVA: "Fronius Reserva",
+    BATTERY_SYSTEM_FRONIUS_RESERVA: "Fronius GEN24 storage",
     BATTERY_SYSTEM_NEOVOLT: "Neovolt",
     BATTERY_SYSTEM_SOLAREDGE: "SolarEdge",
 }
@@ -1731,7 +1731,7 @@ BATTERY_CAPACITY_DEFAULTS = {
     BATTERY_SYSTEM_ESY_SUNHOME: 10000,  # HM6 varies; default 10 kWh
     BATTERY_SYSTEM_SOLAX: 11600,      # T-BAT-SYS-HV 11.6 kWh typical
     BATTERY_SYSTEM_SAJ_H2: 10000,     # Varies, default 10 kWh
-    BATTERY_SYSTEM_FRONIUS_RESERVA: 9600,  # Fronius Reserva varies by module count
+    BATTERY_SYSTEM_FRONIUS_RESERVA: 9600,  # Fronius GEN24 storage varies by module count
     BATTERY_SYSTEM_NEOVOLT: 20100,    # Bytewatt pack is commonly 20.1 kWh
     BATTERY_SYSTEM_SOLAREDGE: 10000,  # SolarEdge Home Battery varies by stack
 }

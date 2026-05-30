@@ -128,6 +128,57 @@ def _calls_vol_optional_without_default(node: ast.AST) -> bool:
     )
 
 
+def test_fronius_gen24_storage_keeps_legacy_step_ids_and_routes():
+    route = ast.get_source_segment(
+        CONFIG_FLOW_PATH.read_text(),
+        _config_flow_method("_route_to_battery_setup"),
+    )
+    create_entry = ast.get_source_segment(
+        CONFIG_FLOW_PATH.read_text(),
+        _config_flow_method("_create_final_entry"),
+    )
+
+    assert route is not None
+    assert create_entry is not None
+    assert "BATTERY_SYSTEM_FRONIUS_RESERVA" in route
+    assert "return await self.async_step_fronius_reserva_battery()" in route
+    assert '"_fronius_reserva_data"' in create_entry
+    assert ("fronius_reserva_battery", "fronius_reserva_connection") in CONFIG_OPTION_TEXT_STEP_PAIRS
+
+
+def test_fronius_gen24_storage_strings_are_generic():
+    strings = json.loads(STRINGS_PATH.read_text())
+    translations = json.loads(TRANSLATIONS_PATH.read_text())
+
+    for payload in (strings, translations):
+        config_steps = payload["config"]["step"]
+        options_steps = payload["options"]["step"]
+        errors = payload["config"]["error"]
+        aborts = payload["config"]["abort"]
+
+        assert config_steps["fronius_reserva_battery"]["title"] == "Fronius GEN24 storage connection"
+        assert options_steps["fronius_reserva_connection"]["title"] == "Fronius GEN24 storage connection"
+        assert "GEN24 BYD or Reserva storage" in config_steps["fronius_reserva_battery"]["description"]
+        assert "Fronius GEN24 storage entities" in errors["fronius_reserva_missing_entities"]
+        assert "Fronius GEN24 storage entities" in errors["fronius_reserva_connect_failed"]
+        assert "GEN24 BYD or Reserva storage" in aborts["fronius_reserva_not_installed"]
+
+
+def test_fronius_gen24_storage_flow_validates_fronius_modbus_entry():
+    source = CONFIG_FLOW_PATH.read_text()
+    setup = ast.get_source_segment(source, _config_flow_method("async_step_fronius_reserva_battery"))
+    options = ast.get_source_segment(source, _options_flow_method("async_step_fronius_reserva_connection"))
+
+    assert setup is not None
+    assert options is not None
+    for method_source in (setup, options):
+        assert 'async_entries("fronius_modbus")' in method_source
+        assert 'async_abort(reason="fronius_reserva_not_installed")' in method_source
+        assert "await ctrl.connect()" in method_source
+        assert 'errors["base"] = "fronius_reserva_missing_entities"' in method_source
+        assert 'errors["base"] = "fronius_reserva_connect_failed"' in method_source
+
+
 def test_optional_entity_normalizer_treats_none_as_unset():
     function = _top_level_function("_normalize_optional_entity")
     module = ast.Module(body=[function], type_ignores=[])

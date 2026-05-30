@@ -104,7 +104,7 @@ from .const import (
     DEFAULT_SAJ_BATTERY_CAPACITY_KWH,
     CONF_SAJ_INVERTER_RATED_KW,
     DEFAULT_SAJ_INVERTER_RATED_KW,
-    # Fronius Reserva battery system configuration
+    # Fronius GEN24 storage battery system configuration
     CONF_FRONIUS_RESERVA_CONFIG_ENTRY_ID,
     CONF_FRONIUS_RESERVA_BATTERY_CAPACITY_KWH,
     CONF_FRONIUS_RESERVA_MAX_CHARGE_KW,
@@ -1789,7 +1789,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             BATTERY_SYSTEM_ESY_SUNHOME: "ESY Sunhome",
             BATTERY_SYSTEM_SOLAX: "Solax",
             BATTERY_SYSTEM_SAJ_H2: "SAJ H2",
-            BATTERY_SYSTEM_FRONIUS_RESERVA: "Fronius Reserva",
+            BATTERY_SYSTEM_FRONIUS_RESERVA: "Fronius GEN24 storage",
             BATTERY_SYSTEM_NEOVOLT: "Neovolt",
             BATTERY_SYSTEM_SOLAREDGE: "SolarEdge",
         }.get(self._selected_battery_system, "")
@@ -3219,7 +3219,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_fronius_reserva_battery(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Configure Fronius Reserva bridge via the fronius_modbus integration."""
+        """Configure Fronius GEN24 storage bridge via the fronius_modbus integration."""
         from .inverters.fronius_reserva import FroniusReservaBatteryController
 
         fronius_entries = self.hass.config_entries.async_entries("fronius_modbus")
@@ -3273,7 +3273,7 @@ class PowerSyncConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 else:
                     errors["base"] = "fronius_reserva_connect_failed"
             except Exception as exc:
-                _LOGGER.error("Fronius Reserva setup error: %s", exc)
+                _LOGGER.error("Fronius GEN24 storage setup error: %s", exc)
                 errors["base"] = "fronius_reserva_connect_failed"
 
         schema_fields: dict[Any, Any] = {}
@@ -6087,7 +6087,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
     async def async_step_fronius_reserva_connection(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Menu handler: Fronius Reserva bridge settings."""
+        """Menu handler: Fronius GEN24 storage bridge settings."""
         from .inverters.fronius_reserva import FroniusReservaBatteryController
 
         fronius_entries = self.hass.config_entries.async_entries("fronius_modbus")
@@ -6136,7 +6136,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 else:
                     errors["base"] = "fronius_reserva_connect_failed"
             except Exception as exc:
-                _LOGGER.error("Fronius Reserva options error: %s", exc)
+                _LOGGER.error("Fronius GEN24 storage options error: %s", exc)
                 errors["base"] = "fronius_reserva_connect_failed"
 
         entry_options = {e.entry_id: e.title or e.entry_id for e in fronius_entries}

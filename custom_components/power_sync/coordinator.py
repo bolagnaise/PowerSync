@@ -6381,7 +6381,7 @@ class SajH2EnergyCoordinator(DataUpdateCoordinator):
 
 
 class FroniusReservaEnergyCoordinator(DataUpdateCoordinator):
-    """Bridge coordinator for Fronius Reserva via the fronius_modbus integration."""
+    """Bridge coordinator for Fronius GEN24 storage via the fronius_modbus integration."""
 
     def __init__(
         self,
@@ -6412,7 +6412,7 @@ class FroniusReservaEnergyCoordinator(DataUpdateCoordinator):
         )
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Return Fronius Reserva data assembled from HA entity states."""
+        """Return Fronius GEN24 storage data assembled from HA entity states."""
         if not self._energy_acc._last_update:
             await self._energy_acc.async_restore()
 
@@ -6423,9 +6423,9 @@ class FroniusReservaEnergyCoordinator(DataUpdateCoordinator):
             status = self._controller.get_status()
         except Exception as exc:
             if self.data:
-                _LOGGER.warning("Fronius Reserva entity read failed, returning stale data: %s", exc)
+                _LOGGER.warning("Fronius GEN24 storage entity read failed, returning stale data: %s", exc)
                 return self.data
-            raise UpdateFailed(f"Fronius Reserva entity read failed: {exc}") from exc
+            raise UpdateFailed(f"Fronius GEN24 storage entity read failed: {exc}") from exc
 
         solar_kw = status.get("solar_power", 0.0) or 0.0
         grid_kw = status.get("grid_power", 0.0) or 0.0
