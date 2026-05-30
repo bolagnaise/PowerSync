@@ -109,20 +109,31 @@ def test_dashboard_layout_drag_starts_from_handle_only():
 
 
 def test_dashboard_layout_can_hide_cards():
-    """Customize mode should persist hidden dashboard cards and restore them."""
+    """Customize mode should persist hidden dashboard cards and preview them safely."""
     source = STRATEGY_PATH.read_text()
 
     assert "this._hiddenStorageKey = 'power-sync-dashboard-hidden-v1';" in source
+    assert "this._showingHidden = false;" in source
     assert "_loadHiddenKeys()" in source
     assert "_saveHiddenKeys(keys)" in source
     assert "_visibleItems()" in source
+    assert "_layoutItems()" in source
     assert "_hideItem(item)" in source
     assert "_showHiddenItems()" in source
+    assert "_unhideItem(item)" in source
+    assert "_toggleItemHidden(item)" in source
     assert "const hideSurface = document.createElement('button');" in source
     assert "hideSurface.setAttribute('aria-label', 'Hide dashboard card')" in source
     assert "toolbar.querySelector('.restore-hidden').addEventListener('click', () => this._showHiddenItems())" in source
-    assert "this._saveHiddenKeys([]);" in source
-    assert "const visibleItems = this._visibleItems();" in source
+    show_hidden_method = source[
+        source.index("  _showHiddenItems() {"):
+        source.index("  _unhideItem(item) {")
+    ]
+    assert "this._showingHidden = !this._showingHidden;" in show_hidden_method
+    assert "this._saveHiddenKeys([]);" not in show_hidden_method
+    assert "Unhide dashboard card" in source
+    assert ".item.hidden-preview" in source
+    assert "const visibleItems = this._layoutItems();" in source
 
 
 def test_battery_health_uses_native_dashboard_card():

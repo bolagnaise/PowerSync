@@ -2449,6 +2449,7 @@ class PowerSyncLayout extends HTMLElement {
     this._dragItem = null;
     this._pointerDrag = null;
     this._dragPlaceholder = null;
+    this._showingHidden = false;
     this._storageKey = 'power-sync-dashboard-layout-v2';
     this._hiddenStorageKey = 'power-sync-dashboard-hidden-v1';
     this._appliedLayoutSignature = '';
@@ -2553,6 +2554,10 @@ class PowerSyncLayout extends HTMLElement {
     return this._items.filter(item => item.dataset.hidden === 'true');
   }
 
+  _layoutItems() {
+    return this._items.filter(item => item.dataset.hidden !== 'true' || this._showingHidden);
+  }
+
   _syncHiddenKeys() {
     const savedKeys = this._loadHiddenKeys();
     const currentKeys = new Set(this._items.map(item => item.dataset.key));
@@ -2587,16 +2592,26 @@ class PowerSyncLayout extends HTMLElement {
     if (toggle) toggle.textContent = this._customizing ? 'Done' : 'Customize layout';
 
     const hiddenCount = this._hiddenItems().length;
+    if (hiddenCount === 0) this._showingHidden = false;
     const restoreHidden = toolbar.querySelector('.restore-hidden');
     if (restoreHidden) {
       restoreHidden.hidden = hiddenCount === 0;
-      restoreHidden.textContent = `Show hidden (${hiddenCount})`;
+      restoreHidden.textContent = this._showingHidden
+        ? `Hide hidden (${hiddenCount})`
+        : `Show hidden (${hiddenCount})`;
+      restoreHidden.setAttribute('aria-pressed', this._showingHidden ? 'true' : 'false');
     }
 
     const hideDisabled = this._visibleItems().length <= 1;
     for (const item of this._items) {
+      const isHidden = item.dataset.hidden === 'true';
+      item.classList.toggle('hidden-preview', isHidden && this._showingHidden);
       const hideSurface = item.querySelector('.hide-surface');
-      if (hideSurface) hideSurface.disabled = hideDisabled;
+      if (hideSurface) {
+        hideSurface.disabled = !isHidden && hideDisabled;
+        hideSurface.textContent = isHidden ? 'Unhide' : 'Hide';
+        hideSurface.setAttribute('aria-label', isHidden ? 'Unhide dashboard card' : 'Hide dashboard card');
+      }
     }
   }
 
@@ -2613,14 +2628,22 @@ class PowerSyncLayout extends HTMLElement {
   }
 
   _setCustomizing(enabled) {
+    const wasShowingHidden = this._showingHidden;
     this._customizing = enabled;
+    if (!enabled) {
+      this._showingHidden = false;
+      for (const item of this._hiddenItems()) item.remove();
+      if (wasShowingHidden) this._appliedLayoutSignature = '';
+    }
     for (const item of this._items) {
       item.draggable = false;
       item.classList.toggle('customizing', enabled);
+      item.classList.toggle('hidden-preview', item.dataset.hidden === 'true' && this._showingHidden);
       const dragSurface = item.querySelector('.drag-surface');
       if (dragSurface) dragSurface.draggable = false;
     }
     this._updateToolbarState();
+    if (wasShowingHidden && !enabled) this._scheduleLayout();
   }
 
   _resetOrder() {
@@ -2638,10 +2661,10 @@ class PowerSyncLayout extends HTMLElement {
   }
 
   _hideItem(item) {
-    if (this._visibleItems().length <= 1) return;
+    if (item.dataset.hidden === 'true' || this._visibleItems().length <= 1) return;
     this._cancelActiveDrag();
     item.dataset.hidden = 'true';
-    item.remove();
+    if (!this._showingHidden) item.remove();
     this._saveHiddenKeys(this._hiddenItems().map(hiddenItem => hiddenItem.dataset.key));
     this._appliedLayoutSignature = '';
     this._updateToolbarState();
@@ -2650,11 +2673,37 @@ class PowerSyncLayout extends HTMLElement {
 
   _showHiddenItems() {
     this._cancelActiveDrag();
-    for (const item of this._items) item.dataset.hidden = 'false';
-    this._saveHiddenKeys([]);
+    if (this._hiddenItems().length === 0) return;
+    this._showingHidden = !this._showingHidden;
+    if (this._showingHidden) this._customizing = true;
+    if (!this._showingHidden) {
+      for (const item of this._hiddenItems()) item.remove();
+    }
+    for (const item of this._items) {
+      item.classList.toggle('customizing', this._customizing);
+      item.classList.toggle('hidden-preview', item.dataset.hidden === 'true' && this._showingHidden);
+    }
     this._appliedLayoutSignature = '';
     this._updateToolbarState();
     this._scheduleLayout();
+  }
+
+  _unhideItem(item) {
+    if (item.dataset.hidden !== 'true') return;
+    this._cancelActiveDrag();
+    item.dataset.hidden = 'false';
+    this._saveHiddenKeys(this._hiddenItems().map(hiddenItem => hiddenItem.dataset.key));
+    this._appliedLayoutSignature = '';
+    this._updateToolbarState();
+    this._scheduleLayout();
+  }
+
+  _toggleItemHidden(item) {
+    if (item.dataset.hidden === 'true') {
+      this._unhideItem(item);
+    } else {
+      this._hideItem(item);
+    }
   }
 
   _renderedItemCount() {
@@ -2829,7 +2878,7 @@ class PowerSyncLayout extends HTMLElement {
     if (!Array.isArray(layout) || layout.length !== count) return null;
     if (!layout.every(lane => Array.isArray(lane))) return null;
 
-    const visibleItems = this._visibleItems();
+    const visibleItems = this._layoutItems();
     const currentKeys = new Set(visibleItems.map(item => item.dataset.key));
     const legacyToCurrent = new Map(visibleItems
       .map(item => [item.dataset.legacyKey, item.dataset.key])
@@ -2902,7 +2951,7 @@ class PowerSyncLayout extends HTMLElement {
       return;
     }
 
-    const byKey = new Map(this._visibleItems().map(item => [item.dataset.key, item]));
+    const byKey = new Map(this._layoutItems().map(item => [item.dataset.key, item]));
     const placed = new Set();
     layout.forEach((keys, laneIndex) => {
       const lane = this._lanes[laneIndex];
@@ -2916,7 +2965,7 @@ class PowerSyncLayout extends HTMLElement {
     });
 
     const heights = this._lanes.map(lane => lane.getBoundingClientRect().height || 0);
-    this._visibleItems()
+    this._layoutItems()
       .filter(item => !placed.has(item))
       .sort((a, b) => Number(a.dataset.defaultIndex) - Number(b.dataset.defaultIndex))
       .forEach((item) => {
@@ -2928,7 +2977,7 @@ class PowerSyncLayout extends HTMLElement {
   }
 
   _balanceLayout() {
-    const visibleItems = this._visibleItems();
+    const visibleItems = this._layoutItems();
     if (!visibleItems.length) {
       const grid = this.shadowRoot.querySelector('.grid');
       if (grid) {
@@ -3101,6 +3150,12 @@ class PowerSyncLayout extends HTMLElement {
         opacity: 0.45;
         cursor: not-allowed;
       }
+      .item.hidden-preview {
+        opacity: 0.58;
+      }
+      .item.hidden-preview .hide-surface {
+        background: color-mix(in srgb, var(--primary-color, #03a9f4) 85%, black);
+      }
       .item.dragging {
         opacity: 0.55;
         cursor: grabbing;
@@ -3210,7 +3265,7 @@ class PowerSyncLayout extends HTMLElement {
       hideSurface.addEventListener('click', (event) => {
         event.stopPropagation();
         event.preventDefault();
-        this._hideItem(item);
+        this._toggleItemHidden(item);
       });
 
       let card;
