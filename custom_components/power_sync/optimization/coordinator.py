@@ -314,12 +314,32 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._initial_opt_task: asyncio.Task | None = None
         self._deferred_restore_task: asyncio.Task | None = None
 
+    def _monitoring_mode_active(self) -> bool:
+        """Return True when monitoring mode should block hardware writes."""
+        if not self._entry:
+            return False
+        from ..const import CONF_MONITORING_MODE
+
+        return bool(
+            self._entry.options.get(
+                CONF_MONITORING_MODE,
+                self._entry.data.get(CONF_MONITORING_MODE, False),
+            )
+        )
+
     async def _restore_pre_idle_backup_reserve(self, battery, context: str = "") -> bool:
         """Restore pre-IDLE backup reserve with retry. Only clears on success."""
         if self._pre_idle_backup_reserve is None:
             return True
         if not hasattr(battery, "set_backup_reserve"):
             return True
+        if self._monitoring_mode_active():
+            _LOGGER.info(
+                "[MONITORING] Optimizer would restore pre-IDLE backup reserve to %d%%%s — blocked by monitoring mode",
+                self._pre_idle_backup_reserve,
+                f" ({context})" if context else "",
+            )
+            return False
         try:
             await battery.set_backup_reserve(self._pre_idle_backup_reserve)
             _LOGGER.info(
@@ -380,6 +400,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Release scheduled EV no-discharge mode when preserve is no longer active."""
         if not self._scheduled_ev_no_discharge_active:
             return True
+        if self._monitoring_mode_active():
+            _LOGGER.info(
+                "[MONITORING] Optimizer would release scheduled EV no-discharge mode%s — blocked by monitoring mode",
+                f" ({reason})" if reason else "",
+            )
+            return False
 
         self._scheduled_ev_no_discharge_active = False
         try:
@@ -1799,10 +1825,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not self._enabled:
             return
 
+        monitoring_mode = self._monitoring_mode_active()
+
         # Safety: if IDLE was the last action, restore backup_reserve and
         # work mode before shutting down. Otherwise the battery stays locked
         # at the IDLE-elevated backup_reserve (and Backup mode for FoxESS).
-        if self._last_executed_action == "idle":
+        if not monitoring_mode and self._last_executed_action == "idle":
             if (
                 self.battery_controller
                 and hasattr(self.battery_controller, "set_backup_reserve")
@@ -1827,8 +1855,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     _LOGGER.info("Optimizer disable: restored work mode from IDLE")
                 except Exception as e:
                     _LOGGER.warning("Failed to restore work mode on disable: %s", e)
+        elif monitoring_mode and self._last_executed_action == "idle":
+            _LOGGER.info(
+                "Optimizer shutdown: monitoring mode active — skipping IDLE cleanup writes"
+            )
         if self._scheduled_ev_no_discharge_active:
-            await self._release_scheduled_ev_no_discharge_mode("optimizer disabled")
+            if monitoring_mode:
+                _LOGGER.info(
+                    "Optimizer shutdown: monitoring mode active — skipping scheduled EV no-discharge release"
+                )
+            else:
+                await self._release_scheduled_ev_no_discharge_mode("optimizer disabled")
         self._last_executed_action = None
 
         # Cancel background tasks first so they can't run optimization
@@ -1854,15 +1891,6 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._octopus_gate_listener_unsub = None
 
         if self._executor:
-            from ..const import CONF_MONITORING_MODE
-
-            monitoring_mode = bool(
-                self._entry
-                and self._entry.options.get(
-                    CONF_MONITORING_MODE,
-                    self._entry.data.get(CONF_MONITORING_MODE, False),
-                )
-            )
             if monitoring_mode:
                 _LOGGER.info(
                     "Optimizer shutdown: monitoring mode active — skipping battery mode restore"
@@ -2455,10 +2483,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
 
         # Monitoring mode — log what would happen but don't execute
-        from ..const import CONF_MONITORING_MODE
-        if self._entry and self._entry.options.get(
-            CONF_MONITORING_MODE, self._entry.data.get(CONF_MONITORING_MODE, False)
-        ):
+        if self._monitoring_mode_active():
             _LOGGER.info(
                 "[MONITORING] Optimizer would execute: %s (power=%sW) — blocked by monitoring mode",
                 action.action, getattr(action, 'power_w', 'N/A'),

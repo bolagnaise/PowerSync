@@ -3308,6 +3308,10 @@ class AutoScheduleExecutor:
         self._current_charge_amps: Dict[str, int] = {}  # {vehicle_id: current_amps}
         self._charge_rate_change_threshold = 2  # Only change rate if diff >= 2 amps
 
+        # Tracks when Smart Schedule is asking the battery optimiser to preserve
+        # energy for a vehicle that is not currently available to charge.
+        self._future_demand_preserve_active = False
+
     def _resolve_vehicle_vin(self, vehicle_id: str) -> Optional[str]:
         """Resolve sequential vehicle_id to actual VIN or BLE identifier.
 
@@ -4117,6 +4121,8 @@ class AutoScheduleExecutor:
             except Exception as e:
                 _LOGGER.error(f"Auto-schedule evaluation failed for {vehicle_id}: {e}")
 
+        self._sync_future_demand_preserve_intent()
+
         # Periodically save cached SoC values to storage
         await self._save_cached_soc_if_needed()
 
@@ -4170,7 +4176,28 @@ class AutoScheduleExecutor:
         # so per-vehicle checks work correctly for multi-vehicle setups
         vehicle_vin = self._resolve_vehicle_vin(vehicle_id)
 
-        # Check if vehicle is at home - only charge at home
+        # Keep the plan fresh before checking availability.
+        ev_soc = await self._get_vehicle_soc(vehicle_id)
+        if ev_soc >= settings.target_soc:
+            # A previously generated plan is no longer needed. Clear it before
+            # any availability gate returns, otherwise the optimiser may keep
+            # reserving EV load from a stale plan.
+            state.current_plan = None
+            state.current_window = None
+
+        # Regenerate the plan before availability checks. The optimiser consumes
+        # this plan as forecast load, so an away/unplugged EV with a deadline can
+        # still protect future charging demand without issuing charger commands.
+        if (
+            ev_soc < settings.target_soc and
+            (
+                state.current_plan is None or
+                state.last_plan_update is None or
+                now - state.last_plan_update > self._plan_update_interval
+            )
+        ):
+            await self._regenerate_plan(vehicle_id, settings, state, current_soc=ev_soc)
+
         location = await get_ev_location(self.hass, self.config_entry, vehicle_vin)
         if location not in ("home", "unknown"):
             # Vehicle is away - don't try to charge
@@ -4191,9 +4218,6 @@ class AutoScheduleExecutor:
             state.last_decision_reason = "Vehicle not plugged in"
             _LOGGER.debug(f"Auto-schedule: Vehicle {vehicle_id} not plugged in, skipping")
             return
-
-        # Get EV's current SoC to check if we've reached target
-        ev_soc = await self._get_vehicle_soc(vehicle_id)
 
         # Check if EV has reached target SoC
         if ev_soc >= settings.target_soc:
@@ -4268,14 +4292,6 @@ class AutoScheduleExecutor:
         # =====================================================================
         # STANDARD CHARGING PLANNER (when Smart Optimization not available)
         # =====================================================================
-
-        # Check if we need to regenerate the plan
-        if (
-            state.current_plan is None or
-            state.last_plan_update is None or
-            now - state.last_plan_update > self._plan_update_interval
-        ):
-            await self._regenerate_plan(vehicle_id, settings, state)
 
         if state.current_plan is None:
             state.last_decision = "no_plan"
@@ -4486,6 +4502,7 @@ class AutoScheduleExecutor:
         vehicle_id: str,
         settings: AutoScheduleSettings,
         state: AutoScheduleState,
+        current_soc: Optional[int] = None,
     ) -> None:
         """Regenerate the charging plan based on current forecasts."""
         now = datetime.now()
@@ -4523,8 +4540,10 @@ class AutoScheduleExecutor:
             except ValueError:
                 _LOGGER.warning(f"Invalid departure time format: {settings.departure_time}")
 
-        # Get current SoC from vehicle sensors
-        current_soc = await self._get_vehicle_soc(vehicle_id)
+        # Get current SoC from vehicle sensors when the caller has not already
+        # done so for availability/target checks.
+        if current_soc is None:
+            current_soc = await self._get_vehicle_soc(vehicle_id)
 
         try:
             # Use per-day priority based on the target departure day
@@ -4550,6 +4569,101 @@ class AutoScheduleExecutor:
             )
         except Exception as e:
             _LOGGER.error(f"Failed to regenerate plan for {vehicle_id}: {e}")
+
+    def _has_future_plan_demand(self, state: AutoScheduleState) -> bool:
+        """Return True if a vehicle has future planned charging demand."""
+        plan = state.current_plan
+        if not plan or not plan.windows or plan.energy_needed_kwh <= 0:
+            return False
+
+        now = dt_util.now()
+        if not isinstance(now, datetime):
+            now = datetime.now()
+        for window in plan.windows:
+            try:
+                end = datetime.fromisoformat(window.end_time)
+            except (TypeError, ValueError):
+                continue
+
+            if end.tzinfo is None and getattr(now, "tzinfo", None) is not None:
+                end = end.replace(tzinfo=now.tzinfo)
+            elif end.tzinfo is not None and getattr(now, "tzinfo", None) is None:
+                end = end.replace(tzinfo=None)
+
+            if end > now:
+                return True
+
+        return False
+
+    def _set_future_demand_preserve_intent(self, reason: str) -> None:
+        """Publish Smart Schedule preserve intent for future EV demand."""
+        from ..const import DOMAIN
+
+        entry_data = self.hass.data.setdefault(DOMAIN, {}).setdefault(
+            self.config_entry.entry_id,
+            {},
+        )
+        existing = entry_data.get("scheduled_ev_preserve_state", {})
+        if existing.get("active") and existing.get("source") not in (None, "smart_schedule"):
+            self._future_demand_preserve_active = True
+            return
+
+        entry_data["scheduled_ev_preserve_state"] = {
+            "active": True,
+            "mode": "no_discharge_charge_allowed",
+            "source": "smart_schedule",
+            "reason": reason,
+        }
+        if not self._future_demand_preserve_active:
+            _LOGGER.info(
+                "Smart Schedule: requested home battery preserve mode (%s)",
+                reason,
+            )
+        self._future_demand_preserve_active = True
+
+    def _clear_future_demand_preserve_intent(self, reason: str = "") -> None:
+        """Clear Smart Schedule preserve intent without touching other EV modes."""
+        from ..const import DOMAIN
+
+        entry_data = self.hass.data.get(DOMAIN, {}).get(
+            self.config_entry.entry_id,
+            {},
+        )
+        state = entry_data.setdefault("scheduled_ev_preserve_state", {})
+        if state.get("source") != "smart_schedule":
+            self._future_demand_preserve_active = False
+            return
+
+        state.update({
+            "active": False,
+            "mode": "no_discharge_charge_allowed",
+            "source": "smart_schedule",
+            "reason": reason,
+        })
+        if not self._future_demand_preserve_active:
+            return
+        self._future_demand_preserve_active = False
+        _LOGGER.info(
+            "Smart Schedule: cleared home battery preserve request%s",
+            f" ({reason})" if reason else "",
+        )
+
+    def _sync_future_demand_preserve_intent(self) -> None:
+        """Keep optimiser no-discharge intent aligned with unavailable EV demand."""
+        unavailable_with_demand = []
+        for vehicle_id, state in self._state.items():
+            if state.last_decision not in ("away", "unplugged"):
+                continue
+            if self._has_future_plan_demand(state):
+                unavailable_with_demand.append(vehicle_id)
+
+        if unavailable_with_demand:
+            vehicles = ", ".join(sorted(unavailable_with_demand))
+            self._set_future_demand_preserve_intent(
+                f"future EV demand while unavailable: {vehicles}"
+            )
+        else:
+            self._clear_future_demand_preserve_intent("no unavailable EV demand")
 
     async def _get_current_price(self) -> float:
         """Get current import price from available sources (provider-aware).

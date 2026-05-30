@@ -97,6 +97,15 @@ def test_force_mode_persistence_uses_setup_store_reference():
 def test_monitoring_mode_optimizer_shutdown_skips_battery_restore():
     coordinator_source = OPTIMIZATION_COORDINATOR_PATH.read_text()
     coordinator_tree = ast.parse(coordinator_source)
+    monitoring_helper = _find_class_method(
+        coordinator_tree,
+        "OptimizationCoordinator",
+        "_monitoring_mode_active",
+    )
+    monitoring_helper_source = ast.get_source_segment(
+        coordinator_source,
+        monitoring_helper,
+    )
     disable = _find_class_method(coordinator_tree, "OptimizationCoordinator", "disable")
     disable_source = ast.get_source_segment(coordinator_source, disable)
 
@@ -107,8 +116,12 @@ def test_monitoring_mode_optimizer_shutdown_skips_battery_restore():
 
     assert disable_source is not None
     assert stop_source is not None
-    assert "CONF_MONITORING_MODE" in disable_source
-    assert "monitoring_mode = bool(" in disable_source
+    assert monitoring_helper_source is not None
+    assert "CONF_MONITORING_MODE" in monitoring_helper_source
+    assert "monitoring_mode = self._monitoring_mode_active()" in disable_source
+    assert 'if not monitoring_mode and self._last_executed_action == "idle":' in disable_source
+    assert "skipping IDLE cleanup writes" in disable_source
+    assert "skipping scheduled EV no-discharge release" in disable_source
     assert "await self._executor.stop(restore_normal=not monitoring_mode)" in disable_source
     assert "restore_normal: bool = True" in stop_source
     assert "if restore_normal:" in stop_source
@@ -131,11 +144,47 @@ def test_monitoring_mode_blocks_service_level_control_writes():
     self_consumption = ast.get_source_segment(
         source, _find_function(tree, "handle_set_self_consumption")
     )
+    hold_soc = ast.get_source_segment(
+        source, _find_function(tree, "handle_hold_battery_soc")
+    )
+    set_autonomous = ast.get_source_segment(
+        source, _find_function(tree, "handle_set_autonomous")
+    )
+    set_backup_reserve = ast.get_source_segment(
+        source, _find_function(tree, "handle_set_backup_reserve")
+    )
+    set_operation_mode = ast.get_source_segment(
+        source, _find_function(tree, "handle_set_operation_mode")
+    )
+    set_grid_export = ast.get_source_segment(
+        source, _find_function(tree, "handle_set_grid_export")
+    )
+    set_grid_charging = ast.get_source_segment(
+        source, _find_function(tree, "handle_set_grid_charging")
+    )
+    set_storm_watch = ast.get_source_segment(
+        source, _find_function(tree, "handle_set_storm_watch")
+    )
+    set_off_grid_ev_reserve = ast.get_source_segment(
+        source, _find_function(tree, "handle_set_off_grid_ev_reserve")
+    )
+    set_vpp_enrollment = ast.get_source_segment(
+        source, _find_function(tree, "handle_set_vpp_enrollment")
+    )
 
     assert force_discharge is not None
     assert force_charge is not None
     assert restore is not None
     assert self_consumption is not None
+    assert hold_soc is not None
+    assert set_autonomous is not None
+    assert set_backup_reserve is not None
+    assert set_operation_mode is not None
+    assert set_grid_export is not None
+    assert set_grid_charging is not None
+    assert set_storm_watch is not None
+    assert set_off_grid_ev_reserve is not None
+    assert set_vpp_enrollment is not None
 
     assert "if _is_monitoring_mode():" in force_discharge
     assert force_discharge.index("if _is_monitoring_mode():") < force_discharge.index(
@@ -168,6 +217,78 @@ def test_monitoring_mode_blocks_service_level_control_writes():
     assert self_consumption.index("if _is_monitoring_mode():") < self_consumption.index(
         'entry_data.get("goodwe_coordinator")'
     )
+
+    assert "if _is_monitoring_mode():" in hold_soc
+    assert hold_soc.index("if _is_monitoring_mode():") < hold_soc.index(
+        "for coord_key, brand in"
+    )
+
+    assert "if _is_monitoring_mode():" in set_autonomous
+    assert set_autonomous.index("if _is_monitoring_mode():") < set_autonomous.index(
+        "is_foxess = bool"
+    )
+
+    assert "if _is_monitoring_mode():" in set_backup_reserve
+    assert set_backup_reserve.index("if _is_monitoring_mode():") < set_backup_reserve.index(
+        "is_sigenergy = bool"
+    )
+    assert set_backup_reserve.index("if _is_monitoring_mode():") < set_backup_reserve.index(
+        "dispatch_powerwall_write"
+    )
+
+    assert "if _is_monitoring_mode():" in set_operation_mode
+    assert set_operation_mode.index("if _is_monitoring_mode():") < set_operation_mode.index(
+        "dispatch_powerwall_write"
+    )
+
+    assert "if _is_monitoring_mode():" in set_grid_export
+    assert set_grid_export.index("if _is_monitoring_mode():") < set_grid_export.index(
+        'entry_data.get("alphaess_coordinator")'
+    )
+    assert set_grid_export.index("if _is_monitoring_mode():") < set_grid_export.index(
+        "dispatch_powerwall_write"
+    )
+
+    assert "if _is_monitoring_mode():" in set_grid_charging
+    assert set_grid_charging.index("if _is_monitoring_mode():") < set_grid_charging.index(
+        "_get_tesla_site_configs"
+    )
+
+    assert "if _is_monitoring_mode():" in set_storm_watch
+    assert set_storm_watch.index("if _is_monitoring_mode():") < set_storm_watch.index(
+        '_get_tesla_coordinator_for_service("set_storm_watch")'
+    )
+
+    assert "if _is_monitoring_mode():" in set_off_grid_ev_reserve
+    assert set_off_grid_ev_reserve.index("if _is_monitoring_mode():") < set_off_grid_ev_reserve.index(
+        '_get_tesla_coordinator_for_service("set_off_grid_ev_reserve")'
+    )
+
+    assert "if _is_monitoring_mode():" in set_vpp_enrollment
+    assert set_vpp_enrollment.index("if _is_monitoring_mode():") < set_vpp_enrollment.index(
+        '_get_tesla_coordinator_for_service("set_vpp_enrollment")'
+    )
+
+
+def test_monitoring_mode_blocks_persisted_force_replay_after_restart():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    restore = ast.get_source_segment(
+        source, _find_function(tree, "restore_force_mode_from_persistence")
+    )
+
+    assert restore is not None
+    assert "if _is_monitoring_mode():" in restore
+    assert restore.index("if _is_monitoring_mode():") < restore.index(
+        'if persisted_source == "optimizer":'
+    )
+    assert restore.index("if _is_monitoring_mode():") < restore.index(
+        "SERVICE_FORCE_CHARGE"
+    )
+    assert restore.index("if _is_monitoring_mode():") < restore.index(
+        "SERVICE_FORCE_DISCHARGE"
+    )
+    assert 'stored_data["force_mode_state"] = None' in restore
 
 
 def test_force_mode_persistence_keeps_requested_power_setpoint():

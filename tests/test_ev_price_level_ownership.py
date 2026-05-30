@@ -983,6 +983,226 @@ def test_auto_schedule_start_allows_solar_surplus_takeover(monkeypatch, fake_act
     assert params["allow_ownership_takeover"] is True
 
 
+def test_auto_schedule_keeps_future_plan_when_vehicle_away(monkeypatch, fake_actions):
+    fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
+    now = datetime(2026, 5, 27, 15, 0, tzinfo=timezone.utc)
+    start = now.replace(hour=23)
+    end = start.replace(hour=23, minute=30)
+    plan_calls = []
+
+    class FuturePlanner:
+        async def plan_charging(self, **kwargs):
+            plan_calls.append(kwargs)
+            return ev_planner.ChargingPlan(
+                vehicle_id=kwargs["vehicle_id"],
+                current_soc=kwargs["current_soc"],
+                target_soc=kwargs["target_soc"],
+                target_time=(
+                    kwargs["target_time"].isoformat()
+                    if kwargs["target_time"]
+                    else None
+                ),
+                energy_needed_kwh=12.0,
+                windows=[
+                    ev_planner.PlannedChargingWindow(
+                        start_time=start.isoformat(),
+                        end_time=end.isoformat(),
+                        source="grid_offpeak",
+                        estimated_power_kw=7.0,
+                        estimated_energy_kwh=3.5,
+                        price_cents_kwh=10.0,
+                        reason="target_deadline",
+                    )
+                ],
+                estimated_grid_kwh=3.5,
+            )
+
+        async def should_charge_now(self, *args, **kwargs):
+            raise AssertionError("away vehicle must not reach charge decision")
+
+    async def away(*args, **kwargs):
+        return "not_home"
+
+    async def plugged_in(*args, **kwargs):
+        raise AssertionError("away vehicle should return before plug check")
+
+    async def vehicle_soc(self, vehicle_id):
+        return 40
+
+    monkeypatch.setattr(ev_planner, "get_ev_location", away)
+    monkeypatch.setattr(ev_planner, "is_ev_plugged_in", plugged_in)
+    monkeypatch.setattr(ev_planner.AutoScheduleExecutor, "_get_vehicle_soc", vehicle_soc)
+    monkeypatch.setattr(ev_planner.AutoScheduleExecutor, "_start_charging", AsyncMock())
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda *args, **kwargs: now)
+
+    hass = _FakeHass()
+    executor = ev_planner.AutoScheduleExecutor(
+        hass,
+        _FakeConfigEntry(),
+        planner=FuturePlanner(),
+    )
+    executor._settings[VIN] = ev_planner.AutoScheduleSettings(
+        enabled=True,
+        vehicle_id=VIN,
+        display_name="Model 3",
+        target_soc=80,
+        departure_time="07:00",
+    )
+
+    asyncio.run(
+        executor.evaluate(
+            {
+                "battery_soc": 75,
+                "solar_power": 0,
+                "load_power": 1000,
+                "grid_power": 0,
+            },
+            current_price_cents=20,
+        )
+    )
+
+    state = executor.get_state(VIN)
+    assert state.last_decision == "away"
+    assert state.current_plan is not None
+    assert state.current_plan.energy_needed_kwh == 12.0
+    assert plan_calls[0]["current_soc"] == 40
+    fake_actions._action_start_ev_charging_dynamic.assert_not_awaited()
+
+    preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
+    assert preserve_state["active"] is True
+    assert preserve_state["source"] == "smart_schedule"
+    assert "future EV demand" in preserve_state["reason"]
+
+
+def test_auto_schedule_clears_stale_plan_when_away_vehicle_reaches_target(
+    monkeypatch,
+    fake_actions,
+):
+    now = datetime(2026, 5, 27, 15, 0, tzinfo=timezone.utc)
+
+    async def away(*args, **kwargs):
+        return "not_home"
+
+    async def vehicle_soc(self, vehicle_id):
+        return 82
+
+    monkeypatch.setattr(ev_planner, "get_ev_location", away)
+    monkeypatch.setattr(ev_planner.AutoScheduleExecutor, "_get_vehicle_soc", vehicle_soc)
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda *args, **kwargs: now)
+
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"] = {
+        "active": True,
+        "mode": "no_discharge_charge_allowed",
+        "source": "smart_schedule",
+        "reason": "future EV demand while unavailable: Model 3",
+    }
+    executor = ev_planner.AutoScheduleExecutor(
+        hass,
+        _FakeConfigEntry(),
+        planner=SimpleNamespace(),
+    )
+    executor._future_demand_preserve_active = True
+    executor._settings[VIN] = ev_planner.AutoScheduleSettings(
+        enabled=True,
+        vehicle_id=VIN,
+        display_name="Model 3",
+        target_soc=80,
+        departure_time="07:00",
+    )
+    state = executor.get_state(VIN)
+    state.current_plan = ev_planner.ChargingPlan(
+        vehicle_id=VIN,
+        current_soc=40,
+        target_soc=80,
+        target_time=None,
+        energy_needed_kwh=12.0,
+        windows=[
+            ev_planner.PlannedChargingWindow(
+                start_time=now.replace(hour=23).isoformat(),
+                end_time=now.replace(hour=23, minute=30).isoformat(),
+                source="grid_offpeak",
+                estimated_power_kw=7.0,
+                estimated_energy_kwh=3.5,
+                price_cents_kwh=10.0,
+                reason="target_deadline",
+            )
+        ],
+    )
+
+    asyncio.run(
+        executor.evaluate(
+            {
+                "battery_soc": 75,
+                "solar_power": 0,
+                "load_power": 1000,
+                "grid_power": 0,
+            },
+            current_price_cents=20,
+        )
+    )
+
+    assert state.last_decision == "away"
+    assert state.current_plan is None
+    preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
+    assert preserve_state["active"] is False
+    assert preserve_state["source"] == "smart_schedule"
+
+
+def test_auto_schedule_preserve_does_not_overwrite_price_level_intent(
+    monkeypatch,
+    fake_actions,
+):
+    now = datetime(2026, 5, 27, 15, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(ev_planner.dt_util, "now", lambda *args, **kwargs: now)
+
+    hass = _FakeHass()
+    hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"] = {
+        "active": True,
+        "mode": "no_discharge_charge_allowed",
+        "source": "price_level_charging",
+        "reason": "cheap price",
+    }
+    executor = ev_planner.AutoScheduleExecutor(
+        hass,
+        _FakeConfigEntry(),
+        planner=SimpleNamespace(),
+    )
+    state = executor.get_state(VIN)
+    state.last_decision = "away"
+    state.current_plan = ev_planner.ChargingPlan(
+        vehicle_id=VIN,
+        current_soc=40,
+        target_soc=80,
+        target_time=None,
+        energy_needed_kwh=12.0,
+        windows=[
+            ev_planner.PlannedChargingWindow(
+                start_time=now.replace(hour=23).isoformat(),
+                end_time=now.replace(hour=23, minute=30).isoformat(),
+                source="grid_offpeak",
+                estimated_power_kw=7.0,
+                estimated_energy_kwh=3.5,
+                price_cents_kwh=10.0,
+                reason="target_deadline",
+            )
+        ],
+    )
+
+    executor._sync_future_demand_preserve_intent()
+    preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
+    assert preserve_state["active"] is True
+    assert preserve_state["source"] == "price_level_charging"
+    assert preserve_state["reason"] == "cheap price"
+
+    state.current_plan = None
+    executor._sync_future_demand_preserve_intent()
+    preserve_state = hass.data["power_sync"]["entry-1"]["scheduled_ev_preserve_state"]
+    assert preserve_state["active"] is True
+    assert preserve_state["source"] == "price_level_charging"
+
+
 def test_auto_schedule_grid_start_uses_optimizer_battery_target(monkeypatch, fake_actions):
     fake_actions._action_start_ev_charging_dynamic = AsyncMock(return_value=True)
     monkeypatch.setattr(

@@ -21198,6 +21198,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 persisted_force_state.get("power_w", 0)
             )
 
+            if _is_monitoring_mode():
+                _LOGGER.info(
+                    "[MONITORING] Persisted force %s was not replayed or restored after restart — blocked by monitoring mode",
+                    mode,
+                )
+                if persisted_source == "optimizer":
+                    hass.data[DOMAIN][entry.entry_id]["optimizer_force_restart_restore_pending"] = False
+                stored_data = await store.async_load() or {}
+                stored_data["force_mode_state"] = None
+                await store.async_save(stored_data)
+                return
+
             if persisted_source == "optimizer":
                 # Optimizer-owned force modes are schedule decisions, not user
                 # commands. After a restart/update the LP must recalculate from
@@ -25025,6 +25037,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         source = call.data.get("source", "user")
 
+        if _is_monitoring_mode():
+            _LOGGER.info(
+                "[MONITORING] Would hold battery SoC for %d minutes (source=%s) — blocked by monitoring mode",
+                duration,
+                source,
+            )
+            return
+
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
 
         # Pick the first available coordinator. All brands expose a
@@ -25475,6 +25495,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         backup_reserve to act as a hard floor that prevents discharge.
         In self_consumption mode, backup_reserve alone is not reliably enforced.
         """
+        if _is_monitoring_mode():
+            _LOGGER.info(
+                "[MONITORING] Would set autonomous mode — blocked by monitoring mode"
+            )
+            return
+
         _LOGGER.info("Optimizer: Setting autonomous (TOU) mode")
 
         # Non-Tesla systems: autonomous is the default, nothing to do
@@ -25563,6 +25589,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return
         except (ValueError, TypeError):
             _LOGGER.error(f"Invalid backup reserve percent: {percent}")
+            return
+
+        if _is_monitoring_mode():
+            _LOGGER.info(
+                "[MONITORING] Would set backup reserve to %d%% — blocked by monitoring mode",
+                percent,
+            )
             return
 
         _LOGGER.info(f"🔋 Setting backup reserve to {percent}%")
@@ -25878,6 +25911,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.error(f"Invalid operation mode: {mode}. Must be 'autonomous', 'self_consumption', or 'backup'.")
             return
 
+        if _is_monitoring_mode():
+            _LOGGER.info(
+                "[MONITORING] Would set operation mode to %s — blocked by monitoring mode",
+                mode,
+            )
+            return
+
         _LOGGER.info(f"⚙️ Setting operation mode to {mode}")
 
         from .const import CONF_POWERWALL_LOCAL_DIN
@@ -25963,6 +26003,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         rule = call.data.get("rule")
         if rule not in ("never", "pv_only", "battery_ok"):
             _LOGGER.error(f"Invalid grid export rule: {rule}. Must be 'never', 'pv_only', or 'battery_ok'.")
+            return
+
+        if _is_monitoring_mode():
+            _LOGGER.info(
+                "[MONITORING] Would set grid export rule to %s — blocked by monitoring mode",
+                rule,
+            )
             return
 
         _LOGGER.info(f"📤 Setting grid export rule to {rule}")
@@ -26124,6 +26171,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             enabled = enabled.lower() == "true"
         enabled = bool(enabled)
 
+        if _is_monitoring_mode():
+            _LOGGER.info(
+                "[MONITORING] Would set grid charging to %s — blocked by monitoring mode",
+                "enabled" if enabled else "disabled",
+            )
+            return
+
         _LOGGER.info(f"🔌 Setting grid charging to {'enabled' if enabled else 'disabled'}")
 
         try:
@@ -26179,6 +26233,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             enabled = enabled.strip().lower() in ("true", "1", "yes", "on")
         enabled = bool(enabled)
 
+        if _is_monitoring_mode():
+            _LOGGER.info(
+                "[MONITORING] Would set Storm Watch to %s — blocked by monitoring mode",
+                "enabled" if enabled else "disabled",
+            )
+            return
+
         coord = _get_tesla_coordinator_for_service("set_storm_watch")
         if coord is None:
             return
@@ -26207,6 +26268,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.error("Off-grid EV reserve percent out of range: %d", percent)
             return
 
+        if _is_monitoring_mode():
+            _LOGGER.info(
+                "[MONITORING] Would set off-grid EV reserve to %d%% — blocked by monitoring mode",
+                percent,
+            )
+            return
+
         coord = _get_tesla_coordinator_for_service("set_off_grid_ev_reserve")
         if coord is None:
             return
@@ -26230,6 +26298,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if isinstance(enrolled, str):
             enrolled = enrolled.strip().lower() in ("true", "1", "yes", "on")
         enrolled = bool(enrolled)
+
+        if _is_monitoring_mode():
+            _LOGGER.info(
+                "[MONITORING] Would %s VPP program %s — blocked by monitoring mode",
+                "enroll in" if enrolled else "unenroll from",
+                program_id,
+            )
+            return
 
         coord = _get_tesla_coordinator_for_service("set_vpp_enrollment")
         if coord is None:
