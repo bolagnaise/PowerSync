@@ -287,6 +287,34 @@ def test_ev_charging_fallback_generic_soc_sensor_is_translated():
             ]
 
 
+def test_ev_charging_sigenergy_charger_fields_are_translated():
+    sigenergy_keys = (
+        "sigenergy_charger_enabled",
+        "sigenergy_charger_type",
+        "sigenergy_charger_host",
+        "sigenergy_charger_port",
+        "sigenergy_charger_slave_id",
+    )
+
+    for path in (STRINGS_PATH, TRANSLATIONS_PATH):
+        data = json.loads(path.read_text())
+        for step_name in ("ev_charging_setup", "ev_charging"):
+            step = data["options"]["step"][step_name]
+
+            for key in sigenergy_keys:
+                assert key in step["data"], f"{path.name}: {step_name}.data.{key}"
+                assert key in step["data_description"], (
+                    f"{path.name}: {step_name}.data_description.{key}"
+                )
+
+            assert step["data"]["sigenergy_charger_enabled"] == (
+                "Enable Sigenergy EV charger"
+            )
+            assert "EVAC/EVDC" in step["data_description"][
+                "sigenergy_charger_enabled"
+            ]
+
+
 def test_globird_initial_flow_warns_tesla_users_about_tariff_baseline():
     source = CONFIG_FLOW_PATH.read_text()
     method = _config_flow_method("async_step_aemo_config")

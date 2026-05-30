@@ -1749,7 +1749,12 @@
           "generic_charger_amps_entity": "Entity ID for charge current control in amps. Leave blank if not supported.",
           "generic_charger_status_entity": "Entity ID reporting connector status. Recognised: charging, preparing, suspended_evse, suspended_ev, finishing. Leave blank to skip.",
           "generic_charger_soc_entity": "Entity ID reporting EV battery SoC as a percentage. Used for target SoC charging. Leave blank if unavailable.",
-          "generic_charger_soc_entity_2": "Optional second EV battery SoC sensor. Used only when the primary SoC sensor is unavailable or invalid."
+          "generic_charger_soc_entity_2": "Optional second EV battery SoC sensor. Used only when the primary SoC sensor is unavailable or invalid.",
+          "sigenergy_charger_enabled": "Use Sigenergy Modbus for EVAC/EVDC charger status and start/stop control.",
+          "sigenergy_charger_type": "EVAC supports rate control and repeated starts. EVDC uses conservative one-shot scheduling, no dynamic amps, and native mySigen PV-surplus behavior.",
+          "sigenergy_charger_host": "IP address of the Sigenergy Modbus endpoint. Defaults to the inverter Modbus host when blank.",
+          "sigenergy_charger_port": "Modbus TCP port. Default: 502.",
+          "sigenergy_charger_slave_id": "Modbus slave ID for the charger or inverter exposing the EV charger registers."
         },
         "submit": "Save"
       },
@@ -1796,7 +1801,12 @@
           "generic_charger_amps_entity": "Charger amps entity",
           "generic_charger_status_entity": "Connector status sensor",
           "generic_charger_soc_entity": "EV battery SoC sensor",
-          "generic_charger_soc_entity_2": "Fallback EV battery SoC sensor"
+          "generic_charger_soc_entity_2": "Fallback EV battery SoC sensor",
+          "sigenergy_charger_enabled": "Enable Sigenergy EV charger",
+          "sigenergy_charger_type": "Sigenergy charger type",
+          "sigenergy_charger_host": "Sigenergy charger Modbus host",
+          "sigenergy_charger_port": "Sigenergy charger Modbus port",
+          "sigenergy_charger_slave_id": "Sigenergy charger slave ID"
         },
         "data_description": {
           "ev_charging_enabled": "Enable smart charging for Tesla vehicles. Not required for OCPP or Zaptec chargers.",
