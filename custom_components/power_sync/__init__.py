@@ -24359,6 +24359,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # can interfere with this restore operation.
         _cancel_all_force_timers("restore_normal")
         _command_generation[0] += 1
+        _restore_generation = _command_generation[0]
+
+        def _restore_superseded(stage: str) -> bool:
+            """Return True if a newer force command started during this restore."""
+            if _command_generation[0] == _restore_generation:
+                return False
+            _LOGGER.info(
+                "Restore normal superseded by newer force command during %s; "
+                "leaving active force state untouched",
+                stage,
+            )
+            return True
 
         # Check if this is a Sigenergy system
         is_sigenergy = bool(entry.data.get(CONF_SIGENERGY_STATION_ID))
@@ -24859,6 +24871,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             _LOGGER.info("Switched site %s to self_consumption mode", site_id)
                         else:
                             _LOGGER.warning("Could not switch site %s to self_consumption: %s", site_id, response.status)
+                    if _restore_superseded("initial mode handoff"):
+                        return
 
             # Check if user is using dynamic pricing (restore via sync instead of saved tariff)
             electricity_provider = entry.options.get(
@@ -24895,6 +24909,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "_allow_monitoring_tou_sync_once"
                     ] = "optimizer shutdown restore is releasing an active force tariff"
                 await hass.services.async_call(DOMAIN, SERVICE_SYNC_TOU, {}, blocking=True)
+                if _restore_superseded("TOU sync"):
+                    return
             elif saved_tariff:
                 # Non-dynamic users - restore saved tariffs per site
                 _LOGGER.info("Restoring saved tariffs...")
@@ -24927,6 +24943,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         )
                     if len(site_configs) > 1:
                         await asyncio.sleep(1)
+                    if _restore_superseded("tariff restore"):
+                        return
             else:
                 # No saved tariff - for tariff-backed spike users this is a problem
                 # because sync_tou_schedule intentionally skips these providers.
@@ -24947,6 +24965,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 else:
                     _LOGGER.warning("No saved tariff to restore, triggering sync")
                     await hass.services.async_call(DOMAIN, SERVICE_SYNC_TOU, {}, blocking=True)
+                    if _restore_superseded("fallback TOU sync"):
+                        return
 
             # Restore operation mode and backup reserve on all gateways
             for site_id, current_token, provider in site_configs:
@@ -25079,6 +25099,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                             _LOGGER.info("Restored export rule to %s for site %s", saved_export_rule, site_id)
                         else:
                             _LOGGER.warning("Could not restore export rule for site %s: %s", site_id, response.status)
+                if _restore_superseded("mode/reserve restore"):
+                    return
 
             # Explicitly re-enable grid charging unless still in a demand peak period
             entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})

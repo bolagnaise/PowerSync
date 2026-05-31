@@ -787,6 +787,26 @@ def test_tesla_force_discharge_disables_grid_charging_before_tariff_upload():
     assert grid_disable_index < tariff_upload_index
 
 
+def test_restore_normal_does_not_clear_newer_force_command():
+    source = INIT_PATH.read_text()
+    tree = ast.parse(source)
+    function = _find_function(tree, "handle_restore_normal")
+    function_source = ast.get_source_segment(source, function)
+
+    assert function_source is not None
+    generation_index = function_source.index("_restore_generation = _command_generation[0]")
+    helper_index = function_source.index("def _restore_superseded")
+    clear_index = function_source.index('force_discharge_state["active"] = False')
+    dispatch_index = function_source.index(
+        f'async_dispatcher_send(hass, f"{{DOMAIN}}_force_discharge_state"'
+    )
+
+    assert generation_index < helper_index < clear_index < dispatch_index
+    assert '_restore_superseded("initial mode handoff")' in function_source
+    assert '_restore_superseded("tariff restore")' in function_source
+    assert '_restore_superseded("mode/reserve restore")' in function_source
+
+
 def test_tesla_force_charge_enables_grid_charging_before_tariff_upload():
     source = INIT_PATH.read_text()
     tree = ast.parse(source)
