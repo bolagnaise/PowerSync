@@ -187,13 +187,21 @@ def _zaptec_hass(cached_state: dict):
     return hass, client
 
 
-def _install_solar_surplus_runtime_stubs(monkeypatch, live_status: dict):
+def _install_solar_surplus_runtime_stubs(
+    monkeypatch,
+    live_status: dict,
+    ev_soc: float | None = None,
+):
     ev_planner = types.ModuleType("power_sync.automations.ev_charging_planner")
 
     async def get_ev_location(*args, **kwargs):
         return "home"
 
+    async def get_ev_battery_level(*args, **kwargs):
+        return ev_soc
+
     ev_planner.get_ev_location = get_ev_location
+    ev_planner.get_ev_battery_level = get_ev_battery_level
     monkeypatch.setitem(sys.modules, "power_sync.automations.ev_charging_planner", ev_planner)
 
     ev_session = types.ModuleType("power_sync.automations.ev_charging_session")
@@ -1095,6 +1103,38 @@ def test_solar_surplus_dynamic_start_uses_home_power_max_over_idle_tesla_cap(mon
     assert params["allow_stale_entity_max_override"] is True
 
 
+def test_solar_surplus_dynamic_start_blocks_full_ev(monkeypatch):
+    ev_planner = importlib.import_module("power_sync.automations.ev_charging_planner")
+
+    async def full_ev_soc(*args, **kwargs):
+        return 100.0
+
+    monkeypatch.setattr(ev_planner, "get_ev_battery_level", full_ev_soc)
+    hass = _Hass([])
+    actions._dynamic_ev_state.clear()
+
+    result = asyncio.run(
+        actions._action_start_ev_charging_dynamic(
+            hass,
+            _Entry(),
+            {
+                "vehicle_vin": "VIN123",
+                "dynamic_mode": "solar_surplus",
+                "owner_mode": "solar_surplus",
+                "charger_type": "tesla",
+            },
+            context=None,
+        )
+    )
+
+    assert result is False
+    assert actions._dynamic_ev_state == {}
+    last_command = hass.data["power_sync"]["entry-1"]["ev_last_command"]["VIN123"]
+    assert last_command["command"] == "start_solar_surplus"
+    assert last_command["success"] is False
+    assert last_command["reason"] == "EV 100.0% >= 100%, already full"
+
+
 def test_dynamic_start_uses_home_power_grid_import_limit(monkeypatch):
     async def fake_start(*args, **kwargs):
         return True
@@ -1820,6 +1860,39 @@ def test_solar_surplus_stop_delay_holds_current_amps_on_first_low_sample(monkeyp
     assert state["target_amps"] == 8
     assert state["low_surplus_start"] is not None
     assert set_amps_calls == []
+
+
+def test_solar_surplus_update_stops_full_ev(monkeypatch):
+    hass = _Hass([])
+    vehicle_id = "VIN123"
+    actions._dynamic_ev_state.clear()
+    state = _solar_surplus_state(current_amps=8)
+    state["params"].update({
+        "charger_type": "generic",
+        "notify_on_complete": False,
+    })
+    actions._dynamic_ev_state["entry-1"] = {vehicle_id: state}
+    set_amps_calls = _install_solar_surplus_runtime_stubs(
+        monkeypatch,
+        {
+            "battery_soc": 40,
+            "grid_power": -5000,
+            "battery_power": 0,
+            "solar_power": 0,
+            "load_power": 0,
+        },
+        ev_soc=100.0,
+    )
+
+    asyncio.run(
+        actions._dynamic_ev_update_surplus(hass, _Entry(), "entry-1", vehicle_id)
+    )
+
+    assert actions._dynamic_ev_state == {}
+    assert set_amps_calls == [0]
+    last_command = hass.data["power_sync"]["entry-1"]["ev_last_command"][vehicle_id]
+    assert last_command["command"] == "stop"
+    assert last_command["reason"] == "already full"
 
 
 def test_solar_surplus_parallel_reserve_prevents_ramp_while_battery_charging(monkeypatch):

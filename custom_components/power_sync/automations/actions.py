@@ -75,6 +75,7 @@ PRE_CHARGE_WAKE_ENTITY_KEYS = (
     "wake_entity",
 )
 OCPP_MIN_CHARGE_AMPS = 6
+FULL_EV_SOC = 100
 PRE_CHARGE_WAKE_DURATION_KEYS = (
     "pre_charge_wake_duration_seconds",
     "pre_charge_wake_wait_seconds",
@@ -378,6 +379,65 @@ def _is_vehicle_charge_complete(hass: HomeAssistant, vehicle_vin: str) -> bool:
                 if state.state and state.state.lower() in ("complete", "stopped"):
                     return True
     return False
+
+
+def _dynamic_ev_soc_vehicle_vin(vehicle_id: str, params: Dict[str, Any]) -> Optional[str]:
+    """Return the VIN/vehicle identifier to use for dynamic EV SOC lookups."""
+    return (
+        params.get("vehicle_vin")
+        or params.get("vehicle_id")
+        or (vehicle_id if vehicle_id != DEFAULT_VEHICLE_ID else None)
+    )
+
+
+async def _get_dynamic_ev_battery_level(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_id: str,
+    params: Dict[str, Any],
+) -> Optional[float]:
+    """Return current EV SOC for dynamic charging when available."""
+    try:
+        from .ev_charging_planner import get_ev_battery_level
+    except (ImportError, AttributeError) as err:
+        _LOGGER.debug("Dynamic EV: could not import EV battery lookup: %s", err)
+        return None
+
+    try:
+        soc = await get_ev_battery_level(
+            hass,
+            config_entry,
+            _dynamic_ev_soc_vehicle_vin(vehicle_id, params),
+        )
+    except Exception as err:
+        _LOGGER.debug("Dynamic EV: could not read EV battery level: %s", err)
+        return None
+
+    if soc is None:
+        return None
+
+    try:
+        return float(soc)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _dynamic_ev_full_soc_reason(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    vehicle_id: str,
+    params: Dict[str, Any],
+) -> Optional[str]:
+    """Return a stop/block reason if the target EV is already full."""
+    ev_soc = await _get_dynamic_ev_battery_level(
+        hass,
+        config_entry,
+        vehicle_id,
+        params,
+    )
+    if ev_soc is None or ev_soc < FULL_EV_SOC:
+        return None
+    return f"EV {ev_soc}% >= {FULL_EV_SOC}%, already full"
 
 
 async def _get_observed_ev_power_kw(
@@ -4734,6 +4794,25 @@ async def _dynamic_ev_update_surplus(
     ):
         return
 
+    full_soc_reason = await _dynamic_ev_full_soc_reason(
+        hass,
+        config_entry,
+        vehicle_id,
+        params,
+    )
+    if full_soc_reason:
+        _LOGGER.info("⚡ Solar surplus EV: Stopping - %s", full_soc_reason)
+        await _action_stop_ev_charging_dynamic(
+            hass,
+            config_entry,
+            {
+                "vehicle_id": vehicle_id,
+                "stop_charging": True,
+                "stop_reason": "already full",
+            },
+        )
+        return
+
     # Don't charge when vehicle is away from home
     try:
         from .ev_charging_planner import get_ev_location
@@ -5883,6 +5962,29 @@ async def _action_start_ev_charging_dynamic_locked(
             reason=reason,
         )
         return False
+
+    if dynamic_mode == "solar_surplus":
+        full_soc_reason = await _dynamic_ev_full_soc_reason(
+            hass,
+            config_entry,
+            vehicle_id,
+            params,
+        )
+        if full_soc_reason:
+            _LOGGER.info(
+                "Solar surplus EV: start blocked for %s because %s",
+                vehicle_id,
+                full_soc_reason,
+            )
+            record_ev_command(
+                hass,
+                config_entry,
+                vehicle_id,
+                command=f"start_{owner_mode}",
+                success=False,
+                reason=full_soc_reason,
+            )
+            return False
 
     # Legacy fallback for runtime state created before explicit ownership was
     # claimed. This keeps old dynamic sessions from being hijacked by another
