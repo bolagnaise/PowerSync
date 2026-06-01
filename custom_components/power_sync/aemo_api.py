@@ -9,6 +9,7 @@ import csv
 import io
 import logging
 import re
+import time
 import zipfile
 from datetime import datetime
 from typing import Any
@@ -36,6 +37,12 @@ class AEMOAPIClient:
     # NEMWEB requires a User-Agent header (blocks bare aiohttp requests with 403)
     HEADERS = {"User-Agent": "PowerSync-HomeAssistant/2.4 (AEMO NEM data)"}
 
+    # NEMWEB can intermittently reject directory/ZIP requests around dispatch
+    # publish time. Back off briefly so the 1s active polling loop does not
+    # turn a transient 403 into a wall of warnings.
+    _NEMWEB_BACKOFF_SECONDS = 30
+    _NEMWEB_WARNING_THROTTLE_SECONDS = 300
+
     # NEM Regions
     REGIONS = {
         "NSW1": "New South Wales",
@@ -62,6 +69,8 @@ class AEMOAPIClient:
         self._session = session
         self._last_dispatch_file: str | None = None
         self._dispatch_cache: dict[str, dict[str, dict[str, Any]]] = {}  # filename -> parsed prices
+        self._nemweb_backoff_until = 0.0
+        self._last_nemweb_warning_at = 0.0
         _LOGGER.info("AEMOAPIClient initialized")
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -94,6 +103,13 @@ class AEMOAPIClient:
             is_new_file  - True when the file on NEMWEB changed since last call
             filename     - the filename that was used (empty string on error)
         """
+        if self._is_nemweb_backing_off():
+            cached = self._latest_cached_dispatch()
+            if cached:
+                filename, prices = cached
+                return prices, False, filename
+            return await self._get_current_prices_json_fallback(), False, ""
+
         try:
             session = await self._get_session()
 
@@ -114,6 +130,7 @@ class AEMOAPIClient:
 
             # Return cached parse result if the file hasn't changed
             if latest_file in self._dispatch_cache:
+                self._clear_nemweb_backoff()
                 _LOGGER.debug("Dispatch file unchanged: %s", latest_file)
                 return self._dispatch_cache[latest_file], False, latest_file
 
@@ -134,13 +151,52 @@ class AEMOAPIClient:
             # Cache the result and evict any previous entry (only keep latest)
             self._dispatch_cache = {latest_file: prices}
             self._last_dispatch_file = latest_file
+            self._clear_nemweb_backoff()
             _LOGGER.info("NEMWEB dispatch: %s -> %d regions", latest_file, len(prices))
             _LOGGER.debug("NEMWEB dispatch data: %s", prices)
             return prices, True, latest_file
 
         except Exception as err:
-            _LOGGER.warning("NEMWEB dispatch fetch failed (%s), using JSON fallback", err)
+            self._record_nemweb_failure(err)
             return await self._get_current_prices_json_fallback(), False, ""
+
+    def _is_nemweb_backing_off(self) -> bool:
+        """Return True while NEMWEB fetches are paused after a transient failure."""
+        return time.monotonic() < self._nemweb_backoff_until
+
+    def _latest_cached_dispatch(self) -> tuple[str, dict[str, dict[str, Any]]] | None:
+        """Return the most recent parsed dispatch file while NEMWEB is backing off."""
+        if self._last_dispatch_file and self._last_dispatch_file in self._dispatch_cache:
+            return self._last_dispatch_file, self._dispatch_cache[self._last_dispatch_file]
+        if self._dispatch_cache:
+            filename = next(iter(self._dispatch_cache))
+            return filename, self._dispatch_cache[filename]
+        return None
+
+    def _record_nemweb_failure(self, err: Exception) -> None:
+        """Throttle NEMWEB failure warnings and start a short retry backoff."""
+        now = time.monotonic()
+        self._nemweb_backoff_until = now + self._NEMWEB_BACKOFF_SECONDS
+        should_warn = (
+            self._last_nemweb_warning_at == 0.0
+            or now - self._last_nemweb_warning_at >= self._NEMWEB_WARNING_THROTTLE_SECONDS
+        )
+        if should_warn:
+            self._last_nemweb_warning_at = now
+            _LOGGER.warning(
+                "NEMWEB dispatch fetch failed (%s), backing off for %ds and using JSON fallback",
+                err,
+                self._NEMWEB_BACKOFF_SECONDS,
+            )
+        else:
+            _LOGGER.debug(
+                "NEMWEB dispatch fetch still failing (%s), backing off until retry window",
+                err,
+            )
+
+    def _clear_nemweb_backoff(self) -> None:
+        """Reset NEMWEB retry backoff after a successful directory/ZIP read."""
+        self._nemweb_backoff_until = 0.0
 
     def _parse_dispatch_zip(self, content: bytes) -> dict[str, dict[str, Any]] | None:
         """Parse a NEMWEB DispatchIS ZIP file to extract current prices.
