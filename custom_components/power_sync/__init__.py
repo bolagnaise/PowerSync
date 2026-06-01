@@ -4492,12 +4492,6 @@ class PowerwallSettingsView(HomeAssistantView):
 
             # Extract settings from site_info
             backup_reserve = site_info.get("backup_reserve_percent", 20)
-            if entry.data.get(CONF_POWERWALL_LOCAL_PAIRED):
-                from .powerwall_local.normalization import normalize_local_backup_reserve_percent
-
-                backup_reserve = normalize_local_backup_reserve_percent(
-                    backup_reserve
-                )
             operation_mode = site_info.get("default_real_mode", "autonomous")
 
             # Get grid settings from components
@@ -26118,10 +26112,43 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     if not din:
                         return False
                     from .powerwall_local.normalization import (
+                        detect_local_backup_reserve_offset,
                         local_backup_reserve_write_percent,
                     )
 
-                    local_percent = local_backup_reserve_write_percent(percent)
+                    entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
+                    low_soe_reserve = entry_data.get("powerwall_local_low_soe_reserve_pct")
+                    if low_soe_reserve is None:
+                        try:
+                            config = await transport.read_config(din)
+                            local_reserve = (
+                                ((config or {}).get("site_info") or {})
+                                .get("backup_reserve_percent")
+                            )
+                            coord = entry_data.get("tesla_coordinator")
+                            site_info = getattr(coord, "_site_info_cache", None)
+                            cloud_reserve = (
+                                site_info.get("backup_reserve_percent")
+                                if isinstance(site_info, dict)
+                                else None
+                            )
+                            detected = detect_local_backup_reserve_offset(
+                                local_reserve,
+                                cloud_reserve,
+                            )
+                            if detected is not None:
+                                low_soe_reserve = detected
+                                entry_data["powerwall_local_low_soe_reserve_pct"] = detected
+                        except Exception as err:
+                            _LOGGER.debug(
+                                "Could not auto-detect Powerwall local reserve offset: %s",
+                                err,
+                            )
+
+                    local_percent = local_backup_reserve_write_percent(
+                        percent,
+                        low_soe_reserve,
+                    )
                     if local_percent is None:
                         return False
                     return await transport.write_config(
@@ -28239,6 +28266,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             if rate is not None:
                 hass.data[DOMAIN][entry.entry_id]["fp_tariff_rate"] = rate
+                async_dispatcher_send(
+                    hass,
+                    f"power_sync_tariff_updated_{entry.entry_id}",
+                )
 
         async def _refresh_fp_avg_daily_tariff(now):
             """Recompute avg daily tariff at midnight for seasonal tariff changes."""
@@ -28247,6 +28278,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             if avg is not None:
                 hass.data[DOMAIN][entry.entry_id]["fp_avg_daily_tariff"] = avg
+                async_dispatcher_send(
+                    hass,
+                    f"power_sync_tariff_updated_{entry.entry_id}",
+                )
                 _LOGGER.info(
                     "Flow Power avg daily tariff recomputed: %.2fc/kWh", avg
                 )

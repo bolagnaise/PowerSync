@@ -143,6 +143,14 @@ def test_local_backup_reserve_readback_subtracts_hidden_reserve():
     assert normalize(100) == 100
 
 
+def test_local_backup_reserve_readback_uses_detected_hidden_reserve():
+    normalize = normalization_mod.normalize_local_backup_reserve_percent
+
+    assert normalize(10, 10) == 0
+    assert normalize(15, 10) == 5
+    assert normalize(30, 10) == 20
+
+
 def test_local_backup_reserve_write_adds_hidden_reserve():
     to_local = normalization_mod.local_backup_reserve_write_percent
 
@@ -151,6 +159,26 @@ def test_local_backup_reserve_write_adds_hidden_reserve():
     assert to_local(10) == 15
     assert to_local(80) == 85
     assert to_local(100) == 100
+
+
+def test_local_backup_reserve_write_uses_detected_hidden_reserve():
+    to_local = normalization_mod.local_backup_reserve_write_percent
+
+    assert to_local(0, 10) == 10
+    assert to_local(5, 10) == 15
+    assert to_local(80, 10) == 90
+    assert to_local(100, 10) == 100
+
+
+def test_local_backup_reserve_offset_detected_from_local_and_cloud_readbacks():
+    detect = normalization_mod.detect_local_backup_reserve_offset
+
+    assert detect(10, 5) == 5
+    assert detect(15, 5) == 10
+    assert detect(5, 5) == 0
+    assert detect(100, 80) is None
+    assert detect(5, 10) is None
+    assert detect(40, 5) is None
 
 
 def test_cloud_only_client_does_not_poll_loopback_gateway():
@@ -183,6 +211,41 @@ def test_coordinator_skips_poll_when_local_access_disabled():
     coord._client = _NoLocalClient()
 
     assert asyncio.run(coord._async_update_data()) is None
+
+
+def test_coordinator_detects_hidden_reserve_offset_from_cloud_site_info():
+    entry_data = {
+        "tesla_coordinator": SimpleNamespace(
+            _site_info_cache={"backup_reserve_percent": 5}
+        )
+    }
+    coord = coordinator_mod.PowerwallLocalCoordinator.__new__(
+        coordinator_mod.PowerwallLocalCoordinator
+    )
+    coord.hass = SimpleNamespace(data={"power_sync": {"entry-1": entry_data}})
+    coord._entry_id = "entry-1"
+    snap = client_mod.PowerwallSnapshot(
+        soc=50.0,
+        solar_w=0.0,
+        battery_w=0.0,
+        grid_w=0.0,
+        load_w=0.0,
+        grid_status="SystemGridConnected",
+        operation_mode="self_consumption",
+        backup_reserve_percent=10,
+        raw={
+            "config": {
+                "site_info": {
+                    "backup_reserve_percent": 15,
+                }
+            }
+        },
+    )
+
+    coord._update_backup_reserve_offset(snap)
+
+    assert entry_data["powerwall_local_low_soe_reserve_pct"] == 10
+    assert snap.backup_reserve_percent == 5
 
 
 def _coordinator_with_snapshot(ev_power_kw: float = 0.0):

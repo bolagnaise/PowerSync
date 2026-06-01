@@ -22,7 +22,7 @@ def _method_source(file_path: Path, class_name: str, method_name: str) -> str:
     for node in module.body:
         if isinstance(node, ast.ClassDef) and node.name == class_name:
             for item in node.body:
-                if isinstance(item, ast.FunctionDef) and item.name == method_name:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == method_name:
                     return ast.unparse(item)
     raise AssertionError(f"{class_name}.{method_name} not found")
 
@@ -203,6 +203,70 @@ def test_network_tariff_lookup_uses_dispatch_interval_end(monkeypatch):
         "BLNRSS2",
     )
     assert captured_times[-1] == datetime(2026, 5, 27, 10, 0, tzinfo=tz)
+
+
+def test_flow_power_tariff_refresh_dispatches_sensor_update_signal():
+    source = (COMPONENT_ROOT / "__init__.py").read_text()
+    tariff_refresh = source[
+        source.index("async def _refresh_fp_tariff_rate"):
+        source.index("async def _refresh_fp_avg_daily_tariff")
+    ]
+    avg_refresh = source[
+        source.index("async def _refresh_fp_avg_daily_tariff"):
+        source.index("fp_tariff_cancel = async_track_utc_time_change")
+    ]
+
+    signal = 'f"power_sync_tariff_updated_{entry.entry_id}"'
+
+    assert '["fp_tariff_rate"] = rate' in tariff_refresh
+    assert signal in tariff_refresh
+    assert tariff_refresh.index('["fp_tariff_rate"] = rate') < tariff_refresh.index(signal)
+
+    assert '["fp_avg_daily_tariff"] = avg' in avg_refresh
+    assert signal in avg_refresh
+    assert avg_refresh.index('["fp_avg_daily_tariff"] = avg') < avg_refresh.index(signal)
+
+
+def test_flow_power_price_sensor_listens_for_tariff_updates():
+    source = _method_source(
+        COMPONENT_ROOT / "sensor.py",
+        "FlowPowerPriceSensor",
+        "async_added_to_hass",
+    )
+
+    assert "async_dispatcher_connect" in source
+    assert "SIGNAL_TARIFF_UPDATED.format(self._entry.entry_id)" in source
+    assert "_handle_flow_power_tariff_update" in source
+
+    handler = _method_source(
+        COMPONENT_ROOT / "sensor.py",
+        "FlowPowerPriceSensor",
+        "_handle_flow_power_tariff_update",
+    )
+    assert "async_write_ha_state" in handler
+
+
+def test_flow_power_tariff_dependent_sensors_listen_for_tariff_updates():
+    for class_name in (
+        "FlowPowerNetworkTariffSensor",
+        "FlowPowerAmberComparisonSensor",
+    ):
+        source = _method_source(
+            COMPONENT_ROOT / "sensor.py",
+            class_name,
+            "async_added_to_hass",
+        )
+
+        assert "async_dispatcher_connect" in source
+        assert "SIGNAL_TARIFF_UPDATED.format(self._entry.entry_id)" in source
+        assert "_handle_flow_power_tariff_update" in source
+
+        handler = _method_source(
+            COMPONENT_ROOT / "sensor.py",
+            class_name,
+            "_handle_flow_power_tariff_update",
+        )
+        assert "async_write_ha_state" in handler
 
 
 def test_network_tariff_dropdown_uses_get_tariffs_api(monkeypatch):

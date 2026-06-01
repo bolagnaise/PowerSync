@@ -4391,6 +4391,18 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
         """Restore the last price while coordinator data warms up."""
         await super().async_added_to_hass()
         await self._async_restore_numeric_state()
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                SIGNAL_TARIFF_UPDATED.format(self._entry.entry_id),
+                self._handle_flow_power_tariff_update,
+            )
+        )
+
+    @callback
+    def _handle_flow_power_tariff_update(self) -> None:
+        """Handle Flow Power tariff data updates."""
+        self.async_write_ha_state()
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -4563,6 +4575,22 @@ class FlowPowerNetworkTariffSensor(PowerSyncCurrencyMixin, SensorEntity):
         """Get config value from options first, then data."""
         return self._entry.options.get(key, self._entry.data.get(key, default))
 
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to Flow Power tariff data updates."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                SIGNAL_TARIFF_UPDATED.format(self._entry.entry_id),
+                self._handle_flow_power_tariff_update,
+            )
+        )
+
+    @callback
+    def _handle_flow_power_tariff_update(self) -> None:
+        """Handle Flow Power tariff data updates."""
+        self.async_write_ha_state()
+
     @property
     def native_value(self) -> float | None:
         """Return the current network tariff rate in c/kWh."""
@@ -4618,6 +4646,22 @@ class FlowPowerAmberComparisonSensor(PowerSyncCurrencyMixin, SensorEntity):
     def _get_config_value(self, key: str, default=None):
         """Get config value from options first, then data."""
         return self._entry.options.get(key, self._entry.data.get(key, default))
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to Flow Power tariff data updates."""
+        await super().async_added_to_hass()
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                SIGNAL_TARIFF_UPDATED.format(self._entry.entry_id),
+                self._handle_flow_power_tariff_update,
+            )
+        )
+
+    @callback
+    def _handle_flow_power_tariff_update(self) -> None:
+        """Handle Flow Power tariff data updates."""
+        self.async_write_ha_state()
 
     def _get_wholesale_price_cents(self) -> float | None:
         """Extract current wholesale price in cents from coordinator data."""

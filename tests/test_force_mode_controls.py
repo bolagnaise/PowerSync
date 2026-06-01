@@ -779,8 +779,10 @@ def test_tesla_local_backup_reserve_write_uses_hidden_reserve_offset():
     function_source = ast.get_source_segment(source, function)
 
     assert function_source is not None
+    assert "detect_local_backup_reserve_offset" in function_source
+    assert '"powerwall_local_low_soe_reserve_pct"' in function_source
     assert "local_backup_reserve_write_percent" in function_source
-    assert "local_percent = local_backup_reserve_write_percent(percent)" in function_source
+    assert "local_percent = local_backup_reserve_write_percent(" in function_source
     assert '"site_info.backup_reserve_percent": local_percent' in function_source
     assert 'json={"backup_reserve_percent": percent}' in function_source
 

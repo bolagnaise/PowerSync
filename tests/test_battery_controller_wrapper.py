@@ -103,7 +103,7 @@ def test_tesla_mode_reads_current_ha_entity_but_backup_reserve_prefers_cache():
         restore()
 
 
-def test_tesla_backup_reserve_normalizes_local_paired_site_info_cache():
+def test_tesla_backup_reserve_uses_cloud_site_info_cache_as_user_facing():
     module, restore = _load_controller_module()
     try:
         hass = SimpleNamespace(
@@ -124,7 +124,7 @@ def test_tesla_backup_reserve_normalizes_local_paired_site_info_cache():
         )
         controller = module.BatteryControllerWrapper(hass, "tesla")
 
-        assert asyncio.run(controller.get_backup_reserve()) == 10
+        assert asyncio.run(controller.get_backup_reserve()) == 5
     finally:
         restore()
 

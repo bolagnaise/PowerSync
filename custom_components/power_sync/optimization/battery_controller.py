@@ -15,11 +15,6 @@ from homeassistant.core import HomeAssistant
 _LOGGER = logging.getLogger(__name__)
 
 
-def _local_powerwall_paired(entry_data) -> bool:
-    entry = entry_data.get("entry") if isinstance(entry_data, dict) else None
-    return bool(getattr(entry, "data", {}).get("powerwall_local_paired"))
-
-
 class BatteryControllerWrapper:
     """
     Wrapper that provides force_charge/force_discharge/restore_normal interface.
@@ -212,14 +207,6 @@ class BatteryControllerWrapper:
                 if tesla_coord and hasattr(tesla_coord, "_site_info_cache") and tesla_coord._site_info_cache:
                     reserve = tesla_coord._site_info_cache.get("backup_reserve_percent")
                     if reserve is not None:
-                        if _local_powerwall_paired(entry_data):
-                            from ..powerwall_local.normalization import (
-                                normalize_local_backup_reserve_percent,
-                            )
-
-                            reserve = normalize_local_backup_reserve_percent(reserve)
-                            if reserve is None:
-                                continue
                         return int(reserve)
                 # Prefer the coordinator's latest data when available. This
                 # also covers wrappers like DualSungrowCoordinator and entity-

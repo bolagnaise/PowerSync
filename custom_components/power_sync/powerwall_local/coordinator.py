@@ -27,6 +27,10 @@ from .exceptions import (
     PowerwallSignatureError,
     PowerwallUnreachableError,
 )
+from .normalization import (
+    detect_local_backup_reserve_offset,
+    normalize_local_backup_reserve_percent,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -140,7 +144,45 @@ class PowerwallLocalCoordinator(DataUpdateCoordinator[PowerwallSnapshot | None])
 
         self._last_success_ts = _time.time()
         self._consecutive_failures = 0
+        self._update_backup_reserve_offset(snap)
         return snap
+
+    def _update_backup_reserve_offset(self, snap: PowerwallSnapshot) -> None:
+        """Detect the local reserve offset by comparing local and cloud readbacks."""
+        entry_data = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {})
+        if not isinstance(entry_data, dict):
+            return
+
+        config = (snap.raw or {}).get("config") or {}
+        site_info = config.get("site_info") or {}
+        local_reserve = site_info.get("backup_reserve_percent")
+        tesla_coord = entry_data.get("tesla_coordinator")
+        cloud_site_info = getattr(tesla_coord, "_site_info_cache", None)
+        cloud_reserve = (
+            cloud_site_info.get("backup_reserve_percent")
+            if isinstance(cloud_site_info, dict)
+            else None
+        )
+        detected = detect_local_backup_reserve_offset(local_reserve, cloud_reserve)
+        if detected is None:
+            return
+
+        previous = entry_data.get("powerwall_local_low_soe_reserve_pct")
+        entry_data["powerwall_local_low_soe_reserve_pct"] = detected
+        normalized = normalize_local_backup_reserve_percent(
+            local_reserve,
+            detected,
+        )
+        if normalized is not None:
+            snap.backup_reserve_percent = normalized
+        if previous != detected:
+            _LOGGER.info(
+                "Detected Powerwall local backup reserve offset: %.1f%% "
+                "(local=%s%%, Tesla site_info=%s%%)",
+                detected,
+                local_reserve,
+                cloud_reserve,
+            )
 
     async def _handle_key_rejected(self, err: Exception) -> None:
         """Mark the entry as unpaired and prompt the user to re-pair.
