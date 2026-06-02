@@ -345,6 +345,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Restored when exiting IDLE so we don't overwrite the user's
         # hardware reserve with the optimizer's LP floor.
         self._pre_idle_backup_reserve: int | None = None
+        self._idle_hold_reserve: int | None = None
         self._scheduled_ev_no_discharge_active = False
         # User's real backup reserve captured ONCE on startup, before any
         # IDLE modifies it. Used as the authoritative restore value.
@@ -374,8 +375,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _restore_pre_idle_backup_reserve(self, battery, context: str = "") -> bool:
         """Restore pre-IDLE backup reserve with retry. Only clears on success."""
         if self._pre_idle_backup_reserve is None:
+            self._idle_hold_reserve = None
             return True
         if not hasattr(battery, "set_backup_reserve"):
+            self._pre_idle_backup_reserve = None
+            self._idle_hold_reserve = None
             return True
         if self._monitoring_mode_active():
             _LOGGER.info(
@@ -392,6 +396,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 f" ({context})" if context else "",
             )
             self._pre_idle_backup_reserve = None
+            self._idle_hold_reserve = None
             return True
         except Exception as e:
             _LOGGER.warning(
@@ -545,6 +550,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "Optimizer: IDLE — holding SOC at %d%% (hold mode)",
                 non_tesla_hold_pct,
             )
+            self._idle_hold_reserve = non_tesla_hold_pct
             return True
 
         if hasattr(battery, "set_backup_reserve"):
@@ -566,14 +572,17 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "(backup reserve=%d%%)",
                 soc_pct, reserve,
             )
+            self._idle_hold_reserve = reserve
             return True
 
         if hasattr(battery, "set_self_consumption_mode"):
             await battery.set_self_consumption_mode()
             _LOGGER.info("Optimizer: IDLE — self-consumption (no set_backup_reserve)")
+            self._idle_hold_reserve = None
             return True
         if hasattr(battery, "restore_normal"):
             await battery.restore_normal()
+            self._idle_hold_reserve = None
             return True
         return False
 
@@ -2147,20 +2156,11 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # work mode before shutting down. Otherwise the battery stays locked
         # at the IDLE-elevated backup_reserve (and Backup mode for FoxESS).
         if not monitoring_mode and self._last_executed_action == "idle":
-            if (
-                self.battery_controller
-                and hasattr(self.battery_controller, "set_backup_reserve")
-                and self._pre_idle_backup_reserve is not None
-            ):
-                try:
-                    await self.battery_controller.set_backup_reserve(self._pre_idle_backup_reserve)
-                    _LOGGER.info(
-                        "Optimizer disable: restored backup reserve from IDLE to %d%%",
-                        self._pre_idle_backup_reserve,
-                    )
-                except Exception as e:
-                    _LOGGER.warning("Failed to restore backup reserve on disable: %s", e)
-            self._pre_idle_backup_reserve = None
+            if self.battery_controller:
+                await self._restore_pre_idle_backup_reserve(
+                    self.battery_controller,
+                    "optimizer disable",
+                )
             # FoxESS/Sungrow: restore from IDLE hold mode to normal operation
             if (
                 self.energy_coordinator
@@ -2175,6 +2175,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.info(
                 "Optimizer shutdown: monitoring mode active — skipping IDLE cleanup writes"
             )
+            self._idle_hold_reserve = None
         if self._scheduled_ev_no_discharge_active:
             if monitoring_mode:
                 _LOGGER.info(
@@ -3294,19 +3295,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 battery = self._executor.battery_controller
                 if hasattr(battery, "restore_normal"):
                     await battery.restore_normal()
-                # Restore backup_reserve to pre-IDLE value if available,
-                # so we don't overwrite the user's hardware reserve setting.
-                if (
-                    hasattr(battery, "set_backup_reserve")
-                    and self._pre_idle_backup_reserve is not None
-                ):
-                    await battery.set_backup_reserve(self._pre_idle_backup_reserve)
-                    _LOGGER.info(
-                        "Optimizer: Restored backup reserve to %d%% "
-                        "after canceling force %s",
-                        self._pre_idle_backup_reserve, force_type,
-                    )
-                    self._pre_idle_backup_reserve = None
+                await self._restore_pre_idle_backup_reserve(
+                    battery,
+                    f"after canceling force {force_type}",
+                )
 
         try:
             # During demand charge windows, override IDLE → self_consumption.
@@ -3435,16 +3427,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     and hasattr(self.energy_coordinator, "restore_work_mode_from_idle")
                 ):
                     await self.energy_coordinator.restore_work_mode_from_idle()
-                if hasattr(battery, "set_backup_reserve") and self._pre_idle_backup_reserve is not None:
-                    await battery.set_backup_reserve(self._pre_idle_backup_reserve)
+                restored = await self._restore_pre_idle_backup_reserve(
+                    battery,
+                    f"exiting IDLE to {effective_action}",
+                )
+                if restored:
                     _LOGGER.info(
-                        "Optimizer: Exiting IDLE → %s — restored backup reserve to %d%%",
-                        effective_action, self._pre_idle_backup_reserve,
+                        "Optimizer: Exiting IDLE → %s — restored reserve/work mode",
+                        effective_action,
                     )
-                    self._pre_idle_backup_reserve = None
                 else:
                     _LOGGER.info(
-                        "Optimizer: Exiting IDLE → %s — restored work mode",
+                        "Optimizer: Exiting IDLE → %s — restored work mode; "
+                        "backup reserve restore is pending",
                         effective_action,
                     )
 
@@ -7133,6 +7128,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "auto_apply_reserve_enabled": self.auto_apply_reserve_enabled,
             "manual_backup_reserve": self.manual_backup_reserve,
             "backup_reserve": self._config.backup_reserve,
+            "idle_hold_active": (
+                self._last_executed_action == "idle"
+                and self._idle_hold_reserve is not None
+            ),
+            "idle_hold_reserve": (
+                self._idle_hold_reserve / 100
+                if self._idle_hold_reserve is not None
+                else None
+            ),
+            "idle_hold_reserve_percent": (
+                self._idle_hold_reserve
+                if self._idle_hold_reserve is not None
+                else None
+            ),
             "status": "active" if self._enabled and optimizer_available else "disabled",
             "optimization_status": "active" if optimizer_available else "not_available",
             "current_action": current_action,
@@ -7161,6 +7170,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "battery_specs_source": self._battery_specs_source,
                 "backup_reserve": self._config.backup_reserve,
                 "hardware_backup_reserve": (self._startup_backup_reserve if self._startup_backup_reserve is not None else 0) / 100,
+                "idle_hold_active": (
+                    self._last_executed_action == "idle"
+                    and self._idle_hold_reserve is not None
+                ),
+                "idle_hold_reserve": (
+                    self._idle_hold_reserve / 100
+                    if self._idle_hold_reserve is not None
+                    else None
+                ),
+                "idle_hold_reserve_percent": (
+                    self._idle_hold_reserve
+                    if self._idle_hold_reserve is not None
+                    else None
+                ),
                 "interval_minutes": self._config.interval_minutes,
                 "horizon_hours": self._config.horizon_hours,
             },

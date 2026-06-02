@@ -1927,6 +1927,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
       powerSeries.push({ key: 'evKw', label: 'EV', color: '#7E57C2' });
     }
     const reserve = this._optimizerReserve(data);
+    const idleHold = this._idleHoldReserve(data);
 
     return {
       raw: data,
@@ -1934,6 +1935,8 @@ class PowerSyncOptimizationPlan extends HTMLElement {
       intervalMinutes,
       reservePercent: reserve.percent,
       reserveCalculated: reserve.calculated,
+      idleHoldActive: idleHold.active,
+      idleHoldReservePercent: idleHold.percent,
       powerSeries,
       priceSeries: hasPrices
         ? [
@@ -1959,6 +1962,9 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     }
     if (model.reserveCalculated && Number.isFinite(model.reservePercent)) {
       chips.push(['Auto Reserve', `${Math.round(model.reservePercent)}%`]);
+    }
+    if (model.idleHoldActive && Number.isFinite(model.idleHoldReservePercent)) {
+      chips.push(['IDLE Hold', `${Math.round(model.idleHoldReservePercent)}%`, true]);
     }
     const breakdown = data.daily_cost_breakdown || {};
     if (Number.isFinite(Number(breakdown.predicted_remaining))) {
@@ -2020,6 +2026,12 @@ class PowerSyncOptimizationPlan extends HTMLElement {
       svg += `<rect x="${pad.left}" y="${ry}" width="${chartW}" height="${pad.top + chartH - ry}" fill="#F44336" opacity="0.06"/>`;
       svg += `<line x1="${pad.left}" y1="${ry}" x2="${W - pad.right}" y2="${ry}" stroke="#F44336" stroke-width="1" stroke-dasharray="5,3" opacity="0.75"/>`;
       svg += `<text x="${W - pad.right - 4}" y="${ry - 5}" text-anchor="end" font-size="${compact ? 9 : 10}" fill="#F44336">${this._escSvg(`${reserveLabel} ${Math.round(model.reservePercent)}%`)}</text>`;
+    }
+    if (model.idleHoldActive && Number.isFinite(model.idleHoldReservePercent)) {
+      const holdY = ySoc(model.idleHoldReservePercent);
+      const labelY = Math.max(pad.top + 11, holdY - 5);
+      svg += `<line x1="${pad.left}" y1="${holdY}" x2="${W - pad.right}" y2="${holdY}" stroke="#FF9800" stroke-width="1.4" stroke-dasharray="2,4" opacity="0.9"/>`;
+      svg += `<text x="${pad.left + 4}" y="${labelY}" text-anchor="start" font-size="${compact ? 9 : 10}" fill="#FF9800">${this._escSvg(`IDLE Hold ${Math.round(model.idleHoldReservePercent)}%`)}</text>`;
     }
 
     for (const series of model.powerSeries) {
@@ -2329,6 +2341,22 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     return {
       percent: Number.isFinite(configuredReserve) ? Math.max(0, Math.min(100, configuredReserve)) : NaN,
       calculated: false,
+    };
+  }
+
+  _idleHoldReserve(data) {
+    const active = data?.idle_hold_active === true || data?.config?.idle_hold_active === true;
+    const rawPercent = this._reservePercent(
+      data?.idle_hold_reserve_percent ??
+      data?.config?.idle_hold_reserve_percent ??
+      data?.idle_hold_reserve ??
+      data?.config?.idle_hold_reserve
+    );
+    return {
+      active,
+      percent: active && Number.isFinite(rawPercent)
+        ? Math.max(0, Math.min(100, rawPercent))
+        : NaN,
     };
   }
 
@@ -4414,6 +4442,13 @@ function _optimizerStatus(e, showForceChargeWindows = false, showForceDischargeW
         : Math.round(powerW) + ' W';
       let line1 = action.charAt(0).toUpperCase() + action.slice(1);
       if (powerW) line1 += ' @ ' + powerStr;
+      if (current.attributes?.idle_hold_active) {
+        const holdPct = Number(current.attributes?.idle_hold_reserve_percent);
+        const holdText = Number.isFinite(holdPct)
+          ? 'holding SOC at ' + Math.round(holdPct) + '%'
+          : 'temporary hold';
+        line1 += ' - ' + holdText;
+      }
       if (next && next.state && next.state !== 'unknown' && next.state !== 'unavailable') {
         const nextAction = (next.state || '').replace('_', ' ');
         const nextTime = next.attributes?.time;

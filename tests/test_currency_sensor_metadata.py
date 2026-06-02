@@ -426,6 +426,9 @@ def test_optimizer_current_action_exposes_reserve_recommendation():
         "current_action_end_time": "2026-05-04T00:05:00+00:00",
         "lp_stats": {"solver_used": "highs"},
         "reserve_recommendation": recommendation,
+        "idle_hold_active": True,
+        "idle_hold_reserve": 1.0,
+        "idle_hold_reserve_percent": 100,
     }
     entity = sensor.OptimizerActionSensor(SimpleNamespace(data=payload), desc, _entry("amber"))
 
@@ -433,6 +436,8 @@ def test_optimizer_current_action_exposes_reserve_recommendation():
     attrs = entity.extra_state_attributes
     assert attrs["reserve_recommendation"] == recommendation
     assert attrs["lp_stats"]["solver_used"] == "highs"
+    assert attrs["idle_hold_active"] is True
+    assert attrs["idle_hold_reserve_percent"] == 100
 
 
 def test_eur_price_forecast_uses_major_rate_and_ct_minor_attributes():

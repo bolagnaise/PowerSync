@@ -6845,6 +6845,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             auto_apply_reserve_enabled = bool(
                 user_input.get(CONF_OPTIMIZATION_AUTO_APPLY_RESERVE, False)
             )
+            previous_auto_apply_reserve_enabled = bool(
+                self._get_option(
+                    CONF_OPTIMIZATION_AUTO_APPLY_RESERVE,
+                    self.config_entry.data.get(
+                        CONF_OPTIMIZATION_AUTO_APPLY_RESERVE, False
+                    ),
+                )
+            )
             if optimization_provider != OPT_PROVIDER_POWERSYNC:
                 optimization_enabled = False
                 auto_apply_reserve_enabled = False
@@ -6902,12 +6910,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     current_manual_reserve = current_manual_reserve / 100.0
                 if (
                     not auto_apply_reserve_enabled
-                    and self._get_option(
-                        CONF_OPTIMIZATION_AUTO_APPLY_RESERVE,
-                        self.config_entry.data.get(
-                            CONF_OPTIMIZATION_AUTO_APPLY_RESERVE, False
-                        ),
-                    )
+                    and previous_auto_apply_reserve_enabled
                 ):
                     backup_reserve = current_manual_reserve
                 manual_reserve = (
@@ -7010,6 +7013,17 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             self.hass.config_entries.async_update_entry(
                 self.config_entry, data=new_data, options=new_options
             )
+            if (
+                previous_auto_apply_reserve_enabled != auto_apply_reserve_enabled
+                and isinstance(entry_data, dict)
+            ):
+                coordinator = entry_data.get("optimization_coordinator")
+                if coordinator and hasattr(
+                    coordinator, "set_auto_apply_reserve_enabled"
+                ):
+                    await coordinator.set_auto_apply_reserve_enabled(
+                        auto_apply_reserve_enabled
+                    )
             self.hass.async_create_task(
                 self.hass.config_entries.async_reload(self.config_entry.entry_id)
             )

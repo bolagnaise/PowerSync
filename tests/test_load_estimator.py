@@ -120,6 +120,38 @@ def test_history_recency_weights_recent_weeks_more(monkeypatch):
     assert 1000.0 < forecast[0] < 2000.0
 
 
+def test_recent_load_regime_scales_forecast_up_for_winter_step_change(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    estimator = module.LoadEstimator(SimpleNamespace(), "sensor.load", interval_minutes=5)
+    start = datetime(2026, 6, 2, 12, tzinfo=timezone.utc)
+
+    history = []
+    for hour_offset in range(30 * 24, 72, -1):
+        history.append((start - timedelta(hours=hour_offset), 500.0))
+    for hour_offset in range(48, 0, -1):
+        history.append((start - timedelta(hours=hour_offset), 1500.0))
+
+    forecast = estimator._forecast_from_history(history, start, 12)
+
+    assert min(forecast) >= 1199.0
+
+
+def test_recent_load_regime_ignores_short_spike(monkeypatch):
+    module = _load_estimator_module(monkeypatch)
+    estimator = module.LoadEstimator(SimpleNamespace(), "sensor.load", interval_minutes=5)
+    start = datetime(2026, 6, 2, 12, tzinfo=timezone.utc)
+
+    history = []
+    for hour_offset in range(30 * 24, 6, -1):
+        history.append((start - timedelta(hours=hour_offset), 500.0))
+    for hour_offset in range(6, 0, -1):
+        history.append((start - timedelta(hours=hour_offset), 1500.0))
+
+    forecast = estimator._forecast_from_history(history, start, 12)
+
+    assert max(forecast) < 900.0
+
+
 def test_history_outlier_does_not_dominate_bucket(monkeypatch):
     module = _load_estimator_module(monkeypatch)
     estimator = module.LoadEstimator(SimpleNamespace(), "sensor.load", interval_minutes=5)

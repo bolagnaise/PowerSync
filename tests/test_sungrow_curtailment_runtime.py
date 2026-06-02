@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 INIT_PATH = ROOT / "custom_components" / "power_sync" / "__init__.py"
 ACTIONS_PATH = ROOT / "custom_components" / "power_sync" / "automations" / "actions.py"
+SUNGROW_INVERTER_PATH = ROOT / "custom_components" / "power_sync" / "inverters" / "sungrow.py"
 
 
 def _function_source(name: str) -> str:
@@ -44,6 +45,19 @@ def _actions_function_source(name: str) -> str:
             assert segment is not None
             return segment
     raise AssertionError(f"{name} not found")
+
+
+def _class_method_source(path: Path, class_name: str, method_name: str) -> str:
+    source = path.read_text()
+    module = ast.parse(source)
+    for node in module.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            for child in node.body:
+                if isinstance(child, ast.AsyncFunctionDef) and child.name == method_name:
+                    segment = ast.get_source_segment(source, child)
+                    assert segment is not None
+                    return segment
+    raise AssertionError(f"{class_name}.{method_name} not found")
 
 
 def test_sungrow_has_native_export_limit_curtailment_handler():
@@ -85,6 +99,28 @@ def test_inverter_status_api_marks_native_sungrow_curtailment_as_curtailed():
     assert 'sungrow_curtailment_state = entry_data.get("sungrow_curtailment_state")' in source
     assert 'or sungrow_curtailment_state == "curtailed"' in source
     assert 'or sungrow_curtailment_state == "normal"' in source
+
+
+def test_ac_inverter_restore_keeps_heartbeat_but_skips_sungrow_verify_readback():
+    source = _function_source("apply_inverter_curtailment")
+
+    controller_index = source.index("controller = get_inverter_controller(")
+    restore_index = source.index("_LOGGER.info(f\"🟢 Restoring inverter")
+    signature_index = source.index("restore_sig = inspect.signature(controller.restore)")
+    verify_false_index = source.index("await controller.restore(verify=False)")
+
+    assert signature_index < verify_false_index
+    assert controller_index < restore_index < verify_false_index
+
+
+def test_sungrow_restore_can_skip_verification_readback():
+    source = _class_method_source(SUNGROW_INVERTER_PATH, "SungrowController", "restore")
+
+    assert "verify: bool = True" in source
+    verify_index = source.index("if verify:")
+    get_status_index = source.index("state = await self.get_status()")
+
+    assert verify_index < get_status_index
 
 
 def test_hybrid_curtailment_handlers_use_tariff_schedule_fallback():

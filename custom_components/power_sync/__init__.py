@@ -17996,7 +17996,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 return success
             else:
                 _LOGGER.info(f"🟢 Restoring inverter at {inverter_host}")
-                success = await controller.restore()
+                import inspect
+                restore_sig = inspect.signature(controller.restore)
+                if "verify" in restore_sig.parameters:
+                    success = await controller.restore(verify=False)
+                else:
+                    success = await controller.restore()
                 if success:
                     _LOGGER.info(f"✅ Inverter restored successfully")
                     # Store last state

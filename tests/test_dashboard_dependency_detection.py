@@ -66,6 +66,18 @@ def test_optimizer_plan_shows_calculated_auto_reserve():
     assert "reserveCalculated" in source
 
 
+def test_optimizer_plan_shows_temporary_idle_hold_separately():
+    """Temporary hardware hold should not be graphed as the optimizer reserve."""
+    source = STRATEGY_PATH.read_text()
+
+    assert "_idleHoldReserve(data)" in source
+    assert "idle_hold_active" in source
+    assert "idle_hold_reserve_percent" in source
+    assert "IDLE Hold" in source
+    assert "idleHoldReservePercent" in source
+    assert "holding SOC at" in source
+
+
 def test_dashboard_battery_controls_include_self_consumption_action():
     """Manual battery controls should expose the self-consumption service."""
     source = STRATEGY_PATH.read_text()

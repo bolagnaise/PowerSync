@@ -620,11 +620,14 @@ class SungrowController(InverterController):
             _LOGGER.error(f"Error curtailing Sungrow inverter: {e}")
             return False
 
-    async def restore(self) -> bool:
+    async def restore(self, verify: bool = True) -> bool:
         """Restore normal operation of the Sungrow inverter.
 
         Sets power limit to 100% (full output).
         Falls back to run mode enable if power limit not available.
+
+        Args:
+            verify: Whether to read registers back after writing the restore command.
 
         Returns:
             True if restore successful
@@ -671,13 +674,14 @@ class SungrowController(InverterController):
 
             if success:
                 _LOGGER.info(f"Successfully restored Sungrow inverter at {self.host}")
-                # Verify the change
-                await asyncio.sleep(1)  # Brief delay for inverter to process
-                state = await self.get_status()
-                if not state.is_curtailed:
-                    _LOGGER.info("Restore verified - inverter at full output")
-                else:
-                    _LOGGER.warning("Restore command sent but state not verified - may take time to start")
+                if verify:
+                    # Verify the change
+                    await asyncio.sleep(1)  # Brief delay for inverter to process
+                    state = await self.get_status()
+                    if not state.is_curtailed:
+                        _LOGGER.info("Restore verified - inverter at full output")
+                    else:
+                        _LOGGER.warning("Restore command sent but state not verified - may take time to start")
             else:
                 _LOGGER.error(f"Failed to restore Sungrow inverter at {self.host}")
 

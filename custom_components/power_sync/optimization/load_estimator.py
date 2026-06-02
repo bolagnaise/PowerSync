@@ -37,6 +37,13 @@ OUTLIER_MIN_SAMPLES = 4
 OUTLIER_MIN_THRESHOLD_W = 500.0
 OUTLIER_MEDIAN_FRACTION = 0.5
 MAD_NORMAL_SCALE = 1.4826
+RECENT_LOAD_WINDOW_HOURS = 48
+RECENT_LOAD_BASELINE_EXCLUDE_HOURS = 48
+RECENT_LOAD_MIN_COVERAGE_HOURS = 12
+RECENT_LOAD_DEADBAND = 0.15
+RECENT_LOAD_BLEND = 0.7
+RECENT_LOAD_MIN_SCALE = 0.8
+RECENT_LOAD_MAX_SCALE = 2.5
 
 _SOLCAST_ESTIMATE_FIELDS = {
     SOLCAST_ESTIMATE: ("pv_estimate", "pv_estimate50"),
@@ -372,7 +379,94 @@ class LoadEstimator:
         # Apply smoothing
         forecast = self._smooth_forecast(forecast)
 
+        recent_scale = self._recent_load_scale(history, start_time)
+        if recent_scale is not None:
+            forecast = [value * recent_scale for value in forecast]
+
         return forecast
+
+    def _recent_load_scale(
+        self,
+        history: list[tuple[datetime, float]],
+        start_time: datetime,
+    ) -> float | None:
+        """Return a recent-regime multiplier when load has clearly shifted.
+
+        The day/time pattern and weather model are deliberately still the base
+        forecast. This multiplier catches step changes such as the first cold
+        snap of winter where the 30-day history is too slow to move.
+        """
+        if not history:
+            return None
+
+        ref_time = dt_util.as_local(start_time) if start_time.tzinfo else start_time
+        recent_end = ref_time
+        recent_start = recent_end - timedelta(hours=RECENT_LOAD_WINDOW_HOURS)
+        baseline_end = recent_start - timedelta(hours=RECENT_LOAD_BASELINE_EXCLUDE_HOURS)
+
+        older_pattern: dict[tuple[int, int, int], list[tuple[datetime, float]]] = defaultdict(list)
+        actual_values: list[float] = []
+        expected_values: list[float] = []
+        matched_timestamps: list[datetime] = []
+
+        for ts, value in history:
+            sample_time = dt_util.as_local(ts) if ts.tzinfo else ts
+            if sample_time < baseline_end:
+                key = (
+                    sample_time.weekday(),
+                    sample_time.hour,
+                    0 if sample_time.minute < 30 else 1,
+                )
+                older_pattern[key].append((ts, value))
+
+        for ts, value in history:
+            sample_time = dt_util.as_local(ts) if ts.tzinfo else ts
+            if not (recent_start <= sample_time <= recent_end):
+                continue
+
+            key = (
+                sample_time.weekday(),
+                sample_time.hour,
+                0 if sample_time.minute < 30 else 1,
+            )
+            exact_samples = self._clip_outliers(older_pattern.get(key, []))
+            if len(exact_samples) < MIN_EXACT_BUCKET_SAMPLES:
+                continue
+
+            expected = self._weighted_average(exact_samples, sample_time)
+            if expected is None or expected <= 0:
+                continue
+
+            actual_values.append(value)
+            expected_values.append(expected)
+            matched_timestamps.append(sample_time)
+
+        matched_coverage = 0.0
+        if len(matched_timestamps) > 1:
+            matched_coverage = (
+                max(matched_timestamps) - min(matched_timestamps)
+            ).total_seconds() / 3600.0
+
+        if not actual_values or matched_coverage < RECENT_LOAD_MIN_COVERAGE_HOURS:
+            return None
+
+        recent_avg = sum(actual_values) / len(actual_values)
+        baseline_avg = sum(expected_values) / len(expected_values)
+        ratio = recent_avg / baseline_avg
+        if abs(ratio - 1.0) < RECENT_LOAD_DEADBAND:
+            return None
+
+        scale = 1.0 + (ratio - 1.0) * RECENT_LOAD_BLEND
+        scale = max(RECENT_LOAD_MIN_SCALE, min(RECENT_LOAD_MAX_SCALE, scale))
+        _LOGGER.info(
+            "Recent load regime adjustment: recent=%.0fW over %.1fh, "
+            "matched_history=%.0fW, scale=%.2fx",
+            recent_avg,
+            matched_coverage,
+            baseline_avg,
+            scale,
+        )
+        return scale
 
     def _history_bucket_forecast(
         self,

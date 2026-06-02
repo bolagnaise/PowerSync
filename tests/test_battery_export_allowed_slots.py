@@ -246,6 +246,8 @@ def _coordinator(opt_module, provider: str, profit_max: bool = False, **options)
     coordinator._actual_zerohero_base_export_earnings_today = 0.0
     coordinator._actual_zerohero_bonus_export_earnings_today = 0.0
     coordinator._actual_zerohero_credit_value_today = 0.0
+    coordinator._pre_idle_backup_reserve = None
+    coordinator._idle_hold_reserve = None
     coordinator._optimizer = None
     coordinator.energy_coordinator = None
     return coordinator
@@ -1087,6 +1089,7 @@ def _execution_coordinator(opt_module, battery: _FakeBattery, soc: float):
     coordinator._last_executed_action = "self_consumption"
     coordinator._startup_backup_reserve = 20
     coordinator._pre_idle_backup_reserve = None
+    coordinator._idle_hold_reserve = None
     coordinator._scheduled_ev_no_discharge_active = False
     coordinator._last_export_prices = None
     coordinator.energy_coordinator = None
@@ -1652,6 +1655,32 @@ def test_idle_to_self_consumption_exits_idle_immediately(opt_module):
     assert battery.self_consumption_calls == 1
     assert battery.backup_reserve_calls == [47, 20]
     assert coordinator._pre_idle_backup_reserve is None
+    assert coordinator._last_executed_action == "self_consumption"
+
+
+def test_foxess_idle_exit_restores_user_reserve_without_applying_optimizer_floor(opt_module):
+    battery = _FakeBattery()
+    energy_coordinator = _FakeEnergyCoordinator()
+    coordinator = _execution_coordinator(opt_module, battery, soc=0.50)
+    coordinator.battery_system = "foxess"
+    coordinator._config.backup_reserve = 0.45
+    coordinator._startup_backup_reserve = 15
+    coordinator._last_executed_action = "idle"
+    coordinator._pre_idle_backup_reserve = 15
+    coordinator._idle_hold_reserve = 100
+    coordinator.energy_coordinator = energy_coordinator
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert energy_coordinator.restore_work_mode_from_idle_calls == 1
+    assert battery.self_consumption_calls == 1
+    assert battery.backup_reserve_calls == [15]
+    assert coordinator._pre_idle_backup_reserve is None
+    assert coordinator._idle_hold_reserve is None
     assert coordinator._last_executed_action == "self_consumption"
 
 
