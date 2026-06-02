@@ -1926,12 +1926,14 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     if (hasEv) {
       powerSeries.push({ key: 'evKw', label: 'EV', color: '#7E57C2' });
     }
+    const reserve = this._optimizerReserve(data);
 
     return {
       raw: data,
       points,
       intervalMinutes,
-      reservePercent: this._reservePercent(data?.config?.backup_reserve),
+      reservePercent: reserve.percent,
+      reserveCalculated: reserve.calculated,
       powerSeries,
       priceSeries: hasPrices
         ? [
@@ -1954,6 +1956,9 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     }
     if (data.last_optimization) {
       chips.push(['Optimized', this._formatTime(data.last_optimization)]);
+    }
+    if (model.reserveCalculated && Number.isFinite(model.reservePercent)) {
+      chips.push(['Auto Reserve', `${Math.round(model.reservePercent)}%`]);
     }
     const breakdown = data.daily_cost_breakdown || {};
     if (Number.isFinite(Number(breakdown.predicted_remaining))) {
@@ -2011,9 +2016,10 @@ class PowerSyncOptimizationPlan extends HTMLElement {
 
     if (Number.isFinite(model.reservePercent)) {
       const ry = ySoc(model.reservePercent);
+      const reserveLabel = model.reserveCalculated ? 'Calculated Reserve' : 'Reserve';
       svg += `<rect x="${pad.left}" y="${ry}" width="${chartW}" height="${pad.top + chartH - ry}" fill="#F44336" opacity="0.06"/>`;
       svg += `<line x1="${pad.left}" y1="${ry}" x2="${W - pad.right}" y2="${ry}" stroke="#F44336" stroke-width="1" stroke-dasharray="5,3" opacity="0.75"/>`;
-      svg += `<text x="${W - pad.right - 4}" y="${ry - 5}" text-anchor="end" font-size="${compact ? 9 : 10}" fill="#F44336">${this._escSvg(`Reserve ${Math.round(model.reservePercent)}%`)}</text>`;
+      svg += `<text x="${W - pad.right - 4}" y="${ry - 5}" text-anchor="end" font-size="${compact ? 9 : 10}" fill="#F44336">${this._escSvg(`${reserveLabel} ${Math.round(model.reservePercent)}%`)}</text>`;
     }
 
     for (const series of model.powerSeries) {
@@ -2308,6 +2314,28 @@ class PowerSyncOptimizationPlan extends HTMLElement {
     const n = Number(value);
     if (!Number.isFinite(n)) return NaN;
     return n <= 1 ? n * 100 : n;
+  }
+
+  _optimizerReserve(data) {
+    const recommendation = data?.reserve_recommendation || {};
+    const autoApplyEnabled = data?.auto_apply_reserve_enabled === true ||
+      data?.config?.auto_apply_reserve_enabled === true ||
+      recommendation?.auto_apply_enabled === true;
+    const appliedReserve = this._clampedPercent(recommendation?.applied_optimizer_reserve_percent);
+    if (autoApplyEnabled && Number.isFinite(appliedReserve)) {
+      return { percent: appliedReserve, calculated: true };
+    }
+    const configuredReserve = this._reservePercent(data?.config?.backup_reserve);
+    return {
+      percent: Number.isFinite(configuredReserve) ? Math.max(0, Math.min(100, configuredReserve)) : NaN,
+      calculated: false,
+    };
+  }
+
+  _clampedPercent(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return NaN;
+    return Math.max(0, Math.min(100, n));
   }
 
   _niceCeil(value) {

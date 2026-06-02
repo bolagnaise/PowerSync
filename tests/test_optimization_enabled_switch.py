@@ -104,6 +104,21 @@ def test_auto_apply_reserve_setting_is_exposed_through_api_and_coordinator():
     assert "def _apply_auto_reserve_recommendation(" in coordinator_source
 
 
+def test_auto_apply_reserve_recommendation_uses_manual_baseline_floor():
+    coordinator_source = COORDINATOR_PATH.read_text()
+
+    assert "def _auto_reserve_baseline_floor() -> float | None:" in coordinator_source
+    assert 'getattr(self, "_manual_backup_reserve", None)' in coordinator_source
+    assert "recommendation_floor = _auto_reserve_baseline_floor()" in coordinator_source
+    assert (
+        "result: OptimizerResult = await _run_optimizer_once(\n"
+        "                recommendation_floor"
+    ) in coordinator_source
+    assert "used_recommendation_floor = recommendation_floor is not None" in coordinator_source
+    assert "if reserve_changed or used_recommendation_floor:" in coordinator_source
+    assert "result.reserve_recommendation = reserve_recommendation" in coordinator_source
+
+
 def test_max_grid_import_setting_is_exposed_through_api_and_coordinator():
     const_source = CONST_PATH.read_text()
     init_source = INIT_PATH.read_text()

@@ -54,6 +54,18 @@ def test_optimizer_windows_use_combined_visual_card():
     assert "Future Force Charge" not in source
 
 
+def test_optimizer_plan_shows_calculated_auto_reserve():
+    """Auto-applied optimizer reserve should be visible on the schedule graph."""
+    source = STRATEGY_PATH.read_text()
+
+    assert "_optimizerReserve(data)" in source
+    assert "applied_optimizer_reserve_percent" in source
+    assert "auto_apply_reserve_enabled" in source
+    assert "Calculated Reserve" in source
+    assert "Auto Reserve" in source
+    assert "reserveCalculated" in source
+
+
 def test_dashboard_battery_controls_include_self_consumption_action():
     """Manual battery controls should expose the self-consumption service."""
     source = STRATEGY_PATH.read_text()

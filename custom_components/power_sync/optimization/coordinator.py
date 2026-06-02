@@ -2401,22 +2401,56 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._sync_grid_export_cap_to_optimizer()
             self._sync_optimizer_discharge_limits()
 
+            def _auto_reserve_baseline_floor() -> float | None:
+                if not self.auto_apply_reserve_enabled:
+                    return None
+                manual_reserve = self._reserve_ratio(
+                    getattr(self, "_manual_backup_reserve", None),
+                    self._config.backup_reserve,
+                )
+                if manual_reserve is None:
+                    return None
+                if math.isclose(
+                    manual_reserve,
+                    self._config.backup_reserve,
+                    abs_tol=0.0001,
+                ):
+                    return None
+                return manual_reserve
+
+            async def _run_optimizer_once(
+                reserve_floor: float | None = None,
+            ) -> OptimizerResult:
+                if reserve_floor is not None:
+                    self._optimizer.update_config(backup_reserve=reserve_floor)
+                try:
+                    return await self.hass.async_add_executor_job(
+                        self._optimizer.optimize,
+                        import_prices,
+                        export_prices,
+                        solar_forecast,
+                        load_forecast,
+                        soc,
+                        self._cost_function.value,
+                        acq_cost,
+                        battery_export_allowed,
+                        battery_charge_blocked,
+                        self._config.allow_grid_charge,
+                        self._last_zerohero_bonus_prices,
+                        self._last_zerohero_bonus_cap_kwh,
+                    )
+                finally:
+                    if reserve_floor is not None:
+                        self._optimizer.update_config(
+                            backup_reserve=self._config.backup_reserve
+                        )
+
             # Run LP in executor thread to avoid blocking event loop
-            result: OptimizerResult = await self.hass.async_add_executor_job(
-                self._optimizer.optimize,
-                import_prices,
-                export_prices,
-                solar_forecast,
-                load_forecast,
-                soc,
-                self._cost_function.value,
-                acq_cost,
-                battery_export_allowed,
-                battery_charge_blocked,
-                self._config.allow_grid_charge,
-                self._last_zerohero_bonus_prices,
-                self._last_zerohero_bonus_cap_kwh,
+            recommendation_floor = _auto_reserve_baseline_floor()
+            result: OptimizerResult = await _run_optimizer_once(
+                recommendation_floor
             )
+            used_recommendation_floor = recommendation_floor is not None
 
             self._last_optimizer_result = result
             self._current_schedule = result.schedule
@@ -2452,22 +2486,18 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 result.schedule = self._current_schedule
 
-            if self._apply_auto_reserve_recommendation(result):
-                result = await self.hass.async_add_executor_job(
-                    self._optimizer.optimize,
-                    import_prices,
-                    export_prices,
-                    solar_forecast,
-                    load_forecast,
-                    soc,
-                    self._cost_function.value,
-                    acq_cost,
-                    battery_export_allowed,
-                    battery_charge_blocked,
-                    self._config.allow_grid_charge,
-                    self._last_zerohero_bonus_prices,
-                    self._last_zerohero_bonus_cap_kwh,
+            reserve_recommendation = dict(
+                getattr(result, "reserve_recommendation", {}) or {}
+            )
+            reserve_changed = self._apply_auto_reserve_recommendation(result)
+            if getattr(result, "reserve_recommendation", {}) or {}:
+                reserve_recommendation = dict(
+                    getattr(result, "reserve_recommendation", {}) or {}
                 )
+            if reserve_changed or used_recommendation_floor:
+                result = await _run_optimizer_once()
+                if reserve_recommendation:
+                    result.reserve_recommendation = reserve_recommendation
                 self._last_optimizer_result = result
                 self._current_schedule = result.schedule
                 if self._should_spread_import_schedule():
