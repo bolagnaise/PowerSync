@@ -240,41 +240,17 @@ def test_pre_window_reachability_uses_grid_import_charge_limit_source():
     assert "self.max_charge_kw * eff * sum" not in pre_window_block
 
 
-class _FakeSparseMatrix:
-    def __init__(self, shape, dtype=float):
-        self.shape = shape
-        self._values = {}
-
-    def __setitem__(self, key, value):
-        if value:
-            self._values[key] = value
-
-    def tocsr(self):
-        return self
-
-    @property
-    def nnz(self):
-        return len(self._values)
-
-
 def test_lp_solver_uses_extended_time_limit(battery_optimizer_module, monkeypatch):
     captured = {}
 
-    def fake_linprog(*args, **kwargs):
-        captured["options"] = kwargs["options"]
-        return types.SimpleNamespace(
-            success=False,
-            message="Time limit reached.",
+    def fake_solve(c, A_ub, b_ub, A_eq, b_eq, bounds, time_limit):
+        captured["time_limit"] = time_limit
+        return battery_optimizer_module._HighsResult(
+            x=None, success=False, message="Time limit reached.", status=0, fun=None,
         )
 
-    monkeypatch.setattr(battery_optimizer_module, "SCIPY_AVAILABLE", True)
-    monkeypatch.setattr(battery_optimizer_module, "linprog", fake_linprog, raising=False)
-    monkeypatch.setattr(
-        battery_optimizer_module,
-        "sparse",
-        types.SimpleNamespace(lil_matrix=_FakeSparseMatrix),
-        raising=False,
-    )
+    monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", True)
+    monkeypatch.setattr(battery_optimizer_module, "_solve_lp_highs", fake_solve)
     optimizer = _optimizer(battery_optimizer_module)
 
     result = optimizer.optimize(
@@ -285,10 +261,10 @@ def test_lp_solver_uses_extended_time_limit(battery_optimizer_module, monkeypatc
         current_soc=0.80,
     )
 
-    assert captured["options"]["time_limit"] == (
+    assert captured["time_limit"] == (
         battery_optimizer_module.LP_SOLVER_TIME_LIMIT_SECONDS
     )
-    assert captured["options"]["time_limit"] == 30.0
+    assert captured["time_limit"] == 30.0
     assert result.solver_used == "greedy"
 
 
@@ -427,7 +403,7 @@ def test_grid_export_cannot_come_from_grid_passthrough(battery_optimizer_module)
 def test_zerohero_bonus_cap_limits_intentional_battery_export(
     battery_optimizer_module,
 ):
-    if not battery_optimizer_module.SCIPY_AVAILABLE:
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
         pytest.skip("ZeroHero bonus cap is enforced by the LP optimizer")
 
     optimizer = battery_optimizer_module.BatteryOptimizer(
@@ -462,7 +438,7 @@ def test_zerohero_bonus_cap_limits_intentional_battery_export(
 def test_zerohero_solar_surplus_shares_bonus_bucket_before_battery_export(
     battery_optimizer_module,
 ):
-    if not battery_optimizer_module.SCIPY_AVAILABLE:
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
         pytest.skip("ZeroHero bonus cap is enforced by the LP optimizer")
 
     optimizer = battery_optimizer_module.BatteryOptimizer(
@@ -527,24 +503,15 @@ def test_below_optimizer_reserve_lp_uses_hardware_floor(
 ):
     captured = {}
 
-    def fake_linprog(c, **kwargs):
-        captured["bounds"] = kwargs["bounds"]
-        return types.SimpleNamespace(
-            success=True,
-            message="Optimization terminated successfully.",
-            status=0,
-            x=[0.0] * len(c),
-            fun=0.0,
+    def fake_solve(c, A_ub, b_ub, A_eq, b_eq, bounds, time_limit):
+        captured["bounds"] = bounds
+        return battery_optimizer_module._HighsResult(
+            x=[0.0] * len(c), success=True,
+            message="Optimal", status=0, fun=0.0,
         )
 
-    monkeypatch.setattr(battery_optimizer_module, "SCIPY_AVAILABLE", True)
-    monkeypatch.setattr(battery_optimizer_module, "linprog", fake_linprog, raising=False)
-    monkeypatch.setattr(
-        battery_optimizer_module,
-        "sparse",
-        types.SimpleNamespace(lil_matrix=_FakeSparseMatrix),
-        raising=False,
-    )
+    monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", True)
+    monkeypatch.setattr(battery_optimizer_module, "_solve_lp_highs", fake_solve)
     optimizer = battery_optimizer_module.BatteryOptimizer(
         capacity_wh=10000,
         max_charge_w=10000,
@@ -602,30 +569,16 @@ def test_below_optimizer_reserve_blocks_lp_battery_export(
 ):
     captured = {}
 
-    def fake_linprog(c, **kwargs):
-        captured["bounds"] = kwargs["bounds"]
+    def fake_solve(c, A_ub, b_ub, A_eq, b_eq, bounds, time_limit):
+        captured["bounds"] = bounds
         captured["variable_count"] = len(c)
-        return types.SimpleNamespace(
-            success=True,
-            message="Optimization terminated successfully.",
-            status=0,
-            x=[0.0] * len(c),
-            fun=0.0,
+        return battery_optimizer_module._HighsResult(
+            x=[0.0] * len(c), success=True,
+            message="Optimal", status=0, fun=0.0,
         )
 
-    monkeypatch.setattr(battery_optimizer_module, "SCIPY_AVAILABLE", True)
-    monkeypatch.setattr(
-        battery_optimizer_module,
-        "sparse",
-        types.SimpleNamespace(lil_matrix=_FakeSparseMatrix),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        battery_optimizer_module,
-        "linprog",
-        fake_linprog,
-        raising=False,
-    )
+    monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", True)
+    monkeypatch.setattr(battery_optimizer_module, "_solve_lp_highs", fake_solve)
     optimizer = battery_optimizer_module.BatteryOptimizer(
         capacity_wh=13500,
         max_charge_w=5000,
@@ -660,7 +613,7 @@ def test_below_optimizer_reserve_blocks_greedy_battery_export(
     battery_optimizer_module,
     monkeypatch,
 ):
-    monkeypatch.setattr(battery_optimizer_module, "SCIPY_AVAILABLE", False)
+    monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", False)
     optimizer = battery_optimizer_module.BatteryOptimizer(
         capacity_wh=13500,
         max_charge_w=5000,
@@ -691,7 +644,7 @@ def test_below_optimizer_reserve_greedy_allows_natural_self_consumption(
     battery_optimizer_module,
     monkeypatch,
 ):
-    monkeypatch.setattr(battery_optimizer_module, "SCIPY_AVAILABLE", False)
+    monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", False)
     optimizer = battery_optimizer_module.BatteryOptimizer(
         capacity_wh=13500,
         max_charge_w=5000,
@@ -919,7 +872,7 @@ def test_charge_block_mask_prevents_greedy_fallback_charging(
     battery_optimizer_module,
     monkeypatch,
 ):
-    monkeypatch.setattr(battery_optimizer_module, "SCIPY_AVAILABLE", False)
+    monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", False)
     optimizer = _optimizer(battery_optimizer_module)
 
     unblocked = optimizer.optimize(
@@ -1388,8 +1341,8 @@ def test_pre_export_fill_target_respects_configured_soc(
 def test_pre_export_fill_target_leaves_room_for_forecast_solar(
     battery_optimizer_module,
 ):
-    if not battery_optimizer_module.SCIPY_AVAILABLE:
-        pytest.skip("requires scipy LP solver")
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
 
     optimizer = battery_optimizer_module.BatteryOptimizer(
         capacity_wh=10000,
@@ -1427,8 +1380,8 @@ def test_pre_export_fill_target_leaves_room_for_forecast_solar(
 def test_pre_export_fill_target_still_prefills_without_forecast_solar(
     battery_optimizer_module,
 ):
-    if not battery_optimizer_module.SCIPY_AVAILABLE:
-        pytest.skip("requires scipy LP solver")
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
 
     optimizer = battery_optimizer_module.BatteryOptimizer(
         capacity_wh=10000,
@@ -1461,8 +1414,8 @@ def test_pre_export_fill_target_still_prefills_without_forecast_solar(
 def test_pre_export_solar_ceiling_does_not_force_discharge_for_headroom(
     battery_optimizer_module,
 ):
-    if not battery_optimizer_module.SCIPY_AVAILABLE:
-        pytest.skip("requires scipy LP solver")
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("requires HiGHS LP solver")
 
     optimizer = battery_optimizer_module.BatteryOptimizer(
         capacity_wh=10000,
@@ -1598,8 +1551,8 @@ def test_tiered_lp_periods_split_on_solar_surplus_changes(
 def test_no_grid_charge_does_not_expand_solar_charge_into_dark_slots(
     battery_optimizer_module,
 ):
-    if not battery_optimizer_module.SCIPY_AVAILABLE:
-        pytest.skip("scipy unavailable")
+    if not battery_optimizer_module.HIGHS_AVAILABLE:
+        pytest.skip("highspy unavailable")
 
     optimizer = battery_optimizer_module.BatteryOptimizer(
         capacity_wh=13500,
@@ -1641,26 +1594,17 @@ def test_sparse_lp_stats_and_schedule_expansion(
 ):
     captured = {}
 
-    def fake_linprog(c, **kwargs):
-        captured["A_eq"] = kwargs["A_eq"]
-        captured["A_ub"] = kwargs["A_ub"]
-        captured["bounds"] = kwargs["bounds"]
-        return types.SimpleNamespace(
-            success=True,
-            message="Optimization terminated successfully.",
-            status=0,
-            x=[0.0] * len(c),
-            fun=0.0,
+    def fake_solve(c, A_ub, b_ub, A_eq, b_eq, bounds, time_limit):
+        captured["A_eq"] = A_eq
+        captured["A_ub"] = A_ub
+        captured["bounds"] = bounds
+        return battery_optimizer_module._HighsResult(
+            x=[0.0] * len(c), success=True,
+            message="Optimal", status=0, fun=0.0,
         )
 
-    monkeypatch.setattr(battery_optimizer_module, "SCIPY_AVAILABLE", True)
-    monkeypatch.setattr(battery_optimizer_module, "linprog", fake_linprog, raising=False)
-    monkeypatch.setattr(
-        battery_optimizer_module,
-        "sparse",
-        types.SimpleNamespace(lil_matrix=_FakeSparseMatrix),
-        raising=False,
-    )
+    monkeypatch.setattr(battery_optimizer_module, "HIGHS_AVAILABLE", True)
+    monkeypatch.setattr(battery_optimizer_module, "_solve_lp_highs", fake_solve)
     optimizer = battery_optimizer_module.BatteryOptimizer(
         interval_minutes=5,
         horizon_hours=48,
@@ -1679,7 +1623,7 @@ def test_sparse_lp_stats_and_schedule_expansion(
     assert result.solver_used == "highs"
     assert len(result.schedule.actions) == n
     assert len(result.grid_import_w) == n
-    assert result.lp_stats["backend"] == "scipy_sparse"
+    assert result.lp_stats["backend"] == "highspy"
     assert result.lp_stats["base_steps"] == n
     assert result.lp_stats["period_count"] == 132
     assert result.lp_stats["variables"] == 5 * 132 + 1

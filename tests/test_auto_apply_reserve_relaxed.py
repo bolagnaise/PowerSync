@@ -1,12 +1,15 @@
-"""Regression tests: a relaxed (infeasible) solve must not lower the reserve.
+"""Regression tests: an infeasible solve must hold in self-consumption.
 
 Background: with Profit Max + Auto-Apply Optimizer Reserve, the constrained LP
-often went infeasible. The relaxed fallback temporarily drops backup_reserve to
-5% and re-solves, so any reserve recommendation it builds reflects that
-artificial floor. Auto-Apply was then writing that 5% "recommendation" to the
-battery, collapsing the optimiser reserve to the hardware floor and never
-recovering. These tests pin the invariant that a relaxed solve emits no usable
-reserve recommendation.
+often went infeasible. The old fallback temporarily dropped backup_reserve to
+5% and re-solved, so the "optimal" relaxed plan would discharge the battery to
+~5% just to satisfy the objective — draining users' batteries overnight, and
+Auto-Apply then wrote that 5% floor back to the battery.
+
+The fallback now holds in self-consumption instead: the battery only serves
+home load, never exports to the grid, never charges from the grid, and never
+drops below the genuine reserve floor. These tests pin that invariant and the
+"no usable reserve recommendation" invariant Auto-Apply relies on.
 """
 
 from __future__ import annotations
@@ -92,77 +95,75 @@ def _optimizer(module):
     )
 
 
-def _result_with_recommendation(module, *, feasible: bool):
-    return module.OptimizerResult(
-        schedule=module.OptimizationSchedule(
-            actions=[],
-            predicted_cost=0.0,
-            predicted_savings=0.0,
-            last_updated=module.dt_util.now(),
-        ),
-        solver_used="highs",
-        feasible=feasible,
-        reserve_recommendation={"suggested_optimizer_reserve_percent": 5},
-    )
+def _hold_kwargs(*, soc_0: float, n: int = 12):
+    """A horizon with home load and no solar — pure discharge-to-load case.
 
-
-def _relaxed_kwargs():
+    Export price sits far above import to make battery export *look* attractive;
+    the hold must refuse to export the battery regardless.
+    """
     return dict(
-        n=1,
-        import_prices=[0.5],
-        export_prices=[0.0],
-        solar=[0.0],
-        load=[1.0],
-        soc_0=0.20,
+        n=n,
+        import_prices=[0.20] * n,
+        export_prices=[1.50] * n,
+        solar=[0.0] * n,
+        load=[1.0] * n,
+        soc_0=soc_0,
         cost_function="cost",
     )
 
 
-def test_relaxed_solve_discards_recommendation_and_restores_reserve(
+def _min_soc(schedule) -> float:
+    """Lowest SOC across the produced schedule actions (0-1)."""
+    socs = [getattr(a, "soc", None) for a in schedule.actions]
+    socs = [s for s in socs if s is not None]
+    return min(socs) if socs else 1.0
+
+
+def test_hold_never_exports_battery_or_drops_below_reserve(
     battery_optimizer_module,
 ):
-    """The recursive-solve path: recommendation built at the 5% floor is dropped."""
-    module = battery_optimizer_module
-    optimizer = _optimizer(module)
-    captured: dict[str, float] = {}
-
-    def fake_solve_lp(*args, **kwargs):
-        # Mimic the recursive solve running while the reserve is relaxed to 5%.
-        captured["reserve_during_solve"] = optimizer.backup_reserve
-        return _result_with_recommendation(module, feasible=True)
-
-    optimizer._solve_lp = fake_solve_lp
-
-    result = optimizer._solve_lp_relaxed(**_relaxed_kwargs())
-
-    # Inner solve saw the artificially lowered floor...
-    assert captured["reserve_during_solve"] == pytest.approx(0.05)
-    # ...but the wrapper discards the tainted recommendation and marks it relaxed.
-    assert result.reserve_recommendation == {}
-    assert result.feasible is False
-    # ...and the user's optimiser reserve is restored afterwards.
-    assert optimizer.backup_reserve == pytest.approx(0.30)
-
-
-def test_relaxed_solve_greedy_fallback_also_discards_recommendation(
-    battery_optimizer_module,
-):
-    """The except path: even a greedy fallback (feasible=True) is sanitised."""
+    """Healthy SOC, lucrative export prices: hold serves load, never exports."""
     module = battery_optimizer_module
     optimizer = _optimizer(module)
 
-    def boom(*args, **kwargs):
-        raise RuntimeError("solver exploded")
+    result = optimizer._solve_self_consumption_hold(**_hold_kwargs(soc_0=0.80))
 
-    def fake_solve_greedy(*args, **kwargs):
-        # Greedy returns feasible=True with a 5%-floor recommendation.
-        return _result_with_recommendation(module, feasible=True)
+    # No solar surplus exists, so the grid never sees exported energy — the
+    # battery is never discharged to the grid.
+    assert max(result.grid_export_w) == pytest.approx(0.0, abs=1e-6)
+    # SOC never crosses below the genuine reserve floor (30%).
+    assert _min_soc(result.schedule) >= 0.30 - 1e-6
+    # It is a fallback: no reserve recommendation, marked infeasible/relaxed.
+    assert result.reserve_recommendation == {}
+    assert result.feasible is False
+    assert result.solver_used == "self_consumption_hold"
+    # The user's configured reserve is never mutated.
+    assert optimizer.backup_reserve == pytest.approx(0.30)
 
-    optimizer._solve_lp = boom
-    optimizer._solve_greedy = fake_solve_greedy
 
-    result = optimizer._solve_lp_relaxed(**_relaxed_kwargs())
+def test_hold_below_reserve_holds_at_hardware_floor(
+    battery_optimizer_module,
+):
+    """Already below the optimiser reserve: never drain past the hardware floor."""
+    module = battery_optimizer_module
+    optimizer = _optimizer(module)
 
+    # soc_0 (20%) is below the 30% optimiser reserve; the hold may still serve
+    # home load down to the 5% hardware floor, but never deeper and never to
+    # the grid.
+    result = optimizer._solve_self_consumption_hold(**_hold_kwargs(soc_0=0.20))
+
+    assert max(result.grid_export_w) == pytest.approx(0.0, abs=1e-6)
+    assert _min_soc(result.schedule) >= 0.05 - 1e-6
     assert result.reserve_recommendation == {}
     assert result.feasible is False
     assert optimizer.backup_reserve == pytest.approx(0.30)
+
+
+def test_relaxed_5pct_fallback_is_gone(battery_optimizer_module):
+    """The reserve-relaxing fallback must not exist — only the safe hold."""
+    module = battery_optimizer_module
+    optimizer = _optimizer(module)
+
+    assert not hasattr(optimizer, "_solve_lp_relaxed")
+    assert hasattr(optimizer, "_solve_self_consumption_hold")

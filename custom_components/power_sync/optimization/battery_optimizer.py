@@ -1,8 +1,8 @@
 """
 Built-in LP Battery Optimizer for PowerSync.
 
-Uses a direct scipy-based Linear Programming optimizer. Falls back to a greedy
-heuristic if scipy is unavailable.
+Uses the HiGHS Linear Programming solver directly (via highspy). Falls back to a
+greedy heuristic if highspy is unavailable.
 
 Action model:
 - CHARGE: Force grid → battery (LP detects grid_import > load)
@@ -28,18 +28,124 @@ from .schedule_reader import ScheduleAction, OptimizationSchedule
 
 _LOGGER = logging.getLogger(__name__)
 
-# Try to import scipy; fall back to greedy if unavailable
+# Try to import the HiGHS solver; fall back to greedy if unavailable.
 try:
-    from scipy import sparse
-    from scipy.optimize import linprog
+    import highspy
 
-    SCIPY_AVAILABLE = True
+    HIGHS_AVAILABLE = True
 except ImportError:
-    SCIPY_AVAILABLE = False
-    sparse = None
+    HIGHS_AVAILABLE = False
+    highspy = None
     _LOGGER.warning(
-        "scipy not available — using greedy fallback optimizer. "
-        "Install scipy for optimal LP-based scheduling."
+        "highspy not available — using greedy fallback optimizer. "
+        "Install highspy for optimal LP-based scheduling."
+    )
+
+
+class _LpMatrix:
+    """Minimal row-oriented sparse matrix for building LP constraints.
+
+    Implements just the subset of ``scipy.sparse.lil_matrix`` the optimizer
+    relies on — ``shape``, ``m[i, j] = v`` assignment, ``m[i, j]`` lookup,
+    ``.nnz``, ``.tocsr()`` (a no-op) and per-row iteration — so we can build the
+    constraint matrices and feed HiGHS directly without depending on scipy.
+    """
+
+    __slots__ = ("shape", "_rows")
+
+    def __init__(self, shape, dtype=float):
+        rows, cols = int(shape[0]), int(shape[1])
+        self.shape = (rows, cols)
+        self._rows: list[dict[int, float]] = [dict() for _ in range(rows)]
+
+    def __setitem__(self, key, value) -> None:
+        i, j = key
+        value = float(value)
+        if value == 0.0:
+            self._rows[i].pop(j, None)
+        else:
+            self._rows[i][j] = value
+
+    def __getitem__(self, key) -> float:
+        i, j = key
+        return self._rows[i].get(j, 0.0)
+
+    @property
+    def nnz(self) -> int:
+        return sum(len(r) for r in self._rows)
+
+    def tocsr(self) -> "_LpMatrix":
+        return self
+
+    def iter_rows(self):
+        """Yield (row_index, [col indices], [values]) for non-trivial use."""
+        for i, row in enumerate(self._rows):
+            yield i, list(row.keys()), list(row.values())
+
+
+class _HighsResult:
+    """linprog-compatible result wrapper so the solve call site is unchanged."""
+
+    __slots__ = ("x", "success", "message", "status", "fun")
+
+    def __init__(self, x, success, message, status, fun):
+        self.x = x
+        self.success = success
+        self.message = message
+        self.status = status
+        self.fun = fun
+
+
+def _solve_lp_highs(c, A_ub, b_ub, A_eq, b_eq, bounds, time_limit):
+    """Solve a standard-form LP with HiGHS and return a linprog-like result.
+
+    minimize  c·x   s.t.   A_ub·x <= b_ub,  A_eq·x == b_eq,  bounds[j] on x[j].
+
+    Mirrors ``scipy.optimize.linprog(method="highs")``: only an optimal solve
+    sets ``success=True``; infeasible/time-limit/unbounded report success=False
+    with a message string (``"infeasible"`` substring preserved so the caller's
+    self-consumption fallback still triggers).
+    """
+    inf = highspy.kHighsInf
+    h = highspy.Highs()
+    h.setOptionValue("output_flag", False)
+    h.setOptionValue("log_to_console", False)
+    h.setOptionValue("time_limit", float(time_limit))
+
+    # Columns carry the objective coefficients and variable bounds; constraint
+    # coefficients are supplied row-by-row below, so each column starts empty.
+    for j in range(len(c)):
+        lo, hi = bounds[j]
+        lo = -inf if lo is None else float(lo)
+        hi = inf if hi is None else float(hi)
+        h.addCol(float(c[j]), lo, hi, 0, [], [])
+
+    # Equality rows: lower == upper == b_eq[i].
+    for i, idx, val in A_eq.iter_rows():
+        rhs = float(b_eq[i])
+        h.addRow(rhs, rhs, len(idx), idx, val)
+
+    # Inequality rows: -inf <= row·x <= b_ub[i].
+    for i, idx, val in A_ub.iter_rows():
+        h.addRow(-inf, float(b_ub[i]), len(idx), idx, val)
+
+    h.run()
+
+    model_status = h.getModelStatus()
+    message = h.modelStatusToString(model_status)
+    optimal = model_status == highspy.HighsModelStatus.kOptimal
+    if optimal:
+        x = list(h.getSolution().col_value)
+        fun = float(h.getObjectiveValue())
+    else:
+        x = None
+        fun = None
+    return _HighsResult(
+        x=x,
+        success=optimal,
+        message=message,
+        status=int(model_status),
+        fun=fun,
     )
 
 # Action detection threshold (W) — below this, treat as idle to avoid rapid switching
@@ -108,7 +214,7 @@ class OptimizerResult:
 
 class BatteryOptimizer:
     """
-    LP-based battery optimizer using scipy.optimize.linprog.
+    LP-based battery optimizer using the HiGHS solver (highspy).
 
     Solves a cost-minimization (or self-consumption) LP over a forecast horizon
     and maps the result to battery actions.
@@ -334,7 +440,7 @@ class BatteryOptimizer:
             block_battery_charge, n_steps
         )
 
-        if SCIPY_AVAILABLE:
+        if HIGHS_AVAILABLE:
             try:
                 result = self._solve_lp(
                     n_steps,
@@ -761,7 +867,7 @@ class BatteryOptimizer:
         export_bonus_cap_kwh: float | None = None,
     ) -> OptimizerResult:
         """
-        Solve the LP formulation using scipy.optimize.linprog.
+        Solve the LP formulation using the HiGHS solver (highspy).
 
         Variables per time step (4 * n total):
             x[0..n-1]   = grid_import[t]  (kW, >= 0)
@@ -1069,7 +1175,7 @@ class BatteryOptimizer:
         # === Equality constraints: power balance ===
         # solar[t] + grid_import[t] + battery_discharge[t] = load[t] + grid_export[t] + battery_charge[t]
         # Rearranged: grid_import[t] - grid_export[t] - battery_charge[t] + battery_discharge[t] = load[t] - solar[t]
-        A_eq = sparse.lil_matrix((2 * p_n, num_vars), dtype=float)
+        A_eq = _LpMatrix((2 * p_n, num_vars), dtype=float)
         b_eq = [0.0] * (2 * p_n)
 
         for t in range(p_n):
@@ -1123,7 +1229,7 @@ class BatteryOptimizer:
                 )
                 A_ub_rows += 1
 
-        A_ub = sparse.lil_matrix((A_ub_rows, num_vars), dtype=float)
+        A_ub = _LpMatrix((A_ub_rows, num_vars), dtype=float)
         b_ub: list[float] = []
 
         for t in range(p_n):
@@ -1357,19 +1463,18 @@ class BatteryOptimizer:
         )
 
         solver_start = time.monotonic()
-        result = linprog(
+        result = _solve_lp_highs(
             c,
-            A_ub=A_ub,
-            b_ub=b_ub,
-            A_eq=A_eq,
-            b_eq=b_eq,
-            bounds=bounds,
-            method="highs",
-            options={"time_limit": LP_SOLVER_TIME_LIMIT_SECONDS},
+            A_ub,
+            b_ub,
+            A_eq,
+            b_eq,
+            bounds,
+            time_limit=LP_SOLVER_TIME_LIMIT_SECONDS,
         )
         solver_time_s = time.monotonic() - solver_start
         lp_stats = {
-            "backend": "scipy_sparse",
+            "backend": "highspy",
             "base_steps": n,
             "period_count": p_n,
             "variables": num_vars,
@@ -1384,9 +1489,15 @@ class BatteryOptimizer:
 
         if not result.success:
             _LOGGER.warning(f"LP solver status: {result.message}")
-            if "infeasible" in result.message.lower() and not getattr(self, '_relaxing', False):
-                # Try relaxing constraints (guard prevents infinite recursion)
-                relaxed = self._solve_lp_relaxed(
+            if "infeasible" in result.message.lower():
+                # The LP could not be satisfied with the real backup-reserve
+                # floor. Rather than relaxing that floor to 5% and re-solving
+                # — which authorises the battery to discharge to near-empty
+                # purely to make the model feasible (and has drained users'
+                # batteries to 5%) — fall back to a self-consumption hold that
+                # never exports the battery, never grid-charges, and never
+                # drops below the genuine reserve.
+                hold = self._solve_self_consumption_hold(
                     n, import_prices, export_prices, solar, load, soc_0, cost_function,
                     acquisition_cost_kwh,
                     allow_battery_export,
@@ -1395,8 +1506,8 @@ class BatteryOptimizer:
                     export_bonus_prices,
                     export_bonus_cap_kwh,
                 )
-                relaxed.lp_stats = {**lp_stats, "fallback_reason": "infeasible_relaxed"}
-                return relaxed
+                hold.lp_stats = {**lp_stats, "fallback_reason": "infeasible_self_consumption_hold"}
+                return hold
             # Fall back to greedy
             greedy = self._solve_greedy(
                 n, import_prices, export_prices, solar, load, soc_0, cost_function,
@@ -1660,7 +1771,7 @@ class BatteryOptimizer:
 
         return best_bridge
 
-    def _solve_lp_relaxed(
+    def _solve_self_consumption_hold(
         self,
         n: int,
         import_prices: list[float],
@@ -1676,50 +1787,128 @@ class BatteryOptimizer:
         export_bonus_prices: list[float] | None = None,
         export_bonus_cap_kwh: float | None = None,
     ) -> OptimizerResult:
-        """Retry LP with relaxed SOC constraints (lower backup reserve)."""
+        """Safe fallback when the LP is infeasible: hold in self-consumption.
+
+        The previous fallback relaxed the backup-reserve floor to 5% and
+        re-solved the LP. That made the model feasible by deleting the very
+        safety floor it exists to protect — so the "optimal" relaxed plan would
+        happily discharge the battery to ~5% just to satisfy the objective,
+        draining users' batteries overnight.
+
+        Instead, fall back to native self-consumption — the same do-no-harm
+        behaviour the inverter exhibits without optimisation:
+
+        * the battery only discharges to serve home load (never exports to grid),
+        * the battery only charges from solar surplus (never from the grid),
+        * SOC never drops below the genuine reserve floor (or, when already
+          below it, holds at the current SOC down to the hardware floor).
+
+        The result is marked ``feasible=False`` with no reserve recommendation
+        so Auto-Apply Optimizer Reserve never ratchets the reserve down off the
+        back of an infeasible solve.
+        """
         _LOGGER.warning(
-            "LP infeasible — relaxing backup reserve from %.0f%% to 5%%",
+            "LP infeasible — holding in self-consumption (reserve floor %.0f%% "
+            "preserved; battery will not export or discharge below reserve)",
             self.backup_reserve * 100,
         )
-        original_reserve = self.backup_reserve
-        self.backup_reserve = 0.05  # Minimal reserve
-        self._relaxing = True  # Guard against infinite recursion
-        allow_battery_export = allow_battery_export or [True] * n
+
+        eff = self.efficiency
+        cap = self.capacity_kwh
+        dt = self.dt_hours
+        export_bonus_prices = export_bonus_prices or [0.0] * n
         block_battery_charge = block_battery_charge or [False] * n
 
-        try:
-            result = self._solve_lp(
-                n, import_prices, export_prices, solar, load, soc_0, cost_function,
-                acquisition_cost_kwh,
-                allow_battery_export,
-                block_battery_charge,
-                allow_grid_charge,
-                export_bonus_prices,
-                export_bonus_cap_kwh,
-            )
-        except Exception:
-            # Complete failure — use greedy
-            result = self._solve_greedy(
-                n, import_prices, export_prices, solar, load, soc_0, cost_function,
-                acquisition_cost_kwh,
-                allow_battery_export,
-                block_battery_charge,
-                allow_grid_charge,
-                export_bonus_prices,
-                export_bonus_cap_kwh,
-            )
-        finally:
-            self.backup_reserve = original_reserve
-            self._relaxing = False
+        optimizer_reserve = max(0.0, min(1.0, self.backup_reserve))
+        below_optimizer_reserve = soc_0 < optimizer_reserve
+        # When already below the optimiser reserve, hold at the current SOC and
+        # only allow self-consumption down to the hardware floor — never drain
+        # further to chase a solve. Otherwise the real reserve is the floor.
+        self_consumption_floor = (
+            max(0.0, min(soc_0, self.hardware_reserve))
+            if below_optimizer_reserve
+            else optimizer_reserve
+        )
+        max_grid_export_kw = (
+            max(0.0, self.max_grid_export_w / 1000.0)
+            if self.max_grid_export_w is not None
+            else None
+        )
 
-        # This solve ran with an artificially lowered (5%) reserve floor, so any
-        # reserve recommendation it produced reflects the relaxed floor, not a
-        # real forecast. Drop it and mark the result as relaxed so Auto-Apply
-        # Optimizer Reserve never ratchets the optimiser reserve down to the
-        # hardware floor off the back of an infeasible solve.
-        result.feasible = False  # Mark as relaxed
-        result.reserve_recommendation = {}
-        return result
+        grid_import = [0.0] * n
+        grid_export = [0.0] * n
+        battery_charge = [0.0] * n
+        battery_discharge = [0.0] * n
+
+        soc = soc_0
+        for t in range(n):
+            net_load = load[t] - solar[t]
+            charge_kw = 0.0
+            discharge_kw = 0.0
+            if net_load > 0:
+                # Home needs power: discharge the battery to serve load only,
+                # bounded by the discharge rate and the energy available above
+                # the reserve floor.
+                discharge_room = max(0.0, soc - self_consumption_floor) * cap * eff / dt
+                discharge_kw = min(self.max_discharge_kw, net_load, discharge_room)
+            elif net_load < 0 and not block_battery_charge[t]:
+                # Solar surplus: charge from solar only (never from the grid).
+                surplus = -net_load
+                charge_room = max(0.0, 1.0 - soc) * cap / (eff * dt)
+                charge_kw = min(self.max_charge_kw, surplus, charge_room)
+
+            battery_charge[t] = charge_kw
+            battery_discharge[t] = discharge_kw
+
+            # Power balance: grid_import + solar + discharge = load + export + charge
+            net_grid = net_load + charge_kw - discharge_kw
+            if net_grid > 0:
+                grid_import[t] = net_grid
+            else:
+                # Only ever solar surplus reaches the grid — the battery is
+                # never exported in this fallback.
+                export_kw = -net_grid
+                if max_grid_export_kw is not None:
+                    export_kw = min(export_kw, max_grid_export_kw)
+                grid_export[t] = export_kw
+
+            soc += (charge_kw * eff - discharge_kw / eff) * dt / cap
+            soc = max(self_consumption_floor, min(1.0, soc))
+
+        schedule = self._build_schedule(
+            n, grid_import, grid_export, battery_charge, battery_discharge,
+            solar, load, soc_0, import_prices,
+            [export_prices[t] + export_bonus_prices[t] for t in range(n)],
+            block_battery_charge,
+        )
+
+        n_24h = min(n, int(24 * 60 / self.interval_minutes))
+        predicted_cost = sum(
+            import_prices[t] * grid_import[t] * dt
+            - export_prices[t] * grid_export[t] * dt
+            for t in range(n_24h)
+        )
+        baseline_cost = self._calculate_baseline_cost(
+            n_24h,
+            import_prices,
+            export_prices,
+            solar,
+            load,
+            export_bonus_prices=export_bonus_prices,
+            export_bonus_cap_kwh=export_bonus_cap_kwh,
+        )
+        schedule.predicted_cost = round(predicted_cost, 2)
+        schedule.predicted_savings = round(baseline_cost - predicted_cost, 2)
+
+        return OptimizerResult(
+            schedule=schedule,
+            solver_used="self_consumption_hold",
+            # Fallback solve: never let Auto-Apply ratchet the reserve off this.
+            feasible=False,
+            grid_import_w=[v * 1000 for v in grid_import],
+            grid_export_w=[v * 1000 for v in grid_export],
+            reserve_recommendation={},
+        )
 
     def _solve_greedy(
         self,

@@ -366,7 +366,7 @@
           "optimization_provider": "Optimization mode"
         },
         "data_description": {
-          "optimization_provider": "Smart Optimization generally delivers lower bills but requires scipy. The native mode is simpler and uses your battery's own scheduling logic."
+          "optimization_provider": "Smart Optimization generally delivers lower bills but requires the HiGHS solver (highspy). The native mode is simpler and uses your battery's own scheduling logic."
         },
         "submit": "Next"
       },
@@ -949,7 +949,7 @@
       "zaptec_auth_failed": "Zaptec Cloud login failed. Check that your email and password are correct.",
       "zaptec_missing_credentials": "Both email and password are required for Zaptec Cloud authentication.",
       "no_prices": "No prices found for this tariff and region combination. Verify your Octopus product and GSP region match your account.",
-      "optimizer_not_installed": "Smart Optimization requires scipy, which is not installed. Check Home Assistant logs for installation errors.",
+      "optimizer_not_installed": "Smart Optimization requires the HiGHS solver (highspy), which is not installed. Check Home Assistant logs for installation errors.",
       "invalid_tariff": "This tariff code is not recognised for the selected network distributor. Check the code on your electricity bill.",
       "invalid_token_format": "Token format is not recognised. PowerSync tokens start with 'psync_' -- make sure you copied the full string.",
       "invalid_time": "Enter a valid 24-hour time in HH:MM format.",
