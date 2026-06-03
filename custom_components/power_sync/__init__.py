@@ -1511,17 +1511,6 @@ def _get_neovolt_entry_ids(
             _LOGGER.debug("Could not expand legacy Neovolt config entry ids", exc_info=True)
     return [legacy_entry_id] if legacy_entry_id else []
 
-# Force DEBUG logging for power_sync and all submodules
-_LOGGER.setLevel(logging.DEBUG)
-logging.getLogger("custom_components.power_sync").setLevel(logging.DEBUG)
-logging.getLogger("custom_components.power_sync.coordinator").setLevel(logging.DEBUG)
-logging.getLogger("custom_components.power_sync.sensor").setLevel(logging.DEBUG)
-logging.getLogger("custom_components.power_sync.inverters").setLevel(logging.DEBUG)
-logging.getLogger("custom_components.power_sync.inverters.sungrow").setLevel(logging.DEBUG)
-logging.getLogger("custom_components.power_sync.inverters.zeversolar").setLevel(logging.DEBUG)
-logging.getLogger("custom_components.power_sync.inverters.sigenergy").setLevel(logging.DEBUG)
-logging.getLogger("custom_components.power_sync.websocket_client").setLevel(logging.DEBUG)
-logging.getLogger("custom_components.power_sync.tariff_converter").setLevel(logging.DEBUG)
 
 PLATFORMS: list[Platform] = [
     Platform.SENSOR,
