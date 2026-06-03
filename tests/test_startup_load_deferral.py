@@ -135,8 +135,12 @@ def test_initial_optimizer_pass_is_deferred_after_enable():
     )
     assert "self._run_initial_optimization_after_startup_delay()" in enable_source
     assert "powersync_initial_optimization" in enable_source
-    assert "self._seconds_until_initial_optimization_allowed()" in initial_run_source
-    assert "await asyncio.sleep(delay)" in initial_run_source
+    # The first solve now waits on HA's real started signal (bounded by the
+    # legacy window as a cap), not a flat sleep.
+    assert "self.hass.is_running" in initial_run_source
+    assert "EVENT_HOMEASSISTANT_STARTED" in initial_run_source
+    assert "async_listen_once" in initial_run_source
+    assert "INITIAL_OPTIMIZATION_DELAY_SECONDS" in initial_run_source
     assert "if not self._enabled:" in initial_run_source
     assert "await self._run_optimization()" in initial_run_source
     assert (

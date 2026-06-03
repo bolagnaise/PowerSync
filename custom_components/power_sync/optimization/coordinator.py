@@ -2086,14 +2086,31 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return True
 
     async def _run_initial_optimization_after_startup_delay(self) -> None:
-        """Run the first optimizer pass after HA startup pressure settles."""
-        delay = self._seconds_until_initial_optimization_allowed()
-        if delay:
-            _LOGGER.info(
-                "Deferring initial optimization for %.0fs to reduce HA startup load",
-                delay,
+        """Run the first optimizer pass once HA has finished starting.
+
+        Gates on HA's real startup-complete signal rather than a fixed window,
+        so the first solve lands as soon as startup settles instead of after an
+        arbitrary delay. The heavy forecast data processing runs in an executor
+        now, so a long hold is no longer needed to keep the event loop
+        responsive during startup.
+        """
+        if not self.hass.is_running:
+            from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+
+            _LOGGER.info("Deferring initial optimization until HA finishes starting")
+            started = asyncio.Event()
+            unsub = self.hass.bus.async_listen_once(
+                EVENT_HOMEASSISTANT_STARTED, lambda _event: started.set()
             )
-            await asyncio.sleep(delay)
+            # Bounded by the legacy startup window so a missed start event can
+            # never hold the first solve forever.
+            cap = max(0.0, float(INITIAL_OPTIMIZATION_DELAY_SECONDS))
+            try:
+                await asyncio.wait_for(started.wait(), timeout=cap or None)
+            except asyncio.TimeoutError:
+                pass
+            finally:
+                unsub()
 
         if not self._enabled:
             return
@@ -2101,7 +2118,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self._run_optimization()
 
     def _seconds_until_initial_optimization_allowed(self) -> float:
-        """Return remaining startup delay before the first LP solve may run."""
+        """Return remaining startup hold before the first LP solve may run.
+
+        Returns 0 once HA has finished starting: startup pressure is gone, so
+        price-triggered and polling re-optimizations may proceed normally.
+        """
+        if self.hass.is_running:
+            return 0.0
         if self._initial_optimization_not_before is None:
             return 0.0
         return max(
