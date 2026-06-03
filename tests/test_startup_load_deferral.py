@@ -162,21 +162,30 @@ def test_aemo_dispatch_sync_debounces_during_startup():
     allowed_source = ast.get_source_segment(source, allowed)
     handler_source = ast.get_source_segment(source, handler)
 
+    runner = _find_setup_child(tree, "_run_aemo_dispatch_sync")
+    runner_source = ast.get_source_segment(source, runner)
+
     assert "AEMO_SETTLED_SYNC_DELAY_SECONDS = 5.0" in source
-    assert "AEMO_STARTUP_SYNC_DELAY_SECONDS = 90.0" in source
+    # The fixed 90s startup window is gone — the deferral now tracks HA's real
+    # startup-complete signal instead of an arbitrary constant.
+    assert "AEMO_STARTUP_SYNC_DELAY_SECONDS" not in source
     assert setup_source is not None
     assert allowed_source is not None
     assert handler_source is not None
-    assert "aemo_dispatch_setup_started = dt_util.utcnow()" in setup_source
+    assert runner_source is not None
     assert "aemo_startup_sync_pending = False" in setup_source
     assert "CONF_AUTO_SYNC_ENABLED" in allowed_source
     assert "nonlocal aemo_startup_sync_pending" in handler_source
-    assert "AEMO_SETTLED_SYNC_DELAY_SECONDS" in handler_source
-    assert "AEMO_STARTUP_SYNC_DELAY_SECONDS" in handler_source
+    # During startup the handler waits on the started event, not a timed sleep.
+    assert "hass.is_running" in handler_source
+    assert "EVENT_HOMEASSISTANT_STARTED" in handler_source
+    assert "async_listen_once" in handler_source
     assert "aemo_startup_sync_pending = True" in handler_source
-    assert "AEMO-dispatch sync already deferred during startup" in handler_source
-    assert "entry.entry_id not in hass.data.get(DOMAIN, {})" in handler_source
-    assert handler_source.count("_aemo_dispatch_sync_allowed()") == 2
-    assert handler_source.index("entry.entry_id not") < handler_source.index(
+    assert "AEMO-dispatch sync already deferred until HA start completes" in handler_source
+    # The settled-price delay + entry-still-loaded guard live in the runner that
+    # both the normal and deferred paths funnel through.
+    assert "AEMO_SETTLED_SYNC_DELAY_SECONDS" in runner_source
+    assert "entry.entry_id not in hass.data.get(DOMAIN, {})" in runner_source
+    assert runner_source.index("entry.entry_id not") < runner_source.index(
         "await handle_sync_rest_api_check"
     )

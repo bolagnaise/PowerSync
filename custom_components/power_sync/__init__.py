@@ -18,7 +18,6 @@ _discrepancy_alert_date: dict[str, str] = {}
 DISCREPANCY_ALERT_COOLDOWN = timedelta(minutes=30)
 DISCREPANCY_ALERT_DAILY_MAX = 4
 AEMO_SETTLED_SYNC_DELAY_SECONDS = 5.0
-AEMO_STARTUP_SYNC_DELAY_SECONDS = 90.0
 
 
 def _parse_battery_health_timestamp(value: Any) -> datetime | None:
@@ -28164,10 +28163,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # racing the AEMO publish window. Octopus UK is on a different settlement
     # cadence (30 min, not on NEM) and gets its own :00/:30 cron.
     from .coordinator import SIGNAL_AEMO_NEW_DISPATCH, AEMOPriceCoordinator
+    from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 
     NEM_PROVIDERS = ("amber", "flow_power", "localvolts", "aemo_sensor")
     is_nem_provider = electricity_provider in NEM_PROVIDERS
-    aemo_dispatch_setup_started = dt_util.utcnow()
     aemo_startup_sync_pending = False
 
     def _aemo_dispatch_sync_allowed() -> bool:
@@ -28187,6 +28186,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         return True
 
+    async def _run_aemo_dispatch_sync() -> None:
+        """Push the settled tariff for one AEMO dispatch after a brief delay."""
+        # Brief delay so Amber / Localvolts have time to ingest the AEMO
+        # publish into their own REST APIs (network fees, batching).
+        await asyncio.sleep(AEMO_SETTLED_SYNC_DELAY_SECONDS)
+
+        if entry.entry_id not in hass.data.get(DOMAIN, {}):
+            return
+        if not _aemo_dispatch_sync_allowed():
+            return
+
+        _LOGGER.info("📡 AEMO dispatch received — syncing settled tariff")
+        await handle_sync_rest_api_check(check_name="aemo dispatch")
+
     async def _handle_aemo_dispatch_event(_signal_data) -> None:
         """Run TOU sync once per AEMO dispatch (settled price publish event).
 
@@ -28199,37 +28212,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if not _aemo_dispatch_sync_allowed():
             return
 
-        # Brief delay so Amber / Localvolts have time to ingest the AEMO
-        # publish into their own REST APIs (network fees, batching).
-        delay_seconds = AEMO_SETTLED_SYNC_DELAY_SECONDS
-        startup_remaining = (
-            AEMO_STARTUP_SYNC_DELAY_SECONDS
-            - (dt_util.utcnow() - aemo_dispatch_setup_started).total_seconds()
-        )
-        if startup_remaining > 0:
+        # While HA is still starting, defer the first sync until startup
+        # actually finishes — gating on the real "started" signal rather than a
+        # fixed window. The tariff POST then never contends with the startup
+        # warmups, and the wait is only as long as startup genuinely takes
+        # (seconds once heavy imports are gone) instead of an arbitrary constant.
+        if not hass.is_running:
             if aemo_startup_sync_pending:
-                _LOGGER.debug("AEMO-dispatch sync already deferred during startup")
+                _LOGGER.debug(
+                    "AEMO-dispatch sync already deferred until HA start completes"
+                )
                 return
             aemo_startup_sync_pending = True
-            delay_seconds = max(delay_seconds, startup_remaining)
-            _LOGGER.info(
-                "Deferring AEMO-dispatch sync for %.0fs during startup",
-                delay_seconds,
+            _LOGGER.info("Deferring AEMO-dispatch sync until HA finishes starting")
+
+            async def _sync_after_started(_event=None) -> None:
+                nonlocal aemo_startup_sync_pending
+                try:
+                    await _run_aemo_dispatch_sync()
+                finally:
+                    aemo_startup_sync_pending = False
+
+            hass.bus.async_listen_once(
+                EVENT_HOMEASSISTANT_STARTED, _sync_after_started
             )
+            return
 
-        try:
-            await asyncio.sleep(delay_seconds)
-
-            if entry.entry_id not in hass.data.get(DOMAIN, {}):
-                return
-            if not _aemo_dispatch_sync_allowed():
-                return
-
-            _LOGGER.info("📡 AEMO dispatch received — syncing settled tariff")
-            await handle_sync_rest_api_check(check_name="aemo dispatch")
-        finally:
-            if startup_remaining > 0:
-                aemo_startup_sync_pending = False
+        await _run_aemo_dispatch_sync()
 
     def _aemo_dispatch_callback(data) -> None:
         # HA invokes dispatcher listeners on whichever thread called
