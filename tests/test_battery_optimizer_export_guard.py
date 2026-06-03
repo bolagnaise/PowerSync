@@ -1173,6 +1173,53 @@ def test_reserve_recommendation_marks_no_charge_in_horizon(
     assert recommendation["protects_until"].startswith("2026-05-04T00:55")
 
 
+def test_reserve_recommendation_reports_export_floor_for_home_load_bridge(
+    battery_optimizer_module,
+):
+    optimizer = battery_optimizer_module.BatteryOptimizer(
+        capacity_wh=10000,
+        max_charge_w=5000,
+        max_discharge_w=5000,
+        backup_reserve=0.05,
+        hardware_reserve=0.05,
+        interval_minutes=5,
+        horizon_hours=2,
+    )
+
+    start = datetime(2026, 5, 4, 0, 0, tzinfo=timezone.utc)
+    actions = []
+    for idx in range(24):
+        action = "export" if idx < 6 else "self_consumption"
+        actions.append(
+            battery_optimizer_module.ScheduleAction(
+                timestamp=start + idx * battery_optimizer_module.timedelta(minutes=5),
+                action=action,
+                power_w=5000 if action == "export" else 0,
+                soc=0.9,
+                battery_charge_w=0,
+                battery_discharge_w=5000 if action == "export" else 0,
+            )
+        )
+    schedule = battery_optimizer_module.OptimizationSchedule(
+        actions=actions,
+        predicted_cost=0,
+        predicted_savings=0,
+        last_updated=start,
+    )
+
+    recommendation = optimizer._build_reserve_recommendation(
+        schedule,
+        solar=[0.0] * 18 + [5.0] * 6,
+        load=[1.0] * 24,
+    )
+
+    assert recommendation["home_load_bridge_next_charge_reason"] == "forecast_solar_surplus"
+    assert recommendation["home_load_bridge_kwh"] == pytest.approx(1.0)
+    assert 15 <= recommendation["home_load_export_floor_percent"] <= 17
+    assert recommendation["home_load_bridge_start"].startswith("2026-05-04T00:30")
+    assert recommendation["home_load_bridge_until"].startswith("2026-05-04T01:30")
+
+
 def test_positive_fit_iog_charge_does_not_create_all_day_export_loop(
     battery_optimizer_module,
 ):

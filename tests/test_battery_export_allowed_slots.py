@@ -1257,14 +1257,16 @@ def test_active_optimizer_export_at_reserve_is_canceled_not_extended(opt_module)
     assert coordinator._last_executed_action == "self_consumption"
 
 
-def test_profit_max_auto_apply_active_export_uses_live_optimizer_floor(opt_module):
+def test_profit_max_home_load_export_floor_cancels_active_export(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.10)
     coordinator.battery_system = "goodwe"
     coordinator._config.backup_reserve = 0.05
     coordinator._config.profit_max_enabled = True
     coordinator._auto_apply_reserve_enabled = True
-    coordinator._manual_backup_reserve = 0.15
+    coordinator._last_optimizer_result = SimpleNamespace(
+        reserve_recommendation={"home_load_export_floor_percent": 15}
+    )
     action = SimpleNamespace(
         action="export",
         power_w=5000,
@@ -1276,23 +1278,25 @@ def test_profit_max_auto_apply_active_export_uses_live_optimizer_floor(opt_modul
     asyncio.run(coordinator._execute_optimizer_action(action))
 
     assert battery.force_discharge_calls == []
-    assert battery.restore_normal_calls == 0
-    assert coordinator._optimizer_force_state["active"] is True
+    assert battery.restore_normal_calls == 1
+    assert coordinator._optimizer_force_state["active"] is False
     assert coordinator._last_executed_action == "self_consumption"
 
 
-def test_profit_max_auto_apply_live_floor_blocks_projected_export(opt_module):
+def test_profit_max_home_load_export_floor_blocks_projected_export(opt_module):
     battery = _FakeBattery()
     coordinator = _execution_coordinator(opt_module, battery, soc=0.18)
     coordinator.battery_system = "goodwe"
-    coordinator._config.backup_reserve = 0.12
+    coordinator._config.backup_reserve = 0.05
     coordinator._config.profit_max_enabled = True
     coordinator._auto_apply_reserve_enabled = True
-    coordinator._manual_backup_reserve = 0.15
+    coordinator._last_optimizer_result = SimpleNamespace(
+        reserve_recommendation={"home_load_export_floor_percent": 15}
+    )
     action = SimpleNamespace(
         action="export",
         power_w=5000,
-        soc=0.11,
+        soc=0.14,
         timestamp=datetime(2026, 5, 3, 8, 30, tzinfo=timezone.utc),
     )
     coordinator._current_schedule = SimpleNamespace(actions=[action])

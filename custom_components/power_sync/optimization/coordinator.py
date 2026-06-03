@@ -902,7 +902,19 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _force_discharge_reserve_floor(self) -> float:
         """Return the software floor used before force discharge/export commands."""
-        return self._reserve_ratio(self._config.backup_reserve, 0.0) or 0.0
+        floor = self._reserve_ratio(self._config.backup_reserve, 0.0) or 0.0
+        if self._config.profit_max_enabled:
+            recommendation = (
+                getattr(getattr(self, "_last_optimizer_result", None), "reserve_recommendation", {})
+                or {}
+            )
+            export_floor = self._reserve_ratio(
+                recommendation.get("home_load_export_floor_percent"),
+                None,
+            )
+            if export_floor is not None:
+                floor = max(floor, export_floor)
+        return max(0.0, min(1.0, floor))
 
     def _force_discharge_reaches_reserve(
         self,
@@ -932,6 +944,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         current_ratio = self._reserve_ratio(self._config.backup_reserve, 0.0) or 0.0
         recommendation["auto_apply_enabled"] = True
         manual_reserve = getattr(self, "_manual_backup_reserve", None)
+        if manual_reserve is not None:
+            manual_reserve = self._reserve_ratio(manual_reserve, None)
         if manual_reserve is not None:
             recommendation["manual_optimizer_reserve_percent"] = int(
                 round(manual_reserve * 100)

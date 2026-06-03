@@ -19,6 +19,8 @@
 // Self-contained SVG chart that reads data from HA entity attributes.
 // Native responsive chart card for history, forecast, and TOU schedule data.
 
+const OPTIMIZER_POWER_AXIS_EXPONENT = 0.7;
+
 class PowerSyncChart extends HTMLElement {
   constructor() {
     super();
@@ -2064,7 +2066,7 @@ class PowerSyncOptimizationPlan extends HTMLElement {
   _renderPowerChart(model, compact) {
     const { W, H, pad, chartW, chartH, powerMax } = this._powerChartMetrics(model, compact);
     const x = (i) => pad.left + (i / Math.max(1, model.points.length - 1)) * chartW;
-    const yPower = (value) => pad.top + chartH - (Math.max(0, value) / powerMax) * chartH;
+    const yPower = (value) => pad.top + chartH - this._optimizerPowerRatio(value, powerMax) * chartH;
     const ySoc = (value) => pad.top + chartH - (Math.max(0, Math.min(100, value)) / 100) * chartH;
     let svg = this._chartGrid(W, H, pad, model.points, compact, `${powerMax} kW`);
 
@@ -2124,6 +2126,12 @@ class PowerSyncOptimizationPlan extends HTMLElement {
       ...model.points.flatMap(p => model.powerSeries.map(s => p[s.key] || 0)),
     )));
     return { W, H, pad, chartW, chartH, powerMax };
+  }
+
+  _optimizerPowerRatio(value, maxValue) {
+    const safeMax = Math.max(Number(maxValue) || 0, 1);
+    const ratio = Math.max(0, Math.min(1, (Number(value) || 0) / safeMax));
+    return Math.pow(ratio, OPTIMIZER_POWER_AXIS_EXPONENT);
   }
 
   _priceChartMetrics(model, compact) {

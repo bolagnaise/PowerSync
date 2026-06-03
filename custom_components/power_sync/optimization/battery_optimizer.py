@@ -1551,7 +1551,103 @@ class BatteryOptimizer:
             recommendation["note"] = "No discharge bridge before next charge"
         if next_charge_idx is None:
             recommendation["note"] = "No charging opportunity in optimizer horizon"
+        home_load_export_bridge = self._build_home_load_export_bridge(
+            actions,
+            solar,
+            load,
+        )
+        if home_load_export_bridge:
+            recommendation.update(home_load_export_bridge)
         return recommendation
+
+    def _build_home_load_export_bridge(
+        self,
+        actions: list[ScheduleAction],
+        solar: list[float],
+        load: list[float],
+    ) -> dict[str, Any]:
+        """Return an export-only floor that leaves energy for post-export home load."""
+        threshold_w = ACTION_THRESHOLD_W
+        best_bridge: dict[str, Any] = {}
+        best_floor = 0.0
+        idx = 0
+
+        while idx < len(actions):
+            if actions[idx].action != "export":
+                idx += 1
+                continue
+
+            export_start_idx = idx
+            while idx < len(actions) and actions[idx].action == "export":
+                idx += 1
+            bridge_start_idx = idx
+            if bridge_start_idx >= len(actions):
+                continue
+
+            next_charge_idx: int | None = None
+            next_charge_reason: str | None = None
+            for scan_idx in range(bridge_start_idx, len(actions)):
+                action = actions[scan_idx]
+                if action.battery_charge_w > threshold_w:
+                    next_charge_idx = scan_idx
+                    next_charge_reason = (
+                        "scheduled_grid_charge"
+                        if action.action == "charge"
+                        else "forecast_solar_surplus"
+                    )
+                    break
+
+                if scan_idx < len(solar) and scan_idx < len(load):
+                    if (solar[scan_idx] - load[scan_idx]) * 1000 > threshold_w:
+                        next_charge_idx = scan_idx
+                        next_charge_reason = "forecast_solar_surplus"
+                        break
+
+            bridge_end_exclusive = (
+                next_charge_idx
+                if next_charge_idx is not None
+                else len(actions)
+            )
+            bridge_kwh = 0.0
+            for load_idx in range(bridge_start_idx, bridge_end_exclusive):
+                if load_idx >= len(solar) or load_idx >= len(load):
+                    break
+                bridge_kwh += max(0.0, load[load_idx] - solar[load_idx]) * self.dt_hours
+
+            if bridge_kwh <= 0:
+                continue
+
+            bridge_soc = bridge_kwh / max(self.capacity_kwh * self.efficiency, 0.001)
+            export_floor = max(
+                self.hardware_reserve,
+                min(1.0, self.hardware_reserve + bridge_soc),
+            )
+            if export_floor <= best_floor:
+                continue
+
+            best_floor = export_floor
+            protects_until_idx = (
+                next_charge_idx
+                if next_charge_idx is not None
+                else len(actions) - 1
+            )
+            best_bridge = {
+                "home_load_export_floor_percent": max(
+                    0,
+                    min(100, int(round(export_floor * 100))),
+                ),
+                "home_load_bridge_kwh": round(bridge_kwh, 3),
+                "home_load_bridge_start": actions[bridge_start_idx].timestamp.isoformat(),
+                "home_load_bridge_until": actions[protects_until_idx].timestamp.isoformat(),
+                "home_load_bridge_next_charge_reason": (
+                    next_charge_reason or "no_charge_in_horizon"
+                ),
+                "home_load_bridge_after_export_start": actions[
+                    export_start_idx
+                ].timestamp.isoformat(),
+            }
+
+        return best_bridge
 
     def _solve_lp_relaxed(
         self,
