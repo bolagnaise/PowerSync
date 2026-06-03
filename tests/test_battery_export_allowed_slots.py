@@ -719,6 +719,50 @@ def test_profit_max_auto_apply_can_lower_to_forecast_reserve(opt_module):
     assert recommendation["applied_optimizer_reserve_percent"] == 5
 
 
+def test_auto_apply_reserve_ignores_relaxed_infeasible_result(opt_module):
+    """A relaxed/infeasible solve must never lower the optimiser reserve.
+
+    Relaxed solves run with an artificially lowered 5% floor, so their reserve
+    recommendation is bogus. Regression for the optimiser reserve collapsing to
+    the hardware floor under Profit Max + Auto-Apply.
+    """
+    coordinator = _coordinator(
+        opt_module,
+        "flow_power",
+        profit_max=True,
+        optimization_backup_reserve=0.15,
+        optimization_manual_reserve=0.15,
+        optimization_auto_apply_reserve=True,
+        hardware_backup_reserve=0.05,
+    )
+    coordinator.entry_id = "entry-1"
+    coordinator._auto_apply_reserve_enabled = True
+    coordinator._manual_backup_reserve = 0.15
+    coordinator._config.backup_reserve = 0.15
+    coordinator._startup_backup_reserve = 5
+    update_calls = []
+    coordinator._optimizer = SimpleNamespace(
+        update_config=lambda **kwargs: update_calls.append(kwargs),
+        max_grid_export_w=None,
+        terminal_weight=0,
+    )
+    coordinator.hass = SimpleNamespace(
+        data={"power_sync": {"entry-1": {}}},
+        config_entries=SimpleNamespace(async_update_entry=lambda *a, **k: None),
+    )
+
+    changed = coordinator._apply_auto_reserve_recommendation(
+        SimpleNamespace(
+            feasible=False,
+            reserve_recommendation={"suggested_optimizer_reserve_percent": 5},
+        )
+    )
+
+    assert changed is False
+    assert coordinator._config.backup_reserve == 0.15
+    assert update_calls == []
+
+
 def test_set_settings_ignores_interval_minutes_override(opt_module):
     coordinator = _coordinator(opt_module, "amber")
     coordinator.entry_id = "entry-1"

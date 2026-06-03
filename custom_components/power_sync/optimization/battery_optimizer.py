@@ -1697,11 +1697,9 @@ class BatteryOptimizer:
                 export_bonus_prices,
                 export_bonus_cap_kwh,
             )
-            result.feasible = False  # Mark as relaxed
-            return result
         except Exception:
             # Complete failure — use greedy
-            return self._solve_greedy(
+            result = self._solve_greedy(
                 n, import_prices, export_prices, solar, load, soc_0, cost_function,
                 acquisition_cost_kwh,
                 allow_battery_export,
@@ -1713,6 +1711,15 @@ class BatteryOptimizer:
         finally:
             self.backup_reserve = original_reserve
             self._relaxing = False
+
+        # This solve ran with an artificially lowered (5%) reserve floor, so any
+        # reserve recommendation it produced reflects the relaxed floor, not a
+        # real forecast. Drop it and mark the result as relaxed so Auto-Apply
+        # Optimizer Reserve never ratchets the optimiser reserve down to the
+        # hardware floor off the back of an infeasible solve.
+        result.feasible = False  # Mark as relaxed
+        result.reserve_recommendation = {}
+        return result
 
     def _solve_greedy(
         self,

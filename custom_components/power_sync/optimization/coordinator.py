@@ -939,6 +939,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Apply one forecast optimizer reserve update after a solve."""
         if not bool(getattr(self, "_auto_apply_reserve_enabled", False)):
             return False
+        # Never act on a relaxed/greedy fallback solve. Those run with an
+        # artificially lowered reserve floor (5%), so their reserve
+        # recommendation is not a real forecast — applying it would ratchet the
+        # optimiser reserve down to the hardware floor and leave it there.
+        if not bool(getattr(result, "feasible", True)):
+            return False
         recommendation = getattr(result, "reserve_recommendation", {}) or {}
         target_ratio = self._recommended_auto_reserve_ratio(recommendation)
         if target_ratio is None:
