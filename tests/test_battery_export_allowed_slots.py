@@ -655,8 +655,10 @@ def test_auto_apply_reserve_applies_clamped_optimizer_recommendation(opt_module)
 
     assert changed is True
     assert coordinator._config.backup_reserve == 0.30
-    assert updates[-1]["options"]["optimization_backup_reserve"] == 0.30
     assert update_calls[-1]["backup_reserve"] == 0.30
+    # The forecast floor is applied to the running optimiser only — it must NOT
+    # write the config entry (that fired a dashboard refresh every ~5 minutes).
+    assert updates == []
 
     changed = coordinator._apply_auto_reserve_recommendation(
         SimpleNamespace(
@@ -666,7 +668,7 @@ def test_auto_apply_reserve_applies_clamped_optimizer_recommendation(opt_module)
 
     assert changed is True
     assert coordinator._config.backup_reserve == 0.20
-    assert updates[-1]["options"]["optimization_backup_reserve"] == 0.20
+    assert updates == []
 
 
 def test_profit_max_auto_apply_can_lower_to_forecast_reserve(opt_module):
@@ -713,8 +715,9 @@ def test_profit_max_auto_apply_can_lower_to_forecast_reserve(opt_module):
 
     assert changed is True
     assert coordinator._config.backup_reserve == 0.05
-    assert updates[-1]["options"]["optimization_backup_reserve"] == 0.05
     assert update_calls[-1]["backup_reserve"] == 0.05
+    # Runtime-only: no per-cycle config-entry write.
+    assert updates == []
     assert recommendation["manual_optimizer_reserve_percent"] == 15
     assert recommendation["applied_optimizer_reserve_percent"] == 5
 

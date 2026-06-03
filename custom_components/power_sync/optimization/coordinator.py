@@ -964,8 +964,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if math.isclose(target_ratio, current_ratio, abs_tol=0.0001):
             return False
 
+        # Apply the forecast floor to the running optimiser ONLY. This value is
+        # recomputed every solve, so it must not be written to the config entry:
+        # persisting it each cycle fired HA's config-entry-updated event every
+        # ~5 minutes, refreshing the dashboard (and risking reload churn) for a
+        # purely transient value. The live reserve is still surfaced to sensors
+        # and the mobile app via get_api_data (self._config.backup_reserve), and
+        # it is recomputed from the manual baseline within one solve of a restart.
         self.update_config(backup_reserve=target_ratio)
-        self._persist_optimizer_reserve_settings(backup_reserve=target_ratio)
         recommendation["applied_optimizer_reserve_percent"] = int(
             round(target_ratio * 100)
         )
