@@ -1396,6 +1396,24 @@ def test_self_consumption_adopts_manual_tesla_reserve_above_cached_target(opt_mo
     assert coordinator._last_executed_action == "self_consumption"
 
 
+def test_self_consumption_reapplies_stale_tesla_full_reserve(opt_module):
+    battery = _FakeBattery(hardware_mode="autonomous", backup_reserve=100)
+    coordinator = _execution_coordinator(opt_module, battery, soc=1.0)
+    coordinator._startup_backup_reserve = 0
+    coordinator._config.backup_reserve = 0.20
+
+    asyncio.run(
+        coordinator._execute_optimizer_action(
+            SimpleNamespace(action="self_consumption", power_w=0)
+        )
+    )
+
+    assert battery.self_consumption_calls == 1
+    assert battery.backup_reserve_calls == [0]
+    assert coordinator._startup_backup_reserve == 0
+    assert coordinator._last_executed_action == "self_consumption"
+
+
 def test_self_consumption_does_not_raise_tesla_reserve_above_current_soc(opt_module):
     battery = _FakeBattery(hardware_mode="self_consumption", backup_reserve=5)
     coordinator = _execution_coordinator(opt_module, battery, soc=0.11)

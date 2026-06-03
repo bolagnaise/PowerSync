@@ -50,6 +50,7 @@ CUSTOM_LOAD_POWER_ENTITY = "custom_load_power_entity"
 
 COST_STORE_VERSION = 1
 COST_STORE_SAVE_DELAY = 300  # Coalesce writes — flush at most every 5 minutes
+INITIAL_OPTIMIZATION_DELAY_SECONDS = 90.0
 FIXED_OPTIMIZATION_INTERVAL_MINUTES = DEFAULT_OPTIMIZATION_INTERVAL
 FLOW_POWER_NEM_TZ = timezone(timedelta(hours=10))
 EXPORT_ACTIONS = {"discharge", "export"}
@@ -264,6 +265,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Cached schedule from optimizer
         self._current_schedule: OptimizationSchedule | None = None
         self._last_update_time: datetime | None = None
+        self._initial_optimization_not_before: datetime | None = None
 
         # Cached forecast data (populated each optimization run)
         self._last_solar_forecast: list[float] | None = None    # kW values
@@ -1975,6 +1977,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not self._enabled or not self._is_dynamic_pricing:
             return
 
+        startup_delay = self._seconds_until_initial_optimization_allowed()
+        if startup_delay > 0:
+            _LOGGER.debug(
+                "Price update: skipping LP re-optimization for %.0fs during startup",
+                startup_delay,
+            )
+            self._last_price_triggered_optimization = dt_util.utcnow()
+            return
+
         # AEMO coordinator polls at 1-second intervals while searching for a new
         # dispatch file (ACTIVE mode). HA fires all listeners on every successful
         # poll, even when the file hasn't changed. Guard against that: only
@@ -2033,6 +2044,10 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         self._enabled = True
         _LOGGER.info("Optimization enabled (built-in LP)")
+        initial_delay = max(0.0, float(INITIAL_OPTIMIZATION_DELAY_SECONDS))
+        self._initial_optimization_not_before = (
+            dt_util.utcnow() + timedelta(seconds=initial_delay)
+        )
 
         # Restore dynamic price listener (may have been lost on disable/enable cycle)
         await self._setup_price_listener()
@@ -2048,7 +2063,8 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Run initial optimization and start polling loop as background tasks
         # so they don't block HA bootstrap (LP solve can take several seconds)
         self._initial_opt_task = self.hass.async_create_background_task(
-            self._run_optimization(), "powersync_initial_optimization"
+            self._run_initial_optimization_after_startup_delay(),
+            "powersync_initial_optimization",
         )
         self._polling_task = self.hass.async_create_background_task(
             self._schedule_polling_loop(), "powersync_schedule_polling"
@@ -2062,6 +2078,30 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
 
         return True
+
+    async def _run_initial_optimization_after_startup_delay(self) -> None:
+        """Run the first optimizer pass after HA startup pressure settles."""
+        delay = self._seconds_until_initial_optimization_allowed()
+        if delay:
+            _LOGGER.info(
+                "Deferring initial optimization for %.0fs to reduce HA startup load",
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+        if not self._enabled:
+            return
+
+        await self._run_optimization()
+
+    def _seconds_until_initial_optimization_allowed(self) -> float:
+        """Return remaining startup delay before the first LP solve may run."""
+        if self._initial_optimization_not_before is None:
+            return 0.0
+        return max(
+            0.0,
+            (self._initial_optimization_not_before - dt_util.utcnow()).total_seconds(),
+        )
 
     async def _deferred_enable_restore(self) -> None:
         """Restore backup reserve and work mode in the background.
@@ -2691,6 +2731,20 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # Check again after sleep — disable() may have been called
                 if not self._enabled:
                     break
+
+                startup_delay = self._seconds_until_initial_optimization_allowed()
+                if startup_delay > 0:
+                    _LOGGER.debug(
+                        "Schedule polling waiting %.0fs for startup optimization delay",
+                        startup_delay,
+                    )
+                    await asyncio.sleep(startup_delay)
+                    if not self._enabled:
+                        break
+                    # The dedicated initial optimization task owns the first
+                    # post-startup solve. Resume polling at the next boundary.
+                    if self._initial_opt_task is not None:
+                        continue
 
                 # Re-optimize on each interval (executes the resulting action internally)
                 await self._run_optimization()
@@ -3923,7 +3977,15 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                 and reserve_pct is not None
                                 and current_reserve != reserve_pct
                             ):
-                                if (
+                                if current_reserve == 100 and reserve_pct < current_reserve:
+                                    _LOGGER.info(
+                                        "Optimizer: Tesla backup_reserve=100%% while target "
+                                        "self-consumption reserve is %d%% — treating it as "
+                                        "stale force-charge state and reapplying",
+                                        reserve_pct,
+                                    )
+                                    reapply_backup_reserve = True
+                                elif (
                                     current_reserve > reserve_pct
                                     and current_reserve <= soc_pct
                                 ):

@@ -143,6 +143,25 @@ def test_hybrid_curtailment_handlers_use_tariff_schedule_fallback():
         assert "using feed-in price from tariff schedule" in handler
 
 
+def test_goodwe_curtailment_state_is_initialized():
+    source = INIT_PATH.read_text()
+
+    assert '"goodwe_curtailment_state": "normal"' in source
+    assert source.index('"goodwe_coordinator": goodwe_coordinator') < source.index(
+        '"goodwe_curtailment_state": "normal"'
+    )
+
+
+def test_goodwe_curtailment_periodically_reapplies_export_limit():
+    handler = _function_source("handle_goodwe_curtailment")
+
+    assert "_last_goodwe_curtailment_reapply" in handler
+    assert "GoodWe curtailment RE-APPLY" in handler
+    assert 'current_state != "curtailed" or _needs_reapply' in handler
+    assert 'entry_data["_last_goodwe_curtailment_reapply"] = _now' in handler
+    assert 'entry_data.pop("_last_goodwe_curtailment_reapply", None)' in handler
+
+
 def test_periodic_solar_curtailment_routes_to_sungrow_before_tesla_path():
     handler = _function_source("handle_solar_curtailment_check")
     pre_tesla_path = handler[: handler.index("if token_getter is None:")]

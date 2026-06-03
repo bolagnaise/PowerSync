@@ -5073,14 +5073,14 @@ class EVStatusSensor(SensorEntity):
                     "ev_charger_discharging", False
                 )
             elif coord_data.get("ev_charger_type"):
-                self._ev_data["ev_power_kw"] = ev_power
-                self._ev_data["vehicle_id"] = "sigenergy_charger"
-                self._ev_data["vehicle_name"] = "Sigenergy EVDC"
-                self._ev_data["is_connected"] = coord_data.get("ev_charger_connected", False)
-                self._ev_data["is_charging"] = coord_data.get("ev_charger_charging", False)
-                self._ev_data["is_discharging"] = coord_data.get("ev_charger_discharging", False)
-                if coord_data.get("ev_soc") is not None:
-                    self._ev_data["ev_soc"] = coord_data.get("ev_soc")
+                self._apply_sigenergy_charger_context(
+                    charger_type=coord_data.get("ev_charger_type"),
+                    ev_power_kw=ev_power,
+                    is_connected=coord_data.get("ev_charger_connected", False),
+                    is_charging=coord_data.get("ev_charger_charging", False),
+                    is_discharging=coord_data.get("ev_charger_discharging", False),
+                    ev_soc=coord_data.get("ev_soc"),
+                )
             elif abs(ev_power) > 0.05 or self._ev_data.get("ev_power_kw", 0) == 0:
                 self._ev_data["ev_power_kw"] = ev_power
         self.async_write_ha_state()
@@ -5136,9 +5136,48 @@ class EVStatusSensor(SensorEntity):
         if active_soc is not None:
             self._ev_data["ev_soc"] = active_soc
 
+    @staticmethod
+    def _sigenergy_vehicle_name(charger_type: Any) -> str:
+        """Return a dashboard label for a Sigenergy charger type."""
+        if str(charger_type or "").lower() == "evdc":
+            return "Sigenergy EVDC"
+        return "Sigenergy EVAC"
+
+    def _apply_sigenergy_charger_context(
+        self,
+        *,
+        charger_type: Any,
+        ev_power_kw: Any,
+        is_connected: Any,
+        is_charging: Any,
+        is_discharging: Any = False,
+        ev_soc: Any = None,
+    ) -> None:
+        """Attach Sigenergy charger presence so the dashboard can show idle EVs."""
+        if self._ev_data is None:
+            self._ev_data = {}
+
+        try:
+            power_kw = float(ev_power_kw if ev_power_kw is not None else 0.0)
+        except (TypeError, ValueError):
+            power_kw = 0.0
+
+        self._ev_data["ev_power_kw"] = power_kw
+        self._ev_data["vehicle_id"] = "sigenergy_charger"
+        self._ev_data["vehicle_name"] = self._sigenergy_vehicle_name(charger_type)
+        self._ev_data["is_connected"] = bool(is_connected)
+        self._ev_data["is_charging"] = bool(is_charging)
+        self._ev_data["is_discharging"] = bool(is_discharging)
+        if ev_soc is not None:
+            self._ev_data["ev_soc"] = ev_soc
+
     async def _async_update_ev(self, _now=None) -> None:
         """Poll EV status from vehicle sensors."""
-        from . import _get_ev_vehicle_status, _get_ev_vehicles_status
+        from . import (
+            _get_ev_vehicle_status,
+            _get_ev_vehicles_status,
+            _read_sigenergy_charger_state_for_entry,
+        )
         try:
             self._ev_data = _get_ev_vehicle_status(self.hass, self._entry)
             self._apply_vehicle_context(_get_ev_vehicles_status(self.hass, self._entry))
@@ -5149,23 +5188,39 @@ class EVStatusSensor(SensorEntity):
                 wc_power = tesla_coordinator.data.get("ev_power", 0)
                 if wc_power > 0 and self._ev_data.get("ev_power_kw", 0) <= 0:
                     self._ev_data["ev_power_kw"] = wc_power
+            sigenergy_context_applied = False
             sigenergy_coordinator = entry_data.get("sigenergy_coordinator")
             if sigenergy_coordinator and sigenergy_coordinator.data:
                 coord_data = sigenergy_coordinator.data
                 ev_power = coord_data.get("ev_power")
                 if ev_power is not None and coord_data.get("ev_charger_type"):
-                    self._ev_data["ev_power_kw"] = ev_power
-                    self._ev_data["vehicle_id"] = "sigenergy_charger"
-                    self._ev_data["vehicle_name"] = "Sigenergy EVDC"
-                    self._ev_data["is_connected"] = coord_data.get("ev_charger_connected", False)
-                    self._ev_data["is_charging"] = coord_data.get("ev_charger_charging", False)
-                    self._ev_data["is_discharging"] = coord_data.get("ev_charger_discharging", False)
-                    if coord_data.get("ev_soc") is not None:
-                        self._ev_data["ev_soc"] = coord_data.get("ev_soc")
+                    sigenergy_context_applied = True
+                    self._apply_sigenergy_charger_context(
+                        charger_type=coord_data.get("ev_charger_type"),
+                        ev_power_kw=ev_power,
+                        is_connected=coord_data.get("ev_charger_connected", False),
+                        is_charging=coord_data.get("ev_charger_charging", False),
+                        is_discharging=coord_data.get("ev_charger_discharging", False),
+                        ev_soc=coord_data.get("ev_soc"),
+                    )
                 elif ev_power is not None and (
                     abs(ev_power) > 0.05 or self._ev_data.get("ev_power_kw", 0) == 0
                 ):
                     self._ev_data["ev_power_kw"] = ev_power
+
+            if not sigenergy_context_applied:
+                sigenergy_state = await _read_sigenergy_charger_state_for_entry(self._entry)
+            else:
+                sigenergy_state = None
+            if sigenergy_state is not None:
+                self._apply_sigenergy_charger_context(
+                    charger_type=getattr(sigenergy_state, "charger_type", None),
+                    ev_power_kw=getattr(sigenergy_state, "power_kw", 0.0),
+                    is_connected=getattr(sigenergy_state, "is_connected", False),
+                    is_charging=getattr(sigenergy_state, "is_charging", False),
+                    is_discharging=getattr(sigenergy_state, "is_discharging", False),
+                    ev_soc=getattr(sigenergy_state, "vehicle_soc", None),
+                )
             solaredge_coordinator = entry_data.get("solaredge_coordinator")
             if solaredge_coordinator and solaredge_coordinator.data:
                 coord_data = solaredge_coordinator.data

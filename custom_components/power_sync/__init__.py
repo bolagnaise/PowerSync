@@ -17,6 +17,8 @@ _discrepancy_alert_count: dict[str, int] = {}
 _discrepancy_alert_date: dict[str, str] = {}
 DISCREPANCY_ALERT_COOLDOWN = timedelta(minutes=30)
 DISCREPANCY_ALERT_DAILY_MAX = 4
+AEMO_SETTLED_SYNC_DELAY_SECONDS = 5.0
+AEMO_STARTUP_SYNC_DELAY_SECONDS = 90.0
 
 
 def _parse_battery_health_timestamp(value: Any) -> datetime | None:
@@ -17172,6 +17174,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "foxess_curtailment_state": "normal",  # Track FoxESS DC curtailment state
         "sigenergy_curtailment_state": "normal",  # Track Sigenergy DC curtailment state
         "alphaess_curtailment_state": "normal",  # Track AlphaESS DC curtailment state
+        "goodwe_curtailment_state": "normal",  # Track GoodWe export-limit curtailment state
         "solaredge_curtailment_state": "normal",  # Track SolarEdge active-power curtailment state
         "sungrow_curtailment_state": "normal",  # Track Sungrow export-limit curtailment state
         "sungrow_power_limit_w": None,  # Current Sungrow load-following export limit
@@ -20286,7 +20289,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         """Handle GoodWe DC curtailment via export limit register.
 
         Sets export limit to 0W when export price < 1c/kWh; removes the limit
-        (sets to 99999W) when export is valuable again.
+        when export is valuable again.
         """
         entry_data = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
         current_state = entry_data.get("goodwe_curtailment_state", "normal")
@@ -20323,14 +20326,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         try:
             if export_earnings < 1:
-                if current_state == "normal":
-                    _LOGGER.info(
-                        "GoodWe curtailment TRIGGERED: export_earnings=%.2fc (<1c) → zero export",
-                        export_earnings,
-                    )
+                import time as _time_mod
+                _goodwe_reapply_interval = 900
+                _last_reapply = entry_data.get("_last_goodwe_curtailment_reapply", 0)
+                _now = _time_mod.monotonic()
+                _elapsed_since_reapply = _now - _last_reapply
+                _needs_reapply = (
+                    current_state == "curtailed"
+                    and _elapsed_since_reapply >= _goodwe_reapply_interval
+                )
+
+                if current_state != "curtailed" or _needs_reapply:
+                    if current_state == "curtailed":
+                        _LOGGER.info(
+                            "GoodWe curtailment RE-APPLY: export_earnings=%.2fc (<1c), %ds since last apply",
+                            export_earnings,
+                            int(_elapsed_since_reapply),
+                        )
+                    else:
+                        _LOGGER.info(
+                            "GoodWe curtailment TRIGGERED: export_earnings=%.2fc (<1c) → zero export",
+                            export_earnings,
+                        )
                     success = await controller.curtail()
                     if success:
-                        hass.data[DOMAIN][entry.entry_id]["goodwe_curtailment_state"] = "curtailed"
+                        entry_data["goodwe_curtailment_state"] = "curtailed"
+                        entry_data["_last_goodwe_curtailment_reapply"] = _now
                     else:
                         _LOGGER.error("GoodWe curtail() failed")
                 else:
@@ -20343,7 +20364,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     )
                     success = await controller.restore()
                     if success:
-                        hass.data[DOMAIN][entry.entry_id]["goodwe_curtailment_state"] = "normal"
+                        entry_data["goodwe_curtailment_state"] = "normal"
+                        entry_data.pop("_last_goodwe_curtailment_reapply", None)
                     else:
                         _LOGGER.error("GoodWe restore() failed")
                 else:
@@ -28079,6 +28101,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     NEM_PROVIDERS = ("amber", "flow_power", "localvolts", "aemo_sensor")
     is_nem_provider = electricity_provider in NEM_PROVIDERS
+    aemo_dispatch_setup_started = dt_util.utcnow()
+    aemo_startup_sync_pending = False
+
+    def _aemo_dispatch_sync_allowed() -> bool:
+        provider = entry.options.get(
+            CONF_ELECTRICITY_PROVIDER,
+            entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber"),
+        )
+        if provider in ("octopus", "globird", "aemo_vpp", "other", "tou_only", "nz", "epex"):
+            return False
+
+        if not entry.options.get(
+            CONF_AUTO_SYNC_ENABLED,
+            entry.data.get(CONF_AUTO_SYNC_ENABLED, True),
+        ):
+            _LOGGER.debug("Auto-sync disabled, skipping AEMO-dispatch sync")
+            return False
+
+        return True
 
     async def _handle_aemo_dispatch_event(_signal_data) -> None:
         """Run TOU sync once per AEMO dispatch (settled price publish event).
@@ -28087,25 +28128,42 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         Octopus, GloBird, and AEMO VPP are skipped here — Octopus has its
         own cron, the others don't sync TOU at all (see provider_check below).
         """
-        provider = entry.options.get(
-            CONF_ELECTRICITY_PROVIDER,
-            entry.data.get(CONF_ELECTRICITY_PROVIDER, "amber"),
-        )
-        if provider in ("octopus", "globird", "aemo_vpp", "other", "tou_only", "nz", "epex"):
-            return
+        nonlocal aemo_startup_sync_pending
 
-        if not entry.options.get(
-            CONF_AUTO_SYNC_ENABLED,
-            entry.data.get(CONF_AUTO_SYNC_ENABLED, True),
-        ):
-            _LOGGER.debug("Auto-sync disabled, skipping AEMO-dispatch sync")
+        if not _aemo_dispatch_sync_allowed():
             return
 
         # Brief delay so Amber / Localvolts have time to ingest the AEMO
         # publish into their own REST APIs (network fees, batching).
-        await asyncio.sleep(5)
-        _LOGGER.info("📡 AEMO dispatch received — syncing settled tariff")
-        await handle_sync_rest_api_check(check_name="aemo dispatch")
+        delay_seconds = AEMO_SETTLED_SYNC_DELAY_SECONDS
+        startup_remaining = (
+            AEMO_STARTUP_SYNC_DELAY_SECONDS
+            - (dt_util.utcnow() - aemo_dispatch_setup_started).total_seconds()
+        )
+        if startup_remaining > 0:
+            if aemo_startup_sync_pending:
+                _LOGGER.debug("AEMO-dispatch sync already deferred during startup")
+                return
+            aemo_startup_sync_pending = True
+            delay_seconds = max(delay_seconds, startup_remaining)
+            _LOGGER.info(
+                "Deferring AEMO-dispatch sync for %.0fs during startup",
+                delay_seconds,
+            )
+
+        try:
+            await asyncio.sleep(delay_seconds)
+
+            if entry.entry_id not in hass.data.get(DOMAIN, {}):
+                return
+            if not _aemo_dispatch_sync_allowed():
+                return
+
+            _LOGGER.info("📡 AEMO dispatch received — syncing settled tariff")
+            await handle_sync_rest_api_check(check_name="aemo dispatch")
+        finally:
+            if startup_remaining > 0:
+                aemo_startup_sync_pending = False
 
     def _aemo_dispatch_callback(data) -> None:
         # HA invokes dispatcher listeners on whichever thread called

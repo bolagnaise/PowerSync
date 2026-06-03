@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import sys
 import time
@@ -826,3 +827,35 @@ def test_ev_status_sensor_labels_solaredge_coordinator_power():
     assert entity.native_value == 7.4
     assert entity.extra_state_attributes["vehicle_name"] == "SolarEdge EV Charger"
     assert entity.extra_state_attributes["vehicle_id"] == "solaredge_ev_charger"
+
+
+def test_ev_status_sensor_exposes_idle_sigenergy_evac_presence():
+    sensor = _sensor_module()
+    power_sync = sys.modules["power_sync"]
+    power_sync._get_ev_vehicle_status = lambda hass, entry: {"ev_power_kw": 0.0}
+    power_sync._get_ev_vehicles_status = lambda hass, entry: []
+
+    async def read_sigenergy_charger_state(entry):
+        return SimpleNamespace(
+            charger_type="evac",
+            power_kw=0.0,
+            vehicle_soc=None,
+            is_connected=True,
+            is_charging=False,
+            is_discharging=False,
+        )
+
+    power_sync._read_sigenergy_charger_state_for_entry = read_sigenergy_charger_state
+    desc = next(d for d in sensor.EV_SENSORS if d.key == "ev_power")
+    entry = SimpleNamespace(entry_id="entry-1", data={}, options={})
+    entity = sensor.EVStatusSensor(SimpleNamespace(data={}), entry, desc)
+    entity.async_write_ha_state = lambda: None
+    entity.hass = SimpleNamespace(data={sensor.DOMAIN: {"entry-1": {}}})
+
+    asyncio.run(entity._async_update_ev())
+
+    assert entity.native_value == 0.0
+    assert entity.extra_state_attributes["vehicle_name"] == "Sigenergy EVAC"
+    assert entity.extra_state_attributes["vehicle_id"] == "sigenergy_charger"
+    assert entity.extra_state_attributes["is_connected"] is True
+    assert entity.extra_state_attributes["is_charging"] is False
