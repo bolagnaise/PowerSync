@@ -2698,6 +2698,49 @@ def test_spread_export_schedule_flattens_planned_energy_across_allowed_window(op
     assert spread_wh == pytest.approx(original_wh, abs=0.1)
 
 
+def test_spread_export_schedule_respects_auto_reserve_export_floor(opt_module):
+    coordinator = _coordinator(opt_module, "flow_power", profit_max=True)
+    coordinator.battery_system = "goodwe"
+    coordinator._config.spread_export_enabled = True
+    coordinator._config.max_discharge_w = 5000
+    start = datetime(2026, 5, 3, 17, 30, tzinfo=timezone.utc)
+    actions = [
+        opt_module.ScheduleAction(
+            timestamp=start + idx * timedelta(minutes=5),
+            action="export" if idx < 3 else "self_consumption",
+            power_w=5000 if idx < 3 else 0,
+            soc=[0.74, 0.65, 0.56, 0.42, 0.25, 0.05][idx],
+            battery_discharge_w=5000 if idx < 3 else 0,
+        )
+        for idx in range(6)
+    ]
+    schedule = opt_module.OptimizationSchedule(
+        actions=actions,
+        predicted_cost=0,
+        predicted_savings=0,
+        last_updated=start,
+    )
+
+    spread = coordinator._spread_export_schedule(
+        schedule,
+        [True] * 6,
+        export_reserve_floor=0.56,
+    )
+
+    assert [action.action for action in spread.actions] == [
+        "export",
+        "export",
+        "export",
+        "self_consumption",
+        "self_consumption",
+        "self_consumption",
+    ]
+    assert min(
+        action.soc for action in spread.actions if action.action == "export"
+    ) >= 0.56
+    assert spread.actions[-1].soc == pytest.approx(0.05)
+
+
 def test_spread_export_schedule_uses_export_power_for_target_batteries(opt_module):
     coordinator = _coordinator(opt_module, "octopus")
     coordinator.battery_system = "goodwe"

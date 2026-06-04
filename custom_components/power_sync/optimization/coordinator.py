@@ -2757,6 +2757,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self._current_schedule = self._spread_export_schedule(
                         self._current_schedule,
                         battery_export_allowed,
+                        export_reserve_floor=export_reserve_floor,
                     )
                     result.schedule = self._current_schedule
                 self._current_schedule = self._bridge_short_export_gaps(
@@ -4555,6 +4556,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self,
         schedule: OptimizationSchedule,
         allowed_slots: bool | list[bool],
+        export_reserve_floor: float | None = None,
     ) -> OptimizationSchedule:
         """Spread planned export energy across each contiguous allowed window."""
         actions = list(schedule.actions or [])
@@ -4596,15 +4598,33 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if export_wh <= 0:
                 continue
 
+            spread_positions = list(range(start, end))
+            floor = self._reserve_ratio(export_reserve_floor, None)
+            if floor is not None:
+                spread_positions = [
+                    pos
+                    for pos in spread_positions
+                    if (
+                        self._reserve_ratio(
+                            getattr(actions[pos], "soc", None),
+                            None,
+                        )
+                        or 0.0
+                    )
+                    > floor + 0.0001
+                ]
+                if not spread_positions:
+                    continue
+
             target_w = min(
                 float(self._config.max_discharge_w),
-                export_wh / (len(window_actions) * interval_hours),
+                export_wh / (len(spread_positions) * interval_hours),
             )
             target_w = round(max(0.0, target_w), 1)
             if target_w <= 0:
                 continue
 
-            for pos in range(start, end):
+            for pos in spread_positions:
                 original = actions[pos]
                 new_actions[pos] = ScheduleAction(
                     timestamp=original.timestamp,
