@@ -77,6 +77,7 @@ class GoodWeController(InverterController):
 
     # Timeout for Modbus operations
     TIMEOUT_SECONDS = 10.0
+    RESET_CONNECTION_AFTER_REQUEST = True
 
     def __init__(
         self,
@@ -128,25 +129,44 @@ class GoodWeController(InverterController):
     async def disconnect(self) -> None:
         """Disconnect from the GoodWe inverter."""
         async with self._lock:
-            if self._client:
-                self._client.close()
-                self._client = None
-            self._connected = False
+            self._close_client()
             _LOGGER.debug(f"Disconnected from GoodWe inverter at {self.host}")
+
+    def _close_client(self) -> None:
+        """Close and discard the active Modbus TCP client."""
+        client = self._client
+        if client:
+            try:
+                client.close()
+            except Exception as err:
+                _LOGGER.debug("Error closing GoodWe Modbus TCP client: %s", err)
+        self._client = None
+        self._connected = False
+
+    async def _connected_client(self) -> Optional[AsyncModbusTcpClient]:
+        """Return a connected Modbus TCP client."""
+        if self._client and self._client.connected:
+            return self._client
+        if await self.connect():
+            return self._client
+        return None
 
     async def _write_register(self, address: int, value: int) -> bool:
         """Write a value to a Modbus register."""
-        if not self._client or not self._client.connected:
-            if not await self.connect():
-                return False
-
         try:
             async with self._request_lock:
-                result = await self._client.write_register(
-                    address=address,
-                    value=value,
-                    **{_SLAVE_PARAM: self.slave_id},
-                )
+                client = await self._connected_client()
+                if not client:
+                    return False
+                try:
+                    result = await client.write_register(
+                        address=address,
+                        value=value,
+                        **{_SLAVE_PARAM: self.slave_id},
+                    )
+                finally:
+                    if self.RESET_CONNECTION_AFTER_REQUEST:
+                        self._close_client()
 
             if result.isError():
                 _LOGGER.error(f"Modbus write error at register {address}: {result}")
@@ -156,25 +176,33 @@ class GoodWeController(InverterController):
             return True
 
         except ModbusException as e:
+            self._close_client()
             _LOGGER.error(f"Modbus exception writing to register {address}: {e}")
             return False
         except Exception as e:
+            self._close_client()
             _LOGGER.error(f"Error writing to register {address}: {e}")
             return False
 
     async def _read_register(self, address: int, count: int = 1) -> Optional[list]:
         """Read values from Modbus registers."""
-        if not self._client or not self._client.connected:
-            if not await self.connect():
-                return None
-
         try:
             async with self._request_lock:
-                result = await self._client.read_holding_registers(
-                    address=address,
-                    count=count,
-                    **{_SLAVE_PARAM: self.slave_id},
-                )
+                client = await self._connected_client()
+                if not client:
+                    return None
+                try:
+                    result = await client.read_holding_registers(
+                        address=address,
+                        count=count,
+                        **{_SLAVE_PARAM: self.slave_id},
+                    )
+                finally:
+                    # Some GoodWe LAN/TCP gateways repeat delayed Modbus TCP
+                    # frames on the same stream. Dropping the socket prevents
+                    # stale frames from being consumed by the next request.
+                    if self.RESET_CONNECTION_AFTER_REQUEST:
+                        self._close_client()
 
             if result.isError():
                 _LOGGER.debug(f"Modbus read error at register {address}: {result}")
@@ -183,9 +211,11 @@ class GoodWeController(InverterController):
             return result.registers
 
         except ModbusException as e:
+            self._close_client()
             _LOGGER.debug(f"Modbus exception reading register {address}: {e}")
             return None
         except Exception as e:
+            self._close_client()
             _LOGGER.debug(f"Error reading register {address}: {e}")
             return None
 
