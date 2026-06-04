@@ -123,6 +123,16 @@ def _datetime_now_for(expires_at: datetime) -> datetime:
     return datetime.now(expires_at.tzinfo) if expires_at.tzinfo else datetime.now()
 
 
+async def _reoptimize_if_enabled(coordinator: Any, changed: bool) -> None:
+    """Refresh the LP plan after an optimizer setting switch changes."""
+    if (
+        changed
+        and bool(getattr(coordinator, "enabled", False))
+        and hasattr(coordinator, "force_reoptimize")
+    ):
+        await coordinator.force_reoptimize()
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -1260,13 +1270,15 @@ class ProfitMaxModeSwitch(SwitchEntity):
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Enable profit maximisation mode."""
         self._attr_is_on = True
-        self._coordinator.set_profit_max_mode(True)
+        changed = self._coordinator.set_profit_max_mode(True)
+        await _reoptimize_if_enabled(self._coordinator, changed)
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disable profit maximisation mode."""
         self._attr_is_on = False
-        self._coordinator.set_profit_max_mode(False)
+        changed = self._coordinator.set_profit_max_mode(False)
+        await _reoptimize_if_enabled(self._coordinator, changed)
         self.async_write_ha_state()
 
 
@@ -1321,13 +1333,15 @@ class DisableIdleModeSwitch(SwitchEntity):
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Enable Flow Power no-idle mode."""
         self._attr_is_on = True
-        self._coordinator.set_disable_idle_enabled(True)
+        changed = self._coordinator.set_disable_idle_enabled(True)
+        await _reoptimize_if_enabled(self._coordinator, changed)
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disable Flow Power no-idle mode."""
         self._attr_is_on = False
-        self._coordinator.set_disable_idle_enabled(False)
+        changed = self._coordinator.set_disable_idle_enabled(False)
+        await _reoptimize_if_enabled(self._coordinator, changed)
         self.async_write_ha_state()
 
 
@@ -1380,13 +1394,15 @@ class SpreadExportSwitch(SwitchEntity):
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Enable spread export mode."""
         self._attr_is_on = True
-        self._coordinator.set_spread_export_enabled(True)
+        changed = self._coordinator.set_spread_export_enabled(True)
+        await _reoptimize_if_enabled(self._coordinator, changed)
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disable spread export mode."""
         self._attr_is_on = False
-        self._coordinator.set_spread_export_enabled(False)
+        changed = self._coordinator.set_spread_export_enabled(False)
+        await _reoptimize_if_enabled(self._coordinator, changed)
         self.async_write_ha_state()
 
 
@@ -1439,13 +1455,15 @@ class SpreadImportSwitch(SwitchEntity):
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Enable spread import mode."""
         self._attr_is_on = True
-        self._coordinator.set_spread_import_enabled(True)
+        changed = self._coordinator.set_spread_import_enabled(True)
+        await _reoptimize_if_enabled(self._coordinator, changed)
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Disable spread import mode."""
         self._attr_is_on = False
-        self._coordinator.set_spread_import_enabled(False)
+        changed = self._coordinator.set_spread_import_enabled(False)
+        await _reoptimize_if_enabled(self._coordinator, changed)
         self.async_write_ha_state()
 
 

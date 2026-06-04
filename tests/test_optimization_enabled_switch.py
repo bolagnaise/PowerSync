@@ -74,6 +74,7 @@ def test_spread_export_switch_is_registered_and_capability_gated():
     assert "set_spread_export_enabled(False)" in switch_source
     assert "set_spread_import_enabled(True)" in switch_source
     assert "set_spread_import_enabled(False)" in switch_source
+    assert "await _reoptimize_if_enabled(self._coordinator, changed)" in switch_source
 
 
 def test_flow_power_disable_idle_switch_is_registered_and_provider_gated():
@@ -91,10 +92,11 @@ def test_flow_power_disable_idle_switch_is_registered_and_provider_gated():
     assert 'self._attr_name = "No Idle Mode"' in switch_source
     assert "set_disable_idle_enabled(True)" in switch_source
     assert "set_disable_idle_enabled(False)" in switch_source
-    assert "def set_disable_idle_enabled(self, enabled: bool) -> None:" in coordinator_source
+    assert "def set_disable_idle_enabled(self, enabled: bool) -> bool:" in coordinator_source
     assert '"disable_idle_enabled": self.disable_idle_enabled' in coordinator_source
     assert '"disable_idle_enabled": opt_coordinator.disable_idle_enabled' in init_source
     assert "CONF_OPTIMIZATION_DISABLE_IDLE" in init_source
+    assert "await _reoptimize_if_enabled(self._coordinator, changed)" in switch_source
 
 
 def test_spread_export_setting_is_exposed_through_api_and_coordinator():
@@ -107,8 +109,26 @@ def test_spread_export_setting_is_exposed_through_api_and_coordinator():
     assert 'new_options[CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED] = bool(settings["spread_import_enabled"])' in init_source
     assert '"spread_export_enabled": self._config.spread_export_enabled' in coordinator_source
     assert '"spread_import_enabled": self._config.spread_import_enabled' in coordinator_source
-    assert "def set_spread_export_enabled(self, enabled: bool) -> None:" in coordinator_source
-    assert "def set_spread_import_enabled(self, enabled: bool) -> None:" in coordinator_source
+    assert "def set_spread_export_enabled(self, enabled: bool) -> bool:" in coordinator_source
+    assert "def set_spread_import_enabled(self, enabled: bool) -> bool:" in coordinator_source
+
+
+def test_optimizer_mode_switches_reoptimize_after_change():
+    switch_source = SWITCH_PATH.read_text()
+    coordinator_source = COORDINATOR_PATH.read_text()
+
+    assert "async def _reoptimize_if_enabled(coordinator: Any, changed: bool) -> None:" in switch_source
+    assert 'and bool(getattr(coordinator, "enabled", False))' in switch_source
+    assert "await coordinator.force_reoptimize()" in switch_source
+    assert "changed = self._coordinator.set_profit_max_mode(True)" in switch_source
+    assert "changed = self._coordinator.set_profit_max_mode(False)" in switch_source
+    assert "changed = self._coordinator.set_disable_idle_enabled(True)" in switch_source
+    assert "changed = self._coordinator.set_disable_idle_enabled(False)" in switch_source
+    assert "changed = self._coordinator.set_spread_export_enabled(True)" in switch_source
+    assert "changed = self._coordinator.set_spread_export_enabled(False)" in switch_source
+    assert "changed = self._coordinator.set_spread_import_enabled(True)" in switch_source
+    assert "changed = self._coordinator.set_spread_import_enabled(False)" in switch_source
+    assert "def set_profit_max_mode(self, enabled: bool) -> bool:" in coordinator_source
 
 
 def test_auto_apply_reserve_setting_is_exposed_through_api_and_coordinator():

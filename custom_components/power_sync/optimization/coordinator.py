@@ -717,14 +717,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception:
             return False
 
-    def set_spread_export_enabled(self, enabled: bool) -> None:
+    def set_spread_export_enabled(self, enabled: bool) -> bool:
         """Enable or disable spread-export mode."""
         # No-op when unchanged: a redundant settings push (e.g. the periodic
         # settings sync from the companion app) must not invalidate the
         # load-estimator cache, which forces an expensive temperature-sensitivity
         # refit over the full load history on the event loop.
         if self._config.spread_export_enabled == bool(enabled):
-            return
+            return False
         self._config.spread_export_enabled = bool(enabled)
         if self._load_estimator:
             self._load_estimator.invalidate_cache()
@@ -748,12 +748,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             new_options[CONF_OPTIMIZATION_SPREAD_EXPORT_ENABLED] = bool(enabled)
             self.hass.data.setdefault(DOMAIN, {}).setdefault(self.entry_id, {})["_skip_reload"] = True
             self.hass.config_entries.async_update_entry(self._entry, options=new_options)
+        return True
 
-    def set_spread_import_enabled(self, enabled: bool) -> None:
+    def set_spread_import_enabled(self, enabled: bool) -> bool:
         """Enable or disable spread-import mode."""
         # No-op when unchanged (see set_spread_export_enabled).
         if self._config.spread_import_enabled == bool(enabled):
-            return
+            return False
         self._config.spread_import_enabled = bool(enabled)
         if self._load_estimator:
             self._load_estimator.invalidate_cache()
@@ -777,13 +778,14 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             new_options[CONF_OPTIMIZATION_SPREAD_IMPORT_ENABLED] = bool(enabled)
             self.hass.data.setdefault(DOMAIN, {}).setdefault(self.entry_id, {})["_skip_reload"] = True
             self.hass.config_entries.async_update_entry(self._entry, options=new_options)
+        return True
 
-    def set_profit_max_mode(self, enabled: bool) -> None:
+    def set_profit_max_mode(self, enabled: bool) -> bool:
         """Enable or disable profit maximisation mode."""
         # No-op when unchanged (see set_spread_export_enabled) — avoids a
         # redundant cache invalidation + load-estimator refit on every sync.
         if self._config.profit_max_enabled == bool(enabled):
-            return
+            return False
         self._config.profit_max_enabled = enabled
         if self._optimizer:
             self._optimizer.terminal_weight = self._profit_max_terminal_weight()
@@ -806,11 +808,12 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             new_options[CONF_PROFIT_MAX_ENABLED] = enabled
             self.hass.data.setdefault(DOMAIN, {}).setdefault(self.entry_id, {})["_skip_reload"] = True
             self.hass.config_entries.async_update_entry(self._entry, options=new_options)
+        return True
 
-    def set_disable_idle_enabled(self, enabled: bool) -> None:
+    def set_disable_idle_enabled(self, enabled: bool) -> bool:
         """Enable or disable Flow Power no-idle mode."""
         if self._config.disable_idle_enabled == bool(enabled):
-            return
+            return False
         self._config.disable_idle_enabled = bool(enabled)
         if self._load_estimator:
             self._load_estimator.invalidate_cache()
@@ -841,6 +844,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 data=new_data,
                 options=new_options,
             )
+        return True
 
     async def set_auto_apply_reserve_enabled(self, enabled: bool) -> None:
         """Enable or disable forecast-driven optimizer reserve tracking."""
@@ -958,21 +962,13 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         reserve_recommendation: dict[str, Any],
     ) -> float | None:
         """Return clamped forecast optimizer reserve target as a ratio."""
-        reserve_candidates = [
-            reserve_recommendation.get("suggested_optimizer_reserve_percent"),
-            reserve_recommendation.get("home_load_export_floor_percent"),
-        ]
-        suggested_values: list[float] = []
-        for candidate in reserve_candidates:
-            if candidate is None:
-                continue
-            try:
-                suggested_values.append(float(candidate))
-            except (TypeError, ValueError):
-                continue
-        if not suggested_values:
+        candidate = reserve_recommendation.get("suggested_optimizer_reserve_percent")
+        if candidate is None:
             return None
-        suggested_percent = max(suggested_values)
+        try:
+            suggested_percent = float(candidate)
+        except (TypeError, ValueError):
+            return None
         hardware_percent = (
             getattr(self, "_startup_backup_reserve", None)
             if getattr(self, "_startup_backup_reserve", None) is not None
@@ -7994,6 +7990,7 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             self.update_config(**config_updates)
             response["changes"].append(f"config: {list(config_updates.keys())}")
+            rerun_after_settings = True
 
             # Persist settings to config entry
             if self._entry:
@@ -8080,32 +8077,31 @@ class OptimizationCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Handle profit maximisation mode toggle
         if "profit_max_enabled" in settings:
             new_val = bool(settings["profit_max_enabled"])
-            changed = self._config.profit_max_enabled != new_val
-            self.set_profit_max_mode(new_val)
+            changed = self.set_profit_max_mode(new_val)
             if changed:
                 response["changes"].append(f"profit_max_enabled: {settings['profit_max_enabled']}")
                 rerun_after_settings = True
 
         if "spread_export_enabled" in settings:
             new_val = bool(settings["spread_export_enabled"])
-            changed = self._config.spread_export_enabled != new_val
-            self.set_spread_export_enabled(new_val)
+            changed = self.set_spread_export_enabled(new_val)
             if changed:
                 response["changes"].append(f"spread_export_enabled: {settings['spread_export_enabled']}")
+                rerun_after_settings = True
 
         if "spread_import_enabled" in settings:
             new_val = bool(settings["spread_import_enabled"])
-            changed = self._config.spread_import_enabled != new_val
-            self.set_spread_import_enabled(new_val)
+            changed = self.set_spread_import_enabled(new_val)
             if changed:
                 response["changes"].append(f"spread_import_enabled: {settings['spread_import_enabled']}")
+                rerun_after_settings = True
 
         if "disable_idle_enabled" in settings:
             new_val = bool(settings["disable_idle_enabled"])
-            changed = self._config.disable_idle_enabled != new_val
-            self.set_disable_idle_enabled(new_val)
+            changed = self.set_disable_idle_enabled(new_val)
             if changed:
                 response["changes"].append(f"disable_idle_enabled: {settings['disable_idle_enabled']}")
+                rerun_after_settings = True
 
         if "profit_max_target_time" in settings and self._entry:
             from ..const import CONF_PROFIT_MAX_TARGET_TIME

@@ -7455,8 +7455,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 }
                 try:
                     await coordinator.set_settings(live_settings)
-                    if getattr(coordinator, "_enabled", False):
-                        await coordinator._run_optimization()
                 except Exception as err:  # never leave settings half-applied
                     _LOGGER.warning(
                         "Live optimiser settings apply failed (%s) — reloading entry",

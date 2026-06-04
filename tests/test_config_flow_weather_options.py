@@ -689,6 +689,7 @@ def test_optimization_options_apply_tunables_in_place_without_reload():
     )
     set_settings_index = method_source.index("await coordinator.set_settings(")
     assert update_entry_index < set_settings_index
+    assert "await coordinator._run_optimization()" not in method_source
 
 
 def test_neovolt_surplus_balancer_selector_is_in_optimization_options():

@@ -723,7 +723,7 @@ def test_profit_max_auto_apply_can_lower_to_forecast_reserve(opt_module):
     assert recommendation["applied_optimizer_reserve_percent"] == 5
 
 
-def test_auto_apply_reserve_uses_home_load_export_bridge_floor(opt_module):
+def test_auto_apply_reserve_ignores_home_load_export_bridge_floor(opt_module):
     coordinator = _coordinator(
         opt_module,
         "flow_power",
@@ -768,11 +768,11 @@ def test_auto_apply_reserve_uses_home_load_export_bridge_floor(opt_module):
         SimpleNamespace(reserve_recommendation=recommendation)
     )
 
-    assert changed is True
-    assert coordinator._config.backup_reserve == 0.25
-    assert update_calls[-1]["backup_reserve"] == 0.25
+    assert changed is False
+    assert coordinator._config.backup_reserve == 0.05
+    assert update_calls == []
     assert updates == []
-    assert recommendation["applied_optimizer_reserve_percent"] == 25
+    assert recommendation["applied_optimizer_reserve_percent"] == 5
 
 
 def test_auto_apply_reserve_ignores_relaxed_infeasible_result(opt_module):
@@ -885,6 +885,43 @@ def test_profit_max_setting_change_forces_immediate_reoptimization(opt_module):
     assert result["changes"] == ["profit_max_enabled: True"]
     assert coordinator._config.profit_max_enabled is True
     assert updates[-1]["options"]["profit_max_enabled"] is True
+    assert len(run_calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("settings", "expected_change"),
+    [
+        ({"spread_export_enabled": True}, "spread_export_enabled: True"),
+        ({"spread_import_enabled": True}, "spread_import_enabled: True"),
+        ({"disable_idle_enabled": True}, "disable_idle_enabled: True"),
+    ],
+)
+def test_optimizer_mode_setting_change_forces_immediate_reoptimization(
+    opt_module,
+    settings,
+    expected_change,
+):
+    coordinator = _coordinator(opt_module, "flow_power")
+    updates, run_calls = _prepare_enabled_settings_coordinator(coordinator)
+
+    result = asyncio.run(coordinator.set_settings(settings))
+
+    assert result["success"] is True
+    assert expected_change in result["changes"]
+    assert updates
+    assert len(run_calls) == 1
+
+
+def test_optimizer_config_setting_change_forces_immediate_reoptimization(opt_module):
+    coordinator = _coordinator(opt_module, "flow_power")
+    updates, run_calls = _prepare_enabled_settings_coordinator(coordinator)
+
+    result = asyncio.run(coordinator.set_settings({"allow_grid_charge": False}))
+
+    assert result["success"] is True
+    assert "config: ['allow_grid_charge']" in result["changes"]
+    assert coordinator._config.allow_grid_charge is False
+    assert updates[-1]["options"]["allow_grid_charge"] is False
     assert len(run_calls) == 1
 
 
