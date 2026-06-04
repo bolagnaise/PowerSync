@@ -1028,6 +1028,7 @@
         "description": "Choose a section to configure. Changes take effect immediately.",
         "menu_options": {
           "pricing": "Electricity pricing & provider",
+          "provider_portal": "Provider portal login",
           "tesla_connection": "Tesla API connection",
           "sigenergy_connection": "Sigenergy connection",
           "sungrow_connection": "Sungrow Modbus connection",
@@ -1481,7 +1482,7 @@
       },
       "flow_power_options": {
         "title": "Flow Power settings",
-        "description": "Update Flow Power tariff and PEA settings. Portal account login is handled in its own section so credentials and SMS verification stay separate from pricing formula settings.",
+        "description": "Update Flow Power tariff and PEA settings. Portal account login is available from the Provider portal login page in the main Configure menu.",
         "data": {
           "flow_power_state": "NEM region",
           "flow_power_price_source": "Price source",
@@ -1493,8 +1494,7 @@
           "fp_network": "Network distributor (DNSP)",
           "fp_tariff_code": "Tariff code",
           "fp_twap_override": "TWAP override",
-          "fp_amber_markup": "Amber comparison markup",
-          "configure_flow_power_portal": "Open Flow Power portal login section"
+          "fp_amber_markup": "Amber comparison markup"
         },
         "data_description": {
           "flow_power_price_source": "AEMO Direct fetches wholesale prices from NEMWeb (no API key). Amber API uses your Amber Electric account.",
@@ -1504,8 +1504,7 @@
           "fp_network": "Your local network distributor (DNSP). Filtered by your NEM region.",
           "fp_tariff_code": "The tariff code from your electricity bill (e.g. RESELE, 6900).",
           "fp_twap_override": "Override the dynamic 30-day TWAP with a fixed value. Leave empty for the rolling average.",
-          "fp_amber_markup": "Retailer margin for the Amber comparison sensor. Regional default is pre-filled.",
-          "configure_flow_power_portal": "Opens the dedicated Flow Power portal account section after saving these tariff settings. Use it to connect or refresh the email/password plus SMS login used for account metrics."
+          "fp_amber_markup": "Retailer margin for the Amber comparison sensor. Regional default is pre-filled."
         },
         "submit": "Next"
       },
@@ -1583,7 +1582,7 @@
       },
       "globird_options": {
         "title": "Globird / AEMO settings",
-        "description": "Configure your GloBird tariff source/model and optional AEMO spike export. Portal account login is handled in its own section so usage, billing, and credential setup stay separate from tariff modelling.\n\n{tariff_hint}",
+        "description": "Configure your GloBird tariff source/model and optional AEMO spike export. Portal account login is available from the Provider portal login page in the main Configure menu.\n\n{tariff_hint}",
         "data": {
           "globird_plan": "GloBird ZeroHero plan",
           "globird_zerohero_start": "Custom Super Export start",
@@ -1595,8 +1594,7 @@
           "aemo_spike_enabled": "Enable spike detection",
           "aemo_region": "NEM region",
           "aemo_spike_threshold": "Spike threshold",
-          "configure_custom_tariff": "Configure custom tariff",
-          "configure_globird_portal": "Open GloBird portal login section"
+          "configure_custom_tariff": "Configure custom tariff"
         },
         "data_description": {
           "globird_plan": "Choose the current ZeroHero plan (15 kWh from 18:00-21:00), the older legacy window, a custom ZeroHero setup, or Not on ZeroHero. PowerSync uses this to model ZeroHero export caps and no-import credits.",
@@ -1609,8 +1607,7 @@
           "aemo_spike_enabled": "Required for Globird and AEMO VPP plans that include spike export payments. Disable if your plan does not pay for spike exports.",
           "aemo_region": "Your NEM region determines which AEMO price feed is monitored. Check your electricity bill if unsure.",
           "aemo_spike_threshold": "Battery exports when the AEMO wholesale price exceeds this value. Default 3,000 in the selected market price unit matches most Globird and VPP plans. Only change if your plan specifies a different threshold.",
-          "configure_custom_tariff": "Recommended: TOU rates are needed for accurate price sensors, optimization, and EV charging.",
-          "configure_globird_portal": "Opens the dedicated GloBird portal account section after saving these tariff settings. Use it to connect or refresh the login used for balance, invoice, usage, cost, and ZeroHero readiness sensors."
+          "configure_custom_tariff": "Recommended: TOU rates are needed for accurate price sensors, optimization, and EV charging."
         },
         "submit": "Next"
       },

@@ -5703,6 +5703,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
 
         # Build menu options based on current config
         menu_options = ["pricing"]
+        current_provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
+        if current_provider in ("flow_power", "globird"):
+            menu_options.append("provider_portal")
 
         # Battery connection settings
         if battery_system == BATTERY_SYSTEM_TESLA:
@@ -5837,6 +5840,17 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 }
             ),
         )
+
+    async def async_step_provider_portal(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Menu handler: configure provider portal account login."""
+        provider = self._get_option(CONF_ELECTRICITY_PROVIDER, "amber")
+        if provider == "flow_power":
+            return await self.async_step_flow_power_portal_options()
+        if provider == "globird":
+            return await self.async_step_globird_portal_options()
+        return await self.async_step_init()
 
     async def async_step_tesla_connection(
         self, user_input: dict[str, Any] | None = None
@@ -9921,15 +9935,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
     ) -> FlowResult:
         """Step 2b: Flow Power main settings (region, base rate, PEA, sync)."""
         if user_input is not None:
-            configure_portal = user_input.pop("configure_flow_power_portal", False)
-
             # Store main options temporarily
             self._flow_power_main_options = user_input
-
-            # Portal login lives in its own section so account credentials are
-            # clearly separated from tariff/PEA settings.
-            if configure_portal:
-                return await self.async_step_flow_power_portal_options()
 
             # If switching to Amber and no token exists, collect it first
             price_source = user_input.get(CONF_FLOW_POWER_PRICE_SOURCE, "aemo")
@@ -9991,7 +9998,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_AUTO_SYNC_ENABLED,
                 default=self._get_option(CONF_AUTO_SYNC_ENABLED, True),
             ): BooleanSelector(),
-            vol.Optional("configure_flow_power_portal", default=False): BooleanSelector(),
         }
 
         return self.async_show_form(
@@ -10006,7 +10012,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             if user_input.get("connect_portal", True):
                 return await self.async_step_flow_power_portal_reauth()
-            return await self.async_step_flow_power_network_options()
+            return self.async_create_entry(
+                title="", data=dict(self.config_entry.options)
+            )
 
         return self.async_show_form(
             step_id="flow_power_portal_options",
@@ -10112,15 +10120,14 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 success = await self._fp_client.verify_mfa(code)
                 if success:
                     # Store credentials and stash client
-                    opts = dict(self.config_entry.options)
-                    opts[CONF_FLOWPOWER_EMAIL] = self._fp_email
-                    opts[CONF_FLOWPOWER_PASSWORD] = self._fp_password
-                    self.hass.config_entries.async_update_entry(
-                        self.config_entry, options=opts
-                    )
                     self.hass.data.setdefault(DOMAIN, {})
                     self.hass.data[DOMAIN]["_pending_fp_client"] = self._fp_client
-                    return await self.async_step_flow_power_network_options()
+                    return self._save_and_finish(
+                        {
+                            CONF_FLOWPOWER_EMAIL: self._fp_email,
+                            CONF_FLOWPOWER_PASSWORD: self._fp_password,
+                        }
+                    )
                 else:
                     errors["base"] = "invalid_mfa_code"
             else:
@@ -10361,8 +10368,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            configure_portal = user_input.pop("configure_globird_portal", False)
-
             if not errors:
                 # Add provider to the data
                 user_input[CONF_ELECTRICITY_PROVIDER] = getattr(
@@ -10394,9 +10399,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
 
                 # Store options and route accordingly
                 self._amber_options = user_input
-
-                if configure_portal:
-                    return await self.async_step_globird_portal_options()
 
                 return await self._route_after_globird_portal_options()
 
@@ -10460,8 +10462,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 "no-import credit on top of the Tesla tariff."
             )
 
-        schema_fields[vol.Optional("configure_globird_portal", default=False)] = BooleanSelector()
-
         return self.async_show_form(
             step_id="globird_options",
             data_schema=vol.Schema(schema_fields),
@@ -10486,7 +10486,9 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             if user_input.get("connect_globird_portal", True):
                 return await self.async_step_globird_portal_login_options()
-            return await self._route_after_globird_portal_options()
+            return self.async_create_entry(
+                title="", data=dict(self.config_entry.options)
+            )
 
         return self.async_show_form(
             step_id="globird_portal_options",
@@ -10515,9 +10517,12 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                     email, password_for_validation
                 )
                 if error is None:
-                    self._amber_options[CONF_GLOBIRD_EMAIL] = email
-                    self._amber_options[CONF_GLOBIRD_PASSWORD] = password_for_validation
-                    return await self._route_after_globird_portal_options()
+                    return self._save_and_finish(
+                        {
+                            CONF_GLOBIRD_EMAIL: email,
+                            CONF_GLOBIRD_PASSWORD: password_for_validation,
+                        }
+                    )
                 errors["base"] = error
             else:
                 errors["base"] = "invalid_globird_auth"

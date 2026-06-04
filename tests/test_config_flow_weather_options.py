@@ -444,6 +444,12 @@ def test_globird_plan_strings_are_available_in_setup_and_options():
 
 def test_provider_portal_login_has_dedicated_options_sections():
     source = CONFIG_FLOW_PATH.read_text()
+    init_options = ast.get_source_segment(
+        source, _options_flow_method("async_step_init")
+    )
+    provider_portal = ast.get_source_segment(
+        source, _options_flow_method("async_step_provider_portal")
+    )
     flow_options = ast.get_source_segment(
         source, _options_flow_method("async_step_flow_power_options")
     )
@@ -451,26 +457,30 @@ def test_provider_portal_login_has_dedicated_options_sections():
         source, _options_flow_method("async_step_globird_options")
     )
 
+    assert init_options is not None
+    assert provider_portal is not None
     assert flow_options is not None
     assert globird_options is not None
-    assert "configure_flow_power_portal" in flow_options
-    assert "async_step_flow_power_portal_options()" in flow_options
+    assert "provider_portal" in init_options
+    assert "async_step_flow_power_portal_options()" in provider_portal
+    assert "async_step_globird_portal_options()" in provider_portal
+    assert "configure_flow_power_portal" not in flow_options
     assert "CONF_FLOWPOWER_EMAIL" not in flow_options
     assert "CONF_FLOWPOWER_PASSWORD" not in flow_options
-    assert "configure_globird_portal" in globird_options
-    assert "async_step_globird_portal_options()" in globird_options
+    assert "configure_globird_portal" not in globird_options
     assert "CONF_GLOBIRD_EMAIL" not in globird_options
     assert "CONF_GLOBIRD_PASSWORD" not in globird_options
 
     for path in (STRINGS_PATH, TRANSLATIONS_PATH):
         data = json.loads(path.read_text())
         options_steps = data["options"]["step"]
+        menu_options = options_steps["init"]["menu_options"]
+
+        assert menu_options["provider_portal"] == "Provider portal login"
 
         flow_step = options_steps["flow_power_options"]
-        assert "configure_flow_power_portal" in flow_step["data"]
-        assert "dedicated Flow Power portal account section" in flow_step[
-            "data_description"
-        ]["configure_flow_power_portal"]
+        assert "Provider portal login page" in flow_step["description"]
+        assert "configure_flow_power_portal" not in flow_step["data"]
         assert "flowpower_email" not in flow_step["data"]
         assert "flowpower_password" not in flow_step["data"]
 
@@ -480,10 +490,8 @@ def test_provider_portal_login_has_dedicated_options_sections():
         assert "connect_portal" in flow_portal["data_description"]
 
         globird_step = options_steps["globird_options"]
-        assert "configure_globird_portal" in globird_step["data"]
-        assert "dedicated GloBird portal account section" in globird_step[
-            "data_description"
-        ]["configure_globird_portal"]
+        assert "Provider portal login page" in globird_step["description"]
+        assert "configure_globird_portal" not in globird_step["data"]
         assert "globird_email" not in globird_step["data"]
         assert "globird_password" not in globird_step["data"]
 
