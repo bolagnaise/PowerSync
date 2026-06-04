@@ -9916,12 +9916,15 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
     ) -> FlowResult:
         """Step 2b: Flow Power main settings (region, base rate, PEA, sync)."""
         if user_input is not None:
+            configure_portal = user_input.pop("configure_flow_power_portal", False)
+
             # Store main options temporarily
             self._flow_power_main_options = user_input
 
-            # Portal re-auth requested?
-            if user_input.pop("connect_portal", False):
-                return await self.async_step_flow_power_portal_reauth()
+            # Portal login lives in its own section so account credentials are
+            # clearly separated from tariff/PEA settings.
+            if configure_portal:
+                return await self.async_step_flow_power_portal_options()
 
             # If switching to Amber and no token exists, collect it first
             price_source = user_input.get(CONF_FLOW_POWER_PRICE_SOURCE, "aemo")
@@ -9983,12 +9986,30 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 CONF_AUTO_SYNC_ENABLED,
                 default=self._get_option(CONF_AUTO_SYNC_ENABLED, True),
             ): BooleanSelector(),
-            vol.Optional("connect_portal", default=False): BooleanSelector(),
+            vol.Optional("configure_flow_power_portal", default=False): BooleanSelector(),
         }
 
         return self.async_show_form(
             step_id="flow_power_options",
             data_schema=vol.Schema(schema),
+        )
+
+    async def async_step_flow_power_portal_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Dedicated Flow Power portal account section (options flow)."""
+        if user_input is not None:
+            if user_input.get("connect_portal", True):
+                return await self.async_step_flow_power_portal_reauth()
+            return await self.async_step_flow_power_network_options()
+
+        return self.async_show_form(
+            step_id="flow_power_portal_options",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional("connect_portal", default=True): BooleanSelector(),
+                }
+            ),
         )
 
     async def async_step_flow_power_portal_reauth(
@@ -10324,33 +10345,7 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            current = {**self.config_entry.data, **self.config_entry.options}
-            existing_email = current.get(CONF_GLOBIRD_EMAIL, "")
-            existing_password = current.get(CONF_GLOBIRD_PASSWORD, "")
-            submitted_email = (user_input.get(CONF_GLOBIRD_EMAIL) or "").strip()
-            submitted_password = user_input.get(CONF_GLOBIRD_PASSWORD) or ""
-
-            user_input.pop(CONF_GLOBIRD_EMAIL, None)
-            user_input.pop(CONF_GLOBIRD_PASSWORD, None)
-
-            if submitted_email or submitted_password:
-                password_for_validation = submitted_password or existing_password
-                if not submitted_email or not password_for_validation:
-                    errors["base"] = "invalid_globird_auth"
-                elif (
-                    submitted_email != existing_email
-                    or submitted_password
-                    or not existing_password
-                ):
-                    error = await self._validate_globird_credentials(
-                        submitted_email, password_for_validation
-                    )
-                    if error is not None:
-                        errors["base"] = error
-
-                if not errors:
-                    user_input[CONF_GLOBIRD_EMAIL] = submitted_email
-                    user_input[CONF_GLOBIRD_PASSWORD] = password_for_validation
+            configure_portal = user_input.pop("configure_globird_portal", False)
 
             if not errors:
                 # Add provider to the data
@@ -10377,15 +10372,17 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                         user_input.pop(key, None)
 
                 # Check if user wants to configure custom tariff
-                configure_tariff = user_input.pop("configure_custom_tariff", False)
+                self._globird_configure_custom_tariff = user_input.pop(
+                    "configure_custom_tariff", False
+                )
 
                 # Store options and route accordingly
                 self._amber_options = user_input
 
-                if configure_tariff:
-                    return await self.async_step_custom_tariff_options()
+                if configure_portal:
+                    return await self.async_step_globird_portal_options()
 
-                return await self.async_step_demand_charge_options()
+                return await self._route_after_globird_portal_options()
 
         # Build region choices for AEMO
         region_choices = {"": "Select Region..."}
@@ -10402,13 +10399,6 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             self._globird_plan_schema(current_globird_settings).schema
         )
         schema_fields.update({
-            vol.Optional(
-                CONF_GLOBIRD_EMAIL,
-                default=current_globird_settings.get(CONF_GLOBIRD_EMAIL, ""),
-            ): TextSelector(TextSelectorConfig(type=TextSelectorType.EMAIL)),
-            vol.Optional(CONF_GLOBIRD_PASSWORD): TextSelector(
-                TextSelectorConfig(type=TextSelectorType.PASSWORD)
-            ),
             vol.Optional(
                 CONF_AEMO_SPIKE_ENABLED,
                 default=self._get_option(CONF_AEMO_SPIKE_ENABLED, False),
@@ -10454,6 +10444,8 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
                 "no-import credit on top of the Tesla tariff."
             )
 
+        schema_fields[vol.Optional("configure_globird_portal", default=False)] = BooleanSelector()
+
         return self.async_show_form(
             step_id="globird_options",
             data_schema=vol.Schema(schema_fields),
@@ -10461,6 +10453,73 @@ class PowerSyncOptionsFlow(config_entries.OptionsFlow):
             description_placeholders={
                 "tariff_hint": tariff_hint,
             },
+        )
+
+    async def _route_after_globird_portal_options(self) -> FlowResult:
+        """Continue the GloBird options flow after the portal section."""
+        configure_tariff = getattr(self, "_globird_configure_custom_tariff", False)
+        self._globird_configure_custom_tariff = False
+        if configure_tariff:
+            return await self.async_step_custom_tariff_options()
+        return await self.async_step_demand_charge_options()
+
+    async def async_step_globird_portal_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Dedicated GloBird portal account section (options flow)."""
+        if user_input is not None:
+            if user_input.get("connect_globird_portal", True):
+                return await self.async_step_globird_portal_login_options()
+            return await self._route_after_globird_portal_options()
+
+        return self.async_show_form(
+            step_id="globird_portal_options",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        "connect_globird_portal", default=True
+                    ): BooleanSelector(),
+                }
+            ),
+        )
+
+    async def async_step_globird_portal_login_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Authenticate with the GloBird portal from options."""
+        errors: dict[str, str] = {}
+        current = {**self.config_entry.data, **self.config_entry.options}
+
+        if user_input is not None:
+            email = (user_input.get(CONF_GLOBIRD_EMAIL) or "").strip()
+            password = user_input.get(CONF_GLOBIRD_PASSWORD) or ""
+            password_for_validation = password or current.get(CONF_GLOBIRD_PASSWORD, "")
+            if email and password_for_validation:
+                error = await self._validate_globird_credentials(
+                    email, password_for_validation
+                )
+                if error is None:
+                    self._amber_options[CONF_GLOBIRD_EMAIL] = email
+                    self._amber_options[CONF_GLOBIRD_PASSWORD] = password_for_validation
+                    return await self._route_after_globird_portal_options()
+                errors["base"] = error
+            else:
+                errors["base"] = "invalid_globird_auth"
+
+        return self.async_show_form(
+            step_id="globird_portal_login_options",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_GLOBIRD_EMAIL,
+                        default=current.get(CONF_GLOBIRD_EMAIL, ""),
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.EMAIL)),
+                    vol.Optional(CONF_GLOBIRD_PASSWORD): TextSelector(
+                        TextSelectorConfig(type=TextSelectorType.PASSWORD)
+                    ),
+                }
+            ),
+            errors=errors,
         )
 
     async def async_step_localvolts_options(

@@ -442,6 +442,59 @@ def test_globird_plan_strings_are_available_in_setup_and_options():
             assert "0.09 kWh total import allowance" in step["data_description"]["globird_zerohero_import_limit_kw"]
 
 
+def test_provider_portal_login_has_dedicated_options_sections():
+    source = CONFIG_FLOW_PATH.read_text()
+    flow_options = ast.get_source_segment(
+        source, _options_flow_method("async_step_flow_power_options")
+    )
+    globird_options = ast.get_source_segment(
+        source, _options_flow_method("async_step_globird_options")
+    )
+
+    assert flow_options is not None
+    assert globird_options is not None
+    assert "configure_flow_power_portal" in flow_options
+    assert "async_step_flow_power_portal_options()" in flow_options
+    assert "CONF_FLOWPOWER_EMAIL" not in flow_options
+    assert "CONF_FLOWPOWER_PASSWORD" not in flow_options
+    assert "configure_globird_portal" in globird_options
+    assert "async_step_globird_portal_options()" in globird_options
+    assert "CONF_GLOBIRD_EMAIL" not in globird_options
+    assert "CONF_GLOBIRD_PASSWORD" not in globird_options
+
+    for path in (STRINGS_PATH, TRANSLATIONS_PATH):
+        data = json.loads(path.read_text())
+        options_steps = data["options"]["step"]
+
+        flow_step = options_steps["flow_power_options"]
+        assert "configure_flow_power_portal" in flow_step["data"]
+        assert "dedicated Flow Power portal account section" in flow_step[
+            "data_description"
+        ]["configure_flow_power_portal"]
+        assert "flowpower_email" not in flow_step["data"]
+        assert "flowpower_password" not in flow_step["data"]
+
+        flow_portal = options_steps["flow_power_portal_options"]
+        assert flow_portal["title"] == "Flow Power portal account"
+        assert "separate from the tariff formula settings" in flow_portal["description"]
+        assert "connect_portal" in flow_portal["data_description"]
+
+        globird_step = options_steps["globird_options"]
+        assert "configure_globird_portal" in globird_step["data"]
+        assert "dedicated GloBird portal account section" in globird_step[
+            "data_description"
+        ]["configure_globird_portal"]
+        assert "globird_email" not in globird_step["data"]
+        assert "globird_password" not in globird_step["data"]
+
+        globird_portal = options_steps["globird_portal_options"]
+        assert globird_portal["title"] == "GloBird portal account"
+        assert "separate from the tariff and AEMO spike settings" in globird_portal[
+            "description"
+        ]
+        assert "connect_globird_portal" in globird_portal["data_description"]
+
+
 def test_optimization_options_exposes_enabled_toggle():
     source = CONFIG_FLOW_PATH.read_text()
     method = _options_flow_method("async_step_optimization")

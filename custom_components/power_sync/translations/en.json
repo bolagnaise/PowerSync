@@ -1440,7 +1440,7 @@
       },
       "flow_power_options": {
         "title": "Flow Power settings",
-        "description": "Update your Flow Power pricing and portal settings. Changes apply after the next sync cycle.",
+        "description": "Update Flow Power tariff and PEA settings. Portal account login is handled in its own section so credentials and SMS verification stay separate from pricing formula settings.",
         "data": {
           "flow_power_state": "NEM region",
           "flow_power_price_source": "Price source",
@@ -1448,19 +1448,31 @@
           "flow_power_export_rate": "Happy Hour export rate",
           "pea_enabled": "Enable PEA pricing (recommended)",
           "auto_sync_enabled": "Enable automatic TOU sync",
-          "connect_portal": "Connect Flow Power portal account"
+          "configure_flow_power_portal": "Open Flow Power portal login section"
         },
         "data_description": {
           "flow_power_price_source": "AEMO Direct fetches wholesale prices from NEMWeb (no API key). Amber API uses your Amber Electric account.",
           "flow_power_export_rate": "Fixed export credit paid during Flow Power Happy Hour. Set this if Flow Power has applied a promo or account-specific feed-in rate.",
           "pea_enabled": "PEA reflects how Flow Power actually bills you: final rate moves with wholesale prices. Disable for flat network tariff rates.",
-          "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery based on current prices."
+          "auto_sync_enabled": "Automatically upload TOU tariff schedules to your battery based on current prices.",
+          "configure_flow_power_portal": "Opens the dedicated Flow Power portal account section after saving these tariff settings. Use it to connect or refresh the email/password plus SMS login used for account metrics."
+        },
+        "submit": "Next"
+      },
+      "flow_power_portal_options": {
+        "title": "Flow Power portal account",
+        "description": "This section connects PowerSync to the Flow Power customer portal for account-specific metrics such as PEA, LWAP, TWAP, DLF, and demand. It is separate from the tariff formula settings above and requires SMS verification.",
+        "data": {
+          "connect_portal": "Connect or refresh Flow Power portal login"
+        },
+        "data_description": {
+          "connect_portal": "Continue to the Flow Power credential and SMS verification steps. Leave disabled to keep the existing portal connection unchanged."
         },
         "submit": "Next"
       },
       "flow_power_portal_reauth": {
-        "title": "Portal re-authentication",
-        "description": "Enter your Flow Power portal credentials to reconnect.",
+        "title": "Flow Power portal credentials",
+        "description": "Enter the email and password for the Flow Power customer portal. PowerSync will request an SMS code from Flow Power before saving the refreshed portal session.",
         "data": {
           "flowpower_email": "Email address",
           "flowpower_password": "Password"
@@ -1472,8 +1484,8 @@
         "submit": "Connect"
       },
       "flow_power_portal_mfa_options": {
-        "title": "SMS verification",
-        "description": "Enter the SMS code sent to your registered phone number.",
+        "title": "Flow Power SMS verification",
+        "description": "Enter the SMS code Flow Power sent to the phone number registered on your portal account.",
         "data": {
           "mfa_code": "SMS code"
         },
@@ -1527,7 +1539,7 @@
       },
       "globird_options": {
         "title": "Globird / AEMO settings",
-        "description": "Configure your tariff source and optional AEMO spike export. Changes apply after the next sync cycle.\n\n{tariff_hint}",
+        "description": "Configure your GloBird tariff source/model and optional AEMO spike export. Portal account login is handled in its own section so usage, billing, and credential setup stay separate from tariff modelling.\n\n{tariff_hint}",
         "data": {
           "globird_plan": "GloBird ZeroHero plan",
           "globird_zerohero_start": "Custom Super Export start",
@@ -1539,7 +1551,8 @@
           "aemo_spike_enabled": "Enable spike detection",
           "aemo_region": "NEM region",
           "aemo_spike_threshold": "Spike threshold",
-          "configure_custom_tariff": "Configure custom tariff"
+          "configure_custom_tariff": "Configure custom tariff",
+          "configure_globird_portal": "Open GloBird portal login section"
         },
         "data_description": {
           "globird_plan": "Choose the current ZeroHero plan (15 kWh from 18:00-21:00), the older legacy window, a custom ZeroHero setup, or Not on ZeroHero. PowerSync uses this to model ZeroHero export caps and no-import credits.",
@@ -1552,9 +1565,34 @@
           "aemo_spike_enabled": "Required for Globird and AEMO VPP plans that include spike export payments. Disable if your plan does not pay for spike exports.",
           "aemo_region": "Your NEM region determines which AEMO price feed is monitored. Check your electricity bill if unsure.",
           "aemo_spike_threshold": "Battery exports when the AEMO wholesale price exceeds this value. Default 3,000 in the selected market price unit matches most Globird and VPP plans. Only change if your plan specifies a different threshold.",
-          "configure_custom_tariff": "Recommended: TOU rates are needed for accurate price sensors, optimization, and EV charging."
+          "configure_custom_tariff": "Recommended: TOU rates are needed for accurate price sensors, optimization, and EV charging.",
+          "configure_globird_portal": "Opens the dedicated GloBird portal account section after saving these tariff settings. Use it to connect or refresh the login used for balance, invoice, usage, cost, and ZeroHero readiness sensors."
         },
-        "submit": "Save"
+        "submit": "Next"
+      },
+      "globird_portal_options": {
+        "title": "GloBird portal account",
+        "description": "This section connects PowerSync to the GloBird customer portal for account, usage, cost, latest-data, and ZeroHero readiness sensors. It is separate from the tariff and AEMO spike settings above.",
+        "data": {
+          "connect_globird_portal": "Connect or refresh GloBird portal login"
+        },
+        "data_description": {
+          "connect_globird_portal": "Continue to the GloBird credential step. Leave disabled to keep the existing portal connection unchanged."
+        },
+        "submit": "Next"
+      },
+      "globird_portal_login_options": {
+        "title": "GloBird portal credentials",
+        "description": "Enter the email and password for the GloBird customer portal. PowerSync validates the login before saving it for account and usage sensors.",
+        "data": {
+          "globird_email": "Email address",
+          "globird_password": "Password"
+        },
+        "data_description": {
+          "globird_email": "The email address you use to log in to the GloBird portal.",
+          "globird_password": "Enter a new password to connect or update the portal account. Leave blank to keep the stored password when the email address is unchanged."
+        },
+        "submit": "Connect"
       },
       "localvolts_options": {
         "title": "Localvolts settings",
