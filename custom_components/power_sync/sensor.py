@@ -182,6 +182,7 @@ from .const import (
     ATTR_AEMO_THRESHOLD,
     ATTR_SPIKE_START_TIME,
     family_device_info,
+    provider_pricing_device_info,
     powerwall_device_info,
     SENSOR_KEY_TO_FAMILY,
     SENSOR_FAMILY_LP_OPTIMIZER,
@@ -1964,6 +1965,15 @@ async def async_setup_entry(
                         )
                     )
                 _LOGGER.info("Flow Power portal sensors added (%d sensors)", len(FLOW_POWER_PORTAL_SENSORS))
+
+    # Add GloBird portal/account sensors if the provider account is connected.
+    globird_coordinator = domain_data.get("globird_coordinator")
+    if electricity_provider == "globird" and globird_coordinator:
+        from .globird_sensors import build_globird_entities
+
+        globird_entities = build_globird_entities(globird_coordinator, entry)
+        entities.extend(globird_entities)
+        _LOGGER.info("GloBird portal sensors added (%d sensors)", len(globird_entities))
 
     # Always add battery health sensor
     # For non-Tesla systems, pass coordinator so it can read battery_soh
@@ -4290,7 +4300,7 @@ class FlowPowerPriceSensor(PowerSyncCurrencyMixin, CoordinatorEntity, RestoredNu
 
     @property
     def device_info(self):
-        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
+        return provider_pricing_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
 
     def _get_config_value(self, key: str, default=None):
         """Get config value from options first, then data."""
@@ -4538,7 +4548,7 @@ class FlowPowerTWAPSensor(PowerSyncCurrencyMixin, SensorEntity):
 
     @property
     def device_info(self):
-        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
+        return provider_pricing_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
 
     def _get_config_value(self, key: str, default=None):
         """Get config value from options first, then data."""
@@ -4608,7 +4618,7 @@ class FlowPowerNetworkTariffSensor(PowerSyncCurrencyMixin, SensorEntity):
 
     @property
     def device_info(self):
-        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
+        return provider_pricing_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
 
     def _get_config_value(self, key: str, default=None):
         """Get config value from options first, then data."""
@@ -4680,7 +4690,7 @@ class FlowPowerAmberComparisonSensor(PowerSyncCurrencyMixin, SensorEntity):
 
     @property
     def device_info(self):
-        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
+        return provider_pricing_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
 
     def _get_config_value(self, key: str, default=None):
         """Get config value from options first, then data."""
@@ -4796,13 +4806,14 @@ class FlowPowerPortalSensor(SensorEntity):
         self._source_label = source_label
         self._attr_name = f"Power Sync {name}"
         self._attr_unique_id = f"power_sync_{entry.entry_id}_{sensor_type}"
+        self._attr_suggested_object_id = f"power_sync_{sensor_type}"
         self._attr_native_unit_of_measurement = unit
         self._attr_icon = icon
         self._attr_state_class = SensorStateClass.MEASUREMENT if unit else None
 
     @property
     def device_info(self):
-        return family_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
+        return provider_pricing_device_info(self._entry.entry_id, SENSOR_FAMILY_FLOW_POWER)
 
     @property
     def native_value(self) -> float | None:

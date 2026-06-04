@@ -3672,6 +3672,47 @@ class PowerSyncStrategy {
       })[0];
     };
 
+    const findProviderSensor = (provider, suffixOrSuffixes) => {
+      const providerKey = String(provider || '').trim().toLowerCase();
+      const suffixes = (Array.isArray(suffixOrSuffixes) ? suffixOrSuffixes : [suffixOrSuffixes])
+        .map((suffix) => String(suffix || '').trim())
+        .filter(Boolean);
+      if (!providerKey || suffixes.length === 0) return null;
+
+      const directMatches = [];
+      for (const suffix of suffixes) {
+        for (const id of [
+          `sensor.power_sync_${providerKey}_${suffix}`,
+          `sensor.powersync_${providerKey}_${suffix}`,
+        ]) {
+          if (hass.states[id]) directMatches.push(id);
+        }
+      }
+
+      const suffixMatches = Object.keys(hass.states || {}).filter((id) => {
+        if (!id.startsWith('sensor.')) return false;
+        const objectId = id.slice('sensor.'.length);
+        if (!objectId.startsWith(`power_sync_${providerKey}_`) && !objectId.startsWith(`powersync_${providerKey}_`)) {
+          return false;
+        }
+        return suffixes.some((suffix) => objectId.endsWith(`_${suffix}`));
+      });
+
+      const candidates = Array.from(new Set([...directMatches, ...suffixMatches]));
+      if (candidates.length === 0) return null;
+      const available = candidates.filter(has);
+      const pool = available.length > 0 ? available : candidates;
+      return pool.sort((a, b) => {
+        const directScore = (id) => directMatches.includes(id) ? 0 : 1;
+        return directScore(a) - directScore(b) || a.length - b.length || a.localeCompare(b);
+      })[0];
+    };
+
+    const hasProviderSensor = (provider, suffixOrSuffixes) => {
+      const id = findProviderSensor(provider, suffixOrSuffixes);
+      return !!(id && has(id));
+    };
+
     // Domain-aware entity finder used by the Tesla Energy Site controls section.
     // The new Tesla entities use _attr_has_entity_name=True, so HA composes
     // their entity_ids from the device name (e.g. "Home" → home_backup_reserve)
@@ -3926,9 +3967,14 @@ class PowerSyncStrategy {
       if (health) left.push(health);
     }
 
-    // --- Left Column: Flow Power ---
-    if (hasE('flow_power_price')) {
-      left.push(_flowPower(e));
+    // --- Left Column: Provider Pricing ---
+    if (hasE('flow_power_price') || hasE('fp_account_pea')) {
+      const flowPowerCard = _flowPower(e, hasE);
+      if (flowPowerCard) left.push(flowPowerCard);
+    }
+    if (hasProviderSensor('globird', ['latest_data_status', 'latest_day_cost', 'balance'])) {
+      const globirdCard = _globirdProvider(findProviderSensor);
+      if (globirdCard) left.push(globirdCard);
     }
 
     // --- Left Column: Missing dependency warnings ---
@@ -5643,17 +5689,60 @@ function _aemoSpike(e) {
   };
 }
 
-function _flowPower(e) {
+function _flowPower(e, hasE) {
+  const candidates = [
+    ['flow_power_price', 'Import Price'],
+    ['flow_power_export_price', 'Export Price'],
+    ['flow_power_twap', 'TWAP 30-Day Average'],
+    ['flow_power_network_tariff', 'Network Tariff'],
+    ['fp_account_pea', 'Portal PEA'],
+    ['fp_account_pea_30d', 'Portal PEA 30-Day'],
+    ['fp_account_lwap', 'Portal LWAP'],
+    ['fp_account_twap', 'Portal TWAP'],
+    ['fp_account_dlf', 'DLF'],
+    ['fp_account_avg_usage', 'Average Demand'],
+    ['fp_account_max_usage', 'Max Demand'],
+  ];
+  const entities = candidates
+    .filter(([key]) => !hasE || hasE(key))
+    .map(([key, name]) => ({ entity: e(key), name }));
+  if (entities.length === 0) return null;
+
   return {
     type: 'entities',
-    title: 'Flow Power',
+    title: 'Flow Power Pricing',
     show_header_toggle: false,
-    entities: [
-      { entity: e('flow_power_price'), name: 'Import Price' },
-      { entity: e('flow_power_export_price'), name: 'Export Price' },
-      { entity: e('flow_power_twap'), name: 'TWAP 30-Day Average' },
-      { entity: e('flow_power_network_tariff'), name: 'Network Tariff' },
-    ],
+    entities,
+  };
+}
+
+function _globirdProvider(findProviderSensor) {
+  const candidates = [
+    ['latest_data_status', 'Latest Data Status'],
+    ['latest_data_date', 'Latest Data Date'],
+    ['latest_day_usage', 'Latest Day Usage'],
+    ['latest_day_solar_export', 'Latest Day Export'],
+    ['latest_day_cost', 'Latest Day Cost'],
+    ['balance', 'Balance'],
+    ['latest_invoice', 'Latest Invoice'],
+    ['zerohero_status', 'ZeroHero Status'],
+    ['billing_period_cost', 'Billing Period Cost'],
+    ['billing_period_days', 'Billing Period Days'],
+    ['expected_month_cost', 'Expected Monthly Cost'],
+  ];
+  const entities = candidates
+    .map(([suffix, name]) => {
+      const entity = findProviderSensor('globird', suffix);
+      return entity ? { entity, name } : null;
+    })
+    .filter(Boolean);
+  if (entities.length === 0) return null;
+
+  return {
+    type: 'entities',
+    title: 'GloBird Pricing',
+    show_header_toggle: false,
+    entities,
   };
 }
 

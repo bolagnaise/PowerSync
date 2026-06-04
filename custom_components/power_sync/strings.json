@@ -194,6 +194,30 @@
         },
         "submit": "Next"
       },
+      "globird_portal": {
+        "title": "GloBird portal",
+        "description": "Connect your GloBird account to expose billing, usage, latest data, ZeroHero readiness, and cost summary sensors.",
+        "data": {
+          "connect_globird_portal": "Connect GloBird portal account"
+        },
+        "data_description": {
+          "connect_globird_portal": "When enabled, PowerSync fetches account and usage metrics from the GloBird portal. Pricing optimization continues to use the existing PowerSync tariff/AEMO model."
+        },
+        "submit": "Next"
+      },
+      "globird_portal_login": {
+        "title": "GloBird portal login",
+        "description": "Enter your GloBird portal credentials.",
+        "data": {
+          "globird_email": "Email address",
+          "globird_password": "Password"
+        },
+        "data_description": {
+          "globird_email": "The email address you use to log in to the GloBird portal.",
+          "globird_password": "Your GloBird portal password. Stored securely in Home Assistant."
+        },
+        "submit": "Connect"
+      },
       "epex": {
         "title": "EPEX day-ahead pricing",
         "description": "Configure European day-ahead pricing. Prices are sourced from ENTSO-E via the EPEX Predictor API (free, no account needed).",
@@ -920,6 +944,8 @@
     "error": {
       "invalid_auth": "Token rejected by the API -- check you copied the full token string with no extra spaces.",
       "cannot_connect": "Cannot reach the API server. Check your internet connection and that Home Assistant has outbound HTTPS access.",
+      "invalid_globird_auth": "Email or password is incorrect. Check your GloBird portal login credentials.",
+      "captcha_required": "GloBird requested captcha verification. Sign in through the GloBird portal in a browser, then try again.",
       "no_sites": "No Amber sites found for this token. Verify the token belongs to an account with an active Amber site.",
       "no_energy_sites": "No Tesla energy sites found. Ensure your Powerwall or Solar system is set up in the Tesla app before continuing.",
       "no_token_provided": "Paste a token in the field above. See the hint text for where to find it.",
@@ -1544,6 +1570,8 @@
           "globird_zerohero_super_export_rate": "Custom Super Export rate",
           "globird_zerohero_credit_amount": "Custom no-import credit",
           "globird_zerohero_import_limit_kw": "No-import threshold",
+          "globird_email": "GloBird email address",
+          "globird_password": "GloBird password",
           "aemo_spike_enabled": "Enable spike detection",
           "aemo_region": "NEM region",
           "aemo_spike_threshold": "Spike threshold",
@@ -1557,6 +1585,8 @@
           "globird_zerohero_super_export_rate": "Only used when GloBird plan is ZeroHero custom. This is the total export rate, not an amount added to the base feed-in tariff.",
           "globird_zerohero_credit_amount": "Only used when GloBird plan is ZeroHero custom.",
           "globird_zerohero_import_limit_kw": "Only used when GloBird plan is ZeroHero custom. Current ZeroHero uses 0.03 kWh per hour over 18:00-21:00, giving a 0.09 kWh total import allowance for the evening credit.",
+          "globird_email": "The email address you use to log in to the GloBird portal.",
+          "globird_password": "Enter a new password to connect or update the portal account. Leave blank to keep the stored password.",
           "aemo_spike_enabled": "Required for Globird and AEMO VPP plans that include spike export payments. Disable if your plan does not pay for spike exports.",
           "aemo_region": "Your NEM region determines which AEMO price feed is monitored. Check your electricity bill if unsure.",
           "aemo_spike_threshold": "Battery exports when the AEMO wholesale price exceeds this value. Default 3,000 in the selected market price unit matches most Globird and VPP plans. Only change if your plan specifies a different threshold.",

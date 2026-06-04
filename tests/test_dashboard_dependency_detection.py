@@ -217,3 +217,30 @@ def test_tesla_controls_gate_uses_entity_resolver():
     assert "findEntity('select', 'operation_mode')" in source
     assert "_s['select.power_sync_operation_mode']" not in source
     assert "_s['number.power_sync_backup_reserve']" not in source
+
+
+def test_dashboard_adds_provider_pricing_cards_as_hideable_sections():
+    """Provider account sensors should render as normal layout cards."""
+    source = STRATEGY_PATH.read_text()
+
+    assert "findProviderSensor = (provider, suffixOrSuffixes)" in source
+    assert "hasProviderSensor('globird', ['latest_data_status', 'latest_day_cost', 'balance'])" in source
+    assert "const globirdCard = _globirdProvider(findProviderSensor);" in source
+    assert "const flowPowerCard = _flowPower(e, hasE);" in source
+    assert "left.push(flowPowerCard)" in source
+    assert "left.push(globirdCard)" in source
+
+
+def test_dashboard_provider_cards_include_portal_account_metrics():
+    """Dashboard provider cards should expose the imported portal metrics."""
+    source = STRATEGY_PATH.read_text()
+
+    assert "title: 'GloBird Pricing'" in source
+    assert "['latest_day_cost', 'Latest Day Cost']" in source
+    assert "['zerohero_status', 'ZeroHero Status']" in source
+    assert "['billing_period_cost', 'Billing Period Cost']" in source
+    assert "title: 'Flow Power Pricing'" in source
+    assert "['fp_account_pea', 'Portal PEA']" in source
+    assert "['fp_account_lwap', 'Portal LWAP']" in source
+    assert "['fp_account_avg_usage', 'Average Demand']" in source
+    assert "['fp_account_max_usage', 'Max Demand']" in source

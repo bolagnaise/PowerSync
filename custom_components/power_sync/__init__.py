@@ -230,6 +230,8 @@ from .const import (
     CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE,
     CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT,
     CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW,
+    CONF_GLOBIRD_EMAIL,
+    CONF_GLOBIRD_PASSWORD,
     GLOBIRD_PLAN_NOT_ZEROHERO,
     GLOBIRD_PLAN_ZEROHERO_CUSTOM,
     DEFAULT_GLOBIRD_ZEROHERO_START,
@@ -17011,6 +17013,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 _LOGGER.warning("Flow Power: Error restoring portal session: %s", exc)
                 flow_power_portal_client = None
 
+    # Initialize GloBird portal coordinator for account, usage, cost, and
+    # readiness sensors. This is additive to the existing GloBird tariff/AEMO
+    # spike behavior and does not become an optimizer price source.
+    globird_coordinator = None
+    if electricity_provider == "globird":
+        globird_email = entry.options.get(
+            CONF_GLOBIRD_EMAIL, entry.data.get(CONF_GLOBIRD_EMAIL)
+        )
+        globird_password = entry.options.get(
+            CONF_GLOBIRD_PASSWORD, entry.data.get(CONF_GLOBIRD_PASSWORD)
+        )
+        if globird_email and globird_password:
+            from .globird_coordinator import GloBirdCoordinator
+
+            globird_coordinator = GloBirdCoordinator(hass, entry)
+            try:
+                await globird_coordinator.async_config_entry_first_refresh()
+                _LOGGER.info("GloBird portal coordinator initialized")
+            except Exception as exc:
+                _LOGGER.warning("GloBird portal coordinator unavailable: %s", exc)
+                try:
+                    await globird_coordinator.async_shutdown()
+                except Exception:
+                    pass
+                globird_coordinator = None
+
     # Initialize Solcast Solar Forecast Coordinator if enabled
     # Skip if the Solcast Solar integration is already installed (avoid double-polling API)
     solcast_coordinator = None
@@ -17293,6 +17321,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "flow_power_twap_tracker": flow_power_twap_tracker,  # For dynamic PEA pricing
         "flow_power_portal_client": flow_power_portal_client,  # Authenticated portal client
         "flow_power_portal_data": flow_power_portal_data,  # Account PEA/LWAP/TWAP/DLF data
+        "globird_coordinator": globird_coordinator,  # GloBird portal account/usage/cost data
         "fp_tariff_rate": fp_tariff_rate,  # Current network tariff rate (c/kWh) — v2
         "fp_avg_daily_tariff": fp_avg_daily_tariff,  # 24h avg network tariff (c/kWh) — v2
         "saving_session_coordinator": saving_session_coordinator,  # Octopus Saving Sessions
@@ -30484,6 +30513,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if fp_mid_cancel := entry_data.get("fp_midnight_cancel"):
         fp_mid_cancel()
         _LOGGER.debug("Cancelled Flow Power midnight tariff recalc timer")
+
+    if globird_coordinator := entry_data.get("globird_coordinator"):
+        try:
+            await globird_coordinator.async_shutdown()
+        except Exception as e:
+            _LOGGER.debug("GloBird coordinator shutdown error: %s", e)
+        entry_data["globird_coordinator"] = None
+        _LOGGER.debug("Closed GloBird portal coordinator")
 
     # Cancel Zaptec state polling and close client
     if unsub_zaptec := entry_data.get("unsub_zaptec_poll"):

@@ -596,6 +596,32 @@ CONF_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH = "globird_zerohero_export_cap_kwh"
 CONF_GLOBIRD_ZEROHERO_SUPER_EXPORT_RATE = "globird_zerohero_super_export_rate"
 CONF_GLOBIRD_ZEROHERO_CREDIT_AMOUNT = "globird_zerohero_credit_amount"
 CONF_GLOBIRD_ZEROHERO_IMPORT_LIMIT_KW = "globird_zerohero_import_limit_kw"
+CONF_GLOBIRD_EMAIL = "globird_email"
+CONF_GLOBIRD_PASSWORD = "globird_password"
+GLOBIRD_BASE_URL = "https://myaccount.globirdenergy.com.au"
+GLOBIRD_DEFAULT_USAGE_DAYS = 31
+GLOBIRD_ACCOUNT_UPDATE_INTERVAL_SECONDS = 1800
+GLOBIRD_STORAGE_VERSION = 1
+GLOBIRD_SENSITIVE_KEYS = {
+    "accessToken",
+    "accountAddress",
+    "accountName",
+    "accountNumber",
+    "address",
+    "concessionAddress",
+    "documentId",
+    "email",
+    "emailAddress",
+    "identifier",
+    "invoiceNumber",
+    "nmi",
+    "password",
+    "serial",
+    "serialNumber",
+    "siteAddress",
+    "siteIdentifier",
+    "streetAddress",
+}
 DEFAULT_GLOBIRD_ZEROHERO_START = "18:00"
 DEFAULT_GLOBIRD_ZEROHERO_END = "21:00"
 DEFAULT_GLOBIRD_ZEROHERO_EXPORT_CAP_KWH = 15.0
@@ -1867,6 +1893,7 @@ SENSOR_FAMILY_SOLAR_INVERTER = "solar_inverter"
 SENSOR_FAMILY_GRID_HOME = "grid_home"
 SENSOR_FAMILY_PRICING = "pricing"
 SENSOR_FAMILY_FLOW_POWER = "flow_power"
+SENSOR_FAMILY_GLOBIRD = "globird"
 SENSOR_FAMILY_AEMO = "aemo"
 SENSOR_FAMILY_EV_CHARGING = "ev_charging"
 SENSOR_FAMILY_OCTOPUS = "octopus"
@@ -1879,6 +1906,7 @@ FAMILY_DISPLAY_NAMES: dict[str, str] = {
     SENSOR_FAMILY_GRID_HOME: "Grid & Home",
     SENSOR_FAMILY_PRICING: "Pricing & Cost",
     SENSOR_FAMILY_FLOW_POWER: "Flow Power",
+    SENSOR_FAMILY_GLOBIRD: "GloBird",
     SENSOR_FAMILY_AEMO: "AEMO",
     SENSOR_FAMILY_EV_CHARGING: "EV Charging",
     SENSOR_FAMILY_OCTOPUS: "Octopus",
@@ -1985,6 +2013,29 @@ SENSOR_KEY_TO_FAMILY: dict[str, str] = {
     "fp_account_dlf": SENSOR_FAMILY_FLOW_POWER,
     "fp_account_avg_usage": SENSOR_FAMILY_FLOW_POWER,
     "fp_account_max_usage": SENSOR_FAMILY_FLOW_POWER,
+    # GloBird portal/account sensors
+    "globird_balance": SENSOR_FAMILY_GLOBIRD,
+    "globird_dashboard_balance": SENSOR_FAMILY_GLOBIRD,
+    "globird_latest_invoice": SENSOR_FAMILY_GLOBIRD,
+    "globird_signup_services": SENSOR_FAMILY_GLOBIRD,
+    "globird_last_successful_refresh": SENSOR_FAMILY_GLOBIRD,
+    "globird_refresh_status": SENSOR_FAMILY_GLOBIRD,
+    "globird_account_summary": SENSOR_FAMILY_GLOBIRD,
+    "globird_service_status": SENSOR_FAMILY_GLOBIRD,
+    "globird_meter_info": SENSOR_FAMILY_GLOBIRD,
+    "globird_latest_data_date": SENSOR_FAMILY_GLOBIRD,
+    "globird_latest_data_status": SENSOR_FAMILY_GLOBIRD,
+    "globird_usage_total": SENSOR_FAMILY_GLOBIRD,
+    "globird_latest_day_usage": SENSOR_FAMILY_GLOBIRD,
+    "globird_solar_export_total": SENSOR_FAMILY_GLOBIRD,
+    "globird_latest_day_solar_export": SENSOR_FAMILY_GLOBIRD,
+    "globird_cost_total": SENSOR_FAMILY_GLOBIRD,
+    "globird_latest_day_cost": SENSOR_FAMILY_GLOBIRD,
+    "globird_zerohero_status": SENSOR_FAMILY_GLOBIRD,
+    "globird_expected_month_cost": SENSOR_FAMILY_GLOBIRD,
+    "globird_billing_period_days": SENSOR_FAMILY_GLOBIRD,
+    "globird_billing_period_cost": SENSOR_FAMILY_GLOBIRD,
+    "globird_weather_summary": SENSOR_FAMILY_GLOBIRD,
     # AEMO
     "aemo_price": SENSOR_FAMILY_AEMO,
     "aemo_spike_status": SENSOR_FAMILY_AEMO,
@@ -2034,6 +2085,28 @@ def powerwall_device_info(entry_id: str) -> dict:
         "name": "Tesla Powerwall",
         "manufacturer": "Tesla",
         "model": "Powerwall",
+        "via_device": (DOMAIN, entry_id),
+    }
+
+
+def provider_pricing_device_info(entry_id: str, provider: str) -> dict:
+    """Provider pricing/account device linked to the main PowerSync hub."""
+    provider_key = provider.lower()
+    if provider_key == SENSOR_FAMILY_GLOBIRD:
+        name = "GloBird Pricing"
+        manufacturer = "GloBird Energy"
+    elif provider_key == SENSOR_FAMILY_FLOW_POWER:
+        name = "Flow Power Pricing"
+        manufacturer = "Flow Power"
+    else:
+        name = f"{provider.title()} Pricing"
+        manufacturer = provider.title()
+
+    return {
+        "identifiers": {(DOMAIN, f"{entry_id}_{provider_key}_pricing")},
+        "name": name,
+        "manufacturer": manufacturer,
+        "model": "Electricity Pricing",
         "via_device": (DOMAIN, entry_id),
     }
 
